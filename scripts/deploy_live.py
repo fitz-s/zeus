@@ -159,7 +159,10 @@ LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS = float(
 # The runtime deliberately spreads a full held book over as many as three
 # two-minute monitor cycles.  Four minutes cannot prove that six-minute
 # contract; allow one additional cycle for launch jitter and DB observation.
-LIVE_MONITOR_CADENCE_CONTRACT_SECONDS = 3 * 2 * 60
+LIVE_MONITOR_FULL_COVERAGE_CYCLES = 3
+LIVE_MONITOR_CADENCE_CONTRACT_SECONDS = (
+    LIVE_MONITOR_FULL_COVERAGE_CYCLES * 2 * 60
+)
 LIVE_MONITOR_CADENCE_VERIFY_GRACE_SECONDS = 2 * 60
 LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS = float(
     os.environ.get(
@@ -527,9 +530,11 @@ def _wait_for_post_start_monitor_cadence(
     """Wait until held-position monitoring proves it ran after this boot.
 
     Chain reconciliation can refresh ``position_current.updated_at`` without any
-    exit/hold decision.  The post-start recovery proof is a fresh canonical
-    ``MONITOR_REFRESHED`` event after the live-trading launch floor while open
-    positions exist.
+    exit/hold decision.  The post-start recovery proof is one runtime coverage
+    tranche of fresh canonical decisions after the launch floor.  Full-book
+    coverage remains the recurring monitor's SLA; making deployment wait for all
+    three tranches lets targeted wake work turn a healthy restart into a permanent
+    operator pause.
     """
 
     trade_db = Path(_require_live_repo()) / "state" / "zeus_trades.db"
@@ -570,12 +575,29 @@ def _wait_for_post_start_monitor_cadence(
                         f"sample={cadence['future_monitor_events']}"
                     )
                 else:
+                    fresh_count = int(cadence["fresh_position_count"])
+                    required_count = min(
+                        open_count,
+                        max(
+                            2,
+                            (
+                                open_count
+                                + LIVE_MONITOR_FULL_COVERAGE_CYCLES
+                                - 1
+                            )
+                            // LIVE_MONITOR_FULL_COVERAGE_CYCLES,
+                        ),
+                    )
                     stale_or_missing = list(cadence["stale_or_missing_positions"])
-                    if not stale_or_missing:
+                    if fresh_count >= required_count:
                         return (
                             True,
                             "post-start monitor cadence verified: "
-                            f"all_positions_refreshed={open_count}",
+                            f"progress_positions={fresh_count} "
+                            f"required_progress={required_count} "
+                            f"open_positions={open_count} "
+                            f"remaining_for_continuous_coverage="
+                            f"{max(0, open_count - fresh_count)}",
                         )
                     sample = ", ".join(
                         f"{item['position_id']} last_monitor_refreshed_at={item['last_monitor_refreshed_at']}"

@@ -890,6 +890,10 @@ class GlobalSellExecutionAuthority:
             "probability_witness_identity",
             "ledger_snapshot_id",
             "resolution_identity",
+            "probability_functional",
+            "exit_authority_status",
+            "exit_authority_reason",
+            "sell_action_authority_identity",
         )
         if any(
             getattr(selected, field) != getattr(jit_candidate, field)
@@ -897,6 +901,26 @@ class GlobalSellExecutionAuthority:
         ):
             raise ValueError("GLOBAL_SELL_EXECUTION_JIT_IDENTITY_SUPERSEDED")
         curve = jit_candidate.executable_sell_curve
+        mean_sell = (
+            selected.probability_functional == "POSTERIOR_PREDICTIVE_MEAN"
+        )
+        expected_terminal = decision.expected_terminal_wealth
+        expected_growth = decision.expected_growth
+        action_economics_invalid = (
+            expected_terminal is None
+            or decision.terminal_wealth is not None
+            or decision.robust_delta_log_wealth != 0.0
+            or decision.robust_ev_usd != 0.0
+            or expected_terminal.expected_delta_log_wealth <= 0.0
+            or expected_terminal.expected_ev_usd <= 0.0
+        ) if mean_sell else (
+            decision.terminal_wealth is None
+            or expected_terminal is not None
+            or not math.isfinite(decision.robust_delta_log_wealth)
+            or decision.robust_delta_log_wealth <= 0
+            or not math.isfinite(decision.robust_ev_usd)
+            or decision.robust_ev_usd <= 0
+        )
         if (
             jit_candidate.execution_curve_identity
             != executable_curve_identity(curve)
@@ -904,10 +928,10 @@ class GlobalSellExecutionAuthority:
             or not str(curve.book_hash or "").strip()
             or decision.shares <= 0
             or decision.shares > jit_candidate.held_shares
-            or not math.isfinite(decision.robust_delta_log_wealth)
-            or decision.robust_delta_log_wealth <= 0
-            or not math.isfinite(decision.robust_ev_usd)
-            or decision.robust_ev_usd <= 0
+            or action_economics_invalid
+            or expected_growth is None
+            or expected_growth.expected_delta_log_wealth <= 0.0
+            or expected_growth.expected_ev_usd <= 0.0
         ):
             raise ValueError("GLOBAL_SELL_EXECUTION_ECONOMICS_INVALID")
         proceeds, _vwap, limit = curve.proceeds_for_shares(decision.shares)
@@ -930,12 +954,29 @@ class GlobalSellExecutionAuthority:
             curve.book_hash,
             jit_candidate.execution_curve_identity,
             jit_candidate.book_captured_at_utc.isoformat(),
+            jit_candidate.probability_functional,
+            jit_candidate.exit_authority_status,
+            jit_candidate.exit_authority_reason,
+            jit_candidate.sell_action_authority_identity,
             deadline.isoformat(),
             decision.shares,
             decision.limit_price,
             decision.cash_proceeds_usd,
             repr(decision.robust_delta_log_wealth),
             repr(decision.robust_ev_usd),
+            repr(
+                expected_terminal.expected_delta_log_wealth
+                if expected_terminal is not None
+                else ""
+            ),
+            repr(
+                expected_terminal.expected_ev_usd
+                if expected_terminal is not None
+                else ""
+            ),
+            repr(expected_growth.expected_delta_log_wealth),
+            repr(expected_growth.expected_ev_usd),
+            repr(expected_growth.expected_log_growth_per_hour),
         ):
             digest.update(str(value).encode("utf-8"))
             digest.update(b"\x1f")
@@ -2347,6 +2388,12 @@ def _global_sell_capital_certificate_error(
         "actuation_identity": actuation.actuation_identity,
         "economic_identity": actuation.economic_identity,
         "probability_witness_identity": candidate.probability_witness_identity,
+        "sell_probability_functional": candidate.probability_functional,
+        "sell_exit_authority_status": candidate.exit_authority_status,
+        "sell_exit_authority_reason": candidate.exit_authority_reason,
+        "sell_action_authority_identity": (
+            candidate.sell_action_authority_identity
+        ),
         "selection_epoch_identity": actuation.selection_epoch_identity,
         "wealth_witness_identity": actuation.wealth_witness_identity,
         "execution_authority_identity": authority.authority_identity,
@@ -2359,14 +2406,34 @@ def _global_sell_capital_certificate_error(
     ):
         return "capital_certificate_identity_mismatch"
     expected_decimal = {
-        "robust_delta_log_wealth": decision.robust_delta_log_wealth,
-        "robust_ev_usd": decision.robust_ev_usd,
         "held_shares": exact_held,
         "sellable_shares": candidate.held_shares,
         "selected_shares": decision.shares,
         "selected_cash_proceeds_usd": decision.cash_proceeds_usd,
         "exact_limit_price": decision.limit_price,
+        "expected_comparison_delta_log_wealth": (
+            decision.expected_growth.expected_delta_log_wealth
+        ),
+        "expected_comparison_ev_usd": decision.expected_growth.expected_ev_usd,
     }
+    if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
+        expected_decimal.update(
+            {
+                "expected_sell_delta_log_wealth": (
+                    decision.expected_terminal_wealth.expected_delta_log_wealth
+                ),
+                "expected_sell_ev_usd": (
+                    decision.expected_terminal_wealth.expected_ev_usd
+                ),
+            }
+        )
+    else:
+        expected_decimal.update(
+            {
+                "robust_delta_log_wealth": decision.robust_delta_log_wealth,
+                "robust_ev_usd": decision.robust_ev_usd,
+            }
+        )
     if any(
         not matches_decimal(certificate.get(field), expected)
         for field, expected in expected_decimal.items()
@@ -5992,6 +6059,9 @@ def check_pending_exits(
                     stats["retried"] += 1
                     stats["released_no_order"] = stats.get("released_no_order", 0) + 1
                     continue
+                if _pending_exit_no_order_waits_for_liquidity(pos, conn=conn):
+                    stats["unchanged"] += 1
+                    continue
                 if not _last_exit_order_id(pos, conn=conn):
                     pos.exit_state = ""
                     if str(getattr(pos, "order_status", "") or "") == "exit_intent":
@@ -6018,6 +6088,9 @@ def check_pending_exits(
             if release_pending_exit_without_order_if_retryable(pos, conn=conn):
                 stats["retried"] += 1
                 stats["released_no_order"] = stats.get("released_no_order", 0) + 1
+                continue
+            if _pending_exit_no_order_waits_for_liquidity(pos, conn=conn):
+                stats["unchanged"] += 1
                 continue
             _mark_exit_retry(pos, reason="SELL_NO_ORDER_ID", error="no_order_id", conn=conn)
             if conn is not None:
@@ -6528,6 +6601,8 @@ def release_pending_exit_without_order_if_retryable(
         return False
     if _last_exit_order_id(position, conn=conn):
         return False
+    if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
+        return False
     if exit_state in _EXIT_LIFECYCLE_IN_FLIGHT_STATES and conn is None:
         return False
     previous_next_retry_at = str(getattr(position, "next_exit_retry_at", "") or "")
@@ -6551,6 +6626,27 @@ def release_pending_exit_without_order_if_retryable(
             caused_by="pending_exit_no_order_released",
         )
     return True
+
+
+def _pending_exit_no_order_waits_for_liquidity(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+) -> bool:
+    """Keep a rejected no-order exit pending until fresh in-band liquidity returns."""
+
+    previous_error = _latest_exit_reject_error(conn, position)
+    if not _is_exit_liquidity_wait_error(previous_error):
+        return False
+    snapshot = _latest_exit_snapshot_context(
+        conn,
+        _asset_id_for_position(position),
+        require_sell_bid=False,
+    )
+    snapshot_bid = _positive_decimal(
+        snapshot.get("executable_snapshot_orderbook_top_bid")
+    )
+    return snapshot_bid is None or snapshot_bid < LIVE_ORDER_MIN_UNIT_PRICE
 
 
 def _check_order_fill(clob, order_id: str) -> tuple[str, object]:

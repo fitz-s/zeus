@@ -953,12 +953,12 @@ class TestEmitterMonotone:
 
         reports.append(_report("RJTT", t0 + timedelta(hours=1), 24.0, t_group=False))
         n3 = self._emit(emitter, conn, reports, t0 + timedelta(minutes=80))
-        assert n3 == 1  # running max moved 21->24; low unchanged
+        assert n3 == 2  # HIGH moved; LOW plateau carries a newer source version
 
         rows = conn.execute(
             "SELECT payload_json FROM opportunity_events WHERE event_type='DAY0_EXTREME_UPDATED'"
         ).fetchall()
-        assert len(rows) == 3
+        assert len(rows) == 4
         import json as _json
 
         payloads = [_json.loads(r["payload_json"]) for r in rows]
@@ -2004,14 +2004,65 @@ class TestMutexNoHttpSplit:
         assert high_key not in emitter._last_live_emitted_rounded
         assert low_key not in emitter._last_live_emitted_rounded
         assert updates == {
-            high_key: (21, 21),
-            low_key: (21, 21),
+            high_key: (21, 21, t0.isoformat()),
+            low_key: (21, 21, t0.isoformat()),
         }
 
         emitter.apply_memo_updates(updates)
 
         assert emitter._last_live_emitted_rounded[high_key] == 21
         assert emitter._last_live_emitted_rounded[low_key] == 21
+        assert emitter._last_live_emitted_observation_time[high_key] == t0.isoformat()
+        assert emitter._last_live_emitted_observation_time[low_key] == t0.isoformat()
+
+    def test_plateau_new_observation_version_emits_once(self):
+        """Equal extreme plus later source time shrinks the remaining window."""
+
+        import src.data.day0_fast_obs as fast_obs
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        t1 = t0 + timedelta(minutes=30)
+        city = _tokyo()
+        emitter = fast_obs.Day0FastObsEmitter()
+        conn = _world_conn()
+
+        def prefetch(at):
+            report = _report("RJTT", at, 21.0, t_group=False)
+            return fast_obs.FastObsPrefetch(
+                eligible=((city, fast_obs.fast_obs_source_for_city(city), "2026-06-10"),),
+                reports=(report,),
+                freshness_status=fast_obs.FETCH_FRESH,
+                cache_age_s=0.0,
+                decision_time=at + timedelta(minutes=5),
+                ledger_reports=(report,),
+            )
+
+        assert emitter.emit_prefetched(
+            world_conn=conn,
+            prefetch=prefetch(t0),
+            received_at=(t0 + timedelta(minutes=5)).isoformat(),
+            persist_ledger=False,
+        ) == 2
+        conn.commit()
+
+        later = prefetch(t1)
+        assert emitter.emit_prefetched(
+            world_conn=conn,
+            prefetch=later,
+            received_at=(t1 + timedelta(minutes=5)).isoformat(),
+            persist_ledger=False,
+        ) == 2
+        conn.commit()
+        assert conn.execute(
+            "SELECT COUNT(*) FROM opportunity_events WHERE event_type='DAY0_EXTREME_UPDATED'"
+        ).fetchone()[0] == 4
+
+        assert emitter.emit_prefetched(
+            world_conn=conn,
+            prefetch=later,
+            received_at=(t1 + timedelta(minutes=6)).isoformat(),
+            persist_ledger=False,
+        ) == 0
 
     def test_event_memo_watermark_ignores_non_day0_appends(self):
         import src.data.day0_fast_obs as fast_obs
@@ -2362,6 +2413,67 @@ class TestMutexNoHttpSplit:
         assert kwargs["max_cities"] == 3
         assert kwargs["quota_priority_cities"] == 1
         assert kwargs["persist_lock_blocking"] is False
+
+    def test_hourly_refresh_cursor_advances_across_full_held_segment_when_throttled(
+        self, monkeypatch
+    ):
+        """A throttled microbatch cannot starve held cities beyond its first page."""
+        import src.config as config_module
+        import src.main  # load settings consumers before replacing the config singleton
+        from src.events import reactor as reactor_module
+
+        cities = [
+            SimpleNamespace(name=name, timezone="UTC")
+            for name in ("A", "B", "C", "D", "E")
+        ]
+        target_date = datetime.now(UTC).date().isoformat()
+        held = {(city.name, target_date, "high") for city in cities}
+        calls = []
+
+        monkeypatch.setattr(
+            config_module,
+            "settings",
+            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        )
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: cities)
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_current_held_position_family_keys",
+            lambda: held,
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_latest_day0_hourly_blocked_families",
+            lambda **_: set(),
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_day0_hourly_priority_families",
+            lambda **_: sorted(held),
+        )
+        monkeypatch.setattr(reactor_module, "_DAY0_HOURLY_REFRESH_CURSOR", 0)
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3")
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", "3")
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
+            lambda selected, **_kwargs: calls.append(
+                [city.name for city in selected]
+            )
+            or SimpleNamespace(
+                vectors_written=0,
+                cities_attempted=0,
+                cities_skipped_throttle=len(selected),
+                cities_skipped_quota=0,
+                incomplete_expected_bundles=0,
+                budget_exhausted=False,
+            ),
+        )
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        assert calls == [["A", "B", "C"], ["D", "E", "A"]]
+        assert reactor_module._DAY0_HOURLY_REFRESH_CURSOR == 1
 
     def test_hourly_refresh_defers_unprioritized_universe_while_trading(self, monkeypatch):
         import src.config as config_module

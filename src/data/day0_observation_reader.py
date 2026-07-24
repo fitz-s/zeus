@@ -180,17 +180,39 @@ class Day0ObservedExtrema:
 # SQL helpers
 # ---------------------------------------------------------------------------
 
+_OBSERVATION_FACT_TIME_SQL = """
+    CASE
+        WHEN LOWER(source) = 'hko_hourly_accumulator' THEN utc_timestamp
+        WHEN json_valid(COALESCE(provenance_json, '')) THEN COALESCE(
+            json_extract(provenance_json, '$.latest_raw_ts'),
+            CASE
+                WHEN datetime(json_extract(provenance_json, '$.hour_max_raw_ts'))
+                   >= datetime(json_extract(provenance_json, '$.hour_min_raw_ts'))
+                THEN json_extract(provenance_json, '$.hour_max_raw_ts')
+                ELSE json_extract(provenance_json, '$.hour_min_raw_ts')
+            END,
+            json_extract(provenance_json, '$.hour_max_raw_ts'),
+            json_extract(provenance_json, '$.hour_min_raw_ts'),
+            utc_timestamp
+        )
+        ELSE utc_timestamp
+    END
+"""
+
+
 _EXTREMA_SQL = """
     SELECT
         MAX(running_max) AS agg_high,
         MIN(running_min) AS agg_low,
         COUNT(*) AS n_rows,
-        MAX(utc_timestamp) AS last_observation_time_utc
+        MAX({observation_fact_time}) AS last_observation_time_utc
     FROM {table_ref}
     WHERE city = ?
       AND target_date = ?
       AND source = ?
       AND datetime(utc_timestamp) <= datetime(?)
+      AND datetime({observation_fact_time}) <= datetime(?)
+      AND datetime(imported_at) <= datetime(?)
       AND authority IN ({auth_placeholders})
       AND COALESCE(causality_status, '') = 'OK'
       AND (
@@ -213,6 +235,8 @@ _CURRENT_TEMP_SQL = """
       AND target_date = ?
       AND source = ?
       AND datetime(utc_timestamp) <= datetime(?)
+      AND datetime({observation_fact_time}) <= datetime(?)
+      AND datetime(imported_at) <= datetime(?)
       AND authority IN ({auth_placeholders})
       AND COALESCE(causality_status, '') = 'OK'
       AND (
@@ -227,7 +251,7 @@ _CURRENT_TEMP_SQL = """
       )
       AND temp_current IS NOT NULL
       {source_semantics}
-    ORDER BY utc_timestamp DESC
+    ORDER BY datetime({observation_fact_time}) DESC, datetime(imported_at) DESC
     LIMIT 1
 """
 
@@ -249,6 +273,8 @@ _LATEST_CONTEXT_SQL = """
       AND target_date = ?
       AND source = ?
       AND datetime(utc_timestamp) <= datetime(?)
+      AND datetime({observation_fact_time}) <= datetime(?)
+      AND datetime(imported_at) <= datetime(?)
       AND authority IN ({auth_placeholders})
       AND COALESCE(causality_status, '') = 'OK'
       AND (
@@ -262,7 +288,7 @@ _LATEST_CONTEXT_SQL = """
             )
       )
       {source_semantics}
-    ORDER BY datetime(utc_timestamp) DESC, datetime(imported_at) DESC, id DESC
+    ORDER BY datetime({observation_fact_time}) DESC, datetime(imported_at) DESC, id DESC
     LIMIT 1
 """
 
@@ -273,6 +299,8 @@ _LATEST_EXTREMA_SQL = """
       AND target_date = ?
       AND source = ?
       AND datetime(utc_timestamp) <= datetime(?)
+      AND datetime({observation_fact_time}) <= datetime(?)
+      AND datetime(imported_at) <= datetime(?)
       AND authority IN ({auth_placeholders})
       AND COALESCE(causality_status, '') = 'OK'
       AND (
@@ -286,7 +314,7 @@ _LATEST_EXTREMA_SQL = """
             )
       )
       {source_semantics}
-    ORDER BY datetime(utc_timestamp) DESC, id DESC
+    ORDER BY datetime({observation_fact_time}) DESC, datetime(imported_at) DESC, id DESC
     LIMIT 1
 """
 
@@ -298,12 +326,14 @@ _LATEST_EXTREMA_SQL = """
 # correct-by-construction, runs once (chosen source only), and keeps the shared
 # WHERE clause identical to _EXTREMA_SQL.
 _TIMESTAMPS_SQL = """
-    SELECT utc_timestamp
+    SELECT {observation_fact_time} AS observation_fact_time
     FROM {table_ref}
     WHERE city = ?
       AND target_date = ?
       AND source = ?
       AND datetime(utc_timestamp) <= datetime(?)
+      AND datetime({observation_fact_time}) <= datetime(?)
+      AND datetime(imported_at) <= datetime(?)
       AND authority IN ({auth_placeholders})
       AND COALESCE(causality_status, '') = 'OK'
       AND (
@@ -317,7 +347,7 @@ _TIMESTAMPS_SQL = """
             )
       )
       {source_semantics}
-    ORDER BY datetime(utc_timestamp)
+    ORDER BY datetime({observation_fact_time})
 """
 
 
@@ -479,8 +509,8 @@ def read_day0_observed_extrema(
         IANA timezone name (stored in provenance; not used for filtering
         because target_date carries local-day attribution in the writer).
     decision_time_utc:
-        Cutoff: only rows with utc_timestamp <= this time are included.
-        Must be timezone-aware UTC.
+        Causal cutoff: bucket identity, source fact time, and possession time
+        must all be no later than this time. Must be timezone-aware UTC.
     source_priority:
         Ordered sequence of source tags to try.  The first source that has
         qualifying rows is used exclusively.  Defaults to canonical tier order.
@@ -533,10 +563,13 @@ def read_day0_observed_extrema(
             auth_placeholders=auth_ph,
             source_semantics=source_sql,
             table_ref=table_ref,
+            observation_fact_time=_OBSERVATION_FACT_TIME_SQL,
         )
         row = conn.execute(
             extrema_sql,
-            (city, target_date, source, decision_str) + auth_vals + source_vals,
+            (city, target_date, source, decision_str, decision_str, decision_str)
+            + auth_vals
+            + source_vals,
         ).fetchone()
         if row is None or row[2] == 0:
             continue
@@ -552,10 +585,13 @@ def read_day0_observed_extrema(
                 auth_placeholders=auth_ph,
                 source_semantics=source_sql,
                 table_ref=table_ref,
+                observation_fact_time=_OBSERVATION_FACT_TIME_SQL,
             )
             latest_extrema = conn.execute(
                 latest_extrema_sql,
-                (city, target_date, source, decision_str) + auth_vals + source_vals,
+                (city, target_date, source, decision_str, decision_str, decision_str)
+                + auth_vals
+                + source_vals,
             ).fetchone()
             if latest_extrema is None:
                 continue
@@ -571,12 +607,22 @@ def read_day0_observed_extrema(
             auth_placeholders=auth_ph,
             source_semantics=source_sql,
             table_ref=table_ref,
+            observation_fact_time=_OBSERVATION_FACT_TIME_SQL,
         )
         sample_times = [
             parsed
             for (raw,) in conn.execute(
                 timestamps_sql,
-                (city, target_date, chosen_source, decision_str) + auth_vals + source_vals,
+                (
+                    city,
+                    target_date,
+                    chosen_source,
+                    decision_str,
+                    decision_str,
+                    decision_str,
+                )
+                + auth_vals
+                + source_vals,
             )
             if (parsed := _parse_row_utc(raw)) is not None
         ]
@@ -598,11 +644,21 @@ def read_day0_observed_extrema(
             auth_placeholders=auth_ph,
             source_semantics=source_sql,
             table_ref=table_ref,
+            observation_fact_time=_OBSERVATION_FACT_TIME_SQL,
         )
         try:
             ct_row = conn.execute(
                 current_temp_sql,
-                (city, target_date, chosen_source, decision_str) + auth_vals + source_vals,
+                (
+                    city,
+                    target_date,
+                    chosen_source,
+                    decision_str,
+                    decision_str,
+                    decision_str,
+                )
+                + auth_vals
+                + source_vals,
             ).fetchone()
         except sqlite3.OperationalError:
             ct_row = None
@@ -736,11 +792,19 @@ def read_day0_observation_context_from_instants(
         auth_placeholders=auth_ph,
         source_semantics=source_sql,
         table_ref="observation_instants",
+        observation_fact_time=_OBSERVATION_FACT_TIME_SQL,
     )
     try:
         latest = conn.execute(
             latest_sql,
-            (city_name, str(target_date), result.chosen_source, decision_str)
+            (
+                city_name,
+                str(target_date),
+                result.chosen_source,
+                decision_str,
+                decision_str,
+                decision_str,
+            )
             + _auth_values()
             + source_vals,
         ).fetchone()
@@ -761,6 +825,7 @@ def read_day0_observation_context_from_instants(
               AND target_date = ?
               AND source = ?
               AND datetime(utc_timestamp) <= datetime(?)
+              AND datetime(imported_at) <= datetime(?)
               AND authority IN ({auth_placeholders})
               AND COALESCE(causality_status, '') = 'OK'
               AND (
@@ -780,7 +845,13 @@ def read_day0_observation_context_from_instants(
                 auth_placeholders=auth_ph,
                 source_semantics=source_sql,
             ),
-            (city_name, str(target_date), result.chosen_source, decision_str)
+            (
+                city_name,
+                str(target_date),
+                result.chosen_source,
+                decision_str,
+                decision_str,
+            )
             + _auth_values()
             + source_vals,
         ).fetchone()

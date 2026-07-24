@@ -46,6 +46,7 @@ from src.contracts.executable_market_snapshot import (
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.venue.response_contracts import (
+    VenueOrderNotFound,
     VenueResponseShapeError,
     extract_order_id as _extract_order_id,
     extract_response_error as _response_error,
@@ -584,6 +585,7 @@ class PolymarketV2Adapter:
             creds=effective_api_creds,
             signature_type=kwargs.get("signature_type", DEFAULT_SIGNATURE_TYPE),
             funder=kwargs.get("funder_address"),
+            use_server_time=True,
         )
         # CLOB v2 L2 endpoints (balance/order/user-channel auth) require L2 API
         # creds bound to the active signer. Use runtime creds first: Keychain is
@@ -1278,6 +1280,8 @@ class PolymarketV2Adapter:
     def get_order(self, order_id: str) -> OrderState:
         _assert_no_world_mutex_held_for_io("venue.get_order")
         raw = self._sdk_client().get_order(order_id)
+        if raw is None or raw == {}:
+            raise VenueOrderNotFound(order_id)
         raw_dict = _normalize_v2_amount_response(
             dict(raw or {}),
             endpoint="get_order",

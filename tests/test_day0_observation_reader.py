@@ -22,7 +22,7 @@ Concrete case: Amsterdam 2026-05-22
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -129,6 +129,8 @@ def _insert(conn: sqlite3.Connection, **kwargs: object) -> None:
         "source_role": "historical_hourly",
     }
     defaults.update(kwargs)
+    if "imported_at" not in kwargs:
+        defaults["imported_at"] = defaults["utc_timestamp"]
     cols = list(defaults.keys())
     placeholders = ", ".join("?" for _ in cols)
     conn.execute(
@@ -210,6 +212,131 @@ def test_reader_accepts_hko_runtime_monitoring_rows_without_training():
     assert out.coverage_status == COVERAGE_LOW
     assert out.row_count == 1
     assert out.low_so_far == 27.0
+
+
+def test_reader_freshness_uses_latest_raw_report_not_bucket_floor():
+    conn = _make_conn()
+    _insert(
+        conn,
+        city="Miami",
+        target_date="2026-07-23",
+        source="wu_icao_history",
+        timezone_name="America/New_York",
+        local_hour=21.0,
+        local_timestamp="2026-07-23T21:00:00-04:00",
+        utc_timestamp="2026-07-24T01:00:00+00:00",
+        running_max=86.0,
+        running_min=86.0,
+        temp_unit="F",
+        station_id="KMIA",
+        imported_at="2026-07-24T02:15:36+00:00",
+        provenance_json=(
+            '{"source_url":"redacted","station_id":"KMIA",'
+            '"latest_raw_ts":"2026-07-24T01:53:00+00:00",'
+            '"hour_max_raw_ts":"2026-07-24T01:53:00+00:00",'
+            '"hour_min_raw_ts":"2026-07-24T01:53:00+00:00"}'
+        ),
+    )
+
+    out = read_day0_observed_extrema(
+        conn,
+        city="Miami",
+        target_date="2026-07-23",
+        timezone_name="America/New_York",
+        decision_time_utc=datetime(2026, 7, 24, 2, 20, tzinfo=timezone.utc),
+        source_priority=("wu_icao_history",),
+    )
+
+    assert out.last_observation_time_utc == "2026-07-24T01:53:00+00:00"
+
+
+def test_reader_excludes_unpossessed_or_future_source_facts():
+    conn = _make_conn()
+    common = {
+        "city": "Miami",
+        "target_date": "2026-07-23",
+        "source": "wu_icao_history",
+        "timezone_name": "America/New_York",
+        "local_timestamp": "2026-07-23T21:00:00-04:00",
+        "utc_timestamp": "2026-07-24T01:00:00+00:00",
+        "running_max": 92.0,
+        "running_min": 83.0,
+        "temp_unit": "F",
+        "station_id": "KMIA",
+    }
+    _insert(
+        conn,
+        **common,
+        imported_at="2026-07-24T02:15:36+00:00",
+        provenance_json=(
+            '{"latest_raw_ts":"2026-07-24T01:20:00+00:00",'
+            '"hour_max_raw_ts":"2026-07-24T01:20:00+00:00",'
+            '"hour_min_raw_ts":"2026-07-24T01:10:00+00:00"}'
+        ),
+    )
+    out = read_day0_observed_extrema(
+        conn,
+        city="Miami",
+        target_date="2026-07-23",
+        timezone_name="America/New_York",
+        decision_time_utc=datetime(2026, 7, 24, 2, 0, tzinfo=timezone.utc),
+        source_priority=("wu_icao_history",),
+    )
+    assert out.coverage_status == COVERAGE_NONE
+
+    conn.execute("DELETE FROM observation_instants")
+    _insert(
+        conn,
+        **common,
+        imported_at="2026-07-24T01:20:00+00:00",
+        provenance_json=(
+            '{"latest_raw_ts":"2026-07-24T01:53:00+00:00",'
+            '"hour_max_raw_ts":"2026-07-24T01:53:00+00:00",'
+            '"hour_min_raw_ts":"2026-07-24T01:53:00+00:00"}'
+        ),
+    )
+    out = read_day0_observed_extrema(
+        conn,
+        city="Miami",
+        target_date="2026-07-23",
+        timezone_name="America/New_York",
+        decision_time_utc=datetime(2026, 7, 24, 1, 30, tzinfo=timezone.utc),
+        source_priority=("wu_icao_history",),
+    )
+    assert out.coverage_status == COVERAGE_NONE
+
+
+def test_gap_clock_uses_raw_report_time_not_bucket_floor():
+    conn = _make_conn()
+    start = datetime(2026, 5, 21, 22, 0, tzinfo=timezone.utc)
+    for offset in range(13):
+        bucket = start + timedelta(hours=offset)
+        raw = bucket + timedelta(minutes=53)
+        imported = raw + timedelta(minutes=1)
+        _insert(
+            conn,
+            utc_timestamp=bucket.isoformat(),
+            imported_at=imported.isoformat(),
+            running_max=20.0,
+            running_min=12.0,
+            provenance_json=(
+                '{"latest_raw_ts":"' + raw.isoformat() + '",'
+                '"hour_max_raw_ts":"' + raw.isoformat() + '",'
+                '"hour_min_raw_ts":"' + raw.isoformat() + '"}'
+            ),
+        )
+
+    out = read_day0_observed_extrema(
+        conn,
+        city="Amsterdam",
+        target_date="2026-05-22",
+        timezone_name="Europe/Amsterdam",
+        decision_time_utc=datetime(2026, 5, 22, 12, 30, tzinfo=timezone.utc),
+        source_priority=("wu_icao_history",),
+    )
+
+    assert out.max_gap_minutes == pytest.approx(97.0)
+    assert out.gap_suspect_metrics == ()
 
 
 def test_reader_rejects_hko_current_temperature_pseudo_extrema():
@@ -468,6 +595,7 @@ def test_context_reader_fallback_schema_keeps_provenance_fields_aligned():
             temp_current REAL,
             running_max REAL,
             running_min REAL,
+            imported_at TEXT NOT NULL,
             authority TEXT NOT NULL,
             data_version TEXT NOT NULL,
             training_allowed INTEGER DEFAULT 1,
@@ -483,9 +611,9 @@ def test_context_reader_fallback_schema_keeps_provenance_fields_aligned():
             INSERT INTO observation_instants (
                 city, target_date, source, timezone_name, local_hour,
                 local_timestamp, utc_timestamp, temp_current, running_max, running_min,
-                authority, data_version, training_allowed, causality_status, source_role,
+                imported_at, authority, data_version, training_allowed, causality_status, source_role,
                 provenance_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "Hong Kong",
@@ -498,6 +626,7 @@ def test_context_reader_fallback_schema_keeps_provenance_fields_aligned():
                 27.0 + hour,
                 27.0 + hour,
                 27.0,
+                f"2026-06-30T{16 + hour:02d}:00:00+00:00",
                 "ICAO_STATION_NATIVE",
                 "v1.hko-native",
                 0,

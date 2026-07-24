@@ -79,6 +79,14 @@ from src.contracts import (
     SettlementSemantics,
 )
 from src.contracts.probability_arithmetic import one_minus
+from src.contracts.day0_payoff_truth import (
+    Day0PayoffTruth,
+    classify_day0_payoff_truth,
+)
+from src.contracts.position_truth import (
+    CURRENT_MONEY_RISK_CHAIN_STATES,
+    NO_CURRENT_MONEY_RISK_CHAIN_STATES,
+)
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.polymarket_client import PolymarketClient
 from src.engine.discovery_mode import DiscoveryMode
@@ -2418,8 +2426,8 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
     # legacy behavior (T6).
     from src.engine.dispatch import is_settlement_day_dispatch
     if is_settlement_day_dispatch(candidate):
-        day0_truth = _day0_high_truth_classification_for_edge(candidate, edge)
-        if day0_truth and day0_truth != "observation_locked":
+        day0_truth = _day0_truth_classification_for_edge(candidate, edge)
+        if day0_truth != "observation_locked":
             return "day0_nowcast_entry"
         if not _imminent_open_capture_candidate(candidate):
             return "settlement_capture"
@@ -2441,8 +2449,8 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
     # P3 site 2 of 3 in evaluator (PLAN_v3 §6.P3).
     from src.engine.dispatch import is_settlement_day_dispatch
     if is_settlement_day_dispatch(candidate):
-        day0_truth = _day0_high_truth_classification_for_edge(candidate, edge)
-        if day0_truth and day0_truth != "observation_locked":
+        day0_truth = _day0_truth_classification_for_edge(candidate, edge)
+        if day0_truth != "observation_locked":
             return "day0_nowcast_entry"
         if not _imminent_open_capture_candidate(candidate):
             return "settlement_capture"
@@ -2462,16 +2470,11 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
     # P3 site 3 of 3 in evaluator (PLAN_v3 §6.P3).
     from src.engine.dispatch import is_settlement_day_dispatch
     if is_settlement_day_dispatch(candidate):
-        # Hypothesis path cannot check bin-level observation-lock; approximate by
-        # temperature_metric: HIGH edges on settlement day are predominantly
-        # day0_nowcast_entry unless locked. Edge-level _strategy_key_for() is
-        # authoritative for actual trade decisions.
-        if str(getattr(candidate, "temperature_metric", "") or "").lower() == "high":
-            return "day0_nowcast_entry"
-        if not _imminent_open_capture_candidate(candidate):
-            return "settlement_capture"
-        # IOC non-HIGH settlement-day hypothesis: fall through to opening_inertia
-        # (settlement_capture is day0_capture-only → would phase-mismatch).
+        # A hypothesis has no selected bin object, so it cannot prove that the
+        # running extreme has locked this side's payoff. Attribute the tested
+        # hypothesis to forecast-speed Day0 nowcast; the edge-level classifier
+        # upgrades only a proven locked side to settlement_capture.
+        return "day0_nowcast_entry"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
@@ -2692,35 +2695,25 @@ def _apply_edli_live_family_before_selection(
     return proof
 
 
-def _day0_high_truth_classification_for_edge(
+def _day0_truth_classification_for_edge(
     candidate: MarketCandidate,
     edge: BinEdge,
 ) -> str | None:
-    """Classify whether a settlement-day HIGH buy_yes edge is observation-locked.
+    """Classify selected-side Day0 payoff truth after settlement rounding."""
 
-    Settlement capture is reserved for facts already locked by canonical
-    intraday observation. A buy_yes bin above the observed high is still a
-    nowcast/forecast-upside edge and must not inherit settlement_capture live
-    policy.
-
-    Bin boundaries are integer settlement values; comparison must use the
-    settled (rounded) value, not the raw sensor float.  Raw WU °F is already
-    integer, but provider decimal or HKO floor-truncation paths require
-    explicit rounding before the bin test (review5.23 P1-2).
-    """
-    if str(candidate.temperature_metric).lower() != "high":
+    metric = str(candidate.temperature_metric).lower()
+    if metric not in {"high", "low"}:
         return None
-    if edge.direction != "buy_yes":
-        return None
-    observed_high_raw = _finite_day0_observation_float(
+    observation_field = "high_so_far" if metric == "high" else "low_so_far"
+    observed_raw = _finite_day0_observation_float(
         candidate.observation,
-        "high_so_far",
+        observation_field,
     )
-    if observed_high_raw is None:
+    if observed_raw is None:
         return "observation_unknown"
     try:
         sem = SettlementSemantics.for_city(candidate.city)
-        observed_high = sem.round_single(observed_high_raw)
+        observed = sem.round_single(observed_raw)
     except Exception as exc:
         logger.warning(
             "settlement_semantics_rounding_failed city=%s: %s — candidate rejected",
@@ -2728,27 +2721,36 @@ def _day0_high_truth_classification_for_edge(
         )
         return "settlement_semantics_unavailable"
     edge_bin = edge.bin
-    if edge_bin.is_open_high:
-        try:
-            return (
-                "observation_locked"
-                if observed_high >= float(edge_bin.low)
-                else "observation_floor_plus_forecast_upside"
-            )
-        except (TypeError, ValueError):
-            return "observation_unknown"
-    if edge_bin.is_open_low:
-        try:
-            if observed_high > float(edge_bin.high):
-                return "observation_excludes_bin"
-        except (TypeError, ValueError):
-            return "observation_unknown"
-        return "observation_partial_unresolved"
-    if edge_bin.low is not None and observed_high < float(edge_bin.low):
+    truth = classify_day0_payoff_truth(
+        metric=metric,
+        direction=edge.direction,
+        observed_extreme=observed,
+        bin_low=edge_bin.low,
+        bin_high=edge_bin.high,
+    )
+    if truth is Day0PayoffTruth.LOCKED:
+        return "observation_locked"
+    if truth is Day0PayoffTruth.REFUTED:
+        return "observation_refutes_selected_side"
+    if truth is Day0PayoffTruth.UNKNOWN:
+        return "observation_unknown"
+    if (
+        metric == "high"
+        and edge.direction == "buy_yes"
+        and edge_bin.low is not None
+        and observed < float(edge_bin.low)
+    ):
         return "observation_floor_plus_forecast_upside"
-    if edge_bin.high is not None and observed_high > float(edge_bin.high):
-        return "observation_excludes_bin"
     return "observation_partial_unresolved"
+
+
+def _day0_high_truth_classification_for_edge(
+    candidate: MarketCandidate,
+    edge: BinEdge,
+) -> str | None:
+    """Compatibility alias for the former HIGH-only classifier."""
+
+    return _day0_truth_classification_for_edge(candidate, edge)
 
 
 def day0_high_truth_classification_for_edge(
@@ -2762,7 +2764,7 @@ def day0_high_truth_classification_for_edge(
     the evaluator uses for edge_source/strategy_key, so it can be persisted per
     opportunity row without duplicating the classification logic.
     """
-    return _day0_high_truth_classification_for_edge(candidate, edge)
+    return _day0_truth_classification_for_edge(candidate, edge)
 
 
 def _entry_ci_rejection_reason(candidate: MarketCandidate, edge: BinEdge) -> str | None:
@@ -3301,6 +3303,20 @@ def _pending_entry_terminal_no_fill_cleared(conn, row) -> bool:
     phase = str(row["phase"] if hasattr(row, "keys") else row[1] or "").lower()
     if phase != "pending_entry":
         return False
+    try:
+        chain_shares = Decimal(
+            str(row["chain_shares"] if hasattr(row, "keys") else row[8] or "0")
+        )
+    except (InvalidOperation, ValueError):
+        return False
+    chain_state = str(
+        row["chain_state"] if hasattr(row, "keys") else row[9] or ""
+    ).strip()
+    if (
+        chain_shares > Decimal("0.000001")
+        and chain_state not in NO_CURRENT_MONEY_RISK_CHAIN_STATES
+    ):
+        return False
     position_id = str(row["position_id"] if hasattr(row, "keys") else row[0] or "")
     order_id = str(row["order_id"] if hasattr(row, "keys") else row[2] or "")
     try:
@@ -3327,17 +3343,72 @@ def _pending_entry_terminal_no_fill_cleared(conn, row) -> bool:
 
 def _has_same_token_blocking_open_db(conn, token_id: str) -> bool:
     phase_placeholders = ",".join("?" for _ in _ENTRY_DEDUP_NON_OPEN_PHASES)
+    columns = {
+        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+        for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+    }
+    chain_states = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+    if "chain_shares" in columns:
+        if "chain_state" in columns:
+            chain_exposure_sql = (
+                " OR (COALESCE(chain_shares, 0) > ? AND chain_state IN ("
+                + ",".join("?" for _ in chain_states)
+                + "))"
+            )
+            chain_exposure_params: tuple[object, ...] = (1e-6, *chain_states)
+        else:
+            chain_exposure_sql = (
+                " OR (COALESCE(chain_shares, 0) > ? AND phase = 'voided')"
+            )
+            chain_exposure_params = (1e-6,)
+    else:
+        chain_exposure_sql = ""
+        chain_exposure_params = ()
+    if "chain_shares" in columns:
+        chain_identity_sql = (
+            ", chain_shares, chain_state"
+            if "chain_state" in columns
+            else ", chain_shares, NULL AS chain_state"
+        )
+    else:
+        chain_identity_sql = ", NULL AS chain_shares, NULL AS chain_state"
     rows = conn.execute(
-        f"""SELECT position_id, phase, order_id, shares, cost_basis_usd
+        f"""SELECT position_id, phase, order_id, shares, cost_basis_usd,
+                   direction, token_id, no_token_id{chain_identity_sql}
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
-            AND phase NOT IN ({phase_placeholders})""",
-        (token_id, token_id, *_ENTRY_DEDUP_NON_OPEN_PHASES),
+            AND (
+                  phase NOT IN ({phase_placeholders})
+                  {chain_exposure_sql}
+            )""",
+        (
+            token_id,
+            token_id,
+            *_ENTRY_DEDUP_NON_OPEN_PHASES,
+            *chain_exposure_params,
+        ),
     ).fetchall()
     for row in rows:
         if _pending_entry_terminal_no_fill_cleared(conn, row):
             continue
-        return True
+        if hasattr(row, "keys"):
+            direction = str(row["direction"] or "").strip().lower()
+            yes_token = str(row["token_id"] or "").strip()
+            no_token = str(row["no_token_id"] or "").strip()
+        else:
+            direction = str(row[5] or "").strip().lower()
+            yes_token = str(row[6] or "").strip()
+            no_token = str(row[7] or "").strip()
+        if (
+            direction not in {"buy_yes", "buy_no"}
+            or not yes_token
+            or not no_token
+            or yes_token == no_token
+        ):
+            return True
+        selected_token = no_token if direction == "buy_no" else yes_token
+        if selected_token == token_id:
+            return True
     return False
 
 

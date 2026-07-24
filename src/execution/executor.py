@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
+from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from src.config import get_mode, settings
@@ -45,6 +46,10 @@ from src.contracts.execution_intent import (
     POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
 )
 from src.contracts.venue_submission_envelope import assert_live_order_unit_price
+from src.contracts.position_truth import (
+    CURRENT_MONEY_RISK_CHAIN_STATES,
+    NO_CURRENT_MONEY_RISK_CHAIN_STATES,
+)
 from src.types import BinEdge
 from src.architecture.decorators import capability, protects
 from src.decision.family_decision_engine import (
@@ -544,6 +549,20 @@ def _pending_entry_terminal_no_fill_allows_entry(
 ) -> bool:
     phase = str(row["phase"] if isinstance(row, sqlite3.Row) else row[1] or "").lower()
     if phase != "pending_entry":
+        return False
+    try:
+        chain_shares = Decimal(
+            str(row["chain_shares"] if isinstance(row, sqlite3.Row) else row[8] or "0")
+        )
+    except (InvalidOperation, ValueError):
+        return False
+    chain_state = str(
+        row["chain_state"] if isinstance(row, sqlite3.Row) else row[9] or ""
+    ).strip()
+    if (
+        chain_shares > Decimal("0.000001")
+        and chain_state not in NO_CURRENT_MONEY_RISK_CHAIN_STATES
+    ):
         return False
     position_id = str(row["position_id"] if isinstance(row, sqlite3.Row) else row[0] or "")
     order_id = str(row["order_id"] if isinstance(row, sqlite3.Row) else row[2] or "")
@@ -2071,7 +2090,7 @@ def _entry_same_token_cooldown_component(
         else _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS
     )
     remaining_seconds = cooldown_seconds - age_seconds
-    if terminal_no_fill and reprice_cancel_reason:
+    if terminal_no_fill and reprice_cancel_reason and remaining_seconds > 0:
         existing_price = _decimal_or_none(prior_price)
         candidate_price = _decimal_or_none(limit_price)
         if existing_price is None or candidate_price is None:
@@ -2133,6 +2152,33 @@ def _entry_same_token_cooldown_component(
             "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
             "rest_pull_cancel_reason": reprice_cancel_reason,
         }
+    no_fill_redecision_proof = (
+        _entry_terminal_no_fill_redecision_proof(conn, command_id=command_id)
+        if terminal_no_fill
+        else None
+    )
+    if no_fill_redecision_proof == "pre_submit_db_lock":
+        # The exact proof says the adapter never crossed POST and canonical
+        # order/trade facts are absent. Re-decision must therefore recapture a
+        # fresh quote immediately; applying the generic terminal-no-fill
+        # cooldown only turns local writer contention into lost alpha.
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "allowed_terminal_pre_submit_db_lock_no_fill_redecision",
+            "terminal_no_fill_redecision_proof": no_fill_redecision_proof,
+            "cooldown_seconds": 0,
+            "age_seconds": int(age_seconds),
+            "existing_command_id": command_id,
+            "existing_position_id": position_id,
+            "existing_command_state": state,
+            "existing_updated_at": str(updated_at or ""),
+            "existing_created_at": str(created_at or ""),
+            "existing_price": str(prior_price or ""),
+            "existing_size": str(prior_size or ""),
+            "candidate_price": str(limit_price or ""),
+            "candidate_shares": str(shares or ""),
+        }
     if remaining_seconds > 0:
         return {
             "component": "entry_same_token_cooldown",
@@ -2154,11 +2200,6 @@ def _entry_same_token_cooldown_component(
             "candidate_price": str(limit_price or ""),
             "candidate_shares": str(shares or ""),
         }
-    no_fill_redecision_proof = (
-        _entry_terminal_no_fill_redecision_proof(conn, command_id=command_id)
-        if terminal_no_fill
-        else None
-    )
     if no_fill_redecision_proof:
         return {
             "component": "entry_same_token_cooldown",
@@ -2177,7 +2218,11 @@ def _entry_same_token_cooldown_component(
             "candidate_price": str(limit_price or ""),
             "candidate_shares": str(shares or ""),
         }
-    if terminal_no_fill:
+    terminal_order_fact_proven = (
+        terminal_no_fill
+        and _entry_command_has_terminal_no_fill_order_fact(conn, command_id)
+    )
+    if terminal_no_fill and not terminal_order_fact_proven:
         existing_price = _decimal_or_none(prior_price)
         candidate_price = _decimal_or_none(limit_price)
         if existing_price is None or candidate_price is None:
@@ -2269,19 +2314,58 @@ def _entry_duplicate_same_token_component(
     increment_position_generation = ""
     if _table_exists(conn, "position_current"):
         phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_NON_OPEN_PHASES)
+        position_columns = {
+            str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(position_current)"
+            ).fetchall()
+        }
+        chain_states = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        if "chain_shares" in position_columns:
+            if "chain_state" in position_columns:
+                chain_exposure_sql = (
+                    " OR (COALESCE(chain_shares, 0) > ? AND chain_state IN ("
+                    + ",".join("?" for _ in chain_states)
+                    + "))"
+                )
+                chain_exposure_params: tuple[object, ...] = (
+                    1e-6,
+                    *chain_states,
+                )
+            else:
+                chain_exposure_sql = (
+                    " OR (COALESCE(chain_shares, 0) > ? AND phase = 'voided')"
+                )
+                chain_exposure_params = (1e-6,)
+        else:
+            chain_exposure_sql = ""
+            chain_exposure_params = ()
+        if "chain_shares" in position_columns:
+            chain_identity_sql = (
+                ", chain_shares, chain_state"
+                if "chain_state" in position_columns
+                else ", chain_shares, NULL AS chain_state"
+            )
+        else:
+            chain_identity_sql = ", NULL AS chain_shares, NULL AS chain_state"
         rows = conn.execute(
             f"""
-            SELECT position_id, phase, order_id, shares, cost_basis_usd
+            SELECT position_id, phase, order_id, shares, cost_basis_usd,
+                   direction, token_id, no_token_id{chain_identity_sql}
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
               AND position_id != ?
-              AND phase NOT IN ({phase_placeholders})
+              AND (
+                    phase NOT IN ({phase_placeholders})
+                    {chain_exposure_sql}
+              )
             """,
             (
                 token,
                 token,
                 candidate_position_id,
                 *sorted(_ENTRY_DUPLICATE_NON_OPEN_PHASES),
+                *chain_exposure_params,
             ),
         ).fetchall()
         for row in rows:
@@ -2295,9 +2379,51 @@ def _entry_duplicate_same_token_component(
             position_cost = (
                 row["cost_basis_usd"] if isinstance(row, sqlite3.Row) else row[4]
             )
+            direction = str(
+                (
+                    row["direction"]
+                    if isinstance(row, sqlite3.Row)
+                    else row[5]
+                )
+                or ""
+            ).strip().lower()
+            yes_token = str(
+                (
+                    row["token_id"]
+                    if isinstance(row, sqlite3.Row)
+                    else row[6]
+                )
+                or ""
+            ).strip()
+            no_token = str(
+                (
+                    row["no_token_id"]
+                    if isinstance(row, sqlite3.Row)
+                    else row[7]
+                )
+                or ""
+            ).strip()
             position_order_id = str(
                 row["order_id"] if isinstance(row, sqlite3.Row) else row[2]
             )
+            if (
+                direction not in {"buy_yes", "buy_no"}
+                or not yes_token
+                or not no_token
+                or yes_token == no_token
+            ):
+                return {
+                    "component": "entry_duplicate_same_token",
+                    "allowed": False,
+                    "reason": "position_selected_token_identity_invalid",
+                    "existing_position_id": position_id,
+                    "existing_phase": phase,
+                }
+            selected_token = no_token if direction == "buy_no" else yes_token
+            if selected_token != token:
+                # The candidate is the opposite outcome token. Sibling holdings
+                # are distinct capital legs and must never share a position id.
+                continue
             if (
                 allow_reconciled_position_increment
                 and phase in _ENTRY_INCREMENTABLE_POSITION_PHASES
@@ -4125,6 +4251,38 @@ class PreSubmitIdentityBindingError(RuntimeError):
     """Raised when a pre-submit envelope cannot bind canonical live identity."""
 
 
+def _signed_identity_persistence_connection(
+    conn: sqlite3.Connection,
+) -> tuple[sqlite3.Connection, bool]:
+    """Return a fresh file-backed connection for the final pre-POST write.
+
+    Reactor connections are long-lived and temporarily change connection-local
+    SQLite handlers.  Reusing one here can inherit a stale WAL snapshot or a
+    shortened busy handler, turning an executable order into an immediate
+    ``database is locked`` rejection.  A file-backed command is already committed
+    before this boundary, so a fresh connection sees the same canonical row while
+    starting with neither condition.  In-memory and test-double connections stay
+    on the caller connection because they have no separately addressable DB.
+    """
+
+    if not isinstance(conn, sqlite3.Connection) or conn.in_transaction:
+        return conn, False
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+        path = next(
+            (str(row[2] or "") for row in rows if str(row[1] or "") == "main"),
+            "",
+        )
+    except (IndexError, sqlite3.Error):
+        return conn, False
+    if not path:
+        return conn, False
+
+    from src.state.db import connect_existing_trade_db_without_journal_bootstrap
+
+    return connect_existing_trade_db_without_journal_bootstrap(Path(path)), True
+
+
 def _persist_final_submission_envelope_payload(
     conn: sqlite3.Connection,
     result,
@@ -4190,18 +4348,30 @@ def _persist_signed_submission_identity_before_post(
         _issue_signed_identity_persistence_receipt,
     )
 
+    persist_conn, close_persist_conn = _signed_identity_persistence_connection(conn)
     receipt = None
 
     def _persist_once() -> None:
         nonlocal receipt
+        if (
+            isinstance(persist_conn, sqlite3.Connection)
+            and not persist_conn.in_transaction
+        ):
+            # Acquire the WAL writer slot before the repository's validation
+            # reads.  A deferred read transaction can otherwise lose a race to
+            # a concurrent auction write and fail its later write upgrade with
+            # SQLITE_BUSY_SNAPSHOT, forcing a time-sensitive pre-POST retry.
+            # This transaction ends before the receipt is issued and before
+            # any venue I/O crosses the side-effect boundary.
+            persist_conn.execute("BEGIN IMMEDIATE")
         envelope_id = bind_signed_submission_identity(
-            conn,
+            persist_conn,
             command_id=command_id,
             envelope=envelope,
         )
-        conn.commit()
+        persist_conn.commit()
         receipt = _issue_signed_identity_persistence_receipt(
-            conn,
+            persist_conn,
             command_id=command_id,
             envelope_id=envelope_id,
         )
@@ -4210,18 +4380,21 @@ def _persist_signed_submission_identity_before_post(
         # Reactor preparation temporarily shortens this connection-wide handler.
         # Restore the canonical live write budget at the final pre-POST boundary;
         # otherwise every retry inherits the leaked short timeout and spins.
-        _apply_busy_timeout(conn)
+        _apply_busy_timeout(persist_conn)
         # This is still strictly pre-POST. Retrying only the local durable bind
         # cannot duplicate a venue order, while treating a transient writer lock
         # as a terminal submit rejection drops otherwise executable orders.
         _retry_persist_on_db_lock(
-            conn,
+            persist_conn,
             _persist_once,
             what="signed_identity_before_post",
         )
     except BaseException:
-        conn.rollback()
+        persist_conn.rollback()
         raise
+    finally:
+        if close_persist_conn:
+            persist_conn.close()
     if receipt is None:
         raise RuntimeError("signed identity persistence returned no receipt")
     return receipt

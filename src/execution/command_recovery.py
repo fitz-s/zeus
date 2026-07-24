@@ -3899,10 +3899,13 @@ def _event_bound_strategy_key_from_payload(payload: dict) -> str:
             return "forecast_qkernel_entry"
         return ""
     if event_type == "DAY0_EXTREME_UPDATED":
-        if direction == "buy_no":
-            return "settlement_capture"
-        if direction == "buy_yes":
-            return "day0_nowcast_entry"
+        if direction in {"buy_yes", "buy_no"}:
+            return (
+                "settlement_capture"
+                if str(payload.get("day0_payoff_truth") or "").strip().lower()
+                == "locked"
+                else "day0_nowcast_entry"
+            )
     return ""
 
 
@@ -9337,14 +9340,13 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
                 sp_name = f"sp_terminal_partial_order_{safe_command_id}"
                 conn.execute(f"SAVEPOINT {sp_name}")
                 try:
-                    if str(row.get("state") or "").upper() == CommandState.FILLED.value:
-                        append_event(
-                            conn,
-                            command_id=command_id,
-                            event_type=CommandEventType.PARTIAL_FILL_OBSERVED.value,
-                            occurred_at=observed_at,
-                            payload=payload,
-                        )
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type=CommandEventType.PARTIAL_FILL_OBSERVED.value,
+                        occurred_at=observed_at,
+                        payload=payload,
+                    )
                     _append_terminal_partial_order_fact(
                         conn,
                         venue_order_id=order_id,
@@ -9874,6 +9876,100 @@ def _matched_cancel_review_required_candidates(conn: sqlite3.Connection) -> list
     return [_dict_row(row) for row in rows]
 
 
+def _clear_review_required_terminal_partial(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    order_fact: Mapping[str, object],
+    trade_summary: Mapping[str, object],
+) -> bool:
+    """Restore PARTIAL when exact venue facts prove a zero-remainder fill."""
+
+    fact_state = str(order_fact.get("state") or "").upper()
+    matched = _positive_decimal_or_none(order_fact.get("matched_size"))
+    filled = _positive_decimal_or_none(trade_summary.get("filled_size"))
+    requested = _positive_decimal_or_none(command.get("size"))
+    remaining = _decimal_or_none(order_fact.get("remaining_size"))
+    if not (
+        fact_state in {"PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}
+        and int(trade_summary.get("count") or 0) > 0
+        and matched is not None
+        and filled == matched
+        and requested is not None
+        and filled < requested
+        and remaining is not None
+        and remaining == 0
+    ):
+        return False
+
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    observed_at = str(
+        order_fact.get("venue_timestamp")
+        or order_fact.get("observed_at")
+        or trade_summary.get("observed_at")
+        or _now_iso()
+    )
+    filled_size = format(filled, "f")
+    payload = {
+        "reason": "terminal_partial_order_fact_corrected",
+        "proof_class": "terminal_partial_order_fact",
+        "command_id": command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "venue_order_id": venue_order_id,
+        "matched_size": filled_size,
+        "filled_size": filled_size,
+        "remaining_size": "0",
+        "requested_size": str(command.get("size") or ""),
+        "latest_order_fact_id": order_fact.get("fact_id"),
+        "latest_order_fact_state": order_fact.get("state"),
+        "latest_order_fact_source": order_fact.get("source"),
+        "latest_order_fact_observed_at": order_fact.get("observed_at"),
+        "required_predicates": {
+            "terminal_order_remainder_zero": True,
+            "canonical_trade_facts_match_terminal_order_fact": True,
+            "cumulative_fill_below_requested_size": True,
+        },
+        "source_proof": {
+            "source_commit": "runtime",
+            "source_function": (
+                "command_recovery."
+                "reconcile_matched_cancel_review_required_entries"
+            ),
+            "source_reason": "review_required_terminal_partial_clearance",
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": observed_at,
+    }
+    safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+    sp_name = f"sp_terminal_partial_review_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=CommandEventType.PARTIAL_FILL_OBSERVED.value,
+            occurred_at=observed_at,
+            payload=payload,
+        )
+        if str(command.get("intent_kind") or "").upper() == "ENTRY":
+            _append_matched_order_fill_projection(
+                conn,
+                command=dict(command),
+                venue_order_id=venue_order_id,
+                matched_size=filled_size,
+                fill_price=str(trade_summary.get("fill_price") or command.get("price") or ""),
+                observed_at=observed_at,
+                order_fact_source=str(order_fact.get("source") or "REST"),
+            )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    return True
+
+
 def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -> dict:
     """Clear REVIEW_REQUIRED entries when canonical venue facts prove a fill.
 
@@ -9935,6 +10031,14 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
                 command_id=command_id,
                 venue_order_id=venue_order_id,
             )
+            if order_fact and _clear_review_required_terminal_partial(
+                conn,
+                command=command,
+                order_fact=order_fact,
+                trade_summary=trade_summary,
+            ):
+                summary["advanced"] += 1
+                continue
             if (
                 len(confirmed_rows) == 1
                 and order_fact
@@ -17393,7 +17497,13 @@ def _authenticated_entry_trade_fact_candidates(
             ON pc.position_id = cmd.position_id
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
-           AND cmd.state IN ('ACKED', 'POST_ACKED', 'PARTIAL', 'CANCEL_PENDING')
+           AND cmd.state IN (
+                'SUBMITTING',
+                'POST_ACKED',
+                'ACKED',
+                'PARTIAL',
+                'CANCEL_PENDING'
+           )
            AND COALESCE(cmd.venue_order_id, '') != ''
            AND (
                 pc.position_id IS NULL
@@ -17552,11 +17662,14 @@ def _reconcile_authenticated_entry_trade_fact(
         raise ValueError(
             "authenticated entry fill exceeds submitted share/capital bound"
         )
-    if _latest_order_fact_matched_size(
-        conn,
-        command_id=command_id,
-        venue_order_id=venue_order_id,
-    ) >= filled - Decimal("0.000001"):
+    if (
+        str(command.get("state") or "") == CommandState.PARTIAL.value
+        and _latest_order_fact_matched_size(
+            conn,
+            command_id=command_id,
+            venue_order_id=venue_order_id,
+        ) >= filled - Decimal("0.000001")
+    ):
         return "stayed"
 
     complete = _fill_size_completes_limit_order(
@@ -17629,6 +17742,27 @@ def _reconcile_authenticated_entry_trade_fact(
     sp_name = f"sp_authenticated_entry_fill_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
+        if str(command.get("state") or "") == CommandState.SUBMITTING.value:
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type=CommandEventType.SUBMIT_ACKED.value,
+                occurred_at=observed_at,
+                payload={
+                    "schema_version": 1,
+                    "reason": "authenticated_entry_trade_fact_implies_submit_ack",
+                    "proof_class": "canonical_confirmed_trade_facts_exact_order",
+                    "command_id": command_id,
+                    "venue_order_id": venue_order_id,
+                    "trade_ids": list(facts["trade_ids"]),
+                    "source": source,
+                    "required_predicates": {
+                        "bound_venue_order_id_matches_trade": True,
+                        "authenticated_confirmed_trade_facts": True,
+                        "positive_fill_economics": True,
+                    },
+                },
+            )
         if cancel_pending:
             append_event(
                 conn,
@@ -19591,8 +19725,8 @@ def _restart_preflight_unresolved_commands(conn: sqlite3.Connection) -> list[dic
     return rows
 
 
-def _capital_blocking_cancel_review_commands(conn: sqlite3.Connection) -> list[dict]:
-    """Return terminal-uncertain cancel races with a bound venue order."""
+def _capital_blocking_cancel_commands(conn: sqlite3.Connection) -> list[dict]:
+    """Return unresolved cancels that can retain venue exposure or collateral."""
 
     if not (
         _table_exists(conn, "venue_commands")
@@ -19601,11 +19735,15 @@ def _capital_blocking_cancel_review_commands(conn: sqlite3.Connection) -> list[d
         return []
     rows: list[dict] = []
     for row in find_unresolved_commands(conn):
-        if str(row.get("state") or "") != CommandState.REVIEW_REQUIRED.value:
-            continue
+        state = str(row.get("state") or "")
         command_id = str(row.get("command_id") or "")
         venue_order_id = str(row.get("venue_order_id") or "")
         if not command_id or not venue_order_id:
+            continue
+        if state == CommandState.CANCEL_PENDING.value:
+            rows.append(row)
+            continue
+        if state != CommandState.REVIEW_REQUIRED.value:
             continue
         events = _command_events(conn, command_id)
         if (
@@ -20101,8 +20239,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             ),
         )
 
-    def _already_canceled_review_fast_pass():
-        """Resolve capital-blocking cancel races before broad maintenance.
+    def _capital_recovery_fast_pass():
+        """Resolve capital-blocking terminal orders before maintenance.
 
         The general live-tick sweep has a deliberately tiny cumulative DB
         budget.  A large maintenance query must not repeatedly consume that
@@ -20113,18 +20251,21 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
 
         with open_tracked(
             read_conn_factory,
-            label="recovery.already_canceled_review_fast:snapshot",
+            label="recovery.capital_recovery_fast:snapshot",
         ) as conn:
-            candidates = _capital_blocking_cancel_review_commands(conn)
-        if not candidates:
+            cancel_candidates = _capital_blocking_cancel_commands(conn)
+            terminal_candidates = _terminal_point_order_candidates(conn)
+        if not cancel_candidates and not terminal_candidates:
             return None
-        command_ids = {str(row.get("command_id") or "") for row in candidates}
+        cancel_command_ids = {
+            str(row.get("command_id") or "") for row in cancel_candidates
+        }
         order_ids = {
             str(row.get("venue_order_id") or "")
-            for row in candidates
+            for row in cancel_candidates + terminal_candidates
             if str(row.get("venue_order_id") or "")
         }
-        assert_no_open_connection("recovery.already_canceled_review_fast")
+        assert_no_open_connection("recovery.capital_recovery_fast")
         snapshot = capture_venue_read_snapshot(
             client,
             order_ids=order_ids,
@@ -20142,9 +20283,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
             current = {
                 str(row.get("command_id") or ""): row
-                for row in _capital_blocking_cancel_review_commands(conn)
+                for row in _capital_blocking_cancel_commands(conn)
             }
-            for command_id in sorted(command_ids):
+            for command_id in sorted(cancel_command_ids):
                 row = current.get(command_id)
                 if row is None:
                     continue
@@ -20169,18 +20310,24 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                     ps["stayed"] += 1
                 else:
                     ps["errors"] += 1
-            _accumulate(summary, "already_canceled_review_fast", ps)
+            _accumulate(summary, "cancel_recovery_fast", ps)
+
+            terminal_ps = reconcile_restart_preflight_terminal_point_orders(
+                conn,
+                snap_client,
+            )
+            _accumulate(summary, "terminal_point_recovery_fast", terminal_ps)
             return ps
 
         return _run_recovery_pass_with_lock_policy(
-            "already_canceled_review_fast",
+            "capital_recovery_fast",
             lambda: run_three_phase(
                 lambda conn: None,
                 lambda _snap: snapshot,
                 _apply,
                 conn_factory=fast_conn_factory,
                 snapshot_conn_factory=read_conn_factory,
-                label="recovery.already_canceled_review_fast",
+                label="recovery.capital_recovery_fast",
             ),
             scope="live_tick",
             summary=summary,
@@ -20462,18 +20609,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         return
 
     if scope == "live_tick":
-        _already_canceled_review_fast_pass()
-
-    if scope == "live_tick":
-        # This pass closes the narrow provenance gap that otherwise blocks the
-        # entire entry reactor.  Keep it ahead of authenticated-fill and broad
-        # maintenance queries so cumulative lock/budget deferral cannot starve
-        # a repair whose source facts are already durable in zeus_trades.
-        _db_pass(
-            "missing_filled_entry_execution_fact_repair",
-            reconcile_missing_filled_entry_execution_fact_repairs,
-            "missing_filled_entry_execution_fact_repair",
-        )
+        _capital_recovery_fast_pass()
 
     _db_pass(
         "authenticated_entry_trade_fact",
@@ -20508,6 +20644,16 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "completed_partial_order_facts",
             reconcile_completed_partial_order_facts,
             "completed_partial_order_facts",
+        )
+
+    if scope == "live_tick":
+        # Command-bound fills and terminal partials are current collateral
+        # truth.  Consume both before historical projection maintenance so a
+        # broad repair query cannot strand spendable capital behind them.
+        _db_pass(
+            "missing_filled_entry_execution_fact_repair",
+            reconcile_missing_filled_entry_execution_fact_repairs,
+            "missing_filled_entry_execution_fact_repair",
         )
 
     if scope == "live_tick":

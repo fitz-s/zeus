@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-23; last_reviewed=2026-07-20; last_reused=2026-07-20
+# Lifecycle: created=2026-04-23; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: Ingest HKO accumulator readings and project them into observation_instants.
 # Reuse: Keep HKO source identity separate from WU/VHHH and preserve writer provenance identity.
 # Created: 2026-04-23
-# Last reused/audited: 2026-07-20
+# Last reused/audited: 2026-07-23
 # Authority basis: .omc/plans/observation-instants-migration-iter3.md Phase 1
 #                  L95 ("HK: no backfill; write accumulator-forward-only
 #                  starting now with data_version='v1.wu-native' + authority=
@@ -67,6 +67,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 # Intentionally NOT importing from src.main, src.engine, src.execution —
 # this script must not pull in the trading daemon's import graph.
+from src.contracts.availability_time import proof_of_possession_available_at  # noqa: E402
 from src.data.daily_obs_append import _accumulate_hko_reading  # noqa: E402
 from src.data.observation_instants_writer import (  # noqa: E402
     InvalidObsV2RowError,
@@ -250,9 +251,9 @@ def _parse_hko_extrema_csv(
 
 
 def _fetch_hko_extrema() -> HkoExtremaSnapshot:
-    fetched_at = datetime.now(timezone.utc).isoformat()
     response = httpx.get(HKO_EXTREMA_URL, timeout=30.0)
     response.raise_for_status()
+    fetched_at = proof_of_possession_available_at(datetime.now(timezone.utc))
     return _parse_hko_extrema_csv(response.text, fetched_at_utc=fetched_at)
 
 
@@ -411,7 +412,7 @@ def project_accumulator_to_v2(
     snapshot: HkoExtremaSnapshot | None = None,
 ) -> dict:
     """Write one current HKO extrema fact and retire legacy pseudo-extrema."""
-    ts_now = datetime.now(timezone.utc).isoformat()
+    ts_now = proof_of_possession_available_at(datetime.now(timezone.utc))
     try:
         snapshot = snapshot or _fetch_hko_extrema()
         current = _latest_accumulator_temperature(
@@ -426,7 +427,7 @@ def project_accumulator_to_v2(
             temperature_c=temp_c,
             accumulator_fetched_at=accumulator_fetched_at,
             data_version=data_version,
-            imported_at=ts_now,
+            imported_at=snapshot.fetched_at_utc,
         )
     except (httpx.HTTPError, InvalidObsV2RowError, ValueError) as exc:
         logger.warning("HKO extrema build failed: %s", exc)

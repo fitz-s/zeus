@@ -441,6 +441,7 @@ def _aggregate(
             temp_unit=unit_out,
             station_id=station,
             observation_count=len(obs_list),
+            latest_raw_ts=max(dt_v for _, dt_v in obs_list).isoformat(),
         )
 
 

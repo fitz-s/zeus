@@ -125,21 +125,24 @@ _ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
 _ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS = 6 * 60 * 60
 _ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES = frozenset({"economically_closed"})
 _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK = Decimal("0.001")
-_ENTRY_TERMINAL_NO_FILL_REPRICE_LOOKBACK_SECONDS = 6 * 60 * 60
+_ENTRY_TERMINAL_NO_FILL_REPRICE_LOOKBACK_SECONDS = 2 * 60
 _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
-_HELD_POSITION_MONITOR_POSITIVE_BUDGET_PROGRESS_MIN = 2
-_HELD_POSITION_MONITOR_FULL_COVERAGE_CYCLES = 3
+_HELD_POSITION_MONITOR_RESERVATION_MIN = 2
+_HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
 
 
-def _held_position_monitor_positive_progress_limit(position_count: int) -> int:
-    """Keep one full held book inside three nominal monitor cycles."""
+def _held_position_monitor_reservation_count(position_count: int) -> int:
+    """Reserve one third of the book for deadline-degraded monitor cycles."""
 
     return max(
-        _HELD_POSITION_MONITOR_POSITIVE_BUDGET_PROGRESS_MIN,
-        math.ceil(max(0, int(position_count)) / _HELD_POSITION_MONITOR_FULL_COVERAGE_CYCLES),
+        _HELD_POSITION_MONITOR_RESERVATION_MIN,
+        math.ceil(
+            max(0, int(position_count))
+            / _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES
+        ),
     )
 
 
@@ -3652,6 +3655,17 @@ _DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES = (
 
 def _day0_immature_exit_authority_reason(*sources) -> str | None:
     for source in sources:
+        status = str(
+            getattr(source, "day0_exit_authority_status", None)
+            or getattr(source, "_day0_exit_authority_status", None)
+            or ""
+        ).strip().lower()
+        if status in {"immature", "unavailable"}:
+            return str(
+                getattr(source, "day0_exit_authority_reason", None)
+                or getattr(source, "_day0_exit_authority_reason", None)
+                or f"day0_extreme_maturity_unavailable:status={status}"
+            )
         for validation in getattr(source, "applied_validations", []) or []:
             text = str(validation or "")
             if text.startswith(_DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES):
@@ -5081,6 +5095,18 @@ def _build_exit_context(
         day0_zero_probability_exit_authority=bool(
             getattr(pos, "_day0_zero_probability_exit_authority", False)
         ),
+        day0_exit_authority_status=str(
+            getattr(pos, "_day0_exit_authority_status", None)
+            or ("unavailable" if position_state == "day0_window" else "not_applicable")
+        ),
+        day0_exit_authority_reason=str(
+            getattr(pos, "_day0_exit_authority_reason", None)
+            or (
+                "day0_extreme_maturity_unavailable:typed_authority_missing"
+                if position_state == "day0_window"
+                else "non_day0_family"
+            )
+        ),
         whale_toxicity=getattr(pos, "last_monitor_whale_toxicity", None),
         chain_is_fresh=pos.chain_state == "synced",
         divergence_score=float(getattr(edge_ctx, "divergence_score", 0.0) or 0.0),
@@ -5243,13 +5269,21 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
     )
 
 
+def _monitor_probability_content_identity(receipt: object) -> str:
+    """Return stable full-q content identity from a fresh monitor receipt."""
+
+    if not isinstance(receipt, dict):
+        return ""
+    return str(receipt.get("probability_content_identity") or "").strip()
+
+
 def _current_monitor_global_holding_coverage(
     *,
     conn,
     clob,
     portfolio,
     position,
-    probability_witness_identity: str,
+    probability_content_identity: str,
     checked_at_utc: datetime,
     current_time_provider: Callable[[], datetime] | None = None,
 ):
@@ -5384,7 +5418,7 @@ def _current_monitor_global_holding_coverage(
                 else global_sell_book_witness_identity(curve)
             )
 
-        def current_probability_witness_identity(_coverage) -> str | None:
+        def current_probability_content_identity(_coverage) -> str | None:
             from src.engine.monitor_refresh import (
                 _refresh_current_global_day0_probability,
             )
@@ -5402,11 +5436,7 @@ def _current_monitor_global_holding_coverage(
                 "_day0_monitor_probability_receipt",
                 None,
             )
-            return (
-                str(receipt.get("probability_witness_identity") or "")
-                if isinstance(receipt, dict)
-                else None
-            )
+            return _monitor_probability_content_identity(receipt) or None
 
         def current_holding_witness(_coverage) -> _CurrentHoldingWitness | None:
             current_wealth = current_portfolio_wealth_witness(
@@ -5438,7 +5468,7 @@ def _current_monitor_global_holding_coverage(
                 or getattr(position, "trade_id", "")
                 or ""
             ),
-            probability_witness_identity=probability_witness_identity,
+            probability_content_identity=probability_content_identity,
             checked_at_utc=checked,
             family_key=family_key,
             bin_label=str(getattr(position, "bin_label", "") or "").strip(),
@@ -5449,8 +5479,8 @@ def _current_monitor_global_holding_coverage(
             current_ledger_snapshot_id=str(wealth.ledger_snapshot_id),
             current_wealth_economic_identity=str(wealth.economic_identity),
             current_sell_book_witness_resolver=current_sell_book_witness,
-            current_probability_witness_identity_resolver=(
-                current_probability_witness_identity
+            current_probability_content_identity_resolver=(
+                current_probability_content_identity
             ),
             current_holding_witness_resolver=current_holding_witness,
             current_time_provider=current_time,
@@ -5641,7 +5671,7 @@ def execute_monitoring_phase(
     monitor_budget_seconds = _held_position_monitor_budget_seconds(
         held_position_monitor_budget_seconds
     )
-    monitor_progress_limit = _held_position_monitor_positive_progress_limit(
+    monitor_reservation_count = _held_position_monitor_reservation_count(
         len(monitor_positions)
     )
     monitor_deadline = time.monotonic() + monitor_budget_seconds
@@ -5698,7 +5728,7 @@ def execute_monitoring_phase(
         _reserve_held_monitor_positions(
             "bounded_coverage",
             monitor_positions,
-            limit=monitor_progress_limit,
+            limit=monitor_reservation_count,
             priority_key=lambda pos: (
                 -1
                 if id(pos) in dead_bin_position_ids
@@ -5868,7 +5898,7 @@ def execute_monitoring_phase(
     )
     network_prefetch_started = False
     network_prefetch_unavailable = False
-    summary["held_monitor_positive_progress_limit"] = monitor_progress_limit
+    summary["held_monitor_budget_reservation_count"] = monitor_reservation_count
 
     for position_index, pos in enumerate(monitor_positions):
         if urgent_preemption_requested():
@@ -5878,41 +5908,18 @@ def execute_monitoring_phase(
             summary["held_monitor_defer_reason"] = "urgent_day0_wake"
             break
         monitor_deadline_expired = time.monotonic() >= monitor_deadline
-        monitor_progress_count = int(summary.get("monitors", 0) or 0)
-        monitor_progress_persisted = monitor_progress_count > 0
-        monitor_progress_limit_reached = (
-            monitor_budget_seconds > 0.0
-            and monitor_progress_count
-            >= monitor_progress_limit
-        )
         if (
-            (
-                monitor_progress_limit_reached
-                and id(pos) not in budget_guaranteed_position_ids
-            )
-            or (
-                monitor_deadline_expired
-                and (
-                    id(pos) not in budget_guaranteed_position_ids
-                    or (monitor_budget_seconds > 0.0 and monitor_progress_persisted)
-                )
-            )
+            monitor_deadline_expired
+            and id(pos) not in budget_guaranteed_position_ids
         ):
             deferred_count = len(monitor_positions) - position_index
             if deferred_count > 0:
                 summary["held_monitor_positions_deferred"] = deferred_count
-                summary["held_monitor_defer_reason"] = (
-                    "positive_budget_progress_limit"
-                    if monitor_progress_limit_reached
-                    else "cycle_budget_exhausted"
+                summary["held_monitor_defer_reason"] = "cycle_budget_exhausted"
+                summary["held_monitor_deadline_deferred_positions"] = deferred_count
+                summary["held_monitor_deadline_defer_reason"] = (
+                    "MONITOR_DEADLINE_EXPIRED"
                 )
-                if monitor_progress_limit_reached:
-                    summary["held_monitor_progress_limit_reached"] = True
-                if monitor_deadline_expired:
-                    summary["held_monitor_deadline_deferred_positions"] = deferred_count
-                    summary["held_monitor_deadline_defer_reason"] = (
-                        "MONITOR_DEADLINE_EXPIRED"
-                    )
             break
         if monitor_deadline_expired:
             summary["held_monitor_budget_bypass_scanned"] = (
@@ -6693,15 +6700,12 @@ def execute_monitoring_phase(
                     "_day0_monitor_probability_receipt",
                     None,
                 )
-                probability_witness_identity = (
-                    str(
-                        probability_receipt.get("probability_witness_identity")
-                        or ""
+                probability_content_identity = (
+                    _monitor_probability_content_identity(
+                        probability_receipt
                     )
-                    if isinstance(probability_receipt, dict)
-                    else ""
                 )
-                if probability_witness_identity:
+                if probability_content_identity:
                     def coverage_time() -> datetime:
                         try:
                             value = (
@@ -6726,8 +6730,8 @@ def execute_monitoring_phase(
                         clob=clob,
                         portfolio=portfolio,
                         position=pos,
-                        probability_witness_identity=(
-                            probability_witness_identity
+                        probability_content_identity=(
+                            probability_content_identity
                         ),
                         checked_at_utc=coverage_checked_at,
                         current_time_provider=coverage_time,

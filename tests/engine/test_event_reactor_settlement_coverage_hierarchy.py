@@ -1,5 +1,5 @@
 # Created: 2026-07-04
-# Last reused/audited: 2026-07-04
+# Last reused/audited: 2026-07-23
 # Authority basis: F1 hierarchical settlement-coverage calibrator wiring
 #   (src/calibration/settlement_coverage_hierarchy.py + the money-path choke
 #   point in src/engine/event_reactor_adapter.py::
@@ -168,9 +168,9 @@ class TestFlagOnWiring:
         # winning (the audit anchor) -- spread across many cities so the
         # exact-cell scope for the QUERY (a fresh city "Manila") stays thin and
         # only the Level-1 STRATEGY_BUCKET cohort can license the shrink.
-        # event_type=DAY0_EXTREME_UPDATED + direction=buy_no is the ONLY
-        # _event_bound_strategy_key combination that resolves to a CANONICAL
-        # strategy ("settlement_capture") -- the qkernel forecast lane resolves
+        # A locked selected-side Day0 payoff is the only input that resolves to
+        # settlement_capture; direction alone must never select that cohort. The
+        # qkernel forecast lane resolves
         # to "forecast_qkernel_entry", which is NOT in CANONICAL_STRATEGY_KEYS
         # and correctly canonicalizes to UNKNOWN (by design, see
         # src/calibration/settlement_coverage_hierarchy.py).
@@ -222,6 +222,7 @@ class TestFlagOnWiring:
             forecast_conn=forecast_conn,
             topology_conn=topology_conn,
             decision_time=datetime(2026, 6, 5, tzinfo=timezone.utc),
+            day0_payoff_truth="locked",
         )
         assert pair.status == "UNLICENSED"
         assert pair.level in ("STRATEGY_BUCKET", "CROSS_STRATEGY", "GLOBAL")

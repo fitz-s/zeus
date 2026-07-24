@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-23
 # Authority basis: 2026-06-22 lifecycle design consult REQ-20260622-060011 (Pro
 #   Extended) — D2 shift-bin reactor wiring. Pins the ADDITIVE integration points in
 #   src/engine/event_reactor_adapter.py:
@@ -305,6 +305,90 @@ def test_day0_remaining_day_forecast_determinism_does_not_mature_exit_authority(
     assert payload["_edli_day0_bound_classification"] == "DETERMINISTIC"
     assert payload["_edli_day0_model_bound_classification_role"] == (
         "forecast_remaining_window_evidence_only"
+    )
+
+
+def test_day0_temporal_exit_authority_requires_intraday_observation():
+    payload = {"metric": "low"}
+
+    era._record_day0_temporal_exit_authority(
+        payload=payload,
+        family=SimpleNamespace(city="Hong Kong", target_date="2026-07-24"),
+        metric="low",
+        decision_time=datetime(2026, 7, 24, 13, 30, tzinfo=timezone.utc),
+    )
+
+    assert payload["_edli_day0_exit_authority_status"] == "unavailable"
+    assert payload["_edli_day0_exit_authority_reason"] == (
+        "day0_extreme_maturity_unavailable:no_intraday_extreme"
+    )
+
+
+@pytest.mark.parametrize(
+    ("decision_time", "observation_time", "status", "reason"),
+    [
+        (
+            datetime(2026, 7, 24, 1, 51, tzinfo=timezone.utc),
+            "2026-07-24T01:00:00+00:00",
+            "immature",
+            "day0_low_extreme_not_terminal:hours_remaining=14.2",
+        ),
+        (
+            datetime(2026, 7, 24, 13, 30, tzinfo=timezone.utc),
+            "2026-07-24T13:00:00+00:00",
+            "mature",
+            "day0_low_extreme_terminal_window",
+        ),
+        (
+            datetime(2026, 7, 24, 13, 30, tzinfo=timezone.utc),
+            "2026-07-24T01:00:00+00:00",
+            "unavailable",
+            (
+                "day0_extreme_maturity_unavailable:observation_stale:"
+                "age_minutes=750.0,budget_minutes=100.0"
+            ),
+        ),
+    ],
+)
+def test_day0_low_temporal_exit_authority_uses_decision_clock(
+    monkeypatch,
+    decision_time,
+    observation_time,
+    status,
+    reason,
+):
+    observed_decision_times = []
+
+    def temporal_context(*_args, **kwargs):
+        observed_decision_times.append(kwargs["observation_time"])
+        return SimpleNamespace(daypart="morning", post_peak_confidence=0.0)
+
+    monkeypatch.setattr(
+        "src.signal.diurnal.build_day0_temporal_context",
+        temporal_context,
+    )
+    monkeypatch.setattr(
+        "src.signal.day0_obs_latency.staleness_budget_minutes",
+        lambda _city: 100.0,
+    )
+    payload = {
+        "metric": "low",
+        "rounded_value": 26,
+        "low_so_far": 26.0,
+        "observation_time": observation_time,
+    }
+
+    era._record_day0_temporal_exit_authority(
+        payload=payload,
+        family=SimpleNamespace(city="Hong Kong", target_date="2026-07-24"),
+        metric="low",
+        decision_time=decision_time,
+    )
+
+    assert payload["_edli_day0_exit_authority_status"] == status
+    assert payload["_edli_day0_exit_authority_reason"] == reason
+    assert observed_decision_times == (
+        [] if status == "unavailable" else [decision_time]
     )
 
 

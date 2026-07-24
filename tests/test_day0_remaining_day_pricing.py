@@ -1,5 +1,8 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-19
+# Last reused or audited: 2026-07-24
+# Lifecycle: created=2026-06-10; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Purpose: Protect causal Day0 remaining-window probability construction.
+# Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector); day0 first-principles review §2.4
 #   (full-day-masked q DEVIATES: overprices excursion bins post-peak) and
@@ -669,6 +672,118 @@ class TestRemainingDayMembers:
 
         assert _day0_remaining_day_q_enabled() is True
 
+    def test_current_temperature_uses_newer_same_station_fast_print(
+        self, monkeypatch
+    ):
+        """Trajectory time follows the freshest station print, not old WU cadence."""
+        import src.engine.event_reactor_adapter as era
+        from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+        conn = _conn()
+        ensure_table(conn)
+        append_print(
+            conn,
+            city="Paris",
+            station_id="LFPG",
+            source_channel="wu_icao_history",
+            publish_ts_utc="2026-06-10T13:00:00+00:00",
+            value_native=24.0,
+            unit="C",
+            fetched_at_utc="2026-06-10T13:05:00+00:00",
+        )
+        append_print(
+            conn,
+            city="Paris",
+            station_id="LFPG",
+            source_channel="aviationweather_metar",
+            publish_ts_utc="2026-06-10T13:30:00+00:00",
+            value_native=23.0,
+            unit="C",
+            fetched_at_utc="2026-06-10T13:34:00+00:00",
+            raw_report="METAR LFPG 101330Z 23010KT 23/12",
+        )
+        append_print(
+            conn,
+            city="Paris",
+            station_id="LFPG",
+            source_channel="aviationweather_metar",
+            publish_ts_utc="2026-06-10T13:35:00+00:00",
+            value_native=22.0,
+            unit="C",
+            fetched_at_utc="2026-06-10T13:50:00+00:00",
+            raw_report="METAR LFPG 101335Z 23010KT 22/12",
+        )
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+
+        current = era._latest_day0_current_temperature_native(
+            world_conn=conn,
+            family=self._family(),
+            decision_time=datetime(2026, 6, 10, 13, 40, tzinfo=UTC),
+        )
+        conn.close()
+
+        assert current == (
+            23.0,
+            datetime(2026, 6, 10, 13, 30, tzinfo=UTC),
+            "aviationweather_metar",
+        )
+
+    def test_fahrenheit_fast_current_temperature_requires_precise_t_group(
+        self, monkeypatch
+    ):
+        """Whole-C METAR fallback cannot silently become a Fahrenheit path state."""
+        import src.engine.event_reactor_adapter as era
+        from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+        city = SimpleNamespace(
+            name="NYC",
+            timezone="America/New_York",
+            settlement_unit="F",
+            settlement_source_type="wu_icao",
+            wu_station="KLGA",
+            lat=40.7,
+            lon=-73.9,
+        )
+        conn = _conn()
+        ensure_table(conn)
+        for observed_at, raw_report in (
+            (
+                "2026-06-10T19:30:00+00:00",
+                "METAR KLGA 101930Z 18008KT 10SM CLR 26/16 A2998 T02560161",
+            ),
+            (
+                "2026-06-10T19:40:00+00:00",
+                "METAR KLGA 101940Z 18008KT 10SM CLR 26/16 A2998",
+            ),
+        ):
+            append_print(
+                conn,
+                city="NYC",
+                station_id="KLGA",
+                source_channel="aviationweather_metar",
+                publish_ts_utc=observed_at,
+                value_native=26.0,
+                unit="C",
+                fetched_at_utc=observed_at,
+                raw_report=raw_report,
+            )
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"NYC": city})
+
+        current = era._latest_day0_current_temperature_native(
+            world_conn=conn,
+            family=SimpleNamespace(
+                city="NYC", target_date="2026-06-10", metric="high"
+            ),
+            decision_time=datetime(2026, 6, 10, 19, 45, tzinfo=UTC),
+        )
+        conn.close()
+
+        assert current == (
+            pytest.approx(78.08),
+            datetime(2026, 6, 10, 19, 30, tzinfo=UTC),
+            "aviationweather_metar",
+        )
+
     def test_post_peak_members_clamp_to_running_max_floor(self, monkeypatch):
         """All remaining-hours extremes BELOW the running max -> every pooled
         member clamps to the floor -> the floor bin owns ~all probability mass.
@@ -695,7 +810,121 @@ class TestRemainingDayMembers:
         assert members is not None
         # every member clamped UP to the running max (absorbing physical law)
         assert np.all(members == 25.0)
+        assert payload["_edli_day0_unclamped_remaining_extrema_native"] == [
+            20.0,
+            21.0,
+        ]
         assert payload["_edli_day0_remaining_models"] == 2
+
+    def test_remaining_members_keep_source_clock_exact_but_freeze_temporal_q_clock(
+        self, monkeypatch
+    ):
+        """Sub-minute submit latency must not manufacture a new point-q world."""
+        import src.engine.event_reactor_adapter as era
+
+        vectors = [
+            _vector(model="icon_d2", temps=[20.0] * 24),
+            _vector(model="meteofrance_arome_france_hd", temps=[21.0] * 24),
+        ]
+        source_times: list[datetime] = []
+        probability_times: list[datetime | None] = []
+
+        def read_vectors(**kwargs):
+            source_times.append(kwargs["now"])
+            return vectors
+
+        def record_authority(**kwargs):
+            probability_times.append(kwargs["decision_time"])
+
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            read_vectors,
+        )
+        monkeypatch.setattr(
+            era,
+            "_record_day0_remaining_day_exit_authority",
+            record_authority,
+        )
+        exact = datetime(2026, 6, 10, 15, 0, 59, 900000, tzinfo=UTC)
+        probability_cut = era._day0_probability_clock(exact)
+        members = era._day0_remaining_day_members(
+            payload={
+                "metric": "high",
+                "rounded_value": 25.0,
+                "settlement_source": "wu_api",
+            },
+            family=self._family(),
+            unit="C",
+            decision_time=exact,
+            probability_time=probability_cut,
+        )
+
+        assert members is not None
+        assert source_times == [exact]
+        assert probability_times == [probability_cut]
+
+    @pytest.mark.parametrize(
+        ("metric", "observed", "future", "winning_index"),
+        (
+            ("high", 26.0, [21.0, 22.0], 1),
+            ("low", 26.0, [30.0, 31.0], 1),
+        ),
+    )
+    def test_probability_noise_applies_before_absorbing_boundary(
+        self, monkeypatch, metric, observed, future, winning_index
+    ):
+        """A completed plateau cannot be noised into a fictitious excursion."""
+        import src.engine.event_reactor_adapter as era
+
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        bins = [
+            Bin(None, 25, "C", "25C or below"),
+            Bin(26, 26, "C", "26C"),
+            Bin(27, None, "C", "27C or above"),
+        ]
+        payload = {
+            "metric": metric,
+            "rounded_value": observed,
+            "_edli_q_source": "day0_remaining_day",
+        }
+        q = era._snapshot_p_raw(
+            {"settlement_unit": "C", "temperature_metric": metric},
+            family=SimpleNamespace(city="Paris", metric=metric),
+            bins=bins,
+            members=np.asarray(future, dtype=float),
+            payload=payload,
+            members_already_corrected=True,
+        )
+
+        assert q[winning_index] == pytest.approx(1.0)
+        assert payload["_edli_day0_probability_operator"] == (
+            "extreme_observed_then_noisy_future_v1"
+        )
+
+    def test_probability_operator_preserves_real_future_excursion(self, monkeypatch):
+        """Correct ordering removes fictitious tails without suppressing real upside."""
+        import src.engine.event_reactor_adapter as era
+
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        bins = [
+            Bin(None, 25, "C", "25C or below"),
+            Bin(26, 26, "C", "26C"),
+            Bin(27, None, "C", "27C or above"),
+        ]
+        q = era._snapshot_p_raw(
+            {"settlement_unit": "C", "temperature_metric": "high"},
+            family=SimpleNamespace(city="Paris", metric="high"),
+            bins=bins,
+            members=np.asarray([28.0, 29.0], dtype=float),
+            payload={
+                "metric": "high",
+                "rounded_value": 26.0,
+                "_edli_q_source": "day0_remaining_day",
+            },
+            members_already_corrected=True,
+        )
+
+        assert q[2] > 0.99
 
     def test_members_use_observation_time_after_local_midnight(self, monkeypatch):
         import src.engine.event_reactor_adapter as era
@@ -799,8 +1028,8 @@ class TestRemainingDayMembers:
         )
         assert sorted(members.tolist()) == [25.0, 27.5]
 
-    def test_live_members_condition_future_path_on_current_state(self, monkeypatch):
-        """An already-observed model miss must move the remaining trajectory."""
+    def test_live_members_do_not_transport_instant_error_without_covariance(self, monkeypatch):
+        """A current miss is audit evidence, not a permanent future shift."""
         import src.engine.event_reactor_adapter as era
 
         vector = Day0HourlyVector(
@@ -845,11 +1074,14 @@ class TestRemainingDayMembers:
         )
 
         assert members is not None
-        # At local 16:00 the model said 26 while reality was 23. The -3C
-        # innovation moves the local 17:00 future value 25 -> 22; the already
-        # observed daily high remains the 24C absorbing floor.
-        assert members.tolist() == [24.0]
+        # At local 16:00 the model said 26 while reality was 23. Without a
+        # time-covariance law, that -3C instant error cannot erase the model's
+        # still-future 25C peak.
+        assert members.tolist() == [25.0]
         assert payload["_edli_day0_model_innovations_c"] == {"ecmwf_ifs": -3.0}
+        assert payload["_edli_day0_trajectory_conditioning_basis"] == (
+            "current_state_diagnostic_no_unvalidated_transport_v1"
+        )
         assert payload["_edli_day0_remaining_window_start_utc"] == (
             "2026-06-10T14:00:00+00:00"
         )
@@ -895,12 +1127,12 @@ class TestRemainingDayMembers:
         )
 
         assert members is not None
-        # The 30C anchor itself has occurred. Applying its -10C innovation to
-        # the strictly-future 20C path yields 10C; including the anchor as
-        # future support would incorrectly return 20C.
-        assert members.tolist() == [10.0]
+        # The 30C anchor itself has occurred and is excluded; the unobserved
+        # 20C path remains future support. The instant -10C miss is not carried
+        # into that path without a validated transport law.
+        assert members.tolist() == [20.0]
 
-    def test_current_state_conditioning_is_persisted_in_probability_authority(self):
+    def test_current_state_diagnostic_is_persisted_in_probability_authority(self):
         import src.engine.event_reactor_adapter as era
 
         authority = era._global_day0_probability_authority_payload(
@@ -917,7 +1149,7 @@ class TestRemainingDayMembers:
                 ),
                 "_edli_day0_current_temperature_source": "wu_icao_history",
                 "_edli_day0_trajectory_conditioning_basis": (
-                    "current_state_persistent_additive_innovation_v1"
+                    "current_state_diagnostic_no_unvalidated_transport_v1"
                 ),
                 "_edli_day0_model_innovations_c": {
                     "ecmwf_ifs": -1.3,
@@ -932,7 +1164,7 @@ class TestRemainingDayMembers:
         )
         assert authority["current_temperature_source"] == "wu_icao_history"
         assert authority["trajectory_conditioning_basis"] == (
-            "current_state_persistent_additive_innovation_v1"
+            "current_state_diagnostic_no_unvalidated_transport_v1"
         )
         assert authority["model_innovations_c"] == {
             "ecmwf_ifs": -1.3,

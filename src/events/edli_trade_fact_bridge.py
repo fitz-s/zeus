@@ -211,8 +211,11 @@ def append_rest_filled_orphan_trade_facts_to_edli(
     Recovery contract (explicit reconcile authority, RECONCILE_SOURCE):
     - the trade fact has filled_size > 0 and fill_price > 0;
     - the owning venue command is in a terminal fill state (FILLED/PARTIAL);
-    - the fact is OLDER than ``grace_minutes`` — the user channel had every
-      chance to deliver first (within the window this bridge does nothing);
+    - a REST ``CONFIRMED`` fact is already explicit venue reconciliation and is
+      recovered immediately;
+    - a REST ``MATCHED``/``MINED`` fact is OLDER than ``grace_minutes`` — the
+      user channel had every chance to deliver first (within the window this
+      bridge does nothing);
     - no UserTradeObserved event exists for the trade under ANY authority
       (the WS bridge always wins when it ran).
     Every recovered event carries the full provenance chain in its payload.
@@ -344,7 +347,11 @@ def append_rest_filled_orphan_trade_facts_to_edli(
     skipped_invalid = 0
     for row in rows:
         observed_at = _parse_dt(_row_get(row, "observed_at"), default=default_now)
-        if observed_at.timestamp() > grace_cutoff:
+        rest_confirmed = (
+            str(_row_get(row, "trade_source") or "").upper() == "REST"
+            and str(_row_get(row, "state") or "").upper() == "CONFIRMED"
+        )
+        if not rest_confirmed and observed_at.timestamp() > grace_cutoff:
             continue  # still inside the user-channel grace window
         command_occurred_at = _parse_dt(
             _row_get(row, "command_occurred_at"), default=default_now
@@ -378,6 +385,19 @@ def append_rest_filled_orphan_trade_facts_to_edli(
 
 
 def _append_one_recovered_fill(ledger, row, observed_at, message_hash, grace_minutes) -> None:
+    rest_confirmed = (
+        str(_row_get(row, "trade_source") or "").upper() == "REST"
+        and str(_row_get(row, "state") or "").upper() == "CONFIRMED"
+    )
+    recovery_basis = (
+        "rest_confirmed_fill_fact;cmd_terminal_fill_state+rest_trade_fact"
+        if rest_confirmed
+        else (
+            "ws_user_confirmed_missing_after_grace;"
+            f"grace_minutes={float(grace_minutes):g};"
+            "cmd_terminal_fill_state+rest_trade_fact"
+        )
+    )
     append_reconcile_recovered_fill(
         ledger,
         aggregate_id=str(_row_get(row, "aggregate_id")),
@@ -399,11 +419,7 @@ def _append_one_recovered_fill(ledger, row, observed_at, message_hash, grace_min
                 f"{_row_get(row, 'state')}"
             ),
             "venue_command_state": str(_row_get(row, "command_state")),
-            "recovery_basis": (
-                "ws_user_confirmed_missing_after_grace;"
-                f"grace_minutes={float(grace_minutes):g};"
-                "cmd_terminal_fill_state+rest_trade_fact"
-            ),
+            "recovery_basis": recovery_basis,
         },
     )
 

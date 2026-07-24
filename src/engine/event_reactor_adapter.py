@@ -174,6 +174,10 @@ _GLOBAL_BOOK_PROJECTION_HINT_IN_FLIGHT = False
 _ProjectionHintT = TypeVar("_ProjectionHintT")
 
 from src.contracts.day0_observation_context import BoundClassification, classify_bound
+from src.contracts.day0_payoff_truth import (
+    Day0PayoffTruth,
+    classify_day0_payoff_truth,
+)
 from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.venue_submission_envelope import assert_live_order_unit_price
@@ -949,6 +953,42 @@ def _global_book_prefetch_tokens(
     )
 
 
+def _global_book_exact_retry_facts(
+    missing_tokens: tuple[str, ...],
+    retry_books: Mapping[str, Mapping[str, object]],
+) -> dict[str, Mapping[str, object]]:
+    """Normalize a successful exact retry into book or confirmed-absence facts."""
+
+    from src.engine.global_auction_universe import (
+        GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD,
+    )
+
+    tokens = tuple(str(token or "").strip() for token in missing_tokens)
+    token_set = set(tokens)
+    if (
+        not tokens
+        or any(not token for token in tokens)
+        or len(token_set) != len(tokens)
+        or not isinstance(retry_books, Mapping)
+        or any(str(token) not in token_set for token in retry_books)
+    ):
+        raise ValueError("GLOBAL_BOOK_EXACT_RETRY_INVALID")
+    facts = {
+        str(token): raw
+        for token, raw in retry_books.items()
+        if isinstance(raw, Mapping)
+    }
+    for token in tokens:
+        facts.setdefault(
+            token,
+            {
+                "asset_id": token,
+                GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD: True,
+            },
+        )
+    return facts
+
+
 def _global_book_actionable_topology(
     probabilities: Mapping[str, object],
     *,
@@ -1361,7 +1401,7 @@ def _global_book_receipt_token_pairs(
             compressed_b64,
         ) = receipt_row
         if (
-            schema_version not in {12, 13, 14, 15, 16}
+            schema_version not in {12, 13, 14, 15, 16, 17}
             or coverage_status != "COMPLETE"
             or coverage_complete != 1
             or encoding != "zlib+base64+canonical-json-v1"
@@ -2965,6 +3005,7 @@ class _CandidateProof:
     # fix). Carried to the receipt so 06-05+ settlement can attribute EMOS-cells
     # vs maze-cells per city (the PROMOTE evidence).
     q_source: str | None = None
+    day0_payoff_truth: str | None = None
     q_lcb_calibration_source: str | None = None
     same_bin_yes_posterior: float | None = None
     # Twin-authority reconciliation #7 (2026-06-11; selected-leg repair 2026-06-30):
@@ -3297,156 +3338,6 @@ def _adapter_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     except sqlite3.Error:
         return False
     return False
-
-
-_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK = Decimal("0.001")
-_ENTRY_TERMINAL_NO_EXPOSURE_COMMAND_STATES = frozenset(
-    {"REJECTED", "SUBMIT_REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}
-)
-_ENTRY_TERMINAL_NO_FILL_ORDER_FACT_STATES = frozenset(
-    {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
-)
-
-
-def _entry_command_has_positive_trade_fact(
-    conn: sqlite3.Connection,
-    command_id: str,
-) -> bool:
-    if not command_id or not _adapter_table_exists(conn, "venue_trade_facts"):
-        return False
-    try:
-        row = conn.execute(
-            """
-            SELECT 1
-              FROM venue_trade_facts
-             WHERE command_id = ?
-               AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
-             LIMIT 1
-            """,
-            (command_id,),
-        ).fetchone()
-    except sqlite3.Error:
-        return False
-    return row is not None
-
-
-def _entry_command_has_terminal_zero_fill_order_fact(
-    conn: sqlite3.Connection,
-    command_id: str,
-) -> bool:
-    if not command_id or not _adapter_table_exists(conn, "venue_order_facts"):
-        return False
-    try:
-        row = conn.execute(
-            """
-            SELECT state, matched_size
-              FROM venue_order_facts
-             WHERE command_id = ?
-               AND UPPER(COALESCE(state, '')) IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
-             ORDER BY local_sequence DESC, observed_at DESC
-             LIMIT 1
-            """,
-            (command_id,),
-        ).fetchone()
-    except sqlite3.Error:
-        return False
-    if row is None:
-        return False
-    matched_size = row["matched_size"] if isinstance(row, sqlite3.Row) else row[1]
-    try:
-        return Decimal(str(matched_size or "0")) == Decimal("0")
-    except Exception:  # noqa: BLE001 - malformed venue facts are not early-block evidence.
-        return False
-
-
-def _terminal_entry_command_has_no_fill_exposure(
-    conn: sqlite3.Connection,
-    *,
-    command_id: str,
-    state: str,
-) -> bool:
-    state_text = str(state or "").strip().upper()
-    if state_text not in _ENTRY_TERMINAL_NO_EXPOSURE_COMMAND_STATES:
-        return False
-    if _entry_command_has_positive_trade_fact(conn, command_id):
-        return False
-    if state_text in {"CANCELLED", "CANCELED", "EXPIRED"}:
-        return _entry_command_has_terminal_zero_fill_order_fact(conn, command_id)
-    return True
-
-
-def _same_token_terminal_no_fill_reprice_suppression_reason(
-    conn: sqlite3.Connection | None,
-    *,
-    token_id: str,
-    candidate_position_id: str,
-    limit_price: object,
-) -> str | None:
-    """Return executor-equivalent no-fill reprice suppression before EDLI append.
-
-    This is a read-only optimization guard at the decision seam. The executor
-    remains the final authority; on unreadable state this helper returns ``None``
-    so the existing pre-submit gate still blocks fail-closed.
-    """
-
-    if conn is None or not _adapter_table_exists(conn, "venue_commands"):
-        return None
-    token = str(token_id or "").strip()
-    position_id = str(candidate_position_id or "").strip()
-    if not token or not position_id:
-        return None
-    try:
-        candidate_price = Decimal(str(limit_price))
-    except Exception:  # noqa: BLE001 - executor will reject missing malformed price.
-        return None
-    try:
-        row = conn.execute(
-            """
-            SELECT command_id, position_id, state, price, size, created_at, updated_at
-              FROM venue_commands
-             WHERE UPPER(COALESCE(intent_kind, '')) = 'ENTRY'
-               AND UPPER(COALESCE(side, '')) = 'BUY'
-               AND token_id = ?
-               AND position_id != ?
-             ORDER BY updated_at DESC, created_at DESC
-             LIMIT 1
-            """,
-            (token, position_id),
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    if row is None:
-        return None
-
-    command_id = str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0] or "")
-    state = str(row["state"] if isinstance(row, sqlite3.Row) else row[2] or "")
-    if not _terminal_entry_command_has_no_fill_exposure(
-        conn,
-        command_id=command_id,
-        state=state,
-    ):
-        return None
-    prior_price_raw = row["price"] if isinstance(row, sqlite3.Row) else row[3]
-    try:
-        prior_price = Decimal(str(prior_price_raw))
-    except Exception:  # noqa: BLE001 - executor will handle missing reprice evidence.
-        return None
-    reprice_delta = abs(candidate_price - prior_price)
-    if reprice_delta >= _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK:
-        return None
-    existing_position_id = str(
-        row["position_id"] if isinstance(row, sqlite3.Row) else row[1] or ""
-    )
-    updated_at = str(row["updated_at"] if isinstance(row, sqlite3.Row) else row[6] or "")
-    return (
-        "ENTRY_COOLDOWN_TERMINAL_NO_FILL_REPRICE_REQUIRED:"
-        f"token_id={token}:existing_command_id={command_id}:"
-        f"existing_position_id={existing_position_id}:existing_command_state={state}:"
-        f"existing_price={prior_price}:candidate_price={candidate_price}:"
-        f"reprice_delta={reprice_delta}:"
-        f"min_reprice_tick={_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK}:"
-        f"existing_updated_at={updated_at}"
-    )
 
 
 def _entry_global_submit_suppression_reason() -> str | None:
@@ -5072,9 +4963,10 @@ def _event_bound_strategy_key(
     event_type: str,
     direction: str | None,
     metric: str | None,
+    day0_payoff_truth: str | None = None,
     require_metric_live: bool = False,
 ) -> str:
-    """Classify the EDLI event-bound entry strategy without mixing live lanes."""
+    """Classify strategy from selected-side truth, never direction alone."""
 
     direction_value = getattr(direction, "value", direction)
     normalized_direction = str(direction_value or "").strip().lower()
@@ -5084,12 +4976,12 @@ def _event_bound_strategy_key(
         normalized_direction = "buy_no"
     normalized_metric = str(metric or "").strip().lower()
     if event_type == "DAY0_EXTREME_UPDATED":
-        if normalized_direction == "buy_no":
-            strategy = "settlement_capture"
-        elif normalized_direction == "buy_yes":
-            strategy = "day0_nowcast_entry"
-        else:
+        if normalized_direction not in {"buy_yes", "buy_no"}:
             raise ValueError(f"EDLI_STRATEGY_DIRECTION_UNKNOWN:{event_type}:{normalized_direction}")
+        if str(day0_payoff_truth or "").strip().lower() == Day0PayoffTruth.LOCKED.value:
+            strategy = "settlement_capture"
+        else:
+            strategy = "day0_nowcast_entry"
     elif event_type in _FORECAST_DECISION_EVENT_TYPES:
         if normalized_direction not in {"buy_yes", "buy_no"}:
             raise ValueError(f"EDLI_STRATEGY_DIRECTION_UNKNOWN:{event_type}:{normalized_direction}")
@@ -5173,6 +5065,9 @@ def _event_bound_effective_live_quality_floors(
                 event_type=event_type,
                 direction=str(actionable_payload.get("direction") or ""),
                 metric=str(actionable_payload.get("metric") or ""),
+                day0_payoff_truth=str(
+                    actionable_payload.get("day0_payoff_truth") or ""
+                ),
             )
         except Exception:  # noqa: BLE001
             strategy_key = ""
@@ -6853,7 +6748,10 @@ def event_bound_live_adapter_from_trade_conn(
     # True on the submit result.  Exposed on the adapter callable for main.py.
     _live_ack_count: list[int] = [0]
     _consumed_global_preflight_tokens: dict[str, datetime] = {}
-    _global_entry_policy_by_family: dict[str, tuple[str, str]] = {}
+    _global_entry_policy_by_family: dict[
+        str,
+        tuple[str, str, dict[tuple[str, str], str | None]],
+    ] = {}
     from src.runtime.reactor_wake import (
         reactor_urgent_wake_identity,
         reactor_urgent_wake_reason,
@@ -6930,6 +6828,12 @@ def event_bound_live_adapter_from_trade_conn(
     ) -> EventSubmissionReceipt:
         payload = _payload(event)
         family_key = str(prepared.probability_witness.family_key)
+        day0_truth_by_bin_side = {
+            (str(bin_id), str(side).upper()): str(truth)
+            for bin_id, side, truth in tuple(
+                getattr(prepared, "day0_payoff_truth_by_bin_side", ()) or ()
+            )
+        }
         _global_entry_policy_by_family[family_key] = (
             str(
                 payload.get("event_type")
@@ -6941,6 +6845,7 @@ def event_bound_live_adapter_from_trade_conn(
                 or payload.get("temperature_metric")
                 or ""
             ).strip(),
+            day0_truth_by_bin_side,
         )
         return EventSubmissionReceipt(
             False,
@@ -8637,11 +8542,13 @@ def event_bound_live_adapter_from_trade_conn(
                         else None
                     )
                 if prefetched is None:
-                    return _prefetch_books(
+                    prefetched = _prefetch_books(
                         probability_slice,
                         mode=mode,
                         token_override=exact_tokens,
                     )
+                    if prefetched is None:
+                        return None
                 _, prefetched_books, prefetched_at = prefetched
                 missing_tokens = tuple(
                     token
@@ -8659,7 +8566,12 @@ def event_bound_live_adapter_from_trade_conn(
                     if supplement is None:
                         return None
                     _, supplement_books, supplement_at = supplement
-                    books.update(supplement_books)
+                    books.update(
+                        _global_book_exact_retry_facts(
+                            missing_tokens,
+                            supplement_books,
+                        )
+                    )
                     epoch_at = min(epoch_at, supplement_at)
                 return exact_tokens, books, epoch_at
 
@@ -9363,12 +9275,14 @@ def event_bound_live_adapter_from_trade_conn(
             side = str(getattr(candidate, "side", "") or "").strip().upper()
             if owner is None or side not in {"YES", "NO"}:
                 return "GLOBAL_ENTRY_FEASIBILITY_OWNER_MISSING"
-            event_type, metric = owner
+            event_type, metric, day0_truth_by_bin_side = owner
+            bin_id = str(getattr(candidate, "bin_id", "") or "").strip()
             try:
                 strategy_key = _event_bound_strategy_key(
                     event_type=event_type,
                     direction=f"buy_{side.lower()}",
                     metric=metric,
+                    day0_payoff_truth=day0_truth_by_bin_side.get((bin_id, side)),
                     require_metric_live=True,
                 )
             except ValueError as exc:
@@ -10094,6 +10008,9 @@ def _record_qkernel_selection_family_facts(
     event: OpportunityEvent,
     decision_time: datetime,
     decision_snapshot_id: str | None,
+    day0_payoff_truth_by_bin_side: Mapping[
+        tuple[str, str], str | None
+    ] | None = None,
 ) -> dict[str, Any]:
     """Persist qkernel family-selection facts to canonical world DB only.
 
@@ -10143,12 +10060,18 @@ def _record_qkernel_selection_family_facts(
             continue
         payload = dict(economics_by_key.get((bin_id, side), {}) or {})
         direction = "buy_yes" if side == "YES" else "buy_no"
+        day0_payoff_truth = (
+            day0_payoff_truth_by_bin_side.get((bin_id, side))
+            if day0_payoff_truth_by_bin_side is not None
+            else None
+        )
         strategy_key = ""
         try:
             strategy_key = _event_bound_strategy_key(
                 event_type=str(getattr(event, "event_type", "") or ""),
                 direction=direction,
                 metric=str(getattr(family, "metric", "") or ""),
+                day0_payoff_truth=day0_payoff_truth,
             )
         except Exception:
             strategy_key = ""
@@ -10221,6 +10144,7 @@ def _record_qkernel_selection_family_facts(
                     "side": side,
                     "bin_id": bin_id,
                     "strategy_key": strategy_key,
+                    "day0_payoff_truth": day0_payoff_truth,
                     "qkernel_execution_economics": payload,
                 },
             }
@@ -11157,14 +11081,45 @@ def _submit_current_global_sell(
         )
     now = decision_time.astimezone(UTC)
     try:
-        _current_global_actuation_prepared_family(
-            event,
-            global_actuation=global_actuation,
-            forecast_conn=forecast_conn,
-            topology_conn=topology_conn,
-            observation_conn=calibration_conn,
-            decision_time=now,
+        current_prepared, current_day0_payload = (
+            _current_global_actuation_prepared_family(
+                event,
+                global_actuation=global_actuation,
+                forecast_conn=forecast_conn,
+                topology_conn=topology_conn,
+                observation_conn=calibration_conn,
+                decision_time=now,
+            )
         )
+        if getattr(candidate, "exit_authority_status", None) == "mature":
+            current_status = str(
+                getattr(
+                    current_prepared,
+                    "day0_exit_authority_status",
+                    current_day0_payload.get(
+                        "_edli_day0_exit_authority_status"
+                    ),
+                )
+                or ""
+            ).strip().lower()
+            if current_status != "mature":
+                raise ValueError(
+                    "GLOBAL_SELL_DAY0_EXIT_AUTHORITY_SUPERSEDED:"
+                    f"{current_status or 'missing'}"
+                )
+            if str(
+                getattr(
+                    current_prepared,
+                    "sell_action_authority_identity",
+                    "",
+                )
+                or ""
+            ) != str(
+                getattr(candidate, "sell_action_authority_identity", "") or ""
+            ):
+                raise ValueError(
+                    "GLOBAL_SELL_DAY0_EXIT_AUTHORITY_IDENTITY_SUPERSEDED"
+                )
         wealth_block = _global_actuation_current_wealth_block_reason(
             trade_conn,
             global_actuation=global_actuation,
@@ -11283,6 +11238,55 @@ def _submit_current_global_sell(
                 actuation=global_actuation,
                 jit_candidate=current_candidate,
             )
+            expected_growth = getattr(decision, "expected_growth", None)
+            expected_terminal = getattr(
+                decision,
+                "expected_terminal_wealth",
+                None,
+            )
+            if expected_growth is None:
+                raise ValueError("GLOBAL_SELL_EXPECTED_COMPARISON_MISSING")
+            if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
+                if expected_terminal is None:
+                    raise ValueError("GLOBAL_SELL_EXPECTED_ECONOMICS_MISSING")
+                held_q = float(expected_terminal.held_probability_mean)
+                capital_economics = {
+                    "held_probability_mean": float(
+                        expected_terminal.held_probability_mean
+                    ),
+                    "favorable_sell_probability_mean": float(
+                        expected_terminal.favorable_sell_probability_mean
+                    ),
+                    "expected_sell_delta_log_wealth": float(
+                        expected_terminal.expected_delta_log_wealth
+                    ),
+                    "expected_sell_ev_usd": float(
+                        expected_terminal.expected_ev_usd
+                    ),
+                }
+            else:
+                capital_economics = {
+                    "sell_favorable_probability_lcb": float(
+                        getattr(decision.terminal_wealth, "win_probability_lcb")
+                    ),
+                    "robust_delta_log_wealth": float(
+                        getattr(decision, "robust_delta_log_wealth")
+                    ),
+                    "robust_ev_usd": float(getattr(decision, "robust_ev_usd")),
+                }
+            capital_economics.update(
+                {
+                    "expected_comparison_delta_log_wealth": float(
+                        expected_growth.expected_delta_log_wealth
+                    ),
+                    "expected_comparison_ev_usd": float(
+                        expected_growth.expected_ev_usd
+                    ),
+                    "expected_comparison_log_growth_per_hour": float(
+                        expected_growth.expected_log_growth_per_hour
+                    ),
+                }
+            )
             exit_context = ExitContext(
                 exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
                 fresh_prob=held_q,
@@ -11323,6 +11327,23 @@ def _submit_current_global_sell(
                     "probability_witness_identity": str(
                         getattr(candidate, "probability_witness_identity", "") or ""
                     ),
+                    "sell_probability_functional": str(
+                        getattr(candidate, "probability_functional", "") or ""
+                    ),
+                    "sell_exit_authority_status": str(
+                        getattr(candidate, "exit_authority_status", "") or ""
+                    ),
+                    "sell_exit_authority_reason": str(
+                        getattr(candidate, "exit_authority_reason", "") or ""
+                    ),
+                    "sell_action_authority_identity": str(
+                        getattr(
+                            candidate,
+                            "sell_action_authority_identity",
+                            "",
+                        )
+                        or ""
+                    ),
                     "selection_epoch_identity": str(
                         getattr(global_actuation, "selection_epoch_identity", "") or ""
                     ),
@@ -11337,13 +11358,10 @@ def _submit_current_global_sell(
                         current_candidate.execution_curve_identity
                     ),
                     "held_probability_point": held_q,
-                    "sell_favorable_probability_lcb": float(
-                        getattr(decision.terminal_wealth, "win_probability_lcb")
+                    "sell_favorable_probability_functional": str(
+                        getattr(candidate, "probability_functional", "") or ""
                     ),
-                    "robust_delta_log_wealth": float(
-                        getattr(decision, "robust_delta_log_wealth")
-                    ),
-                    "robust_ev_usd": float(getattr(decision, "robust_ev_usd")),
+                    **capital_economics,
                     "held_shares": str(getattr(position, "effective_shares", "")),
                     "sellable_shares": str(getattr(candidate, "held_shares", "")),
                     "selected_shares": str(getattr(decision, "shares", "")),
@@ -11476,6 +11494,7 @@ def _global_preflight_block_status(reason: str) -> str:
     if reason.startswith(
         (
             "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:",
+            "GLOBAL_PREFLIGHT_CANDIDATE_NOT_ACTIONABLE:",
             "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:",
             "GLOBAL_PREFLIGHT_CANDIDATE_UNIT_PRICE_INVALID:",
         )
@@ -11764,6 +11783,19 @@ def _global_preflight_candidate_mode_receipt(
     proof_mode = str(receipt.execution_mode_intent or "").strip().upper()
     if proof_mode not in {"MAKER", "TAKER"}:
         return receipt
+    rest_policy = str(receipt.rest_then_cross_policy or "").strip().upper()
+    if rest_policy == "MAKER_TAKER_FORBIDDEN":
+        return dataclass_replace(
+            receipt,
+            submitted=False,
+            side_effect_status="NO_SUBMIT",
+            reason=(
+                "GLOBAL_PREFLIGHT_CANDIDATE_NOT_ACTIONABLE:"
+                "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:"
+                "policy=MAKER_TAKER_FORBIDDEN"
+            ),
+            proof_accepted=False,
+        )
     proof_bundle = receipt.decision_proof_bundle
     executable_snapshot = getattr(proof_bundle, "executable_snapshot", None)
     snapshot_payload = getattr(executable_snapshot, "payload", None)
@@ -12481,6 +12513,11 @@ def _global_deterministic_actuation_proofs(
             p_live_vector_hash=probability_identity,
             missing_reason=missing_reason,
             q_source="day0_deterministic_bin_payoff",
+            day0_payoff_truth=(
+                Day0PayoffTruth.LOCKED.value
+                if q_point == 1.0
+                else Day0PayoffTruth.REFUTED.value
+            ),
             same_bin_yes_posterior=float(yes_payoff),
             probability_authority="day0_deterministic_bin_payoff_v1",
             execution_mode_intent=proof_mode,
@@ -13071,7 +13108,8 @@ def _current_global_actuation_prepared_family(
             == "SELL"
         ),
         allow_provisional_day0_replacement=(
-            getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED"
+            str(getattr(candidate, "action", "BUY") or "BUY").upper()
+            == "SELL"
         ),
         entry_authority=(
             str(getattr(candidate, "action", "BUY") or "BUY").upper()
@@ -13079,18 +13117,49 @@ def _current_global_actuation_prepared_family(
         ),
     )
     current_witness = getattr(current, "probability_witness", None)
-    if current_witness is None or not _global_probability_witness_content_matches(
-        current_witness,
-        selected,
-    ):
+    probability_mismatches = (
+        ("probability_witness",)
+        if current_witness is None
+        else _global_probability_witness_content_mismatches(
+            current_witness,
+            selected,
+        )
+    )
+    if probability_mismatches:
+        logging.getLogger(__name__).warning(
+            "global actuation probability superseded: family=%s action=%s "
+            "fields=%s selected_witness=%s current_witness=%s",
+            getattr(selected, "family_key", "unknown"),
+            str(getattr(candidate, "action", "BUY") or "BUY").upper(),
+            ",".join(probability_mismatches),
+            getattr(selected, "witness_identity", "unknown"),
+            getattr(current_witness, "witness_identity", "missing"),
+        )
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
     if isinstance(selected, DeterministicBinPayoffWitness):
         _bind_current_deterministic_day0_witness(
             current_day0_payload,
             selected,
         )
+    rebound = dataclass_replace(current, probability_witness=selected)
+    if str(getattr(rebound, "day0_exit_authority_status", "") or "") == "mature":
+        from src.engine.qkernel_spine_bridge import (
+            sell_action_authority_identity,
+        )
+
+        rebound = dataclass_replace(
+            rebound,
+            sell_action_authority_identity=sell_action_authority_identity(
+                family_key=str(getattr(selected, "family_key", "") or ""),
+                probability_witness_identity=str(
+                    getattr(selected, "witness_identity", "") or ""
+                ),
+                status=str(rebound.day0_exit_authority_status),
+                reason=str(rebound.day0_exit_authority_reason),
+            ),
+        )
     return (
-        dataclass_replace(current, probability_witness=selected),
+        rebound,
         current_day0_payload,
     )
 
@@ -13879,6 +13948,18 @@ def _build_event_bound_no_submit_receipt_core(
                     event=event,
                     decision_time=decision_time,
                     decision_snapshot_id=event.causal_snapshot_id,
+                    day0_payoff_truth_by_bin_side={
+                        (
+                            _candidate_bin_id(candidate_proof),
+                            str(
+                                _native_curve_side_for_direction(
+                                    candidate_proof.direction
+                                )
+                                or ""
+                            ),
+                        ): getattr(candidate_proof, "day0_payoff_truth", None)
+                        for candidate_proof in _active_spine_entry_proofs
+                    },
                 )
             if proof is not None and _selection_fact_result.get("status") not in {
                 "written",
@@ -14059,6 +14140,7 @@ def _build_event_bound_no_submit_receipt_core(
         forecast_conn=source_conn,
         topology_conn=topology_authority_conn,
         decision_time=decision_time,
+        day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
         coverage_cache=provenance_capture.setdefault("_coverage_hierarchy_cache", {}),
     )
     _coverage_hierarchy_receipt_kwargs: dict[str, Any] = (
@@ -14317,6 +14399,7 @@ def _build_event_bound_no_submit_receipt_core(
         forecast_conn=source_conn,
         topology_conn=topology_authority_conn,
         decision_time=decision_time,
+        day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
         coverage_cache=provenance_capture.setdefault("_coverage_hierarchy_cache", {}),
     )
     _coverage_hierarchy_receipt_kwargs = (
@@ -15585,6 +15668,7 @@ def _build_event_bound_no_submit_receipt_core(
         event_type=event.event_type,
         direction=direction,
         metric=family.metric,
+        day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
     )
     live_quality_floors = _event_bound_strategy_live_quality_floors(strategy_key)
     raw_receipt.update(
@@ -15593,6 +15677,7 @@ def _build_event_bound_no_submit_receipt_core(
             "target_date": family.target_date,
             "metric": family.metric,
             "strategy_key": strategy_key,
+            "day0_payoff_truth": getattr(proof, "day0_payoff_truth", None),
             "bin_label": candidate.bin.label,
             "unit": getattr(candidate.bin, "unit", None),
             "outcome_label": "NO" if selected_token_id == candidate.no_token_id else "YES",
@@ -18151,14 +18236,6 @@ def _build_live_execution_command_certificates(
         entry_global_submit_suppression_reason = _entry_global_submit_suppression_reason()
         if entry_global_submit_suppression_reason is not None:
             raise _LiveOpportunityAlreadyLocked(entry_global_submit_suppression_reason)
-        terminal_no_fill_reprice_reason = _same_token_terminal_no_fill_reprice_suppression_reason(
-            live_cap_conn,
-            token_id=str(final_intent.payload.get("token_id") or ""),
-            candidate_position_id=str(final_intent.payload.get("final_intent_id") or ""),
-            limit_price=final_intent.payload.get("limit_price"),
-        )
-        if terminal_no_fill_reprice_reason is not None:
-            raise _LiveOpportunityAlreadyLocked(terminal_no_fill_reprice_reason)
         # FIX A (#125): live-order-state duplicate lock. Suppress THIS submit only
         # while an order for the same (token, direction) is genuinely ACTIVE on the
         # venue (open/pending/in-flight/unknown). After a TERMINAL unfilled cancel
@@ -23997,6 +24074,7 @@ def _strategy_policy_selection_rejection_reason(
                 or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
                 or ""
             ),
+            day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
             require_metric_live=False,
         )
         policy_now = decision_time
@@ -24057,6 +24135,7 @@ def _proof_strategy_key_for_quality(
                 )
                 or ""
             ),
+            day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
             require_metric_live=False,
         )
     except Exception:  # noqa: BLE001 - quality gate falls back to ordinary binary floor.
@@ -24231,6 +24310,7 @@ def _qkernel_final_submit_floor_rejection_reason(
                 or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
                 or ""
             ),
+            day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
             require_metric_live=False,
         )
     except Exception as exc:  # noqa: BLE001
@@ -24432,6 +24512,7 @@ def _qkernel_actual_submit_quality_rejection_reason(
                     or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
                     or ""
                 ),
+                day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
                 require_metric_live=False,
             )
         except Exception as exc:  # noqa: BLE001
@@ -24463,6 +24544,7 @@ def _qkernel_actual_submit_quality_rejection_reason(
                 or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
                 or ""
             ),
+            day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
             require_metric_live=False,
         )
     except Exception as exc:  # noqa: BLE001
@@ -25278,6 +25360,11 @@ def _generate_candidate_proofs(
     if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED":
         _day0_metric = str(payload.get("metric") or payload.get("temperature_metric") or getattr(family, "metric", "") or "")
         _day0_observed_extreme = _observed_day0_extreme_native(payload, _day0_metric)
+        _day0_settled_extreme = _settled_day0_extreme(
+            payload,
+            family=family,
+            metric=_day0_metric,
+        )
         if _day0_observed_extreme is not None:
             payload["_edli_spine_day0_observed_extreme_native"] = float(_day0_observed_extreme)
     # P1 BELIEF CAPTURE (continuous re-decision resurrection 2026-06-12). Buffer this family's
@@ -25967,6 +26054,17 @@ def _generate_candidate_proofs(
                     # ONE-CALIBRATOR SEAM (era.py:3772 emos / 3774 maze). Same
                     # payload instance (#149 fix), so this is the actual q_source.
                     q_source=payload.get("_edli_q_source"),
+                    day0_payoff_truth=(
+                        classify_day0_payoff_truth(
+                            metric=str(getattr(family, "metric", "") or ""),
+                            direction=direction,
+                            observed_extreme=_day0_settled_extreme,
+                            bin_low=getattr(candidate.bin, "low", None),
+                            bin_high=getattr(candidate.bin, "high", None),
+                        ).value
+                        if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED"
+                        else None
+                    ),
                     same_bin_yes_posterior=yes_q,
                     settlement_coverage_status=settlement_coverage_status,
                     replacement_calibration_credential=replacement_calibration_credential,
@@ -29255,12 +29353,23 @@ def _global_probability_witness_content_matches(
 ) -> bool:
     """Compare submit-time probability content, including the point simplex."""
 
-    if any(
-        getattr(current, field, None) != getattr(selected, field, None)
+    return not _global_probability_witness_content_mismatches(current, selected)
+
+
+def _global_probability_witness_content_mismatches(
+    current: object,
+    selected: object,
+) -> tuple[str, ...]:
+    """Name probability facts that changed between selection and submit."""
+
+    mismatches = tuple(
+        field
         for field in _GLOBAL_PROBABILITY_CONTENT_FIELDS
-    ):
-        return False
-    return _global_probability_point_q_matches(current, selected)
+        if getattr(current, field, None) != getattr(selected, field, None)
+    )
+    if not _global_probability_point_q_matches(current, selected):
+        mismatches += ("yes_point_q",)
+    return mismatches
 
 
 def _global_probability_point_q_matches(left: object, right: object) -> bool:
@@ -29314,6 +29423,14 @@ def _global_day0_execution_payload(
     )
     if fact is None:
         raise ValueError("GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING")
+    physical_fact = _latest_authorized_day0_fact(
+        observation_conn,
+        city=str(getattr(family, "city", "") or ""),
+        target_date=str(getattr(family, "target_date", "") or ""),
+        temperature_metric=str(getattr(family, "metric", "") or ""),
+        decision_time=decision_time,
+        require_settlement_channel=False,
+    )
 
     def utc(value: object, *, reason: str) -> datetime:
         try:
@@ -29405,6 +29522,55 @@ def _global_day0_execution_payload(
         "settlement_unit": unit,
         "evidence_finality": evidence_finality,
     }
+    physical_clock: dict[str, object] | None = None
+    if physical_fact is not None:
+        try:
+            physical_native = float(physical_fact["observed_extreme_native"])
+            physical_at = utc(
+                physical_fact.get("observation_time"),
+                reason="GLOBAL_DAY0_PHYSICAL_FRONTIER_TIME_INVALID",
+            )
+            physical_available_at = utc(
+                physical_fact.get("observation_available_at")
+                or physical_fact.get("observation_time"),
+                reason="GLOBAL_DAY0_PHYSICAL_FRONTIER_AVAILABLE_AT_INVALID",
+            )
+        except (KeyError, TypeError, ValueError):
+            physical_native = math.nan
+            physical_at = observed_at
+            physical_available_at = observed_at
+        physical_station = str(physical_fact.get("station_id") or "").strip().upper()
+        physical_unit = str(physical_fact.get("unit") or "").strip().upper()
+        physical_source = str(
+            physical_fact.get("observation_source") or ""
+        ).strip()
+        # A same-station physical channel advances only the INFORMATION CLOCK.
+        # The settlement-channel value remains the sole deterministic payoff
+        # boundary. Equality is required so a faster proxy can neither invent
+        # nor retract settlement certainty.
+        if (
+            math.isfinite(physical_native)
+            and math.isclose(
+                physical_native,
+                observed_native,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+            and physical_at > observed_at
+            and physical_available_at <= decision_time.astimezone(UTC)
+            and physical_station == station_id
+            and physical_unit == unit
+            and physical_source
+        ):
+            physical_clock = {
+                "observation_time": physical_at.isoformat(),
+                "observation_available_at": physical_available_at.isoformat(),
+                "source": physical_source,
+                "station_id": physical_station,
+                "unit": physical_unit,
+                "value_role": "clock_only_equal_settlement_frontier",
+            }
+            binding["physical_frontier_clock"] = physical_clock
     if posterior_id not in (None, ""):
         try:
             binding["posterior_id"] = int(posterior_id)
@@ -29415,7 +29581,7 @@ def _global_day0_execution_payload(
         binding["probability_base_identity"] = base_identity
     if "posterior_id" not in binding and not base_identity:
         raise ValueError("GLOBAL_DAY0_PROBABILITY_BASE_IDENTITY_MISSING")
-    return {
+    payload = {
         "observation_time": binding["observation_time"],
         "observation_available_at": binding["observation_available_at"],
         "raw_value": observed_native,
@@ -29439,6 +29605,26 @@ def _global_day0_execution_payload(
         "observation_context_id": "global_current_day0:" + stable_hash(binding),
         "_edli_global_day0_binding": binding,
     }
+    if physical_clock is not None:
+        payload.update(
+            {
+                "_edli_day0_physical_frontier_observation_time": (
+                    physical_clock["observation_time"]
+                ),
+                "_edli_day0_physical_frontier_available_at": (
+                    physical_clock["observation_available_at"]
+                ),
+                "_edli_day0_physical_frontier_source": physical_clock["source"],
+            }
+        )
+    _record_day0_temporal_exit_authority(
+        payload=payload,
+        family=family,
+        metric=metric,
+        decision_time=decision_time,
+        world_conn=observation_conn,
+    )
+    return payload
 
 
 def _global_day0_probability_authority_payload(
@@ -30077,6 +30263,48 @@ def _day0_global_candidate_payoff_q_lcb_caps(
     return tuple(sorted(caps))
 
 
+def _intersect_candidate_payoff_q_lcb_caps(
+    left: tuple[tuple[str, str, str, str, float], ...],
+    right: tuple[tuple[str, str, str, str, float], ...],
+) -> tuple[tuple[str, str, str, str, float], ...]:
+    """Intersect two complete candidate-local lower-bound authorities."""
+
+    def indexed(
+        rows: tuple[tuple[str, str, str, str, float], ...],
+    ) -> dict[tuple[str, str, str, str], float]:
+        out: dict[tuple[str, str, str, str], float] = {}
+        for row in rows:
+            if not isinstance(row, tuple) or len(row) != 5:
+                raise ValueError("GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAP_SHAPE_INVALID")
+            family_key, condition_id, bin_id, side, raw_cap = row
+            key = (
+                str(family_key or "").strip(),
+                str(condition_id or "").strip(),
+                str(bin_id or "").strip(),
+                str(side or "").strip().upper(),
+            )
+            cap = float(raw_cap)
+            if (
+                not all(key)
+                or key[3] not in {"YES", "NO"}
+                or key in out
+                or not math.isfinite(cap)
+                or not 0.0 <= cap <= 1.0
+            ):
+                raise ValueError("GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAP_INVALID")
+            out[key] = cap
+        return out
+
+    left_by_key = indexed(left)
+    right_by_key = indexed(right)
+    if not left_by_key or left_by_key.keys() != right_by_key.keys():
+        raise ValueError("GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAP_COVERAGE_MISMATCH")
+    return tuple(
+        (*key, min(left_by_key[key], right_by_key[key]))
+        for key in sorted(left_by_key)
+    )
+
+
 def _prepared_candidate_payoff_q_lcb_cap(
     prepared: object,
     candidate: object,
@@ -30175,6 +30403,7 @@ def _prepare_current_global_probability_family(
         _event_resolution_identity,
         build_forecast_case,
         build_outcome_space,
+        sell_action_authority_identity,
     )
     from src.engine.replacement_forecast_hook_factory import (
         _latest_replacement_readiness,
@@ -30236,6 +30465,7 @@ def _prepare_current_global_probability_family(
     final_daily_observation = None
     source_available_at = ""
     bundle = None
+    day0_source_clock_bound_identity = ""
     if is_day0:
         city = runtime_cities_by_name().get(str(family.city))
         if city is None:
@@ -30360,22 +30590,31 @@ def _prepare_current_global_probability_family(
                 and not has_target_observation
                 and local_now.date() == local_target
             ):
-                from src.data.observation_client import (
-                    _DAY0_COVERAGE_WINDOW_GRACE_HOURS,
-                )
-
-                local_midnight = local_now.replace(
-                    hour=0,
-                    minute=0,
-                    second=0,
-                    microsecond=0,
-                    fold=0,
-                )
-                use_unobserved_day0_replacement = (
-                    timedelta(0) <= local_now - local_midnight <= timedelta(
-                        hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
+                # Local midnight is not new physical evidence.  A held position
+                # therefore keeps the fresh full-day replacement distribution
+                # until the first causal target-day observation exists.  Entry
+                # authority retains the bounded coverage grace: this widening is
+                # reduce-only redecision continuity, not permission to add risk
+                # while the expected Day0 source is absent.
+                if not entry_authority:
+                    use_unobserved_day0_replacement = True
+                else:
+                    from src.data.observation_client import (
+                        _DAY0_COVERAGE_WINDOW_GRACE_HOURS,
                     )
-                )
+
+                    local_midnight = local_now.replace(
+                        hour=0,
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                        fold=0,
+                    )
+                    use_unobserved_day0_replacement = (
+                        timedelta(0) <= local_now - local_midnight <= timedelta(
+                            hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
+                        )
+                    )
         local_today = decision_time.astimezone(ZoneInfo(str(city.timezone))).date()
         if use_unobserved_day0_replacement or provisional_day0_observation:
             readiness = _latest_replacement_readiness(
@@ -30625,20 +30864,22 @@ def _prepare_current_global_probability_family(
     elif current_day0_payload is not None and provisional_day0_observation:
         if bundle is None:
             raise ValueError("GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING")
-        components = _replacement_global_probability_components(
-            bundle,
-            candidates=family.candidates,
-            bindings=bindings,
+        components = _day0_remaining_global_probability_components(
+            event,
+            forecast_conn=forecast_conn,
+            calibration_conn=day0_observation_conn,
+            family=family,
+            payload=payload,
+            decision_time=decision_time,
+            snapshot=day0_snapshot,
         )
-        probability_authority = (
-            "replacement_provisional_day0_global_probability_v1"
-        )
+        probability_authority = "day0_remaining_day_global_probability_v1"
         payload.update(
             {
                 "probability_authority": probability_authority,
-                "q_source": "replacement_0_1",
-                "_edli_q_source": "replacement_0_1",
-                "_edli_day0_q_mode": "provisional_current_snapshot_replacement",
+                "q_source": "day0_remaining_day",
+                "_edli_q_source": "day0_remaining_day",
+                "_edli_day0_q_mode": "remaining_day",
             }
         )
     elif current_day0_payload is not None:
@@ -30850,6 +31091,25 @@ def _prepare_current_global_probability_family(
                     ),
                     probability_witness=witness,
                     candidate_seeds=(),
+                    day0_exit_authority_status="mature",
+                    day0_exit_authority_reason=(
+                        "day0_deterministic_bin_payoff"
+                    ),
+                    sell_action_authority_identity=(
+                        sell_action_authority_identity(
+                            family_key=family.family_id,
+                            probability_witness_identity=witness_identity,
+                            status="mature",
+                            reason="day0_deterministic_bin_payoff",
+                        )
+                    ),
+                    day0_payoff_truth_by_bin_side=(
+                        _day0_payoff_truth_rows(
+                            event_type=event.event_type,
+                            payload=payload,
+                            family=family,
+                        )
+                    ),
                 )
             if components is None:
                 components = _day0_remaining_global_probability_components(
@@ -30906,19 +31166,115 @@ def _prepare_current_global_probability_family(
     if (
         current_day0_payload is not None
         and final_daily_observation is None
-        and not provisional_day0_observation
     ):
-        candidate_payoff_q_lcb_caps = (
-            _day0_global_candidate_payoff_q_lcb_caps(
-                payload=payload,
+        day0_caps = _day0_global_candidate_payoff_q_lcb_caps(
+            payload=payload,
+            family=family,
+            bindings=bindings,
+            samples=samples,
+            point_q=point_q,
+            band_alpha=_GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA,
+            decision_time=decision_time,
+        )
+        current_caps = day0_caps
+        if probability_authority == "day0_remaining_day_global_probability_v1":
+            bound_bundle = bundle
+            if bound_bundle is None:
+                readiness = _latest_replacement_readiness(
+                    forecast_conn,
+                    city=family.city,
+                    target_date=family.target_date,
+                    temperature_metric=family.metric,
+                    decision_time=decision_time,
+                )
+                if readiness is None:
+                    raise ValueError(
+                        "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_READINESS_MISSING"
+                    )
+                bound_result = read_replacement_forecast_bundle(
+                    forecast_conn,
+                    baseline_bundle=None,
+                    readiness=readiness,
+                    city=family.city,
+                    target_date=family.target_date,
+                    temperature_metric=family.metric,
+                    decision_time=decision_time,
+                    require_baseline_bundle=False,
+                    current_bin_topology_hash=current_topology_hash,
+                    enforce_raw_input_hwm=True,
+                )
+                if not bound_result.ok or bound_result.bundle is None:
+                    raise ValueError(
+                        "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
+                        f"{bound_result.reason_code}"
+                    )
+                bound_bundle = bound_result.bundle
+            bound_components = _replacement_global_probability_components(
+                bound_bundle,
+                candidates=family.candidates,
+                bindings=bindings,
+            )
+            if bound_components is None:
+                raise ValueError("GLOBAL_DAY0_SOURCE_CLOCK_BOUND_INVALID")
+            bound_samples, bound_point_q, _bound_basis = bound_components
+            source_clock_caps = _day0_global_candidate_payoff_q_lcb_caps(
+                payload=dict(payload),
                 family=family,
                 bindings=bindings,
-                samples=samples,
-                point_q=point_q,
+                samples=bound_samples,
+                point_q=bound_point_q,
                 band_alpha=_GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA,
                 decision_time=decision_time,
             )
-        )
+            current_caps = (
+                _intersect_candidate_payoff_q_lcb_caps(
+                    day0_caps,
+                    source_clock_caps,
+                )
+            )
+            bound_posterior_identity = str(
+                bound_bundle.posterior_identity_hash or ""
+            ).strip()
+            bound_dependency_hash = str(
+                bound_bundle.dependency_hash or ""
+            ).strip()
+            bound_config_hash = str(
+                bound_bundle.posterior_config_hash or ""
+            ).strip()
+            if not all(
+                (
+                    bound_posterior_identity,
+                    bound_dependency_hash,
+                    bound_config_hash,
+                )
+            ):
+                raise ValueError("GLOBAL_DAY0_SOURCE_CLOCK_BOUND_IDENTITY_INCOMPLETE")
+            day0_source_clock_bound_identity = stable_hash(
+                {
+                    "posterior_identity_hash": bound_posterior_identity,
+                    "dependency_hash": bound_dependency_hash,
+                    "posterior_config_hash": bound_config_hash,
+                    "sample_matrix_identity": probability_sample_matrix_identity(
+                        bound_samples
+                    ),
+                    "candidate_payoff_q_lcb_caps": current_caps,
+                }
+            )
+            payload.update(
+                {
+                    "_edli_day0_source_clock_bound_posterior_identity": (
+                        bound_posterior_identity
+                    ),
+                    "_edli_day0_source_clock_bound_identity": (
+                        day0_source_clock_bound_identity
+                    ),
+                    "_edli_day0_source_clock_bound_basis": (
+                        "intersection_with_replacement_current_evidence_v1"
+                    ),
+                }
+            )
+        if not provisional_day0_observation:
+            candidate_payoff_q_lcb_caps = current_caps
     if (
         current_day0_payload is not None
         and final_daily_observation is None
@@ -30939,10 +31295,15 @@ def _prepare_current_global_probability_family(
             "_edli_day0_current_temperature_source",
             "_edli_day0_trajectory_conditioning_basis",
             "_edli_day0_model_innovations_c",
+            "_edli_day0_probability_clock_utc",
+            "_edli_day0_process_sigma_native",
             "_edli_day0_exit_authority_status",
             "_edli_day0_exit_authority_reason",
             "_edli_day0_bound_classification",
             "_edli_day0_lcb_transform",
+            "_edli_day0_source_clock_bound_posterior_identity",
+            "_edli_day0_source_clock_bound_identity",
+            "_edli_day0_source_clock_bound_basis",
         ):
             if key in payload:
                 day0_payload_out[key] = payload[key]
@@ -30975,9 +31336,19 @@ def _prepare_current_global_probability_family(
             "model_innovations_c": payload.get(
                 "_edli_day0_model_innovations_c"
             ),
+            "process_sigma_native": payload.get(
+                "_edli_day0_process_sigma_native"
+            ),
+            "source_clock_bound_identity": (
+                day0_source_clock_bound_identity or None
+            ),
         }
         source_truth_identity = stable_hash(source_truth)
-        if not provisional_day0_observation:
+        if (
+            not provisional_day0_observation
+            or probability_authority
+            == "day0_remaining_day_global_probability_v1"
+        ):
             posterior_identity_hash = stable_hash(
                 {
                     "probability_authority": probability_authority,
@@ -31050,6 +31421,25 @@ def _prepare_current_global_probability_family(
         max_age=max_age,
         witness_identity=witness_identity,
     )
+    exit_status = (
+        "mature"
+        if final_daily_observation is not None
+        else str(
+            payload.get("_edli_day0_exit_authority_status") or "unavailable"
+        )
+        if is_day0
+        else "not_applicable"
+    )
+    exit_reason = (
+        "final_daily_observation_exact"
+        if final_daily_observation is not None
+        else str(
+            payload.get("_edli_day0_exit_authority_reason")
+            or "day0_extreme_maturity_unavailable:missing"
+        )
+        if is_day0
+        else "non_day0_family"
+    )
     return PreparedGlobalFamily(
         decision_id=stable_hash(
             {
@@ -31061,7 +31451,20 @@ def _prepare_current_global_probability_family(
         candidate_seeds=(),
         posterior_id=(int(bundle.posterior_id) if bundle is not None else None),
         probability_authority=("replacement_0_1" if bundle is not None else None),
+        day0_exit_authority_status=exit_status,
+        day0_exit_authority_reason=exit_reason,
+        sell_action_authority_identity=sell_action_authority_identity(
+            family_key=family.family_id,
+            probability_witness_identity=witness_identity,
+            status=exit_status,
+            reason=exit_reason,
+        ),
         candidate_payoff_q_lcb_caps=candidate_payoff_q_lcb_caps,
+        day0_payoff_truth_by_bin_side=_day0_payoff_truth_rows(
+            event_type=event.event_type,
+            payload=payload,
+            family=family,
+        ),
     )
 
 
@@ -33072,10 +33475,11 @@ def _day0_process_sigma_native(
 ) -> float | None:
     """Day0 observation/process width in the settlement native unit.
 
-    Day0 remaining-day q is conditioned on an observed running boundary, but that
-    boundary still has instrument noise and publication latency. This helper is
-    the single process-sigma seam used by both q_lcb bootstrap and qkernel served
-    sigma threading, so a single-model remaining-day bundle still carries a real
+    Day0 remaining-day q is conditioned on a fixed observed running boundary.
+    This width belongs to the still-unobserved trajectory: instrument noise plus
+    publication-latency and unseen-peak uncertainty are applied before the
+    physical max/min with that boundary.  The helper is shared by point q and
+    q_lcb bootstrap, so a single-model remaining-day bundle still carries a real
     positive predictive width instead of failing with MU_SIGMA_NOT_STASHED.
     """
     try:
@@ -33108,6 +33512,7 @@ def _day0_process_sigma_native(
         return None
     if not (sigma > 0.0 and np.isfinite(sigma)):
         return None
+    payload["_edli_day0_process_sigma_native"] = sigma
     return sigma
 
 
@@ -33120,10 +33525,10 @@ def _day0_extra_member_sigma_native(
 ) -> float:
     """Extra member-space sigma for Day0 point q integration.
 
-    ``p_raw_vector_from_maxes`` already adds instrument sigma.  The Day0 process
-    seam includes instrument + staleness + unseen-peak uncertainty because the
-    q_lcb bootstrap samples raw member values directly.  For point q, pass only
-    the extra part so instrument noise is not double-counted.
+    The Day0 point-q operator already adds instrument sigma to raw future
+    extrema.  The process seam includes instrument + staleness + unseen-peak
+    uncertainty because q_lcb samples those same raw future values.  Pass only
+    the extra part to point q so instrument noise is not double-counted.
     """
 
     sigma = _day0_process_sigma_native(
@@ -33492,13 +33897,14 @@ def _market_analysis_from_event_snapshot(
         # When fresh hourly vectors are persisted for this family
         # (day0_hourly_vectors lane), the member array becomes the pooled per-model
         # REMAINING-day extremes (hours >= now, city-local), clamped to the absorbing
-        # physical law (HIGH: max(model_remaining, running max)). This prices
+        # physical law only after future-path noise is drawn. This prices
         # P(remaining excursion | now) instead of the full-day distribution —
         # below-floor remaining members land IN the floor bin (the post-peak
         # repricing) rather than being renormalized away. Platt is SKIPPED in this
         # mode (identity p_cal): the fitted Platt's domain is full-day member
         # distributions, not remaining-day pools. The absorbing mask below still
-        # applies, and the day0 bootstrap sampler draws from the SAME members.
+        # applies, and point q plus the day0 bootstrap sampler draw from the
+        # SAME un-clamped future extrema before applying the observed boundary.
         _day0_rd_members = None
         _day0_rd_required = is_day0 and _day0_remaining_day_q_enabled()
         if _day0_rd_required:
@@ -33507,6 +33913,7 @@ def _market_analysis_from_event_snapshot(
                 family=family,
                 unit=unit,
                 decision_time=decision_time,
+                probability_time=day0_probability_time,
                 world_conn=calibration_conn,
                 forecast_conn=hourly_vector_conn,
             )
@@ -33515,7 +33922,15 @@ def _market_analysis_from_event_snapshot(
                 payload["_edli_day0_q_block_reason"] = "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
                 raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
         if _day0_rd_members is not None:
-            members = _day0_rd_members
+            raw_remaining = payload.get(
+                "_edli_day0_unclamped_remaining_extrema_native"
+            )
+            members = np.asarray(
+                raw_remaining
+                if isinstance(raw_remaining, (list, tuple)) and raw_remaining
+                else _day0_rd_members,
+                dtype=float,
+            )
             _bias_corrected = False
             payload["_edli_q_source"] = "day0_remaining_day"
             payload["_edli_day0_q_mode"] = "remaining_day"
@@ -33607,7 +34022,7 @@ def _market_analysis_from_event_snapshot(
         # percentile collapsed to the point estimate (q_lcb == q — ZERO
         # uncertainty quantification on the day0 lane). Replace with a real
         # obs-floor-conditional member bootstrap: each draw resamples the
-        # member extremes, adds instrument noise WIDENED by the measured
+        # un-clamped future extremes, adds instrument noise WIDENED by the measured
         # per-city obs staleness (config/wu_obs_latency.json), clamps to the
         # absorbing physical law (final >= running max / final <= running min),
         # settles, bins, and applies the absorbing mask. q_lcb < q again, and
@@ -35362,6 +35777,7 @@ def _settlement_coverage_hierarchy_executable_pair(
     forecast_conn: sqlite3.Connection,
     topology_conn: sqlite3.Connection,
     decision_time: datetime,
+    day0_payoff_truth: str | None = None,
     coverage_cache: dict | None = None,
 ) -> Any:
     """F1 money-path choke point: the executable (q_exec, q_lcb_exec) pair.
@@ -35401,7 +35817,10 @@ def _settlement_coverage_hierarchy_executable_pair(
 
     try:
         strategy_key = _event_bound_strategy_key(
-            event_type=event_type, direction=direction, metric=metric,
+            event_type=event_type,
+            direction=direction,
+            metric=metric,
+            day0_payoff_truth=day0_payoff_truth,
         )
     except Exception:
         strategy_key = None
@@ -35453,13 +35872,23 @@ def _snapshot_p_raw(
         )
         if _bias_corrected:
             payload["_edli_bias_corrected"] = True
-    arr = p_raw_vector_from_maxes(
-        members,
-        city,
-        semantics,
-        bins,
-        extra_member_sigma=extra_member_sigma,
-    )
+    if str(payload.get("_edli_q_source") or "") == "day0_remaining_day":
+        arr = _day0_remaining_p_raw_vector(
+            members,
+            city=city,
+            settlement_semantics=semantics,
+            bins=bins,
+            payload=payload,
+            extra_member_sigma=extra_member_sigma,
+        )
+    else:
+        arr = p_raw_vector_from_maxes(
+            members,
+            city,
+            semantics,
+            bins,
+            extra_member_sigma=extra_member_sigma,
+        )
     if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
         raise ValueError("event-bound p_raw vector invalid")
     total = float(arr.sum())
@@ -35467,6 +35896,80 @@ def _snapshot_p_raw(
         raise ValueError("event-bound p_raw vector has zero mass")
     arr = arr / total
     return arr
+
+
+def _day0_remaining_p_raw_vector(
+    future_extremes: np.ndarray,
+    *,
+    city: object,
+    settlement_semantics: SettlementSemantics,
+    bins: list[Bin],
+    payload: dict[str, object],
+    extra_member_sigma: float,
+) -> np.ndarray:
+    """Integrate ``extreme(observed, noisy_future)`` in physical order.
+
+    Instrument/process uncertainty belongs to the still-unobserved trajectory,
+    not to an already observed settlement-channel boundary. Applying noise
+    after clamping manufactures excursions from a completed plateau.
+    """
+
+    from src.config import ensemble_n_mc
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    members = np.asarray(future_extremes, dtype=float).ravel()
+    rounded = _optional_float(payload.get("rounded_value"))
+    metric = str(
+        payload.get("metric") or payload.get("temperature_metric") or ""
+    ).strip().lower()
+    if (
+        members.size == 0
+        or not np.isfinite(members).all()
+        or rounded is None
+        or metric not in {"high", "low"}
+        or extra_member_sigma < 0.0
+        or not math.isfinite(extra_member_sigma)
+    ):
+        raise ValueError("DAY0_REMAINING_OPERATOR_INPUT_INVALID")
+    n_mc = int(ensemble_n_mc())
+    sigma = float(
+        np.hypot(
+            sigma_instrument_for_city(city).value,
+            extra_member_sigma,
+        )
+    )
+    seed = int(
+        stable_hash(
+            {
+                "operator": "day0_extreme_observed_then_noisy_future_v1",
+                "city": str(getattr(city, "name", "") or ""),
+                "metric": metric,
+                "rounded": rounded,
+                "future_extremes": sorted(float(v) for v in members.tolist()),
+                "sigma": sigma,
+                "n_mc": n_mc,
+                "bins": [str(bin_value) for bin_value in bins],
+            }
+        )[:16],
+        16,
+    )
+    rng = np.random.default_rng(seed)
+    future = members + rng.normal(0.0, sigma, (n_mc, members.size))
+    final = (
+        np.maximum(future, rounded)
+        if metric == "high"
+        else np.minimum(future, rounded)
+    )
+    measured = settlement_semantics.round_values(final)
+    probabilities = bin_counts_from_array(measured.reshape(-1), bins).astype(float)
+    probabilities /= float(n_mc * members.size)
+    total = float(probabilities.sum())
+    if total > 0.0:
+        probabilities /= total
+    payload["_edli_day0_probability_operator"] = (
+        "extreme_observed_then_noisy_future_v1"
+    )
+    return probabilities
 
 
 def _snapshot_p_cal(
@@ -35708,17 +36211,22 @@ def _day0_probability_clock(decision_time: "datetime | None") -> "datetime | Non
 def _day0_observation_age_minutes(
     payload: dict[str, object], decision_time: "datetime | None"
 ) -> float | None:
-    """Age of the day0 running extreme at decision time, in minutes.
+    """Age of the latest conservative Day0 physical frontier, in minutes.
 
-    Measured from the OBSERVATION VALID TIME (payload.observation_time — the
-    station report timestamp), not from imported_at/observation_available_at:
-    the absorbing boundary's truth-age is how old the station report itself is.
+    A same-station physical channel may advance this clock only when its
+    conservative running extreme exactly equals the settlement-channel bound;
+    the settlement value remains authoritative. Measured from observation valid
+    time, never fetch/availability time.
     Returns None when unparseable (callers must treat None as MAXIMALLY STALE —
     fail-closed; see day0 first-principles review 2026-06-10, charge #1).
     """
     if decision_time is None:
         return None
-    raw = payload.get("observation_time") or payload.get("observation_available_at")
+    raw = (
+        payload.get("_edli_day0_physical_frontier_observation_time")
+        or payload.get("observation_time")
+        or payload.get("observation_available_at")
+    )
     if not raw:
         return None
     try:
@@ -35744,6 +36252,52 @@ def _observed_day0_extreme_native(payload: dict[str, object], metric: str) -> fl
     return _optional_float(payload.get("rounded_value"))
 
 
+def _settled_day0_extreme(
+    payload: dict[str, object],
+    *,
+    family,
+    metric: str,
+) -> float | None:
+    """Round the running extreme through the market's settlement contract."""
+
+    observed = _observed_day0_extreme_native(payload, metric)
+    city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
+    if observed is None or city is None:
+        return None
+    try:
+        return SettlementSemantics.for_city(city).round_single(observed)
+    except (TypeError, ValueError):
+        return None
+
+
+def _day0_payoff_truth_rows(
+    *,
+    event_type: str,
+    payload: dict[str, object],
+    family,
+) -> tuple[tuple[str, str, str], ...]:
+    """Freeze selected-side Day0 truth into a prepared global family."""
+
+    if event_type != "DAY0_EXTREME_UPDATED":
+        return ()
+    metric = str(getattr(family, "metric", "") or "").strip().lower()
+    observed = _settled_day0_extreme(payload, family=family, metric=metric)
+    rows: list[tuple[str, str, str]] = []
+    for candidate in tuple(getattr(family, "candidates", ()) or ()):
+        bin_id = _candidate_bin_id_from_topology(candidate)
+        bin_obj = getattr(candidate, "bin", None)
+        for side in ("YES", "NO"):
+            truth = classify_day0_payoff_truth(
+                metric=metric,
+                direction=f"buy_{side.lower()}",
+                observed_extreme=observed,
+                bin_low=getattr(bin_obj, "low", None),
+                bin_high=getattr(bin_obj, "high", None),
+            )
+            rows.append((bin_id, side, truth.value))
+    return tuple(sorted(rows))
+
+
 def _record_day0_remaining_day_exit_authority(
     *,
     payload: dict[str, object],
@@ -35762,14 +36316,12 @@ def _record_day0_remaining_day_exit_authority(
     the authority result without re-reading hourly vectors.
     """
 
-    status_key = "_edli_day0_exit_authority_status"
-    reason_key = "_edli_day0_exit_authority_reason"
-    payload[status_key] = "unavailable"
-    payload[reason_key] = "day0_extreme_maturity_unavailable:not_evaluated"
-
     try:
         if metric not in {"high", "low"}:
-            payload[reason_key] = f"day0_extreme_maturity_unavailable:unsupported_metric={metric}"
+            payload["_edli_day0_exit_authority_status"] = "unavailable"
+            payload["_edli_day0_exit_authority_reason"] = (
+                f"day0_extreme_maturity_unavailable:unsupported_metric={metric}"
+            )
             return
         observed_extreme = _observed_day0_extreme_native(payload, metric)
         remaining = [float(v) for v in np.asarray(remaining_extremes_native, dtype=float).tolist()]
@@ -35780,22 +36332,103 @@ def _record_day0_remaining_day_exit_authority(
         )
         payload["_edli_day0_bound_classification"] = str(classification.value)
         if classification == BoundClassification.UNBOUNDED_NO_OBS_YET:
-            payload[status_key] = "immature"
-            payload[reason_key] = "day0_extreme_maturity_unavailable:no_intraday_extreme"
+            payload["_edli_day0_exit_authority_status"] = "unavailable"
+            payload["_edli_day0_exit_authority_reason"] = (
+                "day0_extreme_maturity_unavailable:no_intraday_extreme"
+            )
             return
         if classification == BoundClassification.DETERMINISTIC:
             payload["_edli_day0_model_bound_classification"] = "deterministic"
             payload["_edli_day0_model_bound_classification_role"] = (
                 "forecast_remaining_window_evidence_only"
             )
+        _record_day0_temporal_exit_authority(
+            payload=payload,
+            family=family,
+            metric=metric,
+            decision_time=decision_time,
+            world_conn=world_conn,
+        )
+    except Exception as exc:  # noqa: BLE001 - live exit authority fails closed.
+        payload["_edli_day0_exit_authority_status"] = "unavailable"
+        payload["_edli_day0_exit_authority_reason"] = (
+            f"day0_extreme_maturity_unavailable:{type(exc).__name__}:{exc}"
+        )
 
+
+def _record_day0_temporal_exit_authority(
+    *,
+    payload: dict[str, object],
+    family,
+    metric: str,
+    decision_time: "datetime | None",
+    world_conn: sqlite3.Connection | None = None,
+) -> None:
+    """Stamp held-position exit maturity on the current decision clock."""
+
+    status_key = "_edli_day0_exit_authority_status"
+    reason_key = "_edli_day0_exit_authority_reason"
+    payload[status_key] = "unavailable"
+    payload[reason_key] = "day0_extreme_maturity_unavailable:not_evaluated"
+    try:
+        if metric not in {"high", "low"}:
+            payload[reason_key] = (
+                f"day0_extreme_maturity_unavailable:unsupported_metric={metric}"
+            )
+            return
+        if _observed_day0_extreme_native(payload, metric) is None:
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:no_intraday_extreme"
+            )
+            return
+        if decision_time is None or decision_time.tzinfo is None:
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:decision_time_missing"
+            )
+            return
         city_obj = runtime_cities_by_name().get(str(family.city))
         timezone_name = str(getattr(city_obj, "timezone", "") or "")
         if not timezone_name:
-            payload[status_key] = "unavailable"
-            payload[reason_key] = "day0_extreme_maturity_unavailable:city_timezone_missing"
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:city_timezone_missing"
+            )
             return
+        from src.signal.day0_obs_latency import staleness_budget_minutes
+
+        observation_age_minutes = _day0_observation_age_minutes(
+            payload,
+            decision_time,
+        )
+        observation_budget_minutes = staleness_budget_minutes(str(family.city))
+        payload["_edli_day0_exit_observation_age_minutes"] = (
+            observation_age_minutes
+        )
+        payload["_edli_day0_exit_observation_budget_minutes"] = (
+            observation_budget_minutes
+        )
+        if observation_age_minutes is None:
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:observation_age_missing"
+            )
+            return
+        if observation_age_minutes > observation_budget_minutes:
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:observation_stale:"
+                f"age_minutes={observation_age_minutes:.1f},"
+                f"budget_minutes={observation_budget_minutes:.1f}"
+            )
+            return
+
+        from zoneinfo import ZoneInfo
+
         target = date.fromisoformat(str(family.target_date)[:10])
+        tz = ZoneInfo(timezone_name)
+        local_now = decision_time.astimezone(tz)
+        if local_now.date() != target:
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:decision_outside_target_date"
+            )
+            return
         try:
             from src.signal.diurnal import build_day0_temporal_context
 
@@ -35803,17 +36436,19 @@ def _record_day0_remaining_day_exit_authority(
                 str(family.city),
                 target,
                 timezone_name,
-                observation_time=payload.get("observation_time")
-                or payload.get("observation_available_at"),
-                observation_source="day0_extreme_updated_event",
+                observation_time=decision_time,
+                observation_source="day0_exit_decision_clock",
                 conn=world_conn,
             )
         except Exception as exc:  # noqa: BLE001 - fail closed with reason evidence.
             temporal_context = None
-            payload["_edli_day0_temporal_context_error"] = f"{type(exc).__name__}:{exc}"
+            payload["_edli_day0_temporal_context_error"] = (
+                f"{type(exc).__name__}:{exc}"
+            )
         if temporal_context is None:
-            payload[status_key] = "unavailable"
-            payload[reason_key] = "day0_extreme_maturity_unavailable:temporal_context_missing"
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:temporal_context_missing"
+            )
             return
 
         if metric == "high":
@@ -35830,26 +36465,34 @@ def _record_day0_remaining_day_exit_authority(
             payload[status_key] = "immature"
             payload[reason_key] = (
                 "day0_high_extreme_not_mature:"
-                f"daypart={daypart or 'unknown'},post_peak_confidence={post_peak_confidence:.3f}"
+                f"daypart={daypart or 'unknown'},"
+                f"post_peak_confidence={post_peak_confidence:.3f}"
             )
             return
 
-        from zoneinfo import ZoneInfo
-
-        tz = ZoneInfo(timezone_name)
-        local_now = temporal_context.current_local_timestamp
-        local_end = datetime.combine(target + timedelta(days=1), time.min, tzinfo=tz)
-        hours_remaining = max(0.0, (local_end - local_now).total_seconds() / 3600.0)
+        local_end = datetime.combine(
+            target + timedelta(days=1),
+            time.min,
+            tzinfo=tz,
+        )
+        hours_remaining = max(
+            0.0,
+            (local_end - local_now).total_seconds() / 3600.0,
+        )
         payload["_edli_day0_hours_remaining"] = hours_remaining
         if hours_remaining <= _DAY0_LOW_EXTREME_AUTHORITY_HOURS:
             payload[status_key] = "mature"
             payload[reason_key] = "day0_low_extreme_terminal_window"
             return
         payload[status_key] = "immature"
-        payload[reason_key] = f"day0_low_extreme_not_terminal:hours_remaining={hours_remaining:.1f}"
+        payload[reason_key] = (
+            f"day0_low_extreme_not_terminal:hours_remaining={hours_remaining:.1f}"
+        )
     except Exception as exc:  # noqa: BLE001 - live exit authority fails closed.
         payload[status_key] = "unavailable"
-        payload[reason_key] = f"day0_extreme_maturity_unavailable:{type(exc).__name__}:{exc}"
+        payload[reason_key] = (
+            f"day0_extreme_maturity_unavailable:{type(exc).__name__}:{exc}"
+        )
 
 
 def _day0_shift_old_leg_exit_block_reason(
@@ -35973,13 +36616,16 @@ def _latest_day0_current_temperature_native(
     if not expected_station:
         return None
     if source_type == "wu_icao":
-        channels = ("wu_icao_history",)
+        channels = ("wu_icao_history", "aviationweather_metar")
     elif source_type == "hko":
         # Instantaneous HKO spot temperature may condition a forecast path;
         # it still cannot create a settlement extreme or deterministic payoff.
         channels = ("hko_rhrread_spot",)
     elif source_type == "noaa":
-        channels = (f"ogimet_metar_{expected_station.lower()}",)
+        channels = (
+            f"ogimet_metar_{expected_station.lower()}",
+            "aviationweather_metar",
+        )
     else:
         return None
     try:
@@ -35992,13 +36638,15 @@ def _latest_day0_current_temperature_native(
     placeholders = ",".join("?" for _ in channels)
     rows = world_conn.execute(
         f"""
-        SELECT publish_ts_utc, value_native, unit, station_id, source_channel
+        SELECT publish_ts_utc, value_native, unit, station_id, source_channel,
+               raw_report, fetched_at_utc
           FROM observation_prints
          WHERE city = ?
            AND source_channel IN ({placeholders})
            AND publish_ts_utc >= ?
            AND publish_ts_utc < ?
            AND publish_ts_utc <= ?
+           AND julianday(fetched_at_utc) <= julianday(?)
          ORDER BY publish_ts_utc DESC, id DESC
         """,
         (
@@ -36007,32 +36655,68 @@ def _latest_day0_current_temperature_native(
             start.isoformat(),
             end.isoformat(),
             decision_time.astimezone(UTC).isoformat(),
+            decision_time.astimezone(UTC).isoformat(),
         ),
     ).fetchall()
     expected_unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
     for row in rows:
-        publish_raw, value_raw, unit_raw, station_raw, channel_raw = row
-        if (
-            str(unit_raw or "").strip().upper() != expected_unit
-            or not _station_matches(
-                str(station_raw or "").strip().upper(), expected_station
-            )
+        (
+            publish_raw,
+            value_raw,
+            unit_raw,
+            station_raw,
+            channel_raw,
+            raw_report,
+            fetched_raw,
+        ) = row
+        channel = str(channel_raw or "").strip().lower()
+        if not _station_matches(
+            str(station_raw or "").strip().upper(), expected_station
         ):
             continue
         try:
             published = datetime.fromisoformat(
                 str(publish_raw).replace("Z", "+00:00")
             )
+            fetched = datetime.fromisoformat(
+                str(fetched_raw).replace("Z", "+00:00")
+            )
             value = float(value_raw)
         except (TypeError, ValueError):
             continue
-        if published.tzinfo is None or not math.isfinite(value):
+        if (
+            published.tzinfo is None
+            or fetched.tzinfo is None
+            or fetched.astimezone(UTC) > decision_time.astimezone(UTC)
+        ):
+            continue
+        if channel == "aviationweather_metar":
+            # The fast ledger stores wire Celsius. Fahrenheit-settled cities
+            # require the precise METAR T-group before conversion; a rounded
+            # whole-C report is not precise enough to condition a bin path.
+            from src.data.day0_fast_obs import (
+                _T_GROUP_RE,
+                metar_t_group_temperature_c,
+            )
+
+            if expected_unit == "F":
+                if not _T_GROUP_RE.search(str(raw_report or "")):
+                    continue
+                precise_c = metar_t_group_temperature_c(str(raw_report or ""))
+                if precise_c is None:
+                    continue
+                value = precise_c * 9.0 / 5.0 + 32.0
+            elif expected_unit != "C":
+                continue
+        elif str(unit_raw or "").strip().upper() != expected_unit:
+            continue
+        if not math.isfinite(value):
             continue
         return value, published.astimezone(UTC), str(channel_raw)
     return None
 
 
-def _condition_remaining_day_extremes_c_on_current_state(
+def _remaining_day_extremes_c_with_current_state_diagnostic(
     vectors: list[object],
     *,
     target_date: str,
@@ -36041,13 +36725,12 @@ def _condition_remaining_day_extremes_c_on_current_state(
     current_temp_c: float,
     metric: str,
 ) -> tuple[list[float], dict[str, float]]:
-    """Condition each future model path on its observed current innovation.
+    """Return future model extrema and audit the current-state innovation.
 
-    For model ``m``, the only untuned current-evidence update is the persistent
-    additive state error ``e_m = T_obs - T_m(t_obs)``.  Future grid values use
-    ``T_m(t) + e_m`` and the already observed grid point is excluded.  This
-    prevents a model that is wrong *now* from manufacturing a Day0 excursion
-    while preserving its remaining trajectory shape.
+    The current observation defines the causal window and the already observed
+    grid point is excluded.  Its model innovation is diagnostic only: without a
+    validated time-covariance law, transporting one instantaneous error through
+    every future hour would manufacture certainty rather than condition it.
     """
 
     from src.data.day0_hourly_vectors import (
@@ -36085,11 +36768,7 @@ def _condition_remaining_day_extremes_c_on_current_state(
         if not timedelta(0) <= observed_utc - anchor_time <= timedelta(hours=1):
             return [], {}
         innovation = float(current_temp_c) - anchor_temp
-        future = [
-            float(temp) + innovation
-            for instant, temp in values
-            if instant > observed_utc
-        ]
+        future = [float(temp) for instant, temp in values if instant > observed_utc]
         if not future:
             local_end = datetime.combine(
                 target + timedelta(days=1), time.min, tzinfo=tz
@@ -36108,6 +36787,7 @@ def _day0_remaining_day_members(
     family,
     unit: str,
     decision_time: "datetime | None",
+    probability_time: "datetime | None" = None,
     world_conn: sqlite3.Connection | None = None,
     forecast_conn: sqlite3.Connection | None = None,
 ) -> "np.ndarray | None":
@@ -36212,7 +36892,7 @@ def _day0_remaining_day_members(
                 else (current_native - 32.0) * 5.0 / 9.0
             )
             extremes_c, innovations = (
-                _condition_remaining_day_extremes_c_on_current_state(
+                _remaining_day_extremes_c_with_current_state_diagnostic(
                     vectors,
                     target_date=str(family.target_date),
                     decision_time=decision_time,
@@ -36227,24 +36907,34 @@ def _day0_remaining_day_members(
             )
             payload["_edli_day0_current_temperature_source"] = current_source
             payload["_edli_day0_trajectory_conditioning_basis"] = (
-                "current_state_persistent_additive_innovation_v1"
+                "current_state_diagnostic_no_unvalidated_transport_v1"
             )
             payload["_edli_day0_model_innovations_c"] = innovations
         if not extremes_c:
             payload["_edli_day0_remaining_unavailable_reason"] = (
-                "current_state_conditioned_trajectory_unavailable"
+                "current_state_aligned_trajectory_unavailable"
             )
             return None
         values = np.asarray(extremes_c, dtype=float)
         if str(unit).upper() == "F":
             values = values * 9.0 / 5.0 + 32.0
+        payload["_edli_day0_unclamped_remaining_extrema_native"] = [
+            float(value) for value in values.tolist()
+        ]
         maturity_values = np.asarray(values, dtype=float).copy()
+        probability_clock = (
+            probability_time if probability_time is not None else decision_time
+        )
+        if probability_clock is not None and probability_clock.tzinfo is not None:
+            payload["_edli_day0_probability_clock_utc"] = (
+                probability_clock.astimezone(timezone.utc).isoformat()
+            )
         _record_day0_remaining_day_exit_authority(
             payload=payload,
             family=family,
             metric=metric,
             remaining_extremes_native=maturity_values,
-            decision_time=decision_time,
+            decision_time=probability_clock,
             world_conn=world_conn,
         )
         rounded = _optional_float(payload.get("rounded_value"))

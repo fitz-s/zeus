@@ -96,6 +96,7 @@ class HourlyObservation:
     temp_unit: str  # 'F' or 'C'
     station_id: str  # ICAO (e.g. 'KORD')
     observation_count: int  # raw METAR/SPECI reports in the bucket
+    latest_raw_ts: Optional[str] = None  # latest source report in the bucket
 
 
 @dataclass(frozen=True)
@@ -339,6 +340,7 @@ def _aggregate_hourly(
                 temp_unit=unit,
                 station_id=icao,
                 observation_count=len(obs_list),
+                latest_raw_ts=max(dt_v for _, dt_v in obs_list).isoformat(),
             )
         )
     return out

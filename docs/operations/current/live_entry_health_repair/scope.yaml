@@ -12,6 +12,12 @@ in_scope:
 - src/engine/global_auction_universe.py
 - src/signal/ensemble_signal.py
 - src/data/polymarket_request_governor.py
+- src/data/observation_client.py
+- src/data/station_forecast_adapter.py
+- src/data/replacement_fusion_upgrade_trigger.py
+- src/state/schema/v2_schema.py
+- src/ingest_main.py
+- config/station_forecast_sources.json
 - src/risk_allocator/governor.py
 - src/riskguard/riskguard.py
 - src/engine/global_single_order_auction.py
@@ -43,8 +49,14 @@ in_scope:
 - tests/test_live_safety_invariants.py
 - tests/test_ensemble_signal.py
 - tests/test_polymarket_request_governor.py
+- tests/test_day0_obs_fastlane_optionbc.py
+- tests/test_day0_remaining_day_pricing.py
+- tests/test_ingest_scheduler_jobs.py
 - tests/test_command_recovery.py
 - tests/test_fill_synchronizer.py
+- tests/test_station_forecast_live_ingest_wiring.py
+- tests/data/test_fusion_upgrade_trigger.py
+- architecture/db_table_ownership.yaml
 - tests/execution/test_venue_sync_contract.py
 - tests/test_db_writer_lock.py
 allow_companions:
@@ -56,16 +68,17 @@ allow_companions:
 out_of_scope:
 - state/**
 - src/execution/** except src/execution/exit_lifecycle.py, src/execution/executor.py, src/execution/command_recovery.py, and src/execution/venue_sync_contract.py
-- src/state/** except src/state/portfolio.py, src/state/db.py, and src/state/venue_command_repo.py
+- src/state/** except src/state/portfolio.py, src/state/db.py, src/state/venue_command_repo.py, and src/state/schema/v2_schema.py
 - scripts/**
 - architecture/2026_04_02_architecture_kernel.sql
 - architecture/kernel_manifest.yaml
-- config/**
+- config/** except config/station_forecast_sources.json
 status: in_progress
 live_side_effects_allowed: true
 live_side_effect_allowlist:
 - scripts/repair_active_entry_q_versions.py --apply
 - scripts/deploy_live.py restart live-trading
+- scripts/deploy_live.py restart data-ingest
 live_side_effect_denied:
 - manual or forced venue submit or cancel
 - DB backup or copy

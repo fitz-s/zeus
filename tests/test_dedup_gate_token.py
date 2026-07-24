@@ -1,6 +1,6 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-07-18
-# Lifecycle: created=2026-05-17; last_reviewed=2026-07-17; last_reused=2026-07-18
+# Last reused/audited: 2026-07-23
+# Lifecycle: created=2026-05-17; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: Protect same-token entry deduplication and certified global increments.
 # Reuse: Run when entry dedup, fill materialization, or increment admission changes.
 # Authority basis: first-principles global marginal-increment execution repair
@@ -61,9 +61,10 @@ def mem_db():
             market_id TEXT,
             city TEXT,
             bin_label TEXT,
-            direction TEXT NOT NULL DEFAULT 'buy_yes',
+            direction TEXT DEFAULT 'buy_yes',
             shares REAL DEFAULT 0,
             chain_shares REAL DEFAULT 0,
+            chain_state TEXT,
             cost_basis_usd REAL DEFAULT 0,
             token_id TEXT,
             no_token_id TEXT,
@@ -150,17 +151,20 @@ def _insert_position(
     *,
     shares=0.0,
     chain_shares=0.0,
+    chain_state=None,
     cost_basis_usd=0.0,
 ):
     conn.execute(
         """INSERT INTO position_current
-           (position_id, phase, trade_id, market_id, city, bin_label,
-            direction, shares, chain_shares, cost_basis_usd, token_id, no_token_id, order_id, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (position_id, phase, trade_id, market_id, city, bin_label,
+            direction, shares, chain_shares, chain_state, cost_basis_usd,
+            token_id, no_token_id, order_id, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             position_id, phase, "trade-" + position_id, "mkt-1",
-            "London", "18°C", direction, shares, chain_shares, cost_basis_usd, token_id,
-            no_token_id or TOKEN_X_NO, "order-" + position_id, "2026-05-17T22:13:38",
+            "London", "18°C", direction, shares, chain_shares, chain_state,
+            cost_basis_usd, token_id, no_token_id or TOKEN_X_NO,
+            "order-" + position_id, "2026-05-17T22:13:38",
         ),
     )
     conn.commit()
@@ -198,6 +202,97 @@ def test_pending_exit_does_not_block_different_token(mem_db):
     assert has_same_token_open_db(mem_db, OTHER_TOKEN) is False
 
 
+def test_opposite_outcome_token_is_not_the_same_held_token(mem_db):
+    """A held NO leg cannot absorb or block a distinct YES sibling holding."""
+    _insert_position(
+        mem_db,
+        "held-no-position",
+        "day0_window",
+        token_id=TOKEN_X,
+        direction="buy_no",
+        no_token_id=TOKEN_X_NO,
+        shares=5.2,
+        cost_basis_usd=1.768,
+    )
+
+    assert has_same_token_open_db(mem_db, TOKEN_X_NO) is True
+    assert has_same_token_open_db(mem_db, TOKEN_X) is False
+    assert _layer7_dedup_fires(
+        mem_db,
+        PortfolioState(),
+        TOKEN_X,
+    ) is False
+
+    admission = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="new-yes-position",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert admission["allowed"] is True
+    assert admission["reason"] == "allowed"
+    assert admission["increment_position_id"] == ""
+
+
+def test_executor_fails_closed_on_ambiguous_selected_token_identity(mem_db):
+    _insert_position(
+        mem_db,
+        "ambiguous-position",
+        "active",
+        token_id=TOKEN_X,
+        direction="unknown",
+        no_token_id=TOKEN_X_NO,
+        shares=5.2,
+        cost_basis_usd=1.768,
+    )
+
+    admission = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="new-position",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert admission["allowed"] is False
+    assert admission["reason"] == "position_selected_token_identity_invalid"
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
+
+    mem_db.execute(
+        """UPDATE position_current
+              SET direction='buy_no', no_token_id=NULL
+            WHERE position_id='ambiguous-position'"""
+    )
+    mem_db.commit()
+
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
+    missing_held_token = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="new-position",
+        allow_reconciled_position_increment=True,
+    )
+    assert missing_held_token["allowed"] is False
+    assert (
+        missing_held_token["reason"]
+        == "position_selected_token_identity_invalid"
+    )
+
+    mem_db.execute(
+        """UPDATE position_current
+              SET direction=NULL, no_token_id=?
+            WHERE position_id='ambiguous-position'""",
+        (TOKEN_X_NO,),
+    )
+    mem_db.commit()
+
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+    assert has_same_token_open_db(mem_db, TOKEN_X_NO) is True
+    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
+
+
 def test_economically_closed_allows_reentry(mem_db):
     """
     GIVEN: prior position exited cleanly → phase economically_closed
@@ -233,8 +328,18 @@ def test_terminal_local_phase_with_positive_chain_shares_blocks_reentry(mem_db):
         "voided",
         TOKEN_X,
         chain_shares=12.5,
+        chain_state="synced",
     )
     assert has_same_token_open_db(mem_db, TOKEN_X) is True
+    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
+    final_boundary = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="new-chain-duplicate",
+        allow_reconciled_position_increment=True,
+    )
+    assert final_boundary["allowed"] is False
+    assert final_boundary["reason"] == "open_position_same_token"
 
 
 def test_economically_closed_positive_chain_projection_does_not_block_reentry(mem_db):
@@ -473,7 +578,18 @@ def test_evaluator_rejects_when_only_inflight_exit_present(mem_db):
     )
 
 
-def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(mem_db):
+@pytest.mark.parametrize(
+    ("chain_shares", "chain_state"),
+    [
+        (0.0, None),
+        (12.5, "chain_confirmed_zero"),
+    ],
+)
+def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(
+    mem_db,
+    chain_shares,
+    chain_state,
+):
     _insert_position(
         mem_db,
         "stale-pending",
@@ -481,6 +597,8 @@ def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(mem
         token_id=TOKEN_X_NO,
         direction="buy_no",
         no_token_id=TOKEN_X,
+        chain_shares=chain_shares,
+        chain_state=chain_state,
     )
     mem_db.execute(
         """INSERT INTO venue_commands
@@ -507,6 +625,60 @@ def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(mem
     )
 
     assert result["allowed"] is True
+
+
+@pytest.mark.parametrize(
+    ("chain_state", "drop_chain_state_column"),
+    [
+        ("synced", False),
+        (None, False),
+        (None, True),
+    ],
+)
+def test_terminal_no_fill_cannot_clear_unresolved_chain_exposure(
+    mem_db,
+    chain_state,
+    drop_chain_state_column,
+):
+    _insert_position(
+        mem_db,
+        "chain-held-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+        chain_shares=12.5,
+        chain_state=chain_state,
+    )
+    if drop_chain_state_column:
+        mem_db.execute("ALTER TABLE position_current DROP COLUMN chain_state")
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-chain-held', 'chain-held-pending', ?, 'ENTRY', 'BUY',
+                   'order-chain-held', 'CANCELLED',
+                   '2026-06-18T09:15:14', '2026-06-18T09:20:22')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-chain-held', 'cmd-chain-held', 'CANCEL_CONFIRMED',
+                   '0', '0', 'REST', '2026-06-18T09:20:22', 1)"""
+    )
+    mem_db.commit()
+
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
+    result = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+    )
+    assert result["allowed"] is False
+    assert result["reason"] == "open_position_same_token"
 
 
 def test_executor_duplicate_gate_allows_cancelled_pending_entry_with_stale_live_order_fact(mem_db):
@@ -1114,7 +1286,16 @@ def test_terminal_no_fill_no_exposure_still_obeys_same_token_cooldown(mem_db):
     assert result["candidate_shares"] == "12.7"
 
 
-def test_terminal_no_fill_rest_pull_reprice_bypasses_same_token_cooldown(mem_db):
+def test_terminal_no_fill_rest_pull_reprice_bypasses_same_token_cooldown(
+    mem_db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "src.execution.executor._entry_terminal_no_fill_redecision_proof",
+        lambda *args, **kwargs: pytest.fail(
+            "rest-pull reprice must not query no-fill redecision proof"
+        ),
+    )
     _insert_position(
         mem_db,
         "stale-pending",
@@ -1260,7 +1441,7 @@ def test_terminal_no_fill_redecision_allowed_after_same_token_cooldown(mem_db):
     assert result["existing_command_id"] == "cmd-cancelled"
 
 
-def test_terminal_no_fill_redecision_after_cooldown_requires_actual_reprice(mem_db):
+def test_terminal_no_fill_redecision_after_cooldown_allows_same_price(mem_db):
     _insert_position(
         mem_db,
         "stale-pending",
@@ -1296,8 +1477,8 @@ def test_terminal_no_fill_redecision_after_cooldown_requires_actual_reprice(mem_
         now=datetime.fromisoformat("2026-06-18T10:02:01+00:00"),
     )
 
-    assert result["allowed"] is False
-    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
+    assert result["allowed"] is True
+    assert result["reason"] == "allowed_terminal_no_fill_no_exposure_cooldown_elapsed"
     assert result["existing_command_id"] == "cmd-cancelled"
     assert result["existing_price"] == "0.73"
     assert result["candidate_price"] == "0.73"
@@ -1359,7 +1540,7 @@ def test_terminal_fok_no_fill_redecision_allows_same_price_after_cooldown(
     assert ready["candidate_shares"] == "1016"
 
 
-def test_pre_submit_db_lock_redecision_allows_same_price_after_cooldown(mem_db):
+def test_pre_submit_db_lock_redecision_bypasses_terminal_no_fill_cooldown(mem_db):
     mem_db.execute(
         """INSERT INTO venue_commands
            (command_id, position_id, token_id, intent_kind, side, size, price,
@@ -1388,30 +1569,21 @@ def test_pre_submit_db_lock_redecision_allows_same_price_after_cooldown(mem_db):
     )
     mem_db.commit()
 
-    cooling = _entry_same_token_cooldown_component(
-        mem_db,
-        token_id=TOKEN_X,
-        candidate_position_id="fresh-candidate",
-        limit_price=0.10,
-        shares=254,
-        now=datetime.fromisoformat("2026-07-23T08:08:50+00:00"),
-    )
     ready = _entry_same_token_cooldown_component(
         mem_db,
         token_id=TOKEN_X,
         candidate_position_id="fresh-candidate",
         limit_price=0.10,
         shares=254,
-        now=datetime.fromisoformat("2026-07-23T08:09:51+00:00"),
+        now=datetime.fromisoformat("2026-07-23T08:07:51+00:00"),
     )
 
-    assert cooling["allowed"] is False
-    assert cooling["reason"] == "same_token_terminal_no_fill_cooling_down"
     assert ready["allowed"] is True
     assert ready["reason"] == (
         "allowed_terminal_pre_submit_db_lock_no_fill_redecision"
     )
     assert ready["terminal_no_fill_redecision_proof"] == "pre_submit_db_lock"
+    assert ready["cooldown_seconds"] == 0
     assert ready["existing_price"] == "0.1"
     assert ready["candidate_price"] == "0.1"
 

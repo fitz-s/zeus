@@ -4,6 +4,185 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-24 Day0 trajectory correction
+
+Current live Ankara 28C evidence falsified one probability assumption before
+Kelly or execution. The remaining-path builder transported each model's
+instantaneous predawn error unchanged through every future hour, moving the
+three current extrema from 28.2/25.6/26.0C to 25.4/24.6/24.9C. No current
+temporal covariance witness authorized that permanent translation, yet it
+helped produce a 98.67% NO lower bound and a live 16-share maker order.
+
+The clock hypothesis was separately rejected: a later row carrying the same
+running extreme proves the no-new-extreme coverage frontier through that later
+observation time. Rebinding it to the first occurrence would discard valid
+plateau information and contradict continuous-time redecision. That path is
+unchanged.
+
+Current temperature still cuts the remaining window, records the model
+innovation diagnostic, and participates in the absorbing frontier; its
+innovation is not propagated into unseen hours without a validated temporal
+covariance law. Re-decision behavior is unchanged in shape: the next current
+Day0 auction rebuilds q from the corrected witness, and any resting order whose
+edge disappears is pulled by the existing normal lifecycle.
+
+Money path: forecast signal -> Day0 current-evidence probability -> global
+auction -> Kelly -> maker lifecycle. Behavioral antibodies cover exclusion of
+elapsed model points and the absence of unvalidated permanent state transport.
+
+## 2026-07-23 Day0 raw-report freshness clock correction
+
+Live Miami evidence separated two clocks that the hourly observation schema
+intentionally stores: `utc_timestamp` is the stable UTC-hour bucket identity,
+while `hour_*_raw_ts` is the source report time. Day0 readers and the event
+catch-up scanner used the bucket identity as the freshness clock. A 01:53Z WU
+report possessed at 02:15Z was therefore treated as a 01:00Z observation and
+declared stale against a 60-minute budget, suppressing current Day0 authority
+while the source stream was healthy.
+
+The hot-fix preserves bucket identity, extrema aggregation, source routing, and
+causality gates. Hourly clients now retain the latest raw report in each
+bucket; the typed writer rejects possession timestamps earlier than that fact;
+and both direct readers and event catch-up use that raw source time, with the
+existing max/min raw timestamps as a backward-compatible fallback. HKO's
+cumulative snapshot clock remains its canonical `utc_timestamp`. Eligibility
+now requires bucket identity, source fact time, and possession time all to be no
+later than the decision; gap analysis and latest-context selection use the same
+fact clock. This restores causal held-position redecision without letting quote
+time or market price enter probability authority.
+
+## 2026-07-23 continuous-time plateau redecision correction
+
+The loss-to-zero reconstruction found that the fast Day0 source clock emitted a
+new `DAY0_EXTREME_UPDATED` event only when the rounded running extreme moved.
+An unchanged HIGH after the peak, or unchanged LOW after the overnight trough,
+was treated as no new information even when the settlement-station observation
+version advanced. That froze the conditioned probability surface precisely when
+elapsed time and a shrinking remaining window should continuously remove paths
+to a different settlement bin. The replacement materializer already treats a
+strictly newer observation version on a plateau as new information; the event
+producer discarded that version before it could reach the materializer.
+
+The hot-fix extends the existing split event memo with a monotone source-time
+version. Rounded extremes remain absorbing and may only move in their physical
+direction; observation versions may only move strictly forward. Either change
+emits one event, while a repeated source version remains idempotent. This keeps
+the source-report cadence (normally 30/60 minutes) and does not restore the
+per-scan event firehose that the rounded-extreme gate removed.
+
+Money path: source truth -> Day0 conditioned probability -> held-position
+redecision -> exit. Re-decision behavior: plateau evidence now refreshes q(t)
+using the shorter remaining window; no market-price anchor or price-only stop is
+introduced. The 72-hour causal replay rejected a generic trailing stop because
+its apparent gain depended on one large outlier and it sold multiple eventual
+winners; this change repairs the missing fact instead of optimizing that
+loss-only proxy.
+
+The London 26°C NO incident then exposed a second, independent category error.
+At 19:55–22:55 UTC every current remaining-path member was below the already
+observed 26°C high, yet live q for the held NO repeatedly rose toward 0.28. The
+old calculation evaluated `noise(max(observed_high, future_high))`, so fixed
+instrument noise was applied to the already observed settlement boundary and
+manufactured a 27°C tail even as current temperature fell to 21°C. Physical law
+is `max(observed_high, noisy_future_high)` (and symmetrically `min` for LOW).
+The corrected Day0-only operator preserves real future excursions, removes only
+the impossible post-boundary noise, and persists its operator identity in the
+probability receipt. A same-station fast print may advance the physical clock
+and trajectory state, but it cannot replace the settlement-channel value used
+for deterministic payoffs. Trajectory state is causal on both source publish
+time and local fetch time; Fahrenheit cities require and parse the METAR
+tenths-Celsius T-group instead of converting a rounded whole-C ledger value.
+Those rules live at the central Day0 fact reduction as well as the trajectory
+reader, so global redecision and remaining-path conditioning cannot construct
+different information sets from the same observation ledger.
+
+Live resampling exposed a third independent continuity defect: the Day0 hourly
+refresh cursor advanced only when an HTTP attempt occurred and took modulo the
+already-truncated three-city microbatch. With twelve held cities, throttle made
+the cursor repeatedly offer the same first page while later holdings exceeded
+the three-hour probability freshness window. The corrected cursor advances by
+held slots offered, including throttled/failed slots, and takes modulo the full
+held-capital segment. This preserves the bounded HTTP budget while guaranteeing
+coverage; it increases fairness, not request volume.
+
+## 2026-07-23 Day0 expected-value and maturity composition
+
+The Mexico City 26C NO receipt isolated a downstream category error after its
+fresh held probability fell to 3.73% and its executable bid still paid 20.7c.
+Its entry and current confidence intervals were disjoint, yet the exit evaluator
+priced HOLD with the current 37.33% upper confidence bound. A confidence bound
+is evidence for or against reversal, not the expected terminal payoff. Reusing
+it as payoff blocked thirteen of fourteen executable adverse cuts and stranded
+the leg below the venue's legal exit band.
+
+The 72-hour Ankara 31C YES winner refutes an unconditional point-q liquidation:
+an early-day disjoint reversal at q=10% and bid=42c later settled in the held
+side's favor. The missing discriminator is causal time. The Day0 remaining-day
+builder already emits whether the observed extreme is mature enough to sponsor
+a statistical exit, but the current-global materializer dropped that evidence
+before family redecision.
+
+The correction composes the existing authorities instead of adding a price
+stop. CI separation remains the confidence gate; current point-q supplies the
+Day0 expected HOLD payoff; current-global refresh carries the temporal maturity
+reason; and family redecision blocks an otherwise valid statistical exit until
+that reason clears. Non-Day0 and near-settlement UCB comparisons are unchanged.
+A low-priced claim with high fresh expected value remains held, while a mature
+reversal is monetized before its bid becomes unexecutable.
+
+The downstream global auction exposed a second category error: it independently
+re-scored every held SELL with lower-CVaR parameter draws and could veto the
+local fixed-action expected-value decision. The 72-hour counterfactual set
+contains both sides of the discriminator: Mexico City was a mature mean-positive
+sale stranded by the tail objective, while Ankara and current Cape Town were
+early mean-positive reversals that maturity must exclude. Outcome knowledge is
+not an input to either decision.
+
+The global correction therefore makes three different statements in three
+different types. Temporal authority determines whether a Day0 statistical SELL
+exists in the feasible set and is bound to the exact probability witness.
+Action economics determine size and safe FAK prefixes: mature Day0 SELL uses
+posterior-mean expected log wealth and EV in `expected_*`, while BUY keeps robust
+admission/sizing. Finally, every admitted fixed proposal receives the same
+posterior-mean expected-log-growth comparison for cross-action ranking. Mean
+numbers are never written into `robust_*`; selection-time maturity is rebuilt at
+submit before any venue call. Receipt schema 17 / candidate v11 / holding v2
+make those distinctions auditable.
+
+## 2026-07-23 loss-to-zero causality correction
+
+The 72-hour loss census and decision-time reconstruction found three defects that
+sit upstream of any exit-price floor: `src.main` remained launchd-running while
+its recurring monitor and daemon heartbeat stopped for roughly 9h45m, and Day0
+`buy_no` was classified as `settlement_capture` from direction alone even when
+the observed extreme had not crossed the selected finite bin. In the same stall,
+WU/OGIMET and the HKO fallback fetch path captured possession timestamps before
+their network requests; when execution resumed, later source facts were persisted
+as if held hours earlier. The first froze q(t) while the book moved; the second
+gave forecast-dependent positions the wrong strategy identity, alpha clock,
+policy cohort, and attribution; the third violated point-in-time causality.
+
+This hot-fix extends the existing venue-heartbeat watchdog, under its existing
+deploy restart lock and fresh-sidecar prerequisites, to restart a running but
+heartbeat-stale live daemon. It also introduces one selected-payoff truth
+contract for HIGH/LOW x YES/NO: only a side physically locked by the monotone
+observed extreme is `settlement_capture`; unresolved or unavailable truth is
+`day0_nowcast_entry`. Command recovery defaults missing legacy truth to nowcast.
+
+Authority surfaces touched: `architecture/strategy_profile_registry.yaml` and
+`architecture/source_rationale.yaml`. This harmonizes the registry's existing
+"observation itself" versus "forecast-upside" theses; it supersedes the
+direction-only aliases in evaluator/event/command-recovery code. INV-05, INV-06,
+INV-41, and INV-43 remain binding: risk policy still actuates, point-in-time
+truth is preserved, selected-side evidence remains mandatory, and no live price
+band is weakened.
+
+The observation repair records possession only after each fetch returns and adds
+a typed-writer boundary that rejects any `imported_at` earlier than the hourly
+bucket or its raw extrema print. Historical false timestamps remain evidence to
+reconstruct or quarantine through sanctioned learning paths; this hot-fix does
+not rewrite canonical history out of band.
+
 ## 2026-07-15 current-evidence coherence correction
 
 A current 150-family source-clock census found 72 families where the absolute
@@ -65,10 +244,12 @@ probability-authority discontinuity: the monitor switched from a fresh
 replacement posterior to mandatory Day0 observation at local midnight, before
 EGLC had published the target day's first same-station observation. This made
 one held position probability-stale and froze every otherwise-independent
-global entry. The repair may use the fresh replacement posterior only inside
-the existing local-day-start coverage grace while no Day0 observation is
-available. Once an observation exists, after the grace expires, or when the
-replacement posterior is stale, the Day0 lane remains fail-closed.
+global entry. Local midnight is not physical evidence: when canonical truth
+positively proves that the target day still has zero observations, a held
+position keeps the fresh replacement posterior until the first causal Day0
+observation arrives. Generic observation faults do not prove an empty prefix;
+they retain the bounded grace and then fail closed. Entry authority remains
+grace-limited, and a stale replacement posterior is never promoted.
 
 The same live proof window exposed an execution-truth discontinuity after a
 reduce-only YES exit: a positive but partial MATCHED order fact was promoted to
@@ -132,9 +313,10 @@ authority surface.
 - Make held-position probability refresh order explicit: release TRADE, write
   the current Day0 WORLD fact, then write TRADE quote/monitor evidence.
 - Preserve probability continuity before the first target-day observation:
-  inside the existing coverage grace, a fresh replacement posterior remains
-  monitor authority; this is not permission to use stale forecast belief or to
-  ignore any available Day0 observation.
+  a typed canonical zero-observation result keeps a fresh replacement posterior
+  as held-position monitor authority even after the coverage grace; this is not
+  permission to add risk, use stale forecast belief, treat a generic source
+  failure as zero observations, or ignore any available Day0 observation.
 - Require cumulative canonical EXIT fill quantity to cover the command and the
   current position before lifecycle alignment may emit `FILL_CONFIRMED` or
   economic close; cumulative order facts never stack on existing trade facts,
@@ -211,9 +393,10 @@ authority surface.
   required separately from tests.
 - POSIX WAL-byte evidence shows no simultaneous opposite-order WORLD/TRADE
   writer hold after restart; reactor cycles progress beyond claim bounces.
-- A deterministic local-midnight antibody proves fresh replacement belief is
-  admitted only during the pre-observation coverage grace, with stale belief
-  and post-grace absence still rejected.
+- A deterministic local-midnight antibody proves fresh replacement belief stays
+  continuous for held-position redecision while canonical truth proves zero
+  observations; entry remains grace-limited, and stale belief or a generic
+  post-grace observation failure is still rejected.
 - A partial MATCHED EXIT antibody proves the command remains PARTIAL and the
   position remains pending exit; the full-size sibling still closes exactly
   once.

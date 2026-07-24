@@ -102,6 +102,26 @@ def build_day0_extreme_updated_event(
     )
 
 
+_OBSERVATION_FACT_TIME_SQL = """
+    CASE
+        WHEN LOWER(source) = 'hko_hourly_accumulator' THEN utc_timestamp
+        WHEN json_valid(COALESCE(provenance_json, '')) THEN COALESCE(
+            json_extract(provenance_json, '$.latest_raw_ts'),
+            CASE
+                WHEN datetime(json_extract(provenance_json, '$.hour_max_raw_ts'))
+                   >= datetime(json_extract(provenance_json, '$.hour_min_raw_ts'))
+                THEN json_extract(provenance_json, '$.hour_max_raw_ts')
+                ELSE json_extract(provenance_json, '$.hour_min_raw_ts')
+            END,
+            json_extract(provenance_json, '$.hour_max_raw_ts'),
+            json_extract(provenance_json, '$.hour_min_raw_ts'),
+            utc_timestamp
+        )
+        ELSE utc_timestamp
+    END
+"""
+
+
 class Day0ExtremeUpdatedTrigger:
     def __init__(
         self,
@@ -281,7 +301,15 @@ class Day0ExtremeUpdatedTrigger:
             placeholders = ",".join("?" for _ in self._scan_cities)
             city_clause = f"AND city IN ({placeholders})"
             params.extend(self._scan_cities)
-        params.extend((target_floor, decision_iso, decision_iso, max(1, int(limit))))
+        params.extend(
+            (
+                target_floor,
+                decision_iso,
+                decision_iso,
+                decision_iso,
+                max(1, int(limit)),
+            )
+        )
         rows = _dict_rows(
             observation_conn,
             f"""
@@ -291,15 +319,16 @@ class Day0ExtremeUpdatedTrigger:
                     ROW_NUMBER() OVER (
                         PARTITION BY city, target_date, source, timezone_name,
                                      temp_unit, station_id
-                        ORDER BY datetime(utc_timestamp) DESC,
+                        ORDER BY datetime({_OBSERVATION_FACT_TIME_SQL}) DESC,
                                  datetime(imported_at) DESC
                     ) AS source_recency_rank
                 FROM {table}
                 WHERE target_date IS NOT NULL
                   {city_clause}
                   AND target_date >= ?
-                  AND utc_timestamp <= ?
-                  AND imported_at <= ?
+                  AND datetime(utc_timestamp) <= datetime(?)
+                  AND datetime({_OBSERVATION_FACT_TIME_SQL}) <= datetime(?)
+                  AND datetime(imported_at) <= datetime(?)
                   AND substr(local_timestamp, 1, 10) = target_date
                   AND (running_max IS NOT NULL OR running_min IS NOT NULL)
                   AND authority IN ('VERIFIED', 'ICAO_STATION_NATIVE')
@@ -339,7 +368,7 @@ class Day0ExtremeUpdatedTrigger:
                     timezone_name,
                     temp_unit,
                     station_id,
-                    MAX(utc_timestamp) AS observation_time,
+                    MAX({_OBSERVATION_FACT_TIME_SQL}) AS observation_time,
                     MAX(imported_at) AS observation_available_at,
                     CASE
                         WHEN LOWER(source) = 'hko_hourly_accumulator'

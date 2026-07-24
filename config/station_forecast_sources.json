@@ -28,14 +28,17 @@
       "provider": "hong_kong_observatory",
       "provider_family": "hko",
       "city": "Hong Kong",
-      "metric": "high",
+      "metrics": [
+        "high",
+        "low"
+      ],
       "value_unit": "C",
       "endpoint": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=fnd&lang=en",
       "adapter_kind": "hko_fnd_json",
       "max_lead_days": 9,
       "settlement_aligned": true,
       "settlement_source_type": "hko",
-      "notes": "HKO Nine-Day Forecast (fnd). weatherForecast[].forecastMaxtemp.value degC, forecastDate YYYYMMDD. updateTime is the issue/cycle clock. Research-disabled until its evidence is promoted through the same live registry path as gridded sources."
+      "notes": "HKO Nine-Day Forecast (fnd). weatherForecast[].forecastMaxtemp.value and forecastMintemp.value degC, forecastDate YYYYMMDD. One issue is fetched once and persisted as distinct HIGH/LOW rows. updateTime is the issue/cycle clock."
     }
   }
 }

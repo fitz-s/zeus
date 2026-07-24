@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-22; last_reused=2026-07-22
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-22; last_reused=2026-07-23
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-07-23
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -422,7 +422,7 @@ def test_forecast_presubmit_revalidation_still_requires_qkernel_economics():
         _validate_pre_submit_revalidation_payload(payload)
 
 
-def test_day0_strategy_fallback_preserves_buy_yes_nowcast_semantics():
+def test_day0_strategy_fallback_requires_locked_selected_payoff_for_capture():
     from src.execution.command_recovery import _event_bound_strategy_key_from_payload
 
     assert (
@@ -433,9 +433,19 @@ def test_day0_strategy_fallback_preserves_buy_yes_nowcast_semantics():
     )
     assert (
         _event_bound_strategy_key_from_payload(
-            {"event_type": "DAY0_EXTREME_UPDATED", "direction": "buy_no"}
+            {
+                "event_type": "DAY0_EXTREME_UPDATED",
+                "direction": "buy_no",
+                "day0_payoff_truth": "locked",
+            }
         )
         == "settlement_capture"
+    )
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {"event_type": "DAY0_EXTREME_UPDATED", "direction": "buy_no"}
+        )
+        == "day0_nowcast_entry"
     )
 
 
@@ -1003,12 +1013,12 @@ def test_live_tick_recovers_fill_provenance_before_maintenance_budget_defer(
 
     def _execution_fact_repair(_conn):
         calls.append("missing_filled_entry_execution_fact_repair")
-        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
 
     def _authenticated_fill(_conn):
         calls.append("authenticated_entry_trade_fact")
-        now[0] = 1.0
-        raise sqlite3.OperationalError("interrupted")
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
 
     monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
     monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
@@ -1031,12 +1041,14 @@ def test_live_tick_recovers_fill_provenance_before_maintenance_budget_defer(
     )
 
     assert calls == [
-        "missing_filled_entry_execution_fact_repair",
         "authenticated_entry_trade_fact",
+        "missing_filled_entry_execution_fact_repair",
     ]
-    assert summary["missing_filled_entry_execution_fact_repair"]["advanced"] == 1
+    assert summary["authenticated_entry_trade_fact"]["advanced"] == 1
     assert summary["db_budget_deferred"] is True
-    assert summary["db_budget_deferred_at"] == "authenticated_entry_trade_fact"
+    assert summary["db_budget_deferred_at"] == (
+        "missing_filled_entry_execution_fact_repair"
+    )
 
 
 def test_live_tick_recovers_confirmed_review_fill_before_maintenance_budget_defer(
@@ -1064,7 +1076,7 @@ def test_live_tick_recovers_confirmed_review_fill_before_maintenance_budget_defe
 
     def _run_priority_pass(label, fn, **kwargs):
         if label in {
-            "already_canceled_review_fast",
+            "cancel_recovery_fast",
             "review_required_exit_mutex_release",
         }:
             return None
@@ -2699,6 +2711,88 @@ def _append_trade_fact(
 
 class TestAuthenticatedEntryTradeFactProjection:
     """A confirmed authenticated fill must become owned wealth immediately."""
+
+    def test_submitting_fill_synthesizes_ack_and_releases_reservation(self, conn):
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        command_id = "cmd-authenticated-submitting"
+        position_id = "pos-authenticated-submitting"
+        order_id = "ord-authenticated-submitting"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id="dec-authenticated-submitting",
+            token_id="tok-authenticated-submitting",
+            size=10.0,
+            price=0.50,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id="tok-authenticated-submitting",
+        )
+        conn.execute(
+            """
+            INSERT INTO collateral_reservations (
+                command_id, reservation_type, token_id, amount, created_at
+            ) VALUES (?, 'PUSD_BUY', NULL, 5000000, ?)
+            """,
+            (command_id, datetime.now(timezone.utc).isoformat()),
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-submitting",
+            filled_size="10",
+            fill_price="0.40",
+        )
+        _append_order_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            state="MATCHED",
+            matched_size="10",
+            remaining_size="0",
+        )
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "FILLED"
+        events = _get_events(conn, command_id)
+        assert [event["event_type"] for event in events][-2:] == [
+            "SUBMIT_ACKED",
+            "FILL_CONFIRMED",
+        ]
+        ack_payload = json.loads(events[-2]["payload_json"])
+        assert ack_payload["proof_class"] == (
+            "canonical_confirmed_trade_facts_exact_order"
+        )
+        reservation = conn.execute(
+            """
+            SELECT released_at, release_reason, converted_amount
+              FROM collateral_reservations
+             WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        assert reservation["released_at"] is not None
+        assert reservation["release_reason"] == "CONVERTED_ON_FILL"
+        assert reservation["converted_amount"] == 5000000
 
     def test_full_fill_atomically_advances_command_and_position(self, conn):
         from src.execution.command_recovery import (
@@ -8764,6 +8858,21 @@ class TestRecoveryResolutionTable:
         _seed_pending_entry_projection(conn)
         _open_test_entry_obligation(conn, "cmd-001")
         _advance_to_partial(conn, venue_order_id="ord-001")
+        conn.execute(
+            """
+            INSERT INTO collateral_reservations (
+                command_id, reservation_type, token_id, amount, created_at
+            ) VALUES ('cmd-001', 'PUSD_BUY', NULL, 1200000, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        assert conn.execute(
+            """
+            SELECT released_at
+              FROM collateral_reservations
+             WHERE command_id = 'cmd-001'
+            """
+        ).fetchone()["released_at"] is None
         _append_trade_fact(
             conn,
             command_id="cmd-001",
@@ -8857,6 +8966,27 @@ class TestRecoveryResolutionTable:
             "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
         ).fetchone()
         assert obligation["status"] == "RESOLVED"
+        reservation = conn.execute(
+            """
+            SELECT released_at, release_reason, converted_amount
+              FROM collateral_reservations
+             WHERE command_id = 'cmd-001'
+            """
+        ).fetchone()
+        assert reservation["released_at"] is not None
+        assert reservation["release_reason"] == "CONVERTED_ON_FILL"
+        assert reservation["converted_amount"] == 880000
+        unsettled = conn.execute(
+            """
+            SELECT direction, amount_micro
+              FROM collateral_unsettled_proceeds
+             WHERE command_id = 'cmd-001'
+            """
+        ).fetchone()
+        assert dict(unsettled) == {
+            "direction": "OUTGOING_DEDUCTION",
+            "amount_micro": 880000,
+        }
 
         repeated = reconcile_unresolved_commands(conn, mock_client)
         assert repeated["completed_partial_order_facts"] == {
@@ -8987,6 +9117,7 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
         assert _get_state(conn, "cmd-001") == "PARTIAL"
+
         events = _get_events(conn, "cmd-001")
         assert events[-1]["event_type"] == "PARTIAL_FILL_OBSERVED"
         payload = json.loads(events[-1]["payload_json"])
@@ -10925,7 +11056,7 @@ class TestRecoveryResolutionTable:
             scope="live_tick",
         )
 
-        assert summary["already_canceled_review_fast"] == {
+        assert summary["cancel_recovery_fast"] == {
             "scanned": 1,
             "advanced": 1,
             "stayed": 0,
@@ -10934,6 +11065,126 @@ class TestRecoveryResolutionTable:
         verified = _conn_factory()
         try:
             assert _get_state(verified, "cmd-001") == "EXPIRED"
+        finally:
+            verified.close()
+
+    def test_live_tick_prioritizes_cancel_pending_before_general_budget(
+        self,
+        tmp_path,
+        monkeypatch,
+        mock_client,
+    ):
+        """A zero DB budget cannot strand a venue-absent CANCEL_PENDING order."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema, init_schema_trade_only
+
+        db_path = tmp_path / "priority-cancel-pending.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        _insert(seed, size=81.0, price=0.58)
+        _advance_to_cancel_pending(seed, venue_order_id="ord-cancel-pending")
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=mock_client,
+            scope="live_tick",
+        )
+
+        assert summary["cancel_recovery_fast"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        verified = _conn_factory()
+        try:
+            assert _get_state(verified, "cmd-001") == "CANCELLED"
+        finally:
+            verified.close()
+
+    def test_live_tick_prioritizes_terminal_point_order_before_general_budget(
+        self,
+        tmp_path,
+        monkeypatch,
+        mock_client,
+    ):
+        """A zero DB budget cannot strand collateral after a venue terminal no-fill."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema, init_schema_trade_only
+
+        db_path = tmp_path / "priority-terminal-point.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        _insert(seed, size=7.0, price=0.52)
+        _advance_to_acked(seed, venue_order_id="ord-terminal-no-fill")
+        _seed_pending_entry_projection(seed, order_id="ord-terminal-no-fill")
+        _append_order_fact(seed, state="LIVE", matched_size="0", remaining_size="7")
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-terminal-no-fill",
+            "status": "CANCELED",
+            "original_size": "7",
+            "size_matched": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=mock_client,
+            scope="live_tick",
+        )
+
+        assert summary["terminal_point_recovery_fast"]["scanned"] == 1
+        assert summary["terminal_point_recovery_fast"]["advanced"] >= 2
+        verified = _conn_factory()
+        try:
+            assert _get_state(verified, "cmd-001") == "EXPIRED"
+            current = verified.execute(
+                "SELECT phase, shares, cost_basis_usd FROM position_current "
+                "WHERE position_id = 'pos-001'"
+            ).fetchone()
+            assert dict(current) == {
+                "phase": "voided",
+                "shares": 0.0,
+                "cost_basis_usd": 0.0,
+            }
         finally:
             verified.close()
 
@@ -14537,6 +14788,56 @@ class TestRecoveryResolutionTable:
         assert payload["proof_class"] == (
             "review_required_matched_order_fact_with_positive_trade_fact"
         )
+
+    def test_terminal_partial_fact_clears_review_without_equal_aggregate_position(self, conn):
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+
+        _insert(conn, size=47.75, price=0.42)
+        _seed_pending_entry_projection(conn)
+        _advance_to_acked(conn, venue_order_id="ord-terminal-partial")
+        _append_trade_fact(
+            conn,
+            order_id="ord-terminal-partial",
+            trade_id="trade-terminal-partial",
+            state="CONFIRMED",
+            filled_size="6.234135",
+            fill_price="0.42",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-terminal-partial",
+            state="PARTIALLY_MATCHED",
+            matched_size="6.234135",
+            remaining_size="0",
+        )
+        _advance_to_review_required(conn)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'day0_window',
+                   shares = 15.446665,
+                   chain_shares = 15.446665,
+                   chain_state = 'synced',
+                   cost_basis_usd = 6.2
+             WHERE position_id = 'pos-001'
+            """
+        )
+
+        summary = reconcile_matched_cancel_review_required_entries(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        event = _get_events(conn, "cmd-001")[-1]
+        assert event["event_type"] == "PARTIAL_FILL_OBSERVED"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == "terminal_partial_order_fact"
+        assert payload["required_predicates"] == {
+            "terminal_order_remainder_zero": True,
+            "canonical_trade_facts_match_terminal_order_fact": True,
+            "cumulative_fill_below_requested_size": True,
+        }
 
     def test_filled_entry_execution_fact_repair_preserves_position_increments(
         self,

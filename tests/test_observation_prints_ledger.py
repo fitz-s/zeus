@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -118,6 +118,66 @@ def _paris_temps_by_hhmm() -> list[tuple[str, float]]:
 
 
 class TestParisTypeSpecimenThroughLedger:
+    def test_physical_ledger_clock_is_causal_and_uses_latest_equal_plateau(self):
+        conn = _conn()
+        for published, fetched in (
+            ("2026-07-14T14:00:00+00:00", "2026-07-14T14:04:00+00:00"),
+            ("2026-07-14T14:30:00+00:00", "2026-07-14T14:34:00+00:00"),
+            # Published before the snapshot but not fetched until afterwards:
+            # replay and live must both exclude it from the decision information set.
+            ("2026-07-14T15:00:00+00:00", "2026-07-14T16:00:00+00:00"),
+        ):
+            append_print(
+                conn,
+                city="Paris",
+                station_id="LFPB",
+                source_channel="aviationweather_metar",
+                publish_ts_utc=published,
+                value_native=34.0,
+                unit="C",
+                fetched_at_utc=fetched,
+                raw_report="METAR LFPB 141430Z 34/14",
+            )
+
+        fact = _latest_authorized_day0_fact(
+            conn,
+            city="Paris",
+            target_date="2026-07-14",
+            temperature_metric="high",
+            decision_time=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        )
+
+        assert fact is not None
+        assert fact["observation_time"] == "2026-07-14T14:30:00+00:00"
+        assert fact["observation_available_at"] == "2026-07-14T14:34:00+00:00"
+
+    def test_fahrenheit_fast_fact_uses_precise_t_group_value(self):
+        conn = _conn()
+        append_print(
+            conn,
+            city="NYC",
+            station_id="KLGA",
+            source_channel="aviationweather_metar",
+            publish_ts_utc="2026-07-10T19:30:00+00:00",
+            value_native=26.0,
+            unit="C",
+            fetched_at_utc="2026-07-10T19:34:00+00:00",
+            raw_report=(
+                "METAR KLGA 101930Z 18008KT 10SM CLR 26/16 A2998 T02560161"
+            ),
+        )
+
+        fact = _latest_authorized_day0_fact(
+            conn,
+            city="NYC",
+            target_date="2026-07-10",
+            temperature_metric="high",
+            decision_time=datetime(2026, 7, 10, 19, 45, tzinfo=UTC),
+        )
+
+        assert fact is not None
+        assert fact["observed_extreme_native"] == pytest.approx(78.08)
+
     def test_ledger_fact_reaches_35_even_when_instants_says_34_and_events_says_31(self):
         conn = _conn()
         # observation_instants: frozen at 34.0 (defect-2 scenario) -- present
@@ -173,10 +233,13 @@ class TestParisTypeSpecimenThroughLedger:
         )
         # observation_prints: the FULL real METAR sequence, incl. 35.0@14:30Z.
         for hhmm, temp in _paris_temps_by_hhmm():
+            published = datetime.fromisoformat(
+                f"2026-07-14T{hhmm}:00+00:00"
+            )
             append_print(
                 conn, city="Paris", station_id="LFPB", source_channel="aviationweather_metar",
-                publish_ts_utc=f"2026-07-14T{hhmm}:00+00:00", value_native=temp, unit="C",
-                fetched_at_utc=f"2026-07-14T{hhmm}:04:00+00:00",
+                publish_ts_utc=published.isoformat(), value_native=temp, unit="C",
+                fetched_at_utc=(published + timedelta(minutes=4)).isoformat(),
                 raw_report=f"METAR LFPB {temp}/15",
             )
 

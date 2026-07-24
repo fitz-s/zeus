@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from src.data.day0_observation_reader import _OBSERVATION_FACT_TIME_SQL
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_input_hwm import (
     prime_frozen_replacement_artifact_hwm,
@@ -703,15 +704,23 @@ def _latest_authorized_day0_fact(
     if "observation_instants" in _table_names(conn):
         extreme_col = "running_min" if metric == "low" else "running_max"
         extreme_order = "ASC" if metric == "low" else "DESC"
-        instant_order = (
-            "utc_timestamp DESC"
-            if source_type == "hko"
-            else f"observed_extreme_native {extreme_order}, utc_timestamp DESC"
-        )
         instant_columns = {
             str(column[1])
             for column in conn.execute("PRAGMA table_info(observation_instants)").fetchall()
         }
+        observation_fact_time_sql = (
+            _OBSERVATION_FACT_TIME_SQL
+            if "provenance_json" in instant_columns
+            else "utc_timestamp"
+        )
+        instant_order = (
+            "observation_fact_time DESC"
+            if source_type == "hko"
+            else (
+                f"observed_extreme_native {extreme_order}, "
+                "observation_fact_time DESC"
+            )
+        )
 
         def optional_column(name: str) -> str:
             return name if name in instant_columns else f"NULL AS {name}"
@@ -738,6 +747,7 @@ def _latest_authorized_day0_fact(
         query_params: tuple[object, ...] = (
             city,
             target_date,
+            decision_utc.isoformat(),
             decision_utc.isoformat(),
         )
         if "imported_at" in instant_columns:
@@ -790,6 +800,7 @@ def _latest_authorized_day0_fact(
             WITH authorized AS (
                 SELECT CAST({extreme_col} AS REAL) AS observed_extreme_native,
                        utc_timestamp,
+                       {observation_fact_time_sql} AS observation_fact_time,
                        source,
                        {optional_column('station_id')},
                        {optional_column('temp_unit')},
@@ -799,6 +810,7 @@ def _latest_authorized_day0_fact(
                    AND target_date = ?
                    AND substr(local_timestamp, 1, 10) = target_date
                    AND utc_timestamp <= ?
+                   AND datetime({observation_fact_time_sql}) <= datetime(?)
                    {availability_clause}
                    {time_geometry_clause}
                    {station_identity_clause}
@@ -827,7 +839,10 @@ def _latest_authorized_day0_fact(
                    AND {extreme_col} IS NOT NULL
             )
             SELECT observed_extreme_native,
-                   (SELECT MAX(utc_timestamp) FROM authorized) AS observation_time,
+                   (
+                       SELECT MAX(observation_fact_time)
+                         FROM authorized
+                   ) AS observation_time,
                    (SELECT COUNT(*) FROM authorized) AS sample_count,
                    source AS observation_source,
                    station_id,
@@ -1087,13 +1102,15 @@ def _latest_authorized_day0_fact(
                 placeholders = ",".join("?" for _ in allowed_channels)
                 print_rows = conn.execute(
                     f"""
-                    SELECT source_channel, publish_ts_utc, value_native, unit, station_id, raw_report
+                    SELECT source_channel, publish_ts_utc, value_native, unit,
+                           station_id, raw_report, fetched_at_utc
                       FROM observation_prints
                      WHERE city = ?
                        AND source_channel IN ({placeholders})
                        AND publish_ts_utc >= ?
                        AND publish_ts_utc < ?
                        AND publish_ts_utc <= ?
+                       AND julianday(fetched_at_utc) <= julianday(?)
                     """,
                     (
                         city,
@@ -1101,12 +1118,14 @@ def _latest_authorized_day0_fact(
                         local_day_start_utc.isoformat(),
                         local_day_end_utc.isoformat(),
                         decision_utc.isoformat(),
+                        decision_utc.isoformat(),
                     ),
                 ).fetchall()
                 margin_by_channel: dict[str, float | None] = {}
                 best_value: float | None = None
                 best_channel = ""
                 best_publish_ts = ""
+                best_fetched_at = ""
                 for print_row in print_rows:
                     channel = str(print_row["source_channel"])
                     print_unit = str(print_row["unit"] or "").strip().upper()
@@ -1123,12 +1142,20 @@ def _latest_authorized_day0_fact(
                         # only trust a report carrying a T-group; a whole-C
                         # ->F conversion is imprecise enough to falsely cross
                         # a bin edge) instead of the generic unit-match check.
-                        from src.data.day0_fast_obs import _T_GROUP_RE
+                        from src.data.day0_fast_obs import (
+                            _T_GROUP_RE,
+                            metar_t_group_temperature_c,
+                        )
 
                         if expected_unit == "F":
                             if not _T_GROUP_RE.search(str(print_row["raw_report"] or "")):
                                 continue
-                            value = value * 9.0 / 5.0 + 32.0
+                            precise_c = metar_t_group_temperature_c(
+                                str(print_row["raw_report"] or "")
+                            )
+                            if precise_c is None:
+                                continue
+                            value = precise_c * 9.0 / 5.0 + 32.0
                         elif expected_unit != "C":
                             continue
                         # Same-station fast channel (not the settlement
@@ -1151,13 +1178,16 @@ def _latest_authorized_day0_fact(
                     elif print_unit != expected_unit:
                         continue
                     publish_ts = str(print_row["publish_ts_utc"])
+                    fetched_at = str(print_row["fetched_at_utc"])
                     if best_value is None or (
                         (metric == "high" and value > best_value)
                         or (metric == "low" and value < best_value)
+                        or (value == best_value and publish_ts > best_publish_ts)
                     ):
                         best_value = value
                         best_channel = channel
                         best_publish_ts = publish_ts
+                        best_fetched_at = fetched_at
                 if best_value is not None:
                     facts.append(
                         {
@@ -1168,7 +1198,7 @@ def _latest_authorized_day0_fact(
                             "observation_source": best_channel,
                             "station_id": expected_station or "",
                             "unit": expected_unit,
-                            "observation_available_at": best_publish_ts,
+                            "observation_available_at": best_fetched_at,
                         }
                     )
 

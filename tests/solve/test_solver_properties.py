@@ -726,7 +726,17 @@ def _global_exact_oracle(
 
 
 def _global_sell_candidate(
-    *, candidate_id, family, side, held_q, bids, shares="10", fee="0"
+    *,
+    candidate_id,
+    family,
+    side,
+    held_q,
+    bids,
+    shares="10",
+    fee="0",
+    probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
+    exit_authority_status="not_applicable",
+    exit_authority_reason="non_day0_family",
 ):
     probability_seed = _global_candidate(
         candidate_id=f"{candidate_id}-q",
@@ -765,6 +775,9 @@ def _global_sell_candidate(
         ledger_snapshot_id="ledger-current",
         executable_sell_curve=curve,
         resolution_identity=probability_seed.resolution_identity,
+        probability_functional=probability_functional,
+        exit_authority_status=exit_authority_status,
+        exit_authority_reason=exit_authority_reason,
     )
 
 
@@ -1256,13 +1269,19 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
     )
 
     assert plan.no_trade_reason is None
-    assert plan.primary_candidate_id == "candidate-33-YES"
-    assert Decimal("45") < plan.fractional_target_cost_usd <= Decimal("1449.166") / 32
-    assert plan.robust_delta_log_wealth > 0.06
+    assert plan.primary_candidate_id is not None
+    assert Decimal("0") < plan.fractional_target_cost_usd <= Decimal("1449.166") / 32
+    assert plan.full_kelly_cost_usd > plan.fractional_target_cost_usd
+    assert plan.robust_delta_log_wealth > 0
+    for target in plan.targets:
+        assert target.fractional_kelly_target_shares == (
+            target.full_kelly_target_shares * Decimal("0.03125")
+        )
+        assert target.shares <= target.fractional_kelly_target_shares
     target_by_id = {target.candidate_id: target.shares for target in plan.targets}
-    assert Decimal("500") <= target_by_id["candidate-33-YES"] <= Decimal("505")
-    assert "candidate-35-NO" not in target_by_id
-    assert "candidate-36-NO" not in target_by_id
+    assert "candidate-33-YES" not in target_by_id
+    assert "candidate-35-NO" in target_by_id
+    assert "candidate-36-NO" in target_by_id
     assert optimize_calls == 1
 
     payout = {bin_id: Decimal("0") for bin_id in witness.bin_ids}
@@ -1327,7 +1346,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         (row.candidate_id, row.status, row.rejection_reason)
         for row in decision.candidate_evaluations
     )
-    assert decision.candidate.candidate_id == "candidate-33-YES", tuple(
+    assert decision.candidate.candidate_id == plan.primary_candidate_id, tuple(
         (
             row.candidate_id,
             row.status,
@@ -1339,6 +1358,57 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
     )
     assert decision.buy_sizing_mode == "FAMILY_JOINT_FRACTIONAL_TARGET"
     assert optimizer_shapes == [5, 4]
+
+
+def test_family_joint_does_not_spend_fixed_capital_fraction_above_kelly_target():
+    candidate = _global_candidate(
+        candidate_id="family-joint-weak-edge",
+        family="family-joint-weak-edge",
+        side="NO",
+        q=0.8125733672356523,
+        levels=(("0.78", "57.5"),),
+        fee="0.05",
+        min_order="5",
+    )
+    witness = _global_probability_witness(candidate)
+    endowment = S.FamilyPortfolioEndowment(
+        family_key=candidate.family_key,
+        payout_by_bin_usd=tuple(
+            (bin_id, Decimal("0")) for bin_id in witness.bin_ids
+        ),
+        current_token_shares=(),
+        wealth_floor_usd=Decimal("465.531417"),
+        spendable_cash_usd=Decimal("465.531417"),
+        portfolio_capital_usd=Decimal("1450"),
+        committed_capital_usd=Decimal("0"),
+        ledger_snapshot_id="ledger-current",
+    )
+
+    full = S.plan_family_joint_buy_targets(
+        (candidate,),
+        probability_witness=witness,
+        endowment=endowment,
+        capital_limit_by_candidate={candidate.candidate_id: Decimal("1450")},
+        fractional_kelly_multiplier=Decimal("1"),
+    )
+    fractional = S.plan_family_joint_buy_targets(
+        (candidate,),
+        probability_witness=witness,
+        endowment=endowment,
+        capital_limit_by_candidate={candidate.candidate_id: Decimal("1450")},
+        fractional_kelly_multiplier=Decimal("0.03125"),
+    )
+
+    assert full.primary_candidate_id == candidate.candidate_id
+    assert full.targets[0].shares > Decimal("55")
+    assert full.targets[0].full_kelly_target_shares == full.targets[0].shares
+    assert (
+        full.targets[0].full_kelly_target_shares * Decimal("0.03125")
+        < Decimal("5")
+    )
+    assert fractional.primary_candidate_id is None
+    assert fractional.targets == ()
+    assert fractional.no_trade_reason == "FAMILY_JOINT_NO_POSITIVE_TARGET"
 
 
 def _global_witness(
@@ -2060,6 +2130,130 @@ def test_sell_point_counterfactual_is_identity_bound_and_cannot_change_live_acti
     assert high_evaluation.sell_point_counterfactual.expected_ev_usd < 0.0
 
 
+def test_mature_day0_sell_uses_point_expectation_after_temporal_gate():
+    """Parameter-tail caution cannot replace fixed-action expected utility."""
+
+    sell = _global_sell_candidate(
+        candidate_id="mature-day0-point-functional",
+        family="mature-day0-point-functional-family",
+        side="YES",
+        held_q=0.10,
+        bids=(("0.30", "10"),),
+        shares="10",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="mature",
+        exit_authority_reason="day0_high_extreme_mature:post_peak_confidence=0.97",
+    )
+    held_q_samples = np.concatenate((np.full(380, 0.10), np.full(20, 0.90)))
+    sell = _replace_global_q_samples(sell, held_q_samples)
+    sell = _replace_global_point_q(sell, 0.10)
+    alternate_tail = _replace_global_q_samples(
+        sell,
+        np.concatenate((np.full(300, 0.01), np.full(100, 0.99))),
+    )
+    alternate_tail = _replace_global_point_q(alternate_tail, 0.10)
+
+    decision = _global_select((sell,))
+    alternate_decision = _global_select((alternate_tail,))
+
+    assert decision.candidate is sell
+    assert decision.robust_delta_log_wealth == 0.0
+    assert decision.robust_ev_usd == 0.0
+    assert decision.terminal_wealth is None
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.expected_delta_log_wealth > 0.0
+    assert decision.expected_terminal_wealth.expected_ev_usd > 0.0
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.expected_delta_log_wealth > 0.0
+    assert alternate_decision.candidate is alternate_tail
+    assert alternate_decision.shares == decision.shares
+    assert alternate_decision.limit_price == decision.limit_price
+    assert alternate_decision.expected_terminal_wealth is not None
+    assert (
+        alternate_decision.expected_terminal_wealth.expected_delta_log_wealth
+        == pytest.approx(
+            decision.expected_terminal_wealth.expected_delta_log_wealth
+        )
+    )
+    assert alternate_decision.expected_terminal_wealth.expected_ev_usd == pytest.approx(
+        decision.expected_terminal_wealth.expected_ev_usd
+    )
+    evaluation = decision.candidate_evaluations[0]
+    assert evaluation.status == "SELECTED"
+    assert evaluation.sell_probability_functional == "POSTERIOR_PREDICTIVE_MEAN"
+    assert evaluation.sell_exit_authority_status == "mature"
+    assert evaluation.sell_exit_authority_reason == sell.exit_authority_reason
+
+
+def test_mature_mean_sell_cannot_masquerade_as_robust_certificate():
+    mature = _global_sell_candidate(
+        candidate_id="mature-explicit-mean",
+        family="mature-explicit-mean-family",
+        side="YES",
+        held_q=0.10,
+        bids=(("0.30", "10"),),
+        shares="10",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="mature",
+        exit_authority_reason="day0_high_extreme_mature:post_peak_confidence=0.97",
+    )
+    mature_decision = _global_select((mature,))
+    robust = replace(
+        mature,
+        probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
+        exit_authority_status="not_applicable",
+        exit_authority_reason="non_day0_family",
+    )
+    robust_decision = _global_select((robust,))
+
+    assert mature_decision.candidate is mature
+    assert robust_decision.candidate is robust
+    with pytest.raises(ValueError, match="positive economics"):
+        replace(
+            mature_decision.candidate_evaluations[0],
+            robust_delta_log_wealth=robust_decision.robust_delta_log_wealth,
+            robust_ev_usd=robust_decision.robust_ev_usd,
+            capital_efficiency=robust_decision.capital_efficiency,
+            robust_log_growth_per_hour=(
+                robust_decision.robust_log_growth_per_hour
+            ),
+            terminal_wealth=robust_decision.terminal_wealth,
+            expected_terminal_wealth=None,
+        )
+
+
+def test_buy_robust_admission_and_size_are_invariant_to_common_mean_score():
+    buy = _global_candidate(
+        candidate_id="robust-buy-common-mean-ranking",
+        family="robust-buy-common-mean-ranking-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.20", "20"),),
+    )
+    low_mean = _replace_global_point_q(buy, 0.70)
+    high_mean = _replace_global_point_q(buy, 0.95)
+
+    low_decision = _global_select((low_mean,))
+    high_decision = _global_select((high_mean,))
+
+    assert low_decision.candidate is low_mean
+    assert high_decision.candidate is high_mean
+    assert low_decision.shares == high_decision.shares
+    assert low_decision.robust_delta_log_wealth == pytest.approx(
+        high_decision.robust_delta_log_wealth
+    )
+    assert low_decision.robust_ev_usd == pytest.approx(
+        high_decision.robust_ev_usd
+    )
+    assert low_decision.expected_growth is not None
+    assert high_decision.expected_growth is not None
+    assert (
+        high_decision.expected_growth.expected_delta_log_wealth
+        > low_decision.expected_growth.expected_delta_log_wealth
+        > 0.0
+    )
+
+
 def test_sell_point_counterfactual_failure_cannot_block_profitable_live_sell(
     monkeypatch,
 ):
@@ -2089,7 +2283,7 @@ def test_sell_point_counterfactual_failure_cannot_block_profitable_live_sell(
     )
 
 
-def test_missing_sell_point_probability_cannot_block_profitable_live_sell(
+def test_missing_posterior_mean_blocks_cross_action_selection_fail_closed(
     monkeypatch,
 ):
     sell = _global_sell_candidate(
@@ -2104,8 +2298,11 @@ def test_missing_sell_point_probability_cannot_block_profitable_live_sell(
 
     decision = _global_select((sell,))
 
-    assert decision.candidate is sell
-    assert decision.robust_delta_log_wealth > 0.0
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+    assert decision.rejection_reasons == {
+        sell.candidate_id: "EXPECTED_COMPARISON_UNAVAILABLE"
+    }
     counterfactual = decision.candidate_evaluations[0].sell_point_counterfactual
     assert counterfactual is not None
     assert counterfactual.status == "UNAVAILABLE"

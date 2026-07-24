@@ -1,5 +1,6 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Lifecycle: created=2026-05-17; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Last reused or audited: 2026-07-23
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
 #   Antibody for F44: observation_instants writer dead since 2026-05-10.
 #   These tests catch the "dead-writer" category permanently by asserting
@@ -262,6 +263,44 @@ def test_obs_v2_live_tick_connection_carries_busy_timeout(monkeypatch, tmp_path:
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 12345
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    ("city_name", "tick_name", "fetch_name"),
+    [
+        ("Chicago", "_tick_wu_city", "fetch_wu_hourly"),
+        ("Karachi", "_tick_ogimet_city", "fetch_ogimet_hourly"),
+    ],
+)
+def test_obs_live_tick_stamps_possession_only_after_fetch(
+    monkeypatch, city_name: str, tick_name: str, fetch_name: str
+) -> None:
+    """A resumed fetch must not backdate observations to its pre-request clock."""
+    import scripts.obs_live_tick as obs_tick
+
+    fetch_returned = False
+
+    def fake_fetch(**_kwargs):
+        nonlocal fetch_returned
+        fetch_returned = True
+        return SimpleNamespace(failed=False, observations=[])
+
+    def possession_time(_captured):
+        assert fetch_returned, "possession clock was captured before fetch returned"
+        return "2026-07-23T20:00:00+00:00"
+
+    monkeypatch.setattr(obs_tick, fetch_name, fake_fetch)
+    monkeypatch.setattr(obs_tick, "proof_of_possession_available_at", possession_time)
+
+    result = getattr(obs_tick, tick_name)(
+        city_name,
+        None,
+        start_date=date(2026, 7, 23),
+        end_date=date(2026, 7, 23),
+        dry_run=True,
+    )
+
+    assert result.failure_reason is None
 
 
 def test_obs_v2_live_tick_retries_sqlite_lock_per_city(monkeypatch) -> None:

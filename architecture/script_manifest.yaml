@@ -397,7 +397,7 @@ scripts:
     write_targets: [observation_instants]
     observability: [state/obs_v2_live_tick_log.jsonl]
     required_tests: [tests/test_obs_v2_writer.py]
-    notes: "Hourly rolling live writer invoked by src.ingest_main._k2_obs_tick; payload_hash must cover material extrema values so revised source facts enter revision history instead of same-hash material conflicts."
+    notes: "Hourly rolling live writer invoked by src.ingest_main._k2_obs_tick; imported_at is captured only after the upstream fetch returns, and payload_hash must cover material extrema values so revised source facts enter revision history instead of same-hash material conflicts."
   fill_obs_dst_gaps.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_writer, src.data.ogimet_hourly_client], external_inputs: [Ogimet METAR], target_db: state/zeus-world.db, write_targets: [observation_instants], observability: [state/obs_v2_dst_fill_log.jsonl], notes: "Targeted gap-fill for Tier 1 WU cities on DST-spring-forward days where WU archive has silent upstream holes. Uses Ogimet as authoritative NOAA-METAR mirror."}
 
   backfill_ogimet_metar.py:
@@ -517,7 +517,7 @@ scripts:
     required_tests: []
     reason: "Reports highest evidence-backed completion state plus exact blockers for forecast-live authority chain. Prevents operators/agents from confusing code presence with live data readiness. Salvaged from closed PR #134."
 
-  hko_ingest_tick.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Standalone HKO accumulator tick + observation_instants projection; idempotent via ON CONFLICT / UNIQUE constraints. Designed for cron invocation independent of trading daemon."}
+  hko_ingest_tick.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Standalone HKO accumulator tick + observation_instants projection; possession time is captured only after the official-extrema response returns, and writes are idempotent via ON CONFLICT / UNIQUE constraints. Designed for cron invocation independent of trading daemon."}
   repair_hko_runtime_monitoring_observations.py: {class: db_repair, dangerous_if_run: false, dry_run_default: true, apply_flag: "--apply", target_db: state/zeus-world.db, write_targets: [state/zeus-world.db.observation_instants], reason: "One-time repair for old Hong Kong HKO rows that were persisted as coverage_fill_evidence / REQUIRES_SOURCE_REAUDIT. Promotes only ICAO_STATION_NATIVE hko_hourly_accumulator rows to runtime_monitoring / OK / training_allowed=0 so live Day0 monitoring can consume canonical HKO truth without admitting HK into calibration training."}
   check_data_pipeline_live_e2e.py:
     # Created: 2026-05-15

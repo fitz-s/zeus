@@ -5200,6 +5200,8 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             held_city_count=held_city_count,
             cursor=_DAY0_HOURLY_REFRESH_CURSOR,
         )
+        cursor_span = held_city_count or priority_city_count or len(ordered_cities)
+        cursor_advance = 0
         max_cities = _day0_hourly_refresh_max_cities(
             priority_city_count=priority_city_count,
         )
@@ -5219,12 +5221,17 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 # budget.  Any remaining slots return to held capital.
                 ordered_cities = [held[0], pending[0]] + held[1:max_cities - 1]
                 quota_priority_cities = 1
+                cursor_advance = 1 + len(held[1:max_cities - 1])
             elif held:
                 ordered_cities = held[:max_cities]
                 quota_priority_cities = len(ordered_cities)
+                cursor_advance = len(ordered_cities)
             else:
                 ordered_cities = pending[:max_cities]
                 quota_priority_cities = 0
+                cursor_advance = len(ordered_cities)
+        else:
+            cursor_advance = min(max_cities, cursor_span)
         stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,
             decision_time=decision_time,
@@ -5237,17 +5244,21 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         )
         vectors_written = int(getattr(stats, "vectors_written", stats))
         cities_attempted = int(getattr(stats, "cities_attempted", 0) or 0)
-        if cities_attempted > 0 and ordered_cities:
+        # Fairness is about which complete held segment was OFFERED a slot,
+        # not whether its fetch escaped throttle/provider failure. Advancing
+        # only on attempts and taking modulo the truncated microbatch trapped
+        # the cursor in its first three held cities indefinitely.
+        if cursor_advance > 0 and cursor_span > 0:
             _DAY0_HOURLY_REFRESH_CURSOR = (
-                _DAY0_HOURLY_REFRESH_CURSOR + cities_attempted
-            ) % max(1, len(ordered_cities))
+                _DAY0_HOURLY_REFRESH_CURSOR + cursor_advance
+            ) % cursor_span
         if vectors_written or priority_city_count:
             _log.info(
                 "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d "
                 "held_cities=%d trading_lane_active=%s "
                 "max_cities=%d cities_attempted=%d skipped_throttle=%d "
                 "skipped_quota=%d incomplete_expected_bundles=%d "
-                "budget_exhausted=%s cursor=%d",
+                "budget_exhausted=%s cursor=%d cursor_span=%d cursor_advance=%d",
                 vectors_written,
                 priority_city_count,
                 held_city_count,
@@ -5259,6 +5270,8 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
                 bool(getattr(stats, "budget_exhausted", False)),
                 _DAY0_HOURLY_REFRESH_CURSOR,
+                cursor_span,
+                cursor_advance,
             )
     except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
         _log.warning("EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc)

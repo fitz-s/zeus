@@ -262,13 +262,17 @@ lets one large holding erase every otherwise-positive family. Before scoring, th
 unlicensed longshots. Inside that feasible set, a BUY must have payoff-side lower-tail-CVaR
 probability above fee-inclusive executable cost plus positive robust delta-log wealth and EV;
 there is no price-independent `q > 0.5` wall, and the exact binary median follows the probability
-branch. A full-size and every-FAK-prefix positive reduce-only SELL remains an eligible
-current-endowment improvement, but execution direction does not override the objective: all
-positive BUY and SELL alternatives rank by lower-CVaR Δlog-wealth per remaining family-resolution
-hour. That horizon is not caller-authored: the current immutable
+branch. Non-Day0 SELL retains its lower-CVaR action gate pending an explicit
+future-information option-value model. A Day0 statistical SELL requires a current
+maturity authority bound to the exact probability witness; mature fixed-action size
+and every FAK prefix use posterior-mean expected log wealth and EV in explicit
+`expected_*` certificates, never in `robust_*` fields. BUY robust admission and sizing
+remain unchanged. The action-law-admitted fixed BUY and SELL proposals then rank on one
+posterior-mean expected Δlog-wealth rate per remaining family-resolution hour. That
+horizon is not caller-authored: the current immutable
 family city and target local date plus configured settlement timezone derive it, and both current
-scope and venue-universe witness identities bind it. Ties use raw robust Δlog, robust Δlog per
-dollar, then lower cash. Expected value is diagnostic only, not realized capital gain. This is a
+scope and venue-universe witness identities bind it. Ties use raw expected Δlog, expected Δlog per
+dollar, then lower cash. Expected value is a decision-time expectation, not realized capital gain. This is a
 current certified resolution-horizon rate, not a claim about future opportunity arrivals or a
 learned continuation value. Maker-contingent assets and any stale/mismatched certificate fail
 closed. The event reactor now owns

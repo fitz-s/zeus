@@ -1,5 +1,6 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-23
+# Last reused/audited: 2026-07-23
+# Lifecycle: created=2026-05-04; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §6.P3 + §8 T6 (mode-default preservation post-D-B). Audited: critic a6d4e8bb1f0cb0de4.
 """D-B mode→phase migration tests (PLAN_v3 §6.P3).
 
@@ -197,26 +198,22 @@ def test_settlement_day_dispatch_for_mode_uses_legacy_axis(
 # ---------------------------------------------------------------------- #
 
 
-def test_evaluator_edge_source_flag_off_preserves_legacy(
+def test_evaluator_edge_source_flag_off_does_not_fabricate_settlement_truth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T6 byte-equal invariant exercised through the evaluator helper.
-    Pre-P3 behavior: ``_edge_source_for(candidate, edge)`` returned
-    "settlement_capture" iff candidate.discovery_mode == DAY0_CAPTURE.
-    Post-P3 with flag OFF: same.
-    """
+    """The dispatch kill-switch cannot turn unknown payoff truth into capture."""
     monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     from src.engine.evaluator import _edge_source_for
 
     bin_stub = SimpleNamespace(is_shoulder=False)
     edge_stub = SimpleNamespace(direction="buy_yes", bin=bin_stub)
 
-    # DAY0_CAPTURE → settlement_capture (legacy)
+    # DAY0_CAPTURE without selected-side lock proof remains forecast-dependent.
     cand_day0 = _candidate(
         discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
         market_phase=MarketPhase.PRE_SETTLEMENT_DAY,  # tag intentionally "wrong"
     )
-    assert _edge_source_for(cand_day0, edge_stub) == "settlement_capture"
+    assert _edge_source_for(cand_day0, edge_stub) == "day0_nowcast_entry"
 
     # OPENING_HUNT + buy_yes/center → opening_inertia (legacy precedence)
     cand_opening = _candidate(
@@ -235,12 +232,12 @@ def test_evaluator_edge_source_flag_on_routes_on_phase(
     bin_stub = SimpleNamespace(is_shoulder=False)
     edge_stub = SimpleNamespace(direction="buy_yes", bin=bin_stub)
 
-    # OPENING_HUNT mode but market_phase=SETTLEMENT_DAY → settlement_capture
+    # OPENING_HUNT mode but market_phase=SETTLEMENT_DAY has no lock proof.
     cand = _candidate(
         discovery_mode=DiscoveryMode.OPENING_HUNT.value,
         market_phase=MarketPhase.SETTLEMENT_DAY,
     )
-    assert _edge_source_for(cand, edge_stub) == "settlement_capture", (
+    assert _edge_source_for(cand, edge_stub) == "day0_nowcast_entry", (
         "flag ON should route on market_phase, not discovery_mode"
     )
 
@@ -415,9 +412,9 @@ def test_evaluator_strategy_key_three_sites_consistent(
         market_phase=MarketPhase.SETTLEMENT_DAY,
     )
 
-    assert _edge_source_for(cand, edge_stub) == "settlement_capture"
-    assert _strategy_key_for(cand, edge_stub) == "settlement_capture"
-    assert _strategy_key_for_hypothesis(cand, hypothesis_stub) == "settlement_capture"
+    assert _edge_source_for(cand, edge_stub) == "day0_nowcast_entry"
+    assert _strategy_key_for(cand, edge_stub) == "day0_nowcast_entry"
+    assert _strategy_key_for_hypothesis(cand, hypothesis_stub) == "day0_nowcast_entry"
 
 
 # ---------------------------------------------------------------------- #

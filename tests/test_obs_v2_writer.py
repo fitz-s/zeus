@@ -1,6 +1,6 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-05-20; last_reused=2026-05-20
-# Last reused/audited: 2026-05-20
+# Lifecycle: created=2026-04-21; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Last reused/audited: 2026-07-23
 # Authority basis: plan v3 antibodies A1/A2; P1 obs_v2 provenance identity packet;
 #                  2026-05-20 live tick payload hash material-extrema repair.
 # Purpose: Pin observation_instants writer provenance and source-role semantics.
@@ -126,6 +126,34 @@ def test_local_hour_must_match_local_timestamp_hour():
 def test_target_date_must_match_local_timestamp_local_date():
     with pytest.raises(InvalidObsV2RowError, match="must match local_timestamp local date"):
         _make_row(target_date="2024-01-16")
+
+
+def test_writer_rejects_imported_at_before_observation_bucket():
+    with pytest.raises(InvalidObsV2RowError, match="causality violation.*utc_timestamp"):
+        _make_row(imported_at="2024-01-15T13:59:59+00:00")
+
+
+def test_writer_rejects_imported_at_before_raw_source_print():
+    with pytest.raises(InvalidObsV2RowError, match="causality violation.*hour_max_raw_ts"):
+        _make_row(
+            imported_at="2024-01-15T14:10:00+00:00",
+            provenance_json=_valid_provenance(
+                hour_max_raw_ts="2024-01-15T14:30:00+00:00",
+                hour_min_raw_ts="2024-01-15T14:00:00+00:00",
+            ),
+        )
+
+
+def test_writer_rejects_imported_at_before_latest_raw_source_print():
+    with pytest.raises(InvalidObsV2RowError, match="causality violation.*latest_raw_ts"):
+        _make_row(
+            imported_at="2024-01-15T14:40:00+00:00",
+            provenance_json=_valid_provenance(
+                hour_max_raw_ts="2024-01-15T14:30:00+00:00",
+                hour_min_raw_ts="2024-01-15T14:00:00+00:00",
+                latest_raw_ts="2024-01-15T14:45:00+00:00",
+            ),
+        )
 
 
 # ----------------------------------------------------------------------
@@ -715,6 +743,7 @@ def test_live_tick_payload_hash_changes_with_hourly_extrema_material_values():
         temp_unit="F",
         station_id="KORD",
         observation_count=1,
+        latest_raw_ts="2026-05-20T13:53:00+00:00",
     )
     row_a = _hourly_obs_to_v2_row(
         HourlyObservation(**base),
@@ -726,11 +755,23 @@ def test_live_tick_payload_hash_changes_with_hourly_extrema_material_values():
         imported_at="2026-05-20T14:01:00+00:00",
         tier_name="WU_ICAO",
     )
+    row_c = _hourly_obs_to_v2_row(
+        HourlyObservation(
+            **{**base, "latest_raw_ts": "2026-05-20T13:59:00+00:00"}
+        ),
+        imported_at="2026-05-20T14:01:00+00:00",
+        tier_name="WU_ICAO",
+    )
 
     hash_a = json.loads(row_a.provenance_json)["payload_hash"]
     hash_b = json.loads(row_b.provenance_json)["payload_hash"]
+    hash_c = json.loads(row_c.provenance_json)["payload_hash"]
 
+    assert json.loads(row_a.provenance_json)["latest_raw_ts"] == (
+        "2026-05-20T13:53:00+00:00"
+    )
     assert hash_a != hash_b
+    assert hash_a != hash_c
 
 
 def test_insert_rows_rolls_back_revision_history_on_failure(mem_db):

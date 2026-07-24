@@ -45,6 +45,11 @@ from src.solve.solver import (
     portfolio_wealth_identity,
     rebind_family_payoff_witness,
 )
+
+
+GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD = "_global_confirmed_absent"
+
+
 @dataclass(frozen=True, init=False)
 class CurrentGlobalAuctionScope:
     """Complete probability-ready family set at one decision instant."""
@@ -686,29 +691,30 @@ def _current_global_book_asset_state(
         if raw_asset_id != token_id:
             raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token_id}")
         book_hash = _canonical_raw_book_hash(raw_book)
-        curve = _global_book_curve(
-            family_key=family_key,
-            bin_id=bin_id,
-            condition_id=condition_id,
-            side=side,
-            token_id=token_id,
-            raw_book=raw_book,
-            metadata=metadata,
-            captured_at_utc=captured_at_utc,
-            max_age=max_age,
-        )
-        sell_curve = _global_sell_curve(
-            family_key=family_key,
-            bin_id=bin_id,
-            condition_id=condition_id,
-            side=side,
-            token_id=token_id,
-            raw_book=raw_book,
-            metadata=metadata,
-            captured_at_utc=captured_at_utc,
-            max_age=max_age,
-        )
-        status = "EXECUTABLE" if curve is not None else "NO_ASK"
+        if raw_book.get(GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD) is not True:
+            curve = _global_book_curve(
+                family_key=family_key,
+                bin_id=bin_id,
+                condition_id=condition_id,
+                side=side,
+                token_id=token_id,
+                raw_book=raw_book,
+                metadata=metadata,
+                captured_at_utc=captured_at_utc,
+                max_age=max_age,
+            )
+            sell_curve = _global_sell_curve(
+                family_key=family_key,
+                bin_id=bin_id,
+                condition_id=condition_id,
+                side=side,
+                token_id=token_id,
+                raw_book=raw_book,
+                metadata=metadata,
+                captured_at_utc=captured_at_utc,
+                max_age=max_age,
+            )
+            status = "EXECUTABLE" if curve is not None else "NO_ASK"
     else:
         book_hash = "metadata:" + hashlib.sha256(
             json.dumps(
@@ -2859,9 +2865,13 @@ def current_portfolio_wealth_witness(
             ):
                 raise ValueError("CURRENT_WEALTH_CHAIN_POSITION_SIZE_MISMATCH")
         held_balances = represented_micro
+        # Only currently represented native inventory may create a SELL action.
+        # Unresolved verified-fill claims still bound wealth and consume capital,
+        # but they are not executable token balances.
         native_holdings = dict(held_balances)
+        bounded_claims = dict(held_balances)
         for token, amount in uncertain_micro.items():
-            native_holdings[token] = native_holdings.get(token, 0) + amount
+            bounded_claims[token] = bounded_claims.get(token, 0) + amount
         (
             pending_endowments,
             obligation_identities,
@@ -2870,7 +2880,7 @@ def current_portfolio_wealth_witness(
         ) = _pending_entry_endowments(
             trade_conn,
             positions=positions,
-            native_holdings_micro=native_holdings,
+            native_holdings_micro=bounded_claims,
         )
         inflight_command_ids = {identity[0] for identity in inflight_identities}
         if not inflight_command_ids.issubset(obligation_ids):

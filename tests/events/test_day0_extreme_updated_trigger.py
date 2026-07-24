@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.data.day0_observation_reader import read_day0_observed_extrema
 from src.events.event_writer import EventWriter
 from src.events.day0_authority import day0_evidence_finality
 from src.events.triggers.day0_extreme_updated import (
@@ -517,7 +518,12 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
             "2026-06-06T04:15:00+00:00",
             "VERIFIED",
             "v1.wu-native",
-            '{"source_url":"redacted","station_id":"LFPB"}',
+            (
+                '{"source_url":"redacted","station_id":"LFPB",'
+                '"latest_raw_ts":"2026-06-06T04:13:00+00:00",'
+                '"hour_max_raw_ts":"2026-06-06T04:13:00+00:00",'
+                '"hour_min_raw_ts":"2026-06-06T04:03:00+00:00"}'
+            ),
             1,
             "OK",
             "historical_hourly",
@@ -547,7 +553,12 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
             "2026-06-06T05:15:00+00:00",
             "VERIFIED",
             "v1.wu-native",
-            '{"source_url":"redacted","station_id":"LFPB"}',
+            (
+                '{"source_url":"redacted","station_id":"LFPB",'
+                '"latest_raw_ts":"2026-06-06T05:13:00+00:00",'
+                '"hour_max_raw_ts":"2026-06-06T05:13:00+00:00",'
+                '"hour_min_raw_ts":"2026-06-06T05:03:00+00:00"}'
+            ),
             1,
             "OK",
             "historical_hourly",
@@ -560,8 +571,17 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
         decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc),
         received_at="2026-06-06T05:20:00+00:00",
     )
+    direct = read_day0_observed_extrema(
+        conn,
+        city="Paris",
+        target_date="2026-06-06",
+        timezone_name="Europe/Paris",
+        decision_time_utc=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc),
+        source_priority=("wu_icao_history",),
+    )
 
     assert len(results) == 2
+    assert direct.last_observation_time_utc == "2026-06-06T05:13:00+00:00"
     payloads = [row[0] for row in conn.execute("SELECT payload_json FROM opportunity_events").fetchall()]
     assert {'"metric":"high"', '"metric":"low"'} == {
         '"metric":"high"' if '"metric":"high"' in payload else '"metric":"low"'
@@ -572,6 +592,7 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
     assert '"raw_value":14.0' in high_payload
     assert '"high_so_far":14.0' in high_payload
     assert '"low_so_far":11.0' in high_payload
+    assert '"observation_time":"2026-06-06T05:13:00+00:00"' in high_payload
     assert '"raw_value":11.0' in low_payload
     assert '"high_so_far":14.0' in low_payload
     assert '"low_so_far":11.0' in low_payload

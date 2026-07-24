@@ -501,7 +501,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
     inserted_families: list[tuple[str, str, str]] = []
     evaluated_report_keys: list[tuple[str, str, float]] = []
     deferred_memo_updates: dict[
-        tuple[str, str, str], tuple[int | None, int | None]
+        tuple[str, str, str], tuple[int | None, int | None, str | None]
     ] = {}
     pending_reports = 0
     try:
@@ -2356,6 +2356,7 @@ def _replacement_availability_poll_tick():
     # 2026-07-20 after the 2026-06-11 download-lane migration orphaned the call (it lived only in the
     # descheduled forecast-live _replacement_forecast_download_cycle, so cwa_township/hko_fnd went dark
     # 2026-07-17). Due-gated (~3h) + fail-soft: a provider outage never touches the gridded capture.
+    _station_report = None
     try:
         _station_report = _ingest_station_forecasts_if_due(cfg)
         if _station_report:
@@ -2375,7 +2376,10 @@ def _replacement_availability_poll_tick():
         if scopes is not None:
             manifest_snapshot = prepared_manifest_snapshot or {}
         upgrade_report = (
-            _enqueue_fusion_upgrade_reseeds_if_needed(cfg)
+            _enqueue_fusion_upgrade_reseeds_if_needed(
+                cfg,
+                changed_sources=changed_sources,
+            )
             if scopes is None
             else _enqueue_fusion_upgrade_reseeds_if_needed(
                 cfg,
@@ -2424,6 +2428,40 @@ def _replacement_availability_poll_tick():
                     )
                 }
         return report
+
+    _station_reseed_report: dict[str, object] | None = None
+    _station_rows_written = sum(
+        max(0, int(value))
+        for value in (_station_report or {}).values()
+    )
+    if _station_report is not None:
+        _station_completed_sources = tuple(
+            str(source) for source in (_station_report or {})
+        )
+        _station_reseed_report = {
+            "status": (
+                "STATION_FORECAST_ROWS_COMMITTED"
+                if _station_rows_written > 0
+                else "STATION_FORECAST_RECONCILIATION"
+            ),
+            "rows_written": _station_rows_written,
+        }
+        try:
+            _attach_reseed_reports(
+                _station_reseed_report,
+                changed_sources=_station_completed_sources or None,
+                include_cycle_advance=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - source-clock poll must continue.
+            _station_reseed_report["fusion_upgrade_status"] = (
+                "STATION_FORECAST_RESEED_FAILED"
+            )
+            _station_reseed_report["error"] = f"{type(exc).__name__}: {str(exc)[:220]}"
+            logger.warning(
+                "station-forecast fusion reseed failed fail-soft: %s",
+                exc,
+                exc_info=True,
+            )
 
     def _download_current_targets(
         *,
@@ -2478,6 +2516,8 @@ def _replacement_availability_poll_tick():
             "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
             "source_clock_error": source_clock_payload.get("error"),
         }
+        if _station_reseed_report is not None:
+            report["station_forecast_reseed"] = _station_reseed_report
         report["maintenance_status"] = "REPLACEMENT_MAINTENANCE_DECOUPLED"
         logger.info("replacement source-clock poll current: %s", report)
         return report
@@ -3505,7 +3545,7 @@ def _ingest_main_job_specs() -> list[tuple]:
     day0_metar_poll_seconds = _day0_metar_poll_seconds()
     day0_hko_poll_seconds = _day0_hko_poll_seconds()
     specs: list[tuple] = [
-        (_k2_daily_obs_tick, "cron", dict(minute=0, id="ingest_k2_daily_obs",
+        (_k2_daily_obs_tick, "cron", dict(minute=5, id="ingest_k2_daily_obs",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
         (_k2_hourly_instants_tick, "cron", dict(minute=7, id="ingest_k2_hourly_instants",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),

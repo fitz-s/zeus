@@ -1830,6 +1830,12 @@ class EventStore:
         The immutable ``opportunity_events`` row remains append-only. This method only
         expires mutable ``opportunity_event_processing`` rows, preserving provenance
         while reducing the active working set.
+
+        ``GLOBAL_WINNER_TARGETED_CLAIM`` rows belong to the global auction's
+        single-winner handoff and are deliberately outside this generic family
+        sweep. The next auction transaction owns replacing that carrier when its
+        causal source changes; expiring it here can strand a positive winner with
+        no claimable carrier.
         """
 
         self._require_world_event_tables()
@@ -1862,7 +1868,9 @@ class EventStore:
             where_sql="""
                AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
                AND e.entity_key IS NOT NULL
+               AND COALESCE(p.last_error, '') <> ?
             """,
+            params=(GLOBAL_WINNER_TARGETED_CLAIM,),
             batch_limit=batch_limit,
         )
         if not candidate_rows:
@@ -2829,12 +2837,26 @@ class EventStore:
             "WHERE consumer_name = ? AND event_id = ?",
             (self.consumer_name, event.event_id),
         ).fetchone()
-        if terminal is not None and tuple(terminal) == (
+        expired_target = terminal is not None and tuple(terminal) == (
             "expired",
-            "GLOBAL_WINNER_TARGET_SUPERSEDED",
+            GLOBAL_WINNER_TARGETED_CLAIM,
+        )
+        if terminal is not None and (
+            tuple(terminal)
+            == (
+                "expired",
+                "GLOBAL_WINNER_TARGET_SUPERSEDED",
+            )
+            or (
+                expired_target
+                and self._expired_global_target_is_refreshable_no_order_event(
+                    event.event_id
+                )
+            )
         ):
             # The deterministic carrier was side-effect-free when another
-            # cross-family winner superseded it, but immutable terminal event
+            # cross-family winner superseded it or when the legacy generic FSR
+            # sweep terminalized the targeted handoff. Immutable terminal event
             # rows cannot be claimed again. Materialize a new carrier identity;
             # the pending same-source retention above prevents duplicates.
             event = make_opportunity_event(
@@ -2884,6 +2906,21 @@ class EventStore:
             self._remember_winner(event.event_id, event.received_at)
             return event
         return None
+
+    def _expired_global_target_is_refreshable_no_order_event(
+        self,
+        event_id: str,
+    ) -> bool:
+        """Prove a maintenance-expired target never entered order execution."""
+
+        if not _table_exists(self.conn, "edli_live_order_events"):
+            return False
+        order_event = self.conn.execute(
+            "SELECT 1 FROM edli_live_order_events "
+            "WHERE json_extract(payload_json, '$.event_id') = ? LIMIT 1",
+            (event_id,),
+        ).fetchone()
+        return order_event is None
 
     def _processed_global_target_is_refreshable_no_submit(
         self,

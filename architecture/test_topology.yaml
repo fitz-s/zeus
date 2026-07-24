@@ -217,7 +217,7 @@ test_trust_policy:
     tests/events/test_opportunity_event.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_event_candidate_binding.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_event_bound_decision_engine_no_runtime.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/events/test_event_store_idempotency.py: {created: "2026-05-24", last_used: "2026-07-16"}
+    tests/events/test_event_store_idempotency.py: {created: "2026-05-24", last_used: "2026-07-23"}
     tests/events/test_event_store_lock_not_schema_error.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_edli_position_bridge.py: {created: "2026-06-01", last_used: "2026-07-13"}
     tests/events/test_event_writer_single_writer.py: {created: "2026-05-24", last_used: "2026-05-24"}
@@ -308,7 +308,7 @@ test_trust_policy:
     tests/test_backtest_training_eligibility.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_dissemination_schedules.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_ddd_wiring.py: {created: "2026-05-03", last_used: "2026-05-15"}
-    tests/test_dedup_gate_token.py: {created: "2026-05-17", last_used: "2026-07-14"}
+    tests/test_dedup_gate_token.py: {created: "2026-05-17", last_used: "2026-07-23"}
     tests/test_solar_append_future_window.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_data_density_discount_v2.py: {created: "2026-05-03", last_used: "2026-05-15"}
     tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-07-17", note: "Ensemble cache, source-role gates, provenance, and pre-request shared quota reservation."}
@@ -418,7 +418,7 @@ test_trust_policy:
     tests/test_day0_extreme_updated_materialization_bridge.py: {created: "2026-07-19", last_used: "2026-07-20", note: "Non-blocking coalesced Day0 posterior rematerialization bridge: scoped manifests, same-cycle observation advance, and no family drop under burst."}
     tests/test_day0_exposure_cap_kernel.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-07-21", note: "Fast METAR publication persistence and Day0 hourly-vector fairness: held capital keeps critical-quota priority while a busy trading lane reserves one normal-quota slot for a pending same-day family, preventing new-entry authority starvation without sweeping the unprioritized universe."}
-    tests/test_day0_obs_fastlane_optionbc.py: {created: "2026-06-12", last_used: "2026-07-20", note: "Day0 METAR/HKO source-clock scheduling, conditional HKO validator commit coupling, isolated executor lanes, bounded commit retry, and commit-before-wake ordering."}
+    tests/test_day0_obs_fastlane_optionbc.py: {created: "2026-06-12", last_used: "2026-07-24", note: "Day0 METAR/HKO source-clock scheduling, conditional HKO validator commit coupling, isolated executor lanes, bounded commit retry, commit-before-wake ordering, and exact-station monotone WU-context strengthening."}
     tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-07-16"}
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
@@ -440,7 +440,7 @@ test_trust_policy:
 
     tests/test_execution_price.py: {created: "2026-04-13", last_used: "2026-04-29"}
     tests/test_executor.py: {created: "2026-04-27", last_used: "2026-07-22", note: "Executor live-order safety, including INV-43 inclusive 0.05/0.95 boundaries and reduce-only exit rejection outside the absolute band before command persistence."}
-    tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-07-22"}
+    tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-07-24"}
     tests/test_executor_db_target.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-27"}
     tests/test_fdr.py: {created: "2026-03-30", last_used: "2026-04-29"}
@@ -454,7 +454,7 @@ test_trust_policy:
     tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_live_execution.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-05-02"}
-    tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-07-19"}
+    tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-07-24"}
     tests/test_load_platt_v2_data_version_filter.py: {created: "2026-04-30", last_used: "2026-04-30"}
     tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-05-24"}
     tests/test_scanner_archived_filter.py: {created: "2026-05-19", last_used: "2026-05-19"}
@@ -550,7 +550,7 @@ test_trust_policy:
     tests/test_command_grammar_amendment.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-07-20", note: "RED durable CANCEL/DERISK grammar and cancellation of historical tail-priced resting orders without creating a trade."}
     tests/test_command_bus_types.py: {created: "2026-04-26", last_used: "2026-04-27"}
-    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-07-22", note: "Command recovery law, including live-tick nonblocking DB contention defer without in-cycle sleep while full/boot recovery preserves bounded retries. 2026-07-21: terminal entry obligations release only when command-deduped execution aggregates exactly match canonical and chain position economics; divergent aggregates stay open. 2026-07-22: confirmed maker fills remain recoverable when a later cancel terminalizes the command while order facts lag; split confirmed fills aggregate to one command fill, authenticated already-canceled zero-fill increments expire without voiding older same-position exposure, and live tick handles those capital locks before broad maintenance budget exhaustion."}
+    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-07-23", note: "Command recovery law, including live-tick nonblocking DB contention defer without in-cycle sleep while full/boot recovery preserves bounded retries. 2026-07-21: terminal entry obligations release only when command-deduped execution aggregates exactly match canonical and chain position economics; divergent aggregates stay open. 2026-07-22: confirmed maker fills remain recoverable when a later cancel terminalizes the command while order facts lag; split confirmed fills aggregate to one command fill, authenticated already-canceled zero-fill increments expire without voiding older same-position exposure, and live tick handles those capital locks before broad maintenance budget exhaustion. 2026-07-23: a proof-bound terminal partial fill keeps PARTIAL command truth while atomically converting and releasing its zero-remainder collateral reservation; ordinary live partials retain collateral."}
     tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-07-20", note: "Venue command persistence contracts: q_version identity and independent INV-43 inclusive-boundary enforcement for ENTRY/EXIT/DERISK before journal insertion."}
     tests/test_migration_venue_commands_q_version.py: {created: "2026-07-04", last_used: "2026-07-04", note: "SCH-W1.2-ORDER-STATE live trade-DB migration coverage: adds nullable venue_commands.q_version, idempotent when already present, no-op when venue_commands is absent."}
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
@@ -934,6 +934,7 @@ categories:
     - tests/test_replacement_fused_q_shape.py
     - tests/test_day0_admission.py
     - tests/test_day0_extreme_updated_materialization_bridge.py
+    - tests/test_day0_obs_fastlane_optionbc.py
     # T0-1 conn-across-IO ordering invariant (2026-06-13): riskguard._tick_once
     # must fetch the bankroll (wallet NETWORK fetch) BEFORE opening any
     # write-class DB conn. RED-on-revert relationship test.
@@ -1919,6 +1920,16 @@ test_metadata:
       Proves that a committed current Day0 observation triggers one monotone,
       fail-soft posterior rematerialization seed without inventing another
       probability authority or blocking event delivery.
+  tests/test_day0_obs_fastlane_optionbc.py:
+    modules: [data, engine]
+    category: core_law_antibody
+    blocks_commit: true
+    law_dependencies:
+      - architecture/invariants.yaml
+      - docs/operations/current_source_validity.md
+    notes: >
+      Protects exact-station Day0 fast-tail freshness, monotone-extreme
+      strengthening, coverage provenance, and source-clock scheduling.
   tests/test_tier_resolver.py:
     modules: [data]
     category: core_law_antibody

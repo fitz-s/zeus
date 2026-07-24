@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-21
+# Last reused or audited: 2026-07-23
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-21; last_reused=2026-07-21
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -342,16 +342,35 @@ def _write_high_yes_edge_dbs(
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode()
+            v11 = global_auction_encoding == (
+                "zlib+base64+canonical-json-v11"
+            )
+            holding_json = b"[]"
             decision_at = (now - timedelta(minutes=1)).isoformat()
             artifact = {
                 "summary": {
-                    "schema_version": 5,
+                    "schema_version": 17 if v11 else 5,
                     "decision_at_utc": decision_at,
                     "candidate_coverage_complete": True,
                     "candidate_condition_index_complete": True,
                     "candidate_evaluation_count": 1,
                     "buy_condition_membership_count": 1,
                     "candidate_evaluation_encoding": global_auction_encoding,
+                    "holding_auction_coverage_encoding": (
+                        "zlib+base64+canonical-json-v2"
+                        if v11
+                        else "zlib+base64+canonical-json-v1"
+                    ),
+                    "held_position_coverage_complete": v11,
+                    "held_position_expected_count": 0,
+                    "held_position_evaluated_count": 0,
+                    "held_position_excluded_count": 0,
+                    "holding_auction_coverage_sha256": hashlib.sha256(
+                        holding_json
+                    ).hexdigest(),
+                    "holding_auction_coverage_zlib_b64": base64.b64encode(
+                        zlib.compress(holding_json)
+                    ).decode(),
                     "candidate_evaluations_sha256": hashlib.sha256(
                         evaluation_json
                     ).hexdigest(),
@@ -4357,6 +4376,7 @@ def test_high_yes_edge_accepts_canonical_global_entry_pause(
         "zlib+base64+canonical-json-v8",
         "zlib+base64+canonical-json-v9",
         "zlib+base64+canonical-json-v10",
+        "zlib+base64+canonical-json-v11",
     ),
 )
 def test_high_yes_edge_accepts_current_global_auction_candidate(
@@ -4386,6 +4406,248 @@ def test_high_yes_edge_accepts_current_global_auction_candidate(
     assert evidence["receipt_id"] == 1
     assert evidence["candidate_evaluation_count"] == 1
     assert evidence["yes_condition_count"] == 1
+
+
+def test_high_yes_edge_rejects_mean_sell_without_mature_temporal_authority(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(
+        sd,
+        with_global_auction_candidate=True,
+        global_auction_encoding="zlib+base64+canonical-json-v11",
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        artifact = json.loads(
+            conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = 1"
+            ).fetchone()[0]
+        )
+        summary = artifact["summary"]
+        payload = json.loads(
+            zlib.decompress(
+                base64.b64decode(summary["candidate_evaluations_zlib_b64"])
+            )
+        )
+        payload["rejected_groups"] = []
+        payload["detailed"] = [
+            {
+                "candidate_id": "forged-mean-sell",
+                "action": "SELL",
+                "status": "REJECTED",
+                "position_id": "position-forged-mean-sell",
+                "sell_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+                "sell_exit_authority_status": "not_applicable",
+                "sell_exit_authority_reason": "non_day0_family",
+                "sell_action_authority_identity": "forged-authority",
+            }
+        ]
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        summary["candidate_evaluations_sha256"] = hashlib.sha256(encoded).hexdigest()
+        summary["candidate_evaluations_zlib_b64"] = base64.b64encode(
+            zlib.compress(encoded)
+        ).decode()
+        holding_payload = [
+            {
+                "position_id": "position-forged-mean-sell",
+                "candidate_id": "forged-mean-sell",
+                "status": "EVALUATED",
+                "sell_exit_authority_status": "not_applicable",
+                "sell_exit_authority_reason": "non_day0_family",
+                "sell_action_authority_identity": "forged-authority",
+            }
+        ]
+        holding_encoded = json.dumps(
+            holding_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        summary["held_position_expected_count"] = 1
+        summary["held_position_evaluated_count"] = 1
+        summary["held_position_excluded_count"] = 0
+        summary["holding_auction_coverage_sha256"] = hashlib.sha256(
+            holding_encoded
+        ).hexdigest()
+        summary["holding_auction_coverage_zlib_b64"] = base64.b64encode(
+            zlib.compress(holding_encoded)
+        ).decode()
+        conn.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = 1",
+            (json.dumps(artifact),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+
+    assert surface["ok"] is False
+    assert surface["global_auction_candidate_evidence"]["issue"] == (
+        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:SELL_EXPECTED_AUTHORITY"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "issue"),
+    (
+        ("schema16", "SCHEMA_VERSION_CONTRACT"),
+        ("missing_holding_blob", "ValueError"),
+    ),
+)
+def test_high_yes_edge_rejects_mixed_or_incomplete_v11_receipt(
+    tmp_path: Path,
+    mutation: str,
+    issue: str,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(
+        sd,
+        with_global_auction_candidate=True,
+        global_auction_encoding="zlib+base64+canonical-json-v11",
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        artifact = json.loads(
+            conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = 1"
+            ).fetchone()[0]
+        )
+        summary = artifact["summary"]
+        if mutation == "schema16":
+            summary["schema_version"] = 16
+        else:
+            summary.pop("holding_auction_coverage_zlib_b64")
+        conn.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = 1",
+            (json.dumps(artifact),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+
+    assert surface["ok"] is False
+    assert surface["global_auction_candidate_evidence"]["issue"] == (
+        f"GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:{issue}"
+    )
+
+
+def test_live_health_reconstructs_holding_v2_delta_and_reference() -> None:
+    from src.engine.global_batch_runtime import _keyed_object_list_delta_receipt
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE decision_log ("
+        "id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT, timestamp TEXT)"
+    )
+    base_rows = [
+        {
+            "position_id": "position-1",
+            "candidate_id": "sell-1",
+            "status": "EVALUATED",
+            "sell_exit_authority_status": "mature",
+            "sell_exit_authority_reason": "mature-v1",
+            "sell_action_authority_identity": "authority-v1",
+        }
+    ]
+    base_raw = json.dumps(
+        base_rows,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    base_sha = hashlib.sha256(base_raw).hexdigest()
+    base_summary = {
+        "receipt_hash": "receipt-base",
+        "holding_auction_coverage_encoding": (
+            "zlib+base64+canonical-json-v2"
+        ),
+        "holding_auction_coverage_sha256": base_sha,
+        "holding_auction_coverage_zlib_b64": base64.b64encode(
+            zlib.compress(base_raw)
+        ).decode(),
+    }
+    conn.execute(
+        "INSERT INTO decision_log VALUES (1, ?, ?, ?)",
+        (
+            "global_single_order_auction",
+            json.dumps({"summary": base_summary}),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    current_rows = [
+        {
+            **base_rows[0],
+            "sell_exit_authority_reason": "mature-v2",
+            "sell_action_authority_identity": "authority-v2",
+        }
+    ]
+    current_raw = json.dumps(
+        current_rows,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    current_sha = hashlib.sha256(current_raw).hexdigest()
+    delta = _keyed_object_list_delta_receipt(
+        prefix="holding_auction_coverage",
+        key_field="position_id",
+        base_rows=base_rows,
+        current_rows=current_rows,
+        expected_sha256=current_sha,
+    )
+    delta_summary = {
+        "holding_auction_coverage_encoding": (
+            "zlib+base64+canonical-json-v2"
+        ),
+        "holding_auction_coverage_sha256": current_sha,
+        "holding_auction_coverage_base_decision_log_id": 1,
+        "holding_auction_coverage_base_mode": "global_single_order_auction",
+        "holding_auction_coverage_base_receipt_hash": "receipt-base",
+        "holding_auction_coverage_base_sha256": base_sha,
+        **delta,
+    }
+    assert live_health._current_global_auction_holding_payload(
+        conn,
+        delta_summary,
+    ) == current_rows
+
+    field = "holding_auction_coverage_zlib_b64"
+    reference_summary = {
+        "holding_auction_coverage_encoding": (
+            "zlib+base64+canonical-json-v2"
+        ),
+        "holding_auction_coverage_sha256": base_sha,
+        "payload_reference_fields": [field],
+        "payload_reference_components": {
+            field: {
+                "decision_log_id": 1,
+                "mode": "global_single_order_auction",
+                "receipt_hash": "receipt-base",
+                "sha256": base_sha,
+            }
+        },
+    }
+    assert live_health._current_global_auction_holding_payload(
+        conn,
+        reference_summary,
+    ) == base_rows
+    conn.close()
 
 
 def test_high_yes_edge_reconstructs_latest_global_auction_candidate_delta(

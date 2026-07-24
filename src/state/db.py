@@ -295,6 +295,38 @@ def _connect(
         raise
 
 
+def connect_existing_trade_db_without_journal_bootstrap(
+    db_path: Path,
+) -> sqlite3.Connection:
+    """Open an existing trade DB for one latency-critical canonical write.
+
+    The normal factory ensures WAL mode and is the default for every runtime
+    owner.  A signed-order identity is persisted after its command transaction
+    has committed but immediately before venue POST.  Repeating
+    ``PRAGMA journal_mode=WAL`` at that boundary can itself contend for the WAL
+    writer lock before the caller's write retry is active.  This narrow helper
+    opens only an existing file, installs the canonical busy handler and
+    connection functions, and deliberately leaves journal mode unchanged.
+    """
+
+    path = db_path.resolve(strict=True)
+    timeout_ms = _db_busy_timeout_ms()
+    conn = sqlite3.connect(
+        path.as_uri() + "?mode=rw",
+        uri=True,
+        timeout=timeout_ms / 1000.0,
+    )
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        _install_connection_functions(conn)
+        _apply_busy_timeout(conn, busy_timeout_ms=timeout_ms)
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
 def _connect_read_only(db_path: Path) -> sqlite3.Connection:
     """Low-level read-only SQLite connection with bounded lock wait.
 
@@ -9807,8 +9839,8 @@ def _coerce_optional_float(value) -> float | None:
 def _build_day0_context_json(candidate, decision) -> str | None:
     """Build the per-edge day0 observation-lock classification payload.
 
-    OBS-AUTHORITY-FOUNDATION FIX-2 (2026-05-23). For settlement-day HIGH buy_yes
-    edges, persists day0_truth_classification + observed high/low + candidate bin
+    OBS-AUTHORITY-FOUNDATION FIX-2 (2026-05-23). For settlement-day selected
+    sides, persists day0_truth_classification + observed high/low + candidate bin
     bounds + settlement-capture eligibility so an operator can tell whether a
     day0 edge is observation-locked, forecast-upside, or wrong. Returns None for
     rows where no day0 classification applies (non-HIGH, no edge, no observation,
@@ -9836,9 +9868,9 @@ def _build_day0_context_json(candidate, decision) -> str | None:
         obs_source = getattr(observation, "source", None)
         hours_remaining = _coerce_optional_float(getattr(candidate, "hours_to_resolution", None))
 
-        # settlement_capture is reserved for facts already locked by canonical
-        # observation. Eligible only when observation-locked AND buy_yes.
-        eligible = classification == "observation_locked" and direction == "buy_yes"
+        # The classifier already evaluates the selected YES/NO payoff. Either
+        # direction is settlement capture only when that selected payoff is locked.
+        eligible = classification == "observation_locked"
         ineligible_reason = None
         if not eligible:
             ineligible_reason = f"classification={classification};direction={direction}"

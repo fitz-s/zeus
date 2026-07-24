@@ -34,6 +34,7 @@ from src.engine.global_single_order_auction import (
     global_single_order_actuation_identity,
     select_prepared_global_auction,
 )
+from src.engine.qkernel_spine_bridge import sell_action_authority_identity
 from src.events.candidate_binding import weather_family_id
 from src.events.opportunity_event import OpportunityEvent, make_opportunity_event
 from src.events.reactor import EventSubmissionReceipt, GlobalBatchSubmitResult
@@ -99,6 +100,33 @@ _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS = frozenset(
         "holding_auction_coverage_zlib_b64",
     }
 )
+
+
+def _rebind_prepared_probability(prepared: object, probability: object) -> object:
+    """Keep probability-dependent action authority coherent at the book cut."""
+
+    return replace(
+        prepared,
+        probability_witness=probability,
+        sell_action_authority_identity=sell_action_authority_identity(
+            family_key=str(probability.family_key),
+            probability_witness_identity=str(probability.witness_identity),
+            status=str(
+                getattr(
+                    prepared,
+                    "day0_exit_authority_status",
+                    "not_applicable",
+                )
+            ),
+            reason=str(
+                getattr(
+                    prepared,
+                    "day0_exit_authority_reason",
+                    "non_day0_family",
+                )
+            ),
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -230,6 +258,12 @@ def _holding_coverage_key(
     )
 
 
+def _probability_content_identity(witness: object) -> str:
+    return str(
+        getattr(witness, "probability_content_identity", "") or ""
+    ).strip()
+
+
 def _holding_coverage_partition_complete(
     coverage: Sequence[GlobalHoldingAuctionCoverage],
     *,
@@ -256,14 +290,20 @@ def _holding_coverage_partition_complete(
     }
     evaluated_q_current = all(
         row.status != "EVALUATED"
-        or row.probability_witness_identity
-        == str(
-            getattr(
-                probability_witnesses.get(row.family_key),
-                "witness_identity",
-                "",
+        or (
+            row.probability_witness_identity
+            == str(
+                getattr(
+                    probability_witnesses.get(row.family_key),
+                    "witness_identity",
+                    "",
+                )
+                or ""
             )
-            or ""
+            and row.probability_content_identity
+            == _probability_content_identity(
+                probability_witnesses.get(row.family_key)
+            )
         )
         for row in rows
     )
@@ -322,6 +362,7 @@ def _complete_holding_coverage(
                 held_shares=obligation.held_shares,
                 ledger_snapshot_id=ledger_snapshot_id,
                 probability_witness_identity=None,
+                probability_content_identity=None,
                 wealth_economic_identity=wealth_economic_identity,
                 selection_epoch_identity=selection_epoch_identity,
                 book_epoch_identity=book_epoch_identity,
@@ -433,7 +474,7 @@ def _invalidate_global_holding_coverage_for_wealth(
 def current_global_holding_coverage(
     *,
     position_id: str,
-    probability_witness_identity: str,
+    probability_content_identity: str,
     checked_at_utc: datetime,
     family_key: str = "",
     bin_label: str = "",
@@ -447,7 +488,7 @@ def current_global_holding_coverage(
         [GlobalHoldingAuctionCoverage], str | None
     ]
     | None = None,
-    current_probability_witness_identity_resolver: Callable[
+    current_probability_content_identity_resolver: Callable[
         [GlobalHoldingAuctionCoverage], str | None
     ]
     | None = None,
@@ -466,7 +507,7 @@ def current_global_holding_coverage(
             str(value or "").strip()
             for value in (
                 position_id,
-                probability_witness_identity,
+                probability_content_identity,
                 family_key,
                 bin_label,
                 condition_id,
@@ -478,7 +519,7 @@ def current_global_holding_coverage(
         )
         or side not in {"YES", "NO"}
         or current_sell_book_witness_resolver is None
-        or current_probability_witness_identity_resolver is None
+        or current_probability_content_identity_resolver is None
         or current_holding_witness_resolver is None
     ):
         return None
@@ -492,8 +533,8 @@ def current_global_holding_coverage(
     checked = checked_at_utc.astimezone(UTC)
     if (
         row.status != "EVALUATED"
-        or row.probability_witness_identity
-        != str(probability_witness_identity or "")
+        or row.probability_content_identity
+        != str(probability_content_identity or "")
         or row.family_key != family_key
         or str(row.bin_label or "") != bin_label
         or row.condition_id != condition_id
@@ -510,8 +551,8 @@ def current_global_holding_coverage(
         return None
     try:
         current_sell_book_witness_identity = current_sell_book_witness_resolver(row)
-        current_probability_witness_identity = (
-            current_probability_witness_identity_resolver(row)
+        current_probability_content_identity = (
+            current_probability_content_identity_resolver(row)
         )
         current_holding_witness = current_holding_witness_resolver(row)
         final_checked_at = (
@@ -524,8 +565,8 @@ def current_global_holding_coverage(
     if (
         final_checked_at.tzinfo is None
         or current_sell_book_witness_identity != row.sell_book_witness_identity
-        or current_probability_witness_identity
-        != row.probability_witness_identity
+        or current_probability_content_identity
+        != row.probability_content_identity
         or current_holding_witness is None
         or current_holding_witness.ledger_snapshot_id != row.ledger_snapshot_id
         or current_holding_witness.wealth_economic_identity
@@ -1396,6 +1437,9 @@ def _store_global_auction_receipt(
             Decimal(row.held_shares).quantize(
                 Decimal("0.01"), rounding=ROUND_FLOOR
             ),
+            row.sell_exit_authority_status,
+            row.sell_exit_authority_reason,
+            row.sell_action_authority_identity,
         )
         for row in holding_coverage
         if row.status == "EVALUATED"
@@ -1410,6 +1454,9 @@ def _store_global_auction_receipt(
             str(evaluation.side),
             str(evaluation.token_id),
             Decimal(evaluation.held_shares),
+            str(evaluation.sell_exit_authority_status),
+            str(evaluation.sell_exit_authority_reason),
+            str(evaluation.sell_action_authority_identity),
         )
         for evaluation in evaluations
         if evaluation.action == "SELL"
@@ -1663,7 +1710,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 16,
+        "schema_version": 17,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -1756,7 +1803,7 @@ def _store_global_auction_receipt(
             row.status == "EXCLUDED" for row in holding_coverage
         ),
         "holding_auction_coverage_encoding": (
-            "zlib+base64+canonical-json-v1"
+            "zlib+base64+canonical-json-v2"
         ),
         "holding_auction_coverage_sha256": hashlib.sha256(
             holding_coverage_json
@@ -1770,7 +1817,7 @@ def _store_global_auction_receipt(
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v10",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v11",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),
@@ -3449,11 +3496,9 @@ def process_current_global_batch(
                 current_time(),
             )
             prepared_by_event = {
-                event_id: replace(
+                event_id: _rebind_prepared_probability(
                     prepared,
-                    probability_witness=probabilities[
-                        prepared.probability_witness.family_key
-                    ],
+                    probabilities[prepared.probability_witness.family_key],
                 )
                 for event_id, prepared in prepared_by_event.items()
             }

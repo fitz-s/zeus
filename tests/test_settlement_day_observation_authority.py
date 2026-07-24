@@ -1,8 +1,8 @@
 # Created: 2026-05-23
-# Last reused/audited: 2026-05-23
+# Last reused/audited: 2026-07-23
 # Authority basis: OBS-AUTHORITY-FOUNDATION (auditability foundation for the
 #                  live-stall day0_nowcast_entry root cause). FIX-1 + FIX-2.
-# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
+# Lifecycle: created=2026-05-23; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: Relationship tests for the settlement-day observation authority
 #          foundation (FIX-1: authority row persisted at decision time;
 #          FIX-2: day0_context_json stamped on opportunity_fact).
@@ -369,6 +369,69 @@ def test_day0_truth_classification_observation_locked_is_eligible(trade_conn):
     row = trade_conn.execute(
         "SELECT day0_context_json FROM opportunity_fact WHERE decision_id = ?",
         ("dec-locked",),
+    ).fetchone()
+    ctx = json.loads(row[0])
+    assert ctx["day0_truth_classification"] == "observation_locked"
+    assert ctx["settlement_capture_eligible"] is True
+
+
+def test_day0_locked_buy_no_is_settlement_capture_eligible(trade_conn):
+    observation = SimpleNamespace(
+        high_so_far=30.0,
+        low_so_far=20.0,
+        current_temp=29.0,
+        source="wu_icao",
+        observation_time="2026-05-23T12:00:00Z",
+    )
+    edge = SimpleNamespace(
+        direction="buy_no",
+        bin=SimpleNamespace(
+            low=24.0,
+            high=25.0,
+            is_open_high=False,
+            is_open_low=False,
+            is_shoulder=False,
+            label="24-25F",
+        ),
+        p_model=0.9,
+        p_market=0.7,
+        edge=0.2,
+        ci_lower=0.8,
+        ci_upper=0.95,
+    )
+    candidate = SimpleNamespace(
+        city=_tokyo_city(),
+        target_date="2026-05-23",
+        temperature_metric="high",
+        observation=observation,
+        discovery_mode="day0_capture",
+        hours_to_resolution=4.0,
+        name="Tokyo",
+    )
+    decision = SimpleNamespace(
+        decision_id="dec-locked-no",
+        edge=edge,
+        strategy_key="settlement_capture",
+        selected_method="",
+        entry_method="",
+        decision_snapshot_id="snap-locked-no",
+        availability_status="ok",
+        observation_authority_id="auth-locked-no",
+        alpha=0.0,
+    )
+
+    dbmod.log_opportunity_fact(
+        trade_conn,
+        candidate=candidate,
+        decision=decision,
+        should_trade=True,
+        rejection_stage="",
+        rejection_reasons=None,
+        recorded_at="2026-05-23T09:00:00Z",
+    )
+    row = trade_conn.execute(
+        "SELECT day0_context_json FROM opportunity_fact WHERE decision_id = ?",
+        ("dec-locked-no",),
     ).fetchone()
     ctx = json.loads(row[0])
     assert ctx["day0_truth_classification"] == "observation_locked"

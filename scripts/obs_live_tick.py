@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-17
-# Lifecycle: created=2026-05-17; last_reviewed=2026-05-20; last_reused=2026-05-20
-# Last reused or audited: 2026-05-20
+# Lifecycle: created=2026-05-17; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Last reused or audited: 2026-07-23
 # Purpose: Live rolling-window writer for observation_instants WU/OGIMET hourly rows.
 # Reuse: Run when ingest_main obs_v2 live-tick, hourly payload identity, or obs_v2 writer relationships change.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
@@ -66,6 +66,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.config import STATE_DIR, cities_by_name  # noqa: E402
+from src.contracts.availability_time import proof_of_possession_available_at  # noqa: E402
 from src.data.observation_instants_writer import (  # noqa: E402
     InvalidObsV2RowError,
     ObsV2Row,
@@ -181,6 +182,17 @@ def _source_url_for_obs(obs: HourlyObservation, *, source_tag: str) -> str:
     return f"source:{source_tag}:{obs.station_id}:{obs.target_date}"
 
 
+def _latest_raw_ts(obs: HourlyObservation) -> str:
+    """Return the newest source report time, never the hour-bucket identity."""
+
+    if obs.latest_raw_ts:
+        return obs.latest_raw_ts
+    return max(
+        (obs.hour_max_raw_ts, obs.hour_min_raw_ts),
+        key=lambda value: datetime.fromisoformat(value.replace("Z", "+00:00")),
+    )
+
+
 def _hourly_obs_to_v2_row(
     obs: HourlyObservation,
     *,
@@ -193,11 +205,13 @@ def _hourly_obs_to_v2_row(
     for track-aware queries. Do NOT set to hour_max_temp.
     """
     source_tag = expected_source_for_city(obs.city)
+    latest_raw_ts = _latest_raw_ts(obs)
     provenance = {
         "tier": tier_name,
         "station_id": obs.station_id,
         "hour_max_raw_ts": obs.hour_max_raw_ts,
         "hour_min_raw_ts": obs.hour_min_raw_ts,
+        "latest_raw_ts": latest_raw_ts,
         "raw_obs_count": obs.observation_count,
         "aggregation": "utc_hour_bucket_extremum",
         "source_url": _source_url_for_obs(obs, source_tag=source_tag),
@@ -209,6 +223,7 @@ def _hourly_obs_to_v2_row(
             "utc_timestamp": obs.utc_timestamp,
             "hour_max_raw_ts": obs.hour_max_raw_ts,
             "hour_min_raw_ts": obs.hour_min_raw_ts,
+            "latest_raw_ts": latest_raw_ts,
             "hour_max_temp": obs.hour_max_temp,
             "hour_min_temp": obs.hour_min_temp,
             "temp_unit": obs.temp_unit,
@@ -345,7 +360,6 @@ def _tick_wu_city(
 ) -> TickResult:
     city = cities_by_name[city_name]
     result = TickResult(city=city_name, tier="WU_ICAO")
-    imported_at = datetime.now(timezone.utc).isoformat()
 
     fetch = fetch_wu_hourly(
         icao=city.wu_station,
@@ -359,6 +373,7 @@ def _tick_wu_city(
     if fetch.failed:
         result.failure_reason = fetch.failure_reason
         return result
+    imported_at = proof_of_possession_available_at(datetime.now(timezone.utc))
 
     rows: list[ObsV2Row] = []
     # day0 defect-ledger (2026-07-16): one print per hour-bucket extremum —
@@ -400,7 +415,6 @@ def _tick_ogimet_city(
 ) -> TickResult:
     city = cities_by_name[city_name]
     result = TickResult(city=city_name, tier="OGIMET_METAR")
-    imported_at = datetime.now(timezone.utc).isoformat()
     source_tag = expected_source_for_city(city_name)
 
     # Ogimet needs the ICAO station ID; use the city's wu_station field
@@ -418,6 +432,7 @@ def _tick_ogimet_city(
     if fetch.failed:
         result.failure_reason = fetch.failure_reason
         return result
+    imported_at = proof_of_possession_available_at(datetime.now(timezone.utc))
 
     rows: list[ObsV2Row] = []
     for obs in fetch.observations:

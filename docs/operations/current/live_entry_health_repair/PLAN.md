@@ -87,6 +87,176 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Re-sample loaded SHA/PID, open positions, q identity, posterior/FSR identity, reactor completion cadence, and venue command/event counts.
 - Actual order proof requires separate `venue_commands`, submit event, venue ACK/order ID, fill/trade fact, and capital change lines. A candidate or health-clear signal is not an order.
 
+## Slice B69 -- Stable probability-content handoff for held statistical SELL
+
+- Current proof: Seoul position `e582b997-daf` reached held-side q `0` with a
+  current executable bid of `0.07` at `2026-07-24T05:36:12Z`. The global
+  auction had evaluated the position, but its probability witness identity
+  differed from the monitor's immediately rebuilt identity, so the monitor
+  suppressed the exit as
+  `GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE`.
+- Root cause: the full probability witness identity intentionally binds
+  `captured_at_utc` and the time-bound authority certificate. It is therefore
+  a decision-receipt identity, not a stable probability-content identity.
+  Requiring two independently captured current receipts to have the same full
+  identity makes a valid auction-to-monitor handoff impossible even when the
+  full q simplex, samples, source truth, topology, and posterior are unchanged.
+- Minimal repair: keep the full witness identity unchanged for immutable audit
+  provenance. Derive an explicit `probability_content_identity` from the
+  ordered bindings, resolution/topology, posterior/source truth, q version,
+  full point vector, full sample matrix, and probability-band basis/alpha.
+  Exclude only capture time and the time-bound authority certificate. Carry
+  that identity on held coverage and the fresh monitor receipt for the
+  cross-capture handoff.
+- Files authorized: `src/engine/global_single_order_auction.py`,
+  `src/engine/global_batch_runtime.py`, `src/engine/cycle_runtime.py`,
+  `src/engine/monitor_refresh.py`, `src/solve/solver.py`, and
+  `tests/test_live_safety_invariants.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`.
+- Cumulative gates remain mandatory: the monitor must freshly rebuild the same
+  probability content; the published coverage must remain inside its book
+  deadline; current exact SELL-book content, ledger snapshot, wealth economic
+  identity, and held shares must all still match. The full auction witness
+  remains recorded and is never replaced by the content identity.
+- Forbidden: compare only scalar held q, ignore sample/source/topology changes,
+  extend a stale book deadline, reuse stale wealth, permit local statistical
+  SELL actuation, relax the live `[0.05, 0.95]` band, or turn a monitor proposal
+  into a global winner.
+- Acceptance: same probability content captured at different instants may
+  delegate to the current global auction; changed q content, book, wealth,
+  shares, generation, or deadline fails closed; RED and hard-fact exits retain
+  their existing direct paths; no new local EXIT command is created by the
+  handoff.
+
+## Slice B70 -- Preserve token-typed holdings and sell dominated live legs
+
+- Current proof: Guangzhou position `02a8db2c-c2e` first filled `5.2` NO
+  shares at `0.34`. A later certified YES BUY for `6.5` shares at `0.88`
+  reused that NO position id because the executor's same-token query matched
+  either token column of the binary market. The projection now says
+  `direction=buy_no`, `token_id=YES`, `shares=11.7`, which is not one
+  executable holding. Separately, held NO q became `0` while its executable
+  bid remained `0.08`; CI separation nevertheless returned
+  `CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD`, and the same static threshold
+  stops proposing an exit as the recoverable bid falls toward the venue floor.
+- First-principles invariant: a position is one held outcome token, not a
+  condition-level netting bucket. Sibling outcome BUYs are admissible only as
+  distinct token-typed holdings and are compared together through the exact
+  portfolio payoff endowment. Once current CI has separated against a held
+  leg, immediate executable net sale value and terminal hold value are the
+  capital alternatives; a static edge threshold cannot veto a strictly
+  dominant sale merely because the bid has already fallen.
+- Minimal repair: resolve increment identity from the position's selected
+  held token (`direction=buy_yes -> token_id`, `direction=buy_no ->
+  no_token_id`) and require exact equality with the candidate token before a
+  command may reuse a position id. In the separated-reversal lane, evaluate
+  current-cut sell-versus-hold value before the legacy edge threshold; retain
+  CI separation, probability/book freshness, consecutive Day0 confirmation
+  where applicable, global-auction ownership, maturity authority, exact
+  inventory, and the inclusive live `[0.05, 0.95]` venue band.
+- Existing mixed holdings: repair only through authenticated command/trade
+  facts and append-first canonical events with deterministic identities.
+  Never rewrite or split a row manually, infer ownership from a projection,
+  or issue an operator order. This part may land separately if its
+  truth-path proof is broader than the preventive hot-fix.
+- Files authorized for the preventive hot-fix:
+  `src/execution/executor.py`, `src/engine/evaluator.py`,
+  `src/state/portfolio.py`,
+  `tests/test_dedup_gate_token.py`, `tests/test_live_safety_invariants.py`,
+  this packet, and required existing registry rows only.
+- Forbidden: condition-level one-position veto, local statistical SELL
+  bypass, stop-loss price heuristics, stale q/book acceptance, lowering the
+  legal venue floor, selling more than exact token inventory, changing
+  lifecycle strings, synthetic fills, manual SQL, canonical DB copies, or
+  forced venue actions.
+- Acceptance: an opposite-token sibling BUY receives a distinct position id;
+  a genuine same-token certified increment still reuses its exact reconciled
+  position; ambiguous/malformed direction-token rows fail closed. For a
+  separated current held distribution whose sale value strictly exceeds hold
+  value, the evaluator proposes a statistical exit even when the old edge
+  threshold would hold; equal/inferior sale value still holds. Downstream
+  global authority and executable-price gates remain unchanged. Focused
+  tests, planning lock, compilation, registry checks, and `git diff --check`
+  must pass before hot-fix cherry-pick and exact-SHA live deployment.
+- Pre-deploy verification: token-dedup plus live-safety coverage passes
+  `329 passed, 1 xpassed`; compilation, planning lock, source-rationale delta,
+  freshness/map checks, and `git diff --check` pass. A wider evaluator/hold
+  batch passes `80` tests and reproduces three failures identically on the
+  unmodified live tree (two retired `mx2t6/mn2t6` data-version expectations
+  and one missing isolated forecast-DB fixture). Independent review found and
+  closed malformed NULL/missing held-token fail-open cases. A separate
+  authority review confirmed that zero-probability direct authority and a
+  mature global statistical proposal are distinct: this slice creates no
+  local SELL actuator and preserves full predictive samples, maturity,
+  portfolio, book, inventory, and venue-band gates.
+
+## Slice B70.1 -- Keep Chain-held tokens inside final entry dedup
+
+- Review counterexample: a locally terminal position with positive current
+  chain shares is blocked by `has_same_token_open_db`, but the live evaluator
+  and executor final boundary previously filtered only by local phase. The
+  same held token could therefore reach a fresh ENTRY under a new position id.
+- First-principles invariant: Chain outranks lifecycle projection. A positive
+  token balance in a current-money-risk chain state remains held exposure even
+  when the local phase is terminal; no candidate or executor increment may
+  treat it as absent.
+- Minimal repair: give evaluator and executor the same positive-chain
+  precedence already used by the canonical state helper, including the
+  compatibility behavior when the legacy fixture lacks `chain_state`.
+  Preserve terminal no-fill clearing and valid opposite-token sibling entry.
+- Acceptance: `voided + chain_shares>0 + chain_state=synced` blocks at the
+  state helper, live Layer 7, and executor final boundary; an economically
+  closed stale/null-chain projection retains its existing behavior. Focused
+  tests, compile, planning lock, and diff checks pass before immediate
+  follow-up deployment.
+- Verification: the canonical-shape positive-chain counterexample is blocked
+  at all three boundaries; valid opposite-token sibling admission and
+  same-token certified increments remain green. The combined focused suite
+  still passes `329 passed, 1 xpassed`; compilation and `git diff --check`
+  pass.
+
+## Slice B70.2 -- Do not clear terminal-no-fill over current Chain exposure
+
+- Review counterexample: `pending_entry` with zero local shares/cost, a
+  terminal no-fill command, and `chain_shares>0` in a current-money-risk
+  `chain_state` is selected by both duplicate queries but then skipped by
+  their terminal-no-fill exception. This lets authoritative Chain exposure
+  lose to a stale local command conclusion.
+- First-principles invariant: terminal-no-fill means no exposure only while
+  every stronger venue fact agrees. Positive current Chain shares contradict
+  that conclusion and therefore invalidate the re-entry exception.
+- Minimal repair: carry chain identity into the evaluator and executor rows
+  and deny terminal-no-fill clearing when positive shares are in
+  `CURRENT_MONEY_RISK_CHAIN_STATES`. Preserve the existing no-chain cancelled
+  entry redecision path.
+- Acceptance: `pending_entry + CANCELLED/no-fill + chain_shares=12.5 +
+  chain_state=synced` remains blocked by the canonical state helper, evaluator
+  Layer 7, and executor final boundary; the same command facts with zero Chain
+  exposure remain admissible.
+- Verification: the exact counterexample and the preserved no-Chain exception
+  pass together; the combined token-dedup/live-safety suite passes
+  `330 passed, 1 xpassed`; compilation, planning lock, source-rationale delta,
+  and `git diff --check` pass. The repository-wide dynamic-SQL inventory still
+  reports its pre-existing unbaselined drift; this slice changes parameters
+  inside two already-counted dynamic queries and adds no dynamic-SQL site.
+
+## Slice B70.3 -- Fail closed on unresolved positive Chain exposure
+
+- Independent-review counterexample: B70.2 blocked an explicit current-risk
+  `chain_state`, but a positive `chain_shares` row with NULL/unknown state or
+  a legacy schema without the state column still reached terminal-no-fill
+  clearing. Missing authority was incorrectly treated as proof of no exposure.
+- First-principles invariant: positive Chain shares may be dismissed only by
+  an explicit `NO_CURRENT_MONEY_RISK_CHAIN_STATES` fact. NULL, unknown, and
+  absent state are unresolved contradictions and must block duplicate entry.
+- Acceptance: explicit current state, NULL state, and absent state-column
+  variants all remain blocked across the canonical helper, evaluator Layer 7,
+  and executor boundary; explicit no-current-risk or zero-Chain facts preserve
+  the existing efficient redecision lane.
+- Verification: five exact positive/negative variants pass together; the
+  combined token-dedup/live-safety suite passes `333 passed, 1 xpassed`;
+  compilation and `git diff --check` pass.
+
 ## Slice B4 -- Bounded live working-set reads
 
 - Current runtime proof: the reactor run started at `18:46:50Z`, completed `pending_prune` at `18:46:57Z`, and then emitted no `forecast_snapshot_build` completion for more than ten minutes. That stage spans `_edli_pending_entity_keys` plus the forecast builder, so the log anchors alone do not isolate one call. The pending-key query had no SQLite progress deadline and its plan allowed an unbounded status scan, per-row event PK lookup, and temporary DISTINCT tree. `sqlite_stat1` was stale (2,520,044 estimated rows); a later exact read found 10,801,165 processing rows but only 1,018 pending and 12 processing. Hot read-only timing was 179ms for the old query and 94ms for the bounded query; this is a structural I/O amplifier, not proven as the sole ten-minute root. The separately budgeted forecast builder was 52ms hot after recovery.
@@ -712,3 +882,183 @@ Restore truthful live entry admission after the global auction reached a real wi
 - First-principles invariant: the governor owns HTTP-attempt admission, deduplication, and retry circuits; it does not own the truth of a response already returned by the venue. A transport/429 fact from another request must remain in the persistent circuit, but it cannot retroactively erase an independently owned exact request's 2xx payload. A same-identity higher-priority replacement or an expired lease still fences the older response.
 - Minimal repair: when success bookkeeping loses only generation authority, release the still-owned exact lease neutrally and return the 2xx response for normal downstream identity/completeness/freshness validation. If the exact lease itself is no longer owned, preserve `POLYMARKET_REQUEST_LEASE_LOST`. Do not cache partial books, bypass request admission, clear a circuit/embargo, extend freshness, alter the auction objective, force an order, or touch Wellington.
 - Acceptance: an owned request whose sibling changes endpoint generation returns its received 2xx while preserving the failure circuit; an exact same-identity preemption remains fenced; governor coverage, W3/current-book coverage, live-safety, compilation, planning-lock, and `git diff --check` pass before standard exact-SHA deployment.
+
+## Slice B62 -- Spend the available monitor cycle on the full held book
+
+- Live proof: current exit-monitor receipts repeatedly carried 38-39 candidates but stopped after 14-19 successful monitors in 14-19 seconds, deferring 20-25 positions as `positive_budget_progress_limit` despite a 75-second budget. The Miami loss path therefore waited multiple cycles for fresh probability and quote evidence even while the monitor lane was idle.
+- First-principles invariant: every held position is re-decided from a fresh `ExitContext` every normal monitor cycle. Urgency and rotating reservations determine ordering and degraded-deadline survival; successful work is not a reason to stop while budget remains. A real monotonic deadline and urgent-wake preemption remain the only cycle truncation boundaries.
+- Minimal repair: remove the positive-progress stopping condition while retaining the 75-second monotonic deadline, urgent ordering, batch book prefetch, durable-progress rotation, and one-third reservations for deadline-degraded cycles. Do not change probability, exit thresholds, sizing, lifecycle, price-band law, or venue submission.
+- Acceptance: a positive-budget cycle with time remaining scans the complete held book, including the unreserved tail; an elapsed deadline still defers safely after persisted progress; zero-budget reservation and urgent-preemption behavior remain unchanged. Complete live-safety coverage, compilation, planning-lock, and `git diff --check` pass before exact-SHA deployment and live receipt verification.
+- Verification: focused full-sweep/deadline/reservation coverage passes `7/7`; the complete live-safety file passes `285/285`; compilation, freshness, map-maintenance, planning-lock, and `git diff --check` pass. Ruff reports the same 17 pre-existing findings as current live and no new finding from this slice.
+
+## Slice B63 -- Execute reserved monitor thirds after deadline expiry
+
+- Independent refutation of B62: with nine held positions and a positive budget that expired before the first refresh, the scheduler selected three coverage reservations but stopped after the first successful monitor. Selection-time attempt bookkeeping then rotated reservations that had never produced a `MONITOR_REFRESHED` event, so sustained slow I/O could still starve the book.
+- First-principles invariant: the monotonic deadline ends unreserved work; it does not revoke the bounded tranche already reserved to guarantee degraded coverage. Every reserved position receives one finite attempt, then the unreserved tail defers. Urgent-wake preemption remains absolute.
+- Minimal repair: after deadline expiry, continue only for `budget_guaranteed_position_ids`; remove the successful-first-position exception. Add a three-cycle antibody that advances the monotonic clock before work and proves every selected third receives an actual refresh attempt; the existing bounded urgent/local/network reservations may add progress but never admit the unreserved tail.
+- Acceptance: a nine-position book under sustained deadline expiry actually executes every selected three-position tranche and those tranches cover all nine over three cycles; normal-budget full sweep, zero-budget reservations, urgent preemption, batch prefetch, and finite iteration remain unchanged. Full live-safety, compilation, planning-lock, freshness, map-maintenance, and diff checks pass before follow-up exact-SHA deployment.
+- Verification: the adversarial expired-before-first-refresh case executes every selected third and covers all nine positions over three cycles; the complete live-safety file passes `286/286`. Compilation, planning-lock, freshness, map-maintenance, and `git diff --check` pass; Ruff remains identical to live at 17 pre-existing findings.
+
+## Slice B64 -- Admit the official HKO LOW forecast and reseed immediately
+
+- Live proof: `raw_model_forecasts` contains 1,071 `hko_fnd/high` rows through the current HKO cycle and zero `hko_fnd/low` rows, although the same HKO payload and parser expose `forecastMintemp`. `config/station_forecast_sources.json` and dispatcher kwargs select only `metric=high`. The availability poll then returns on an unchanged Open-Meteo clock without reseeding after successful station writes.
+- First-principles invariant: a settlement-aligned provider payload is one causal issue containing distinct HIGH and LOW facts; source admission must preserve both typed metrics without a second network fetch. Any newly persisted source fact must invalidate and rematerialize affected probability authority independently of unrelated providers' clocks.
+- Minimal repair: configure HKO for both metrics; fetch once, parse both typed fields, and persist the union through the existing idempotent writer. After any positive station write count, run the existing fusion-upgrade reseed before the unchanged-Open-Meteo early return. Preserve CWA HIGH-only behavior and per-source fail-soft isolation.
+- Files authorized: `src/data/station_forecast_adapter.py`, `src/data/replacement_fusion_upgrade_trigger.py`, `src/ingest_main.py`, `src/state/schema/v2_schema.py` comment contract, `config/station_forecast_sources.json`, `tests/test_station_forecast_live_ingest_wiring.py`, `tests/data/test_fusion_upgrade_trigger.py`, `architecture/db_table_ownership.yaml` ownership note, this packet, and its scope sidecar.
+- Forbidden: synthesize the missing historical Jul24 LOW row, mutate a canonical DB manually, weaken freshness/current-shape gates, treat current observation as final settlement, change YES/NO side law, change exit thresholds or the absolute venue price band, force an order, or perform a second HKO request per metric.
+- Acceptance: one HKO fetch persists HIGH and LOW rows with distinct typed identities; invalid/duplicate metrics fail closed; CWA remains HIGH-only; every completed due station poll runs one idempotent fusion-upgrade reconciliation even when Open-Meteo is current, narrowing to changed providers when rows were committed and scanning globally when canonical rows already exist; a not-due poll does not reseed; focused tests, compilation, planning-lock, and `git diff --check` pass before exact-SHA deployment. Post-deploy canonical proof requires new `hko_fnd/low` rows, a rematerialized Hong Kong LOW posterior whose provenance consumes the official source, and fresh held-position monitor receipts.
+- Verification: station ingest/dispatcher/reseed and current-value serving coverage passes `30/30`; the four source-clock station-admission/materializer antibodies pass `4/4`; compilation, test freshness, map maintenance, planning evidence, JSON validation, and `git diff --check` pass. Independent review found no P0/P1 and its P2 value-identity gap was closed by asserting distinct HKO HIGH `33/34` and LOW `28/27` values from one payload. Full legacy materializer coverage remains baseline-drifted on current live (10 Paris/frozen-scheme fixture failures); the focused station authority tests are green on both semantics and current code.
+- Post-deploy corrective finding: live wrote 9 HKO LOW rows and invoked the upgrade trigger, but Hong Kong Jul25 LOW remained on its pre-station posterior. The trigger intersected `changed_sources` with the old posterior's configured sources, making a newly admitted station source unobservable even though the shared current-value reader already returned it. Corrective acceptance: both commit-scoped and periodic comparisons treat capturable `cwa_*`/`hko_*` sources as relevant; the first exact raw row signals one input revision enqueue, an unchanged pending revision is durably coalesced, a newer raw row may enqueue once, and a posterior that consumed the exact row returns to no-op.
+- Corrective verification: focused trigger/station/current-serving coverage passes `46/46`, including the mixed positive/zero provider report; the real enqueue-path antibody proves simultaneous family growth plus HKO revision emits one seed and two durable markers, an identical retry emits zero seeds, and a new HKO raw id emits one seed while retaining the family marker. Compilation, Ruff, planning/freshness/map checks, YAML parsing, and `git diff --check` pass. Independent re-review found zero P0/P1/P2 and judged the behavior deploy-safe; no Python LSP/type checker is installed in this environment, so `compileall` plus Ruff are the disclosed static substitutes.
+- Live mixed-report finding: the first corrective restart returned `cwa_township=6, hko_fnd=0`; narrowing reconciliation only to positive writers seeded Taipei and still omitted Hong Kong. A due poll proves each reported provider completed, not only the ones that inserted a new row. Final acceptance therefore passes every reported provider key (including zero-row HKO) to the exact-source comparison; only a not-due `None` suppresses reconciliation.
+
+## Slice B65 -- Use current-evidence bounds in held-position redecision
+
+- Live proof: Singapore Jul24 HIGH 32 NO consumed WU 32C only at `05:04:07Z`, 6m25.790s after the canonical WU write. The overlapping full-book monitor ran `04:56:10Z -> 05:02:31Z` for 381.535s and could yield to the urgent Day0 wake only after its current position refresh. Non-Day0 held refresh still recomputes a legacy bootstrap CI even though every current live held family has canonical `forecast_posteriors.q_lcb_json/q_ucb_json` coverage.
+- First-principles invariant: the source-clock replacement posterior and its current-evidence q bounds are one probability authority. Held redecision must consume those persisted bounds in native held-side space; a diagnostics-era bootstrap cannot replace them or occupy the single monitor lane while a newer settlement fact waits.
+- Minimal repair: extend `ReplacementBelief` with the exact matched YES and held-side lower/upper bounds, apply the same observed-extreme transport to point and bounds, and let `refresh_position` derive its edge interval directly from those bounds. Missing, malformed, or incoherent bounds make the replacement belief unavailable; the existing fail-closed reseed/read-through path remains the fallback.
+- Files authorized: `src/engine/position_belief.py`, `src/engine/monitor_refresh.py`, `tests/engine/test_position_belief_authority.py`, `tests/engine/test_belief_observed_floor.py`, `tests/engine/test_monitor_held_belief_readthrough.py`, `tests/test_monitor_refresh_nowcast_wiring.py`, and this packet.
+- Forbidden: alter the point q, fabricate bounds, reuse stale entry CI as current replacement authority, weaken probability/quote freshness, change BUY/SELL/HOLD/CASH economics, change the venue price band, force an exit, mutate/copy a canonical DB, or bypass lifecycle/executor law.
+- Acceptance: YES and NO held-side bounds convert symmetrically; observed HIGH/LOW transport preserves exact impossible-bin facts and coherent `lcb <= q <= ucb`; fresh replacement refresh never invokes legacy bootstrap; missing/incoherent bound vectors fail closed; focused authority/observed-floor tests, live-safety monitor tests, compilation, planning-lock, and `git diff --check` pass before exact-SHA deployment. Live proof requires a standard monitor run with no regression in order execution and materially lower full-book/urgent-family latency.
+
+## Slice B66 -- Let a newer same-station physical extreme strengthen current WU truth
+
+- Live proof: Singapore Jul24 HIGH 32 NO held q near `0.79` while its executable NO bid fell from `0.30` to `0.16`. WSSS `aviationweather_metar` published the same-station 32C observation at `04:30:54Z` and Zeus received it at `04:30:57Z`, but `get_current_observation` returned the still-fresh canonical `wu_icao_history` 31C context before consulting the fast tail. The first held refresh using 32C occurred at `05:04:07Z`, after the canonical WU row was written at `04:57:41Z` and after the bid had fallen below the executable `0.05` floor. The exact WU HTTP publication clock is not persisted and is not inferred.
+- First-principles invariant: a running HIGH is monotone nondecreasing and a running LOW is monotone nonincreasing. For a `wu_icao` city, a newer observation from the exact same physical station may strengthen that running extreme without becoming final settlement truth. Source role, station, unit, causal observation time, receipt time, coverage provenance, and both contributing source identities remain explicit; another station, another source role, an older tail, or a non-extreme plateau cannot override canonical WU truth. This harmonizes INV-16 causal observation preservation and INV-36 quote/belief separation; it supersedes no architecture law, and the touched registry surfaces only refresh the existing source-rationale and test-topology rows.
+- Minimal repair: before returning a canonical or live WU context, consult the in-process same-station fast tail and compose only when its observation time is strictly newer and its HIGH or LOW extreme is strictly stronger. Reuse the existing WU-prefix plus fast-tail context, preserve canonical prefix coverage/provenance when its individual sample timestamps are opaque, and keep the combined source inside the existing executable allowlist. Existing absent/stale/coverage-incomplete fallback behavior remains unchanged.
+- Files authorized: `src/data/observation_client.py`, `tests/test_day0_obs_fastlane_optionbc.py`, `architecture/source_rationale.yaml`, `architecture/test_topology.yaml`, this packet, and its scope sidecar.
+- Forbidden: promote METAR to settlement/final truth; admit a different station or non-`wu_icao` city; replace a canonical extreme with an older/weaker value; infer WU publication time; use market price as observation truth; change probability math, exit economics, lifecycle, venue price-band law, source writers, schema, or canonical DB rows; force an exit or any venue action.
+- Acceptance: canonical WSSS 31C plus a newer WSSS 32C fast observation yields an honestly combined 32C context with canonical prefix coverage and dual provenance; the symmetric LOW case lowers the running minimum; older, equal-extreme, unit-mismatched, station-mismatched, non-WU, and missing-tail cases retain prior behavior; fresh live WU can be strengthened by the same rule; focused fast-lane/source tests, Day0 observation consumers, compilation, source/fatal-misread/planning-lock checks, changed-line lint, and `git diff --check` pass. A replay at the historical `0.16` bid must report the existing exit evaluator's result without presupposing EXIT. Post-deploy proof requires a new same-station fast extreme to appear in held-monitor provenance before the later WU canonical write, with no source-authority regression.
+- Pre-deploy verification: the complete fast-lane source file passes `72/72`; the combined hard-fact and Day0 observation consumers pass `160` with one HKO in-memory connection-fixture failure reproduced unchanged on current live. Compilation, changed-surface Ruff (excluding that file's one baseline F841), freshness metadata, map maintenance, test-topology classification, and `git diff --check` pass. Replaying Singapore's frozen `59.8`-share position with entry belief `0.9218`, current held q `0.1067`, its exact current CI, and the historical executable `0.16` bid through current `Position.evaluate_exit` returns first-cycle `CI_SEPARATED_REVERSAL`; at the actual later `0.04` bid the frozen receipt held because terminal hold value exceeded sale. This is a counterfactual decision proof, not a claim that the missed historical fill occurred. Independent review first found and blocked a NaN fast-tail `current_temp` regression; finite-current gating plus NaN/noncausal/missing-prefix-station antibodies closed it, and the final six-file re-review returned LAND with zero P0/P1/P2.
+
+## Slice B67 -- Price provisional HKO held risk on the remaining local day
+
+- Live proof: Hong Kong Jul24 LOW 28 NO entered at `0.53` with held-side q `0.9186`. After the HKO target day began, the executable NO bid fell from `0.21` to `0.02`, while 200-plus monitor refreshes retained q near `0.98` and then `0.9068`. The current global builder deliberately classifies `hko_hourly_accumulator` as `PROVISIONAL_CURRENT_SNAPSHOT`, but that branch dispatches to the scalar full-day replacement posterior. At `15:xx` HKT the replacement posterior still assigned only `0.0776` to YES 28; the existing remaining-local-day builder assigned `0.3867` before any unvalidated current-error transport. The latter uses exactly Jul24 local hours and excludes Jul25, so this is not a timezone-boundary defect.
+- First-principles invariant: provisional means the current HKO daily-extreme publication may be revised; it does not mean elapsed local-day time disappears. A held-position redecision must price the final extreme from the causal observation clock and the forecast hours that remain. HKO evidence must stay non-absorbing and cannot create deterministic payoff or new-entry authority. Market price remains executable truth, never probability input.
+- Minimal repair: route reduce-only provisional HKO held redecision through the existing remaining-day simplex while preserving `PROVISIONAL_CURRENT_SNAPSHOT`, source-clock bound identity, observation/revision uncertainty, and the current no-unvalidated-transport rule. Do not alter new-entry authority. If the remaining-hour bundle or current spot state is unavailable, fail closed and preserve the held position rather than silently reverting to a full-day scalar posterior.
+- Files authorized: `src/engine/event_reactor_adapter.py`, `tests/test_day0_remaining_day_pricing.py`, `tests/integration/test_w3_solve_seam_g3.py`, this packet, and its scope sidecar.
+- Forbidden: promote HKO provisional data to an absorbing or final settlement fact; use market price to construct q; add a stop-loss threshold; lower the venue price band; force an order; mutate/copy a canonical DB; restore persistent full-current-error transport without walk-forward covariance evidence; change entry authority, lifecycle, settlement, or venue semantics.
+- Acceptance: provisional HKO new entry remains blocked; held redecision uses a current remaining-local-day witness with explicit provisional provenance; the observed HKO extreme is not exact-clamped and no deterministic payoff is emitted; missing/incomplete hourly or spot evidence fails closed rather than selecting replacement full-day q; WU/METAR absorbing paths and non-Day0 replacement paths remain unchanged. The frozen Hong Kong decision must show the probability change and the unchanged capital comparison at each historical executable bid without asserting that a losing outcome proves an earlier decision wrong. Focused Day0, global-witness, held-monitor, compilation, planning-lock, freshness, and diff checks must pass before exact-SHA deployment.
+
+## Slice B68 -- Align the HKO spot poll with its publication clock
+
+- Live proof: HKO `rhrread` publishes the current Observatory temperature near `:02`, while the sole `ingest_k2_daily_obs` writer runs at `minute=0`. Canonical rows in the last 72 hours repeatedly show a publication-to-fetch lag near 58 minutes because each poll arrives just before the new source issue.
+- First-principles invariant: source freshness is measured from the provider issue clock, not merely from scheduler liveness. A single hourly writer should poll shortly after the expected source publication and preserve the same cadence, identity, and transaction path.
+- Minimal repair: move the existing hourly cron from `minute=0` to `minute=5`. Do not add a second writer, increase request frequency, alter source authority, synthesize observations, or change probability/exit semantics.
+- Files authorized: `src/ingest_main.py`, `tests/test_ingest_scheduler_jobs.py`, this packet, and its scope sidecar.
+- Acceptance: exactly one `ingest_k2_daily_obs` cron remains, with `minute=5`, the same job id/executor/concurrency/coalescing contract, and no extra network load. Focused scheduler coverage, compilation, planning-lock, and diff checks must pass. Post-deploy proof requires the next HKO current observation to be fetched after its source issue without the former near-hour phase lag.
+
+## Slice B70 -- Rebind statistical SELL authority to the auction probability cut
+
+- Live proof: complete auctions repeatedly selected a positive posterior-mean
+  reduce-only Guangzhou SELL, then JIT preflight rejected it with
+  `GLOBAL_SELL_DAY0_EXIT_AUTHORITY_IDENTITY_SUPERSEDED`. The selected
+  probability witness and `sell_action_authority_identity` do not form the
+  identity prescribed by `sell_action_authority_identity(...)`; the same
+  mismatch appears in held coverage before preflight.
+- Root cause: `current_book_epoch_provider` returns the probability witnesses
+  rebound to the current executable token/book epoch. The batch runtime
+  replaces each prepared family's `probability_witness`, but leaves its
+  statistical SELL authority bound to the pre-book witness. Candidate
+  construction then combines the new probability identity with the old SELL
+  authority, so the auction creates a certificate that its own current
+  preflight must reject.
+- First-principles invariant: one prepared family is one coherent probability
+  and action-law certificate. Any replacement of its probability witness must
+  atomically rederive every identity whose preimage includes that witness.
+- Minimal repair: at the book-epoch rebind seam, replace the probability
+  witness and recompute `sell_action_authority_identity` from the rebound
+  family key and witness identity plus the unchanged typed Day0 authority
+  status/reason. Preserve all other prepared-family content.
+- Files authorized: `src/engine/global_batch_runtime.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`, and this packet.
+- Forbidden: weaken or remove JIT preflight, reuse the old SELL authority,
+  change q/YES-NO complement/Kelly/global ranking, force an order, relax the
+  venue price band, alter lifecycle, or mutate/copy a canonical DB.
+- Acceptance: a book provider that returns a new probability witness yields a
+  prepared family whose SELL authority exactly binds that new witness while
+  retaining maturity status/reason and all other fields; the old authority is
+  absent from candidate/held coverage; focused global-auction and preflight
+  tests pass; deployment uses the exact committed SHA. Post-deploy proof
+  requires a complete new auction whose coverage identity recomputes exactly,
+  and any selected statistical SELL must reach the next truthful preflight or
+  venue outcome rather than this superseded-identity rejection.
+
+## Slice B71 -- Keep unresolved claims out of executable SELL inventory
+
+- Live proof: complete auctions repeatedly select a Guangzhou `NO` SELL for
+  `11.70` shares and then correctly fail JIT preflight with
+  `GLOBAL_SELL_POSITION_SHARES_SUPERSEDED`. The canonical position is
+  `chain_state=unknown, chain_shares=0`, while two authenticated filled BUY
+  commands under the same legacy position id own different native tokens
+  (`5.2 NO` and `6.5 YES`). The latest trusted collateral snapshots contain
+  no CTF balances. The wealth witness therefore falls back to the projection's
+  `11.7` verified-fill claim, and currently publishes that unresolved terminal
+  claim through `native_holdings_micro` as if it were exact sellable inventory.
+- First-principles invariant: an unresolved local claim may widen terminal
+  wealth and consume committed capital, but it is not a venue-native SELL
+  capability. Only a current collateral token balance or a current reconciled
+  chain position may enter `NativeHolding` and generate a reduce-only SELL.
+  Preflight's exact inventory check remains the final independent boundary.
+- Minimal repair: keep unresolved verified-fill claims in the wealth upper
+  bound, position-set identity, and capital commitments, but publish only
+  represented current holdings through `PortfolioWealthWitness.native_holdings_micro`.
+  Preserve the existing conservative treatment of unresolved claims; do not
+  relabel or reconstruct their token payoff from a corrupted projection.
+- Files authorized: `src/engine/global_auction_universe.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`, and this packet.
+- Forbidden: weaken `_current_global_sell_position`, infer or split existing
+  holdings without authenticated append-first facts, treat a verified fill as
+  chain inventory, erase unresolved risk from wealth/Kelly, mutate or copy a
+  canonical DB, force a venue action, change probability or price-band law, or
+  change lifecycle.
+- Acceptance: a verified fill with `chain_state=unknown`, zero chain shares,
+  and no CTF balance still increases wealth ceiling and committed capital but
+  contributes zero `native_holdings_micro`, zero `NativeHolding`, and no SELL
+  candidate. A current reconciled position remains exact sellable inventory.
+  The Guangzhou false winner disappears from a current read-only replay;
+  focused wealth/global-auction/preflight tests and the performance evaluator
+  run before exact-SHA deployment.
+
+## Slice B72 -- Re-auction a selected candidate whose order policy is impossible
+
+- Live proof: after the Seoul fill, complete auctions repeatedly selected San
+  Francisco Jul25 HIGH NO at a `0.92` ask, but every actuation failed before
+  venue submission with
+  `QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN`.
+  The current probability, book, and wealth epoch were complete; the wide
+  two-sided spread correctly made taker crossing inadmissible, while the
+  already-expired maker lane could no longer rest. Preflight nevertheless
+  returned `STABLE`, so the same known-unexecutable candidate monopolized later
+  epochs instead of comparing the remaining BUY/SELL/HOLD/CASH set.
+- First-principles invariant: a positive capital objective is necessary but not
+  sufficient for an order. A candidate whose own current order-policy
+  certificate permits neither maker nor taker is outside the executable
+  feasible set; that fact invalidates only the exact candidate, not the current
+  probability/book/wealth epoch or its siblings.
+- Minimal repair: make the venue-side-effect-free winner preflight reject an
+  exact `MAKER_TAKER_FORBIDDEN` proof as candidate-local before certificate
+  build, then use the existing same-epoch candidate exclusion and re-auction
+  path. Preserve the spread guard and all q, Kelly, fee, depth, price-band,
+  family exposure, and final submit checks.
+- Files authorized: `src/engine/event_reactor_adapter.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`, and this packet.
+- Forbidden: force or synthesize an order; turn a wide-spread candidate into a
+  taker; clear an operator pause; alter Wellington; weaken probability, quote,
+  Kelly, price-band, or venue authority; mutate/copy a canonical DB.
+- Acceptance: preflight emits one typed, side-effect-free candidate-local
+  rejection for `MAKER_TAKER_FORBIDDEN`; the existing global batch excludes
+  only that exact candidate and immediately re-auctions its sibling/runner-up
+  in the same epoch. Unknown policy failures remain batch- or family-scoped as
+  already classified. Focused W3, complete W3/evaluator, compilation,
+  planning-lock, and `git diff --check` pass before exact-SHA deployment.
+- Verification: the candidate classifier, early no-mode/no-submit rejection,
+  same-family sibling fallthrough, ordinary fresh-mode redecision, and
+  sub-band maker fallthrough pass `34/34`. Complete W3 passes `272` and retains
+  three failures reproduced unchanged on live `ad655f5f1` (two fake
+  `object()` DB connections and one incomplete in-memory snapshot schema).
+  The broad SOLVE/qkernel/decision-certificate/W3 evaluator passes `1068` and
+  retains those three plus three decision-certificate fixture failures also
+  reproduced unchanged on `ad655f5f1`. Compilation, planning-lock, and
+  `git diff --check` pass; no canonical DB, control override, or venue state
+  changed during worktree verification.

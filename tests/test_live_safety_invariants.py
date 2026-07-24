@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-24; last_reused=2026-07-24
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-24
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -367,21 +367,17 @@ def test_open_portfolio_loader_marks_runtime_exposure_without_family_filter(
 @pytest.mark.parametrize(
     ("monotonic_values", "expected_count", "expected_reason"),
     (
-        ([0.0, 0.0, 1.0], 1, "cycle_budget_exhausted"),
-        (
-            [0.0, 0.0, 0.0, 0.0],
-            2,
-            "positive_budget_progress_limit",
-        ),
+        ([0.0, 0.0, 1.0, 1.0], 2, "cycle_budget_exhausted"),
+        ([0.0, 0.0, 0.0, 0.0], 3, ""),
     ),
 )
-def test_monitoring_phase_defers_guaranteed_tail_after_persisted_budget_progress(
+def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     monkeypatch,
     monotonic_values,
     expected_count,
     expected_reason,
 ):
-    """Persisted monitor progress turns a positive cycle budget into a hard deadline."""
+    """Only the elapsed deadline, not successful progress, may truncate a sweep."""
     from src.engine import cycle_runtime
 
     first = _make_position(
@@ -497,24 +493,24 @@ def test_monitoring_phase_defers_guaranteed_tail_after_persisted_budget_progress
     assert summary["held_monitor_budget_guaranteed_positions"] == 2
     assert summary["held_monitor_budget_seconds"] == pytest.approx(0.5)
     assert summary["held_monitor_positions_scanned"] == expected_count
-    assert summary["held_monitor_positions_deferred"] == 3 - expected_count
-    assert summary["held_monitor_defer_reason"] == expected_reason
+    assert summary.get("held_monitor_positions_deferred", 0) == 3 - expected_count
+    assert summary.get("held_monitor_defer_reason", "") == expected_reason
     assert summary["monitors"] == expected_count
     assert len(monitor_results) == expected_count
 
 
-def test_monitor_progress_limit_covers_large_held_book_within_three_cycles():
-    """A fixed two-position cap cannot satisfy the ten-minute live freshness SLO."""
+def test_monitor_reservations_cover_large_held_book_within_three_degraded_cycles():
+    """Deadline-degraded cycles still reserve rotating slices of a large book."""
     from src.engine import cycle_runtime
 
-    assert cycle_runtime._held_position_monitor_positive_progress_limit(0) == 2
-    assert cycle_runtime._held_position_monitor_positive_progress_limit(3) == 2
-    assert cycle_runtime._held_position_monitor_positive_progress_limit(9) == 3
-    assert cycle_runtime._held_position_monitor_positive_progress_limit(23) == 8
+    assert cycle_runtime._held_position_monitor_reservation_count(0) == 2
+    assert cycle_runtime._held_position_monitor_reservation_count(3) == 2
+    assert cycle_runtime._held_position_monitor_reservation_count(9) == 3
+    assert cycle_runtime._held_position_monitor_reservation_count(23) == 8
 
 
-def test_monitor_progress_limit_delivers_unique_three_cycle_coverage(monkeypatch):
-    """The throughput limit must rotate the whole book, not repeat its prefix."""
+def test_monitor_full_sweep_keeps_unique_three_cycle_deadline_reservations(monkeypatch):
+    """Normal cycles sweep all positions while degraded reservations still rotate."""
     from src.engine import cycle_runtime
 
     monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE", {})
@@ -558,6 +554,7 @@ def test_monitor_progress_limit_delivers_unique_three_cycle_coverage(monkeypatch
     )
 
     per_cycle: list[list[str]] = []
+    reserved_per_cycle: list[list[str]] = []
     for cycle in range(3):
         cycle_start = len(visited)
         summary = {"monitors": 0, "exits": 0}
@@ -575,8 +572,93 @@ def test_monitor_progress_limit_delivers_unique_three_cycle_coverage(monkeypatch
             should_preempt_for_urgent_day0=lambda: False,
         )
         per_cycle.append(visited[cycle_start:])
+        reserved_per_cycle.append(summary["held_monitor_budget_coverage_positions"])
 
-    assert all(len(batch) >= 3 for batch in per_cycle)
+    assert all(len(batch) == 9 for batch in per_cycle)
+    assert len(set(visited)) == 9
+    assert all(len(batch) == 3 for batch in reserved_per_cycle)
+    assert len({trade_id for batch in reserved_per_cycle for trade_id in batch}) == 9
+
+
+def test_monitor_deadline_degraded_cycles_execute_rotating_reserved_thirds(monkeypatch):
+    """Expired positive budgets still execute each reserved third before deferring."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    positions = [
+        _make_position(
+            trade_id=f"deadline-{index}",
+            token_id=f"deadline-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(9)
+    ]
+    for position in positions:
+        position._canonical_monitor_refreshed_at = ""
+    portfolio = _make_portfolio(*positions)
+    visited: list[str] = []
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, position: (
+            visited.append(position.trade_id)
+            or _monitor_test_edge_context(position)
+        ),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+
+    per_cycle: list[list[str]] = []
+    reserved_per_cycle: list[list[str]] = []
+    for cycle in range(3):
+        cycle_start = len(visited)
+        monotonic_values = iter([0.0, *([1.0] * 12)])
+        monkeypatch.setattr(
+            cycle_runtime.time,
+            "monotonic",
+            lambda: next(monotonic_values, 1.0),
+        )
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None,
+            object(),
+            portfolio,
+            _monitor_test_artifact(),
+            _monitor_test_tracker(),
+            summary,
+            deps=_monitor_test_deps(f"test_monitor_deadline_coverage_{cycle}"),
+            run_exit_preflight=False,
+            exit_order_submit_enabled=False,
+            held_position_monitor_budget_seconds=0.5,
+            should_preempt_for_urgent_day0=lambda: False,
+        )
+        batch = visited[cycle_start:]
+        per_cycle.append(batch)
+        reserved = summary["held_monitor_budget_coverage_positions"]
+        reserved_per_cycle.append(reserved)
+        assert set(reserved).issubset(batch)
+        assert summary["held_monitor_positions_deferred"] == 9 - len(batch)
+        assert summary["held_monitor_defer_reason"] == "cycle_budget_exhausted"
+
+    assert all(3 <= len(batch) <= 4 for batch in per_cycle)
+    assert all(len(batch) == 3 for batch in reserved_per_cycle)
+    assert len({trade_id for batch in reserved_per_cycle for trade_id in batch}) == 9
     assert len(set(visited)) == 9
 
 
@@ -932,9 +1014,11 @@ def test_monitoring_phase_active_network_hard_fact_exits_after_local_tranche(
         defer_partial_orderbook_gaps=True,
     )
 
-    assert events == ["network_fetch"]
-    assert summary["held_monitor_progress_limit_reached"] is True
-    assert summary["held_monitor_defer_reason"] == "positive_budget_progress_limit"
+    assert events == [
+        "network_fetch",
+        "refresh:local-active-before-hard-fact",
+    ]
+    assert summary.get("held_monitor_positions_deferred", 0) == 0
     assert summary["held_monitor_partial_orderbook_gaps_scheduled_after_local"] == 2
     assert summary["day0_hard_fact_direct_exit_decisions"] == 2
     assert summary["exits_suppressed_no_submit"] == 2
@@ -1015,8 +1099,9 @@ def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("expired ordinary local positions must defer")
+        lambda _conn, _clob, position: (
+            events.append(f"refresh:{position.trade_id}")
+            or _monitor_test_edge_context(position)
         ),
     )
     monkeypatch.setattr(
@@ -1057,9 +1142,9 @@ def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
         defer_partial_orderbook_gaps=True,
     )
 
-    assert events == ["network_fetch"]
+    assert events == ["network_fetch", "refresh:budget-local-0"]
     assert summary["day0_hard_fact_direct_exit_decisions"] == 1
-    assert summary["held_monitor_positions_deferred"] == 2
+    assert summary["held_monitor_positions_deferred"] == 1
     assert monitor_results[0].position_id == dead_bin.trade_id
     assert monitor_results[0].should_exit is True
 
@@ -1332,8 +1417,8 @@ def test_monitoring_phase_reserves_one_active_network_progress_slot(monkeypatch)
     assert all(summary["held_monitor_positions_deferred"] == 3 for summary in summaries)
 
 
-def test_monitoring_phase_positive_cap_preserves_reserved_active_progress(monkeypatch):
-    """Urgent successes cannot cancel already-reserved active monitor work."""
+def test_monitoring_phase_positive_budget_sweeps_unreserved_active_tail(monkeypatch):
+    """Urgent successes do not truncate the remaining held book before deadline."""
     from src.engine import cycle_runtime
 
     monkeypatch.setattr(
@@ -1395,7 +1480,7 @@ def test_monitoring_phase_positive_cap_preserves_reserved_active_progress(monkey
         _monitor_test_artifact(),
         _monitor_test_tracker(),
         summary,
-        deps=_monitor_test_deps("test_monitor_positive_cap_reserved_progress"),
+        deps=_monitor_test_deps("test_monitor_positive_budget_full_sweep"),
         run_exit_preflight=False,
         exit_order_submit_enabled=False,
         held_position_monitor_budget_seconds=10.0,
@@ -1408,11 +1493,10 @@ def test_monitoring_phase_positive_cap_preserves_reserved_active_progress(monkey
         "cap-active-1",
         "cap-active-2",
         "cap-active-3",
+        "cap-active-4",
     }
     assert summary["held_monitor_budget_guaranteed_positions"] == 6
-    assert summary["held_monitor_progress_limit_reached"] is True
-    assert summary["held_monitor_defer_reason"] == "positive_budget_progress_limit"
-    assert summary["held_monitor_positions_deferred"] == 1
+    assert summary.get("held_monitor_positions_deferred", 0) == 0
 
 
 def test_monitor_reservation_attempt_fairness_prevents_sticky_oldest(monkeypatch):
@@ -1739,10 +1823,13 @@ def test_monitoring_phase_network_pending_exit_precedes_local_active_under_budge
         held_position_monitor_budget_seconds=0.5,
     )
 
-    assert events == ["network_fetch", "refresh:network-pending-exit"]
-    assert summary["held_monitor_positions_scanned"] == 1
-    assert summary["held_monitor_positions_deferred"] == 1
-    assert summary["held_monitor_defer_reason"] == "cycle_budget_exhausted"
+    assert events == [
+        "network_fetch",
+        "refresh:network-pending-exit",
+        "refresh:local-active",
+    ]
+    assert summary["held_monitor_positions_scanned"] == 2
+    assert summary.get("held_monitor_positions_deferred", 0) == 0
 
 
 def test_monitoring_phase_commit_failure_defers_network_without_getter(monkeypatch):
@@ -4850,10 +4937,21 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             np.array([0.05, 0.15]),
         )
         setattr(
-            position,
-            "_day0_monitor_probability_receipt",
-            {"probability_witness_identity": "probability-current"},
-        )
+                position,
+                "_day0_monitor_probability_receipt",
+                {
+                    "probability_witness_identity": "probability-current",
+                    "probability_content_identity": (
+                        "probability-content-current"
+                    ),
+                    "q_version": "probability-content-current",
+                    "source_truth_identity": "source-current",
+                    "band": {
+                        "alpha": 0.05,
+                        "basis": "test-band",
+                    },
+                },
+            )
         return EdgeContext(
             p_raw=np.array([]),
             p_cal=np.array([]),
@@ -5034,6 +5132,7 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
     )
     probability = SimpleNamespace(
         witness_identity="q-1",
+        probability_content_identity="q-content-1",
         bindings=(
             SimpleNamespace(
                 bin_id="canonical-bin-1",
@@ -5055,6 +5154,7 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
         held_shares=Decimal("10"),
         ledger_snapshot_id="ledger-1",
         probability_witness_identity="q-1",
+        probability_content_identity="q-content-1",
         wealth_economic_identity="wealth-1",
         selection_epoch_identity="epoch-1",
         book_epoch_identity="book-epoch-1",
@@ -5073,7 +5173,7 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
     )
     current = dict(
         position_id="position-1",
-        probability_witness_identity="q-1",
+        probability_content_identity="q-content-1",
         checked_at_utc=at + timedelta(seconds=2),
         family_key="family-1",
         bin_label="20C",
@@ -5083,7 +5183,7 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
         held_shares=Decimal("10"),
         current_ledger_snapshot_id="ledger-1",
         current_wealth_economic_identity="wealth-1",
-        current_probability_witness_identity_resolver=lambda _row: "q-1",
+        current_probability_content_identity_resolver=lambda _row: "q-content-1",
         current_holding_witness_resolver=lambda _row: (
             global_batch_runtime._CurrentHoldingWitness(
                 ledger_snapshot_id="ledger-1",
@@ -5174,6 +5274,7 @@ def test_global_holding_coverage_lease_revalidates_after_resolver_io(
     )
     probability = SimpleNamespace(
         witness_identity="q-lease",
+        probability_content_identity="q-content-lease",
         bindings=(
             SimpleNamespace(
                 bin_id="canonical-bin-lease",
@@ -5194,6 +5295,7 @@ def test_global_holding_coverage_lease_revalidates_after_resolver_io(
         held_shares=obligation.held_shares,
         ledger_snapshot_id="ledger-lease",
         probability_witness_identity="q-lease",
+        probability_content_identity="q-content-lease",
         wealth_economic_identity="wealth-lease",
         selection_epoch_identity="epoch-lease",
         book_epoch_identity="book-lease",
@@ -5232,7 +5334,7 @@ def test_global_holding_coverage_lease_revalidates_after_resolver_io(
     )
     result = global_batch_runtime.current_global_holding_coverage(
         position_id=obligation.position_id,
-        probability_witness_identity="q-lease",
+        probability_content_identity="q-content-lease",
         checked_at_utc=at + timedelta(seconds=2),
         family_key=obligation.family_key,
         bin_label=obligation.bin_label,
@@ -5243,8 +5345,10 @@ def test_global_holding_coverage_lease_revalidates_after_resolver_io(
         current_ledger_snapshot_id="ledger-lease",
         current_wealth_economic_identity="wealth-lease",
         current_sell_book_witness_resolver=book_resolver,
-        current_probability_witness_identity_resolver=lambda _row: (
-            "q-advanced" if mutation == "q_advance" else "q-lease"
+        current_probability_content_identity_resolver=lambda _row: (
+            "q-content-advanced"
+            if mutation == "q_advance"
+            else "q-content-lease"
         ),
         current_holding_witness_resolver=lambda _row: holding,
         current_time_provider=lambda: (
@@ -5284,6 +5388,7 @@ def test_global_holding_partition_rejects_single_q_epoch_or_deadline_mismatch():
     )
     probability = SimpleNamespace(
         witness_identity="q-current",
+        probability_content_identity="q-content-current",
         bindings=(
             SimpleNamespace(
                 bin_id="canonical-bin-current",
@@ -5304,6 +5409,7 @@ def test_global_holding_partition_rejects_single_q_epoch_or_deadline_mismatch():
         held_shares=first.held_shares,
         ledger_snapshot_id="ledger-current",
         probability_witness_identity="q-current",
+        probability_content_identity="q-content-current",
         wealth_economic_identity="wealth-current",
         selection_epoch_identity="epoch-current",
         book_epoch_identity="book-current",
@@ -5325,6 +5431,7 @@ def test_global_holding_partition_rejects_single_q_epoch_or_deadline_mismatch():
         held_shares=second.held_shares,
         ledger_snapshot_id="ledger-current",
         probability_witness_identity=None,
+        probability_content_identity=None,
         wealth_economic_identity="wealth-current",
         selection_epoch_identity="epoch-current",
         book_epoch_identity="book-current",
@@ -5376,7 +5483,6 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
         global_batch_runtime,
         monitor_refresh,
     )
-
     at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
     portfolio = SimpleNamespace(positions=())
     position = SimpleNamespace(
@@ -5396,6 +5502,7 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
         ledger_snapshot_id="ledger-current",
         economic_identity="wealth-current",
     )
+    content_identity = "q-content-current"
     monkeypatch.setattr(
         global_auction_universe,
         "current_portfolio_wealth_witness",
@@ -5449,7 +5556,14 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
             0.5,
             SimpleNamespace(
                 _day0_monitor_probability_receipt={
-                    "probability_witness_identity": "q-current"
+                    "probability_witness_identity": "q-current",
+                    "probability_content_identity": content_identity,
+                    "q_version": "q-content-current",
+                    "source_truth_identity": "source-current",
+                    "band": {
+                        "alpha": 0.05,
+                        "basis": "current-band",
+                    },
                 }
             ),
             True,
@@ -5467,7 +5581,7 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
             "current_sell_book_witness_resolver"
         ](coverage)
         captured["probability_witness"] = kwargs[
-            "current_probability_witness_identity_resolver"
+            "current_probability_content_identity_resolver"
         ](coverage)
         captured["holding_witness"] = kwargs[
             "current_holding_witness_resolver"
@@ -5491,7 +5605,7 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
         ),
         portfolio=portfolio,
         position=position,
-        probability_witness_identity="q-current",
+        probability_content_identity=content_identity,
         checked_at_utc=at,
         current_time_provider=lambda: at,
     )
@@ -5501,7 +5615,7 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
     assert captured["current_wealth_economic_identity"] == "wealth-current"
     assert captured["held_shares"] == Decimal("12.5")
     assert captured["sell_book_witness"]
-    assert captured["probability_witness"] == "q-current"
+    assert captured["probability_witness"] == content_identity
     assert captured["holding_witness"].ledger_snapshot_id == "ledger-current"
     assert captured["holding_witness"].held_shares == Decimal("12.5")
     assert captured["final_checked_at"] == at
@@ -5585,6 +5699,7 @@ def test_holding_coverage_receipt_compresses_and_references_exact_payload(
         held_shares=obligation.held_shares,
         ledger_snapshot_id="ledger-current",
         probability_witness_identity=None,
+        probability_content_identity=None,
         wealth_economic_identity="wealth-current",
         selection_epoch_identity="epoch-current",
         book_epoch_identity="book-unavailable-current",
@@ -5649,7 +5764,7 @@ def test_holding_coverage_receipt_compresses_and_references_exact_payload(
     raw = zlib.decompress(
         base64.b64decode(first["holding_auction_coverage_zlib_b64"])
     )
-    assert first["schema_version"] == 16
+    assert first["schema_version"] == 17
     assert "holding_auction_coverage" not in first
     assert json.loads(raw) == [
         {
@@ -5707,6 +5822,7 @@ def test_receipt_rejects_uniform_coverage_deadline_beyond_authoritative_book(
             held_shares=obligation.held_shares,
             ledger_snapshot_id="ledger-current",
             probability_witness_identity=None,
+            probability_content_identity=None,
             wealth_economic_identity="wealth-current",
             selection_epoch_identity="epoch-current",
             book_epoch_identity="book-unavailable-current",
@@ -5801,6 +5917,7 @@ def test_receipt_rejects_coverage_q_absent_from_authoritative_manifest(tmp_path)
     )
     probability = SimpleNamespace(
         witness_identity="q-sell",
+        probability_content_identity="q-content-sell",
         bindings=(
             SimpleNamespace(
                 bin_id="canonical-bin-sell",
@@ -5821,6 +5938,7 @@ def test_receipt_rejects_coverage_q_absent_from_authoritative_manifest(tmp_path)
         held_shares=obligation.held_shares,
         ledger_snapshot_id="ledger-current",
         probability_witness_identity="q-sell",
+        probability_content_identity="q-content-sell",
         wealth_economic_identity="wealth-current",
         selection_epoch_identity="epoch-current",
         book_epoch_identity="book-unavailable-current",
@@ -11953,6 +12071,326 @@ def test_day0_overlap_uses_current_expected_value_not_optimistic_ucb(
     assert second.should_exit is True
     assert second.trigger == "EDGE_REVERSAL"
     assert "hold_value_probability_basis:current_point_q" in second.applied_validations
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_day0_separated_reversal_monetizes_expected_value_before_ucb_strands_leg(
+    monkeypatch,
+    direction,
+):
+    """A disjoint belief reversal compares SELL with expected HOLD payoff.
+
+    This is the Mexico City 26C loss shape: q collapsed to 3.73%, the
+    executable bid still paid 20.7c, but the 37.33% CI upper envelope was
+    substituted for expected settlement value and blocked every exit.
+    """
+
+    pos = _make_position(
+        direction=direction,
+        p_posterior=0.9438666668912,
+        entry_price=0.192,
+        entry_ci_width=0.714400000449067,
+        shares=22.5,
+        cost_basis_usd=4.32,
+    )
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: True)
+    monkeypatch.setattr("src.state.portfolio.exit_fee_rate", lambda: 0.05)
+    monkeypatch.setattr("src.state.portfolio.exit_daily_hurdle_rate", lambda: 0.0001)
+    monkeypatch.setattr(
+        "src.state.portfolio._compute_exit_correlation_crowding",
+        lambda **_kwargs: 0.0,
+    )
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.037333333333333336,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.207,
+            current_market_price_is_fresh=True,
+            best_bid=0.207,
+            best_ask=0.22,
+            hours_to_settlement=10.0,
+            position_state="day0_window",
+            day0_active=True,
+            entry_posterior=0.9438666668912,
+            entry_ci=(0.5866666666666667, 1.0),
+            current_ci=(0.0, 0.3733333333333334),
+        )
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "CI_SEPARATED_REVERSAL"
+    assert "hold_value_probability_basis:current_point_q" in decision.applied_validations
+    assert "hold_value_probability_basis:current_q_ucb" not in decision.applied_validations
+    assert "exit_fee_applied_to_sell_value" in decision.applied_validations
+
+
+def test_day0_separated_zero_q_sells_before_static_edge_threshold_strands_leg(
+    monkeypatch,
+):
+    """A recoverable bid strictly dominates a zero-value held leg.
+
+    This is the Guangzhou 36C NO shape: current held q and its full current
+    sample band were zero while the executable bid remained 0.08. The legacy
+    edge threshold treated the smaller negative edge as a reason to hold,
+    making exit less likely as the bid approached the legal venue floor.
+    """
+
+    pos = _make_position(
+        direction="buy_no",
+        p_posterior=0.999999999,
+        entry_price=0.34,
+        entry_ci_width=0.14,
+        shares=5.2,
+        cost_basis_usd=1.768,
+    )
+    monkeypatch.setattr(
+        "src.state.portfolio.hold_value_exit_costs_enabled",
+        lambda: False,
+    )
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.0,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.08,
+            current_market_price_is_fresh=True,
+            best_bid=0.08,
+            best_ask=0.11,
+            hours_to_settlement=10.0,
+            position_state="day0_window",
+            day0_active=True,
+            day0_zero_probability_exit_authority=False,
+            day0_exit_authority_status="mature",
+            day0_exit_authority_reason=(
+                "day0_high_extreme_mature:"
+                "daypart=post_peak,post_peak_confidence=0.99"
+            ),
+            entry_posterior=0.999999999,
+            entry_ci=(0.93, 1.0),
+            current_ci=(0.0, 0.0),
+        )
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "CI_SEPARATED_REVERSAL"
+    assert "sell_value_precedes_edge_threshold" in decision.applied_validations
+    assert (
+        "ci_separated_edge_within_threshold_hold"
+        not in decision.applied_validations
+    )
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_day0_low_price_high_expected_value_remains_a_hold(monkeypatch, direction):
+    """Low price alone cannot liquidate a fresh high-value held claim."""
+
+    pos = _make_position(
+        direction=direction,
+        p_posterior=0.90,
+        entry_price=0.13,
+        entry_ci_width=0.10,
+        shares=100.0,
+        cost_basis_usd=13.0,
+    )
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.4939,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.004,
+            current_market_price_is_fresh=True,
+            best_bid=0.004,
+            best_ask=0.006,
+            hours_to_settlement=10.0,
+            position_state="day0_window",
+            day0_active=True,
+            entry_posterior=0.90,
+            entry_ci=(0.80, 1.0),
+            current_ci=(0.20, 0.70),
+        )
+    )
+
+    assert decision.should_exit is False
+    assert decision.trigger == "CI_SEPARATED_POSITIVE_EDGE_HOLD"
+
+
+def test_day0_point_q_reversal_waits_for_temporal_maturity(monkeypatch):
+    """An Ankara-shaped early reversal cannot outrun Day0 maturity authority."""
+    from src.engine import cycle_runtime
+
+    maturity_reason = (
+        "day0_high_extreme_not_mature:"
+        "daypart=pre_sunrise,post_peak_confidence=0.034"
+    )
+    pos = _make_position(
+        trade_id="ankara-early-separated-reversal",
+        city="Ankara",
+        target_date="2026-07-22",
+        temperature_metric="high",
+        bin_label="31C",
+        direction="buy_yes",
+        p_posterior=0.8042,
+        entry_price=0.27,
+        entry_ci_width=0.43,
+        shares=43.22,
+        cost_basis_usd=11.67,
+        state="day0_window",
+        applied_validations=[maturity_reason],
+    )
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.10,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.42,
+            current_market_price_is_fresh=True,
+            best_bid=0.42,
+            best_ask=0.43,
+            hours_to_settlement=20.0,
+            position_state="day0_window",
+            day0_active=True,
+            entry_posterior=0.8042,
+            entry_ci=(0.57, 1.0),
+            current_ci=(0.0, 0.4533),
+        )
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "CI_SEPARATED_REVERSAL"
+    assert "hold_value_probability_basis:current_point_q" in decision.applied_validations
+
+    pos.last_monitor_prob = 0.10
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.42
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.42
+    pos.last_monitor_best_ask = 0.43
+    pos._monitor_current_held_ci = (0.0, 0.4533)
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos),
+        pos=pos,
+        exit_decision=decision,
+        should_exit=decision.should_exit,
+        exit_reason=decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
+
+
+def test_current_global_day0_maturity_survives_refresh_to_exit_overlay(monkeypatch):
+    """The current-global temporal verdict must survive every monitor seam."""
+    from src.engine import cycle_runtime, monitor_refresh
+
+    condition_id = "0x" + "75" * 32
+    maturity_reason = (
+        "day0_high_extreme_not_mature:"
+        "daypart=pre_sunrise,post_peak_confidence=0.034"
+    )
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                bin_id="31C",
+                condition_id=condition_id,
+                yes_token_id="yes-31",
+                no_token_id="no-31",
+            ),
+        ),
+        yes_q_samples=np.array([[0.0], [0.2]], dtype=np.float64),
+        witness_identity="remaining-window-witness",
+        q_version="remaining-window-q",
+        source_truth_identity="remaining-window-truth",
+        band_basis="current_coherent_day0_remaining_model_bootstrap_v3",
+        band_alpha=0.05,
+    )
+    snapshot = monitor_refresh._CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=((condition_id, "yes-31", "no-31"),),
+        deterministic_condition_ids=frozenset(),
+        day0_payload={
+            "_edli_day0_exit_authority_status": "immature",
+            "_edli_day0_exit_authority_reason": maturity_reason,
+        },
+        metric="high",
+    )
+    pos = _make_position(
+        trade_id="ankara-current-global-seam",
+        city="Ankara",
+        target_date="2026-07-22",
+        temperature_metric="high",
+        bin_label="31C",
+        direction="buy_yes",
+        p_posterior=0.8042,
+        entry_price=0.27,
+        entry_ci_width=0.43,
+        shares=43.22,
+        cost_basis_usd=11.67,
+        state="day0_window",
+        token_id="yes-31",
+        no_token_id="no-31",
+    )
+    pos.condition_id = condition_id
+    probability, refreshed, fresh = (
+        monitor_refresh._materialize_current_global_day0_probability(pos, snapshot)
+    )
+    assert fresh is True
+    assert probability == pytest.approx(0.1)
+    monitor_refresh._replace_probability_validations_preserving_exit_confirmation(
+        pos,
+        refreshed,
+    )
+    pos._day0_exit_authority_status = refreshed._day0_exit_authority_status
+    pos._day0_exit_authority_reason = refreshed._day0_exit_authority_reason
+    assert maturity_reason in pos.applied_validations
+
+    pos.last_monitor_prob = probability
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.42
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.42
+    pos.last_monitor_best_ask = 0.43
+    edge_lo, edge_hi = monitor_refresh._current_global_monitor_edge_band(
+        witness.yes_q_samples[:, 0],
+        alpha=witness.band_alpha,
+        current_p_market=0.42,
+    )
+    edge_ctx = SimpleNamespace(
+        p_market=np.array([0.42]),
+        p_posterior=probability,
+        confidence_band_lower=edge_lo,
+        confidence_band_upper=edge_hi,
+        divergence_score=0.0,
+        market_velocity_1h=0.0,
+    )
+    context = cycle_runtime._build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=20.0,
+        ExitContext=ExitContext,
+        portfolio=_make_portfolio(pos),
+    )
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
+    decision = pos.evaluate_exit(context)
+
+    assert decision.should_exit is False
+    assert decision.trigger == "DAY0_STATISTICAL_EXIT_TEMPORALLY_BLOCKED"
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos),
+        pos=pos,
+        exit_decision=decision,
+        should_exit=decision.should_exit,
+        exit_reason=decision.reason,
+        summary={},
+    )
+    assert should_exit is False
+    assert reason == decision.reason
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
