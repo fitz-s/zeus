@@ -6298,6 +6298,14 @@ def evaluate_candidate(
         # count of portfolio_heat, which dynamic_kelly_mult already attenuates via
         # 1/(1+heat) (kelly.py). The gross_exp / variance_exp branches above are
         # distinct cluster quantities (NOT ingested by Kelly) and STAY.
+        #
+        # NAMED PR-1 EXCEPTION — the current_gross_exp / current_variance_exp
+        # risk_throttle halvings above are cluster-scoped, label-free portfolio-
+        # feasibility constraints, the same class as kelly.py dynamic_kelly_mult's
+        # portfolio_heat exception: they cap correlated cluster exposure, not
+        # per-strategy edge economics. They STAY until the PR-2 joint allocator
+        # (structural-Σ simultaneous Kelly) folds cluster saturation into the
+        # same simultaneous sizing pass that retires portfolio_heat.
 
         try:
             # A6 (PLAN.md §A6): pass strategy_key=None so dynamic_kelly_mult
