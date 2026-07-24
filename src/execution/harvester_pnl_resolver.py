@@ -166,7 +166,8 @@ def _read_venue_resolved_settlement_rows(trade_conn, portfolio, keys):
     import httpx
 
     rows = []
-    seen_keys: set[tuple[str, str, str]] = set()
+    seen_family_keys: set[tuple[str, str, str]] = set()
+    seen_condition_ids: set[str] = set()
     for slug in dict.fromkeys(slugs_by_condition.values()):
         try:
             response = httpx.get(
@@ -185,20 +186,7 @@ def _read_venue_resolved_settlement_rows(trade_conn, portfolio, keys):
             if (
                 not isinstance(event, dict)
                 or str(event.get("slug") or "") != slug
-                or event.get("closed") is not True
             ):
-                continue
-            outcomes = _extract_resolved_market_outcomes(event)
-            winners = [outcome for outcome in outcomes if outcome.yes_won]
-            if len(winners) != 1:
-                continue
-            event_condition_ids = {outcome.condition_id for outcome in outcomes}
-            held_event_ids = {
-                condition_id
-                for condition_id, event_slug in slugs_by_condition.items()
-                if event_slug == slug
-            }
-            if not held_event_ids.issubset(event_condition_ids):
                 continue
 
             city = _match_city(
@@ -217,27 +205,81 @@ def _read_venue_resolved_settlement_rows(trade_conn, portfolio, keys):
                 ],
             )
             key = (city.name, target_date, metric)
-            if key not in keys or key in seen_keys:
+            if key not in keys:
                 continue
-            winner = winners[0]
-            winning_bin = _canonical_bin_label(
-                winner.range_low,
-                winner.range_high,
-                city.settlement_unit,
-            )
-            if winning_bin is None:
+
+            outcomes = _extract_resolved_market_outcomes(event)
+            outcomes_by_condition = {
+                outcome.condition_id: outcome for outcome in outcomes
+            }
+            held_event_ids = {
+                condition_id
+                for condition_id, event_slug in slugs_by_condition.items()
+                if event_slug == slug
+            }
+            winners = [outcome for outcome in outcomes if outcome.yes_won]
+
+            # A fully closed family with one YES winner supplies the canonical
+            # family winning bin and can settle every held sibling in one pass.
+            if (
+                event.get("closed") is True
+                and len(winners) == 1
+                and held_event_ids.issubset(outcomes_by_condition)
+                and key not in seen_family_keys
+            ):
+                winner = winners[0]
+                winning_bin = _canonical_bin_label(
+                    winner.range_low,
+                    winner.range_high,
+                    city.settlement_unit,
+                )
+                if winning_bin is not None:
+                    rows.append({
+                        "city": city.name,
+                        "target_date": target_date,
+                        "market_slug": slug,
+                        "winning_bin": winning_bin,
+                        "temperature_metric": metric,
+                        "authority": "VENUE_RESOLVED",
+                        "settlement_source": "polymarket_gamma",
+                        "settlement_value": None,
+                    })
+                    seen_family_keys.add(key)
+                    seen_condition_ids.update(held_event_ids)
                 continue
-            rows.append({
-                "city": city.name,
-                "target_date": target_date,
-                "market_slug": slug,
-                "winning_bin": winning_bin,
-                "temperature_metric": metric,
-                "authority": "VENUE_RESOLVED",
-                "settlement_source": "polymarket_gamma",
-                "settlement_value": None,
-            })
-            seen_keys.add(key)
+
+            # Gamma can finalize child binary conditions before flipping the
+            # parent weather event to closed. That child payout is exact
+            # economic truth for the matching held condition only. Consume it
+            # without inventing a family winner or touching unresolved siblings.
+            for condition_id in sorted(held_event_ids):
+                if condition_id in seen_condition_ids:
+                    continue
+                outcome = outcomes_by_condition.get(condition_id)
+                if outcome is None:
+                    continue
+                rows.append({
+                    "city": city.name,
+                    "target_date": target_date,
+                    "market_slug": slug,
+                    "winning_bin": (
+                        _canonical_bin_label(
+                            outcome.range_low,
+                            outcome.range_high,
+                            city.settlement_unit,
+                        )
+                        if outcome.yes_won
+                        else None
+                    ),
+                    "temperature_metric": metric,
+                    "authority": "VENUE_RESOLVED",
+                    "settlement_source": "polymarket_gamma",
+                    "settlement_value": None,
+                    "settlement_scope": "condition",
+                    "condition_id": condition_id,
+                    "condition_yes_won": bool(outcome.yes_won),
+                })
+                seen_condition_ids.add(condition_id)
     return rows
 
 
@@ -330,8 +372,36 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
         authority = str(_row_value(row, "authority", 5, "") or "").upper()
         settlement_source = _row_value(row, "settlement_source", 6, "")
         settlement_value = _row_value(row, "settlement_value", 7, None)
+        settlement_scope = str(
+            _row_value(row, "settlement_scope", 8, "family") or "family"
+        ).strip().lower()
+        settlement_condition_id = str(
+            _row_value(row, "condition_id", 9, "") or ""
+        ).strip()
+        settlement_condition_yes_won = _row_value(
+            row,
+            "condition_yes_won",
+            10,
+            None,
+        )
 
-        if not city_name or not target_date or not winning_bin:
+        if not city_name or not target_date:
+            continue
+        if settlement_scope == "condition":
+            if (
+                not settlement_condition_id
+                or not isinstance(settlement_condition_yes_won, bool)
+            ):
+                logger.warning(
+                    "harvester_pnl_resolver: skipping malformed exact-condition "
+                    "settlement row for %s %s condition=%r yes_won=%r",
+                    city_name,
+                    target_date,
+                    settlement_condition_id,
+                    settlement_condition_yes_won,
+                )
+                continue
+        elif not winning_bin:
             continue
         if authority not in {"VERIFIED", "VENUE_RESOLVED"}:
             logger.warning(
@@ -353,12 +423,18 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
                 settlement_truth_source=(
                     "forecasts.settlement_outcomes"
                     if authority == "VERIFIED"
-                    else "gamma_exact_held_event"
+                    else (
+                        "gamma_exact_held_condition"
+                        if settlement_scope == "condition"
+                        else "gamma_exact_held_event"
+                    )
                 ),
                 settlement_market_slug=str(market_slug or ""),
                 settlement_temperature_metric=str(temperature_metric or ""),
                 settlement_source=str(settlement_source or ""),
                 settlement_value=settlement_value,
+                settlement_condition_id=settlement_condition_id,
+                settlement_condition_yes_won=settlement_condition_yes_won,
             )
             positions_settled += n_settled
             if n_settled > 0:

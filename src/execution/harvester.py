@@ -2519,8 +2519,10 @@ def _settle_positions(
     settlement_temperature_metric: str = "high",
     settlement_source: str = "",
     settlement_value: object | None = None,
+    settlement_condition_id: str = "",
+    settlement_condition_yes_won: bool | None = None,
 ) -> int:
-    """Settle held positions that match this market. Log P&L."""
+    """Settle held positions from family truth or one exact binary condition."""
     settled = 0
     settlement_records = settlement_records if settlement_records is not None else []
     settlement_metric = str(settlement_temperature_metric or "high").strip().lower()
@@ -2530,6 +2532,15 @@ def _settle_positions(
             city,
             target_date,
             settlement_temperature_metric,
+        )
+        return 0
+    exact_condition_id = str(settlement_condition_id or "").strip()
+    exact_condition_scope = bool(exact_condition_id)
+    if exact_condition_scope != (settlement_condition_yes_won is not None):
+        logger.warning(
+            "Skipping settlement for %s %s: exact condition identity/outcome is incomplete",
+            city,
+            target_date,
         )
         return 0
 
@@ -2568,6 +2579,12 @@ def _settle_positions(
                 settlement_metric,
             )
             continue
+        if exact_condition_scope:
+            position_condition_id = str(
+                getattr(pos, "condition_id", "") or ""
+            ).strip()
+            if position_condition_id != exact_condition_id:
+                continue
         try:
             entry_provenance = pos.entry_method or pos.selected_method or "unknown"
         except AttributeError:
@@ -2631,16 +2648,21 @@ def _settle_positions(
 
         # Determine P&L — correct formula: shares × exit_price - cost_basis
         # Legacy-predecessor comparison found the old formula underestimated winning P&L
-        won_result = _parsed_temperature_bins_equivalent(pos.bin_label, winning_label)
-        if won_result is None:
-            logger.warning(
-                "Skipping settlement for %s: position bin %r is not comparable to winning bin %r",
-                pos.trade_id,
-                pos.bin_label,
-                winning_label,
-            )
-            continue
-        won = won_result
+        if exact_condition_scope:
+            won = bool(settlement_condition_yes_won)
+            evidence_winning_bin = pos.bin_label if won else ""
+        else:
+            won_result = _parsed_temperature_bins_equivalent(pos.bin_label, winning_label)
+            if won_result is None:
+                logger.warning(
+                    "Skipping settlement for %s: position bin %r is not comparable to winning bin %r",
+                    pos.trade_id,
+                    pos.bin_label,
+                    winning_label,
+                )
+                continue
+            won = won_result
+            evidence_winning_bin = winning_label
         try:
             shares, settlement_cost_basis = _settlement_economics_for_position(pos)
         except ValueError as exc:
@@ -2765,7 +2787,7 @@ def _settle_positions(
 
         log_event(conn, "SETTLEMENT", pos.trade_id, {
             "city": city, "target_date": target_date,
-            "winning_bin": winning_label, "position_bin": pos.bin_label,
+            "winning_bin": evidence_winning_bin, "position_bin": pos.bin_label,
             "direction": pos.direction, "won": won,
             "position_won": bool(exit_price > 0),
             "pnl": round(pnl, 2), "entry_price": pos.entry_price,
@@ -2782,11 +2804,17 @@ def _settle_positions(
             "settlement_temperature_metric": settlement_temperature_metric,
             "settlement_source": settlement_source,
             "settlement_value": settlement_value,
+            "settlement_condition_id": exact_condition_id or None,
+            "settlement_condition_yes_won": (
+                bool(settlement_condition_yes_won)
+                if exact_condition_scope
+                else None
+            ),
         })
         log_settlement_event(
             conn,
             pos,
-            winning_bin=winning_label,
+            winning_bin=evidence_winning_bin,
             won=won,
             outcome=outcome,
             exited_at_override=exited_at_before_settlement or None,
@@ -2794,7 +2822,7 @@ def _settle_positions(
         _dual_write_canonical_settlement_if_available(
             conn,
             closed or pos,
-            winning_bin=winning_label,
+            winning_bin=evidence_winning_bin,
             won=won,
             outcome=outcome,
             phase_before=phase_before,

@@ -1,5 +1,5 @@
 # Created: 2026-06-03
-# Last reused or audited: 2026-06-03
+# Last reused or audited: 2026-07-24
 # Authority basis: 守護 blocker — settlement_outcomes (VERIFIED truth) -> resolver ->
 #   position settled + REDEEM_INTENT enqueued. Relationship test across the
 #   settlement_outcomes -> position_current -> settlement_commands boundary that the
@@ -176,7 +176,6 @@ def test_resolver_settles_position_and_enqueues_redeem_intent(
     closed.exit_price = 1.0
     import src.execution.exit_lifecycle as el
     monkeypatch.setattr(el, "mark_settled", lambda *a, **kw: closed)
-    monkeypatch.setattr(hv, "_get_canonical_exit_flag", lambda: True)
     monkeypatch.setattr(hv, "log_event", lambda *a, **kw: None)
     monkeypatch.setattr(hv, "record_token_suppression", lambda *a, **kw: {"status": "written"})
     # Downstream settlement-event writers persist many position attributes into real
@@ -263,3 +262,148 @@ def test_exact_venue_resolution_is_economic_truth_when_hourly_obs_disagrees(monk
         "settlement_source": "polymarket_gamma",
         "settlement_value": None,
     }]
+
+
+def test_partial_parent_resolution_emits_exact_held_condition_truth(monkeypatch):
+    """A resolved child is economic truth even while its parent event stays open.
+
+    Weather events can publish binary child payouts one by one. Requiring the
+    parent event to close leaves already-final held conditions in day0_window.
+    The resolver may consume the exact held child, but must not invent a family
+    winning bin while another child remains unresolved.
+    """
+    from src.execution import harvester_pnl_resolver as resolver
+
+    condition_id = "0x" + "a" * 64
+    unresolved_id = "0x" + "b" * 64
+    position = MagicMock(
+        city="Cape Town",
+        target_date="2026-07-24",
+        temperature_metric="high",
+        condition_id=condition_id,
+    )
+    portfolio = MagicMock(positions=[position])
+
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = [(
+        condition_id,
+        "highest-temperature-in-cape-town-on-july-24-2026",
+    )]
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = [{
+        "slug": "highest-temperature-in-cape-town-on-july-24-2026",
+        "title": "Highest temperature in Cape Town on July 24?",
+        "closed": False,
+        "markets": [
+            {
+                "conditionId": condition_id,
+                "question": "Will the highest temperature in Cape Town be 17°C on July 24?",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0", "1"]',
+                "clobTokenIds": '["yes-token", "no-token"]',
+                "umaResolutionStatus": "resolved",
+            },
+            {
+                "conditionId": unresolved_id,
+                "question": "Will the highest temperature in Cape Town be 18°C on July 24?",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.5", "0.5"]',
+                "clobTokenIds": '["yes-token-2", "no-token-2"]',
+                "umaResolutionStatus": "proposed",
+            },
+        ],
+    }]
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: response)
+
+    rows = resolver._read_venue_resolved_settlement_rows(
+        conn,
+        portfolio,
+        {("Cape Town", "2026-07-24", "high")},
+    )
+
+    assert rows == [{
+        "city": "Cape Town",
+        "target_date": "2026-07-24",
+        "market_slug": "highest-temperature-in-cape-town-on-july-24-2026",
+        "winning_bin": None,
+        "temperature_metric": "high",
+        "authority": "VENUE_RESOLVED",
+        "settlement_source": "polymarket_gamma",
+        "settlement_value": None,
+        "settlement_scope": "condition",
+        "condition_id": condition_id,
+        "condition_yes_won": False,
+    }]
+
+
+def test_exact_condition_no_settles_only_matching_position(trade_conn, monkeypatch):
+    """A child-NO resolution settles only that condition, never sibling bins."""
+    import src.execution.exit_lifecycle as el
+    import src.execution.harvester as hv
+
+    portfolio, losing_yes = _winning_position(
+        trade_id="cape-17-yes",
+        city="Cape Town",
+        target_date="2026-07-24",
+    )
+    losing_yes.condition_id = "0x" + "c" * 64
+    losing_yes.bin_label = "17°C"
+    losing_yes.direction = "buy_yes"
+    losing_yes.has_fill_economics_authority = True
+    losing_yes.effective_shares = 2.0
+    losing_yes.effective_cost_basis_usd = 1.0
+
+    _, unresolved_no = _winning_position(
+        trade_id="cape-19-no",
+        city="Cape Town",
+        target_date="2026-07-24",
+    )
+    unresolved_no.condition_id = "0x" + "d" * 64
+    unresolved_no.bin_label = "19°C"
+    unresolved_no.direction = "buy_no"
+    unresolved_no.has_fill_economics_authority = True
+    unresolved_no.effective_shares = 2.0
+    unresolved_no.effective_cost_basis_usd = 1.0
+    portfolio.positions.append(unresolved_no)
+
+    settled_calls = []
+
+    def _mark_settled(_portfolio, trade_id, settlement_price, reason):
+        settled_calls.append((trade_id, settlement_price, reason))
+        closed = MagicMock()
+        closed.trade_id = trade_id
+        closed.pnl = -1.0
+        closed.bin_label = losing_yes.bin_label
+        closed.direction = losing_yes.direction
+        closed.p_posterior = losing_yes.p_posterior
+        closed.decision_snapshot_id = ""
+        closed.edge_source = "model"
+        closed.strategy = "default"
+        closed.last_exit_at = "2026-07-24T22:00:00Z"
+        closed.exit_price = settlement_price
+        return closed
+
+    monkeypatch.setattr(el, "mark_settled", _mark_settled)
+    monkeypatch.setattr(hv, "log_event", lambda *a, **kw: None)
+    monkeypatch.setattr(hv, "log_settlement_event", lambda *a, **kw: None)
+    monkeypatch.setattr(hv, "_dual_write_canonical_settlement_if_available", lambda *a, **kw: None)
+    monkeypatch.setattr(hv, "record_token_suppression", lambda *a, **kw: {"status": "written"})
+
+    settled = hv._settle_positions(
+        trade_conn,
+        portfolio,
+        "Cape Town",
+        "2026-07-24",
+        "",
+        settlement_authority="VENUE_RESOLVED",
+        settlement_truth_source="gamma_exact_held_condition",
+        settlement_market_slug="highest-temperature-in-cape-town-on-july-24-2026",
+        settlement_temperature_metric="high",
+        settlement_source="polymarket_gamma",
+        settlement_condition_id=losing_yes.condition_id,
+        settlement_condition_yes_won=False,
+    )
+
+    assert settled == 1
+    assert settled_calls == [("cape-17-yes", 0.0, "SETTLEMENT")]
