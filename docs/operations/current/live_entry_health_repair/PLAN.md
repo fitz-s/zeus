@@ -941,3 +941,39 @@ Restore truthful live entry admission after the global auction reached a real wi
   requires a complete new auction whose coverage identity recomputes exactly,
   and any selected statistical SELL must reach the next truthful preflight or
   venue outcome rather than this superseded-identity rejection.
+
+## Slice B71 -- Keep unresolved claims out of executable SELL inventory
+
+- Live proof: complete auctions repeatedly select a Guangzhou `NO` SELL for
+  `11.70` shares and then correctly fail JIT preflight with
+  `GLOBAL_SELL_POSITION_SHARES_SUPERSEDED`. The canonical position is
+  `chain_state=unknown, chain_shares=0`, while two authenticated filled BUY
+  commands under the same legacy position id own different native tokens
+  (`5.2 NO` and `6.5 YES`). The latest trusted collateral snapshots contain
+  no CTF balances. The wealth witness therefore falls back to the projection's
+  `11.7` verified-fill claim, and currently publishes that unresolved terminal
+  claim through `native_holdings_micro` as if it were exact sellable inventory.
+- First-principles invariant: an unresolved local claim may widen terminal
+  wealth and consume committed capital, but it is not a venue-native SELL
+  capability. Only a current collateral token balance or a current reconciled
+  chain position may enter `NativeHolding` and generate a reduce-only SELL.
+  Preflight's exact inventory check remains the final independent boundary.
+- Minimal repair: keep unresolved verified-fill claims in the wealth upper
+  bound, position-set identity, and capital commitments, but publish only
+  represented current holdings through `PortfolioWealthWitness.native_holdings_micro`.
+  Preserve the existing conservative treatment of unresolved claims; do not
+  relabel or reconstruct their token payoff from a corrupted projection.
+- Files authorized: `src/engine/global_auction_universe.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`, and this packet.
+- Forbidden: weaken `_current_global_sell_position`, infer or split existing
+  holdings without authenticated append-first facts, treat a verified fill as
+  chain inventory, erase unresolved risk from wealth/Kelly, mutate or copy a
+  canonical DB, force a venue action, change probability or price-band law, or
+  change lifecycle.
+- Acceptance: a verified fill with `chain_state=unknown`, zero chain shares,
+  and no CTF balance still increases wealth ceiling and committed capital but
+  contributes zero `native_holdings_micro`, zero `NativeHolding`, and no SELL
+  candidate. A current reconciled position remains exact sellable inventory.
+  The Guangzhou false winner disappears from a current read-only replay;
+  focused wealth/global-auction/preflight tests and the performance evaluator
+  run before exact-SHA deployment.

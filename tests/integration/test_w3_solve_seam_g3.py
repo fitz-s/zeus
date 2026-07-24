@@ -15131,6 +15131,7 @@ def test_current_portfolio_wealth_uses_fresh_synced_positions_when_ctf_mirror_em
 
     assert witness.wealth_floor_usd == Decimal("27")
     assert witness.wealth_ceiling_usd == Decimal("30.25")
+    assert witness.native_holdings_micro == (("yes-token", 3_250_000),)
 
 
 def test_current_portfolio_wealth_uses_fresh_ctf_mirror_over_stale_projection_time():
@@ -15201,6 +15202,7 @@ def test_current_portfolio_wealth_uses_ctf_mirror_during_projection_lag():
     )
 
     assert witness.wealth_ceiling_usd == Decimal("41.5892")
+    assert witness.native_holdings_micro == (("no-token", 14_589_200),)
 
 
 def test_current_portfolio_wealth_bounds_verified_fill_during_chain_lag():
@@ -15234,6 +15236,8 @@ def test_current_portfolio_wealth_bounds_verified_fill_during_chain_lag():
     )
 
     assert witness.wealth_ceiling_usd == Decimal("41.589284")
+    assert witness.native_holdings_micro == ()
+    assert witness.native_commitments_micro == (("no-token", 10_000_000),)
 
 
 def test_current_portfolio_wealth_refuses_unverified_projection_lag():
@@ -15353,6 +15357,7 @@ def test_current_portfolio_wealth_bounds_unverified_claim_without_spendable_cred
     assert witness.spendable_cash_usd == Decimal("25")
     assert witness.wealth_floor_usd == Decimal("27")
     assert witness.wealth_ceiling_usd == Decimal("28")
+    assert witness.native_holdings_micro == ()
 
 
 def test_current_portfolio_wealth_witness_bounds_inflight_buy_reservation():
