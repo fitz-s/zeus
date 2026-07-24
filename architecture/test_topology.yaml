@@ -61,7 +61,7 @@ test_trust_policy:
     tests/test_replacement_fused_q_shape.py: {created: "2026-06-09", last_used: "2026-07-23", note: "Probability authority antibody: absolute current ENS member-center disagreement cannot be recentered out while the same members remain absolute settlement-bin evidence; aligned evidence preserves the within-plus-between decomposition; YES/NO remain exact complements."}
     tests/test_replacement_seed_coverage_gate.py: {created: "2026-06-10", last_used: "2026-07-20", note: "Replacement input-HWM and seed coverage contracts, including product-cycle indexed frozen artifact selection that ignores malformed unrelated older cycles."}
     tests/solve/test_solver_properties.py: {created: "2026-07-03", last_used: "2026-07-22", note: "Current global-auction properties: symmetric YES/NO terminal wealth, exact payoff and token binding, partial-held SELL optimality, current universe/book/wealth authority, executable-depth oracles, Fractional Kelly, and complete BUY/SELL/CASH comparisons."}
-    tests/integration/test_w3_solve_seam_g3.py: {created: "2026-07-03", last_used: "2026-07-23", note: "Current global-auction integration: exact probability and wealth generations, correlated family endowment, deterministic winner selection, preflight zero-side-effect contract, JIT actuation, and receipt-before-external-I/O ordering."}
+    tests/integration/test_w3_solve_seam_g3.py: {created: "2026-07-03", last_used: "2026-07-24", note: "Current global-auction integration: exact probability and wealth generations, correlated family endowment, deterministic winner selection, preflight zero-side-effect contract, JIT actuation, and receipt-before-external-I/O ordering."}
     tests/engine/test_native_holdings.py: {created: "2026-07-22", last_used: "2026-07-22", note: "Current reconciled YES/NO inventory and pending-entry obligations bind to exact family condition, token, and ledger identities before auction scoring."}
     tests/decision_kernel/test_k1_shared_authority_predicates.py: {created: "2026-06-10", last_used: "2026-07-19", note: "Shared verifier/compiler calibration authority set and maturity predicate, including typed Day0 remaining-window and deterministic-payoff credentials."}
     tests/engine/test_s3_native_side_candidate_materialization.py: {created: "2026-06-08", last_used: "2026-07-14", note: "Native YES/NO candidate materialization, including global-auction refusal of scalar execution-price fallback and full economic-curve equality at winner JIT while allowing evidence-carrier-only churn."}
@@ -345,7 +345,7 @@ test_trust_policy:
     tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-07-16"}
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
-    tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-07-20"}
+    tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-07-24"}
     tests/test_diurnal_peak_prob_monotone.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_edli_status_pulse_submit_counter.py: {created: "2026-06-09", last_used: "2026-06-10"}
     tests/test_stake_min_order_not_edge_reversed.py: {created: "2026-06-09", last_used: "2026-06-10"}

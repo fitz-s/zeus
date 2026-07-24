@@ -814,8 +814,8 @@ def maybe_refresh_day0_hourly_vectors(
             if not models:
                 continue
             with _REFRESH_LOCK:
-                last = _LAST_REFRESH_MONOTONIC.get(refresh_key, 0.0)
-                if now_monotonic - last < float(interval_s):
+                last = _LAST_REFRESH_MONOTONIC.get(refresh_key)
+                if last is not None and now_monotonic - last < float(interval_s):
                     skipped_throttle += 1
                     continue
             quota_context = (
@@ -828,8 +828,8 @@ def maybe_refresh_day0_hourly_vectors(
                     skipped_quota += 1
                     break
                 with _REFRESH_LOCK:
-                    last = _LAST_REFRESH_MONOTONIC.get(refresh_key, 0.0)
-                    if now_monotonic - last < float(interval_s):
+                    last = _LAST_REFRESH_MONOTONIC.get(refresh_key)
+                    if last is not None and now_monotonic - last < float(interval_s):
                         skipped_throttle += 1
                         continue
                     _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
