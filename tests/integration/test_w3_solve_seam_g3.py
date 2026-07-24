@@ -20004,6 +20004,10 @@ def test_global_sell_fak_reaches_exit_envelope_and_sdk_when_allocator_is_gtc(
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
     monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: "0x0000000000000000000000000000000000000001",
+    )
+    monkeypatch.setattr(
         "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
         lambda *_args, **_kwargs: {
             "component": "collateral_snapshot_refresh",
