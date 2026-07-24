@@ -304,7 +304,7 @@ class ObsV2Row:
                 f"precedes utc_timestamp={self.utc_timestamp!r}. A live observation "
                 "cannot be usable before it was observed."
             )
-        for key in ("hour_max_raw_ts", "hour_min_raw_ts"):
+        for key in ("hour_max_raw_ts", "hour_min_raw_ts", "latest_raw_ts"):
             value = provenance.get(key)
             if value in (None, ""):
                 continue

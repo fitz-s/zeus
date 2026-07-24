@@ -144,6 +144,18 @@ def test_writer_rejects_imported_at_before_raw_source_print():
         )
 
 
+def test_writer_rejects_imported_at_before_latest_raw_source_print():
+    with pytest.raises(InvalidObsV2RowError, match="causality violation.*latest_raw_ts"):
+        _make_row(
+            imported_at="2024-01-15T14:40:00+00:00",
+            provenance_json=_valid_provenance(
+                hour_max_raw_ts="2024-01-15T14:30:00+00:00",
+                hour_min_raw_ts="2024-01-15T14:00:00+00:00",
+                latest_raw_ts="2024-01-15T14:45:00+00:00",
+            ),
+        )
+
+
 # ----------------------------------------------------------------------
 # A1: missing / wrong authority
 # ----------------------------------------------------------------------
@@ -731,6 +743,7 @@ def test_live_tick_payload_hash_changes_with_hourly_extrema_material_values():
         temp_unit="F",
         station_id="KORD",
         observation_count=1,
+        latest_raw_ts="2026-05-20T13:53:00+00:00",
     )
     row_a = _hourly_obs_to_v2_row(
         HourlyObservation(**base),
@@ -742,11 +755,23 @@ def test_live_tick_payload_hash_changes_with_hourly_extrema_material_values():
         imported_at="2026-05-20T14:01:00+00:00",
         tier_name="WU_ICAO",
     )
+    row_c = _hourly_obs_to_v2_row(
+        HourlyObservation(
+            **{**base, "latest_raw_ts": "2026-05-20T13:59:00+00:00"}
+        ),
+        imported_at="2026-05-20T14:01:00+00:00",
+        tier_name="WU_ICAO",
+    )
 
     hash_a = json.loads(row_a.provenance_json)["payload_hash"]
     hash_b = json.loads(row_b.provenance_json)["payload_hash"]
+    hash_c = json.loads(row_c.provenance_json)["payload_hash"]
 
+    assert json.loads(row_a.provenance_json)["latest_raw_ts"] == (
+        "2026-05-20T13:53:00+00:00"
+    )
     assert hash_a != hash_b
+    assert hash_a != hash_c
 
 
 def test_insert_rows_rolls_back_revision_history_on_failure(mem_db):

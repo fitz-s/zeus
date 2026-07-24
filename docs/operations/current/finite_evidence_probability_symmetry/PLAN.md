@@ -4,6 +4,27 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-23 Day0 raw-report freshness clock correction
+
+Live Miami evidence separated two clocks that the hourly observation schema
+intentionally stores: `utc_timestamp` is the stable UTC-hour bucket identity,
+while `hour_*_raw_ts` is the source report time. Day0 readers and the event
+catch-up scanner used the bucket identity as the freshness clock. A 01:53Z WU
+report possessed at 02:15Z was therefore treated as a 01:00Z observation and
+declared stale against a 60-minute budget, suppressing current Day0 authority
+while the source stream was healthy.
+
+The hot-fix preserves bucket identity, extrema aggregation, source routing, and
+causality gates. Hourly clients now retain the latest raw report in each
+bucket; the typed writer rejects possession timestamps earlier than that fact;
+and both direct readers and event catch-up use that raw source time, with the
+existing max/min raw timestamps as a backward-compatible fallback. HKO's
+cumulative snapshot clock remains its canonical `utc_timestamp`. Eligibility
+now requires bucket identity, source fact time, and possession time all to be no
+later than the decision; gap analysis and latest-context selection use the same
+fact clock. This restores causal held-position redecision without letting quote
+time or market price enter probability authority.
+
 ## 2026-07-23 continuous-time plateau redecision correction
 
 The loss-to-zero reconstruction found that the fast Day0 source clock emitted a

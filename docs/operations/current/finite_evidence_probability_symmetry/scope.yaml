@@ -20,6 +20,9 @@ in_scope:
 - src/data/replacement_forecast_cycle_policy.py
 - src/data/replacement_input_hwm.py
 - src/data/day0_observation_reader.py
+- src/data/wu_hourly_client.py
+- src/data/ogimet_hourly_client.py
+- src/data/observation_instants_writer.py
 - src/data/day0_fast_obs.py
 - src/data/day0_source_health.py
 - src/data/observation_client.py
@@ -34,6 +37,7 @@ in_scope:
 - src/engine/cycle_runtime.py
 - src/engine/event_reactor_adapter.py
 - src/events/day0_authority.py
+- src/events/triggers/day0_extreme_updated.py
 - src/decision_kernel/verifier.py
 - src/control/live_health.py
 - src/control/heartbeat_supervisor.py
@@ -105,6 +109,9 @@ in_scope:
 - tests/test_day0_exit_gate.py
 - tests/test_day0_hard_fact_exit.py
 - tests/test_day0_observation_reader.py
+- tests/test_hourly_clients_parse.py
+- tests/test_obs_v2_writer.py
+- tests/events/test_day0_extreme_updated_trigger.py
 - tests/test_day0_obs_fastlane_optionbc.py
 - tests/test_day0_fast_obs_lane.py
 - tests/test_day0_source_health.py
@@ -143,6 +150,7 @@ in_scope:
 - src/events/live_order_aggregate.py
 - scripts/migrate_b071_token_suppression_to_history.py
 - scripts/deploy_live.py
+- scripts/obs_live_tick.py
 out_of_scope:
 - state/zeus-world.db
 - state/zeus-world.db-*

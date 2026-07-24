@@ -117,6 +117,7 @@ def test_wu_aggregate_emits_hour_max_and_min_from_same_bucket():
     assert bucket_14.hour_min_temp == 79.0
     assert bucket_14.hour_max_raw_ts.startswith("2024-01-15T14:35:00")
     assert bucket_14.hour_min_raw_ts.startswith("2024-01-15T14:00:00")
+    assert bucket_14.latest_raw_ts.startswith("2024-01-15T14:35:00")
     assert bucket_14.observation_count == 2
     # 15:00 bucket has a single obs; max == min == 80
     assert bucket_15.hour_max_temp == 80.0
@@ -170,6 +171,7 @@ def test_wu_aggregate_multi_obs_bucket_tracks_both_max_and_min():
     assert bucket.hour_max_raw_ts.startswith("2024-01-15T14:30:00")
     assert bucket.hour_min_temp == 70.0
     assert bucket.hour_min_raw_ts.startswith("2024-01-15T14:00:00")
+    assert bucket.latest_raw_ts.startswith("2024-01-15T14:45:00")
     assert bucket.observation_count == 4
 
 
@@ -399,3 +401,4 @@ def test_no_hourly_observation_field_named_temp_current():
     assert "hour_min_temp" in fields
     assert "hour_max_raw_ts" in fields
     assert "hour_min_raw_ts" in fields
+    assert "latest_raw_ts" in fields

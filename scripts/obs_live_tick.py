@@ -182,6 +182,17 @@ def _source_url_for_obs(obs: HourlyObservation, *, source_tag: str) -> str:
     return f"source:{source_tag}:{obs.station_id}:{obs.target_date}"
 
 
+def _latest_raw_ts(obs: HourlyObservation) -> str:
+    """Return the newest source report time, never the hour-bucket identity."""
+
+    if obs.latest_raw_ts:
+        return obs.latest_raw_ts
+    return max(
+        (obs.hour_max_raw_ts, obs.hour_min_raw_ts),
+        key=lambda value: datetime.fromisoformat(value.replace("Z", "+00:00")),
+    )
+
+
 def _hourly_obs_to_v2_row(
     obs: HourlyObservation,
     *,
@@ -194,11 +205,13 @@ def _hourly_obs_to_v2_row(
     for track-aware queries. Do NOT set to hour_max_temp.
     """
     source_tag = expected_source_for_city(obs.city)
+    latest_raw_ts = _latest_raw_ts(obs)
     provenance = {
         "tier": tier_name,
         "station_id": obs.station_id,
         "hour_max_raw_ts": obs.hour_max_raw_ts,
         "hour_min_raw_ts": obs.hour_min_raw_ts,
+        "latest_raw_ts": latest_raw_ts,
         "raw_obs_count": obs.observation_count,
         "aggregation": "utc_hour_bucket_extremum",
         "source_url": _source_url_for_obs(obs, source_tag=source_tag),
@@ -210,6 +223,7 @@ def _hourly_obs_to_v2_row(
             "utc_timestamp": obs.utc_timestamp,
             "hour_max_raw_ts": obs.hour_max_raw_ts,
             "hour_min_raw_ts": obs.hour_min_raw_ts,
+            "latest_raw_ts": latest_raw_ts,
             "hour_max_temp": obs.hour_max_temp,
             "hour_min_temp": obs.hour_min_temp,
             "temp_unit": obs.temp_unit,
