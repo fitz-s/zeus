@@ -326,7 +326,7 @@ cards:
       Before touching settlement/probability/calibration, verify WMO half-up
       through SettlementSemantics and never use banker rounding.
 
-  - id: TELEMETRY_BACKTEST_NON_PROMOTION
+  - id: BACKTEST_NON_PROMOTION
     status: active_law
     severity: critical
     sources:
@@ -335,7 +335,7 @@ cards:
       - architecture/data_rebuild_topology.yaml
       - .omx/context/packet8_data_rebuild_topology_closeout_2026-04-13.md
     failure_mode: >
-      Backtest, replay, JSON, or CSV telemetry are treated as authorization
+      Backtest, replay, JSON, or CSV evidence is treated as authorization
       for live strategy, calibration, or DB truth changes.
     trigger_context:
       - replay PnL interpretation

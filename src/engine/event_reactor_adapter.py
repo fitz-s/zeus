@@ -34114,7 +34114,7 @@ def _latest_day0_current_temperature_native(
     return None
 
 
-def _remaining_day_extremes_c_with_current_state_diagnostic(
+def _remaining_day_extremes_c_with_current_state_evidence(
     vectors: list[object],
     *,
     target_date: str,
@@ -34126,7 +34126,7 @@ def _remaining_day_extremes_c_with_current_state_diagnostic(
     """Return future model extrema and audit the current-state innovation.
 
     The current observation defines the causal window and the already observed
-    grid point is excluded.  Its model innovation is diagnostic only: without a
+    grid point is excluded. Its model innovation is evidence only: without a
     validated time-covariance law, transporting one instantaneous error through
     every future hour would manufacture certainty rather than condition it.
     """
@@ -34290,7 +34290,7 @@ def _day0_remaining_day_members(
                 else (current_native - 32.0) * 5.0 / 9.0
             )
             extremes_c, innovations = (
-                _remaining_day_extremes_c_with_current_state_diagnostic(
+                _remaining_day_extremes_c_with_current_state_evidence(
                     vectors,
                     target_date=str(family.target_date),
                     decision_time=decision_time,

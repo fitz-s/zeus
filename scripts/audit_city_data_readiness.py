@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit per-city data readiness for diagnostic runtime and archive work."""
+"""Audit per-city data readiness for read-only evidence and archive work."""
 from __future__ import annotations
 
 import argparse

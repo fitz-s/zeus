@@ -12,7 +12,7 @@ WORKING-class codes.  The downstream issue pipeline only recognises "warning"/"e
 
 Test matrix:
   1. script_long_lived_bad_name (F5, AS-07) → severity="warning", blocking_modes contains "global_health"
-  2. script_diagnostic_forbidden_write_target (F5, AS-08) → severity="warning", blocking_modes contains "global_health"
+  2. script_evidence_forbidden_write_target (F5, AS-08) → severity="warning", blocking_modes contains "global_health"
   3. planning_lock_evidence_missing (AS-09, TRUTH_REWRITE) → severity="error" (still BLOCKING)
   4. Backward compat: code NOT in admission_severity.yaml → severity="error" (legacy default)
 
@@ -137,15 +137,15 @@ def test_f5_bad_name_emits_advisory() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 2: script_diagnostic_forbidden_write_target → severity="advisory"
+# Test 2: script_evidence_forbidden_write_target → severity="advisory"
 # ---------------------------------------------------------------------------
 
 def test_f5_forbidden_write_target_emits_advisory() -> None:
-    """F5/AS-08: script_diagnostic_forbidden_write_target must emit severity='warning' + blocking_modes.
+    """F5/AS-08: script_evidence_forbidden_write_target must emit severity='warning' + blocking_modes.
 
     Simulate run_scripts() checking a diagnostic script whose write_targets include
-    a path not in diagnostic_allowed_write_targets.  The checker calls
-    api._issue_with_admission_severity('script_diagnostic_forbidden_write_target', ...)
+    a path not in read_only_evidence_allowed_write_targets.  The checker calls
+    api._issue_with_admission_severity('script_evidence_forbidden_write_target', ...)
     which must emit severity='warning' with blocking_modes=("global_health",) per AS-08
     via the advisory() helper (F6 fix).
 
@@ -175,7 +175,7 @@ def test_f5_forbidden_write_target_emits_advisory() -> None:
     manifest = {
         "scripts": {"audit_bad_target.py": {}},
         "required_effective_fields": [],
-        "diagnostic_allowed_write_targets": ["stdout", "temp", "docs/historical_evidence/**"],
+        "read_only_evidence_allowed_write_targets": ["stdout", "temp", "docs/historical_evidence/**"],
         "canonical_db_targets": [],
     }
     api.load_script_manifest = MagicMock(return_value=manifest)
@@ -184,21 +184,21 @@ def test_f5_forbidden_write_target_emits_advisory() -> None:
 
     forbidden_issues = [
         i for i in result.issues
-        if i.code == "script_diagnostic_forbidden_write_target"
+        if i.code == "script_evidence_forbidden_write_target"
     ]
     assert forbidden_issues, (
-        "Expected at least one issue with code='script_diagnostic_forbidden_write_target'. "
+        "Expected at least one issue with code='script_evidence_forbidden_write_target'. "
         f"Got issues: {[i.code for i in result.issues]}"
     )
     for issue in forbidden_issues:
         assert issue.severity == "warning", (
-            f"script_diagnostic_forbidden_write_target must emit severity='warning' "
+            f"script_evidence_forbidden_write_target must emit severity='warning' "
             f"(F6/F7 fix: advisory() helper). Got severity={issue.severity!r}. "
             "Check that _issue_with_admission_severity calls advisory() which returns severity='warning'."
         )
         bm = issue.blocking_modes or ()
         assert "global_health" in bm, (
-            f"script_diagnostic_forbidden_write_target must have blocking_modes containing 'global_health'. "
+            f"script_evidence_forbidden_write_target must have blocking_modes containing 'global_health'. "
             f"Got blocking_modes={bm!r}."
         )
 
@@ -281,9 +281,9 @@ def test_load_admission_severity_returns_mapping() -> None:
     assert mapping1.get("script_long_lived_bad_name") == "ADVISORY", (
         f"Expected script_long_lived_bad_name → ADVISORY; got {mapping1.get('script_long_lived_bad_name')!r}"
     )
-    assert mapping1.get("script_diagnostic_forbidden_write_target") == "ADVISORY", (
-        f"Expected script_diagnostic_forbidden_write_target → ADVISORY; "
-        f"got {mapping1.get('script_diagnostic_forbidden_write_target')!r}"
+    assert mapping1.get("script_evidence_forbidden_write_target") == "ADVISORY", (
+        f"Expected script_evidence_forbidden_write_target → ADVISORY; "
+        f"got {mapping1.get('script_evidence_forbidden_write_target')!r}"
     )
     # Cache warm path: second call returns same object
     mapping2 = topology_doctor._load_admission_severity()

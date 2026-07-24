@@ -350,6 +350,36 @@ def test_gate_rejects_extended_alternate_concept_variants(tmp_path: Path) -> Non
     assert violations(tmp_path)
 
 
+def test_gate_rejects_retired_concept_as_control_value_or_modifier(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    token = "diag" + "nostic"
+    (source / "value.py").write_text(f"mode = {token!r}\n", encoding="utf-8")
+    (source / "modifier.py").write_text(
+        f"parser.help = {f'{token} mode'!r}\n",
+        encoding="utf-8",
+    )
+    found = violations(tmp_path)
+    assert any(item.startswith("src/value.py:") for item in found)
+    assert any(item.startswith("src/modifier.py:") for item in found)
+
+
+def test_gate_rejects_retired_concept_in_python_identifier(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    token = "diag" + "nostic"
+    (source / "bad.py").write_text(
+        f"def collect_{token}_rows():\n    return []\n",
+        encoding="utf-8",
+    )
+    assert any(
+        "forbidden alternate-runtime identifier" in item
+        for item in violations(tmp_path)
+    )
+
+
 def test_gate_rejects_persisted_parallel_freshness_authority(tmp_path: Path) -> None:
     source = tmp_path / "src" / "data"
     source.mkdir(parents=True)

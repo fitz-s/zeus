@@ -77,7 +77,7 @@ def _safe_query(conn: sqlite3.Connection, sql: str, params=()) -> list[sqlite3.R
 
 # ── Layer 1: Diagnostics ──────────────────────────────────────────────────
 
-def _collect_diagnostics() -> dict:
+def _collect_evidence() -> dict:
     """Reserved report slot for standalone checks.
 
     Venus computes the few required consistency checks locally below instead
@@ -551,7 +551,7 @@ def generate_sensing_report() -> dict:
         return {"generated_at": generated_at, "_error": f"cannot open forecasts DB: {exc}"}
 
     try:
-        diagnostics = _collect_diagnostics()
+        evidence = _collect_evidence()
         surfaces = _collect_truth_surfaces(conn, forecasts_conn)
         consistency = _collect_consistency(conn, surfaces)
         relationship_checks = _collect_relationship_checks()
@@ -562,7 +562,7 @@ def generate_sensing_report() -> dict:
 
     return {
         "generated_at": generated_at,
-        "diagnostics": diagnostics,
+        "evidence": evidence,
         "truth_surfaces": surfaces,
         "consistency": consistency,
         "relationship_checks": relationship_checks,

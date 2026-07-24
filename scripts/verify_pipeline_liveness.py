@@ -89,7 +89,7 @@ def _fetchone_bounded(
 
 
 def _candidate_receipt_latest(conn: sqlite3.Connection) -> tuple[str | None, dict]:
-    diagnostics: dict = {
+    details: dict = {
         "query_strategy": "per_rejection_stage_idx_no_trade_regret_stage_ordered_desc",
         "query_complete": True,
         "interrupted_stages": [],
@@ -102,7 +102,7 @@ def _candidate_receipt_latest(conn: sqlite3.Connection) -> tuple[str | None, dic
     latest: str | None = None
     for row in rows:
         stage = row[0]
-        diagnostics["checked_stages"] += 1
+        details["checked_stages"] += 1
         found, interrupted = _fetchone_bounded(
             conn,
             """
@@ -116,12 +116,12 @@ def _candidate_receipt_latest(conn: sqlite3.Connection) -> tuple[str | None, dic
             (stage,),
         )
         if interrupted:
-            diagnostics["query_complete"] = False
-            diagnostics["interrupted_stages"].append(stage)
+            details["query_complete"] = False
+            details["interrupted_stages"].append(stage)
             continue
         if found is not None and found[0] and (latest is None or str(found[0]) > latest):
             latest = str(found[0])
-    return latest, diagnostics
+    return latest, details
 
 
 def check() -> tuple[int, dict]:
@@ -140,7 +140,7 @@ def check() -> tuple[int, dict]:
         "SELECT COUNT(*) FROM readiness_state WHERE status='READY' AND expires_at > ?",
         (now.isoformat(),),
     ).fetchone()[0]
-    cand_latest, cand_diagnostics = _candidate_receipt_latest(w)
+    cand_latest, cand_details = _candidate_receipt_latest(w)
 
     failures = []
     for name, latest in (
@@ -152,13 +152,13 @@ def check() -> tuple[int, dict]:
         ok = age is not None and age <= BARS_HOURS[name]
         out["stages"][name] = {"latest": latest, "age_hours": age, "ok": ok}
         if name == "candidate_receipt":
-            out["stages"][name].update(cand_diagnostics)
+            out["stages"][name].update(cand_details)
         if not ok:
             failures.append(f"{name} stale (age={age}, bar={BARS_HOURS[name]}h)")
-        if name == "candidate_receipt" and not cand_diagnostics["query_complete"]:
+        if name == "candidate_receipt" and not cand_details["query_complete"]:
             failures.append(
                 "candidate_receipt query incomplete "
-                f"(interrupted_stages={cand_diagnostics['interrupted_stages']})"
+                f"(interrupted_stages={cand_details['interrupted_stages']})"
             )
 
     ready_ok = ready_n >= MIN_READY_SCOPES

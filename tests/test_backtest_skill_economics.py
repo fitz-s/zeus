@@ -38,7 +38,7 @@ from src.state.portfolio import (
 )
 from scripts import equity_curve as equity_curve_module
 from scripts.equity_curve import (
-    LEGACY_DIAGNOSTIC_COHORT,
+    LEGACY_UNVERIFIED_COHORT,
     _single_exit_economics_cohort,
     require_single_exit_economics_cohort,
 )
@@ -101,7 +101,7 @@ def test_equity_curve_reports_single_corrected_cohort():
 
     assert cohort == CORRECTED_ECONOMICS_COHORT
     assert counts == {CORRECTED_ECONOMICS_COHORT: 2}
-    assert require_single_exit_economics_cohort([]) == LEGACY_DIAGNOSTIC_COHORT
+    assert require_single_exit_economics_cohort([]) == LEGACY_UNVERIFIED_COHORT
 
 
 def test_equity_curve_uses_status_pnl_not_bankroll_delta(monkeypatch):

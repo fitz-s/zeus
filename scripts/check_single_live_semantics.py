@@ -108,6 +108,7 @@ _RUNTIME_CATEGORY_FORBIDDEN = (
 )
 _CONCEPT_TOKENS = (
     "sha" + "dow",
+    "diag" + "nostic",
 )
 
 
@@ -135,6 +136,10 @@ def violations(
         source = path.read_text(encoding="utf-8", errors="replace")
         scan_value = source.lower()
         if path.suffix.lower() == ".py":
+            out.extend(
+                f"{rel}: {item}"
+                for item in _identifier_concept_violations(source)
+            )
             scan_value += "\n" + "\n".join(
                 _static_python_strings(
                     source,
@@ -169,6 +174,31 @@ def violations(
                         f"{rel}: forbidden vague runtime category {token!r}"
                     )
     return sorted(set(out))
+
+
+def _identifier_concept_violations(source: str) -> list[str]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    identifiers: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            identifiers.add(node.name)
+        elif isinstance(node, ast.arg):
+            identifiers.add(node.arg)
+        elif isinstance(node, ast.Name):
+            identifiers.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            identifiers.add(node.attr)
+    return [
+        f"forbidden alternate-runtime identifier {identifier!r}"
+        for identifier in sorted(identifiers)
+        if any(
+            re.search(rf"(?:^|_){re.escape(token)}(?:s)?(?:_|$)", identifier.lower())
+            for token in _CONCEPT_TOKENS
+        )
+    ]
 
 
 def _scan_paths(root: Path) -> set[Path]:
@@ -701,9 +731,11 @@ def _contains_exact(token: str, value: str) -> bool:
 
 
 def _contains_live_alternate_concept(token: str, value: str) -> bool:
+    controls = r"(?:mode|category|lane|runtime|semantics)"
     pattern = (
-        r"(?:['\"]?(?:mode|category|lane|runtime|semantics)['\"]?\s*[:=]\s*"
-        rf"['\"]?){re.escape(token)}(?:[a-z0-9_-]*)"
+        rf"(?:['\"]?{controls}['\"]?\s*[:=]\s*['\"]?"
+        rf"{re.escape(token)}(?:[a-z0-9_-]*)|"
+        rf"{re.escape(token)}(?:[a-z0-9_-]*[\s_-]+){controls})"
     )
     return re.search(pattern, value) is not None
 

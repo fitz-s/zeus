@@ -2896,7 +2896,7 @@ class TestSourceContractGate:
             return conn
 
         monkeypatch.setattr(venus_sensing_report, "get_trade_connection_with_world", _trade_conn)
-        monkeypatch.setattr(venus_sensing_report, "_collect_diagnostics", lambda: {})
+        monkeypatch.setattr(venus_sensing_report, "_collect_evidence", lambda: {})
         forecasts_conn = sqlite3.connect(":memory:")
         forecasts_conn.row_factory = sqlite3.Row
         monkeypatch.setattr(venus_sensing_report, "get_forecasts_connection", lambda: forecasts_conn)

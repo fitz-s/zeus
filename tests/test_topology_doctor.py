@@ -1537,7 +1537,6 @@ def test_data_daemon_test_registry_entries_are_flat_yaml_scalars():
         "tests/test_opendata_writes_v2_table.py",
         "tests/test_opendata_future_target_contract.py",
         "tests/test_ecmwf_open_data_subprocess_hardening.py",
-        "tests/test_forecast_live_daemon.py",
         "tests/test_ecmwf_open_data_step_hours.py",
         "tests/test_forecast_target_contract_horizon.py",
     }
@@ -1631,8 +1630,8 @@ def test_tests_mode_rejects_active_reverse_antibody(monkeypatch):
 
 def test_tests_mode_rejects_law_gate_test_outside_core(monkeypatch):
     topology = topology_doctor.load_test_topology()
-    topology["categories"]["core_law_antibody"].remove("tests/test_fdr.py")
-    topology["categories"]["useful_regression"].append("tests/test_fdr.py")
+    topology["categories"]["core_law_antibody"].remove("tests/test_db.py")
+    topology["categories"]["useful_regression"].append("tests/test_db.py")
 
     monkeypatch.setattr(topology_doctor, "load_test_topology", lambda: topology)
     result = topology_doctor.run_tests()
@@ -1643,8 +1642,8 @@ def test_tests_mode_rejects_law_gate_test_outside_core(monkeypatch):
 
 def test_tests_mode_rejects_high_sensitivity_skip_count_drift(monkeypatch):
     topology = topology_doctor.load_test_topology()
-    topology["high_sensitivity_skips"]["tests/test_db.py"] = {
-        **topology["high_sensitivity_skips"]["tests/test_db.py"],
+    topology["high_sensitivity_skips"]["tests/test_p0_hardening.py"] = {
+        **topology["high_sensitivity_skips"]["tests/test_p0_hardening.py"],
         "skip_count": -1,
     }
 
@@ -2953,7 +2952,7 @@ def test_lore_digest_routes_bin_contract_kind_tasks():
     assert "BIN_CONTRACT_KIND_DISCRETE_SETTLEMENT_SUPPORT" in lore_ids
 
 
-def test_scripts_mode_rejects_diagnostic_canonical_write(monkeypatch):
+def test_scripts_mode_rejects_evidence_canonical_write(monkeypatch):
     manifest = topology_doctor.load_script_manifest()
     manifest["scripts"]["audit_replay_fidelity.py"] = {
         **manifest["scripts"]["audit_replay_fidelity.py"],
@@ -2964,7 +2963,7 @@ def test_scripts_mode_rejects_diagnostic_canonical_write(monkeypatch):
     result = topology_doctor.run_scripts()
 
     assert not result.ok
-    assert any(issue.code == "script_diagnostic_forbidden_write_target" for issue in result.issues)
+    assert any(issue.code == "script_evidence_forbidden_write_target" for issue in result.issues)
 
 
 def test_scripts_mode_rejects_dangerous_script_without_target(monkeypatch):
@@ -2995,18 +2994,20 @@ def test_scripts_mode_rejects_fake_apply_flag(monkeypatch):
     assert any(issue.code == "script_dangerous_apply_flag_not_in_source" for issue in result.issues)
 
 
-def test_scripts_mode_rejects_diagnostic_file_write_without_target(monkeypatch):
+def test_scripts_mode_rejects_evidence_file_write_without_target(monkeypatch):
     manifest = topology_doctor.load_script_manifest()
-    manifest["scripts"]["generate_monthly_bounds.py"] = {"class": "diagnostic"}
+    manifest["scripts"]["generate_monthly_bounds.py"] = {
+        "class": "read_only_evidence"
+    }
 
     monkeypatch.setattr(topology_doctor, "load_script_manifest", lambda: manifest)
     result = topology_doctor.run_scripts()
 
     assert not result.ok
-    assert any(issue.code == "script_diagnostic_untracked_file_write" for issue in result.issues)
+    assert any(issue.code == "script_evidence_untracked_file_write" for issue in result.issues)
 
 
-def test_scripts_mode_applies_diagnostic_rules_to_report_writers(monkeypatch):
+def test_scripts_mode_applies_evidence_rules_to_report_writers(monkeypatch):
     manifest = topology_doctor.load_script_manifest()
     manifest["scripts"]["baseline_experiment.py"] = {
         **manifest["scripts"]["baseline_experiment.py"],
@@ -3017,7 +3018,7 @@ def test_scripts_mode_applies_diagnostic_rules_to_report_writers(monkeypatch):
     result = topology_doctor.run_scripts()
 
     assert not result.ok
-    assert any(issue.code == "script_diagnostic_forbidden_write_target" for issue in result.issues)
+    assert any(issue.code == "script_evidence_forbidden_write_target" for issue in result.issues)
 
 
 def test_scripts_mode_rejects_long_lived_one_off_script_name(monkeypatch):
@@ -3207,7 +3208,7 @@ def test_lore_digest_routes_rounding_tasks_to_wmo_lesson():
     lore_ids = {card["id"] for card in digest["history_lore"]}
 
     assert "WMO_ROUNDING_BANKER_FAILURE" in lore_ids
-    assert "DIAGNOSTIC_BACKTEST_NON_PROMOTION" in lore_ids
+    assert "BACKTEST_NON_PROMOTION" in lore_ids
     assert "UNCOMMITTED_AGENT_EDIT_LOSS" not in lore_ids
 
 
@@ -3890,14 +3891,14 @@ def test_runtime_route_card_surfaces_new_test_companion_before_pr(monkeypatch):
 
 def test_runtime_route_card_keeps_operation_vector_selected_route_first():
     digest = topology_doctor.build_digest(
-        "source canary recovery",
+        "source probe recovery",
         ["src/control/freshness_gate.py", "src/engine/cycle_runner.py"],
         write_intent="edit",
     )
     first = digest["route_card"]["route_candidates"][0]
 
-    assert digest["profile"] == "source canary readiness hot-swap"
-    assert first["profile"] == "source canary readiness hot-swap"
+    assert digest["profile"] == "source probe readiness hot-swap"
+    assert first["profile"] == "source probe readiness hot-swap"
     assert first["selected"] is True
 
 
@@ -4093,7 +4094,7 @@ def test_runtime_claims_appear_in_route_card_and_digest_inputs():
     assert digest["typed_runtime_inputs"]["claims"] == ["admission_valid"]
 
 
-def test_runtime_route_card_explains_generic_source_canary_probe():
+def test_runtime_route_card_explains_generic_source_probe():
     digest = topology_doctor.build_digest(
         "change source freshness handling for provider hot-swap for Paris canary readiness only, no live execution",
         ["src"],
@@ -4102,26 +4103,26 @@ def test_runtime_route_card_explains_generic_source_canary_probe():
     card = digest["route_card"]
 
     assert digest["admission"]["status"] == "scope_expansion_required"
-    assert card["dominant_driver"] in {"source_canary_readiness_hot_swap", "profile_needs_typed_intent"}
+    assert card["dominant_driver"] in {"source_probe_readiness_hot_swap", "profile_needs_typed_intent"}
     assert card["why_not_admitted"]
-    assert "source canary readiness hot-swap" in card["suggested_next_command"]
+    assert "source probe readiness hot-swap" in card["suggested_next_command"]
     assert "src/control/freshness_gate.py" in card["safe_next_files"]
     assert card["merge_evidence_required"]["required"] is False
 
 
-def test_operation_vector_selects_source_canary_without_canonical_phrase():
+def test_operation_vector_selects_source_probe_without_canonical_phrase():
     digest = topology_doctor.build_digest(
-        "source canary recovery",
+        "source probe recovery",
         ["src/control/freshness_gate.py", "src/engine/cycle_runner.py"],
         write_intent="edit",
     )
     card = digest["route_card"]
 
-    assert digest["profile"] == "source canary readiness hot-swap"
+    assert digest["profile"] == "source probe readiness hot-swap"
     assert digest["admission"]["status"] == "admitted"
     assert digest["profile_selection"]["selected_by"] == "operation_vector"
     assert "source_behavior" in card["operation_vector"]["mutation_surfaces"]
-    assert card["dominant_driver"] == "source_canary_readiness_hot_swap"
+    assert card["dominant_driver"] == "source_probe_readiness_hot_swap"
 
 
 def test_operation_vector_does_not_admit_unrelated_freshness_gate_work_as_canary():
@@ -4136,7 +4137,7 @@ def test_operation_vector_does_not_admit_unrelated_freshness_gate_work_as_canary
     assert digest["admission"]["status"] == "advisory_only"
     assert digest["profile_selection"]["selected_by"] != "operation_vector"
     assert "source_behavior" in card["operation_vector"]["mutation_surfaces"]
-    assert card["dominant_driver"] != "source_canary_readiness_hot_swap"
+    assert card["dominant_driver"] != "source_probe_readiness_hot_swap"
 
 
 def test_operation_vector_does_not_misread_pre_merge_hook_as_git_merge():
