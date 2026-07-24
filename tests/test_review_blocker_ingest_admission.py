@@ -409,11 +409,10 @@ def test_hko_tick_resolves_family_admission_before_opening_the_raw_write_transac
 
     source = inspect.getsource(ingest_main._k2_hko_tick)
     admission_pos = source.index("_day0_family_admission_for_scopes(")
-    observation_conn_pos = source.index("get_forecasts_connection(")
+    write_conn_pos = source.index("get_world_connection(")
     write_pos = source.index("project_accumulator_to_v2(")
-    event_conn_pos = source.index("get_world_connection(")
-    assert admission_pos < observation_conn_pos < write_pos < event_conn_pos, (
+    assert admission_pos < write_conn_pos < write_pos, (
         "family-admission resolution must complete before the raw-fact "
-        "forecast write transaction opens; the committed observation must "
-        "also precede the separate world-event transaction"
+        "write transaction opens, so a fail-closed (or any) resolver "
+        "outcome cannot roll back or block the already-separate raw write"
     )

@@ -1739,11 +1739,7 @@ def _k2_hko_tick():
     from src.events.event_priority import day0_is_tradeable_for_scope
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
-    from src.state.db import (
-        get_forecasts_connection,
-        get_world_connection,
-        world_write_mutex,
-    )
+    from src.state.db import get_world_connection, world_write_mutex
     from src.state.write_coordinator import (
         DBIdentity,
         WriteLeaseTimeout,
@@ -1768,8 +1764,7 @@ def _k2_hko_tick():
     )
     write_budget_s = _day0_metar_write_budget_seconds()
     write_deadline = time.monotonic() + write_budget_s
-    observation_conn = None
-    event_conn = None
+    conn = None
     mutex = None
     acquired = False
     inserted_event_ids: tuple[str, ...] = ()
@@ -1787,29 +1782,26 @@ def _k2_hko_tick():
                 int((write_deadline - time.monotonic()) * 1000.0),
             )
             with default_runtime_write_coordinator().lease(
-                (DBIdentity.FORECAST, DBIdentity.WORLD),
+                (DBIdentity.WORLD,),
                 owner="day0_hko_source_clock",
                 write_class="live",
                 deadline_ms=remaining_ms,
                 max_hold_ms=max(1, int(write_budget_s * 1000.0)),
             ) as write_lease:
-                observation_conn = get_forecasts_connection(write_class="live")
-                observation_conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
-                before_changes = int(observation_conn.total_changes)
+                conn = get_world_connection(write_class="live")
+                conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+                before_changes = int(conn.total_changes)
                 commit_started = time.monotonic()
                 project_result = project_accumulator_to_v2(
-                    observation_conn,
+                    conn,
                     "v1.wu-native",
                     DEFAULT_LOG_PATH,
                     snapshot=snapshot,
                 )
                 if event_enabled:
-                    event_conn = get_world_connection(write_class="live")
-                    event_conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
-                    before_changes += int(event_conn.total_changes)
                     decision_time = datetime.now(timezone.utc)
                     trigger = Day0ExtremeUpdatedTrigger(
-                        EventWriter(event_conn),
+                        EventWriter(conn),
                         day0_is_tradeable=day0_is_tradeable_for_scope(
                             str(
                                 edli_cfg.get("edli_live_scope")
@@ -1820,7 +1812,7 @@ def _k2_hko_tick():
                         scan_cities=("Hong Kong",),
                     )
                     results = trigger.scan_observation_instants_rows(
-                        observation_conn=observation_conn,
+                        observation_conn=conn,
                         settlement_semantics=SettlementSemantics.for_city(hko_city),
                         decision_time=decision_time,
                         received_at=decision_time.isoformat(),
@@ -1837,7 +1829,7 @@ def _k2_hko_tick():
                                 str(target_date),
                                 str(metric).lower(),
                             )
-                            for city, target_date, metric in event_conn.execute(
+                            for city, target_date, metric in conn.execute(
                                 f"""
                                 SELECT json_extract(payload_json, '$.city'),
                                        json_extract(payload_json, '$.target_date'),
@@ -1848,31 +1840,26 @@ def _k2_hko_tick():
                                 inserted_event_ids,
                             ).fetchall()
                         )
-                    event_conn.commit()
+                    conn.commit()
                 write_lease.record_commit(
                     commit_ms=(time.monotonic() - commit_started) * 1000.0,
                     rows_changed=max(
                         0,
-                        int(observation_conn.total_changes)
-                        + int(event_conn.total_changes if event_conn is not None else 0)
-                        - before_changes,
+                        int(conn.total_changes) - before_changes,
                     ),
                 )
                 poller.acknowledge(prefetch)
     except WriteLeaseTimeout:
         return {"status": "WRITE_CONTENDED"}
     except sqlite3.OperationalError as exc:
-        for db_conn in (event_conn, observation_conn):
-            if db_conn is not None and db_conn.in_transaction:
-                db_conn.rollback()
+        if conn is not None and conn.in_transaction:
+            conn.rollback()
         if "locked" in str(exc).lower() or "busy" in str(exc).lower():
             return {"status": "WRITE_CONTENDED"}
         raise
     finally:
-        if event_conn is not None:
-            event_conn.close()
-        if observation_conn is not None:
-            observation_conn.close()
+        if conn is not None:
+            conn.close()
         if acquired and mutex is not None:
             mutex.release()
 

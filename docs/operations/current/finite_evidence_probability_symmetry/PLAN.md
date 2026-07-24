@@ -4,18 +4,6 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
-## 2026-07-23 HKO canonical observation routing correction
-
-Current live evidence found HKO official extrema rows for Hong Kong July 23 in
-the world DB while the canonical forecasts DB contained no corresponding
-`observation_instants` row.  The held-position monitor reads forecast-class
-truth, so the split made a real source fact invisible and left post-local-day
-LOW probability stale.  The runtime HKO source-clock writer must commit the
-observation to forecasts DB first, then write its EDLI event to world DB in a
-separate transaction under the existing two-DB write lease.  Re-decision may
-consume only the committed forecast row; absent final evidence remains
-fail-closed and never authorizes a forced SELL.
-
 ## 2026-07-23 continuous-time plateau redecision correction
 
 The loss-to-zero reconstruction found that the fast Day0 source clock emitted a

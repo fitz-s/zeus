@@ -106,7 +106,6 @@ in_scope:
 - tests/test_day0_hard_fact_exit.py
 - tests/test_day0_observation_reader.py
 - tests/test_day0_obs_fastlane_optionbc.py
-- tests/test_review_blocker_ingest_admission.py
 - tests/test_day0_fast_obs_lane.py
 - tests/test_day0_source_health.py
 - tests/engine/test_day0_coverage_gate.py

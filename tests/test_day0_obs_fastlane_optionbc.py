@@ -920,23 +920,7 @@ class TestObsFastTickSchedulerRegistration:
             def fetchall(self):
                 return [("Hong Kong", "2026-07-20", "low")]
 
-        class _ObservationConn:
-            total_changes = 0
-            in_transaction = False
-
-            def execute(self, sql, _params=()):
-                return self
-
-            def commit(self):
-                timeline.append("observation_commit")
-
-            def rollback(self):
-                timeline.append("observation_rollback")
-
-            def close(self):
-                timeline.append("observation_connection_close")
-
-        class _EventConn:
+        class _Conn:
             total_changes = 0
             in_transaction = False
 
@@ -949,10 +933,10 @@ class TestObsFastTickSchedulerRegistration:
                 timeline.append("event_commit")
 
             def rollback(self):
-                timeline.append("event_rollback")
+                timeline.append("rollback")
 
             def close(self):
-                timeline.append("event_connection_close")
+                timeline.append("connection_close")
 
         class _Mutex:
             def acquire(self, *, timeout):
@@ -971,16 +955,11 @@ class TestObsFastTickSchedulerRegistration:
             yield True
 
         @contextmanager
-        def _lease(db_set, **_kwargs):
-            assert tuple(db_set) == (
-                coordinator.DBIdentity.FORECAST,
-                coordinator.DBIdentity.WORLD,
-            )
+        def _lease(*_args, **_kwargs):
             yield _Lease()
 
         def _project(conn, *_args, snapshot, **_kwargs):
             assert snapshot is prefetch.snapshot
-            assert isinstance(conn, _ObservationConn)
             conn.total_changes += 1
             timeline.append("observation_commit")
             return {
@@ -995,13 +974,8 @@ class TestObsFastTickSchedulerRegistration:
                 pass
 
             def scan_observation_instants_rows(self, **_kwargs):
-                assert isinstance(_kwargs["observation_conn"], _ObservationConn)
                 timeline.append("event_write")
                 return [EventWriteResult("event-hko", True, False)]
-
-        def _event_writer(conn):
-            assert isinstance(conn, _EventConn)
-            return object()
 
         hko_city = SimpleNamespace(
             settlement_source_type="hko",
@@ -1043,20 +1017,9 @@ class TestObsFastTickSchedulerRegistration:
             "day0_is_tradeable_for_scope",
             lambda _scope: True,
         )
-        monkeypatch.setattr(event_writer, "EventWriter", _event_writer)
+        monkeypatch.setattr(event_writer, "EventWriter", lambda _conn: object())
         monkeypatch.setattr(day0_trigger, "Day0ExtremeUpdatedTrigger", _Trigger)
-        observation_conn = _ObservationConn()
-        event_conn = _EventConn()
-        monkeypatch.setattr(
-            db,
-            "get_forecasts_connection",
-            lambda **_kwargs: observation_conn,
-        )
-        monkeypatch.setattr(
-            db,
-            "get_world_connection",
-            lambda **_kwargs: event_conn,
-        )
+        monkeypatch.setattr(db, "get_world_connection", lambda **_kwargs: _Conn())
         monkeypatch.setattr(db, "world_write_mutex", lambda: _Mutex())
         monkeypatch.setattr(
             coordinator,
