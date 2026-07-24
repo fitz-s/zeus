@@ -2068,7 +2068,7 @@ scripts:
     do_not_use_when: "Cert fix is confirmed and receipts are being produced by the live daemon."
     promotion_barrier: "Read-only evidence probe only; does not write receipts or authorize trades."
     required_helpers: [src.engine.event_reactor_adapter.build_event_bound_no_submit_receipt]
-    required_tests: [tests/money_path/test_edli_live_readiness.py]
+    required_tests: [tests/engine/test_event_reactor_no_bypass.py]
 
   edli_persist_high_receipt.py:
     class: repair
@@ -2091,9 +2091,9 @@ scripts:
       persisted receipts when the daemon already consumed FSR events terminally under pre-cert-fix code.
     do_not_use_when: "The live daemon is producing receipts autonomously via fresh FSR events."
     promotion_barrier: "Idempotent by receipt_id; daemon reproduces same receipt from next fresh FSR."
-    unguarded_write_rationale: "Operator-authorized bridge: daemon consumed FSR events terminally; no fresh FSR until next ingest window."
+    unguarded_write_rationale: "Operator-authorized repair: daemon consumed FSR events terminally; no fresh FSR until next ingest window."
     required_helpers: [src.engine.event_reactor_adapter.build_event_bound_no_submit_receipt]
-    required_tests: [tests/money_path/test_edli_live_readiness.py]
+    required_tests: [tests/events/test_reactor.py]
 
   backfill_settlement_unit_2026_06_03.py:
     class: one_time_repair

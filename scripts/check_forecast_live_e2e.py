@@ -4,7 +4,7 @@
 # Reuse: When operators need per-stage timing evidence for forecast-live producer chain before live cutover.
 """Temp-only forecast-live E2E smoke.
 
-This diagnostic does not fetch ECMWF, start a daemon, touch launchctl, write
+This observation does not fetch ECMWF, start a daemon, touch launchctl, write
 repo state DBs, place orders, or authorize live trading. It exercises the
 forecast-live producer chain against isolated temp DBs and reports exact
 per-stage timings so live cutover work can distinguish code readiness from

@@ -20,6 +20,7 @@ SCAN_ROOTS = (
     "deploy",
     ".github",
     "docs/authority",
+    "docs/operations/current",
     "docs/reference",
 )
 SCAN_FILES = (

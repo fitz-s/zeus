@@ -2470,7 +2470,7 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
 
@@ -2532,7 +2532,7 @@ def test_market_discovery_scheduler_runs_while_cycle_lock_is_held(monkeypatch):
     # decoupled from main._cycle_lock — a P1 cycle-lock held must not block this producer).
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
 

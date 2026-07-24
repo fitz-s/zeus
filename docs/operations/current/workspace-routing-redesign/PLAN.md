@@ -234,7 +234,7 @@ The router prevents *recurrence*; it does not clean the existing pile. No item i
 
 ## 10. `.omc/` leak — Option A (DECIDED, R19)
 
-`.gitignore` has `.omc/` but `.omc/research/zeus_gate_removal_list_2026-06-13.md` is tracked (half-versioned). **Option A (operator-locked):** `.omc/` is pure scratch. If the tracked file holds anything durable, relocate it to `docs/reference/<topic>.md` first; then `git rm --cached` it, leaving `.omc/` uniformly gitignored. Matches the scratch-never-committed law + no-shadow preference.
+`.gitignore` has `.omc/` but `.omc/research/zeus_gate_removal_list_2026-06-13.md` is tracked (half-versioned). **Option A (operator-locked):** `.omc/` is pure scratch. If the tracked file holds anything durable, relocate it to `docs/reference/<topic>.md` first; then `git rm --cached` it, leaving `.omc/` uniformly gitignored. Matches the scratch-never-committed law + single-live preference.
 
 ---
 

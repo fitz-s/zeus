@@ -287,7 +287,7 @@ def _append_wu_prints_to_ledger(conn: sqlite3.Connection, prints: list[dict] | N
     entering via both the instants-fact and the ledger-fact can never corrupt
     the belief. This is the zero-risk migration path: no switch, no parity
     gate — the ledger grows to dominate as writers fill it, the instants
-    fact becomes a redundant shadow.
+    fact becomes a redundant alternate.
 
     Fail-soft and non-raising by design: any error is logged and swallowed,
     so a caller may call this unconditionally right after a successful

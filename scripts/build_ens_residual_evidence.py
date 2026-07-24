@@ -243,7 +243,7 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
     """Return one evidence row per (city, target_date) for the accepted cycle.
 
     accept_cycle=None uses the metric-strict cycle; pass an explicit "00"/"12"/"ALL" to
-    override (for --compare-cycles diagnostics).
+    override (for --compare-cycles observations).
 
     PRECONDITION: the source DB must carry the CANONICAL schema (table `ensemble_snapshots`
     with the `dataset_id` lineage column, `settlement_outcomes`) — the B3cont/B5 rename
@@ -387,7 +387,7 @@ def main() -> int:
     conn.execute("PRAGMA query_only=1;")
 
     if args.compare_cycles:
-        # Diagnostic: per (city, season) bias under 00 / 12 / ALL.
+        # Observation: per (city, season) bias under 00 / 12 / ALL.
         out_rows = []
         for cyc in ("00", "12", "ALL"):
             ev = build_evidence(conn, metric=args.metric, lead_max=args.lead_max,

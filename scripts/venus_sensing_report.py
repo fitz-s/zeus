@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-04-07; last_reviewed=2026-05-15; last_reused=2026-05-15
-# Purpose: Venus daemon-independent sensing report, including source-contract drift watch, source-block, and diagnostic authority labels.
+# Purpose: Venus daemon-independent sensing report, including source-contract drift watch, source-block, and observation authority labels.
 # Reuse: Run from Venus/cron for runtime truth sensing; inspect architecture/script_manifest.yaml before changing write targets.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation)
 """Venus sensing report generator.
 
 Collects ALL truth surface data Venus needs into one JSON file.
-Four layers: diagnostics, truth_surfaces, consistency, deltas.
+Four layers: observations, truth_surfaces, consistency, deltas.
 
 Usage:
     python scripts/venus_sensing_report.py
@@ -75,7 +75,7 @@ def _safe_query(conn: sqlite3.Connection, sql: str, params=()) -> list[sqlite3.R
         return []
 
 
-# ── Layer 1: Diagnostics ──────────────────────────────────────────────────
+# ── Layer 1: Observations ──────────────────────────────────────────────────
 
 def _collect_evidence() -> dict:
     """Reserved report slot for standalone checks.
@@ -534,7 +534,7 @@ def _collect_relationship_checks() -> dict:
 
 
 def generate_sensing_report() -> dict:
-    """Generate the full sensing report (diagnostics, surfaces, consistency, relationship_checks, deltas)."""
+    """Generate the full sensing report (observations, surfaces, consistency, relationship_checks, deltas)."""
     generated_at = _utcnow().isoformat()
 
     try:

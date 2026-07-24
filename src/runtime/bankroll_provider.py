@@ -832,7 +832,7 @@ def run_warm_cycle() -> None:
     Dedicated frequent (~60s) bankroll-of-record cache warmer.
 
     STRUCTURAL FIX (2026-05-31, follow-up to #45): the per-event no-submit Kelly
-    proof and the live-bridge allocator refresh both read ``cached()`` (300s
+    proof and the live-path allocator refresh both read ``cached()`` (300s
     fail-closed window) and MUST NOT live-fetch per decision. The reactor cycle
     previously warmed that cache ONCE at cycle start, but the probe cycle runs
     ~330s (heavy MC re-pricing + live /book fetches + submit path), so by the

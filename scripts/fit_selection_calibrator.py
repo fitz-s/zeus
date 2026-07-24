@@ -489,7 +489,7 @@ def main() -> int:
     ap.add_argument("--fcst", default=FCST_DEFAULT, help="zeus-forecasts.db (forecast_posteriors + settlement_outcomes).")
     ap.add_argument("--out", default=OUT_DEFAULT, help="output selection_calibrator.json path.")
     ap.add_argument("--min-n", type=int, default=MIN_N_DEFAULT, help="min settled rows per cell to license a bound at runtime.")
-    ap.add_argument("--no-monotone", action="store_true", help="disable isotonic monotone projection (diagnostic only).")
+    ap.add_argument("--no-monotone", action="store_true", help="disable isotonic monotone projection (observation only).")
     args = ap.parse_args()
 
     db_rows = load_db_rows(args.fcst)

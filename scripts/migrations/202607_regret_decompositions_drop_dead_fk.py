@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-07-21; last_reviewed=2026-07-21; last_reused=2026-07-21
 # Purpose: clear the 2nd dangling-FK instance found by the FK-resolution antibody:
 #   zeus-world.db regret_decompositions.experiment_id -> shadow_experiments (a removed
-#   shadow-named table). 0 rows today, but with foreign_keys=ON any future INSERT would
+#   alternate-named table). 0 rows today, but with foreign_keys=ON any future INSERT would
 #   compile-fail `no such table: main.shadow_experiments` — same freeze class as
 #   trade_decisions. Rebuild the table without the dead FK. SINGLE-DB WAL, crash-atomic.
 # Authority: docs/.../implementation/tests/test_no_dangling_foreign_keys.py known-instances.

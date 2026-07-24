@@ -276,10 +276,10 @@ pattern, not flagged)**:
   (`db_table_ownership.yaml:1036-1044`: *"The WU double-write... is
   DELIBERATE: the absorbing-direction reduction is idempotent under
   duplicates... retirement direction is ledger-alone once full coverage +
-  shadow parity."*) This is a **documented, intentional, currently-still-live
+  retired parity."*) This is a **documented, intentional, currently-still-live
   double-write** with a stated retirement plan — not a bug, but worth noting
   as a currently-active 2x-write cost on every WU hourly tick until the
-  stated shadow-parity retirement happens.
+  stated retired-parity retirement happens.
 
 **True duplicate (flagged)**:
 - `settlements` / `settlement_outcomes` (forecasts) — see TOP FINDING #1.

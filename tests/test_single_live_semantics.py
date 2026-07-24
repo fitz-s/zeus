@@ -19,12 +19,13 @@ def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
         ".github/instructions/live.instructions.md",
         ".github/workflows/live.yml",
         "docs/authority/current.md",
+        "docs/operations/current/plans/other.md",
         "docs/reference/current.md",
     ):
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("mode = '" + "shadow_" + "veto_only'\n", encoding="utf-8")
-    assert len({item.split(":", 1)[0] for item in violations(tmp_path)}) == 8
+    assert len({item.split(":", 1)[0] for item in violations(tmp_path)}) == 9
 
 
 def test_gate_scans_selected_active_scripts_and_current_plan(tmp_path: Path) -> None:

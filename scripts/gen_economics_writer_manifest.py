@@ -35,7 +35,7 @@ no execution) for:
     exists to prevent (round-2 delta BLOCKER). The TABLE name itself can also
     be dynamic (e.g. ``src/state/projection.py``'s canonical funnel taking a
     ``table_name: str = "position_current"`` parameter so the same funnel can
-    target a shadow/reduce table too) — ``_WRITE_RE``'s literal-identifier
+    target an alternate/reduce table too) — ``_WRITE_RE``'s literal-identifier
     capture finds nothing at all in that shape, not just an unresolved column
     list, so it is resolved separately (``_dynamic_write_table``): only when
     the placeholder is a bare name bound, in the enclosing function's own

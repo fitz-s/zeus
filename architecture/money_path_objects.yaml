@@ -471,7 +471,6 @@ state_machines:
     invariant_tests:
       - tests/engine/test_multiwinner_wealth_composition.py
       - tests/test_executor.py
-      - tests/money_path/test_edli_live_readiness.py
   business_plane_health:
     owner: src/control/live_health.py
     description: >
@@ -1156,7 +1155,6 @@ schema_objects:
         execution-command certificates can be accepted.
       required_tests:
         - tests/events/test_live_cap.py
-        - tests/money_path/test_edli_live_readiness.py
     edli_live_order_events:
       db: world
       pk: aggregate_event_id

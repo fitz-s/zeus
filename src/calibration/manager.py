@@ -235,7 +235,7 @@ def _emit_tigge_fallback_rescue_warning(
     reason: str = "opendata_platt_missing",
 ) -> None:
     """Emit a deduplicated WARNING when a HIGH+ecmwf_opendata lookup falls back
-    to a TIGGE-archive-keyed Platt model (2026-05-11 train-vs-live bridge).
+    to a TIGGE-archive-keyed Platt model (2026-05-11 train-vs-live path).
 
     Production state today (2026-05-11) has 1197 tigge_* Platt rows and 0
     ecmwf_opendata_* Platt rows. Live forecasts via the OpenData source path
@@ -820,7 +820,7 @@ def get_calibrator(
 
     # Try primary bucket — v2 FIRST (metric-aware), then legacy (HIGH BC).
     # Phase 2 (2026-05-04): thread cycle/source_id/horizon_profile into v2 load.
-    # 2026-05-11 train-vs-live bridge: when a HIGH + ecmwf_opendata caller's
+    # 2026-05-11 train-vs-live path: when a HIGH + ecmwf_opendata caller's
     # OpenData-keyed Platt is missing, the iterator advances to a TIGGE-keyed
     # candidate. TIGGE rows are stored under the legacy stratification schema
     # (cycle='00', source_id='tigge_mars', horizon_profile='full'); the

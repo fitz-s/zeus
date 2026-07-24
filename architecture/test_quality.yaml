@@ -49,12 +49,6 @@ tests:
     falsifying_proof:
       type: negative_fixture
       description: "Executable, config, deployment, or workflow surfaces cannot restore dormant alternate-runtime semantics or route cutover deletion constants into live controls."
-  tests/money_path/test_edli_live_readiness.py:
-    category: money_path
-    protects: [MP-SCH-001, MP-SCH-002, MP-ECO-001]
-    falsifying_proof:
-      type: negative_fixture
-      description: "Full-live probe groundwork cannot claim runtime readiness while no-submit config remains active."
   tests/money_path/test_edli_order_lifecycle.py:
     category: money_path
     protects: [MP-SCH-001, MP-SCH-002, MP-ECO-001]
@@ -67,12 +61,12 @@ tests:
     falsifying_proof:
       type: negative_fixture
       description: "Bankroll freshness for per-event Kelly proof must be decoupled from the slow reactor cycle; a dedicated warm job prevents cached() returning None at cycle end."
-  tests/money_path/test_edli_live_bridge_allocator_refresh.py:
+  tests/money_path/test_edli_allocator_refresh.py:
     category: money_path
     protects: [MP-SCH-001, MP-ECO-001]
     falsifying_proof:
       type: negative_fixture
-      description: "EDLI live-bridge cycle must configure the global risk-allocator singletons before submit; absence causes AllocationDenied(allocator_not_configured) on every candidate."
+      description: "EDLI live-path cycle must configure the global risk-allocator singletons before submit; absence causes AllocationDenied(allocator_not_configured) on every candidate."
   tests/money_path/test_edli_market_substrate_warm_cycle.py:
     category: money_path
     protects: [MP-SCH-001, MP-ECO-001]

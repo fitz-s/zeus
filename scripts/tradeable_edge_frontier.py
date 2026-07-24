@@ -34,7 +34,7 @@ Usage:
     python3 scripts/tradeable_edge_frontier.py --since 7d --phantom-cal-threshold 0.15
     python3 scripts/tradeable_edge_frontier.py --db state/zeus_trades.db
 
-Exit 0 always (diagnostic-only; no gate logic).
+Exit 0 always (observation-only; no gate logic).
 
 K1 compliance: read-only access via get_trade_connection_read_only().
 No mutation of any canonical surface.
@@ -275,14 +275,14 @@ def _run_query_and_print(
         print()
 
     # ------------------------------------------------------------------ #
-    # Diagnostic verdict
+    # Observation verdict
     # ------------------------------------------------------------------ #
     total_tradeable = sum(len(v) for v in tradeable.values())
     total_phantom = sum(phantom.values())
     total_sub_floor = sum(sub_floor.values())
     total_missing = sum(price_missing.values())
 
-    print("--- DIAGNOSTIC ---")
+    print("--- OBSERVATION ---")
     print(f"  TRADEABLE-PRICED (p≥0.05, edge>0) : {total_tradeable:>5}  ({100*total_tradeable/total:.1f}%)")
     print(f"  PHANTOM (p<0.05, p_cal≥{phantom_cal_threshold}) : {total_phantom:>5}  ({100*total_phantom/total:.1f}%)")
     print(f"  SUB-FLOOR genuine low              : {total_sub_floor:>5}  ({100*total_sub_floor/total:.1f}%)")

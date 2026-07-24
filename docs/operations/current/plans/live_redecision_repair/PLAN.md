@@ -3,7 +3,7 @@
 Date: 2026-06-17
 Status: implementing / live-only decoupling verified
 Parent objective: `docs/operations/current/GOAL.md` / `current_live_recovery`
-Scope: existing-position redecision and exit readiness, open-maker-entry continuous redecision after order ack, and live forecast-authority precision for new entry decisions where the current reactor consumes replacement posterior rows. Shadow artifacts may be diagnostic inputs only; they are not an acceptable endpoint for live decision authority.
+Scope: existing-position redecision and exit readiness, open-maker-entry continuous redecision after order ack, and live forecast-authority precision for new entry decisions where the current reactor consumes replacement posterior rows. Retired artifacts may be evidence inputs only; they are not an acceptable endpoint for live decision authority.
 
 ## Compact Reentry Rule
 
@@ -39,9 +39,9 @@ Additional read-only evidence gathered after compact reentry on 2026-06-17:
 - `src/main.py::_edli_open_maker_rests_for_screen` defaults every open rest to `buy_yes`; the comment says NO token checks are side-agnostic, but the price lookup is direction-specific. This can misread NO rests and is misleading source text.
 - `src/engine/cycle_runtime.py::execute_monitoring_phase` builds fresh `ExitContext`, refreshes pending-exit quote from current CLOB, calls `Position.evaluate_exit`, and routes true exits through `execute_exit`. `src/strategy/portfolio_rotation.py` is pure math only; the live cycle may report `portfolio_rotation_evaluation_status` as read-side value evidence, but no cross-family rotation may be labeled live/actionable until an explicit sell-then-entry executor owns that handoff.
 - `state/status_summary.json` at `2026-06-17T10:12:55.563464+00:00` shows the event reactor processed 3 candidates, rejected all 3, built 0 final intents, and made 0 submit attempts. The current reasons are `FDR_REJECTED`, `LIVE_INFERENCE_INPUTS_MISSING:FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:MISSING_EXPECTED_MEMBERS`, and `TRADE_SCORE_NON_POSITIVE`.
-- The processed Milan and Tel Aviv forecast events carried forecast payloads marked `COMPLETE` / `LIVE_ELIGIBLE` with 51/51 members, but their `forecast_posteriors.trade_authority_status` rows were `SHADOW_ONLY`. The live reader nevertheless accepted them as `probability_authority="replacement_0_1"`.
+- The processed Milan and Tel Aviv forecast events carried forecast payloads marked `COMPLETE` / `LIVE_ELIGIBLE` with 51/51 members, but their `forecast_posteriors.retired authority-status column` rows were `NON_AUTHORITATIVE`. The live reader nevertheless accepted them as `probability_authority="replacement_0_1"`.
 - Milan regret evidence showed `direction=buy_yes`, `q_live=0.199009684818666`, and `q_lcb_5pct=0.7957045133438944`. The underlying posterior row for the same bin had `q_lcb=0.04625961651748593` and `q_ucb=0.19901301444522052`; the receipt-facing q-lower-bound was a NO/payoff-space value attached to a YES proof.
-- `src/data/replacement_forecast_bundle_reader.py` claims a live bundle but filters `forecast_posteriors.trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')`, and `ReplacementForecastPosteriorBundle.__post_init__` rejects non-shadow statuses. This is misleading executable source under the user’s live-only requirement.
+- `src/data/replacement_forecast_bundle_reader.py` claimed a live bundle while filtering for retired non-authoritative values, and `ReplacementForecastPosteriorBundle.__post_init__` rejected live values. This was misleading executable source under the user’s live-only requirement.
 - `src/engine/qkernel_spine_bridge.py::_overlay_spine_economics_onto_proof` overwrites `q_posterior` / `q_lcb_5pct` with spine payoff economics and claims it preserves `q_lcb <= q_point`. Current live Milan rows disprove that invariant.
 
 ## Decision
@@ -54,7 +54,7 @@ Repair in this order:
 4. Preserve monitor probability authority boundaries; only repair posterior materialization/reseed if fresh-authority evidence remains absent.
 5. Remove or rewrite misleading source comments that contradict executable behavior.
 6. Repair open-maker-rest redecision math so confirmed entry rests are evaluated against the correct held-side/current-best-bid authority, with NO-token direction preserved.
-7. Repair replacement forecast authority wiring so live entry decisions consume only row-level `LIVE_AUTHORITY` posterior bundles; shadow rows remain visible for diagnostics but cannot be converted into live probability authority by reader fallback.
+7. Repair replacement forecast authority wiring so live entry decisions consume only row-level `LIVE_AUTHORITY` posterior bundles; retired rows remain visible for evidence but cannot be converted into live probability authority by reader fallback.
 8. Repair qkernel bridge receipt semantics so receipt-facing `q_posterior` and `q_lcb_5pct` remain selected-side probability fields and cannot be overwritten by payoff-space values that contradict the selected direction.
 9. State the current boundary for post-fill hold/exit/shift: hold/exit is live; portfolio rotation/switch actuation wires through exit + entry with separate receipts (not yet implemented).
 
@@ -77,11 +77,11 @@ This order separates decision truth from execution readiness and prevents an acc
 11. Open ACKED/PARTIAL maker ENTRY rests are screened against current same-side best bid, not executable ask cost, before cancel/redecision. A normal bid-ask spread must not trigger `BOOK_MOVED`; a rest more than the configured tick drift behind best bid must trigger a pull and redecision.
 12. NO-token rests carry `buy_no` into the rest screen. Direction must be derived from executable snapshot token identity, not from venue side alone.
 13. Misleading comments claiming side-agnostic rest checks are removed or corrected.
-14. `read_replacement_forecast_bundle()` refuses `SHADOW_ONLY` / `SHADOW_VETO_ONLY` posterior rows on the live decision path and returns an explicit live-authority-missing block instead of serving them as `replacement_0_1`.
-15. Replacement forecast materialization stamps `forecast_posteriors.trade_authority_status='LIVE_AUTHORITY'` only when the runtime trade-authority flag ladder is live and the row carries fused-Normal point q plus both certified bootstrap bounds. Bounds-less, Wilson fallback, capture-missing, or unpromoted rows remain diagnostic/shadow and are not live-readable.
+14. `read_replacement_forecast_bundle()` refuses retired non-authoritative posterior rows on the live decision path and returns an explicit live-authority-missing block instead of serving them as `replacement_0_1`.
+15. Replacement forecast materialization stamps `forecast_posteriors.retired authority-status column='LIVE_AUTHORITY'` only when the runtime trade-authority flag ladder is live and the row carries fused-Normal point q plus both certified bootstrap bounds. Bounds-less, Wilson fallback, capture-missing, or unpromoted rows remain evidence/retired and are not live-readable.
 16. Qkernel spine overlay cannot create `q_lcb_5pct > q_posterior` for receipt-facing selected-side probability fields. If qkernel controls selection economics, probability authority fields must remain internally consistent and direction-specific.
-17. Misleading source text that says live authority is flag-only or that replacement bundles must remain shadow-only is removed or rewritten where touched by this slice.
-18. `scripts/healthcheck.py --json` must surface a forecast posterior live-authority schema drift when `state/zeus-forecasts.db::forecast_posteriors` cannot represent `LIVE_AUTHORITY`, so operator readiness cannot look green while live posterior rows are structurally trapped in shadow status.
+17. Misleading source text that says live authority is flag-only or that replacement bundles must remain non-authoritative is removed or rewritten where touched by this slice.
+18. `scripts/healthcheck.py --json` must surface a forecast posterior live-authority schema drift when `state/zeus-forecasts.db::forecast_posteriors` cannot represent `LIVE_AUTHORITY`, so operator readiness cannot look green while live posterior rows are structurally trapped in retired status.
 
 ## Implementation Plan
 
@@ -277,14 +277,14 @@ Stop conditions:
 
 ### Slice G: Live Replacement Forecast Authority And Q Evidence Repair
 
-Purpose: new-entry decisions must not treat shadow-only replacement posterior rows as live probability authority, and qkernel selection must not corrupt receipt-facing probability fields with payoff-space economics.
+Purpose: new-entry decisions must not treat non-authoritative replacement posterior rows as live probability authority, and qkernel selection must not corrupt receipt-facing probability fields with payoff-space economics.
 
 Expected source surfaces:
 
 - `src/data/replacement_forecast_bundle_reader.py`
 - `src/data/replacement_forecast_materializer.py`
 - `src/data/replacement_forecast_runtime_policy.py`
-- `src/data/replacement_forecast_live_dry_run.py`
+- `src/data/retired forecast rehearsal key.py`
 - `src/data/replacement_forecast_switch_decision.py`
 - `src/engine/qkernel_spine_bridge.py`
 - `src/engine/event_reactor_adapter.py` comments at the replacement authority seam
@@ -295,20 +295,20 @@ Expected source surfaces:
 
 Preferred design:
 
-1. Define the live row predicate as row-level `trade_authority_status == "LIVE_AUTHORITY"` plus fused-Normal q mode plus both certified bootstrap bounds. A shadow row can be newest or complete, but it is not live authority.
-2. In the bundle reader, scan newest scope rows for the latest live-authority-grade row. If none exists, block with an explicit reason and include no shadow fallback bundle.
-3. In materialization, compute posterior row trade authority from the runtime flag ladder and the q/bounds predicate. Write `LIVE_AUTHORITY` only when all live predicates hold; otherwise keep the row diagnostic/shadow.
+1. Define the live row predicate as row-level `retired authority-status column == "LIVE_AUTHORITY"` plus fused-Normal q mode plus both certified bootstrap bounds. A retired row can be newest or complete, but it is not live authority.
+2. In the bundle reader, scan newest scope rows for the latest live-authority-grade row. If none exists, block with an explicit reason and include no retired fallback bundle.
+3. In materialization, compute posterior row trade authority from the runtime flag ladder and the q/bounds predicate. Write `LIVE_AUTHORITY` only when all live predicates hold; otherwise keep the row evidence/retired.
 4. Do not promote deterministic Open-Meteo anchor rows to live trading authority; the fused posterior row is the live decision carrier.
 5. In qkernel spine overlay, keep `q_posterior` and `q_lcb_5pct` from the selected reactor proof unless qkernel can supply same-side probability-space values with the same invariant. It may still overlay the selection `trade_score` so the downstream submit path sees the spine’s chosen economics, but it must not relabel payoff-space values as probability fields.
-6. Remove or rewrite touched comments that say `LIVE_AUTHORITY` is flag-only or that bundles must remain shadow-only.
+6. Remove or rewrite touched comments that say `LIVE_AUTHORITY` is flag-only or that bundles must remain non-authoritative.
 
 Tests:
 
-- A shadow-only posterior row with fused q and bounds is not returned by the live bundle reader.
+- A non-authoritative posterior row with fused q and bounds is not returned by the live bundle reader.
 - A fused-Normal posterior with both bootstrap bounds and live runtime flags is materialized as `LIVE_AUTHORITY` and is readable by the live bundle reader.
-- A fallback/non-bootstrap-bounds row stays shadow and is blocked by the live reader.
+- A fallback/non-bootstrap-bounds row stays retired and is blocked by the live reader.
 - Qkernel overlay preserves `q_posterior` / `q_lcb_5pct` on the proof and therefore preserves `q_lcb_5pct <= q_posterior` for a buy-yes proof like the observed Milan case.
-- Existing replacement authority tests are updated so they no longer bless shadow rows as live probability authority.
+- Existing replacement authority tests are updated so they no longer bless retired rows as live probability authority.
 
 Stop conditions:
 
@@ -319,17 +319,17 @@ Implementation status, 2026-06-17 10:36 UTC: source repair complete; live reload
 
 Implemented:
 
-- `src/data/replacement_forecast_bundle_reader.py` now serves only row-level `LIVE_AUTHORITY` bundles with fused-Normal q mode plus both certified bounds. Shadow rows return `REPLACEMENT_POSTERIOR_LIVE_AUTHORITY_MISSING` instead of being laundered into `replacement_0_1`.
+- `src/data/replacement_forecast_bundle_reader.py` now serves only row-level `LIVE_AUTHORITY` bundles with fused-Normal q mode plus both certified bounds. Retired rows return `REPLACEMENT_POSTERIOR_LIVE_AUTHORITY_MISSING` instead of being laundered into `replacement_0_1`.
 - `src/data/replacement_forecast_materializer.py` computes row authority from runtime flags plus the fused/bootstrap carrier predicate, and includes an idempotent source migration for the existing SQLite CHECK so future approved schema migration can admit `LIVE_AUTHORITY`.
-- `src/state/schema/v2_schema.py` and `architecture/_schema_fingerprint.txt` now allow `LIVE_AUTHORITY` in the canonical `forecast_posteriors.trade_authority_status` CHECK.
-- `scripts/healthcheck.py` now reports `FORECAST_POSTERIORS_LIVE_AUTHORITY_SCHEMA_DRIFT` when the active forecasts DB still has the old shadow-only CHECK, and the top-level healthy predicate includes that result.
+- `src/state/schema/v2_schema.py` and `architecture/_schema_fingerprint.txt` now allow `LIVE_AUTHORITY` in the canonical `forecast_posteriors.retired authority-status column` CHECK.
+- `scripts/healthcheck.py` now reports `FORECAST_POSTERIORS_LIVE_AUTHORITY_SCHEMA_DRIFT` when the active forecasts DB still has the old non-authoritative CHECK, and the top-level healthy predicate includes that result.
 - `src/engine/qkernel_spine_bridge.py` no longer overwrites receipt-facing `q_posterior`, `q_lcb_5pct`, or `q_source` with payoff-space spine economics. It preserves selected-side probability authority and only overlays the qkernel-selected `trade_score`.
 - Replacement event/receipt provenance now accepts `LIVE_AUTHORITY` while preserving no-training and no-settlement-authority constraints.
-- Misleading touched text claiming flag-only live authority or shadow-only replacement bundles was removed or rewritten.
+- Misleading touched text claiming flag-only live authority or non-authoritative replacement bundles was removed or rewritten.
 
 Verification:
 
-- `python3 -m py_compile src/state/schema/v2_schema.py src/data/replacement_forecast_bundle_reader.py src/data/replacement_forecast_materializer.py src/data/replacement_forecast_event_payload.py src/data/replacement_forecast_receipt_provenance.py src/data/replacement_forecast_runtime_policy.py src/data/replacement_forecast_live_dry_run.py src/data/replacement_forecast_switch_decision.py src/engine/qkernel_spine_bridge.py src/engine/event_reactor_adapter.py`
+- `python3 -m py_compile src/state/schema/v2_schema.py src/data/replacement_forecast_bundle_reader.py src/data/replacement_forecast_materializer.py src/data/replacement_forecast_event_payload.py src/data/replacement_forecast_receipt_provenance.py src/data/replacement_forecast_runtime_policy.py src/data/retired forecast rehearsal key.py src/data/replacement_forecast_switch_decision.py src/engine/qkernel_spine_bridge.py src/engine/event_reactor_adapter.py`
 - `pytest -q tests/test_replacement_forecast_bundle_reader_tradeable_latest.py tests/test_replacement_forecast_materializer.py::test_live_authority_status_requires_live_flags_and_bootstrap_bounds tests/test_replacement_forecast_materializer.py::test_live_authority_status_rejects_wilson_or_missing_bounds tests/test_replacement_forecast_materializer.py::test_forecast_posteriors_live_authority_check_migration_preserves_rows tests/integration/test_qkernel_spine_blockers_pr409.py::test_overlay_preserves_probability_fields_and_updates_score tests/integration/test_qkernel_spine_blockers_pr409.py::test_overlay_does_not_create_milan_buy_yes_probability_contradiction tests/integration/test_qkernel_spine_routing.py::test_selected_proof_shape_is_submission_pipeline_ready tests/engine/test_event_reactor_no_bypass.py::test_replacement_live_authority_same_direction_replaces_receipt_probability` passed: 14 passed, 1 existing numpy warning.
 - `python3 scripts/check_schema_fingerprint.py` passed.
 - `git diff --check` passed.
@@ -339,9 +339,9 @@ Verification:
 
 Read-only live evidence after source repair:
 
-- `state/zeus-forecasts.db` still has the old `forecast_posteriors` CHECK allowing only `SHADOW_ONLY` / `SHADOW_VETO_ONLY`; no live DB migration was executed in this session.
+- `state/zeus-forecasts.db` still had the old `forecast_posteriors` CHECK allowing only retired non-authoritative values; no live DB migration was executed in that session.
 - `python3 scripts/healthcheck.py --json` now exposes this as `forecast_posteriors_schema_ok=false`, `forecast_posteriors_schema_issue=FORECAST_POSTERIORS_LIVE_AUTHORITY_SCHEMA_DRIFT`, and `healthy=false`.
-- Current replacement posterior rows are still `SHADOW_ONLY` even when they carry `FUSED_NORMAL_FULL` / `FUSED_NORMAL_PARTIAL`, bootstrap `q_lcb_basis=fused_center_bootstrap_p05`, and both q bounds.
+- Current replacement posterior rows are still `NON_AUTHORITATIVE` even when they carry `FUSED_NORMAL_FULL` / `FUSED_NORMAL_PARTIAL`, bootstrap `q_lcb_basis=fused_center_bootstrap_p05`, and both q bounds.
 - `state/status_summary.json` at `2026-06-17T10:29:54.850998+00:00` still shows event reactor mode, entry/exit/cancel `requires_intent` with no blocked components, 0 final intents and 0 submit attempts.
 - New live regret rows after the source edit still show the old running-code contradiction, e.g. Shenzhen buy_yes at `2026-06-17T10:30:24.845359+00:00` with `q_live=0.14429988196290827` and `q_lcb_5pct=0.8669544973916138`. This proves the running daemon/live DB have not consumed the source repair yet; it is not a post-reload failure.
 

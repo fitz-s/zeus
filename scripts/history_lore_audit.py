@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-04-28; last_reviewed=2026-04-28; last_reused=2026-04-28
 # Purpose: Audit recent references for architecture/history_lore.yaml cards before archive/sunset decisions.
-# Reuse: Run read-only for quarterly or packet-close lore-card mention audits; output is diagnostic only.
+# Reuse: Run read-only for quarterly or packet-close lore-card mention audits; output is observation only.
 # Created: 2026-04-28
 # Last reused/audited: 2026-04-28
 # Authority basis: round2_verdict.md §4.2 #12 + DEEP_PLAN §4.2 #12 + Tier 2

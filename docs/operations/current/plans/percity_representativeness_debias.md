@@ -26,7 +26,7 @@ corrected without the overfit that refuted the naive version (`percity_corrected
 - N_min = 30 activation guard (per-city mean SE < one bin); below → family-level fallback.
 - EB shrink λ = τ²/(τ²+SE²) toward 0; thin gently, well-sampled fully.
 - Family-level do-no-harm walk-forward gate; HIGH passes (corr MAE 1.6319 ≤ raw 1.7269), LOW gated off.
-- ARTIFACT-GATED, no shadow flag: artifact absent → loader None → byte-identical to today.
+- ARTIFACT-GATED, no retired flag: artifact absent → loader None → byte-identical to today.
 
 ## Design / current-state detail
 Full design, schema, file:line, test results, deploy procedure:

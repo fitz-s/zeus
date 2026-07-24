@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-06-25
-# Purpose: Read-only vNext profile walk-forward diagnostic; writes report artifacts only.
+# Purpose: Read-only vNext profile walk-forward observation; writes report artifacts only.
 from __future__ import annotations
 
 import argparse

@@ -38,7 +38,7 @@ def _flaky_lock(fail_times: int):
 
 @pytest.fixture
 def _patched(monkeypatch):
-    import src.data.dual_run_lock as dl
+    import src.data.job_lock as dl
     import src.data.source_health_probe as shp
     import src.ingest_main as im
 

@@ -1,13 +1,13 @@
 # 全天候持续改进 Loop — v2 最小设计 (2026-07-07)
 
-**Status: PROPOSED v2。** v1 两个否决理由已修:shadow 全删(第一天即真跑,安全靠 wrapper 机制);治理机器减到三文件三级(每个面都要答"谁写、谁读、静默坏了谁发现")。
+**Status: PROPOSED v2。** v1 两个否决理由已修:retired 全删(第一天即真跑,安全靠 wrapper 机制);治理机器减到三文件三级(每个面都要答"谁写、谁读、静默坏了谁发现")。
 
 ## v1 → v2 砍单
 
 | v1 | v2 | 为什么 |
 |---|---|---|
-| L0 哨兵层(30min) | **删** | mesh 已有 heartbeat-sensor / riskguard / freshness 塔;再造观察层 = shadow 机器 |
-| Phase A 2 天 shadow 观察期 | **删** | 违反 no-shadow 法。第一天即真跑;安全靠 wrapper 机制,不靠阶段仪式 |
+| L0 哨兵层(30min) | **删** | mesh 已有 heartbeat-sensor / riskguard / freshness 塔;再造观察层 = retired 机器 |
+| Phase A 2 天 retired 观察期 | **删** | 违反 single-live 法。第一天即真跑;安全靠 wrapper 机制,不靠阶段仪式 |
 | 5 个状态文件 + budget_guard + digest | **3 个文件** | 每个文件都是一个会过时、会静默、要维护的面 |
 | C0-C4 五级拨盘 | **三级:AUTO / PREPARE / NEVER** | 五级的区分靠 prose 判断;三级的区分靠路径 allowlist,机器可判 |
 | §9 独立元循环 | **删(并入 AUTO)** | prompt 是 loop/ 内文件,改它走 AUTO 同一规则(verifier + keep-or-revert),不配独立章节 |
@@ -71,7 +71,7 @@ claude --model opus -p "$(cat $LOOP/prompts/$1.md)" --max-turns $MAX_TURNS ...
 ## 5. Consult 裁决(REQ-20260707-001102,答案 /tmp/cgc/answer_REQ-20260707-001102-dfbe4f.txt;总裁决 GO-WITH-CHANGES,逐条按最小机器法过滤)
 
 **采纳(全部是 wrapper 一行机制或账本一行法,零新文件零新层):**
-- BLOCKER-1 phase-gating:v2 删 shadow,wrapper 后置 diff 校验 + 硬恢复(§3)。
+- BLOCKER-1 phase-gating:v2 删 retired,wrapper 后置 diff 校验 + 硬恢复(§3)。
 - BLOCKER-3 间接 money-path:接受其威胁模型,用**收窄 AUTO allowlist** 实现(config/LaunchAgents/deploy 类全在 NEVER;scripts/ 中被 plist/manifest 引用者不入 AUTO)—— 不建它要的 machine classifier。
 - BLOCKER-4 死码证明:AUTO 死码三票制上再加一票 —— **boot/import smoke**(`--validate-boot`,仓库已有);动态入口(registry-loaded/string-dispatch)不可 grep 证死 → 一律降 PREPARE。
 - HIGH live-DB 边界:证据查询强制 `mode=ro` URI(一行);manifest 标 dangerous_if_run/write_targets 的脚本 loop 一律不跑。
@@ -84,7 +84,7 @@ claude --model opus -p "$(cat $LOOP/prompts/$1.md)" --max-turns $MAX_TURNS ...
 - 7 个新状态文件(tick_cursor/branches/verification_failures/class_decisions/revert_registry/…)+ 每 tick schema lint —— 正是 v1 被驳回的五文件病的放大版;cursor 进 JOURNAL 一行,分支清单 `git branch --list 'loop/*'` 就是真相,失败原因进 journal 条目。
 - FDR/alpha-spending/negative-controls 全套统计机器 —— n=15 的现实里这是过度工程;预登记 + min_n + 复测已挡住实际威胁面。
 - hash-pinned constitution / 队列 machine-gate schema / 独立 queue-guard —— gate-accretion。
-- "Phase A 加固后保留" —— shadow 概念本身被操作员明令拔除。
+- "Phase A 加固后保留" —— retired 概念本身被操作员明令拔除。
 - event-driven watcher 基建 —— cursor 检查一行查询已达其目的。
 
 ## 5b. 官方 loop 规范对照(Anthropic《Getting started with loops》2026-07-06, @delba_oliveira)
@@ -121,14 +121,14 @@ claude --model opus -p "$(cat $LOOP/prompts/$1.md)" --max-turns $MAX_TURNS ...
 11. ⚠️ 撤销一项:此前报"doctor 错误时 exit 0 静默"系测量错误($? 取了管道里 tail 的退出码)—— doctor 退出码本来正确。误报进过账本也是账本价值的实证:refuted 条目防重提。
 
 **第二批(2026-07-07,操作员直令"净化污染 context,不是加规则"):loop ORIENT 面的指令级污染全清。**
-原则:无人看守的 loop 每 tick 读盘上状态;盘上任何"等审批/做了不部署/shadow/blocker 叙事"的陈旧指令都会被当成现行指令执行 —— 解法是删掉污染源,不是加规则中和它。
+原则:无人看守的 loop 每 tick 读盘上状态;盘上任何"等审批/做了不部署/retired/blocker 叙事"的陈旧指令都会被当成现行指令执行 —— 解法是删掉污染源,不是加规则中和它。
 1. ✅ current/task.md + frontier_status.md + 根 task.md 三个 05-22 僵尸控制文件删除(analysis-reference A-E、SOURCE_COMPARABILITY blocker 全是死代码路径的叙事);GOAL.md 重写 9 行(目标+唯一计分函数+指针);package.yaml 重写(去 frontier 叙事、去死 subtask、去 5 个已删观察面引用)。
 2. ✅ 工作 journal 54KB→6.7KB:19 个已落地 tick 折叠成一段摘要(部署清单/方法论/教训),活跃 tick 保留;逐 tick 原文在 git。
 3. ✅ plans/ 17→11:删 3 个瞄准已删 legacy 管线的计划(live_math_frontier/crosscheck_valid_window/live_release_blocker_repair —— opening_hunt 叙事已是死路径)、3 个已并 PR 的计划(pr332×2、qkernel #412)、3 个工作已落地的(edli_cutoff/horse_race_kelly/allocator_reconcile)、1 个已修的 f109 packet(抗体测试是 durable 记录);INDEX 重写带状态判词(DORMANT/DONE-EXCEPT 如实标)。
 4. ✅ 两个孤儿脚本删除(repro_antibodies/force_cycle_with_healthy_gates —— 调用已删的 execute_discovery_phase)+ 它们在 db_writer_lock allowlist、scripts/AGENTS、测试 allowlist 的行;allowlist 测试 121 绿。
 5. ✅ gate_stack 文档"OPERATOR DECISION pending / not deployed until review"段改写为已执行事实(Phase 1+2 已并已部署)。
 6. ✅ .omc/notepad Priority Context:1.5KB 已部署修复叙事(CWA/HKO)压成一行 durable 法则 + git 指针。
-7. ✅ 根 AGENTS "shadow is observe-only" 行(它把 shadow 合法化为常设运行模式)改为 extirpation 法:shadow 模式已拔除,不得作为 staging tier 重新引入。
+7. ✅ 根 AGENTS "retired is observe-only" 行(它把 retired 合法化为常设运行模式)改为 extirpation 法:retired 模式已拔除,不得作为 staging tier 重新引入。
 8. ✅ 顺带:migration 计划标 DONE-EXCEPT(唯一残留 = heartbeat-sensor plist 仍指 workspace-venus/bin,NEVER 级,等操作员批准后我改)。
 
 **剩余队列(按附录 A):** 附录 A 其余 high 项(current_data_state/current_source_validity 过期自审、GOAL.md/task.md/frontier_status.md 05-22 叙事重写、script_manifest 157 个未注册脚本的 backfill-or-sweep 决策)。

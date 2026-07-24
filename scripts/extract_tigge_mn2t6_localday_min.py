@@ -353,7 +353,7 @@ def build_low_snapshot_json(
         and not any_boundary_ambiguous
     )
 
-    # Collect inner/boundary step ranges across all members for diagnostics
+    # Collect inner/boundary step ranges across all members for observations
     all_inner_ranges: set[str] = set()
     all_boundary_ranges: set[str] = set()
     for clf in member_classifications.values():

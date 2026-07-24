@@ -15,7 +15,7 @@ round-3 verdict:"command_recovery.py:6500 的 filled-entry lot 修复门锚在 f
 ## 为何去掉候选门 EXISTS 是无效的
 apply 的 resolve 照样需要 trade_decisions 行来把 runtime position 映射到整数 lot 身份。去掉候选门只是把 247 个从"**门拦**"变成"**apply 跳**"(resolve→None→return False→"stayed"),**一个都修不了**,还多 247 个 no-op savepoint。候选门与 apply resolve 检查的是同一个 trade_decisions 存在性。
 
-## 离线只读证明(活库,一次性 diagnostic)
+## 离线只读证明(活库,一次性 evidence)
 | | 候选数 |
 |---|---|
 | OLD(trade_decisions 门) | 7 |
