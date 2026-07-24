@@ -485,6 +485,7 @@ def _replacement_day0_recovery_payload(direction: str) -> dict:
     q_live, q_lcb = ((0.65, 0.58) if direction == "buy_yes" else (0.72, 0.64))
     posterior_id = 36169
     condition_id = f"condition-recovery-{direction}"
+    probability_base_identity = f"probability-base-recovery-{direction}"
     observation = {
         "source_match_status": "MATCH",
         "local_date_status": "MATCH",
@@ -504,6 +505,7 @@ def _replacement_day0_recovery_payload(direction: str) -> dict:
         "settlement_unit": "C",
         "_edli_global_day0_binding": {
             "posterior_id": posterior_id,
+            "probability_base_identity": probability_base_identity,
             "city": "London",
             "target_date": "2026-07-13",
             "metric": "low",
@@ -558,6 +560,7 @@ def _replacement_day0_recovery_payload(direction: str) -> dict:
             "probability_authority": "replacement_current_global_probability_v1",
             "q_source": "replacement_0_1",
             "posterior_id": posterior_id,
+            "probability_base_identity": probability_base_identity,
             "global_current_observation_payload": observation,
         },
         "qkernel_execution_economics": economics,
@@ -1555,7 +1558,7 @@ def test_live_tick_first_apply_contention_skips_remaining_sweep(monkeypatch):
 
     assert apply_attempts == [{"blocking": False, "busy_timeout_ms": 0}]
     assert summary["db_lock_deferred"] is True
-    assert summary["db_lock_deferred_at"] == "missing_filled_entry_execution_fact_repair"
+    assert summary["db_lock_deferred_at"] == "authenticated_entry_trade_fact"
     assert summary["db_lock_deferred_count"] == 1
     assert summary["deferred_full_sweep"] is True
     assert summary["scope"] == "live_tick"
@@ -1655,6 +1658,9 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         price=price,
         created_at=created_at,
         q_version="test-q-version",
+        decision_certificate_hash=hashlib.sha256(
+            f"test-certificate:{command_id}".encode()
+        ).hexdigest(),
     )
     return command_id
 
@@ -3148,7 +3154,7 @@ class TestAuthenticatedEntryTradeFactProjection:
             "entry_price": 0.4,
             "order_id": order_id,
             "order_status": "filled",
-            "chain_state": "synced",
+            "chain_state": "unknown",
         }
         event_count = conn.execute(
             """
@@ -3897,7 +3903,7 @@ def _insert_actionable_certificate_for_recovery(
     side = "YES" if direction == "buy_yes" else "NO"
     payoff_q_point = q_live if payoff_q_point is None else payoff_q_point
     payoff_q_lcb = q_lcb
-    cost = min(0.01, max(0.001, payoff_q_lcb / 2.0)) if payoff_q_lcb > 0 else 0.01
+    cost = 0.05
     edge_lcb = payoff_q_lcb - cost
     payload = {
         "event_id": event_id,
@@ -4615,7 +4621,7 @@ class TestRecoveryResolutionTable:
         final_intent_id = "edli_intent:test-event:tok-001"
         venue_order_id = "0xedliorder"
         trade_id = "edli-trade-001"
-        _insert(conn, decision_id=execution_command_id, size=9.0, price=0.97)
+        _insert(conn, decision_id=execution_command_id, size=9.0, price=0.95)
         _advance_to_submitting(conn, venue_order_id=None)
         _insert_edli_live_order_event(
             conn,
@@ -5702,7 +5708,7 @@ class TestRecoveryResolutionTable:
             token_id="tok-exit-no-order",
             side="SELL",
             size=5.06,
-            price=0.98,
+            price=0.95,
         )
         append_event(
             conn,
@@ -5737,7 +5743,7 @@ class TestRecoveryResolutionTable:
         assert payload["venue_absence_proof"]["trade_count"] == 1
 
     def test_cancel_unknown_review_required_live_order_restores_acked(self, conn, mock_client):
-        _insert(conn, intent_kind="EXIT", side="SELL", size=11.62, price=0.02)
+        _insert(conn, intent_kind="EXIT", side="SELL", size=11.62, price=0.05)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-live")
         mock_client.get_order.return_value = {
             "orderID": "ord-live",
@@ -6179,7 +6185,7 @@ class TestRecoveryResolutionTable:
     def test_cancel_unknown_review_required_terminal_no_fill_expires_entry(self, conn, mock_client):
         from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
 
-        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
         _seed_pending_entry_projection(conn, order_id="ord-terminal")
         finding = record_finding(
@@ -6245,7 +6251,7 @@ class TestRecoveryResolutionTable:
         + zero shares + zero cost is exactly as zero-exposure as
         pending_entry; recovery must not strand the command in
         REVIEW_REQUIRED."""
-        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-voided")
         _seed_pending_entry_projection(conn, order_id="ord-voided")
         conn.execute(
@@ -6275,7 +6281,7 @@ class TestRecoveryResolutionTable:
     ):
         from src.risk_allocator.governor import count_unknown_side_effects
 
-        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-absent")
         _seed_pending_entry_projection(conn, order_id="ord-absent")
         mock_client.get_order.return_value = None
@@ -6335,7 +6341,7 @@ class TestRecoveryResolutionTable:
         from src.risk_allocator.governor import count_unknown_side_effects
         from src.state.venue_command_repo import append_event
 
-        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
         _advance_to_cancel_pending(conn, venue_order_id="ord-maker-rest-absent")
         append_event(
             conn,
@@ -6455,7 +6461,7 @@ class TestRecoveryResolutionTable:
         from src.risk_allocator.governor import count_unknown_side_effects
         from src.state.venue_command_repo import append_event
 
-        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
         _advance_to_cancel_pending(conn, venue_order_id="ord-maker-rest-unknown")
         append_event(
             conn,
@@ -6526,14 +6532,14 @@ class TestRecoveryResolutionTable:
     ):
         from src.risk_allocator.governor import count_unknown_side_effects
 
-        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-unknown-live-data")
         _seed_pending_entry_projection(conn, order_id="ord-unknown-live-data")
         mock_client.get_order.return_value = {
             "orderID": "ord-unknown-live-data",
             "status": "UNKNOWN",
             "size": "11.62",
-            "price": "0.02",
+            "price": "0.05",
         }
         mock_client.get_open_orders.return_value = []
         mock_client.get_trades.return_value = []
@@ -6553,7 +6559,7 @@ class TestRecoveryResolutionTable:
     def test_expired_terminal_no_fill_entry_resolves_late_m5_local_orphan_finding(self, conn, mock_client):
         from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
 
-        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
         _seed_pending_entry_projection(conn, order_id="ord-terminal")
         mock_client.get_order.return_value = {
@@ -6601,7 +6607,7 @@ class TestRecoveryResolutionTable:
         }
 
     def test_cancel_unknown_review_required_terminal_with_trade_match_stays_blocked(self, conn, mock_client):
-        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
         _seed_pending_entry_projection(conn, order_id="ord-terminal")
         mock_client.get_order.return_value = {
@@ -6615,7 +6621,7 @@ class TestRecoveryResolutionTable:
                 "id": "trade-terminal",
                 "asset_id": "tok-001",
                 "side": "BUY",
-                "price": "0.02",
+                "price": "0.05",
                 "size": "11.62",
                 "match_time": "2026-04-26T00:04:30Z",
             }
@@ -6632,7 +6638,7 @@ class TestRecoveryResolutionTable:
         assert events[-1]["event_type"] == "CANCEL_REPLACE_BLOCKED"
 
     def test_cancel_unknown_review_required_terminal_with_open_order_match_stays_blocked(self, conn, mock_client):
-        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
         _seed_pending_entry_projection(conn, order_id="ord-terminal")
         mock_client.get_order.return_value = {
@@ -6645,7 +6651,7 @@ class TestRecoveryResolutionTable:
                 "orderID": "ord-terminal",
                 "asset_id": "tok-001",
                 "side": "BUY",
-                "price": "0.02",
+                "price": "0.05",
                 "original_size": "11.62",
             }
         ]
@@ -6662,7 +6668,7 @@ class TestRecoveryResolutionTable:
         assert events[-1]["event_type"] == "CANCEL_REPLACE_BLOCKED"
 
     def test_cancel_unknown_review_required_terminal_with_local_exposure_stays_blocked(self, conn, mock_client):
-        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
         _seed_pending_entry_projection(conn, order_id="ord-terminal")
         conn.execute(
@@ -7908,7 +7914,7 @@ class TestRecoveryResolutionTable:
 
         assert observed_scopes == [True]
 
-    def test_live_tick_clears_terminal_cancel_fact_before_venue_snapshot(
+    def test_live_tick_preserves_cancel_pending_when_venue_snapshot_fails(
         self,
         tmp_path,
         monkeypatch,
@@ -7975,12 +7981,12 @@ class TestRecoveryResolutionTable:
         finally:
             verified.close()
 
-        assert command["state"] == "CANCELLED"
-        assert latest_event["event_type"] == "CANCEL_ACKED"
-        assert current["phase"] == "voided"
+        assert command["state"] == "CANCEL_PENDING"
+        assert latest_event["event_type"] == "CANCEL_REQUESTED"
+        assert current["phase"] == "pending_entry"
         assert Decimal(str(current["shares"])) == Decimal("0")
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
-        assert current["order_status"] == "canceled"
+        assert current["order_status"] == "pending"
 
     def test_acked_terminal_point_order_missing_matched_size_stays(
         self,
@@ -8027,7 +8033,7 @@ class TestRecoveryResolutionTable:
     ):
         from src.state.venue_command_repo import append_event
 
-        _insert(conn, size=13.45, price=0.01)
+        _insert(conn, size=13.45, price=0.05)
         _advance_to_cancel_pending(conn, venue_order_id="ord-cancelled")
         append_event(
             conn,
@@ -8109,7 +8115,7 @@ class TestRecoveryResolutionTable:
     ):
         from src.state.venue_command_repo import append_event
 
-        _insert(conn, size=13.45, price=0.01)
+        _insert(conn, size=13.45, price=0.05)
         _advance_to_cancel_pending(conn, venue_order_id="ord-partial")
         append_event(
             conn,
@@ -8159,7 +8165,7 @@ class TestRecoveryResolutionTable:
     ):
         from src.state.venue_command_repo import append_event
 
-        _insert(conn, size=13.45, price=0.01)
+        _insert(conn, size=13.45, price=0.05)
         _advance_to_acked(conn, venue_order_id="ord-cancelled")
         _append_order_fact(
             conn,
@@ -8839,7 +8845,7 @@ class TestRecoveryResolutionTable:
             intent_kind="EXIT",
             side="SELL",
             size=85.17,
-            price=0.04,
+            price=0.05,
         )
         _advance_to_acked(
             conn,
@@ -9714,8 +9720,16 @@ class TestRecoveryResolutionTable:
         events = _get_events(conn, "cmd-001")
         assert events[-1]["event_type"] == "FILL_CONFIRMED"
         payload = json.loads(events[-1]["payload_json"])
-        assert payload["proof_class"] == "matched_cancel_with_confirmed_held_projection"
-        assert payload["required_predicates"]["active_projection_matches_confirmed_fill"] is True
+        assert payload["proof_class"] == (
+            "review_required_matched_order_fact_with_positive_trade_fact"
+        )
+        assert payload["required_predicates"] == {
+            "command_state_review_required": True,
+            "latest_event_is_review_boundary": True,
+            "positive_trade_fact": True,
+            "matched_order_fact_positive": True,
+            "trade_facts_cover_command_or_leave_only_dust": True,
+        }
 
     def test_review_required_matched_cancel_uses_chain_shares_over_submitted_shares(
         self,
@@ -9784,13 +9798,13 @@ class TestRecoveryResolutionTable:
         assert _get_state(conn, "cmd-001") == "FILLED"
 
     @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
-    def test_scoped_recovery_projects_filled_exit_trade_fact_to_closed(
+    def test_scoped_recovery_keeps_filled_exit_pending_chain_confirmation(
         self,
         tmp_path,
         monkeypatch,
         scope,
     ):
-        """Scoped live recovery must release pending_exit when durable full-fill truth exists."""
+        """A durable venue fill stays pending until chain absence confirms closure."""
         from src.execution import command_recovery, venue_sync_contract
         from src.state.db import init_schema, init_schema_trade_only
         from src.state.collateral_ledger import init_collateral_schema
@@ -9838,7 +9852,7 @@ class TestRecoveryResolutionTable:
             intent_kind="EXIT",
             side="SELL",
             size=10.01,
-            price=0.01,
+            price=0.05,
             token_id="tok-exit",
         )
         _advance_to_acked(seed, command_id="cmd-exit", venue_order_id="ord-exit")
@@ -9852,7 +9866,7 @@ class TestRecoveryResolutionTable:
                 "venue_order_id": "ord-exit",
                 "trade_id": "trade-exit",
                 "filled_size": "10.01",
-                "fill_price": "0.01",
+                "fill_price": "0.05",
                 "tx_hash": "0xexit",
             },
         )
@@ -9863,7 +9877,7 @@ class TestRecoveryResolutionTable:
             trade_id="trade-exit",
             state="MATCHED",
             filled_size="10.01",
-            fill_price="0.01",
+            fill_price="0.05",
             tx_hash="0xexit",
         )
         seed.commit()
@@ -9921,19 +9935,12 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
         assert dict(current) == {
-            "phase": "economically_closed",
-            "order_status": "sell_filled",
-            "exit_price": 0.01,
-            "chain_shares": 0.0,
+            "phase": "pending_exit",
+            "order_status": "sell_pending_confirmation",
+            "exit_price": None,
+            "chain_shares": 10.0102,
         }
-        assert dict(lifecycle_event) == {
-            "event_type": "EXIT_ORDER_FILLED",
-            "phase_before": "pending_exit",
-            "phase_after": "economically_closed",
-            "order_id": "ord-exit",
-            "command_id": "cmd-exit",
-            "venue_status": "sell_filled",
-        }
+        assert lifecycle_event is None
 
         retear = _conn_factory()
         try:
@@ -9986,11 +9993,11 @@ class TestRecoveryResolutionTable:
             second_check.close()
 
         assert second_summary["exit_pending_projections"]["errors"] == 0
-        assert second_count == first_count == 1
+        assert second_count == first_count == 0
         assert dict(repaired) == {
-            "phase": "economically_closed",
-            "order_status": "sell_filled",
-            "chain_shares": 0.0,
+            "phase": "pending_exit",
+            "order_status": "sell_pending_confirmation",
+            "chain_shares": 10.0102,
         }
 
     @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
@@ -10110,7 +10117,9 @@ class TestRecoveryResolutionTable:
         assert state == "FILLED"
         assert events[-1]["event_type"] == "FILL_CONFIRMED"
         payload = json.loads(events[-1]["payload_json"])
-        assert payload["proof_class"] == "matched_cancel_with_confirmed_held_projection"
+        assert payload["proof_class"] == (
+            "review_required_matched_order_fact_with_positive_trade_fact"
+        )
 
     @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
     def test_scoped_recovery_clears_terminal_positive_entry_review(
@@ -11840,11 +11849,11 @@ class TestRecoveryResolutionTable:
             "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone() is None
 
-    def test_edli_trade_case_accepts_final_intent_without_top_level_token_id(
+    def test_edli_trade_case_rejects_unverified_handwritten_certificate_pair(
         self,
         conn,
     ):
-        """FinalIntentCertificate may bind the selected token in semantic identity only."""
+        """Recovery must not treat graph-unverified certificate rows as live authority."""
         from src.execution.command_recovery import _edli_trade_case_for_command
 
         event_id = "edli_evt_token_bound_final_intent"
@@ -11959,16 +11968,7 @@ class TestRecoveryResolutionTable:
             },
         )
 
-        assert trade_case["trade_id"] == "pos-edli"
-        assert trade_case["city"] == "Madrid"
-        assert trade_case["target_date"] == "2026-06-08"
-        assert trade_case["bin_label"] == "Will the highest temperature in Madrid be 33°C on June 8?"
-        assert trade_case["direction"] == "buy_no"
-        assert trade_case["strategy_key"] == "opening_inertia"
-        assert trade_case["entry_method"] == "qkernel_spine"
-        assert trade_case["discovery_mode"] == "update_reaction"
-        assert trade_case["p_posterior"] == pytest.approx(0.81)
-        assert trade_case["entry_ci_width"] == pytest.approx(0.10)
+        assert trade_case == {}
 
     def test_edli_trade_case_recovers_from_live_order_events_without_certificates(
         self,
@@ -12145,12 +12145,12 @@ class TestRecoveryResolutionTable:
 
         assert trade_case == {}
 
-    def test_edli_filled_entry_repair_recovers_missing_bin_label_from_clob_market_identity(
+    def test_edli_filled_entry_repair_rejects_clob_only_bin_identity(
         self,
         conn,
         mock_client,
     ):
-        """Missing EDLI bin labels may be recovered only from matching CLOB market identity."""
+        """CLOB metadata cannot replace canonical market-event identity."""
         from src.state.venue_command_repo import append_event
         from src.execution.command_recovery import reconcile_unresolved_commands
 
@@ -12293,28 +12293,14 @@ class TestRecoveryResolutionTable:
 
         assert summary["filled_entry_projection_repair"] == {
             "scanned": 1,
-            "advanced": 1,
-            "stayed": 0,
+            "advanced": 0,
+            "stayed": 1,
             "errors": 0,
         }
         mock_client.get_clob_market_info.assert_called_once_with(condition_id)
-        current = conn.execute(
-            """
-            SELECT phase, city, target_date, bin_label, direction, strategy_key, shares, entry_price
-              FROM position_current
-             WHERE position_id = 'pos-001'
-            """
-        ).fetchone()
-        assert dict(current) == {
-            "phase": "active",
-            "city": "Madrid",
-            "target_date": "2026-06-08",
-            "bin_label": "Will the highest temperature in Madrid be 33°C on June 8?",
-            "direction": "buy_no",
-            "strategy_key": "opening_inertia",
-            "shares": 8.0,
-            "entry_price": 0.55,
-        }
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
 
     def test_terminal_filled_entry_repair_canonicalizes_legacy_imminent_strategy_key(
         self,
@@ -12390,7 +12376,7 @@ class TestRecoveryResolutionTable:
         conn,
         mock_client,
     ):
-        _insert(conn, size=13.45, price=0.01)
+        _insert(conn, size=13.45, price=0.05)
         _advance_to_acked(conn, venue_order_id="ord-live")
         _append_order_fact(
             conn,
@@ -12467,7 +12453,7 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
-    def test_live_edli_entry_projection_uses_actionable_q_live(
+    def test_live_edli_entry_projection_rejects_unverified_actionable_row(
         self,
         conn,
         mock_client,
@@ -12496,15 +12482,15 @@ class TestRecoveryResolutionTable:
 
         summary = reconcile_unresolved_commands(conn, mock_client)
 
-        assert summary["live_entry_projection_repair"]["advanced"] == 1
-        current = conn.execute(
-            "SELECT phase, direction, p_posterior FROM position_current WHERE position_id = 'pos-001'"
-        ).fetchone()
-        assert dict(current) == {
-            "phase": "pending_entry",
-            "direction": "buy_yes",
-            "p_posterior": pytest.approx(0.62),
+        assert summary["live_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
         }
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
 
     def test_live_edli_entry_projection_refuses_missing_actionable_certificate(
         self,
@@ -12618,7 +12604,7 @@ class TestRecoveryResolutionTable:
             "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone() is None
 
-    def test_invalid_pending_entry_authority_cancel_voids_zero_fill_rest_and_continues_redecision(
+    def test_local_ghost_certificate_cannot_trigger_pending_entry_cancel(
         self,
         conn,
         mock_client,
@@ -12658,39 +12644,14 @@ class TestRecoveryResolutionTable:
         )
 
         clob = FakeClob()
-        traced_sql: list[str] = []
-        conn.set_trace_callback(traced_sql.append)
-        try:
-            summary = reconcile_invalid_pending_entry_authority_cancels(conn, clob)
-        finally:
-            conn.set_trace_callback(None)
+        summary = reconcile_invalid_pending_entry_authority_cancels(conn, clob)
 
-        assert clob.cancelled == ["ord-invalid-pending"]
-        candidate_query = next(
-            sql
-            for sql in traced_sql
-            if "WITH candidate_commands AS" in sql
-            and "canonical_order_truth AS" in sql
-        )
-        assert "JOIN candidate_commands scope ON scope.command_id = fact.command_id" in candidate_query
-        assert summary["scanned"] == 1
-        assert summary["advanced"] == 1
+        assert clob.cancelled == []
+        assert summary["scanned"] == 0
+        assert summary["advanced"] == 0
         assert summary["errors"] == 0
-        assert summary["continuations"] == [
-            {
-                "command_id": "cmd-001",
-                "position_id": "pos-001",
-                "venue_order_id": "ord-invalid-pending",
-                "condition_id": "condition-test",
-                "token_id": "tok-001",
-                "city": "Karachi",
-                "target_date": "2026-05-17",
-                "temperature_metric": "high",
-                "metric": "high",
-                "reason": "invalid_pending_entry_authority_cancel",
-            }
-        ]
-        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        assert summary["continuations"] == []
+        assert _get_state(conn, "cmd-001") == "ACKED"
         position = conn.execute(
             """
             SELECT phase, shares, cost_basis_usd, order_status
@@ -12699,10 +12660,10 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()
         assert dict(position) == {
-            "phase": "voided",
+            "phase": "pending_entry",
             "shares": 0.0,
             "cost_basis_usd": 0.0,
-            "order_status": "canceled",
+            "order_status": "pending",
         }
         events = [
             row["event_type"]
@@ -12715,9 +12676,9 @@ class TestRecoveryResolutionTable:
                 """
             ).fetchall()
         ]
-        assert events[-1] == "ENTRY_ORDER_VOIDED"
+        assert events[-1] == "ENTRY_ORDER_POSTED"
 
-    def test_edli_entry_posterior_projection_repair_backfills_existing_zero(
+    def test_edli_entry_posterior_projection_repair_ignores_local_ghost_certificates(
         self,
         conn,
         mock_client,
@@ -12769,7 +12730,7 @@ class TestRecoveryResolutionTable:
 
         summary = reconcile_edli_entry_posterior_projection_repairs(conn, client=mock_client)
 
-        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         current = conn.execute(
             """
             SELECT p_posterior, entry_method, strategy_key, edge_source,
@@ -12778,14 +12739,14 @@ class TestRecoveryResolutionTable:
              WHERE position_id = 'pos-001'
             """
         ).fetchone()
-        assert current["p_posterior"] == pytest.approx(0.62)
-        assert current["entry_method"] == "qkernel_spine"
-        assert current["strategy_key"] == "forecast_qkernel_entry"
-        assert current["edge_source"] == "forecast_qkernel_entry"
-        assert current["discovery_mode"] == "update_reaction"
-        assert current["decision_snapshot_id"] == "forecast-snap-edli"
+        assert current["p_posterior"] == 0.0
+        assert current["entry_method"] == "ens_member_counting"
+        assert current["strategy_key"] == "center_buy"
+        assert current["edge_source"] == "center_buy"
+        assert current["discovery_mode"] == "opening_hunt"
+        assert current["decision_snapshot_id"] == "forecast-snap-old"
 
-    def test_edli_entry_posterior_projection_repair_refuses_quarantined_actionable_certificate(
+    def test_edli_entry_posterior_projection_repair_ignores_revoked_local_ghost(
         self,
         conn,
         mock_client,
@@ -12828,14 +12789,14 @@ class TestRecoveryResolutionTable:
 
         summary = reconcile_edli_entry_posterior_projection_repairs(conn, client=mock_client)
 
-        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         current = conn.execute(
             "SELECT p_posterior, entry_method FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
         assert current["p_posterior"] == 0.0
         assert current["entry_method"] == "ens_member_counting"
 
-    def test_invalid_open_entry_authority_repair_reviews_active_position_without_quarantine(
+    def test_invalid_open_entry_authority_ignores_local_revocation_ghost(
         self,
         conn,
         mock_client,
@@ -12874,13 +12835,12 @@ class TestRecoveryResolutionTable:
         )
 
         from src.execution.command_recovery import (
-            INVALID_ENTRY_AUTHORITY_REVIEW_REASON,
             reconcile_invalid_open_entry_authority_reviews,
         )
 
         summary = reconcile_invalid_open_entry_authority_reviews(conn)
 
-        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         current = conn.execute(
             """
             SELECT phase, chain_state, exit_reason
@@ -12902,15 +12862,9 @@ class TestRecoveryResolutionTable:
              LIMIT 1
             """
         ).fetchone()
-        payload = json.loads(event["payload_json"])
-        assert event["event_type"] == "REVIEW_REQUIRED"
-        assert event["phase_before"] == "active"
-        assert event["phase_after"] == "active"
-        assert event["command_id"] == "cmd-001"
-        assert event["caused_by"] == INVALID_ENTRY_AUTHORITY_REVIEW_REASON
-        assert payload["proof_class"] == "open_position_entry_actionable_certificate_not_current_valid"
+        assert event is None
 
-    def test_edli_entry_authority_projection_repair_backfills_legacy_method(
+    def test_edli_entry_authority_projection_repair_ignores_local_ghost(
         self,
         conn,
         mock_client,
@@ -12952,14 +12906,14 @@ class TestRecoveryResolutionTable:
 
         summary = reconcile_edli_entry_posterior_projection_repairs(conn, client=mock_client)
 
-        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         current = conn.execute(
             "SELECT p_posterior, entry_method FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
         assert current["p_posterior"] == pytest.approx(0.914)
-        assert current["entry_method"] == "qkernel_spine"
+        assert current["entry_method"] == "ens_member_counting"
 
-    def test_edli_entry_posterior_projection_repair_rejects_final_intent_q_live(
+    def test_edli_entry_posterior_projection_repair_ignores_local_final_intent_q(
         self,
         conn,
         mock_client,
@@ -13010,7 +12964,7 @@ class TestRecoveryResolutionTable:
 
         summary = reconcile_edli_entry_posterior_projection_repairs(conn, client=mock_client)
 
-        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         current = conn.execute(
             "SELECT p_posterior FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
@@ -13403,7 +13357,7 @@ class TestRecoveryResolutionTable:
             outcome_label="NO",
             decision_id="legacy_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
             size=13.45,
-            price=0.01,
+            price=0.05,
         )
         _advance_to_acked(conn, venue_order_id="ord-live")
         _append_order_fact(
@@ -13522,7 +13476,7 @@ class TestRecoveryResolutionTable:
             outcome_label="NO",
             decision_id="legacy_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
             size=13.45,
-            price=0.01,
+            price=0.05,
         )
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
         mock_client.get_order.return_value = {
@@ -13581,7 +13535,7 @@ class TestRecoveryResolutionTable:
         conn,
         mock_client,
     ):
-        _insert(conn, size=13.45, price=0.01)
+        _insert(conn, size=13.45, price=0.05)
         _advance_to_acked(conn, venue_order_id="ord-live")
         _append_order_fact(
             conn,
@@ -13626,7 +13580,7 @@ class TestRecoveryResolutionTable:
         conn,
         mock_client,
     ):
-        _insert(conn, size=13.45, price=0.01)
+        _insert(conn, size=13.45, price=0.05)
         _advance_to_acked(conn, venue_order_id="ord-live")
         _append_order_fact(
             conn,
@@ -14203,7 +14157,7 @@ class TestRecoveryResolutionTable:
         conn,
         mock_client,
     ):
-        _insert(conn, size=13.45, price=0.01)
+        _insert(conn, size=13.45, price=0.05)
         _advance_to_acked(conn, venue_order_id="ord-live")
         _append_order_fact(
             conn,
@@ -16186,7 +16140,7 @@ class TestRecoveryResolutionTable:
         conn,
     ):
         """A terminal remainder fact closes cancel state while preserving exposure."""
-        _insert(conn, size=133.16, price=0.04)
+        _insert(conn, size=133.16, price=0.05)
         _seed_pending_entry_projection(conn)
         _advance_to_cancel_pending(conn, venue_order_id="ord-001")
         conn.execute(
@@ -16357,7 +16311,7 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0.625")
         assert Decimal(str(current["entry_price"])) == Decimal("0.5")
         assert current["order_status"] == "partial"
-        assert current["chain_state"] == "synced"
+        assert current["chain_state"] == "unknown"
         events = [row["event_type"] for row in _get_events(conn, "cmd-001")]
         assert events[-1] == "CANCEL_ACKED"
         position_events = [
@@ -16709,7 +16663,7 @@ class TestRecoveryResolutionTable:
     ):
         from src.state.venue_command_repo import append_event
 
-        _insert(conn, price=0.01, size=3.0)
+        _insert(conn, price=0.05, size=3.0)
         _advance_to_submitting(conn)
         append_event(
             conn,
@@ -16750,7 +16704,7 @@ class TestRecoveryResolutionTable:
     ):
         from src.state.venue_command_repo import append_event
 
-        _insert(conn, price=0.01, size=12.0)
+        _insert(conn, price=0.05, size=12.0)
         _advance_to_submitting(conn)
         append_event(
             conn,
@@ -17305,7 +17259,7 @@ class TestRecoveryResolutionTable:
             intent_kind="EXIT",
             side="SELL",
             size=23.7,
-            price=0.04,
+            price=0.05,
             token_id="tok-001",
         )
         _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
@@ -17391,7 +17345,7 @@ class TestRecoveryResolutionTable:
             intent_kind="EXIT",
             side="SELL",
             size=10.03,
-            price=0.04,
+            price=0.05,
             token_id="tok-001",
         )
         _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
@@ -18865,7 +18819,7 @@ class TestRecoveryResolutionTable:
             intent_kind="EXIT",
             side="SELL",
             size=23.7,
-            price=0.04,
+            price=0.05,
             token_id="tok-001",
         )
         _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
@@ -19191,7 +19145,7 @@ class TestRecoveryResolutionTable:
         events = _get_events(conn, "cmd-001")
         assert events[-1]["event_type"] == "REVIEW_REQUIRED"
 
-    def test_partial_remainder_recovery_resolves_matching_m5_local_orphan_finding(
+    def test_partial_remainder_keeps_finding_without_canonical_entry_identity(
         self,
         conn,
         mock_client,
@@ -19217,7 +19171,10 @@ class TestRecoveryResolutionTable:
         reconcile_unresolved_commands(conn, mock_client)
 
         assert _get_state(conn, "cmd-001") == "EXPIRED"
-        assert [row.finding_id for row in list_unresolved_findings(conn)] == []
+        unresolved = list_unresolved_findings(conn)
+        assert len(unresolved) == 1
+        assert unresolved[0].finding_id != finding.finding_id
+        assert unresolved[0].subject_id == "entry_identity:cmd-001"
         resolved = conn.execute(
             "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
             (finding.finding_id,),
@@ -19755,7 +19712,7 @@ class TestEdliAbsenceVenueCommandSync:
             decision_id=seeded["execution_command_id"],
             token_id=seeded["token_id"],
             side="BUY",
-            price=0.01,
+            price=0.05,
             size=569.08,
         )
         _advance_to_acked(
@@ -19826,7 +19783,7 @@ class TestEdliAbsenceVenueCommandSync:
             decision_id=seeded["execution_command_id"],
             token_id=seeded["token_id"],
             side="BUY",
-            price=0.01,
+            price=0.05,
             size=569.08,
         )
         _advance_to_submitting(conn, command_id="cmd-rejected-edli-stall")
