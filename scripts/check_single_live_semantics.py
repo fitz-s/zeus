@@ -344,6 +344,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
     except SyntaxError:
         return []
 
+    literal_bindings = _literal_bindings(tree, excluded=CUTOVER_RETIRED_ASSIGNMENTS)
     assignments: list[tuple[list[ast.expr], ast.expr]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
@@ -369,7 +370,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
         if not _expr_uses_names(value, tainted):
             continue
         for target in targets:
-            control = _control_target(target)
+            control = _control_target(target, literal_bindings)
             if control is not None:
                 out.append(f"retired deletion constant flows into {control!r}")
     for node in ast.walk(tree):
@@ -381,26 +382,29 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
             and isinstance(node.func, ast.Name)
             and node.func.id == "setattr"
             and len(node.args) >= 3
-            and isinstance(node.args[1], ast.Constant)
-            and isinstance(node.args[1].value, str)
-            and node.args[1].value.lower() in _LIVE_CONTROL_TARGETS
+            and (_literal_string(node.args[1], literal_bindings) or "").lower()
+            in _LIVE_CONTROL_TARGETS
             and _expr_uses_names(node.args[2], tainted)
         ):
+            control = (_literal_string(node.args[1], literal_bindings) or "").lower()
             out.append(
                 "retired deletion constant flows into setattr control "
-                f"{node.args[1].value.lower()!r}"
+                f"{control!r}"
             )
         elif isinstance(node, ast.Dict):
             for key, value in zip(node.keys, node.values, strict=True):
+                control = (
+                    (_literal_string(key, literal_bindings) or "").lower()
+                    if key is not None
+                    else ""
+                )
                 if (
-                    isinstance(key, ast.Constant)
-                    and isinstance(key.value, str)
-                    and key.value.lower() in _LIVE_CONTROL_TARGETS
+                    control in _LIVE_CONTROL_TARGETS
                     and _expr_uses_names(value, tainted)
                 ):
                     out.append(
                         "retired deletion constant flows into mapping key "
-                        f"{key.value.lower()!r}"
+                        f"{control!r}"
                     )
     return sorted(set(out))
 
@@ -422,18 +426,17 @@ def _assigned_names(node: ast.AST) -> set[str]:
     }
 
 
-def _control_target(node: ast.AST) -> str | None:
+def _control_target(node: ast.AST, bindings: dict[str, str]) -> str | None:
     if isinstance(node, ast.Name) and node.id.lower() in _LIVE_CONTROL_TARGETS:
         return node.id.lower()
     if isinstance(node, ast.Attribute) and node.attr.lower() in _LIVE_CONTROL_TARGETS:
         return node.attr.lower()
     if (
         isinstance(node, ast.Subscript)
-        and isinstance(node.slice, ast.Constant)
-        and isinstance(node.slice.value, str)
-        and node.slice.value.lower() in _LIVE_CONTROL_TARGETS
+        and (_literal_string(node.slice, bindings) or "").lower()
+        in _LIVE_CONTROL_TARGETS
     ):
-        return node.slice.value.lower()
+        return (_literal_string(node.slice, bindings) or "").lower()
     return None
 
 
