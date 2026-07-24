@@ -212,7 +212,8 @@ def _find_existing_open_row(
 def _projection_held_tokens(projection: dict) -> tuple[str, ...]:
     """Return owned-token candidates; unknown direction remains conservative."""
 
-    direction = str(projection.get("direction") or "")
+    raw_direction = projection.get("direction")
+    direction = str(getattr(raw_direction, "value", raw_direction) or "")
     if direction == "buy_no":
         token = projection.get("no_token_id")
         return (str(token),) if token else ()

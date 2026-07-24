@@ -297,9 +297,11 @@ def test_b71_multi_command_held_token_group_is_review_only(monkeypatch):
 
 def test_b71_f109_compares_owned_token_not_sibling_topology(conn):
     """A NO root and YES child may share one binary topology, not one holding."""
+    from src.contracts.semantic_types import Direction
     from src.state.projection import (
         CANONICAL_POSITION_CURRENT_COLUMNS,
         DuplicatePositionOpenError,
+        ordered_values,
         upsert_position_current,
     )
 
@@ -333,10 +335,29 @@ def test_b71_f109_compares_owned_token_not_sibling_topology(conn):
         upsert_position_current(conn, projection("unknown-duplicate", "unknown"))
     upsert_position_current(conn, projection("yes-child", "buy_yes"))
 
+    no_monitor = projection("no-root", "buy_no")
+    no_monitor["direction"] = Direction.NO
+    yes_monitor = projection("yes-child", "buy_yes")
+    yes_monitor["direction"] = Direction.YES
+    upsert_position_current(conn, no_monitor)
+    upsert_position_current(conn, yes_monitor)
+
+    legacy_unknown = projection("legacy-unknown", "unknown")
+    conn.execute(
+        f"INSERT INTO position_current "
+        f"({', '.join(CANONICAL_POSITION_CURRENT_COLUMNS)}) "
+        f"VALUES ({', '.join('?' for _ in CANONICAL_POSITION_CURRENT_COLUMNS)})",
+        ordered_values(legacy_unknown, CANONICAL_POSITION_CURRENT_COLUMNS),
+    )
     assert conn.execute(
         "SELECT COUNT(*) FROM position_current "
         "WHERE position_id IN ('no-root', 'yes-child')"
     ).fetchone()[0] == 2
+    from src.state.position_duplicate_consolidator import _enumerate_duplicates
+
+    # Untyped legacy rows cannot safely select one owned token. They remain
+    # review-only rather than being destructively merged with either sibling.
+    assert _enumerate_duplicates(conn) == []
     with pytest.raises(DuplicatePositionOpenError):
         upsert_position_current(conn, projection("yes-duplicate", "buy_yes"))
 

@@ -33,6 +33,7 @@ in_scope:
 - src/state/venue_command_repo.py
 - src/state/ledger.py
 - src/state/projection.py
+- src/state/position_duplicate_consolidator.py
 - src/contracts/position_truth.py
 - tests/test_p4_post_trade_capital_lift.py
 - tests/test_run_mode_failure_surfaces.py
@@ -77,7 +78,7 @@ allow_companions:
 out_of_scope:
 - state/**
 - src/execution/** except src/execution/exit_lifecycle.py, src/execution/executor.py, src/execution/command_recovery.py, and src/execution/venue_sync_contract.py
-- src/state/** except src/state/portfolio.py, src/state/db.py, src/state/venue_command_repo.py, src/state/ledger.py, src/state/projection.py, and src/state/schema/v2_schema.py
+- src/state/** except src/state/portfolio.py, src/state/db.py, src/state/venue_command_repo.py, src/state/ledger.py, src/state/projection.py, src/state/position_duplicate_consolidator.py, and src/state/schema/v2_schema.py
 - scripts/** except scripts/migrations/2026_07_position_token_split_reconstructed.py
 - config/** except config/station_forecast_sources.json
 status: in_progress

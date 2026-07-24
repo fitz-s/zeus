@@ -1135,16 +1135,27 @@ Restore truthful live entry admission after the global auction reached a real wi
   `no_token_id`.
 - First-principles invariant: duplicate-open protection is per owned native
   token, not per sibling token named by the market. `buy_yes` owns `token_id`;
-  `buy_no` owns `no_token_id`. Unknown legacy directions remain conservative
-  across both fields.
+  `buy_no` owns `no_token_id`. The writer checks both fields for an unknown
+  direction; destructive consolidation leaves such untyped rows untouched.
 - Minimal repair: derive the candidate held token from direction and compare it
   only with direction-selected held tokens on existing typed rows. Preserve the
   hard failure for a true same-held-token duplicate and all append/projection
   transaction boundaries.
 - Files authorized: `src/state/projection.py`,
+  `src/state/position_duplicate_consolidator.py`,
   `tests/test_command_recovery.py`, `architecture/source_rationale.yaml`, and
-  this packet.
+  this packet plus its scope sidecar.
 - Acceptance: a NO root and YES child sharing one exact binary topology both
   project; another YES position on the same YES token still raises F109. The
   live B71 reconstruction then writes one root and one deterministic child
   atomically, restart recovery is green, and no venue action is introduced.
+- Post-deploy blocker: monitor projections carry `Direction` enum values, not
+  only DB strings. Treating those enums as unknown made each sibling check both
+  topology tokens and blocked every post-split `MONITOR_REFRESHED`. The legacy
+  duplicate consolidator independently grouped on `token_id OR no_token_id`,
+  which could misclassify legitimate opposite-token siblings as overbook.
+- Corrective acceptance: string and enum directions select the same single
+  owned token; both Guangzhou rows persist monitor projections; the
+  consolidator excludes opposite-token siblings and untyped legacy rows while
+  retaining typed same-token duplicate repair; both positions receive fresh
+  canonical monitor receipts.

@@ -59,6 +59,13 @@ import uuid
 logger = logging.getLogger(__name__)
 
 _OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit", "unknown")
+_HELD_TOKEN_SQL = """
+CASE
+    WHEN direction = 'buy_no' THEN NULLIF(no_token_id, '')
+    WHEN direction = 'buy_yes' THEN NULLIF(token_id, '')
+    ELSE NULL
+END
+""".strip()
 _VOIDED_REASON = "duplicate_consolidated_2026_05_17_f109"
 _MERGED_REASON = "duplicate_open_rows_merged_same_identity_2026_06_17"
 _MICRO_PER_SHARE = 1_000_000  # ctf_token_balances_json is in micro-units
@@ -116,11 +123,11 @@ def _enumerate_duplicates(
     by first-event occurred_at ASCENDING (oldest first).
     """
     token_rows = conn.execute(
-        """
-        SELECT COALESCE(NULLIF(token_id, ''), NULLIF(no_token_id, '')) AS exposure_token
+        f"""
+        SELECT {_HELD_TOKEN_SQL} AS exposure_token
           FROM position_current
          WHERE phase IN (?, ?, ?, ?, ?)
-           AND COALESCE(NULLIF(token_id, ''), NULLIF(no_token_id, '')) IS NOT NULL
+           AND {_HELD_TOKEN_SQL} IS NOT NULL
          GROUP BY exposure_token
         HAVING COUNT(*) > 1
         """,
@@ -129,15 +136,15 @@ def _enumerate_duplicates(
     out: list[tuple[str, list[tuple[str, float, str]]]] = []
     for (token_id,) in token_rows:
         rows = conn.execute(
-            """
+            f"""
             SELECT pc.position_id, pc.shares,
                    (SELECT MIN(occurred_at) FROM position_events pe
                      WHERE pe.position_id = pc.position_id) AS first_at
               FROM position_current pc
-             WHERE (pc.token_id = ? OR pc.no_token_id = ?)
+             WHERE {_HELD_TOKEN_SQL} = ?
                AND pc.phase IN (?, ?, ?, ?, ?)
             """,
-            (str(token_id), str(token_id), *_OPEN_PHASES),
+            (str(token_id), *_OPEN_PHASES),
         ).fetchall()
         triples = [
             (str(r[0]), float(r[1] or 0.0), str(r[2] or "9999"))
@@ -211,15 +218,15 @@ def _void_row(
 
 def _row_dicts_for_token(conn: sqlite3.Connection, token_id: str) -> list[dict]:
     cur = conn.execute(
-        """
+        f"""
         SELECT pc.*,
                (SELECT MIN(occurred_at) FROM position_events pe
                  WHERE pe.position_id = pc.position_id) AS first_at
           FROM position_current pc
-         WHERE (pc.token_id = ? OR pc.no_token_id = ?)
+         WHERE {_HELD_TOKEN_SQL} = ?
            AND pc.phase IN (?, ?, ?, ?, ?)
         """,
-        (str(token_id), str(token_id), *_OPEN_PHASES),
+        (str(token_id), *_OPEN_PHASES),
     )
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]

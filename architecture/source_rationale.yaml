@@ -2997,7 +2997,7 @@ files:
   src/state/position_duplicate_consolidator.py:
     zone: K0_frozen_kernel
     authority_role: canonical_position_repair
-    why: F109 chain-truth-aware repair path for duplicate open-phase position_current rows; voids only structurally provable overbook rows and leaves ambiguous chain divergence untouched.
+    why: F109 chain-truth-aware repair path for duplicate open-phase position_current rows; groups typed rows by the direction-selected held token, voids only structurally provable same-token overbook rows, and leaves legitimate opposite-token siblings or untyped legacy rows untouched.
     write_routes:
     - canonical_position_write
     downstream:
