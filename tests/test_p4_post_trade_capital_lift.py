@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-15
+# Last reused or audited: 2026-07-24
 # Reuse: Run when post-trade-capital process recovery, poller ownership, or launchd liveness changes.
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 P4->riskguard/P1 no-back-coupling + commit-before-HTTP; I4 ingest->P4),
 #   §8 Step 2 (split chain-sync READ from exit-SUBMIT), §9 (regression-unconstructable).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-15; last_reused=2026-07-15
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-24; last_reused=2026-07-24
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P4 — lift the
 #   post-trade capital lifecycle (settlement P&L resolve -> redeem -> wrap +
 #   chain-sync READ phase) OUT of the order daemon into its own process.
@@ -127,6 +127,22 @@ def _add_job_ids(source_path: Path) -> list[str]:
     return ids
 
 
+def _add_job_call(source_path: Path, job_id: str) -> ast.Call | None:
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_job"
+        ):
+            continue
+        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        value = keywords.get("id")
+        if isinstance(value, ast.Constant) and value.value == job_id:
+            return node
+    return None
+
+
 def _function_names_defined(source_path: Path) -> set[str]:
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     return {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
@@ -180,6 +196,23 @@ def test_no_regression_p4_daemon_and_plist_artifacts_exist():
     assert "com.zeus.post-trade-capital" in plist
     assert "src.ingest.post_trade_capital_daemon" in plist
     assert "POLYMARKET_CLOB_V2_SIGNATURE_TYPE" in plist
+
+
+def test_harvester_runs_on_daemon_start_then_keeps_hourly_cadence():
+    """A short-lived restart must still drain newly resolved held positions."""
+    call = _add_job_call(_P4_DAEMON, "harvester")
+    assert call is not None
+    keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+    assert isinstance(keywords.get("hours"), ast.Constant)
+    assert keywords["hours"].value == 1
+    assert isinstance(keywords.get("max_instances"), ast.Constant)
+    assert keywords["max_instances"].value == 1
+    assert isinstance(keywords.get("coalesce"), ast.Constant)
+    assert keywords["coalesce"].value is True
+    next_run = keywords.get("next_run_time")
+    assert isinstance(next_run, ast.Call)
+    assert isinstance(next_run.func, ast.Attribute)
+    assert next_run.func.attr == "now"
 
 
 def test_no_regression_settlement_commands_enqueue_is_idempotent():

@@ -452,6 +452,7 @@ def main() -> None:
         _scheduler_job("harvester")(_harvester_cycle),
         "interval", hours=1, id="harvester",
         max_instances=1, coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
     )
     _scheduler.add_job(
         _scheduler_job("redeem_reconciler")(_redeem_reconciler_cycle),
