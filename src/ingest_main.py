@@ -1050,12 +1050,6 @@ def _forecasts_schema_current_lightweight() -> bool:
             for table in ("forecast_posteriors", "raw_model_forecasts"):
                 if table not in tables:
                     return False
-                columns = {
-                    str(row[1])
-                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-                }
-                if "trade_" + "authority_status" in columns:
-                    return False
             return True
         finally:
             conn.close()

@@ -45,8 +45,6 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from contextlib import contextmanager
-from types import SimpleNamespace
 
 import pytest
 
@@ -152,26 +150,6 @@ def test_t1_confirmed_batch_leaves_zero_usdce_same_call(world_conn):
     assert row["amount_micro"] == 857_476_847
     assert adapter.balance_refreshed == 1, "T1 FAIL: CLOB balance not refreshed."
     assert out["pending"] == [], "T1 FAIL: pending wrap rows remain."
-
-
-def test_retired_wrap_configuration_blocks_before_broadcast(
-    world_conn, monkeypatch
-):
-    from src.execution.wrap_unwrap_commands import wrap_proceeds_now
-
-    retired_key = "ZEUS_AUTONOMOUS_WRAP_" + "DRY_RUN"
-    monkeypatch.setenv(retired_key, "1")
-    adapter = _FakeWrapAdapter(balance_micro=857_476_847)
-
-    with pytest.raises(RuntimeError, match="must be removed before broadcast"):
-        wrap_proceeds_now(
-            world_conn,
-            adapter,
-            _SAFE,
-            _EOA,
-            poll_interval_s=0.0,
-        )
-    assert adapter.wrap_calls == []
 
 
 def test_t2_stranded_mid_flight_row_driven_forward(world_conn):

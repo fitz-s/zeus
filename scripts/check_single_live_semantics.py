@@ -31,6 +31,7 @@ SCAN_FILES = (
 )
 TEXT_SUFFIXES = {".json", ".md", ".plist", ".py", ".sh", ".toml", ".txt", ".yaml", ".yml"}
 EXCLUDED = {Path("scripts/check_single_live_semantics.py")}
+CUTOVER_SCRIPT = Path("scripts/migrations/202607_single_live_semantics_cutover.py")
 EXCLUDED_SUBTREES = (
     Path("docs/archive"),
     Path("docs/evidence"),
@@ -105,12 +106,20 @@ def violations(
         rel_lower = rel.as_posix().lower()
         if rel in EXCLUDED:
             continue
-        text = path.read_text(encoding="utf-8", errors="replace").lower()
+        source = path.read_text(encoding="utf-8", errors="replace")
+        scan_value = source.lower()
+        if path.suffix.lower() == ".py":
+            scan_value += "\n" + "\n".join(
+                _static_python_strings(
+                    source,
+                    allow_retired_assignments=rel == CUTOVER_SCRIPT,
+                )
+            )
         for token in _CONCEPT_TOKENS:
-            if _contains_live_alternate_concept(token, text):
+            if _contains_live_alternate_concept(token, scan_value):
                 out.append(f"{rel}: forbidden alternate-runtime concept {token!r}")
         for token in _FORBIDDEN:
-            if _contains_exact(token, rel_lower) or _contains_exact(token, text):
+            if _contains_exact(token, rel_lower) or _contains_exact(token, scan_value):
                 out.append(f"{rel}: forbidden dormant-runtime token {token!r}")
         if rel.parts and rel.parts[0] in {
             "src",
@@ -120,7 +129,7 @@ def violations(
             ".github",
         }:
             for token in _RUNTIME_CATEGORY_FORBIDDEN:
-                if _contains_exact(token, rel_lower) or _contains_exact(token, text):
+                if _contains_exact(token, rel_lower) or _contains_exact(token, scan_value):
                     out.append(
                         f"{rel}: forbidden vague runtime category {token!r}"
                     )
@@ -206,6 +215,83 @@ def _imported_modules(path: Path, root: Path) -> set[str]:
                 imported.add(base)
                 imported.update(f"{base}.{alias.name}" for alias in node.names)
     return imported
+
+
+def _static_python_strings(
+    source: str, *, allow_retired_assignments: bool = False
+) -> set[str]:
+    """Return strings Python can construct entirely from literals in the AST."""
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    collector = _StaticStringCollector(
+        allow_retired_assignments=allow_retired_assignments
+    )
+    collector.visit(tree)
+    return collector.values
+
+
+class _StaticStringCollector(ast.NodeVisitor):
+    def __init__(self, *, allow_retired_assignments: bool) -> None:
+        self.allow_retired_assignments = allow_retired_assignments
+        self.values: set[str] = set()
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if self.allow_retired_assignments and all(
+            isinstance(target, ast.Name) and target.id.startswith("RETIRED_")
+            for target in node.targets
+        ):
+            return
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if (
+            self.allow_retired_assignments
+            and isinstance(node.target, ast.Name)
+            and node.target.id.startswith("RETIRED_")
+        ):
+            return
+        self.generic_visit(node)
+
+    def generic_visit(self, node: ast.AST) -> None:
+        value = _literal_string(node)
+        if value is not None:
+            self.values.add(value.lower())
+        super().generic_visit(node)
+
+
+def _literal_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_string(node.left)
+        right = _literal_string(node.right)
+        return left + right if left is not None and right is not None else None
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+                return None
+            parts.append(value.value)
+        return "".join(parts)
+    if (
+        isinstance(node, ast.Call)
+        and not node.keywords
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "join"
+        and len(node.args) == 1
+    ):
+        separator = _literal_string(node.func.value)
+        values = node.args[0]
+        if separator is None or not isinstance(values, (ast.List, ast.Tuple)):
+            return None
+        parts = [_literal_string(item) for item in values.elts]
+        if any(part is None for part in parts):
+            return None
+        return separator.join(part for part in parts if part is not None)
+    return None
 
 
 def _contains_exact(token: str, value: str) -> bool:

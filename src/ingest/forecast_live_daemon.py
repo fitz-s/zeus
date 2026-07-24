@@ -281,8 +281,6 @@ def _forecast_boot_schema_ready(conn: Any) -> bool:
             }
             if not required_columns.issubset(columns):
                 return False
-            if "trade_" + "authority_status" in columns:
-                return False
         index_tables = {
             str(row[0]): str(row[1])
             for row in conn.execute(
@@ -1364,7 +1362,6 @@ def _register_replacement_forecast_production_jobs(
 # spec->job_defs derivation is shared across both ingest daemons (one implementation, see
 # src.data.scheduler_adapter) so the trigger-param stripping can never diverge between them.
 from src.data.scheduler_adapter import (  # noqa: E402
-    REGISTRY_OWNED_KWARGS as _REGISTRY_OWNED_KWARGS,
     job_defs_from_specs as _job_defs_from_specs,
 )
 

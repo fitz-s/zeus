@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -230,7 +231,7 @@ def test_recursive_closure_preserves_live_old_sizing_and_writes_atomic_receipt(
             wconn,
             "old-sizing",
             "hash-old-sizing",
-            certificate_type=migration.OLD_SIZING_CERTIFICATE,
+            certificate_type=migration.RETIRED_SIZING_CERTIFICATE,
             minute=3,
         )
         _insert_certificate(wconn, "kept", "hash-kept", minute=4)
@@ -268,7 +269,7 @@ def test_recursive_closure_preserves_live_old_sizing_and_writes_atomic_receipt(
         ).fetchall()
         assert kept == [
             ("kept", "BeliefCertificate"),
-            ("old-sizing", migration.OLD_SIZING_CERTIFICATE),
+            ("old-sizing", migration.RETIRED_SIZING_CERTIFICATE),
         ]
         assert conn.execute("SELECT COUNT(*) FROM decision_certificate_edges").fetchone()[0] == 1
         assert conn.execute("SELECT supersession_id FROM decision_certificate_supersessions").fetchall() == [("keep",)]
@@ -480,6 +481,24 @@ def test_duplicate_command_attribution_blocks(tmp_path: Path) -> None:
     assert sample[0]["attribution_count"] == 2
 
 
+def test_duplicate_command_id_across_positions_blocks_before_writes(
+    tmp_path: Path,
+) -> None:
+    def configure(conn: sqlite3.Connection) -> None:
+        _insert_nonterminal_command(conn, "command-1", "position-1")
+        _insert_attribution(conn, "attr-1", "position-1", "command-1", "hash-current")
+        _insert_attribution(conn, "attr-2", "position-2", "command-1", "hash-current")
+
+    plan = _command_plan(tmp_path, configure)
+    kinds = {blocker["kind"] for blocker in plan["blockers"]}
+    assert "duplicate_command_attribution" in kinds
+    assert "nonterminal_command_attribution_unresolved" in kinds
+    assert plan["trades_preflight"]["duplicate_command_attribution_count"] == 1
+    sample = plan["trades_preflight"]["nonterminal_command_unresolved_sample"]
+    assert sample[0]["attribution_count"] == 2
+    assert sample[0]["matching_position_count"] == 1
+
+
 @pytest.mark.parametrize("malformed", (False, True))
 def test_historical_reference_without_archive_blocks_before_writes(
     tmp_path: Path,
@@ -584,9 +603,9 @@ def test_unknown_position_attribution_blocks_before_any_graph_write(
 @pytest.mark.parametrize(
     "table",
     (
-        migration.TRANSFER_TABLE,
-        migration.CONVERSION_TABLE,
-        migration.CONVERSION_EVENTS,
+        migration.RETIRED_TRANSFER_TABLE,
+        migration.RETIRED_CONVERSION_TABLE,
+        migration.RETIRED_CONVERSION_EVENTS,
     ),
 )
 def test_nonempty_retired_table_is_never_dropped(tmp_path: Path, table: str) -> None:
@@ -619,10 +638,9 @@ def test_nonempty_retired_table_is_never_dropped(tmp_path: Path, table: str) -> 
         "model_bias_ens",
         "model_bias",
         "forecast_skill",
-        "truth_epoch",
     ),
 )
-def test_current_evidence_and_epoch_tables_are_preserved(
+def test_current_evidence_tables_are_preserved(
     tmp_path: Path, table: str
 ) -> None:
     path = tmp_path / "state.db"
@@ -639,6 +657,28 @@ def test_current_evidence_and_epoch_tables_are_preserved(
     conn = sqlite3.connect(path)
     try:
         assert conn.execute(f'SELECT value FROM "{table}"').fetchone()[0] == "keep-byte-for-byte"
+    finally:
+        conn.close()
+
+
+def test_retired_truth_epoch_table_is_deleted(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE truth_epoch "
+            "(id INTEGER PRIMARY KEY, epoch TEXT NOT NULL)"
+        )
+        conn.execute("INSERT INTO truth_epoch VALUES (1, 'ACTIVE_NEW')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert migration.mutation_blockers(path) == []
+    assert migration.mutate_db(path) == ["dropped truth_epoch (1 retired rows)"]
+    conn = sqlite3.connect(path)
+    try:
+        assert not migration.table_exists(conn, "truth_epoch")
     finally:
         conn.close()
 
@@ -1094,7 +1134,7 @@ def test_config_recovery_accepts_exact_clean_hash_but_rejects_later_edit(
 ) -> None:
     root, dbs, settings = _target_fixture(tmp_path)
     settings.resolve().write_text(
-        json.dumps({migration.CONFIG_KEYS[0]: True, "keep": 1}) + "\n",
+        json.dumps({migration.RETIRED_CONFIG_KEYS[0]: True, "keep": 1}) + "\n",
         encoding="utf-8",
     )
     journal = tmp_path / "cutover.progress.json"
@@ -1174,6 +1214,54 @@ def test_legacy_risk_and_collateral_factories_obey_cutover(tmp_path: Path) -> No
         collateral.close()
 
 
+def test_prepost_trade_connection_holds_cutover_lease(tmp_path: Path) -> None:
+    from src.state.db import connect_existing_trade_db_without_journal_bootstrap
+
+    root = tmp_path / "root"
+    trade_db = root / "state" / "zeus_trades.db"
+    trade_db.parent.mkdir(parents=True)
+    sqlite3.connect(trade_db).close()
+    conn = connect_existing_trade_db_without_journal_bootstrap(trade_db)
+    try:
+        with pytest.raises(RuntimeError, match="canonical writer lease is held"):
+            with migration.cutover_lease(root, (trade_db,)):
+                pytest.fail("cutover entered over pre-POST trade connection")
+    finally:
+        conn.close()
+
+
+def test_prepost_trade_connection_waits_for_exclusive_cutover(tmp_path: Path) -> None:
+    from src.state.db import connect_existing_trade_db_without_journal_bootstrap
+
+    root = tmp_path / "root"
+    trade_db = root / "state" / "zeus_trades.db"
+    trade_db.parent.mkdir(parents=True)
+    sqlite3.connect(trade_db).close()
+    started = threading.Event()
+    connected = threading.Event()
+    errors: list[BaseException] = []
+
+    def open_connection() -> None:
+        started.set()
+        try:
+            conn = connect_existing_trade_db_without_journal_bootstrap(trade_db)
+            connected.set()
+            conn.close()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    with migration.cutover_lease(root, (trade_db,)):
+        thread = threading.Thread(target=open_connection)
+        thread.start()
+        assert started.wait(1.0)
+        assert not connected.wait(0.1)
+
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert errors == []
+    assert connected.is_set()
+
+
 def test_position_attribution_schema_migrates_to_command_exact(tmp_path: Path) -> None:
     path = tmp_path / "zeus_trades.db"
     conn = sqlite3.connect(path)
@@ -1206,6 +1294,11 @@ def test_position_attribution_schema_migrates_to_command_exact(tmp_path: Path) -
     assert conn.execute(
         "SELECT COUNT(*) FROM position_decision_attribution WHERE position_id='p1'"
     ).fetchone()[0] == 2
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO position_decision_attribution VALUES "
+            "('a3','p2','c1','h1','ATTRIBUTED',NULL,'LIVE_DECISION','ENTRY','later',1)"
+        )
     conn.close()
 
 

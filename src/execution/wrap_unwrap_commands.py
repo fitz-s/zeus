@@ -827,11 +827,6 @@ def wrap_proceeds_now(
     import time as _time
 
     logger = logging.getLogger(__name__)
-    retired_key = "ZEUS_AUTONOMOUS_WRAP_" + "DRY_RUN"
-    if retired_key in os.environ:
-        raise RuntimeError(
-            f"retired wrap configuration {retired_key} must be removed before broadcast"
-        )
     init_wrap_unwrap_schema(conn)
 
     if threshold_micro is None:

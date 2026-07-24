@@ -38,7 +38,17 @@ if TYPE_CHECKING:
     from src.state.db_writer_lock import WriteClass
 
 from src.architecture.decorators import capability
-from src.config import STATE_DIR, get_mode, state_path
+from src.config import STATE_DIR, get_mode
+from src.contracts.semantic_types import ExitState
+from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
+from src.state.ledger import (
+    _ensure_position_current_authority_columns,
+    apply_architecture_kernel_schema,
+)
+from src.state.projection import POSITION_EVENT_ENVS
+from src.state.market_topology_repo import write_market_topology_state
+from src.state.snapshot_repo import init_snapshot_schema
+from src.observability.counters import increment as _cnt_inc
 
 
 def utc_iso_now() -> str:
@@ -67,18 +77,6 @@ def ensure_single_live_cutover_generation_table(conn: sqlite3.Connection) -> Non
         )
         """
     )
-from src.contracts.semantic_types import ExitState
-from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
-from src.state.ledger import (
-    CANONICAL_POSITION_EVENT_COLUMNS,
-    _ensure_position_current_authority_columns,
-    apply_architecture_kernel_schema,
-    append_many_and_project,
-)
-from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS, POSITION_EVENT_ENVS
-from src.state.market_topology_repo import write_market_topology_state
-from src.state.snapshot_repo import init_snapshot_schema
-from src.observability.counters import increment as _cnt_inc
 
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # LEGACY — remove after Phase 4
@@ -331,8 +329,11 @@ def connect_existing_trade_db_without_journal_bootstrap(
 
     path = db_path.resolve(strict=True)
     timeout_ms = _db_busy_timeout_ms()
-    conn = sqlite3.connect(
+    from src.state.db_writer_lock import connect_with_cutover_lease
+
+    conn = connect_with_cutover_lease(
         path.as_uri() + "?mode=rw",
+        canonical_db_path=path,
         uri=True,
         timeout=timeout_ms / 1000.0,
     )
@@ -6513,16 +6514,6 @@ def assert_schema_current_forecasts(conn: sqlite3.Connection) -> None:
             (table,),
         ).fetchone() is None:
             continue
-        columns = {
-            str(row[1])
-            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-        }
-        if "trade_" + "authority_status" in columns:
-            raise RuntimeError(
-                f"forecasts DB table {table} still has a retired authority column"
-            )
-
-
 _CALIBRATION_DECISION_GROUP_DDL = """
 CREATE TABLE calibration_decision_group (
     group_id TEXT PRIMARY KEY,
@@ -10550,10 +10541,7 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
         # ships.  If synthesis succeeds, lifecycle update proceeds normally.
         # If synthesis also fails, BridgeAbsentError surfaces the real defect.
         try:
-            from src.state.trade_decisions_synthesizer import (
-                BridgeSynthesisError,
-                synthesize_missing_bridge,
-            )
+            from src.state.trade_decisions_synthesizer import synthesize_missing_bridge
             synthesize_missing_bridge(conn, runtime_trade_id)
         except Exception as _synth_err:
             raise BridgeAbsentError(

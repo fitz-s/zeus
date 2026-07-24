@@ -25,20 +25,21 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 STATE = ROOT / "state"
-OLD_AUTHORITY = "trade_" + "authority_status"
-OLD_LIVE_AUTHORITY = "LIVE_" + "AUTHORITY"
-OLD_ELIGIBILITY = "promotion_" + "eligible"
-OLD_AUDIT_INDEX = "idx_edli_live_profit_audit_" + "promotion"
-TRANSFER_TABLE = "validated_calibration_" + "transfers"
-CONVERSION_TABLE = "ctf_conversion_" + "commands"
-CONVERSION_EVENTS = "ctf_conversion_command_" + "events"
-FORCE_EXIT_COLUMN = "force_exit_" + "review"
-OLD_PRE_SUBMIT_MODE = "NO_" + "SUBMIT"
-OLD_REPLAY_MODE = "REPLAY_" + "COUNTERFACTUAL"
-OLD_SIZING_CERTIFICATE = "Kelly" + "DryRunCertificate"
-OLD_PRE_SUBMIT_DECISION_CERTIFICATE = "NoSubmit" + "DecisionCertificate"
-OLD_PRE_SUBMIT_MODE_CERTIFICATE = "NoSubmit" + "ModeCertificate"
-RECEIPT_COLUMNS = (
+RETIRED_AUTHORITY_COLUMN = "trade_" + "authority_status"
+RETIRED_LIVE_AUTHORITY_VALUE = "LIVE_" + "AUTHORITY"
+RETIRED_ELIGIBILITY_COLUMN = "promotion_" + "eligible"
+RETIRED_AUDIT_INDEX = "idx_edli_live_profit_audit_" + "promotion"
+RETIRED_TRANSFER_TABLE = "validated_calibration_" + "transfers"
+RETIRED_CONVERSION_TABLE = "ctf_conversion_" + "commands"
+RETIRED_CONVERSION_EVENTS = "ctf_conversion_command_" + "events"
+RETIRED_EPOCH_TABLE = "truth_epoch"
+RETIRED_FORCE_EXIT_COLUMN = "force_exit_" + "review"
+RETIRED_PRE_SUBMIT_MODE = "NO_" + "SUBMIT"
+RETIRED_REPLAY_MODE = "REPLAY_" + "COUNTERFACTUAL"
+RETIRED_SIZING_CERTIFICATE = "Kelly" + "DryRunCertificate"
+RETIRED_PRE_SUBMIT_DECISION_CERTIFICATE = "NoSubmit" + "DecisionCertificate"
+RETIRED_PRE_SUBMIT_MODE_CERTIFICATE = "NoSubmit" + "ModeCertificate"
+RETIRED_RECEIPT_COLUMNS = (
     "q_live_" + "raw",
     "q_lcb_" + "raw",
     "coverage_" + "hierarchy_level",
@@ -58,8 +59,8 @@ RECEIPT_COLUMNS = (
     "edge_" + "shrunk_posterior_sd",
     "selection_" + "authority",
 )
-REMOVED_MANIFEST_FIELD = OLD_AUTHORITY
-CONFIG_NOTES = (
+RETIRED_MANIFEST_FIELD = RETIRED_AUTHORITY_COLUMN
+RETIRED_CONFIG_NOTES = (
     "_edli_live_" + "scope_note_2026_06_09",
     "_edli_live_" + "scope_note_2026_06_12",
     "_mass_enable_note_2026_06_09",
@@ -69,7 +70,7 @@ CONFIG_NOTES = (
     "_calibration_bin_source_v2_fit_" + "enabled_note",
     "_ddd_v2_" + "enabled_note",
 )
-CONFIG_KEYS = (
+RETIRED_CONFIG_KEYS = (
     "main" + "stream_" + "warm_max_families_per_cycle",
     "main" + "stream_" + "agreement_reference_enabled",
     "main" + "stream_" + "agreement_enforce_on_submit",
@@ -114,7 +115,7 @@ CONFIG_KEYS = (
     "HOLD_VALUE_EXIT_" + "COSTS",
     "_HOLD_VALUE_EXIT_" + "COSTS_note",
 )
-CONFIG_PATHS = ("edli.enabled",)
+RETIRED_CONFIG_PATHS = ("edli.enabled",)
 PROCESS_MARKERS = (
     "src.main",
     "src/main.py",
@@ -562,8 +563,8 @@ def expected_runtime_json_hashes(root: Path) -> dict[str, str]:
         except (UnicodeDecodeError, json.JSONDecodeError):
             expected[str(path.relative_to(root))] = hashlib.sha256(raw).hexdigest()
             continue
-        if isinstance(payload, dict) and REMOVED_MANIFEST_FIELD in payload:
-            del payload[REMOVED_MANIFEST_FIELD]
+        if isinstance(payload, dict) and RETIRED_MANIFEST_FIELD in payload:
+            del payload[RETIRED_MANIFEST_FIELD]
             raw = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
         expected[str(path.relative_to(root))] = hashlib.sha256(raw).hexdigest()
     return expected
@@ -574,8 +575,8 @@ def _cleaned_config(path: Path) -> tuple[dict[str, object], list[str]]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"settings must contain a JSON object: {path}")
     removed: list[str] = []
-    retired = set((*CONFIG_NOTES, *CONFIG_KEYS))
-    retired_paths = set(CONFIG_PATHS)
+    retired = set((*RETIRED_CONFIG_NOTES, *RETIRED_CONFIG_KEYS))
+    retired_paths = set(RETIRED_CONFIG_PATHS)
 
     def strip(mapping: dict[str, object], prefix: str = "") -> None:
         for key in tuple(mapping):
@@ -1030,12 +1031,37 @@ def _trades_preflight(
                 "sample": active_refs[:25],
             }
         )
+    duplicate_command_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT command_id, COUNT(*) AS attribution_count,
+                   COUNT(DISTINCT position_id) AS position_count
+              FROM trades.position_decision_attribution
+             WHERE command_id IS NOT NULL
+             GROUP BY command_id
+            HAVING COUNT(*) != 1
+            """
+        ).fetchall()
+    ]
+    details["duplicate_command_attribution_count"] = len(duplicate_command_rows)
+    details["duplicate_command_attribution_sample"] = duplicate_command_rows[:25]
+    if duplicate_command_rows:
+        blockers.append(
+            {
+                "kind": "duplicate_command_attribution",
+                "count": len(duplicate_command_rows),
+                "sample": duplicate_command_rows[:25],
+            }
+        )
     terminal = sorted(TERMINAL_COMMAND_STATES)
     terminal_placeholders = ",".join("?" for _ in terminal)
     command_rows = conn.execute(
         f"""
         SELECT cmd.command_id, cmd.position_id, cmd.state,
                COUNT(pda.attribution_id) AS attribution_count,
+               SUM(CASE WHEN pda.position_id = cmd.position_id THEN 1 ELSE 0 END)
+                   AS matching_position_count,
                SUM(CASE WHEN upper(COALESCE(pda.resolution, '')) = 'ATTRIBUTED'
                          THEN 1 ELSE 0 END) AS attributed_count,
                MIN(pda.resolution) AS resolution,
@@ -1045,7 +1071,6 @@ def _trades_preflight(
           FROM trades.venue_commands cmd
           LEFT JOIN trades.position_decision_attribution pda
             ON pda.command_id = cmd.command_id
-           AND pda.position_id = cmd.position_id
           LEFT JOIN decision_certificates cert
             ON lower(cert.certificate_hash) = lower(pda.decision_certificate_hash)
          WHERE upper(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
@@ -1058,6 +1083,7 @@ def _trades_preflight(
         row
         for row in command_details
         if int(row["attribution_count"] or 0) != 1
+        or int(row["matching_position_count"] or 0) != 1
         or int(row["attributed_count"] or 0) != 1
         or str(row["resolution"] or "").upper() != "ATTRIBUTED"
         or not str(row["decision_certificate_hash"] or "").strip()
@@ -1258,7 +1284,7 @@ def plan_world_decision_graph(
                     conn.execute(
                         f"SELECT COUNT(*) FROM {DECISION_TABLE} "
                         "WHERE mode=? AND certificate_type=?",
-                        (LIVE_MODE, OLD_SIZING_CERTIFICATE),
+                        (LIVE_MODE, RETIRED_SIZING_CERTIFICATE),
                     ).fetchone()[0]
                 )
                 plan = {
@@ -1682,9 +1708,9 @@ def describe_db(path: Path) -> list[str]:
     try:
         found: list[str] = []
         for table in (
-            TRANSFER_TABLE,
-            CONVERSION_TABLE,
-            CONVERSION_EVENTS,
+            RETIRED_TRANSFER_TABLE,
+            RETIRED_CONVERSION_TABLE,
+            RETIRED_CONVERSION_EVENTS,
             "raw_forecast_artifacts",
             "deterministic_forecast_anchors",
             "forecast_posteriors",
@@ -1699,17 +1725,17 @@ def describe_db(path: Path) -> list[str]:
             relevant = sorted(
                 columns(conn, table)
                 & {
-                    OLD_AUTHORITY,
-                    OLD_ELIGIBILITY,
+                    RETIRED_AUTHORITY_COLUMN,
+                    RETIRED_ELIGIBILITY_COLUMN,
                     "evidence_tier",
-                    FORCE_EXIT_COLUMN,
-                    *RECEIPT_COLUMNS,
+                    RETIRED_FORCE_EXIT_COLUMN,
+                    *RETIRED_RECEIPT_COLUMNS,
                 }
             )
             if relevant or table in {
-                TRANSFER_TABLE,
-                CONVERSION_TABLE,
-                CONVERSION_EVENTS,
+                RETIRED_TRANSFER_TABLE,
+                RETIRED_CONVERSION_TABLE,
+                RETIRED_CONVERSION_EVENTS,
             }:
                 found.append(f"{table}: rows={count} retired_columns={relevant}")
         if table_exists(conn, "decision_certificates"):
@@ -1722,9 +1748,9 @@ def describe_db(path: Path) -> list[str]:
                 "SELECT certificate_type, count(*) FROM decision_certificates "
                 "WHERE certificate_type IN (?,?,?) GROUP BY certificate_type",
                 (
-                    OLD_SIZING_CERTIFICATE,
-                    OLD_PRE_SUBMIT_DECISION_CERTIFICATE,
-                    OLD_PRE_SUBMIT_MODE_CERTIFICATE,
+                    RETIRED_SIZING_CERTIFICATE,
+                    RETIRED_PRE_SUBMIT_DECISION_CERTIFICATE,
+                    RETIRED_PRE_SUBMIT_MODE_CERTIFICATE,
                 ),
             ):
                 found.append(
@@ -1750,9 +1776,9 @@ def mutation_blockers(path: Path) -> list[str]:
     try:
         blockers: list[str] = []
         for table in (
-            TRANSFER_TABLE,
-            CONVERSION_TABLE,
-            CONVERSION_EVENTS,
+            RETIRED_TRANSFER_TABLE,
+            RETIRED_CONVERSION_TABLE,
+            RETIRED_CONVERSION_EVENTS,
         ):
             if table_exists(conn, table):
                 count = int(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
@@ -1761,23 +1787,23 @@ def mutation_blockers(path: Path) -> list[str]:
         table = "edli_live_profit_audit"
         if table_exists(conn, table):
             cols = columns(conn, table)
-            if OLD_ELIGIBILITY in cols and "learning_eligible" in cols:
+            if RETIRED_ELIGIBILITY_COLUMN in cols and "learning_eligible" in cols:
                 blockers.append(f"{path.name}:{table} has both eligibility columns")
         table = "forecast_posteriors"
         if table_exists(conn, table):
             cols = columns(conn, table)
             if "runtime_layer" not in cols:
-                if OLD_AUTHORITY not in cols:
+                if RETIRED_AUTHORITY_COLUMN not in cols:
                     blockers.append(
                         f"{path.name}:{table} is missing runtime_layer after authority removal"
                     )
-            elif OLD_AUTHORITY in cols:
+            elif RETIRED_AUTHORITY_COLUMN in cols:
                 count = int(
                     conn.execute(
                         f"SELECT COUNT(*) FROM {table} WHERE "
                         "(runtime_layer IS NOT NULL AND lower(runtime_layer) != 'live') "
-                        f"OR (runtime_layer IS NULL AND lower(COALESCE({OLD_AUTHORITY}, '')) != ?)",
-                        (OLD_LIVE_AUTHORITY.lower(),),
+                        f"OR (runtime_layer IS NULL AND lower(COALESCE({RETIRED_AUTHORITY_COLUMN}, '')) != ?)",
+                        (RETIRED_LIVE_AUTHORITY_VALUE.lower(),),
                     ).fetchone()[0]
                 )
             else:
@@ -1797,7 +1823,7 @@ def mutation_blockers(path: Path) -> list[str]:
 
 
 def migrate_command_attribution_schema(conn: sqlite3.Connection) -> bool:
-    """Replace the position-wide uniqueness rule with command-exact attribution."""
+    """Make command identity globally unique while allowing position history."""
 
     if not table_exists(conn, "position_decision_attribution"):
         return False
@@ -1806,7 +1832,8 @@ def migrate_command_attribution_schema(conn: sqlite3.Connection) -> bool:
         ("position_decision_attribution",),
     ).fetchone()
     schema = str(schema_row[0] or "") if schema_row else ""
-    if "UNIQUE(position_id)" not in schema.replace(" ", ""):
+    compact_schema = "".join(schema.split())
+    if "UNIQUE(command_id)" in compact_schema:
         return False
     conn.execute(
         """
@@ -1821,7 +1848,7 @@ def migrate_command_attribution_schema(conn: sqlite3.Connection) -> bool:
             intent_kind TEXT,
             created_at TEXT NOT NULL,
             schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
-            UNIQUE(command_id, position_id),
+            UNIQUE(command_id),
             CHECK (
                 (resolution = 'ATTRIBUTED' AND command_id IS NOT NULL
                  AND decision_certificate_hash IS NOT NULL)
@@ -1865,9 +1892,9 @@ def mutate_db(
             if migrate_command_attribution_schema(conn):
                 changed.append("migrated command-exact decision attribution schema")
             for table in (
-                TRANSFER_TABLE,
-                CONVERSION_EVENTS,
-                CONVERSION_TABLE,
+                RETIRED_TRANSFER_TABLE,
+                RETIRED_CONVERSION_EVENTS,
+                RETIRED_CONVERSION_TABLE,
             ):
                 if table_exists(conn, table):
                     count = int(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
@@ -1876,15 +1903,24 @@ def mutate_db(
                     conn.execute(f"DROP TABLE {table}")
                     changed.append(f"dropped {table} ({count} rows)")
 
+            if table_exists(conn, RETIRED_EPOCH_TABLE):
+                count = int(
+                    conn.execute(
+                        f"SELECT count(*) FROM {RETIRED_EPOCH_TABLE}"
+                    ).fetchone()[0]
+                )
+                conn.execute(f"DROP TABLE {RETIRED_EPOCH_TABLE}")
+                changed.append(f"dropped {RETIRED_EPOCH_TABLE} ({count} retired rows)")
+
             for table in ("raw_forecast_artifacts", "deterministic_forecast_anchors"):
-                if table_exists(conn, table) and OLD_AUTHORITY in columns(conn, table):
-                    conn.execute(f"ALTER TABLE {table} DROP COLUMN {OLD_AUTHORITY}")
+                if table_exists(conn, table) and RETIRED_AUTHORITY_COLUMN in columns(conn, table):
+                    conn.execute(f"ALTER TABLE {table} DROP COLUMN {RETIRED_AUTHORITY_COLUMN}")
                     changed.append(f"dropped {table} retired authority column")
 
             table = "forecast_posteriors"
             if table_exists(conn, table):
                 cols = columns(conn, table)
-                has_old_authority = OLD_AUTHORITY in cols
+                has_old_authority = RETIRED_AUTHORITY_COLUMN in cols
                 if "runtime_layer" not in cols and has_old_authority:
                     conn.execute(
                         "ALTER TABLE forecast_posteriors ADD COLUMN runtime_layer TEXT "
@@ -1896,8 +1932,8 @@ def mutate_db(
                 if has_old_authority:
                     conn.execute(
                         f"UPDATE forecast_posteriors SET runtime_layer='live' "
-                        f"WHERE runtime_layer IS NULL AND lower({OLD_AUTHORITY})=?",
-                        (OLD_LIVE_AUTHORITY.lower(),),
+                        f"WHERE runtime_layer IS NULL AND lower({RETIRED_AUTHORITY_COLUMN})=?",
+                        (RETIRED_LIVE_AUTHORITY_VALUE.lower(),),
                     )
                 remaining = int(
                     conn.execute(
@@ -1911,7 +1947,7 @@ def mutate_db(
                         f"{remaining} rows lack a live runtime_layer"
                     )
                 if has_old_authority:
-                    conn.execute(f"ALTER TABLE forecast_posteriors DROP COLUMN {OLD_AUTHORITY}")
+                    conn.execute(f"ALTER TABLE forecast_posteriors DROP COLUMN {RETIRED_AUTHORITY_COLUMN}")
                     changed.append("migrated forecast_posteriors to the live runtime layer")
 
             table = "settlement_capture_verifications"
@@ -1921,7 +1957,7 @@ def mutate_db(
 
             table = "edli_no_submit_receipts"
             if table_exists(conn, table):
-                for column in RECEIPT_COLUMNS:
+                for column in RETIRED_RECEIPT_COLUMNS:
                     if column in columns(conn, table):
                         conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
                         changed.append(f"dropped {table}.{column}")
@@ -1929,13 +1965,13 @@ def mutate_db(
             table = "edli_live_profit_audit"
             if table_exists(conn, table):
                 cols = columns(conn, table)
-                if OLD_ELIGIBILITY in cols and "learning_eligible" in cols:
+                if RETIRED_ELIGIBILITY_COLUMN in cols and "learning_eligible" in cols:
                     raise RuntimeError(f"{table} has both old and new eligibility columns")
-                if OLD_ELIGIBILITY in cols:
+                if RETIRED_ELIGIBILITY_COLUMN in cols:
                     conn.execute(
-                        f"ALTER TABLE {table} RENAME COLUMN {OLD_ELIGIBILITY} TO learning_eligible"
+                        f"ALTER TABLE {table} RENAME COLUMN {RETIRED_ELIGIBILITY_COLUMN} TO learning_eligible"
                     )
-                    conn.execute(f"DROP INDEX IF EXISTS {OLD_AUDIT_INDEX}")
+                    conn.execute(f"DROP INDEX IF EXISTS {RETIRED_AUDIT_INDEX}")
                     conn.execute(
                         "CREATE INDEX IF NOT EXISTS idx_edli_live_profit_audit_learning "
                         "ON edli_live_profit_audit(learning_eligible, order_lifecycle_state, created_at)"
@@ -1943,9 +1979,9 @@ def mutate_db(
                     changed.append(f"renamed {table} eligibility column")
 
             table = "risk_state"
-            if table_exists(conn, table) and FORCE_EXIT_COLUMN in columns(conn, table):
-                conn.execute(f"ALTER TABLE {table} DROP COLUMN {FORCE_EXIT_COLUMN}")
-                changed.append(f"dropped {table}.{FORCE_EXIT_COLUMN}")
+            if table_exists(conn, table) and RETIRED_FORCE_EXIT_COLUMN in columns(conn, table):
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN {RETIRED_FORCE_EXIT_COLUMN}")
+                changed.append(f"dropped {table}.{RETIRED_FORCE_EXIT_COLUMN}")
 
             if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise RuntimeError(f"integrity_check failed for {path}")
@@ -1970,7 +2006,7 @@ def json_files_with_field(base: Path) -> list[Path]:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
-        if isinstance(payload, dict) and REMOVED_MANIFEST_FIELD in payload:
+        if isinstance(payload, dict) and RETIRED_MANIFEST_FIELD in payload:
             found.append(path)
     return found
 
@@ -2000,8 +2036,8 @@ def config_retired_paths(path: Path) -> list[str]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"settings must contain a JSON object: {path}")
     found: list[str] = []
-    retired = set((*CONFIG_NOTES, *CONFIG_KEYS))
-    retired_paths = set(CONFIG_PATHS)
+    retired = set((*RETIRED_CONFIG_NOTES, *RETIRED_CONFIG_KEYS))
+    retired_paths = set(RETIRED_CONFIG_PATHS)
 
     def walk(mapping: dict[str, object], prefix: str = "") -> None:
         for key, value in mapping.items():
@@ -2401,7 +2437,7 @@ def main() -> int:
             progress_path,
             progress,
             "runtime_json",
-            lambda: [rewrite_json_without_field(path, REMOVED_MANIFEST_FIELD) for path in json_paths],
+            lambda: [rewrite_json_without_field(path, RETIRED_MANIFEST_FIELD) for path in json_paths],
             precondition=lambda: assert_writer_fence(root),
             postcondition=lambda: verify_runtime_json(root),
             updated_target_state=lambda: refreshed_target_state(runtime_json=True),

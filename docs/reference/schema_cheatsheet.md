@@ -858,8 +858,6 @@ _77 base tables_
     exit_forward_edge:REAL, settlement_semantics_json:TEXT, epistemic_context_json:TEXT,
     edge_context_json:TEXT, entry_alpha_usd:REAL, execution_slippage_usd:REAL, exit_timing_usd:REAL,
     risk_throttling_usd:REAL, settlement_edge_usd:REAL, env:TEXT
-- **truth_epoch**  (rows≈1, cols=4)
-    id:INTEGER, epoch:TEXT, transitioned_at:TEXT, transitioned_by:TEXT
 - **venue_command_events**  (rows≈6675, cols=7)
     event_id:TEXT, command_id:TEXT, sequence_no:INTEGER, event_type:TEXT, occurred_at:TEXT,
     payload_json:TEXT, state_after:TEXT

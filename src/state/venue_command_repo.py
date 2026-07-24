@@ -1109,7 +1109,7 @@ def record_position_decision_attribution(
     pairs are ambiguous) is instead recorded HERE, at command creation, when the
     real decision certificate hash is known with certainty.
 
-    Append-only: UNIQUE(command_id, position_id) + ON CONFLICT DO NOTHING. Idempotent
+    Append-only: UNIQUE(command_id) + ON CONFLICT DO NOTHING. Idempotent
     on a retried command without collapsing distinct commands for one position.
     ``ensure_table`` is called here
     (not only at DB init) so this self-heals on any trade-shaped connection that
@@ -1126,7 +1126,7 @@ def record_position_decision_attribution(
             resolution, resolution_reason, source, intent_kind, created_at,
             schema_version
         ) VALUES (?, ?, ?, ?, 'ATTRIBUTED', NULL, 'LIVE_DECISION', ?, ?, 1)
-        ON CONFLICT(command_id, position_id) DO NOTHING
+        ON CONFLICT DO NOTHING
         """,
         (_new_id(), position_id, command_id, decision_certificate_hash, intent_kind, created_at),
     )
@@ -1153,7 +1153,7 @@ def record_unattributable_command(
             resolution, resolution_reason, source, intent_kind, created_at,
             schema_version
         ) VALUES (?, ?, ?, NULL, 'UNATTRIBUTABLE', ?, 'LIVE_DECISION', ?, ?, 1)
-        ON CONFLICT(command_id, position_id) DO NOTHING
+        ON CONFLICT DO NOTHING
         """,
         (_new_id(), position_id, command_id, reason, intent_kind, created_at),
     )
