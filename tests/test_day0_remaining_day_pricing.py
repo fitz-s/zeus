@@ -1,5 +1,8 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-19
+# Last reused or audited: 2026-07-24
+# Lifecycle: created=2026-06-10; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Purpose: Protect causal Day0 remaining-window probability construction.
+# Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector); day0 first-principles review §2.4
 #   (full-day-masked q DEVIATES: overprices excursion bins post-peak) and
@@ -978,8 +981,8 @@ class TestRemainingDayMembers:
         )
         assert sorted(members.tolist()) == [25.0, 27.5]
 
-    def test_live_members_condition_future_path_on_current_state(self, monkeypatch):
-        """An already-observed model miss must move the remaining trajectory."""
+    def test_live_members_do_not_transport_instant_error_without_covariance(self, monkeypatch):
+        """A current miss is audit evidence, not a permanent future shift."""
         import src.engine.event_reactor_adapter as era
 
         vector = Day0HourlyVector(
@@ -1024,11 +1027,14 @@ class TestRemainingDayMembers:
         )
 
         assert members is not None
-        # At local 16:00 the model said 26 while reality was 23. The -3C
-        # innovation moves the local 17:00 future value 25 -> 22; the already
-        # observed daily high remains the 24C absorbing floor.
-        assert members.tolist() == [24.0]
+        # At local 16:00 the model said 26 while reality was 23. Without a
+        # time-covariance law, that -3C instant error cannot erase the model's
+        # still-future 25C peak.
+        assert members.tolist() == [25.0]
         assert payload["_edli_day0_model_innovations_c"] == {"ecmwf_ifs": -3.0}
+        assert payload["_edli_day0_trajectory_conditioning_basis"] == (
+            "current_state_diagnostic_no_unvalidated_transport_v1"
+        )
         assert payload["_edli_day0_remaining_window_start_utc"] == (
             "2026-06-10T14:00:00+00:00"
         )
@@ -1074,12 +1080,12 @@ class TestRemainingDayMembers:
         )
 
         assert members is not None
-        # The 30C anchor itself has occurred. Applying its -10C innovation to
-        # the strictly-future 20C path yields 10C; including the anchor as
-        # future support would incorrectly return 20C.
-        assert members.tolist() == [10.0]
+        # The 30C anchor itself has occurred and is excluded; the unobserved
+        # 20C path remains future support. The instant -10C miss is not carried
+        # into that path without a validated transport law.
+        assert members.tolist() == [20.0]
 
-    def test_current_state_conditioning_is_persisted_in_probability_authority(self):
+    def test_current_state_diagnostic_is_persisted_in_probability_authority(self):
         import src.engine.event_reactor_adapter as era
 
         authority = era._global_day0_probability_authority_payload(
@@ -1096,7 +1102,7 @@ class TestRemainingDayMembers:
                 ),
                 "_edli_day0_current_temperature_source": "wu_icao_history",
                 "_edli_day0_trajectory_conditioning_basis": (
-                    "current_state_persistent_additive_innovation_v1"
+                    "current_state_diagnostic_no_unvalidated_transport_v1"
                 ),
                 "_edli_day0_model_innovations_c": {
                     "ecmwf_ifs": -1.3,
@@ -1111,7 +1117,7 @@ class TestRemainingDayMembers:
         )
         assert authority["current_temperature_source"] == "wu_icao_history"
         assert authority["trajectory_conditioning_basis"] == (
-            "current_state_persistent_additive_innovation_v1"
+            "current_state_diagnostic_no_unvalidated_transport_v1"
         )
         assert authority["model_innovations_c"] == {
             "ecmwf_ifs": -1.3,

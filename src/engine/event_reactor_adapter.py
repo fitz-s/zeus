@@ -36475,7 +36475,7 @@ def _latest_day0_current_temperature_native(
     return None
 
 
-def _condition_remaining_day_extremes_c_on_current_state(
+def _remaining_day_extremes_c_with_current_state_diagnostic(
     vectors: list[object],
     *,
     target_date: str,
@@ -36484,13 +36484,12 @@ def _condition_remaining_day_extremes_c_on_current_state(
     current_temp_c: float,
     metric: str,
 ) -> tuple[list[float], dict[str, float]]:
-    """Condition each future model path on its observed current innovation.
+    """Return future model extrema and audit the current-state innovation.
 
-    For model ``m``, the only untuned current-evidence update is the persistent
-    additive state error ``e_m = T_obs - T_m(t_obs)``.  Future grid values use
-    ``T_m(t) + e_m`` and the already observed grid point is excluded.  This
-    prevents a model that is wrong *now* from manufacturing a Day0 excursion
-    while preserving its remaining trajectory shape.
+    The current observation defines the causal window and the already observed
+    grid point is excluded.  Its model innovation is diagnostic only: without a
+    validated time-covariance law, transporting one instantaneous error through
+    every future hour would manufacture certainty rather than condition it.
     """
 
     from src.data.day0_hourly_vectors import (
@@ -36528,11 +36527,7 @@ def _condition_remaining_day_extremes_c_on_current_state(
         if not timedelta(0) <= observed_utc - anchor_time <= timedelta(hours=1):
             return [], {}
         innovation = float(current_temp_c) - anchor_temp
-        future = [
-            float(temp) + innovation
-            for instant, temp in values
-            if instant > observed_utc
-        ]
+        future = [float(temp) for instant, temp in values if instant > observed_utc]
         if not future:
             local_end = datetime.combine(
                 target + timedelta(days=1), time.min, tzinfo=tz
@@ -36655,7 +36650,7 @@ def _day0_remaining_day_members(
                 else (current_native - 32.0) * 5.0 / 9.0
             )
             extremes_c, innovations = (
-                _condition_remaining_day_extremes_c_on_current_state(
+                _remaining_day_extremes_c_with_current_state_diagnostic(
                     vectors,
                     target_date=str(family.target_date),
                     decision_time=decision_time,
@@ -36670,12 +36665,12 @@ def _day0_remaining_day_members(
             )
             payload["_edli_day0_current_temperature_source"] = current_source
             payload["_edli_day0_trajectory_conditioning_basis"] = (
-                "current_state_persistent_additive_innovation_v1"
+                "current_state_diagnostic_no_unvalidated_transport_v1"
             )
             payload["_edli_day0_model_innovations_c"] = innovations
         if not extremes_c:
             payload["_edli_day0_remaining_unavailable_reason"] = (
-                "current_state_conditioned_trajectory_unavailable"
+                "current_state_aligned_trajectory_unavailable"
             )
             return None
         values = np.asarray(extremes_c, dtype=float)

@@ -79,6 +79,7 @@ in_scope:
 - tests/test_finite_evidence_probability_symmetry.py
 - tests/test_replacement_fused_q_shape.py
 - tests/test_replacement_forecast_current_target_plan.py
+- tests/test_day0_remaining_day_pricing.py
 - tests/test_replacement_forecast_materializer_cycle_policy.py
 - tests/test_replacement_seed_coverage_gate.py
 - tests/engine/test_event_reactor_no_bypass.py

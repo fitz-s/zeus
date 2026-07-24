@@ -4,6 +4,32 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-24 Day0 trajectory correction
+
+Current live Ankara 28C evidence falsified one probability assumption before
+Kelly or execution. The remaining-path builder transported each model's
+instantaneous predawn error unchanged through every future hour, moving the
+three current extrema from 28.2/25.6/26.0C to 25.4/24.6/24.9C. No current
+temporal covariance witness authorized that permanent translation, yet it
+helped produce a 98.67% NO lower bound and a live 16-share maker order.
+
+The clock hypothesis was separately rejected: a later row carrying the same
+running extreme proves the no-new-extreme coverage frontier through that later
+observation time. Rebinding it to the first occurrence would discard valid
+plateau information and contradict continuous-time redecision. That path is
+unchanged.
+
+Current temperature still cuts the remaining window, records the model
+innovation diagnostic, and participates in the absorbing frontier; its
+innovation is not propagated into unseen hours without a validated temporal
+covariance law. Re-decision behavior is unchanged in shape: the next current
+Day0 auction rebuilds q from the corrected witness, and any resting order whose
+edge disappears is pulled by the existing normal lifecycle.
+
+Money path: forecast signal -> Day0 current-evidence probability -> global
+auction -> Kelly -> maker lifecycle. Behavioral antibodies cover exclusion of
+elapsed model points and the absence of unvalidated permanent state transport.
+
 ## 2026-07-23 Day0 raw-report freshness clock correction
 
 Live Miami evidence separated two clocks that the hourly observation schema
