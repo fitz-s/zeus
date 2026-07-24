@@ -125,6 +125,19 @@ class TestExitCostConfigBounds:
         finally:
             config_mod.settings["exit"]["fee_rate"] = original
 
+    def test_exit_daily_hurdle_rate_bounds_validation(self):
+        """The daily-hurdle config getter still guards operator misconfiguration
+        even though the hurdle no longer feeds the HoldValue cost model."""
+        from src import config as config_mod
+
+        original = config_mod.settings["exit"]["daily_hurdle_rate"]
+        try:
+            config_mod.settings["exit"]["daily_hurdle_rate"] = 0.1
+            with pytest.raises(ValueError, match="exit.daily_hurdle_rate"):
+                config_mod.exit_daily_hurdle_rate()
+        finally:
+            config_mod.settings["exit"]["daily_hurdle_rate"] = original
+
     def test_fee_rate_config_matches_polymarket_fee_default(self):
         """Two sources of truth for fee_rate (config vs polymarket_fee default)
         must not drift."""
@@ -136,3 +149,106 @@ class TestExitCostConfigBounds:
         sig = inspect.signature(polymarket_fee)
         polymarket_default = sig.parameters["fee_rate"].default
         assert polymarket_default == exit_fee_rate()
+
+
+class TestBuildExitContextPlumbing:
+    """_build_exit_context self-exclusion and portfolio-kwarg handling. These
+    survive the 离场律 collapse (the correlation-crowding surcharge they once fed
+    is retired, but the context plumbing is still live)."""
+
+    def _make_position(self, direction: str = "buy_yes", trade_id: str = "pos_self"):
+        from src.state.portfolio import Position
+
+        return Position(
+            trade_id=trade_id,
+            market_id="m_" + trade_id,
+            city="Chicago",
+            cluster="Chicago",
+            target_date="2026-04-25",
+            bin_label="60-61°F",
+            direction=direction,
+            entry_price=0.40 if direction == "buy_yes" else 0.15,
+            size_usd=50.0,
+            entry_method="calibrated",
+        )
+
+    def test_build_exit_context_excludes_self_from_portfolio_positions(self):
+        """_build_exit_context must filter self out of the portfolio_positions
+        tuple so the helper doesn't double-count this position's own exposure."""
+        from src.engine.cycle_runtime import _build_exit_context
+        from src.state.portfolio import ExitContext, Position, PortfolioState
+        from types import SimpleNamespace
+
+        pos_self = self._make_position("buy_yes", trade_id="pos_self")
+        pos_other = Position(
+            trade_id="pos_other",
+            market_id="m_other",
+            city="Houston",
+            cluster="Houston",
+            target_date="2026-04-25",
+            bin_label="70-71°F",
+            direction="buy_yes",
+            entry_price=0.40,
+            size_usd=100.0,
+            entry_method="calibrated",
+        )
+        portfolio = PortfolioState(bankroll=200.0, positions=[pos_self, pos_other])
+
+        edge_ctx = SimpleNamespace(
+            p_posterior=0.55,
+            p_market=[0.50],
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+        )
+        pos_self.last_monitor_prob_is_fresh = True
+        pos_self.last_monitor_market_price_is_fresh = True
+        pos_self.last_monitor_best_bid = 0.48
+        pos_self.last_monitor_best_ask = 0.52
+        pos_self.last_monitor_market_vig = 1.0
+        pos_self.last_monitor_whale_toxicity = False
+        pos_self.chain_state = "synced"
+
+        ctx = _build_exit_context(
+            pos_self,
+            edge_ctx,
+            hours_to_settlement=48.0,
+            ExitContext=ExitContext,
+            portfolio=portfolio,
+        )
+        assert len(ctx.portfolio_positions) == 1
+        cluster, size_usd, trade_id = ctx.portfolio_positions[0]
+        assert trade_id == "pos_other"
+        assert cluster == "Houston"
+        assert size_usd == 100.0
+        assert ctx.bankroll == 200.0
+
+    def test_build_exit_context_portfolio_none_produces_empty_tuple(self):
+        """Callers not passing the portfolio kwarg get an empty tuple + None
+        bankroll so the downstream helper safely returns zero cost."""
+        from src.engine.cycle_runtime import _build_exit_context
+        from src.state.portfolio import ExitContext
+        from types import SimpleNamespace
+
+        pos = self._make_position("buy_yes", trade_id="pos_self")
+        edge_ctx = SimpleNamespace(
+            p_posterior=0.55,
+            p_market=[0.50],
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+        )
+        pos.last_monitor_prob_is_fresh = True
+        pos.last_monitor_market_price_is_fresh = True
+        pos.last_monitor_best_bid = 0.48
+        pos.last_monitor_best_ask = 0.52
+        pos.last_monitor_market_vig = 1.0
+        pos.last_monitor_whale_toxicity = False
+        pos.chain_state = "synced"
+
+        ctx = _build_exit_context(
+            pos,
+            edge_ctx,
+            hours_to_settlement=48.0,
+            ExitContext=ExitContext,
+        )
+        assert ctx.portfolio_positions == ()
+        assert ctx.bankroll is None
