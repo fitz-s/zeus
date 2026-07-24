@@ -5475,7 +5475,8 @@ CREATE TABLE IF NOT EXISTS position_events (
         'MANUAL_OVERRIDE_APPLIED',
         'VENUE_POSITION_OBSERVED',
         'REVIEW_REQUIRED',
-        'POSITION_IDENTITY_SUPERSEDED'
+        'POSITION_IDENTITY_SUPERSEDED',
+        'POSITION_TOKEN_SPLIT_RECONSTRUCTED'
     )),
     -- 2026-07-11: 'QUARANTINE' sentinel literal removed (dead — see
     -- architecture/2026_04_02_architecture_kernel.sql occurred_at CHECK comment).

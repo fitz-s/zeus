@@ -46,7 +46,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from src.execution.command_bus import (
     CommandState,
@@ -5480,6 +5480,11 @@ def reconcile_filled_entry_projection_repairs(conn: sqlite3.Connection, client=N
     """Repair filled ENTRY command truth when initial position projection failed."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    split_summary = reconcile_mixed_token_entry_position_repairs(conn, client=client)
+    summary["scanned"] += split_summary["scanned"]
+    summary["advanced"] += split_summary["advanced"]
+    summary["stayed"] += split_summary["stayed"]
+    summary["errors"] += split_summary["errors"]
     for candidate in _latest_unprojected_filled_entry_candidates(conn):
         summary["scanned"] += 1
         command_id = str(candidate.get("command_id") or "")
@@ -5505,6 +5510,306 @@ def reconcile_filled_entry_projection_repairs(conn: sqlite3.Connection, client=N
                 command_id,
                 exc,
             )
+            summary["errors"] += 1
+    return summary
+
+
+def _mixed_token_entry_rows(conn: sqlite3.Connection) -> dict[str, list[dict]]:
+    """Return only terminal authenticated ENTRY BUY commands sharing one root.
+
+    The query deliberately names every immutable evidence carrier.  Validation
+    below still checks their contents: joining a row proves presence, not token
+    topology or certificate authority.
+    """
+    required = {
+        "venue_commands", "venue_trade_facts", "position_current",
+        "venue_submission_envelopes", "executable_market_snapshots",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return {}
+    sql = "WITH " + _canonical_trade_fact_cte() + """,
+      fills AS (
+        SELECT command_id,
+               SUM(CAST(filled_size AS REAL)) AS fill_filled_size,
+               SUM(CAST(filled_size AS REAL) * CAST(fill_price AS REAL))
+                 / SUM(CAST(filled_size AS REAL)) AS fill_price,
+               MAX(observed_at) AS fill_observed_at,
+               MAX(trade_fact_id) AS source_trade_fact_id,
+               GROUP_CONCAT(trade_fact_id) AS source_trade_fact_ids,
+               COUNT(*) AS fill_fact_count,
+               GROUP_CONCAT(DISTINCT state) AS fill_states
+          FROM canonical_trade_fact
+         WHERE state = 'CONFIRMED'
+           AND source IN ('REST', 'WS_USER')
+           AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+           AND CAST(COALESCE(fill_price, '0') AS REAL) > 0
+         GROUP BY command_id
+      )
+      SELECT cmd.*, fills.fill_filled_size, fills.fill_price,
+             fills.fill_observed_at, fills.source_trade_fact_id,
+             fills.source_trade_fact_ids,
+             fills.fill_fact_count, fills.fill_states,
+             pc.phase AS projected_phase, pc.direction AS projected_direction,
+             pc.token_id AS projected_yes_token_id, pc.no_token_id AS projected_no_token_id,
+             env.condition_id AS env_condition_id, env.yes_token_id AS env_yes_token_id,
+             env.no_token_id AS env_no_token_id,
+             env.selected_outcome_token_id AS env_selected_outcome_token_id,
+             snap.condition_id AS snapshot_condition_id, snap.yes_token_id AS snapshot_yes_token_id,
+             snap.no_token_id AS snapshot_no_token_id,
+             snap.selected_outcome_token_id AS snapshot_selected_outcome_token_id
+        FROM venue_commands cmd
+        JOIN fills ON fills.command_id = cmd.command_id
+        JOIN position_current pc ON pc.position_id = cmd.position_id
+        JOIN venue_submission_envelopes env ON env.envelope_id = cmd.envelope_id
+        JOIN executable_market_snapshots snap ON snap.snapshot_id = cmd.snapshot_id
+       WHERE cmd.intent_kind = 'ENTRY' AND cmd.side = 'BUY' AND cmd.state = 'FILLED'
+       ORDER BY cmd.position_id, fills.fill_observed_at, cmd.command_id
+    """
+    roots: dict[str, list[dict]] = {}
+    for row in conn.execute(sql).fetchall():
+        item = _dict_row(row)
+        roots.setdefault(str(item["position_id"]), []).append(item)
+    return {root: rows for root, rows in roots.items() if len(rows) > 1}
+
+
+def _split_repair_review(conn: sqlite3.Connection, root: str, rows: list[dict], detail: str) -> None:
+    """Persist an idempotent review fact; never alter exposure on ambiguity."""
+    from src.contracts.review_work_item import FamilyKey, ReviewReasonCode
+    from src.state.review_work_items import open_work_item
+    from src.state.schema.review_work_items_schema import ensure_table
+
+    ensure_table(conn)
+    first = rows[0] if rows else {}
+    city, target, metric = (str(first.get(k) or "") for k in ("city", "target_date", "temperature_metric"))
+    family = FamilyKey(city=city, target_date=target, temperature_metric=metric) if city and target and metric else None
+    refs = tuple(sorted(f"command:{row.get('command_id')}" for row in rows)) + (f"detail:{detail}",)
+    open_work_item(
+        conn, owner_domain="trade", owner_table="position_current", subject_id=root,
+        reason_code=ReviewReasonCode.LOCAL_WRITE_FAILURE, evidence_refs=refs,
+        family_key=family, unbounded=True, priority=10,
+        last_error_class="mixed_token_entry_position", last_error_detail=detail,
+    )
+
+
+def _split_child_position_id(root: str, held_token_id: str, command_ids: list[str]) -> str:
+    material = f"mixed-token-split:v1:{root}:{held_token_id}:{','.join(sorted(command_ids))}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, material))
+
+
+def _split_exact_actionable_certificate_hash(
+    conn: sqlite3.Connection, *, decision_id: str, held_token_id: str
+) -> str:
+    event_id = _edli_event_id_from_decision_id(decision_id)
+    ref = _decision_certificates_ref(conn)
+    if not event_id or ref is None:
+        raise ValueError("missing-edli-certificate-reference")
+    matches: set[str] = set()
+    for row in conn.execute(
+        f"SELECT semantic_key, certificate_hash, payload_json FROM {ref} "
+        "WHERE certificate_type = 'ActionableTradeCertificate' AND semantic_key LIKE ?",
+        (f"%{event_id}%",),
+    ).fetchall():
+        record = _dict_row(row)
+        if _edli_certificate_matches_token(
+            _json_mapping(record.get("payload_json")),
+            semantic_key=str(record.get("semantic_key") or ""), token_id=held_token_id,
+        ) and not _certificate_is_revoked(conn, certificate_hash=str(record.get("certificate_hash") or "")):
+            matches.add(str(record.get("certificate_hash") or ""))
+    if len(matches) != 1 or not next(iter(matches), ""):
+        raise ValueError("ambiguous-or-missing-exact-actionable-certificate")
+    return next(iter(matches))
+
+
+def _record_exact_split_attribution(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    command_id: str,
+    certificate_hash: str,
+    created_at: str,
+    record: Callable[..., None],
+) -> None:
+    """Keep an immutable attribution only when it is already exact or absent."""
+    from src.state.schema.position_decision_attribution_schema import ensure_table
+
+    ensure_table(conn)
+    existing = conn.execute(
+        "SELECT command_id, decision_certificate_hash FROM position_decision_attribution "
+        "WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    if existing is not None:
+        if (
+            str(existing["command_id"] or "") != command_id
+            or str(existing["decision_certificate_hash"] or "") != certificate_hash
+        ):
+            raise ValueError("existing-position-attribution-is-not-exact")
+        return
+    record(
+        conn,
+        position_id=position_id,
+        command_id=command_id,
+        decision_certificate_hash=certificate_hash,
+        intent_kind="ENTRY",
+        created_at=created_at,
+    )
+
+
+def _split_repair_event(position: SimpleNamespace, *, root: str, child: bool, command_ids: list[str], evidence: list[dict], sequence_no: int, phase: str) -> dict:
+    position_id = str(position.trade_id)
+    payload = {
+        "repair_kind": "mixed_token_entry_position_split_v1",
+        "root_position_id": root,
+        "child_position_id": position_id if child else None,
+        "held_token_id": position.no_token_id if position.direction == "buy_no" else position.token_id,
+        "command_ids": sorted(command_ids),
+        "evidence": evidence,
+        "shares": position.shares,
+        "cost_basis_usd": position.cost_basis_usd,
+    }
+    return {
+        "event_id": f"{position_id}:token_split_reconstructed:v1",
+        "position_id": position_id, "event_version": 1, "sequence_no": sequence_no,
+        "event_type": "POSITION_TOKEN_SPLIT_RECONSTRUCTED", "occurred_at": position.entered_at,
+        "phase_before": phase, "phase_after": phase, "strategy_key": position.strategy_key,
+        "decision_id": position.decision_id, "snapshot_id": position.decision_snapshot_id or None,
+        "order_id": position.order_id, "command_id": position.command_id,
+        "caused_by": "mixed_token_entry_position_recovery",
+        "idempotency_key": f"{position_id}:token_split_reconstructed:v1",
+        "venue_status": "CONFIRMED", "source_module": "src.execution.command_recovery",
+        "env": position.env, "payload_json": json.dumps(payload, sort_keys=True),
+    }
+
+
+def reconcile_mixed_token_entry_position_repairs(conn: sqlite3.Connection, client=None) -> dict:
+    """Append-first reconstruction of legacy condition-level ENTRY projections.
+
+    This is intentionally before normal filled-entry repair.  It has no venue
+    client actions: `client` exists only because the established recovery seam
+    passes it to certificate-backed trade-case construction.
+    """
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.ledger import append_many_and_project
+    from src.state.venue_command_repo import record_position_decision_attribution
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "reviewed": 0, "errors": 0}
+    for root, rows in _mixed_token_entry_rows(conn).items():
+        summary["scanned"] += 1
+        sp = f"sp_mixed_token_split_{hashlib.sha1(root.encode()).hexdigest()[:12]}"
+        conn.execute(f"SAVEPOINT {sp}")
+        try:
+            phases = {str(row.get("projected_phase") or "") for row in rows}
+            if phases - {"active", "day0_window"}:
+                raise ValueError(f"non-open-or-exit-phase:{sorted(phases)}")
+            if conn.execute("SELECT 1 FROM position_events WHERE position_id = ? AND event_type IN ('EXIT_INTENT','EXIT_ORDER_POSTED','EXIT_ORDER_FILLED','SETTLED') LIMIT 1", (root,)).fetchone():
+                raise ValueError("exit-or-settlement-evidence-present")
+            positions: list[SimpleNamespace] = []
+            for row in rows:
+                candidate = _hydrate_command_execution_identity(conn, row)
+                for env_key, snapshot_key in (
+                    ("env_condition_id", "snapshot_condition_id"),
+                    ("env_yes_token_id", "snapshot_yes_token_id"),
+                    ("env_no_token_id", "snapshot_no_token_id"),
+                    ("env_selected_outcome_token_id", "snapshot_selected_outcome_token_id"),
+                ):
+                    env_value = str(candidate.get(env_key) or "")
+                    snapshot_value = str(candidate.get(snapshot_key) or "")
+                    if not env_value or not snapshot_value or env_value != snapshot_value:
+                        raise ValueError(f"ambiguous-envelope-snapshot-topology:{env_key}")
+                if str(candidate.get("token_id") or "") not in {
+                    str(candidate.get("env_yes_token_id") or ""),
+                    str(candidate.get("env_no_token_id") or ""),
+                }:
+                    raise ValueError("command-token-not-in-certified-topology")
+                if str(candidate.get("token_id") or "") != str(
+                    candidate.get("env_selected_outcome_token_id") or ""
+                ):
+                    raise ValueError("command-token-not-exact-selected-topology-token")
+                if not _edli_event_id_from_decision_id(str(candidate.get("decision_id") or "")):
+                    raise ValueError("missing-edli-certificate-identity")
+                case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate, client=client)
+                if not case:
+                    raise ValueError("missing-or-revoked-exact-certificate")
+                positions.append(_filled_entry_recovery_position(candidate, case, decision_log_id=decision_log_id))
+            grouped: dict[str, list[SimpleNamespace]] = {}
+            for position in positions:
+                held = str(position.no_token_id if position.direction == "buy_no" else position.token_id)
+                if not held:
+                    raise ValueError("empty-held-token")
+                grouped.setdefault(held, []).append(position)
+            if len(grouped) < 2:
+                conn.execute(f"RELEASE SAVEPOINT {sp}")
+                summary["stayed"] += 1
+                continue
+            # The root belongs to the first authenticated fill, not to the
+            # corrupted projection's direction/token columns.
+            root_row = rows[0]
+            root_first = positions[0]
+            root_held = str(
+                root_first.no_token_id if root_first.direction == "buy_no" else root_first.token_id
+            )
+            root_phase = str(root_row.get("projected_phase") or "")
+            if root_held not in grouped:
+                raise ValueError("root-held-token-not-in-certified-groups")
+            applied = False
+            for held, members in grouped.items():
+                command_ids = [str(p.command_id) for p in members]
+                target = root if held == root_held else _split_child_position_id(root, held, command_ids)
+                existing = conn.execute("SELECT 1 FROM position_events WHERE position_id = ? AND event_type = 'POSITION_TOKEN_SPLIT_RECONSTRUCTED' LIMIT 1", (target,)).fetchone()
+                if existing is not None:
+                    continue
+                seed = members[0]
+                total_shares = sum(Decimal(str(p.shares)) for p in members)
+                total_cost = sum(Decimal(str(p.cost_basis_usd)) for p in members)
+                attrs = dict(vars(seed))
+                attrs.update(trade_id=target, state=("day0_window" if root_phase == "day0_window" else "entered"), shares=float(total_shares), shares_filled=float(total_shares),
+                             cost_basis_usd=float(total_cost), filled_cost_basis_usd=float(total_cost),
+                             size_usd=float(total_cost), entry_price=float(total_cost / total_shares),
+                             command_id=str(seed.command_id), order_id=str(seed.order_id), entry_order_id=str(seed.order_id))
+                rebuilt = SimpleNamespace(**attrs)
+                evidence = [{"command_id": p.command_id, "trade_fact_id": p.source_trade_fact_id,
+                             "trade_fact_ids": str(getattr(p, "source_trade_fact_ids", None) or p.source_trade_fact_id).split(","),
+                             "snapshot_id": p.executable_snapshot_id, "held_token_id": held}
+                            for p in members]
+                certificate_hash = _split_exact_actionable_certificate_hash(
+                    conn, decision_id=str(seed.decision_id), held_token_id=held
+                )
+                projection = build_position_current_projection(rebuilt)
+                latest = _latest_position_sequence(conn, target)
+                append_many_and_project(conn, [_split_repair_event(rebuilt, root=root, child=target != root,
+                    command_ids=command_ids, evidence=evidence, sequence_no=latest + 1, phase=root_phase)], projection)
+                applied = True
+                if target != root:
+                    for member in members:
+                        changed = conn.execute("UPDATE venue_commands SET position_id = ? WHERE command_id = ? AND position_id = ?", (target, member.command_id, root)).rowcount
+                        if changed != 1:
+                            raise RuntimeError(f"command-rebind-cas-failed:{member.command_id}")
+                        rehomed = conn.execute(
+                            "UPDATE execution_fact SET position_id = ?, intent_id = ? "
+                            "WHERE command_id = ? AND position_id = ?",
+                            (target, f"{target}:entry", member.command_id, root),
+                        ).rowcount
+                        if rehomed != 1:
+                            raise RuntimeError(f"execution-fact-rehome-cas-failed:{member.command_id}")
+                _record_exact_split_attribution(
+                    conn,
+                    position_id=target,
+                    command_id=str(seed.command_id),
+                    certificate_hash=certificate_hash,
+                    created_at=str(seed.entered_at),
+                    record=record_position_decision_attribution,
+                )
+            conn.execute(f"RELEASE SAVEPOINT {sp}")
+            summary["advanced" if applied else "stayed"] += 1
+        except ValueError as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+            _split_repair_review(conn, root, rows, str(exc))
+            conn.execute(f"RELEASE SAVEPOINT {sp}")
+            summary["reviewed"] += 1
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+            conn.execute(f"RELEASE SAVEPOINT {sp}")
+            logger.exception("mixed-token position repair failed root=%s", root)
             summary["errors"] += 1
     return summary
 

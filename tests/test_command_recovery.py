@@ -74,6 +74,94 @@ def test_edli_recovery_refs_prefer_world_authority_over_trade_ghosts():
         conn.close()
 
 
+def test_mixed_token_entry_repair_splits_authenticated_groups_idempotently_and_rolls_back(monkeypatch):
+    """B71 / INV-03 / INV-08: token partition is atomic and replayable."""
+    from src.execution import command_recovery as recovery
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE position_events (position_id TEXT, event_type TEXT, sequence_no INTEGER);
+        CREATE TABLE venue_commands (command_id TEXT PRIMARY KEY, position_id TEXT);
+        CREATE TABLE execution_fact (intent_id TEXT PRIMARY KEY, command_id TEXT, position_id TEXT);
+        INSERT INTO venue_commands VALUES ('no-cmd', 'root'), ('yes-cmd', 'root');
+            INSERT INTO execution_fact VALUES ('root:no-entry', 'no-cmd', 'root'),
+                                              ('root:yes-entry', 'yes-cmd', 'root');
+        """
+    )
+    rows = [
+        {"position_id": "root", "command_id": "no-cmd", "projected_phase": "active",
+         "decision_id": "edli_exec_cmd:event-no:x", "projected_direction": "buy_no", "projected_yes_token_id": "yes", "projected_no_token_id": "no",
+         "token_id": "no", "env_condition_id": "condition", "snapshot_condition_id": "condition",
+         "env_yes_token_id": "yes", "snapshot_yes_token_id": "yes",
+         "env_no_token_id": "no", "snapshot_no_token_id": "no",
+         "env_selected_outcome_token_id": "no", "snapshot_selected_outcome_token_id": "no"},
+        {"position_id": "root", "command_id": "yes-cmd", "projected_phase": "active",
+         "decision_id": "edli_exec_cmd:event-yes:x", "projected_direction": "buy_no", "projected_yes_token_id": "yes", "projected_no_token_id": "no",
+         "token_id": "yes", "env_condition_id": "condition", "snapshot_condition_id": "condition",
+         "env_yes_token_id": "yes", "snapshot_yes_token_id": "yes",
+         "env_no_token_id": "no", "snapshot_no_token_id": "no",
+         "env_selected_outcome_token_id": "yes", "snapshot_selected_outcome_token_id": "yes"},
+    ]
+    positions = {
+        "no-cmd": SimpleNamespace(trade_id="root", command_id="no-cmd", direction="buy_no",
+            token_id="yes", no_token_id="no", shares=5.2, cost_basis_usd=1.768,
+            entered_at="2026-07-24T00:00:00+00:00", strategy_key="center_buy",
+            decision_id="edli_exec_cmd:event-no:x", decision_snapshot_id="snap-no", executable_snapshot_id="snap-no", source_trade_fact_id=1, order_id="ord-no", entry_order_id="ord-no", env="test"),
+        "yes-cmd": SimpleNamespace(trade_id="root", command_id="yes-cmd", direction="buy_yes",
+            token_id="yes", no_token_id="no", shares=6.5, cost_basis_usd=5.72,
+            entered_at="2026-07-24T00:01:00+00:00", strategy_key="center_buy",
+            decision_id="edli_exec_cmd:event-yes:x", decision_snapshot_id="snap-yes", executable_snapshot_id="snap-yes", source_trade_fact_id=2, order_id="ord-yes", entry_order_id="ord-yes", env="test"),
+    }
+    projected = []
+    repair_events = []
+
+    monkeypatch.setattr(recovery, "_mixed_token_entry_rows", lambda _conn: {"root": rows})
+    monkeypatch.setattr(recovery, "_hydrate_command_execution_identity", lambda _conn, row: row)
+    monkeypatch.setattr(recovery, "_decision_log_trade_case_for_command", lambda _conn, candidate, client=None: ({"ok": True}, None))
+    monkeypatch.setattr(recovery, "_filled_entry_recovery_position", lambda candidate, _case, decision_log_id=None: positions[candidate["command_id"]])
+    monkeypatch.setattr(recovery, "_split_exact_actionable_certificate_hash", lambda *_args, **_kwargs: "cert")
+    monkeypatch.setattr("src.engine.lifecycle_events.build_position_current_projection", lambda position: {"position_id": position.trade_id, "shares": position.shares, "cost_basis_usd": position.cost_basis_usd})
+    monkeypatch.setattr("src.state.venue_command_repo.record_position_decision_attribution", lambda *_args, **_kwargs: None)
+
+    def append(_conn, events, projection):
+        projected.append(projection)
+        event = events[0]
+        repair_events.append(event)
+        _conn.execute("INSERT INTO position_events VALUES (?, ?, ?)", (event["position_id"], event["event_type"], event["sequence_no"]))
+
+    monkeypatch.setattr("src.state.ledger.append_many_and_project", append)
+    first = recovery.reconcile_mixed_token_entry_position_repairs(conn)
+    child = recovery._split_child_position_id("root", "yes", ["yes-cmd"])
+    assert first["errors"] == 0 and first["reviewed"] == 0 and first["advanced"] == 1, first
+    assert {(item["position_id"], item["shares"], item["cost_basis_usd"]) for item in projected} == {
+        ("root", 5.2, 1.768), (child, 6.5, 5.72)
+    }
+    # Chain reconciliation reads buy_no.no_token_id and buy_yes.token_id; the
+    # reconstructed evidence preserves those two native held tokens exactly.
+    assert {json.loads(event["payload_json"])["held_token_id"] for event in repair_events} == {"no", "yes"}
+    assert conn.execute("SELECT position_id FROM venue_commands WHERE command_id = 'yes-cmd'").fetchone()[0] == child
+    assert conn.execute("SELECT position_id FROM execution_fact WHERE command_id = 'yes-cmd'").fetchone()[0] == child
+    assert recovery.reconcile_mixed_token_entry_position_repairs(conn)["stayed"] == 1
+
+    conn.execute("DELETE FROM position_events")
+    conn.execute("UPDATE venue_commands SET position_id = 'root'")
+    conn.execute("UPDATE execution_fact SET position_id = 'root', intent_id = 'root:no-entry' WHERE command_id = 'no-cmd'")
+    conn.execute("UPDATE execution_fact SET position_id = 'root', intent_id = 'root:yes-entry' WHERE command_id = 'yes-cmd'")
+    monkeypatch.setattr(
+        "src.state.venue_command_repo.record_position_decision_attribution",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("fault-injection")),
+    )
+    failed = recovery.reconcile_mixed_token_entry_position_repairs(conn)
+    assert failed["errors"] == 1
+    assert conn.execute("SELECT position_id FROM venue_commands WHERE command_id = 'yes-cmd'").fetchone()[0] == "root"
+    assert conn.execute("SELECT position_id FROM execution_fact WHERE command_id = 'yes-cmd'").fetchone()[0] == "root"
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+
+    conn.close()
+
+
 # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
 # test_filled_projection_repair_voids_absorbed_chain_only_stub deleted.
 # It exercised command_recovery._void_absorbed_chain_only_projection, which

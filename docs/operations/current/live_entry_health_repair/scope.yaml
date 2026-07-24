@@ -31,6 +31,9 @@ in_scope:
 - src/execution/venue_sync_contract.py
 - src/state/db.py
 - src/state/venue_command_repo.py
+- src/state/ledger.py
+- src/state/projection.py
+- src/contracts/position_truth.py
 - tests/test_p4_post_trade_capital_lift.py
 - tests/test_run_mode_failure_surfaces.py
 - tests/events/test_claim_lock_storm.py
@@ -59,6 +62,12 @@ in_scope:
 - architecture/db_table_ownership.yaml
 - tests/execution/test_venue_sync_contract.py
 - tests/test_db_writer_lock.py
+- tests/test_cross_module_invariants.py
+- architecture/2026_04_02_architecture_kernel.sql
+- architecture/kernel_manifest.yaml
+- architecture/script_manifest.yaml
+- scripts/migrations/2026_07_position_token_split_reconstructed.py
+- tests/test_position_events_identity_supersession_check_migration.py
 allow_companions:
 - architecture/source_rationale.yaml
 - architecture/test_topology.yaml
@@ -68,10 +77,8 @@ allow_companions:
 out_of_scope:
 - state/**
 - src/execution/** except src/execution/exit_lifecycle.py, src/execution/executor.py, src/execution/command_recovery.py, and src/execution/venue_sync_contract.py
-- src/state/** except src/state/portfolio.py, src/state/db.py, src/state/venue_command_repo.py, and src/state/schema/v2_schema.py
-- scripts/**
-- architecture/2026_04_02_architecture_kernel.sql
-- architecture/kernel_manifest.yaml
+- src/state/** except src/state/portfolio.py, src/state/db.py, src/state/venue_command_repo.py, src/state/ledger.py, src/state/projection.py, and src/state/schema/v2_schema.py
+- scripts/** except scripts/migrations/2026_07_position_token_split_reconstructed.py
 - config/** except config/station_forecast_sources.json
 status: in_progress
 live_side_effects_allowed: true

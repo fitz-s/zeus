@@ -42,6 +42,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_SCRIPT = ROOT / "scripts" / "migrations" / "2026_07_position_identity_supersession_check.py"
+B71_MIGRATION_SCRIPT = ROOT / "scripts" / "migrations" / "2026_07_position_token_split_reconstructed.py"
 
 
 def _load_migration_module() -> ModuleType:
@@ -53,7 +54,17 @@ def _load_migration_module() -> ModuleType:
     return mod
 
 
+def _load_b71_migration_module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("b71_position_events_check_migration", B71_MIGRATION_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 mig = _load_migration_module()
+b71_mig = _load_b71_migration_module()
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +354,51 @@ def test_migration_idempotent_rerun_is_noop(tmp_path, fixture_env):
 
     # No-op re-run must not have taken a second backup (returns before the
     # fence/backup phase entirely).
+    assert len(list(backup_dir.glob("*"))) == 1
+
+
+def test_b71_migration_admits_split_reconstruction_literal_and_is_idempotent(tmp_path, fixture_env):
+    state_dir = tmp_path / "state"
+    trade_path = _build_legacy_fixture(state_dir)
+    backup_dir = tmp_path / "backups"
+
+    rc1 = b71_mig.main([
+        "--operator-confirms-fenced", "--state-dir", str(state_dir),
+        "--backup-dir", str(backup_dir),
+    ])
+    assert rc1 == 0
+    conn = sqlite3.connect(str(trade_path))
+    try:
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='position_events'"
+        ).fetchone()[0]
+        assert "'POSITION_TOKEN_SPLIT_RECONSTRUCTED'" in ddl
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                source_module, payload_json, env
+            ) VALUES ('ev-b71', 'pos-b71', 1, 1, 'POSITION_TOKEN_SPLIT_RECONSTRUCTED',
+                      '2026-07-24T00:00:00+00:00', 'active', 'active', 'center_buy',
+                      'test', '{}', 'live')
+            """
+        )
+        conn.commit()
+        before = conn.execute("SELECT * FROM position_events ORDER BY event_id").fetchall()
+    finally:
+        conn.close()
+
+    rc2 = b71_mig.main([
+        "--operator-confirms-fenced", "--state-dir", str(state_dir),
+        "--backup-dir", str(backup_dir),
+    ])
+    assert rc2 == 0
+    conn = sqlite3.connect(str(trade_path))
+    try:
+        assert conn.execute("SELECT * FROM position_events ORDER BY event_id").fetchall() == before
+    finally:
+        conn.close()
     assert len(list(backup_dir.glob("*"))) == 1
 
 

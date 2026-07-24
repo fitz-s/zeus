@@ -702,7 +702,7 @@ files:
   src/contracts/position_truth.py:
     zone: K0_frozen_kernel
     authority_role: position_truth_contract
-    why: Typed position/chain truth contracts, including ChainOnlyFact review states and the automatic exact-match resolution that clears current review debt without suppressing future absence or drift.
+    why: Typed position/chain truth contracts, including ChainOnlyFact review states, the automatic exact-match resolution that clears current review debt without suppressing future absence or drift, and the additive POSITION_TOKEN_SPLIT_RECONSTRUCTED event grammar for append-first reconstruction of a legacy mixed-held-token ENTRY projection (never identity supersession).
     downstream:
     - src/state/portfolio.py
     - src/state/chain_reconciliation.py
@@ -2010,7 +2010,7 @@ files:
   src/execution/command_recovery.py:
     zone: K2_runtime
     authority_role: venue_command_recovery
-    why: Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Confirmed maker fills become execution facts while their ACKED remainder is still resting, even when the initial LIVE order fact still reports zero matched; maker cancel races likewise aggregate all canonical confirmed trade legs for one order. Authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill; deploy-time restart recovery runs that same point-order terminal proof before its read-only alignment gate, and the scheduled live tick prioritizes both already-canceled and cancel-unknown capital locks before broad maintenance can consume its DB budget. Boot invalid-entry authority recovery ranks canonical order facts only for zero-exposure pending ENTRY commands, so historical fact volume cannot delay scheduler and held-position monitor startup.
+    why: Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Confirmed maker fills become execution facts while their ACKED remainder is still resting, even when the initial LIVE order fact still reports zero matched; maker cancel races likewise aggregate all canonical confirmed trade legs for one order. Authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill; deploy-time restart recovery runs that same point-order terminal proof before its read-only alignment gate, and the scheduled live tick prioritizes both already-canceled and cancel-unknown capital locks before broad maintenance can consume its DB budget. Boot invalid-entry authority recovery ranks canonical order facts only for zero-exposure pending ENTRY commands, so historical fact volume cannot delay scheduler and held-position monitor startup. B71 additionally detects one open position_id carrying authenticated FILLED ENTRY BUY commands for multiple native held tokens, then in one append-first transaction reconstructs token-typed projections, rehomes only child commands/facts with CAS, and fails closed to review on topology, certificate, lifecycle, attribution, or rehome ambiguity; it never submits a venue action.
     downstream:
     - src/engine/cycle_runner.py
     - src/state/venue_command_repo.py
@@ -2718,7 +2718,7 @@ files:
   src/state/db.py:
     zone: K2_runtime
     authority_role: db_connection_schema_runtime
-    why: SQLite connections, schema setup, canonical DB queries, and raw provenance projection initialization. Confirmed positive entry execution facts contribute their actual shares and cost to the runtime portfolio whether the command is fully filled or still has a resting partial remainder. Owns the token-suppression reason vocabulary and separates review resolution, permanent ignore, and external-drift suppression semantics.
+    why: SQLite connections, schema setup, canonical DB queries, and raw provenance projection initialization. Confirmed positive entry execution facts contribute their actual shares and cost to the runtime portfolio whether the command is fully filled or still has a resting partial remainder. Owns the token-suppression reason vocabulary and separates review resolution, permanent ignore, and external-drift suppression semantics. The trade DDL admits the additive POSITION_TOKEN_SPLIT_RECONSTRUCTED repair event so fresh databases preserve B71 append-first evidence.
     write_routes:
     - canonical_position_write
     - settlement_write

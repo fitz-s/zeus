@@ -2632,6 +2632,40 @@ scripts:
     required_tests:
       - tests/test_settlement_unit_trigger_deployment_2026_06_03.py
 
+  2026_07_position_token_split_reconstructed.py:
+    class: migration
+    status: active
+    lifecycle: one_shot
+    authority_scope: schema_migration
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--operator-confirms-fenced"
+    target_db: state/zeus_trades.db
+    read_targets: [state/zeus_trades.db]
+    write_targets: [state/zeus_trades.db]
+    canonical_command: "python3 scripts/migrations/2026_07_position_token_split_reconstructed.py --operator-confirms-fenced [--state-dir PATH]"
+    external_inputs: []
+    delete_policy: retain_for_audit
+    reuse_when: >
+      Upgrade an existing trade DB whose position_events CHECK predates
+      POSITION_TOKEN_SPLIT_RECONSTRUCTED. The script fences writers and reuses
+      the audited atomic table-rebuild protocol; it is idempotent and does not
+      reconstruct positions or submit venue actions.
+    do_not_use_when: >
+      Do not run while any Zeus writer is active, without an operator-confirmed
+      writer fence, or as a substitute for runtime mixed-token recovery.
+    promotion_barrier: >
+      Operator must fence the writer plane and verify the backup manifest and
+      new CHECK literal before enabling runtime recovery against a legacy DB.
+    unguarded_write_rationale: >
+      Required one-time DDL compatibility migration for append-only B71 repair
+      evidence; it uses the existing writer fence, backup, and one-transaction
+      CHECK rebuild rather than ad hoc SQL.
+    required_helpers:
+      - scripts/migrations/2026_07_position_identity_supersession_check.py::run_migration
+    required_tests:
+      - tests/test_position_events_identity_supersession_check_migration.py
+
   measure_wu_obs_latency.py:
     class: diagnostic_read
     status: active

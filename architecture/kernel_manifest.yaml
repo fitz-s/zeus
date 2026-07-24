@@ -82,6 +82,7 @@ semantic_atoms:
       # rework of the reverted LX-F): duplicate-position identity supersession
       # fact — replaces the consolidator's prior synthesized merge economics.
       - POSITION_IDENTITY_SUPERSEDED
+      - POSITION_TOKEN_SPLIT_RECONSTRUCTED
 
 truth_surfaces:
   canonical:

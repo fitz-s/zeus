@@ -485,6 +485,10 @@ class CanonicalPositionEventKind(str, Enum):
     # literal in its own position_events.event_type CHECK — the consolidator
     # probes and falls back to a review item rather than crashing.
     POSITION_IDENTITY_SUPERSEDED = "POSITION_IDENTITY_SUPERSEDED"
+    # B71: an authenticated ENTRY command set under one legacy position id was
+    # proven to contain distinct native held tokens.  This records the exact
+    # token partition; it is deliberately not identity supersession.
+    POSITION_TOKEN_SPLIT_RECONSTRUCTED = "POSITION_TOKEN_SPLIT_RECONSTRUCTED"
 
 
 __all__ = [

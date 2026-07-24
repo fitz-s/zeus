@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS position_events (
         'MANUAL_OVERRIDE_APPLIED',
         'VENUE_POSITION_OBSERVED',
         'REVIEW_REQUIRED',
-        'POSITION_IDENTITY_SUPERSEDED'
+        'POSITION_IDENTITY_SUPERSEDED',
+        'POSITION_TOKEN_SPLIT_RECONSTRUCTED'
     )),
     -- 2026-07-11: 'QUARANTINE' sentinel literal removed from this CHECK — a
     -- state word inside a timestamp type (docs/rebuild/quarantine_excision_2026-07-11.md

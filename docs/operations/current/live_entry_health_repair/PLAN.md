@@ -256,7 +256,62 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Verification: five exact positive/negative variants pass together; the
   combined token-dedup/live-safety suite passes `333 passed, 1 xpassed`;
   compilation and `git diff --check` pass.
+## Slice B71 -- Reconstruct mixed-token ENTRY facts into token-typed positions
 
+- Approval: operator-approved K0/K2 recovery slice, based at live
+  `74158bc02`. This is an architecture change: it repairs an invalid
+  condition-level projection through canonical append-first evidence, not a
+  stop-loss rule and not a venue action.
+- Proven defect: one legacy `position_id` can contain authenticated `FILLED`
+  `ENTRY BUY` commands for different native held tokens. A single projection
+  cannot truthfully represent both tokens, so its shares, direction, and
+  executable inventory are corrupted.
+- First-principles invariant: a position is one held native token. The only
+  reconstruction authority is the joined command, canonical trade-fact,
+  exact executable-envelope/snapshot topology, and exact certificate evidence.
+  `position_current`, a model payoff, or a chain absence is never evidence
+  from which a token split may be inferred. Chain facts remain chain facts;
+  this repair creates none.
+- Minimal repair: run before filled-entry projection recovery in the registered
+  command-recovery transaction. Partition authenticated positive-fill ENTRY
+  BUY commands by the token selected by their certified binary topology. Keep
+  the original position for its original token group; derive a stable child id
+  for every other group from the root id, held token, and sorted command ids.
+  Append one typed repair fact for the root and each child, fold both
+  projections atomically, CAS-rebind only still-root-bound commands, rehome
+  their execution facts, and write command-exact attribution. A repeated run
+  is a no-op.
+- Fail closed: any missing/mismatched certificate, envelope or snapshot,
+  malformed/non-binary topology, unauthenticated/nonpositive/unsettled trade,
+  existing exit/terminal lifecycle, non-root CAS conflict, or inconsistent
+  amount opens/refreshes a typed ReviewWorkItem and writes no token split.
+  The repair never sends/cancels an order, alters chain data, fabricates a fill,
+  or uses `POSITION_IDENTITY_SUPERSEDED` (which describes duplicate-identity
+  consolidation, not token ownership reconstruction).
+- Event grammar: add the minimal `POSITION_TOKEN_SPLIT_RECONSTRUCTED` canonical
+  repair event plus DDL and registered migration because no existing lifecycle
+  event truthfully expresses a token partition and root/child evidence relation.
+  It preserves the pre-existing lifecycle phase and carries exact command,
+  trade-fact, topology, certificate, and allocation evidence.
+- Files authorized: `src/execution/command_recovery.py`,
+  `src/state/ledger.py`, `src/state/projection.py`, `src/state/venue_command_repo.py`,
+  `src/state/db.py`, `src/state/schema/v2_schema.py`, `src/contracts/position_truth.py`,
+  `architecture/2026_04_02_architecture_kernel.sql`,
+  `scripts/migrations/2026_07_position_token_split_reconstructed.py`,
+  `architecture/source_rationale.yaml`, `architecture/test_topology.yaml`,
+  `tests/test_command_recovery.py`, `tests/test_cross_module_invariants.py`,
+  and this packet/scope sidecar.
+- Required antibodies: Guangzhou `5.2 @ 0.34 NO` plus `6.5 @ 0.88 YES`
+  reconstructs two token-typed rows with costs `1.768` and `5.72`; rerun adds
+  nothing; a fault between any event/projection/rebind/attribution step rolls
+  back the whole transaction; ambiguous topology/certificate, unsettled or
+  exit/settled state writes review only; chain reconciliation resolves each
+  reconstructed row by its selected held token.
+- Acceptance: focused recovery/contract/invariant tests, schema/migration
+  checks, compile, planning lock, registry/freshness checks, and
+  `git diff --check` pass. Independent review must find no path to a manual
+  SQL repair, synthetic chain fact, direct venue action, partial commit, or
+  false token-owned SELL inventory.
 ## Slice B4 -- Bounded live working-set reads
 
 - Current runtime proof: the reactor run started at `18:46:50Z`, completed `pending_prune` at `18:46:57Z`, and then emitted no `forecast_snapshot_build` completion for more than ten minutes. That stage spans `_edli_pending_entity_keys` plus the forecast builder, so the log anchors alone do not isolate one call. The pending-key query had no SQLite progress deadline and its plan allowed an unbounded status scan, per-row event PK lookup, and temporary DISTINCT tree. `sqlite_stat1` was stale (2,520,044 estimated rows); a later exact read found 10,801,165 processing rows but only 1,018 pending and 12 processing. Hot read-only timing was 179ms for the old query and 94ms for the bounded query; this is a structural I/O amplifier, not proven as the sole ten-minute root. The separately budgeted forecast builder was 52ms hot after recovery.
