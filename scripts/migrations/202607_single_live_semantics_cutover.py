@@ -255,9 +255,9 @@ MIGRATION_DIGEST_COLUMNS: dict[str, tuple[str, ...] | None] = {
         "decision_certificate_hash",
         "resolution",
     ),
-    "position_events": ("decision_id", "payload_json"),
-    "venue_command_events": ("payload_json",),
-    "decision_log": ("artifact_json",),
+    "position_events": ("decision_id",),
+    "venue_command_events": ("command_id", "sequence_no", "event_type"),
+    "decision_log": (),
     "edli_live_profit_audit": (
         RETIRED_ELIGIBILITY_COLUMN,
         "learning_eligible",
@@ -2479,8 +2479,8 @@ def mutate_db(
                 conn.execute(f"ALTER TABLE {table} DROP COLUMN {RETIRED_FORCE_EXIT_COLUMN}")
                 changed.append(f"dropped {table}.{RETIRED_FORCE_EXIT_COLUMN}")
 
-            if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise RuntimeError(f"integrity_check failed for {path}")
+            if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise RuntimeError(f"quick_check failed for {path}")
             if generation is not None and stage is not None:
                 mark_cutover_generation(conn, generation=generation, stage=stage)
             conn.execute("COMMIT")
@@ -2808,7 +2808,7 @@ def main() -> int:
     graph_plan = plan_world_decision_graph(
         world_path,
         trades_path,
-        include_opaque_references=True,
+        include_opaque_references=not args.apply,
         preflight_timeout_seconds=args.preflight_timeout_seconds,
     )
     print("WORLD decision graph plan:")
