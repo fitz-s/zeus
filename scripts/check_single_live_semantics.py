@@ -488,7 +488,11 @@ def _literal_bindings(tree: ast.AST, *, excluded: frozenset[str]) -> dict[str, s
         ):
             assignments.setdefault(node.target.id, []).append(node.value)
 
-    bindings: dict[str, str] = {}
+    bindings = {
+        name: target
+        for name, target in _path_import_aliases(tree).items()
+        if name not in assignments and name not in excluded
+    }
     for _ in range(len(assignments)):
         added = False
         for name, value_nodes in assignments.items():
@@ -502,6 +506,30 @@ def _literal_bindings(tree: ast.AST, *, excluded: frozenset[str]) -> dict[str, s
         if not added:
             break
     return bindings
+
+
+def _path_import_aliases(tree: ast.AST) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for item in node.names:
+                if item.name not in {"os", "os.path", "pathlib", "posixpath"}:
+                    continue
+                local = item.asname or item.name.split(".", 1)[0]
+                aliases[local] = item.name if item.asname else local
+        elif isinstance(node, ast.ImportFrom):
+            module = str(node.module or "")
+            for item in node.names:
+                target = f"{module}.{item.name}" if module else item.name
+                if target not in {
+                    "os.path",
+                    "os.path.join",
+                    "pathlib.Path",
+                    "posixpath.join",
+                }:
+                    continue
+                aliases[item.asname or item.name] = target
+    return aliases
 
 
 def _retired_assignment_control_violations(source: str) -> list[str]:
@@ -827,6 +855,12 @@ def _literal_string(node: ast.AST, bindings: dict[str, str] | None = None) -> st
         left = _literal_string(node.left, bindings)
         right = _literal_string(node.right, bindings)
         return left + right if left is not None and right is not None else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left = _literal_string(node.left, bindings)
+        right = _literal_string(node.right, bindings)
+        if left is not None and right is not None:
+            return f"{left.rstrip('/')}/{right.lstrip('/')}"
+        return None
     if isinstance(node, ast.JoinedStr):
         parts: list[str] = []
         for value in node.values:
@@ -854,13 +888,72 @@ def _literal_string(node: ast.AST, bindings: dict[str, str] | None = None) -> st
     ):
         separator = _literal_string(node.func.value, bindings)
         values = node.args[0]
-        if separator is None or not isinstance(values, (ast.List, ast.Tuple)):
-            return None
-        parts = [_literal_string(item, bindings) for item in values.elts]
-        if any(part is None for part in parts):
-            return None
-        return separator.join(part for part in parts if part is not None)
+        if separator is not None and isinstance(values, (ast.List, ast.Tuple)):
+            parts = [_literal_string(item, bindings) for item in values.elts]
+            if any(part is None for part in parts):
+                return None
+            return separator.join(part for part in parts if part is not None)
+    if isinstance(node, ast.Call) and not node.keywords:
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "joinpath":
+            base = _literal_string(node.func.value, bindings)
+            parts = _literal_call_parts(node.args, bindings)
+            if base is not None and parts is not None:
+                return "/".join(
+                    part.strip("/") if index else part.rstrip("/")
+                    for index, part in enumerate((base, *parts))
+                )
+        name = _bound_call_name(node.func, bindings)
+        if name in {"Path", "pathlib.Path"} and node.args:
+            parts = _literal_call_parts(node.args, bindings)
+            if parts is not None:
+                return "/".join(
+                    part.strip("/") if index else part.rstrip("/")
+                    for index, part in enumerate(parts)
+                )
+        if name == "str" and len(node.args) == 1:
+            return _literal_string(node.args[0], bindings)
+        if name in {"os.path.join", "posixpath.join"} and node.args:
+            parts = _literal_call_parts(node.args, bindings)
+            if parts is not None:
+                return "/".join(
+                    part.strip("/") if index else part.rstrip("/")
+                    for index, part in enumerate(parts)
+                )
     return None
+
+
+def _literal_call_parts(
+    args: list[ast.expr],
+    bindings: dict[str, str],
+) -> list[str] | None:
+    parts: list[str] = []
+    for item in args:
+        values = item.value.elts if isinstance(item, ast.Starred) and isinstance(
+            item.value, (ast.List, ast.Tuple)
+        ) else (item,)
+        for value_node in values:
+            value = _literal_string(value_node, bindings)
+            if value is None:
+                return None
+            parts.append(value)
+    return parts
+
+
+def _bound_call_name(node: ast.AST, bindings: dict[str, str]) -> str:
+    name = _call_name(node)
+    head, separator, tail = name.partition(".")
+    bound = bindings.get(head)
+    if bound not in {
+        "os",
+        "os.path",
+        "os.path.join",
+        "pathlib",
+        "pathlib.Path",
+        "posixpath",
+        "posixpath.join",
+    }:
+        return name
+    return f"{bound}.{tail}" if separator else bound
 
 
 def _contains_exact(token: str, value: str) -> bool:

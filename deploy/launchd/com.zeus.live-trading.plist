@@ -56,8 +56,6 @@
 		<string>22</string>
 		<key>ZEUS_MODE</key>
 		<string>live</string>
-		<key>ZEUS_OPPORTUNITY_BOOK_SELECTOR</key>
-		<string>1</string>
 		<key>ZEUS_PRIMARY_ROOT</key>
 		<string>/Users/leofitz/zeus</string>
 		<key>ZEUS_PUSD_FX_CLASSIFIED</key>
