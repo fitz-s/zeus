@@ -34,6 +34,7 @@ from src.engine.global_single_order_auction import (
     global_single_order_actuation_identity,
     select_prepared_global_auction,
 )
+from src.engine.qkernel_spine_bridge import sell_action_authority_identity
 from src.events.candidate_binding import weather_family_id
 from src.events.opportunity_event import OpportunityEvent, make_opportunity_event
 from src.events.reactor import EventSubmissionReceipt, GlobalBatchSubmitResult
@@ -99,6 +100,33 @@ _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS = frozenset(
         "holding_auction_coverage_zlib_b64",
     }
 )
+
+
+def _rebind_prepared_probability(prepared: object, probability: object) -> object:
+    """Keep probability-dependent action authority coherent at the book cut."""
+
+    return replace(
+        prepared,
+        probability_witness=probability,
+        sell_action_authority_identity=sell_action_authority_identity(
+            family_key=str(probability.family_key),
+            probability_witness_identity=str(probability.witness_identity),
+            status=str(
+                getattr(
+                    prepared,
+                    "day0_exit_authority_status",
+                    "not_applicable",
+                )
+            ),
+            reason=str(
+                getattr(
+                    prepared,
+                    "day0_exit_authority_reason",
+                    "non_day0_family",
+                )
+            ),
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -3468,11 +3496,9 @@ def process_current_global_batch(
                 current_time(),
             )
             prepared_by_event = {
-                event_id: replace(
+                event_id: _rebind_prepared_probability(
                     prepared,
-                    probability_witness=probabilities[
-                        prepared.probability_witness.family_key
-                    ],
+                    probabilities[prepared.probability_witness.family_key],
                 )
                 for event_id, prepared in prepared_by_event.items()
             }

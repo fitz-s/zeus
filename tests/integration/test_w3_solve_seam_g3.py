@@ -16653,6 +16653,9 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     @dataclass(frozen=True)
     class _Prepared:
         probability_witness: object
+        day0_exit_authority_status: str = "not_applicable"
+        day0_exit_authority_reason: str = "non_day0_family"
+        sell_action_authority_identity: str = "non_day0_default_authority"
 
     prepared = {
         event_a.event_id: _Prepared(probability_witness=witness_a),
@@ -18920,6 +18923,47 @@ def test_global_batch_uses_one_probability_and_book_fence_cut(monkeypatch):
     assert result.venue_submit_count == 1
     assert result.winner_event_id == event.event_id
     assert result.receipts[event.event_id].submitted is True
+
+
+def test_global_batch_rebinds_sell_authority_to_book_probability_witness():
+    from src.engine import qkernel_spine_bridge as bridge
+
+    original = bridge.PreparedGlobalFamily(
+        decision_id="decision-before-book",
+        probability_witness=SimpleNamespace(
+            family_key="family-a",
+            witness_identity="probability-before-book",
+        ),
+        candidate_seeds=(),
+        day0_exit_authority_status="mature",
+        day0_exit_authority_reason="day0_high_extreme_post_peak",
+        sell_action_authority_identity="authority-before-book",
+    )
+    rebound_probability = SimpleNamespace(
+        family_key="family-a",
+        witness_identity="probability-at-book-cut",
+    )
+
+    rebound = global_batch_runtime._rebind_prepared_probability(
+        original,
+        rebound_probability,
+    )
+
+    assert rebound.probability_witness is rebound_probability
+    assert rebound.sell_action_authority_identity == (
+        bridge.sell_action_authority_identity(
+            family_key="family-a",
+            probability_witness_identity="probability-at-book-cut",
+            status="mature",
+            reason="day0_high_extreme_post_peak",
+        )
+    )
+    assert rebound.sell_action_authority_identity != (
+        original.sell_action_authority_identity
+    )
+    assert rebound.day0_exit_authority_status == "mature"
+    assert rebound.day0_exit_authority_reason == "day0_high_extreme_post_peak"
+    assert rebound.decision_id == "decision-before-book"
 
 
 def test_global_batch_commits_receipts_before_external_io(monkeypatch, tmp_path):

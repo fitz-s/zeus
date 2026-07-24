@@ -818,3 +818,39 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Minimal repair: move the existing hourly cron from `minute=0` to `minute=5`. Do not add a second writer, increase request frequency, alter source authority, synthesize observations, or change probability/exit semantics.
 - Files authorized: `src/ingest_main.py`, `tests/test_ingest_scheduler_jobs.py`, this packet, and its scope sidecar.
 - Acceptance: exactly one `ingest_k2_daily_obs` cron remains, with `minute=5`, the same job id/executor/concurrency/coalescing contract, and no extra network load. Focused scheduler coverage, compilation, planning-lock, and diff checks must pass. Post-deploy proof requires the next HKO current observation to be fetched after its source issue without the former near-hour phase lag.
+
+## Slice B70 -- Rebind statistical SELL authority to the auction probability cut
+
+- Live proof: complete auctions repeatedly selected a positive posterior-mean
+  reduce-only Guangzhou SELL, then JIT preflight rejected it with
+  `GLOBAL_SELL_DAY0_EXIT_AUTHORITY_IDENTITY_SUPERSEDED`. The selected
+  probability witness and `sell_action_authority_identity` do not form the
+  identity prescribed by `sell_action_authority_identity(...)`; the same
+  mismatch appears in held coverage before preflight.
+- Root cause: `current_book_epoch_provider` returns the probability witnesses
+  rebound to the current executable token/book epoch. The batch runtime
+  replaces each prepared family's `probability_witness`, but leaves its
+  statistical SELL authority bound to the pre-book witness. Candidate
+  construction then combines the new probability identity with the old SELL
+  authority, so the auction creates a certificate that its own current
+  preflight must reject.
+- First-principles invariant: one prepared family is one coherent probability
+  and action-law certificate. Any replacement of its probability witness must
+  atomically rederive every identity whose preimage includes that witness.
+- Minimal repair: at the book-epoch rebind seam, replace the probability
+  witness and recompute `sell_action_authority_identity` from the rebound
+  family key and witness identity plus the unchanged typed Day0 authority
+  status/reason. Preserve all other prepared-family content.
+- Files authorized: `src/engine/global_batch_runtime.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`, and this packet.
+- Forbidden: weaken or remove JIT preflight, reuse the old SELL authority,
+  change q/YES-NO complement/Kelly/global ranking, force an order, relax the
+  venue price band, alter lifecycle, or mutate/copy a canonical DB.
+- Acceptance: a book provider that returns a new probability witness yields a
+  prepared family whose SELL authority exactly binds that new witness while
+  retaining maturity status/reason and all other fields; the old authority is
+  absent from candidate/held coverage; focused global-auction and preflight
+  tests pass; deployment uses the exact committed SHA. Post-deploy proof
+  requires a complete new auction whose coverage identity recomputes exactly,
+  and any selected statistical SELL must reach the next truthful preflight or
+  venue outcome rather than this superseded-identity rejection.
