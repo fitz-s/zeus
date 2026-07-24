@@ -427,6 +427,14 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                             ):
                                 tainted.add(parameter.arg)
                                 changed = True
+                            elif (
+                                parameter is None
+                                and function.args.kwarg is not None
+                                and _expr_uses_names(value, tainted)
+                                and function.args.kwarg.arg not in tainted
+                            ):
+                                tainted.add(function.args.kwarg.arg)
+                                changed = True
                         continue
                     for parameter in parameters.values():
                         if parameter.arg not in tainted:
