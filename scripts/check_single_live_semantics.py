@@ -374,24 +374,70 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
             if function is None:
                 continue
             positional = [*function.args.posonlyargs, *function.args.args]
-            for argument, parameter in zip(node.args, positional, strict=False):
-                if _expr_uses_names(argument, tainted) and parameter.arg not in tainted:
+            position = 0
+            for argument in node.args:
+                if isinstance(argument, ast.Starred):
+                    if _expr_uses_names(argument.value, tainted):
+                        for parameter in positional[position:]:
+                            if parameter.arg not in tainted:
+                                tainted.add(parameter.arg)
+                                changed = True
+                        if (
+                            function.args.vararg is not None
+                            and function.args.vararg.arg not in tainted
+                        ):
+                            tainted.add(function.args.vararg.arg)
+                            changed = True
+                    position = len(positional)
+                    continue
+                if position < len(positional):
+                    parameter = positional[position]
+                    position += 1
+                else:
+                    parameter = function.args.vararg
+                if (
+                    parameter is not None
+                    and _expr_uses_names(argument, tainted)
+                    and parameter.arg not in tainted
+                ):
                     tainted.add(parameter.arg)
                     changed = True
-            if function.args.vararg is not None:
-                for argument in node.args[len(positional) :]:
-                    if (
-                        _expr_uses_names(argument, tainted)
-                        and function.args.vararg.arg not in tainted
-                    ):
-                        tainted.add(function.args.vararg.arg)
-                        changed = True
             parameters = {
                 parameter.arg: parameter
                 for parameter in [*positional, *function.args.kwonlyargs]
             }
             for keyword in node.keywords:
                 if keyword.arg is None:
+                    if not _expr_uses_names(keyword.value, tainted):
+                        continue
+                    if isinstance(keyword.value, ast.Dict):
+                        for key, value in zip(
+                            keyword.value.keys, keyword.value.values, strict=True
+                        ):
+                            name = (
+                                _literal_string(key, literal_bindings)
+                                if key is not None
+                                else None
+                            )
+                            parameter = parameters.get(name or "")
+                            if (
+                                parameter is not None
+                                and _expr_uses_names(value, tainted)
+                                and parameter.arg not in tainted
+                            ):
+                                tainted.add(parameter.arg)
+                                changed = True
+                        continue
+                    for parameter in parameters.values():
+                        if parameter.arg not in tainted:
+                            tainted.add(parameter.arg)
+                            changed = True
+                    if (
+                        function.args.kwarg is not None
+                        and function.args.kwarg.arg not in tainted
+                    ):
+                        tainted.add(function.args.kwarg.arg)
+                        changed = True
                     continue
                 parameter = parameters.get(keyword.arg)
                 if (
@@ -451,18 +497,23 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                         "retired deletion constant flows into mapping key "
                         f"{control!r}"
                     )
-        condition: ast.AST | None = None
-        branches: list[ast.AST] = []
+        controlled: list[tuple[ast.AST, list[ast.AST]]] = []
         if isinstance(node, (ast.If, ast.While)):
-            condition = node.test
-            branches = [*node.body, *node.orelse]
+            controlled.append((node.test, [*node.body, *node.orelse]))
         elif isinstance(node, (ast.For, ast.AsyncFor)):
-            condition = node.iter
-            branches = [*node.body, *node.orelse]
+            controlled.append((node.iter, [*node.body, *node.orelse]))
         elif isinstance(node, ast.Match):
-            condition = node.subject
-            branches = [item for case in node.cases for item in case.body]
-        if condition is not None and _expr_uses_names(condition, tainted):
+            controlled.append(
+                (node.subject, [item for case in node.cases for item in case.body])
+            )
+            controlled.extend(
+                (case.guard, list(case.body))
+                for case in node.cases
+                if case.guard is not None
+            )
+        for condition, branches in controlled:
+            if not _expr_uses_names(condition, tainted):
+                continue
             controls = sorted(
                 {
                     control
