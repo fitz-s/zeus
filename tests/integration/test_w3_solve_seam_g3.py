@@ -2338,7 +2338,10 @@ def test_global_deterministic_actuation_builds_only_selected_exact_proof():
         )
 
 
-def test_global_actuation_revalidates_content_then_preserves_selected_witness(monkeypatch):
+def test_global_actuation_revalidates_content_then_preserves_selected_witness(
+    monkeypatch,
+    caplog,
+):
     content = {
         field: f"current-{field}"
         for field in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
@@ -2439,7 +2442,10 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
             probability_witness=SimpleNamespace(**{**content, "q_version": "moved"}),
         ),
     )
-    with pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
+    with (
+        caplog.at_level("WARNING"),
+        pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"),
+    ):
         era._current_global_actuation_prepared_family(
             SimpleNamespace(),
             global_actuation=actuation,
@@ -2448,6 +2454,8 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
             observation_conn=conn,
             decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
         )
+    assert "fields=q_version" in caplog.text
+    caplog.clear()
 
     monkeypatch.setattr(
         era,
@@ -2461,7 +2469,10 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
             ),
         ),
     )
-    with pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
+    with (
+        caplog.at_level("WARNING"),
+        pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"),
+    ):
         era._current_global_actuation_prepared_family(
             SimpleNamespace(),
             global_actuation=actuation,
@@ -2470,6 +2481,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
             observation_conn=conn,
             decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
         )
+    assert "fields=yes_point_q" in caplog.text
     conn.close()
 
 

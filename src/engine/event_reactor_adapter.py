@@ -13060,10 +13060,24 @@ def _current_global_actuation_prepared_family(
         ),
     )
     current_witness = getattr(current, "probability_witness", None)
-    if current_witness is None or not _global_probability_witness_content_matches(
-        current_witness,
-        selected,
-    ):
+    probability_mismatches = (
+        ("probability_witness",)
+        if current_witness is None
+        else _global_probability_witness_content_mismatches(
+            current_witness,
+            selected,
+        )
+    )
+    if probability_mismatches:
+        logging.getLogger(__name__).warning(
+            "global actuation probability superseded: family=%s action=%s "
+            "fields=%s selected_witness=%s current_witness=%s",
+            getattr(selected, "family_key", "unknown"),
+            str(getattr(candidate, "action", "BUY") or "BUY").upper(),
+            ",".join(probability_mismatches),
+            getattr(selected, "witness_identity", "unknown"),
+            getattr(current_witness, "witness_identity", "missing"),
+        )
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
     if isinstance(selected, DeterministicBinPayoffWitness):
         _bind_current_deterministic_day0_witness(
@@ -29282,12 +29296,23 @@ def _global_probability_witness_content_matches(
 ) -> bool:
     """Compare submit-time probability content, including the point simplex."""
 
-    if any(
-        getattr(current, field, None) != getattr(selected, field, None)
+    return not _global_probability_witness_content_mismatches(current, selected)
+
+
+def _global_probability_witness_content_mismatches(
+    current: object,
+    selected: object,
+) -> tuple[str, ...]:
+    """Name probability facts that changed between selection and submit."""
+
+    mismatches = tuple(
+        field
         for field in _GLOBAL_PROBABILITY_CONTENT_FIELDS
-    ):
-        return False
-    return _global_probability_point_q_matches(current, selected)
+        if getattr(current, field, None) != getattr(selected, field, None)
+    )
+    if not _global_probability_point_q_matches(current, selected):
+        mismatches += ("yes_point_q",)
+    return mismatches
 
 
 def _global_probability_point_q_matches(left: object, right: object) -> bool:
