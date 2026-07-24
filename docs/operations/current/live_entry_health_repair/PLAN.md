@@ -215,6 +215,31 @@ Restore truthful live entry admission after the global auction reached a real wi
   still passes `329 passed, 1 xpassed`; compilation and `git diff --check`
   pass.
 
+## Slice B70.2 -- Do not clear terminal-no-fill over current Chain exposure
+
+- Review counterexample: `pending_entry` with zero local shares/cost, a
+  terminal no-fill command, and `chain_shares>0` in a current-money-risk
+  `chain_state` is selected by both duplicate queries but then skipped by
+  their terminal-no-fill exception. This lets authoritative Chain exposure
+  lose to a stale local command conclusion.
+- First-principles invariant: terminal-no-fill means no exposure only while
+  every stronger venue fact agrees. Positive current Chain shares contradict
+  that conclusion and therefore invalidate the re-entry exception.
+- Minimal repair: carry chain identity into the evaluator and executor rows
+  and deny terminal-no-fill clearing when positive shares are in
+  `CURRENT_MONEY_RISK_CHAIN_STATES`. Preserve the existing no-chain cancelled
+  entry redecision path.
+- Acceptance: `pending_entry + CANCELLED/no-fill + chain_shares=12.5 +
+  chain_state=synced` remains blocked by the canonical state helper, evaluator
+  Layer 7, and executor final boundary; the same command facts with zero Chain
+  exposure remain admissible.
+- Verification: the exact counterexample and the preserved no-Chain exception
+  pass together; the combined token-dedup/live-safety suite passes
+  `330 passed, 1 xpassed`; compilation, planning lock, source-rationale delta,
+  and `git diff --check` pass. The repository-wide dynamic-SQL inventory still
+  reports its pre-existing unbaselined drift; this slice changes parameters
+  inside two already-counted dynamic queries and adds no dynamic-SQL site.
+
 ## Slice B4 -- Bounded live working-set reads
 
 - Current runtime proof: the reactor run started at `18:46:50Z`, completed `pending_prune` at `18:46:57Z`, and then emitted no `forecast_snapshot_build` completion for more than ten minutes. That stage spans `_edli_pending_entity_keys` plus the forecast builder, so the log anchors alone do not isolate one call. The pending-key query had no SQLite progress deadline and its plan allowed an unbounded status scan, per-row event PK lookup, and temporary DISTINCT tree. `sqlite_stat1` was stale (2,520,044 estimated rows); a later exact read found 10,801,165 processing rows but only 1,018 pending and 12 processing. Hot read-only timing was 179ms for the old query and 94ms for the bounded query; this is a structural I/O amplifier, not proven as the sole ten-minute root. The separately budgeted forecast builder was 52ms hot after recovery.

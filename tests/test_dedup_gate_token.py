@@ -614,6 +614,46 @@ def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(mem
     assert result["allowed"] is True
 
 
+def test_terminal_no_fill_cannot_clear_current_chain_exposure(mem_db):
+    _insert_position(
+        mem_db,
+        "chain-held-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+        chain_shares=12.5,
+        chain_state="synced",
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-chain-held', 'chain-held-pending', ?, 'ENTRY', 'BUY',
+                   'order-chain-held', 'CANCELLED',
+                   '2026-06-18T09:15:14', '2026-06-18T09:20:22')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-chain-held', 'cmd-chain-held', 'CANCEL_CONFIRMED',
+                   '0', '0', 'REST', '2026-06-18T09:20:22', 1)"""
+    )
+    mem_db.commit()
+
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
+    result = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+    )
+    assert result["allowed"] is False
+    assert result["reason"] == "open_position_same_token"
+
+
 def test_executor_duplicate_gate_allows_cancelled_pending_entry_with_stale_live_order_fact(mem_db):
     _insert_position(
         mem_db,

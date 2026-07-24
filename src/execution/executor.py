@@ -547,6 +547,20 @@ def _pending_entry_terminal_no_fill_allows_entry(
     phase = str(row["phase"] if isinstance(row, sqlite3.Row) else row[1] or "").lower()
     if phase != "pending_entry":
         return False
+    try:
+        chain_shares = Decimal(
+            str(row["chain_shares"] if isinstance(row, sqlite3.Row) else row[8] or "0")
+        )
+    except (InvalidOperation, ValueError):
+        return False
+    chain_state = str(
+        row["chain_state"] if isinstance(row, sqlite3.Row) else row[9] or ""
+    ).strip()
+    if (
+        chain_shares > Decimal("0.000001")
+        and chain_state in CURRENT_MONEY_RISK_CHAIN_STATES
+    ):
+        return False
     position_id = str(row["position_id"] if isinstance(row, sqlite3.Row) else row[0] or "")
     order_id = str(row["order_id"] if isinstance(row, sqlite3.Row) else row[2] or "")
     try:
@@ -2323,10 +2337,18 @@ def _entry_duplicate_same_token_component(
         else:
             chain_exposure_sql = ""
             chain_exposure_params = ()
+        if "chain_shares" in position_columns:
+            chain_identity_sql = (
+                ", chain_shares, chain_state"
+                if "chain_state" in position_columns
+                else ", chain_shares, NULL AS chain_state"
+            )
+        else:
+            chain_identity_sql = ", NULL AS chain_shares, NULL AS chain_state"
         rows = conn.execute(
             f"""
             SELECT position_id, phase, order_id, shares, cost_basis_usd,
-                   direction, token_id, no_token_id
+                   direction, token_id, no_token_id{chain_identity_sql}
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
               AND position_id != ?
