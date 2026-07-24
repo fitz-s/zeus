@@ -295,6 +295,52 @@ def test_b71_multi_command_held_token_group_is_review_only(monkeypatch):
     conn.close()
 
 
+def test_b71_f109_compares_owned_token_not_sibling_topology(conn):
+    """A NO root and YES child may share one binary topology, not one holding."""
+    from src.state.projection import (
+        CANONICAL_POSITION_CURRENT_COLUMNS,
+        DuplicatePositionOpenError,
+        upsert_position_current,
+    )
+
+    def projection(position_id: str, direction: str) -> dict:
+        row = {column: None for column in CANONICAL_POSITION_CURRENT_COLUMNS}
+        row.update(
+            position_id=position_id,
+            phase="day0_window",
+            trade_id=position_id,
+            market_id="market",
+            city="Guangzhou",
+            target_date="2026-07-24",
+            bin_label="36C",
+            direction=direction,
+            unit="C",
+            size_usd=1.0,
+            shares=1.0,
+            cost_basis_usd=1.0,
+            entry_price=1.0,
+            strategy_key="day0_nowcast_entry",
+            token_id="yes-token",
+            no_token_id="no-token",
+            condition_id="condition",
+            updated_at="2026-07-24T09:45:00+00:00",
+            temperature_metric="high",
+        )
+        return row
+
+    upsert_position_current(conn, projection("no-root", "buy_no"))
+    with pytest.raises(DuplicatePositionOpenError):
+        upsert_position_current(conn, projection("unknown-duplicate", "unknown"))
+    upsert_position_current(conn, projection("yes-child", "buy_yes"))
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_current "
+        "WHERE position_id IN ('no-root', 'yes-child')"
+    ).fetchone()[0] == 2
+    with pytest.raises(DuplicatePositionOpenError):
+        upsert_position_current(conn, projection("yes-duplicate", "buy_yes"))
+
+
 # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
 # test_filled_projection_repair_voids_absorbed_chain_only_stub deleted.
 # It exercised command_recovery._void_absorbed_chain_only_projection, which

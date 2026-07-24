@@ -1125,3 +1125,26 @@ Restore truthful live entry admission after the global auction reached a real wi
   reproduced unchanged on `ad655f5f1`. Compilation, planning-lock, and
   `git diff --check` pass; no canonical DB, control override, or venue state
   changed during worktree verification.
+
+## Slice B71.1 -- Make F109 duplicate protection held-token exact
+
+- Restart proof: B71 reconstructed the Guangzhou root as its authenticated
+  `buy_no` fill, then failed before creating the YES child with F109 claiming
+  the child's YES token was already held by the NO root. The root carries that
+  YES `token_id` only as binary market topology; its owned asset is
+  `no_token_id`.
+- First-principles invariant: duplicate-open protection is per owned native
+  token, not per sibling token named by the market. `buy_yes` owns `token_id`;
+  `buy_no` owns `no_token_id`. Unknown legacy directions remain conservative
+  across both fields.
+- Minimal repair: derive the candidate held token from direction and compare it
+  only with direction-selected held tokens on existing typed rows. Preserve the
+  hard failure for a true same-held-token duplicate and all append/projection
+  transaction boundaries.
+- Files authorized: `src/state/projection.py`,
+  `tests/test_command_recovery.py`, `architecture/source_rationale.yaml`, and
+  this packet.
+- Acceptance: a NO root and YES child sharing one exact binary topology both
+  project; another YES position on the same YES token still raises F109. The
+  live B71 reconstruction then writes one root and one deterministic child
+  atomically, restart recovery is green, and no venue action is introduced.

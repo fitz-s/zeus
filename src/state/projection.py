@@ -185,14 +185,47 @@ def _find_existing_open_row(
     row = conn.execute(
         f"""
         SELECT position_id FROM {table_name}
-         WHERE (token_id = ? OR no_token_id = ?)
+         WHERE (
+                (direction = 'buy_yes' AND token_id = ?)
+             OR (direction = 'buy_no' AND no_token_id = ?)
+             OR (
+                    COALESCE(direction, '') NOT IN ('buy_yes', 'buy_no')
+                AND (token_id = ? OR no_token_id = ?)
+             )
+         )
            AND position_id != ?
            AND phase IN (?, ?, ?, ?, ?)
          LIMIT 1
         """,
-        (token_id, token_id, exclude_position_id, *_F109_OPEN_PHASES),
+        (
+            token_id,
+            token_id,
+            token_id,
+            token_id,
+            exclude_position_id,
+            *_F109_OPEN_PHASES,
+        ),
     ).fetchone()
     return str(row[0]) if row is not None else None
+
+
+def _projection_held_tokens(projection: dict) -> tuple[str, ...]:
+    """Return owned-token candidates; unknown direction remains conservative."""
+
+    direction = str(projection.get("direction") or "")
+    if direction == "buy_no":
+        token = projection.get("no_token_id")
+        return (str(token),) if token else ()
+    if direction == "buy_yes":
+        token = projection.get("token_id")
+        return (str(token),) if token else ()
+    return tuple(
+        dict.fromkeys(
+            str(token)
+            for token in (projection.get("token_id"), projection.get("no_token_id"))
+            if token
+        )
+    )
 
 
 class NullConditionIdOnOpenPhaseError(ValueError):
@@ -606,7 +639,7 @@ def upsert_position_current(
     # sqlite3.IntegrityError from the INDEX will propagate through the
     # caller's SAVEPOINT and roll back the entire entry.
     candidate_phase = str(projection.get("phase") or "")
-    candidate_token = projection.get("token_id") or projection.get("no_token_id")
+    candidate_tokens = _projection_held_tokens(projection)
     candidate_position_id = str(projection.get("position_id") or "")
     if candidate_position_id and candidate_phase not in _ABSORBING_POSITION_PHASES:
         existing_phase_row = conn.execute(
@@ -661,21 +694,22 @@ def upsert_position_current(
 
     if (
         candidate_phase in _F109_OPEN_PHASES
-        and candidate_token
+        and candidate_tokens
         and candidate_position_id
     ):
-        existing = _find_existing_open_row(
-            conn,
-            token_id=str(candidate_token),
-            exclude_position_id=candidate_position_id,
-            table_name=table_name,
-        )
-        if existing is not None:
-            raise DuplicatePositionOpenError(
-                attempted_position_id=candidate_position_id,
-                existing_position_id=existing,
-                token_id=str(candidate_token),
+        for candidate_token in candidate_tokens:
+            existing = _find_existing_open_row(
+                conn,
+                token_id=candidate_token,
+                exclude_position_id=candidate_position_id,
+                table_name=table_name,
             )
+            if existing is not None:
+                raise DuplicatePositionOpenError(
+                    attempted_position_id=candidate_position_id,
+                    existing_position_id=existing,
+                    token_id=candidate_token,
+                )
     # PR #352 (Part-3 audit, bot #7 on PR #351 + Part-4 Finding 1, 2026-05-27):
     # the ON CONFLICT update set is GENERATED from CANONICAL_POSITION_CURRENT_COLUMNS
     # (minus the position_id conflict key), not hand-maintained. The original
