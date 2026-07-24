@@ -24,12 +24,25 @@ NO 侧 native 界(q⁻_NO = 1−q⁺_YES);全部 kill/build 清单与存活 guar
 pause-window 部署(deploy_live.py restart all + resume_entries 既有机制)。
 
 **C2 高尾 fail-closed 顺序反转:先测,后关。** 5.6 排它第一且要求立即
-fail-close 受影响 cell。但本地 era-split 事实:jul15+ NO winrate 0.731 vs
-~0.64 breakeven —— 缺陷很可能已被近期部署实质修复;现在关闭会切断当前
-实测为正的活边际,且 joint-Kelly 放大风险在 PR-2 启用前不存在。裁定:
-band-0.5/高尾 cell 的 **stake-weighted 结算 cohort verdict 脚本现在落地**
-(17 个未结算 token ~2 天内出齐),fail-closed 开关在 PR-1 就位但**默认不翻**;
+fail-close 受影响 cell。裁定:band-0.5/高尾 cell 的 **stake-weighted 结算
+cohort verdict 脚本现在落地**,fail-closed 开关在 PR-1 就位但**默认不翻**;
 verdict 负才翻。这是 evidence-first(操作员法:gates decide),不是拖延。
+
+**C2 修订(tail-scout 实测 2026-07-23)**:verdict 脚本对活库首跑 —— 两个
+era 均 INSUFFICIENT(unresolved stake 56-59% > 20% 门)。但方向信号为负:
+resolved-and-held 子集 stake-weighted winrate 43.9%(jul15+)/44.2%(jul01+)
+vs breakeven 56.0%/56.4% —— 与先前 0.731 count-weighted 数字分歧(那是
+按仓位计数、未剔除结算前退出仓的口径)。"缺陷可能已被修复"的工作假设
+**撤回**;开关仍不翻(证据不足),~2 天后 17 个尾 token 结算、unresolved
+门清空时重跑,verdict 变载重。
+机制已定位(tail-scout):under-shrink 不是 full_transport_v1 产者本身,
+而是 **D2 bias-family unify 回归**(evaluator.py:3369-3433,flag
+exit_bias_family_unify_enabled=true,settings.json:251):统一路径只施
+bias 平移(edli_per_city_v1),从不加 total_residual_sd_c 的 scale 加宽 ——
+预测误差层的一半被静默丢弃。修复面因此比 5.6 假设的窄:在统一路径恢复
+residual 加宽,或对受影响 cell 让 _resolve_unified_entry_bias_native 返回
+None(fail-safe 回退到 plain-p_raw+Platt 已结构性存在,只差 cell 门)。
+serving-gate 挂点:evaluator.py:4876 的 cal_level>=4 CALIBRATION_IMMATURE 拒绝。
 
 **C3 PR-1 exit = ΔJ≡0 特例,allocator 耦合推 PR-2。** 5.6 的停止律含
 J_t(F)(联合 allocator 的现金影子值),但 allocator 是 PR-2 交付物 ——
