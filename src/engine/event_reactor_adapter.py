@@ -32408,7 +32408,6 @@ def _market_analysis_from_event_snapshot(
         p_raw = np.asarray(_q_vec, dtype=float)
         p_cal = np.asarray(_q_vec, dtype=float)  # EMOS IS the calibrated point distribution
         members = raw_members
-        _bias_corrected = False
         payload["_edli_q_source"] = "emos"
         _emos_sampler = _make_emos_bootstrap_sampler(_emos_mu_native, _emos_sigma_native)
         # Stage-0 spine: EMOS IS the predictive N(mu, sigma); record its native center/dispersion.
@@ -32426,7 +32425,6 @@ def _market_analysis_from_event_snapshot(
         # from N(x̄, floored σ). Conservative: only widens → lower q_lcb. When no EMOS σ-model exists
         # for the cell (truly absent), degrade to the pure raw analytic.
         members = raw_members
-        _bias_corrected = False
         payload["_edli_q_source"] = "raw_honest"
         _hr = None
         try:
@@ -32504,12 +32502,10 @@ def _market_analysis_from_event_snapshot(
                 else _day0_rd_members,
                 dtype=float,
             )
-            _bias_corrected = False
             payload["_edli_q_source"] = "day0_remaining_day"
             payload["_edli_day0_q_mode"] = "remaining_day"
         else:
             members = raw_members
-            _bias_corrected = False
         if _day0_rd_members is None:
             payload["_edli_q_source"] = "platt"
         day0_extra_member_sigma = 0.0
@@ -32766,7 +32762,6 @@ def _market_analysis_from_event_snapshot(
         city_name=family.city,
         season="",
         forecast_source=str(snapshot.get("source_id") or payload.get("source_id") or ""),
-        bias_corrected=_bias_corrected,  # §4.1: propagate correction flag
         market_complete=True,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         bootstrap_probability_sampler=sampler,
