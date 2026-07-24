@@ -175,6 +175,165 @@ def test_gate_rejects_live_config_load_from_excluded_subtree(
     )
 
 
+def test_gate_rejects_pathlib_composition_into_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    loader = tmp_path / "src" / "config_loader.py"
+    loader.parent.mkdir(parents=True)
+    loader.write_text(
+        "from pathlib import Path\n"
+        "base = Path('docs') / 'archive'\n"
+        "config = (base / 'historical.md').read_text()\n",
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith("src/config_loader.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_bound_pathlib_subprocess_target(
+    tmp_path: Path,
+) -> None:
+    launcher = tmp_path / "scripts" / "runtime_launcher.py"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        "from pathlib import Path\n"
+        "import subprocess\n"
+        "target = Path('docs') / 'evidence' / 'historical.md'\n"
+        "subprocess.run(['bash', str(target)], check=True)\n",
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith("scripts/runtime_launcher.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_multi_argument_path_into_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    loader = tmp_path / "src" / "config_loader.py"
+    loader.parent.mkdir(parents=True)
+    loader.write_text(
+        "from pathlib import Path\n"
+        "config = Path('docs', 'archive', 'historical.md').read_text()\n",
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith("src/config_loader.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_aliased_path_into_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    loader = tmp_path / "src" / "config_loader.py"
+    loader.parent.mkdir(parents=True)
+    loader.write_text(
+        "from pathlib import Path as P\n"
+        "config = (P('docs') / 'archive' / 'historical.md').read_text()\n",
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith("src/config_loader.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_aliased_join_into_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    loader = tmp_path / "src" / "config_loader.py"
+    loader.parent.mkdir(parents=True)
+    loader.write_text(
+        "from os.path import join as j\n"
+        "with open(j('docs', 'archive', 'historical.md')) as handle:\n"
+        "    config = handle.read()\n",
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith("src/config_loader.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_aliased_os_join_into_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    loader = tmp_path / "src" / "config_loader.py"
+    loader.parent.mkdir(parents=True)
+    loader.write_text(
+        "import os as operating\n"
+        "with open(operating.path.join('docs', 'archive', 'historical.md')) as handle:\n"
+        "    config = handle.read()\n",
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith("src/config_loader.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_joinpath_into_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    loader = tmp_path / "src" / "config_loader.py"
+    loader.parent.mkdir(parents=True)
+    loader.write_text(
+        "from pathlib import Path\n"
+        "config = Path('docs').joinpath('archive', 'historical.md').read_text()\n",
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith("src/config_loader.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_starred_path_into_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    loader = tmp_path / "src" / "config_loader.py"
+    loader.parent.mkdir(parents=True)
+    loader.write_text(
+        "from pathlib import Path\n"
+        "config = Path(*('docs', 'archive', 'historical.md')).read_text()\n",
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith("src/config_loader.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_starred_os_join_into_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    loader = tmp_path / "src" / "config_loader.py"
+    loader.parent.mkdir(parents=True)
+    loader.write_text(
+        "import os\n"
+        "with open(os.path.join(*('docs', 'archive', 'historical.md'))) as handle:\n"
+        "    config = handle.read()\n",
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith("src/config_loader.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
 def test_gate_allows_plain_historical_markdown_under_excluded_subtree(
     tmp_path: Path,
 ) -> None:
