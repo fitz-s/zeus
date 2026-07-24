@@ -2736,6 +2736,7 @@ def current_portfolio_wealth_witness(
         position_max_age = timedelta(seconds=_CHAIN_SEEN_AT_MAX_AGE_SECONDS)
         represented_micro: dict[str, int] = {}
         uncertain_micro: dict[str, int] = {}
+        uncertain_endowments: list[tuple[str, str, int]] = []
         native_commitments_micro: dict[str, int] = {}
         position_rows = []
         for position in positions:
@@ -2783,6 +2784,17 @@ def current_portfolio_wealth_witness(
                         evidence = "position_chain_seen"
             target = represented_micro if evidence != "uncertain_local_claim" else uncertain_micro
             target[token] = target.get(token, 0) + micro
+            if evidence == "uncertain_local_claim":
+                position_id = str(
+                    getattr(position, "position_id", "")
+                    or getattr(position, "trade_id", "")
+                    or ""
+                ).strip()
+                if not position_id:
+                    raise ValueError("CURRENT_WEALTH_OPEN_POSITION_INVALID")
+                uncertain_endowments.append(
+                    (f"position_claim:{position_id}", token, micro)
+                )
             try:
                 cost = max(
                     Decimal(
@@ -2882,6 +2894,9 @@ def current_portfolio_wealth_witness(
             positions=positions,
             native_holdings_micro=bounded_claims,
         )
+        pending_endowments = tuple(
+            sorted((*pending_endowments, *uncertain_endowments))
+        )
         inflight_command_ids = {identity[0] for identity in inflight_identities}
         if not inflight_command_ids.issubset(obligation_ids):
             raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
@@ -2920,10 +2935,6 @@ def current_portfolio_wealth_witness(
         )
         ceiling = floor + sum(
             (Decimal(amount) / Decimal("1000000") for amount in held_balances.values()),
-            Decimal("0"),
-        )
-        ceiling += sum(
-            (Decimal(amount) / Decimal("1000000") for amount in uncertain_micro.values()),
             Decimal("0"),
         )
         ceiling += sum(

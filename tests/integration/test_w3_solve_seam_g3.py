@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-24
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair,
 #                  current Day0 global-cut routing, and auditable SELL holding bindings
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
@@ -15249,14 +15249,32 @@ def test_current_portfolio_wealth_uses_ctf_mirror_during_projection_lag():
     assert witness.native_holdings_micro == (("no-token", 14_589_200),)
 
 
-def test_current_portfolio_wealth_bounds_verified_fill_during_chain_lag():
+@pytest.mark.parametrize(
+    ("direction", "held_token", "side"),
+    (
+        (Direction.YES, "yes-token", "YES"),
+        (Direction.NO, "no-token", "NO"),
+    ),
+)
+def test_current_portfolio_wealth_binds_verified_fill_as_non_sellable_endowment(
+    direction,
+    held_token,
+    side,
+):
+    @dataclass(frozen=True)
+    class Prepared:
+        probability_witness: object
+        holdings_snapshot: object | None = None
+
     decision_at = _dt.datetime(2026, 7, 17, 2, 42, tzinfo=_dt.timezone.utc)
     conn = _wealth_test_conn(captured_at=decision_at)
     portfolio = PortfolioState(
         positions=[
             SimpleNamespace(
                 trade_id="trade-1",
-                direction=Direction.NO,
+                position_id="trade-1",
+                condition_id="condition-a",
+                direction=direction,
                 token_id="yes-token",
                 no_token_id="no-token",
                 chain_state="unknown",
@@ -15281,7 +15299,52 @@ def test_current_portfolio_wealth_bounds_verified_fill_during_chain_lag():
 
     assert witness.wealth_ceiling_usd == Decimal("41.589284")
     assert witness.native_holdings_micro == ()
-    assert witness.native_commitments_micro == (("no-token", 10_000_000),)
+    assert witness.pending_entry_endowments_micro == (
+        ("position_claim:trade-1", held_token, 14_589_284),
+    )
+    assert witness.native_commitments_micro == ((held_token, 10_000_000),)
+
+    prepared = Prepared(
+        probability_witness=SimpleNamespace(
+            family_key="family",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin-a",
+                    condition_id="condition-a",
+                    yes_token_id="yes-token",
+                    no_token_id="no-token",
+                ),
+                SimpleNamespace(
+                    bin_id="bin-b",
+                    condition_id="condition-b",
+                    yes_token_id="yes-b",
+                    no_token_id="no-b",
+                ),
+            ),
+        ),
+        holdings_snapshot=None,
+    )
+    snapshot = global_batch_runtime._bind_selection_holdings(
+        {"event-a": prepared},
+        portfolio_state=portfolio,
+        wealth_witness=witness,
+    )["event-a"].holdings_snapshot
+    endowment = _candidate_portfolio_endowment(
+        SimpleNamespace(
+            family_key="family",
+            bin_id="bin-a",
+            side=side,
+            token_id=held_token,
+        ),
+        probability_witness=SimpleNamespace(bin_ids=("bin-a", "bin-b")),
+        holdings_snapshot=snapshot,
+        wealth_witness=witness,
+    )
+
+    assert snapshot.holdings == ()
+    assert snapshot.pending_endowments[0].side == side
+    assert snapshot.pending_endowments[0].shares == Decimal("14.589284")
+    assert endowment.current_token_shares == Decimal("14.589284")
 
 
 def test_current_portfolio_wealth_refuses_unverified_projection_lag():
