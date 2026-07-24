@@ -816,6 +816,53 @@ class TestRemainingDayMembers:
         ]
         assert payload["_edli_day0_remaining_models"] == 2
 
+    def test_remaining_members_keep_source_clock_exact_but_freeze_temporal_q_clock(
+        self, monkeypatch
+    ):
+        """Sub-minute submit latency must not manufacture a new point-q world."""
+        import src.engine.event_reactor_adapter as era
+
+        vectors = [
+            _vector(model="icon_d2", temps=[20.0] * 24),
+            _vector(model="meteofrance_arome_france_hd", temps=[21.0] * 24),
+        ]
+        source_times: list[datetime] = []
+        probability_times: list[datetime | None] = []
+
+        def read_vectors(**kwargs):
+            source_times.append(kwargs["now"])
+            return vectors
+
+        def record_authority(**kwargs):
+            probability_times.append(kwargs["decision_time"])
+
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            read_vectors,
+        )
+        monkeypatch.setattr(
+            era,
+            "_record_day0_remaining_day_exit_authority",
+            record_authority,
+        )
+        exact = datetime(2026, 6, 10, 15, 0, 59, 900000, tzinfo=UTC)
+        probability_cut = era._day0_probability_clock(exact)
+        members = era._day0_remaining_day_members(
+            payload={
+                "metric": "high",
+                "rounded_value": 25.0,
+                "settlement_source": "wu_api",
+            },
+            family=self._family(),
+            unit="C",
+            decision_time=exact,
+            probability_time=probability_cut,
+        )
+
+        assert members is not None
+        assert source_times == [exact]
+        assert probability_times == [probability_cut]
+
     @pytest.mark.parametrize(
         ("metric", "observed", "future", "winning_index"),
         (

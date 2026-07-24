@@ -31097,6 +31097,8 @@ def _prepare_current_global_probability_family(
             "_edli_day0_current_temperature_source",
             "_edli_day0_trajectory_conditioning_basis",
             "_edli_day0_model_innovations_c",
+            "_edli_day0_probability_clock_utc",
+            "_edli_day0_process_sigma_native",
             "_edli_day0_exit_authority_status",
             "_edli_day0_exit_authority_reason",
             "_edli_day0_bound_classification",
@@ -31132,6 +31134,9 @@ def _prepare_current_global_probability_family(
             ),
             "model_innovations_c": payload.get(
                 "_edli_day0_model_innovations_c"
+            ),
+            "process_sigma_native": payload.get(
+                "_edli_day0_process_sigma_native"
             ),
         }
         source_truth_identity = stable_hash(source_truth)
@@ -33299,6 +33304,7 @@ def _day0_process_sigma_native(
         return None
     if not (sigma > 0.0 and np.isfinite(sigma)):
         return None
+    payload["_edli_day0_process_sigma_native"] = sigma
     return sigma
 
 
@@ -33699,6 +33705,7 @@ def _market_analysis_from_event_snapshot(
                 family=family,
                 unit=unit,
                 decision_time=decision_time,
+                probability_time=day0_probability_time,
                 world_conn=calibration_conn,
                 forecast_conn=hourly_vector_conn,
             )
@@ -36572,6 +36579,7 @@ def _day0_remaining_day_members(
     family,
     unit: str,
     decision_time: "datetime | None",
+    probability_time: "datetime | None" = None,
     world_conn: sqlite3.Connection | None = None,
     forecast_conn: sqlite3.Connection | None = None,
 ) -> "np.ndarray | None":
@@ -36706,12 +36714,19 @@ def _day0_remaining_day_members(
             float(value) for value in values.tolist()
         ]
         maturity_values = np.asarray(values, dtype=float).copy()
+        probability_clock = (
+            probability_time if probability_time is not None else decision_time
+        )
+        if probability_clock is not None and probability_clock.tzinfo is not None:
+            payload["_edli_day0_probability_clock_utc"] = (
+                probability_clock.astimezone(timezone.utc).isoformat()
+            )
         _record_day0_remaining_day_exit_authority(
             payload=payload,
             family=family,
             metric=metric,
             remaining_extremes_native=maturity_values,
-            decision_time=decision_time,
+            decision_time=probability_clock,
             world_conn=world_conn,
         )
         rounded = _optional_float(payload.get("rounded_value"))
