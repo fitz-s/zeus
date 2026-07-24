@@ -1313,6 +1313,63 @@ def test_prune_has_no_raw_connect_allowlist_exception() -> None:
     assert raw_connects == []
 
 
+def test_prune_holds_bulk_lock_for_each_canonical_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = tmp_path / "zeus-world.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE opportunity_event_processing (
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL
+        );
+        INSERT INTO opportunity_events VALUES ('old', '2020-01-01T00:00:00Z');
+        INSERT INTO opportunity_event_processing VALUES ('old', 'expired');
+        """
+    )
+    conn.commit()
+    conn.close()
+    transitions: list[str] = []
+
+    class RecordedLock:
+        def __enter__(self):
+            transitions.append("enter")
+
+        def __exit__(self, exc_type, exc, traceback):
+            transitions.append("exit")
+
+    monkeypatch.setattr(
+        prune,
+        "db_writer_lock",
+        lambda path, write_class: RecordedLock(),
+    )
+    args = prune.argparse.Namespace(
+        keep_hours=0.0,
+        keep_out=str(tmp_path / "keep.txt"),
+        proc_batch=10,
+        max_seconds=10.0,
+        sleep=0.0,
+        vacuum=False,
+    )
+    with prune._prune_connection(db, busy_timeout_ms=100) as prune_conn:
+        assert prune._prune(args, prune_conn, db) == 0
+
+    verify = sqlite3.connect(db)
+    try:
+        assert verify.execute(
+            "SELECT COUNT(*) FROM opportunity_event_processing"
+        ).fetchone()[0] == 0
+    finally:
+        verify.close()
+    assert transitions == ["enter", "exit", "enter", "exit"]
+
+
 def test_legacy_risk_and_collateral_factories_obey_cutover(tmp_path: Path) -> None:
     from src.state.collateral_ledger import _connect_owned_collateral_db
     from src.state.db import get_connection
