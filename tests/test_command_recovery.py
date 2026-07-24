@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-22; last_reused=2026-07-23
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-22; last_reused=2026-07-24
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-24
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -10955,6 +10955,135 @@ class TestRecoveryResolutionTable:
                 "phase_after": "active",
             },
         ]
+
+    def test_cancelled_partial_fill_promotes_zero_projection_and_closes_remainder(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Cancel terminates only the unfilled remainder, never confirmed exposure."""
+        from src.execution.command_recovery import (
+            _latest_order_fact_for_command_order,
+            reconcile_filled_entry_projection_repairs,
+            reconcile_terminal_entry_exposure_obligations,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=63.0, price=0.77)
+        _open_test_entry_obligation(conn, "cmd-001")
+        _advance_to_acked(conn, venue_order_id="ord-cancelled-partial")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-cancelled-partial",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-cancelled-partial",
+            state="PARTIALLY_MATCHED",
+            matched_size="4.347825",
+            remaining_size="58.652175",
+            source="WS_USER",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-cancelled-partial",
+            trade_id="trade-cancelled-partial",
+            state="CONFIRMED",
+            filled_size="4.347825",
+            fill_price="0.7700001725",
+            source="WS_USER",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-cancelled-partial"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-cancelled-partial"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-cancelled-partial"},
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        assert reconcile_filled_entry_projection_repairs(conn, mock_client) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status,
+                   fill_authority
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 4.347825,
+            "cost_basis_usd": pytest.approx(4.347825 * 0.7700001725),
+            "entry_price": pytest.approx(0.7700001725),
+            "order_status": "partial",
+            "fill_authority": "venue_confirmed_partial",
+        }
+        execution = conn.execute(
+            """
+            SELECT shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE command_id = 'cmd-001'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "shares": 4.347825,
+            "fill_price": pytest.approx(0.7700001725),
+            "venue_status": "PARTIAL",
+            "terminal_exec_status": "partial",
+        }
+        terminal_order = _latest_order_fact_for_command_order(
+            conn,
+            command_id="cmd-001",
+            venue_order_id="ord-cancelled-partial",
+        )
+        assert {
+            key: terminal_order[key]
+            for key in ("state", "matched_size", "remaining_size")
+        } == {
+            "state": "PARTIALLY_MATCHED",
+            "matched_size": "4.347825",
+            "remaining_size": "0",
+        }
+        assert json.loads(terminal_order["raw_payload_json"])["proof_class"] == (
+            "terminal_partial_order_fact"
+        )
+        assert reconcile_terminal_entry_exposure_obligations(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        obligation = conn.execute(
+            """
+            SELECT status
+              FROM entry_exposure_obligations
+             WHERE command_id = 'cmd-001'
+            """
+        ).fetchone()
+        assert obligation["status"] == "RESOLVED"
 
     def test_cancel_failed_already_canceled_positive_entry_fill_releases_review_required(
         self,

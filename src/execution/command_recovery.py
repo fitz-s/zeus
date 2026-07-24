@@ -3039,6 +3039,7 @@ def _clob_market_identity_for_command(
 def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> list[dict]:
     required = {
         "venue_commands",
+        "venue_command_events",
         "venue_trade_facts",
         "position_current",
         "position_events",
@@ -3056,6 +3057,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                        / SUM(CAST(fact.filled_size AS REAL)) AS fill_price,
                    MAX(fact.observed_at) AS observed_at,
                    MAX(fact.venue_timestamp) AS venue_timestamp,
+                   MAX(fact.source) AS fill_source,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.trade_fact_id) AS trade_fact_id
               FROM canonical_trade_fact fact
@@ -3069,6 +3071,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                entry_fill.filled_size AS fill_filled_size,
                entry_fill.fill_price AS fill_price,
                COALESCE(NULLIF(entry_fill.venue_timestamp, ''), entry_fill.observed_at) AS fill_observed_at,
+               entry_fill.fill_source AS fill_source,
                entry_fill.fill_states AS fill_states,
                entry_fill.trade_fact_id AS source_trade_fact_id,
                pc.phase AS projected_phase,
@@ -3093,7 +3096,20 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
             ON snap.snapshot_id = cmd.snapshot_id
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
-           AND cmd.state IN ('FILLED', 'PARTIAL')
+           AND (
+                cmd.state IN ('FILLED', 'PARTIAL')
+                OR (
+                    cmd.state = 'CANCELLED'
+                    AND CAST(entry_fill.filled_size AS REAL)
+                        < CAST(cmd.size AS REAL) - 0.01
+                    AND EXISTS (
+                        SELECT 1
+                          FROM venue_command_events cancel_event
+                         WHERE cancel_event.command_id = cmd.command_id
+                           AND cancel_event.event_type = 'CANCEL_ACKED'
+                    )
+                )
+           )
            AND cmd.venue_order_id IS NOT NULL
            AND cmd.venue_order_id != ''
            AND (
@@ -4182,8 +4198,6 @@ def _entry_recovery_position(
         or trade_case.get("no_token_id")
         or ""
     ).strip()
-    command_state = str(candidate.get("state") or "").strip().upper()
-    partial_fill = bool(filled and command_state == "PARTIAL")
     kind = "filled entry" if filled else "live entry"
     if not position_id or not command_id or not venue_order_id:
         raise ValueError(f"{kind} projection repair requires position, command, and order ids")
@@ -4210,6 +4224,14 @@ def _entry_recovery_position(
     )
     command_size = _decimal_or_none(candidate.get("size"))
     command_price = _decimal_or_none(candidate.get("price"))
+    partial_fill = bool(
+        filled
+        and not _fill_size_completes_limit_order(
+            shares_dec,
+            command_size,
+            side=candidate.get("side"),
+        )
+    )
     command_notional = (
         command_size * command_price
         if command_size is not None and command_price is not None
@@ -4579,6 +4601,67 @@ def _append_filled_entry_projection_repair(
             existing_order_projection.get("phase"),
         )
         return False
+    if str(candidate.get("state") or "").upper() == CommandState.CANCELLED.value:
+        cancel_ack = conn.execute(
+            """
+            SELECT occurred_at
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = 'CANCEL_ACKED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (str(position.command_id),),
+        ).fetchone()
+        cancelled_partial = not _fill_size_completes_limit_order(
+            candidate.get("fill_filled_size"),
+            candidate.get("size"),
+            side=candidate.get("side"),
+        )
+        if cancel_ack is None or not cancelled_partial:
+            raise RuntimeError(
+                "cancelled entry projection requires acknowledged terminal partial fill"
+            )
+        order_fact_source = str(candidate.get("fill_source") or "").upper()
+        if order_fact_source not in _LIVE_TERMINAL_ORDER_FACT_SOURCES:
+            raise RuntimeError(
+                "cancelled entry projection requires authenticated fill source"
+            )
+        terminal_at = str(
+            cancel_ack["occurred_at"]
+            or candidate.get("fill_observed_at")
+            or _now_iso()
+        )
+        terminal_payload = {
+            "schema_version": 1,
+            "reason": "cancelled_entry_confirmed_partial_fill_projection_repair",
+            "proof_class": "terminal_partial_order_fact",
+            "command_id": str(position.command_id),
+            "venue_order_id": str(position.order_id),
+            "matched_size": _decimal_text(
+                _positive_decimal_or_none(candidate.get("fill_filled_size"))
+                or Decimal("0")
+            ),
+            "remaining_size": "0",
+            "requested_size": str(candidate.get("size") or ""),
+            "source_trade_fact_id": candidate.get("source_trade_fact_id"),
+            "required_predicates": {
+                "command_state_cancelled": True,
+                "cancel_acked": True,
+                "canonical_positive_trade_facts": True,
+                "cumulative_fill_below_requested_size": True,
+                "pending_entry_projection_zero_exposure": True,
+            },
+        }
+        _append_terminal_partial_order_fact(
+            conn,
+            venue_order_id=str(position.order_id),
+            command_id=str(position.command_id),
+            matched_size=terminal_payload["matched_size"],
+            source=order_fact_source,
+            observed_at=terminal_at,
+            payload=terminal_payload,
+        )
     projection = build_position_current_projection(position)
     position_id = str(position.trade_id)
     existing_fill = conn.execute(
@@ -7983,8 +8066,9 @@ def _terminal_partial_entry_obligation_proven(
 ) -> bool:
     """Prove a terminal partial entry has no unaccounted future side effect."""
 
+    command_state = str(command.get("command_state") or "").upper()
     if (
-        str(command.get("command_state") or "").upper() != CommandState.PARTIAL.value
+        command_state not in {CommandState.PARTIAL.value, CommandState.CANCELLED.value}
         or not command_bound_projection
         or not canonical_orders
     ):
@@ -7993,6 +8077,19 @@ def _terminal_partial_entry_obligation_proven(
     venue_order_id = str(command.get("venue_order_id") or "")
     if not command_id or not venue_order_id:
         return False
+    if command_state == CommandState.CANCELLED.value:
+        cancel_ack = conn.execute(
+            """
+            SELECT 1
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = 'CANCEL_ACKED'
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        if cancel_ack is None:
+            return False
     for order in canonical_orders:
         payload = _json_dict(order.get("raw_payload_json"))
         if (
