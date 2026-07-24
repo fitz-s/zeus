@@ -4254,6 +4254,17 @@ def _persist_signed_submission_identity_before_post(
 
     def _persist_once() -> None:
         nonlocal receipt
+        if (
+            isinstance(persist_conn, sqlite3.Connection)
+            and not persist_conn.in_transaction
+        ):
+            # Acquire the WAL writer slot before the repository's validation
+            # reads.  A deferred read transaction can otherwise lose a race to
+            # a concurrent auction write and fail its later write upgrade with
+            # SQLITE_BUSY_SNAPSHOT, forcing a time-sensitive pre-POST retry.
+            # This transaction ends before the receipt is issued and before
+            # any venue I/O crosses the side-effect boundary.
+            persist_conn.execute("BEGIN IMMEDIATE")
         envelope_id = bind_signed_submission_identity(
             persist_conn,
             command_id=command_id,

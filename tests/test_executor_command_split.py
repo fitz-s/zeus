@@ -222,6 +222,52 @@ def test_pre_post_fresh_connection_opens_while_another_writer_is_active(tmp_path
         outer.close()
 
 
+def test_pre_post_signed_identity_acquires_writer_before_validation_reads(
+    monkeypatch, tmp_path
+):
+    import src.execution.executor as executor
+    import src.state.venue_command_repo as command_repo
+    import src.venue.polymarket_v2_adapter as adapter
+
+    path = tmp_path / "trades.db"
+    outer = sqlite3.connect(path)
+    outer.execute("PRAGMA journal_mode=WAL")
+    outer.execute("CREATE TABLE command_marker (command_id TEXT PRIMARY KEY)")
+    outer.execute("INSERT INTO command_marker VALUES ('command-1')")
+    outer.commit()
+    competitor = sqlite3.connect(path, timeout=0)
+    competitor.execute("PRAGMA busy_timeout = 0")
+
+    def _bind(conn, *, command_id, envelope):
+        assert conn.in_transaction is True
+        assert conn.execute(
+            "SELECT 1 FROM command_marker WHERE command_id = ?", (command_id,)
+        ).fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            competitor.execute("BEGIN IMMEDIATE")
+        return "signed-envelope-id"
+
+    sentinel = object()
+    monkeypatch.setattr(command_repo, "bind_signed_submission_identity", _bind)
+    monkeypatch.setattr(
+        adapter,
+        "_issue_signed_identity_persistence_receipt",
+        lambda conn, **_kwargs: sentinel,
+    )
+
+    try:
+        assert executor._persist_signed_submission_identity_before_post(
+            outer,
+            "signed-envelope",
+            command_id="command-1",
+        ) is sentinel
+        competitor.execute("BEGIN IMMEDIATE")
+        competitor.rollback()
+    finally:
+        competitor.close()
+        outer.close()
+
+
 def test_pre_post_signed_identity_helper_refuses_post_after_persistent_lock(monkeypatch):
     import src.execution.executor as executor
     import src.state.venue_command_repo as command_repo
