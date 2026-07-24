@@ -30850,20 +30850,22 @@ def _prepare_current_global_probability_family(
     elif current_day0_payload is not None and provisional_day0_observation:
         if bundle is None:
             raise ValueError("GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING")
-        components = _replacement_global_probability_components(
-            bundle,
-            candidates=family.candidates,
-            bindings=bindings,
+        components = _day0_remaining_global_probability_components(
+            event,
+            forecast_conn=forecast_conn,
+            calibration_conn=day0_observation_conn,
+            family=family,
+            payload=payload,
+            decision_time=decision_time,
+            snapshot=day0_snapshot,
         )
-        probability_authority = (
-            "replacement_provisional_day0_global_probability_v1"
-        )
+        probability_authority = "day0_remaining_day_global_probability_v1"
         payload.update(
             {
                 "probability_authority": probability_authority,
-                "q_source": "replacement_0_1",
-                "_edli_q_source": "replacement_0_1",
-                "_edli_day0_q_mode": "provisional_current_snapshot_replacement",
+                "q_source": "day0_remaining_day",
+                "_edli_q_source": "day0_remaining_day",
+                "_edli_day0_q_mode": "remaining_day",
             }
         )
     elif current_day0_payload is not None:
@@ -31150,7 +31152,6 @@ def _prepare_current_global_probability_family(
     if (
         current_day0_payload is not None
         and final_daily_observation is None
-        and not provisional_day0_observation
     ):
         day0_caps = _day0_global_candidate_payoff_q_lcb_caps(
             payload=payload,
@@ -31161,35 +31162,39 @@ def _prepare_current_global_probability_family(
             band_alpha=_GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA,
             decision_time=decision_time,
         )
-        candidate_payoff_q_lcb_caps = day0_caps
+        current_caps = day0_caps
         if probability_authority == "day0_remaining_day_global_probability_v1":
-            readiness = _latest_replacement_readiness(
-                forecast_conn,
-                city=family.city,
-                target_date=family.target_date,
-                temperature_metric=family.metric,
-                decision_time=decision_time,
-            )
-            if readiness is None:
-                raise ValueError("GLOBAL_DAY0_SOURCE_CLOCK_BOUND_READINESS_MISSING")
-            bound_result = read_replacement_forecast_bundle(
-                forecast_conn,
-                baseline_bundle=None,
-                readiness=readiness,
-                city=family.city,
-                target_date=family.target_date,
-                temperature_metric=family.metric,
-                decision_time=decision_time,
-                require_baseline_bundle=False,
-                current_bin_topology_hash=current_topology_hash,
-                enforce_raw_input_hwm=True,
-            )
-            if not bound_result.ok or bound_result.bundle is None:
-                raise ValueError(
-                    "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
-                    f"{bound_result.reason_code}"
+            bound_bundle = bundle
+            if bound_bundle is None:
+                readiness = _latest_replacement_readiness(
+                    forecast_conn,
+                    city=family.city,
+                    target_date=family.target_date,
+                    temperature_metric=family.metric,
+                    decision_time=decision_time,
                 )
-            bound_bundle = bound_result.bundle
+                if readiness is None:
+                    raise ValueError(
+                        "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_READINESS_MISSING"
+                    )
+                bound_result = read_replacement_forecast_bundle(
+                    forecast_conn,
+                    baseline_bundle=None,
+                    readiness=readiness,
+                    city=family.city,
+                    target_date=family.target_date,
+                    temperature_metric=family.metric,
+                    decision_time=decision_time,
+                    require_baseline_bundle=False,
+                    current_bin_topology_hash=current_topology_hash,
+                    enforce_raw_input_hwm=True,
+                )
+                if not bound_result.ok or bound_result.bundle is None:
+                    raise ValueError(
+                        "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
+                        f"{bound_result.reason_code}"
+                    )
+                bound_bundle = bound_result.bundle
             bound_components = _replacement_global_probability_components(
                 bound_bundle,
                 candidates=family.candidates,
@@ -31207,7 +31212,7 @@ def _prepare_current_global_probability_family(
                 band_alpha=_GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA,
                 decision_time=decision_time,
             )
-            candidate_payoff_q_lcb_caps = (
+            current_caps = (
                 _intersect_candidate_payoff_q_lcb_caps(
                     day0_caps,
                     source_clock_caps,
@@ -31238,7 +31243,7 @@ def _prepare_current_global_probability_family(
                     "sample_matrix_identity": probability_sample_matrix_identity(
                         bound_samples
                     ),
-                    "candidate_payoff_q_lcb_caps": candidate_payoff_q_lcb_caps,
+                    "candidate_payoff_q_lcb_caps": current_caps,
                 }
             )
             payload.update(
@@ -31254,6 +31259,8 @@ def _prepare_current_global_probability_family(
                     ),
                 }
             )
+        if not provisional_day0_observation:
+            candidate_payoff_q_lcb_caps = current_caps
     if (
         current_day0_payload is not None
         and final_daily_observation is None
@@ -31323,7 +31330,11 @@ def _prepare_current_global_probability_family(
             ),
         }
         source_truth_identity = stable_hash(source_truth)
-        if not provisional_day0_observation:
+        if (
+            not provisional_day0_observation
+            or probability_authority
+            == "day0_remaining_day_global_probability_v1"
+        ):
             posterior_identity_hash = stable_hash(
                 {
                     "probability_authority": probability_authority,

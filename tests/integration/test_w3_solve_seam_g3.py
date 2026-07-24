@@ -4530,6 +4530,362 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
     forecast.close()
 
 
+def test_provisional_hko_held_probability_uses_remaining_day_without_entry_authority(
+    monkeypatch,
+):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as current_target_plan
+    import src.engine.replacement_forecast_hook_factory as hook_factory
+
+    forecast = sqlite3.connect(":memory:")
+    forecast.row_factory = sqlite3.Row
+    forecast.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            market_slug TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL
+        )
+        """
+    )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                "Hong Kong",
+                "2026-07-11",
+                "low",
+                "c0",
+                "yes0",
+                "hong-kong-27-or-below",
+                "27C or below",
+                None,
+                27.0,
+            ),
+            (
+                "Hong Kong",
+                "2026-07-11",
+                "low",
+                "c1",
+                "yes1",
+                "hong-kong-28",
+                "28C",
+                28.0,
+                28.0,
+            ),
+            (
+                "Hong Kong",
+                "2026-07-11",
+                "low",
+                "c2",
+                "yes2",
+                "hong-kong-29-or-above",
+                "29C or above",
+                29.0,
+                None,
+            ),
+        ),
+    )
+    observations = sqlite3.connect(":memory:")
+    observations.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            running_min REAL,
+            utc_timestamp TEXT NOT NULL,
+            local_timestamp TEXT NOT NULL,
+            source TEXT NOT NULL,
+            causality_status TEXT NOT NULL,
+            authority TEXT NOT NULL,
+            source_role TEXT NOT NULL,
+            training_allowed INTEGER NOT NULL
+        )
+        """
+    )
+    observations.execute(
+        "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "Hong Kong",
+            "2026-07-11",
+            28.1,
+            "2026-07-11T07:02:00+00:00",
+            "2026-07-11T15:02:00+08:00",
+            "hko_hourly_accumulator",
+            "CAUSAL",
+            "AUTHORIZED",
+            "SETTLEMENT",
+            0,
+        ),
+    )
+    provisional_fact = {
+        "observation_source": "hko_hourly_accumulator",
+        "observation_time": "2026-07-11T07:02:00+00:00",
+        "observed_extreme_native": 28.1,
+    }
+    monkeypatch.setattr(
+        current_target_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **_kwargs: provisional_fact,
+    )
+
+    bundle = SimpleNamespace(
+        posterior_id=17,
+        posterior_identity_hash="source-clock-posterior-17",
+        dependency_hash="source-clock-dependency-17",
+        posterior_config_hash="source-clock-config-17",
+        source_cycle_time="2026-07-11T00:00:00+00:00",
+        source_available_at="2026-07-11T06:00:00+00:00",
+        provenance_json={
+            "day0_provisional_observation": {
+                "active": True,
+                "support_truncation": False,
+                "source": "hko_hourly_accumulator",
+                "observation_time": "2026-07-11T07:02:00+00:00",
+                "observed_extreme_c": 28.1,
+            }
+        },
+    )
+    bundle_reads = 0
+
+    def read_bundle(*_args, **_kwargs):
+        nonlocal bundle_reads
+        bundle_reads += 1
+        return SimpleNamespace(ok=True, bundle=bundle, reason_code="READY")
+
+    monkeypatch.setattr(
+        hook_factory,
+        "_latest_replacement_readiness",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_replacement_forecast_bundle",
+        read_bundle,
+    )
+    monkeypatch.setattr(
+        era,
+        "_forecast_snapshot_row_for_event",
+        lambda *_args, **_kwargs: {
+            "snapshot_id": "hko-day0-current-base-1",
+            "source_cycle_time": "2026-07-11T00:00:00+00:00",
+            "available_at": "2026-07-11T06:00:00+00:00",
+        },
+    )
+
+    def current_observation_payload(*_args, **kwargs):
+        return {
+            "observation_time": "2026-07-11T07:02:00+00:00",
+            "observation_available_at": "2026-07-11T07:05:00+00:00",
+            "raw_value": 28.1,
+            "rounded_value": 28,
+            "low_so_far": 28.1,
+            "sample_count": 8,
+            "station_id": "HKO",
+            "settlement_source": "hko_hourly_accumulator",
+            "settlement_unit": "C",
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "_edli_global_day0_binding": {
+                "city": "Hong Kong",
+                "target_date": "2026-07-11",
+                "metric": "low",
+                "observation_time": "2026-07-11T07:02:00+00:00",
+                "observed_extreme_native": 28.1,
+                "rounded_value": 28,
+                "settlement_source": "hko_hourly_accumulator",
+                "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+                "posterior_id": kwargs["posterior_id"],
+                "probability_base_identity": kwargs[
+                    "probability_base_identity"
+                ],
+            },
+        }
+
+    monkeypatch.setattr(
+        era,
+        "_global_day0_execution_payload",
+        current_observation_payload,
+    )
+
+    remaining_calls = 0
+
+    def remaining_components(*_args, **kwargs):
+        nonlocal remaining_calls
+        remaining_calls += 1
+        kwargs["payload"].update(
+            {
+                "_edli_day0_remaining_model_names": [
+                    "ecmwf",
+                    "icon",
+                    "ukmo",
+                ],
+                "_edli_day0_remaining_capture_times_utc": [
+                    "2026-07-11T07:10:00+00:00"
+                ],
+            }
+        )
+        matrix = np.asarray([[0.2, 0.5, 0.3]] * 400, dtype=float)
+        return (
+            matrix,
+            np.asarray([0.2, 0.5, 0.3], dtype=float),
+            "current_coherent_day0_remaining_model_bootstrap_v3",
+        )
+
+    replacement_calls = 0
+
+    def replacement_components(*_args, **_kwargs):
+        nonlocal replacement_calls
+        replacement_calls += 1
+        matrix = np.asarray([[0.1, 0.1, 0.8]] * 400, dtype=float)
+        return (
+            matrix,
+            np.asarray([0.1, 0.1, 0.8], dtype=float),
+            "current_coherent_settlement_simplex_v1",
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        remaining_components,
+    )
+    monkeypatch.setattr(
+        era,
+        "_replacement_global_probability_components",
+        replacement_components,
+    )
+
+    forecast_event = _global_scope_event(
+        city="Hong Kong",
+        source_run_id="run-hko",
+        city_timezone="Asia/Hong_Kong",
+    )
+    event_payload = json.loads(forecast_event.payload_json)
+    event_payload.update(
+        {
+            "metric": "low",
+            "station_id": "HKO",
+            "settlement_source": "hko_hourly_accumulator",
+            "settlement_unit": "C",
+            "observation_time": "2026-07-11T07:02:00+00:00",
+            "observation_available_at": "2026-07-11T07:05:00+00:00",
+            "raw_value": 28.1,
+            "rounded_value": 28,
+            "low_so_far": 28.1,
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        }
+    )
+    event = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Hong Kong|2026-07-11|low|HKO",
+        source="global-auction-current-day0-scope",
+        observed_at="2026-07-11T07:02:00+00:00",
+        available_at="2026-07-11T07:05:00+00:00",
+        received_at="2026-07-11T07:05:00+00:00",
+        payload=event_payload,
+        causal_snapshot_id=str(event_payload["snapshot_id"]),
+    )
+    decision_at = _dt.datetime(
+        2026, 7, 11, 7, 30, tzinfo=_dt.timezone.utc
+    )
+    day0_payload: dict[str, object] = {}
+    prepared = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=day0_payload,
+        allow_provisional_day0_replacement=True,
+        entry_authority=False,
+    )
+
+    witness = prepared.probability_witness
+    assert remaining_calls == 1
+    assert replacement_calls == 1
+    assert bundle_reads == 1
+    assert witness.yes_point_q.tolist() == pytest.approx([0.2, 0.5, 0.3])
+    assert witness.yes_q_samples[0].tolist() == pytest.approx([0.2, 0.5, 0.3])
+    assert witness.posterior_identity_hash != bundle.posterior_identity_hash
+    assert prepared.candidate_payoff_q_lcb_caps == ()
+    assert day0_payload["probability_authority"] == (
+        "day0_remaining_day_global_probability_v1"
+    )
+    assert day0_payload["q_source"] == "day0_remaining_day"
+    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
+    assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"] == (
+        bundle.posterior_identity_hash
+    )
+    assert day0_payload["_edli_day0_source_clock_bound_identity"]
+    binding = day0_payload["_edli_global_day0_binding"]
+    assert binding["evidence_finality"] == "PROVISIONAL_CURRENT_SNAPSHOT"
+    assert "_edli_day0_exact_yes_payoffs" not in day0_payload
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_provisional_day0_replacement=True,
+            entry_authority=True,
+        )
+
+    def missing_remaining(*_args, **_kwargs):
+        raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
+
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        missing_remaining,
+    )
+    with pytest.raises(
+        ValueError,
+        match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_provisional_day0_replacement=True,
+            entry_authority=False,
+        )
+    assert replacement_calls == 1
+
+    forecast.close()
+    observations.close()
+
+
 def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
     monkeypatch,
 ):

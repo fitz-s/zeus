@@ -50,6 +50,8 @@ in_scope:
 - tests/test_ensemble_signal.py
 - tests/test_polymarket_request_governor.py
 - tests/test_day0_obs_fastlane_optionbc.py
+- tests/test_day0_remaining_day_pricing.py
+- tests/test_ingest_scheduler_jobs.py
 - tests/test_command_recovery.py
 - tests/test_fill_synchronizer.py
 - tests/test_station_forecast_live_ingest_wiring.py
@@ -76,6 +78,7 @@ live_side_effects_allowed: true
 live_side_effect_allowlist:
 - scripts/repair_active_entry_q_versions.py --apply
 - scripts/deploy_live.py restart live-trading
+- scripts/deploy_live.py restart data-ingest
 live_side_effect_denied:
 - manual or forced venue submit or cancel
 - DB backup or copy
