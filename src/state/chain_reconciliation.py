@@ -2148,6 +2148,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             and str(getattr(chain, "balance_authority", "") or "") == "CHAIN"
             and str(getattr(chain, "balance_source", "") or "")
             == "targeted_ctf_balance_allowance"
+            and state_name not in INACTIVE_RUNTIME_STATES
         ):
             corrected = replace(pos)
             corrected.chain_state = "chain_confirmed_zero"

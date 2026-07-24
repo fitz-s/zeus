@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-31; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-05-31; last_reviewed=2026-07-24; last_reused=2026-07-24
 # Purpose: Relationship test — chain economics (chain_shares, chain_seen_at) persist
 #   to position_current for SYNCED positions and survive a fresh DB read (task #56).
 # Reuse: inspect chain_reconciliation.reconcile() else-branch + _append_canonical_chain_observation_if_available
@@ -1738,6 +1738,54 @@ def test_targeted_ctf_zero_removes_current_risk_without_inventing_close() -> Non
     assert payload["balance_authority"] == "CHAIN"
     assert second_stats.get("chain_confirmed_zero_persisted", 0) == 0
     assert second_event_count == 1
+
+
+def test_targeted_ctf_zero_skips_terminal_position_without_aborting_reconcile() -> None:
+    """A stale terminal cache row cannot abort chain truth for the whole batch."""
+    trade_id = "voided-targeted-zero"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+        pos = _make_position(
+            trade_id=trade_id,
+            token_id="tok-voided-targeted-zero",
+            shares=7.0,
+        )
+        pos.state = "voided"
+        _seed_position_current(
+            conn,
+            pos,
+            chain_shares=0.0,
+            phase="voided",
+        )
+        chain = ChainPosition(
+            token_id=pos.token_id,
+            size=0.0,
+            avg_price=0.0,
+            condition_id=pos.condition_id,
+            balance_authority="CHAIN",
+            balance_source="targeted_ctf_balance_allowance",
+        )
+
+        stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
+        row = conn.execute(
+            "SELECT phase, chain_state FROM position_current WHERE position_id = ?",
+            (trade_id,),
+        ).fetchone()
+        event_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+            """,
+            (trade_id,),
+        ).fetchone()[0]
+        conn.close()
+
+    assert stats.get("skipped_voided", 0) == 1
+    assert row["phase"] == "voided"
+    assert event_count == 0
 
 
 def test_blank_chain_seen_at_refresh_projects_observation_time_once() -> None:
