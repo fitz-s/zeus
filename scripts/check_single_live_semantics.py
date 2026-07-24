@@ -356,11 +356,46 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
             functions[node.name] = node
 
     tainted = set(CUTOVER_RETIRED_ASSIGNMENTS)
+    tainted_returns: set[str] = set()
     changed = True
     while changed:
         changed = False
+        for function in functions.values():
+            positional = [*function.args.posonlyargs, *function.args.args]
+            default_parameters = (
+                positional[-len(function.args.defaults) :]
+                if function.args.defaults
+                else []
+            )
+            for parameter, default in zip(
+                default_parameters, function.args.defaults, strict=True
+            ):
+                if (
+                    _expr_is_tainted(default, tainted, tainted_returns)
+                    and parameter.arg not in tainted
+                ):
+                    tainted.add(parameter.arg)
+                    changed = True
+            for parameter, default in zip(
+                function.args.kwonlyargs, function.args.kw_defaults, strict=True
+            ):
+                if (
+                    default is not None
+                    and _expr_is_tainted(default, tainted, tainted_returns)
+                    and parameter.arg not in tainted
+                ):
+                    tainted.add(parameter.arg)
+                    changed = True
+            if function.name not in tainted_returns and any(
+                isinstance(child, ast.Return)
+                and child.value is not None
+                and _expr_is_tainted(child.value, tainted, tainted_returns)
+                for child in ast.walk(function)
+            ):
+                tainted_returns.add(function.name)
+                changed = True
         for targets, value in assignments:
-            if not _expr_uses_names(value, tainted):
+            if not _expr_is_tainted(value, tainted, tainted_returns):
                 continue
             for target in targets:
                 for name in _assigned_names(target):
@@ -377,7 +412,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
             position = 0
             for argument in node.args:
                 if isinstance(argument, ast.Starred):
-                    if _expr_uses_names(argument.value, tainted):
+                    if _expr_is_tainted(argument.value, tainted, tainted_returns):
                         for parameter in positional[position:]:
                             if parameter.arg not in tainted:
                                 tainted.add(parameter.arg)
@@ -397,7 +432,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                     parameter = function.args.vararg
                 if (
                     parameter is not None
-                    and _expr_uses_names(argument, tainted)
+                    and _expr_is_tainted(argument, tainted, tainted_returns)
                     and parameter.arg not in tainted
                 ):
                     tainted.add(parameter.arg)
@@ -408,7 +443,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
             }
             for keyword in node.keywords:
                 if keyword.arg is None:
-                    if not _expr_uses_names(keyword.value, tainted):
+                    if not _expr_is_tainted(keyword.value, tainted, tainted_returns):
                         continue
                     if isinstance(keyword.value, ast.Dict):
                         for key, value in zip(
@@ -422,7 +457,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                             parameter = parameters.get(name or "")
                             if (
                                 parameter is not None
-                                and _expr_uses_names(value, tainted)
+                                and _expr_is_tainted(value, tainted, tainted_returns)
                                 and parameter.arg not in tainted
                             ):
                                 tainted.add(parameter.arg)
@@ -430,7 +465,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                             elif (
                                 parameter is None
                                 and function.args.kwarg is not None
-                                and _expr_uses_names(value, tainted)
+                                and _expr_is_tainted(value, tainted, tainted_returns)
                                 and function.args.kwarg.arg not in tainted
                             ):
                                 tainted.add(function.args.kwarg.arg)
@@ -450,7 +485,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                 parameter = parameters.get(keyword.arg)
                 if (
                     parameter is not None
-                    and _expr_uses_names(keyword.value, tainted)
+                    and _expr_is_tainted(keyword.value, tainted, tainted_returns)
                     and parameter.arg not in tainted
                 ):
                     tainted.add(parameter.arg)
@@ -458,7 +493,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                 elif (
                     parameter is None
                     and function.args.kwarg is not None
-                    and _expr_uses_names(keyword.value, tainted)
+                    and _expr_is_tainted(keyword.value, tainted, tainted_returns)
                     and function.args.kwarg.arg not in tainted
                 ):
                     tainted.add(function.args.kwarg.arg)
@@ -466,7 +501,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
 
     out: list[str] = []
     for targets, value in assignments:
-        if not _expr_uses_names(value, tainted):
+        if not _expr_is_tainted(value, tainted, tainted_returns):
             continue
         for target in targets:
             control = _control_target(target, literal_bindings)
@@ -474,7 +509,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                 out.append(f"retired deletion constant flows into {control!r}")
     for node in ast.walk(tree):
         if isinstance(node, ast.keyword) and node.arg in _LIVE_CONTROL_TARGETS:
-            if _expr_uses_names(node.value, tainted):
+            if _expr_is_tainted(node.value, tainted, tainted_returns):
                 out.append(f"retired deletion constant flows into keyword {node.arg!r}")
         elif (
             isinstance(node, ast.Call)
@@ -483,7 +518,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
             and len(node.args) >= 3
             and (_literal_string(node.args[1], literal_bindings) or "").lower()
             in _LIVE_CONTROL_TARGETS
-            and _expr_uses_names(node.args[2], tainted)
+            and _expr_is_tainted(node.args[2], tainted, tainted_returns)
         ):
             control = (_literal_string(node.args[1], literal_bindings) or "").lower()
             out.append(
@@ -499,7 +534,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                 )
                 if (
                     control in _LIVE_CONTROL_TARGETS
-                    and _expr_uses_names(value, tainted)
+                    and _expr_is_tainted(value, tainted, tainted_returns)
                 ):
                     out.append(
                         "retired deletion constant flows into mapping key "
@@ -520,7 +555,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                 if case.guard is not None
             )
         for condition, branches in controlled:
-            if not _expr_uses_names(condition, tainted):
+            if not _expr_is_tainted(condition, tainted, tainted_returns):
                 continue
             controls = sorted(
                 {
@@ -542,6 +577,21 @@ def _expr_uses_names(node: ast.AST, names: set[str] | frozenset[str]) -> bool:
         isinstance(child, ast.Name)
         and isinstance(child.ctx, ast.Load)
         and child.id in names
+        for child in ast.walk(node)
+    )
+
+
+def _expr_is_tainted(
+    node: ast.AST,
+    names: set[str] | frozenset[str],
+    tainted_returns: set[str] | frozenset[str],
+) -> bool:
+    if _expr_uses_names(node, names):
+        return True
+    return any(
+        isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Name)
+        and child.func.id in tainted_returns
         for child in ast.walk(node)
     )
 
