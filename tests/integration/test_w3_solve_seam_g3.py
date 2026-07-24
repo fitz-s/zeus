@@ -82,6 +82,7 @@ from src.solve.solver import (
     JointOutcomeProbabilityWitness,
     OutcomeTokenBinding,
     PortfolioWealthWitness,
+    family_payoff_q_samples,
     global_candidate_from_native,
     global_sell_fill_prefix_objective,
     executable_curve_identity,
@@ -3511,7 +3512,7 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
     bootstrap_basis,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
-    import src.engine.replacement_forecast_hook_factory as hook_factory
+    import src.data.replacement_forecast_readiness as readiness_reader
 
     forecast = sqlite3.connect(":memory:")
     forecast.row_factory = sqlite3.Row
@@ -3607,8 +3608,8 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         source_available_at="2026-07-10T06:05:00+00:00",
     )
     monkeypatch.setattr(
-        hook_factory,
-        "_latest_replacement_readiness",
+        readiness_reader,
+        "latest_replacement_readiness",
         lambda *args, **kwargs: object(),
     )
     bundle_read: dict[str, object] = {}
@@ -3691,7 +3692,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
-    import src.engine.replacement_forecast_hook_factory as hook_factory
+    import src.data.replacement_forecast_readiness as readiness_reader
     import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
     from src.data.observation_client import _DAY0_COVERAGE_WINDOW_GRACE_HOURS
 
@@ -3820,7 +3821,9 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
         return bundle_result["value"]
 
     monkeypatch.setattr(
-        hook_factory, "_latest_replacement_readiness", lambda *_a, **_k: object()
+        readiness_reader,
+        "latest_replacement_readiness",
+        lambda *_a, **_k: object(),
     )
     monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", read_bundle)
     monkeypatch.setattr(
@@ -3993,7 +3996,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_current_target_plan as current_target_plan
-    import src.engine.replacement_forecast_hook_factory as hook_factory
+    import src.data.replacement_forecast_readiness as readiness_reader
 
     monkeypatch.setattr(
         current_target_plan,
@@ -4107,8 +4110,8 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
         )
 
     monkeypatch.setattr(
-        hook_factory,
-        "_latest_replacement_readiness",
+        readiness_reader,
+        "latest_replacement_readiness",
         lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setattr(
