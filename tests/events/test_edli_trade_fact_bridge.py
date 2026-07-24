@@ -504,6 +504,36 @@ def test_rest_orphan_inside_grace_window_is_left_for_the_user_channel():
     ).fetchone()[0] == 0
 
 
+def test_rest_confirmed_fill_inside_grace_recovers_immediately():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    _insert_command(conn)
+    _insert_rest_only_fill(
+        conn,
+        observed_at=NOW + timedelta(minutes=1),
+        state="CONFIRMED",
+    )
+
+    assert append_rest_filled_orphan_trade_facts_to_edli(
+        conn,
+        now=NOW + timedelta(minutes=2),
+    ) == 1
+    projection = ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "USER_TRADE_OBSERVED"
+    row = conn.execute(
+        "SELECT payload_json FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert payload["fill_authority_state"] == "FILL_CONFIRMED"
+    assert payload["source_trade_fact_authority"] == (
+        "venue_trade_facts:REST:CONFIRMED"
+    )
+    assert payload["recovery_basis"] == (
+        "rest_confirmed_fill_fact;cmd_terminal_fill_state+rest_trade_fact"
+    )
+
+
 def test_rest_orphan_with_ws_confirmed_sibling_never_double_recovers():
     """When the user channel DID deliver for this trade, the WS bridge owns it
     — the recovery lane must not produce a second authority."""
