@@ -83,6 +83,7 @@ from src.contracts.day0_payoff_truth import (
     Day0PayoffTruth,
     classify_day0_payoff_truth,
 )
+from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.polymarket_client import PolymarketClient
 from src.engine.discovery_mode import DiscoveryMode
@@ -3325,13 +3326,42 @@ def _pending_entry_terminal_no_fill_cleared(conn, row) -> bool:
 
 def _has_same_token_blocking_open_db(conn, token_id: str) -> bool:
     phase_placeholders = ",".join("?" for _ in _ENTRY_DEDUP_NON_OPEN_PHASES)
+    columns = {
+        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+        for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+    }
+    chain_states = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+    if "chain_shares" in columns:
+        if "chain_state" in columns:
+            chain_exposure_sql = (
+                " OR (COALESCE(chain_shares, 0) > ? AND chain_state IN ("
+                + ",".join("?" for _ in chain_states)
+                + "))"
+            )
+            chain_exposure_params: tuple[object, ...] = (1e-6, *chain_states)
+        else:
+            chain_exposure_sql = (
+                " OR (COALESCE(chain_shares, 0) > ? AND phase = 'voided')"
+            )
+            chain_exposure_params = (1e-6,)
+    else:
+        chain_exposure_sql = ""
+        chain_exposure_params = ()
     rows = conn.execute(
         f"""SELECT position_id, phase, order_id, shares, cost_basis_usd,
                    direction, token_id, no_token_id
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
-            AND phase NOT IN ({phase_placeholders})""",
-        (token_id, token_id, *_ENTRY_DEDUP_NON_OPEN_PHASES),
+            AND (
+                  phase NOT IN ({phase_placeholders})
+                  {chain_exposure_sql}
+            )""",
+        (
+            token_id,
+            token_id,
+            *_ENTRY_DEDUP_NON_OPEN_PHASES,
+            *chain_exposure_params,
+        ),
     ).fetchall()
     for row in rows:
         if _pending_entry_terminal_no_fill_cleared(conn, row):

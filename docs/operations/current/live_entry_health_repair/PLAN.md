@@ -190,6 +190,31 @@ Restore truthful live entry admission after the global auction reached a real wi
   local SELL actuator and preserves full predictive samples, maturity,
   portfolio, book, inventory, and venue-band gates.
 
+## Slice B70.1 -- Keep Chain-held tokens inside final entry dedup
+
+- Review counterexample: a locally terminal position with positive current
+  chain shares is blocked by `has_same_token_open_db`, but the live evaluator
+  and executor final boundary previously filtered only by local phase. The
+  same held token could therefore reach a fresh ENTRY under a new position id.
+- First-principles invariant: Chain outranks lifecycle projection. A positive
+  token balance in a current-money-risk chain state remains held exposure even
+  when the local phase is terminal; no candidate or executor increment may
+  treat it as absent.
+- Minimal repair: give evaluator and executor the same positive-chain
+  precedence already used by the canonical state helper, including the
+  compatibility behavior when the legacy fixture lacks `chain_state`.
+  Preserve terminal no-fill clearing and valid opposite-token sibling entry.
+- Acceptance: `voided + chain_shares>0 + chain_state=synced` blocks at the
+  state helper, live Layer 7, and executor final boundary; an economically
+  closed stale/null-chain projection retains its existing behavior. Focused
+  tests, compile, planning lock, and diff checks pass before immediate
+  follow-up deployment.
+- Verification: the canonical-shape positive-chain counterexample is blocked
+  at all three boundaries; valid opposite-token sibling admission and
+  same-token certified increments remain green. The combined focused suite
+  still passes `329 passed, 1 xpassed`; compilation and `git diff --check`
+  pass.
+
 ## Slice B4 -- Bounded live working-set reads
 
 - Current runtime proof: the reactor run started at `18:46:50Z`, completed `pending_prune` at `18:46:57Z`, and then emitted no `forecast_snapshot_build` completion for more than ten minutes. That stage spans `_edli_pending_entity_keys` plus the forecast builder, so the log anchors alone do not isolate one call. The pending-key query had no SQLite progress deadline and its plan allowed an unbounded status scan, per-row event PK lookup, and temporary DISTINCT tree. `sqlite_stat1` was stale (2,520,044 estimated rows); a later exact read found 10,801,165 processing rows but only 1,018 pending and 12 processing. Hot read-only timing was 179ms for the old query and 94ms for the bounded query; this is a structural I/O amplifier, not proven as the sole ten-minute root. The separately budgeted forecast builder was 52ms hot after recovery.

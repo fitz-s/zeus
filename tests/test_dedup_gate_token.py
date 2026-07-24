@@ -64,6 +64,7 @@ def mem_db():
             direction TEXT DEFAULT 'buy_yes',
             shares REAL DEFAULT 0,
             chain_shares REAL DEFAULT 0,
+            chain_state TEXT,
             cost_basis_usd REAL DEFAULT 0,
             token_id TEXT,
             no_token_id TEXT,
@@ -150,17 +151,20 @@ def _insert_position(
     *,
     shares=0.0,
     chain_shares=0.0,
+    chain_state=None,
     cost_basis_usd=0.0,
 ):
     conn.execute(
         """INSERT INTO position_current
-           (position_id, phase, trade_id, market_id, city, bin_label,
-            direction, shares, chain_shares, cost_basis_usd, token_id, no_token_id, order_id, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (position_id, phase, trade_id, market_id, city, bin_label,
+            direction, shares, chain_shares, chain_state, cost_basis_usd,
+            token_id, no_token_id, order_id, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             position_id, phase, "trade-" + position_id, "mkt-1",
-            "London", "18°C", direction, shares, chain_shares, cost_basis_usd, token_id,
-            no_token_id or TOKEN_X_NO, "order-" + position_id, "2026-05-17T22:13:38",
+            "London", "18°C", direction, shares, chain_shares, chain_state,
+            cost_basis_usd, token_id, no_token_id or TOKEN_X_NO,
+            "order-" + position_id, "2026-05-17T22:13:38",
         ),
     )
     conn.commit()
@@ -324,8 +328,18 @@ def test_terminal_local_phase_with_positive_chain_shares_blocks_reentry(mem_db):
         "voided",
         TOKEN_X,
         chain_shares=12.5,
+        chain_state="synced",
     )
     assert has_same_token_open_db(mem_db, TOKEN_X) is True
+    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
+    final_boundary = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="new-chain-duplicate",
+        allow_reconciled_position_increment=True,
+    )
+    assert final_boundary["allowed"] is False
+    assert final_boundary["reason"] == "open_position_same_token"
 
 
 def test_economically_closed_positive_chain_projection_does_not_block_reentry(mem_db):

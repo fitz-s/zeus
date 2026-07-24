@@ -46,6 +46,7 @@ from src.contracts.execution_intent import (
     POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
 )
 from src.contracts.venue_submission_envelope import assert_live_order_unit_price
+from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 from src.types import BinEdge
 from src.architecture.decorators import capability, protects
 from src.decision.family_decision_engine import (
@@ -2296,6 +2297,32 @@ def _entry_duplicate_same_token_component(
     increment_position_generation = ""
     if _table_exists(conn, "position_current"):
         phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_NON_OPEN_PHASES)
+        position_columns = {
+            str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(position_current)"
+            ).fetchall()
+        }
+        chain_states = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        if "chain_shares" in position_columns:
+            if "chain_state" in position_columns:
+                chain_exposure_sql = (
+                    " OR (COALESCE(chain_shares, 0) > ? AND chain_state IN ("
+                    + ",".join("?" for _ in chain_states)
+                    + "))"
+                )
+                chain_exposure_params: tuple[object, ...] = (
+                    1e-6,
+                    *chain_states,
+                )
+            else:
+                chain_exposure_sql = (
+                    " OR (COALESCE(chain_shares, 0) > ? AND phase = 'voided')"
+                )
+                chain_exposure_params = (1e-6,)
+        else:
+            chain_exposure_sql = ""
+            chain_exposure_params = ()
         rows = conn.execute(
             f"""
             SELECT position_id, phase, order_id, shares, cost_basis_usd,
@@ -2303,13 +2330,17 @@ def _entry_duplicate_same_token_component(
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
               AND position_id != ?
-              AND phase NOT IN ({phase_placeholders})
+              AND (
+                    phase NOT IN ({phase_placeholders})
+                    {chain_exposure_sql}
+              )
             """,
             (
                 token,
                 token,
                 candidate_position_id,
                 *sorted(_ENTRY_DUPLICATE_NON_OPEN_PHASES),
+                *chain_exposure_params,
             ),
         ).fetchall()
         for row in rows:
