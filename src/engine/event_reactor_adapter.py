@@ -29534,6 +29534,13 @@ def _global_day0_execution_payload(
                 "_edli_day0_physical_frontier_source": physical_clock["source"],
             }
         )
+    _record_day0_temporal_exit_authority(
+        payload=payload,
+        family=family,
+        metric=metric,
+        decision_time=decision_time,
+        world_conn=observation_conn,
+    )
     return payload
 
 
@@ -36068,14 +36075,12 @@ def _record_day0_remaining_day_exit_authority(
     the authority result without re-reading hourly vectors.
     """
 
-    status_key = "_edli_day0_exit_authority_status"
-    reason_key = "_edli_day0_exit_authority_reason"
-    payload[status_key] = "unavailable"
-    payload[reason_key] = "day0_extreme_maturity_unavailable:not_evaluated"
-
     try:
         if metric not in {"high", "low"}:
-            payload[reason_key] = f"day0_extreme_maturity_unavailable:unsupported_metric={metric}"
+            payload["_edli_day0_exit_authority_status"] = "unavailable"
+            payload["_edli_day0_exit_authority_reason"] = (
+                f"day0_extreme_maturity_unavailable:unsupported_metric={metric}"
+            )
             return
         observed_extreme = _observed_day0_extreme_native(payload, metric)
         remaining = [float(v) for v in np.asarray(remaining_extremes_native, dtype=float).tolist()]
@@ -36086,22 +36091,103 @@ def _record_day0_remaining_day_exit_authority(
         )
         payload["_edli_day0_bound_classification"] = str(classification.value)
         if classification == BoundClassification.UNBOUNDED_NO_OBS_YET:
-            payload[status_key] = "immature"
-            payload[reason_key] = "day0_extreme_maturity_unavailable:no_intraday_extreme"
+            payload["_edli_day0_exit_authority_status"] = "unavailable"
+            payload["_edli_day0_exit_authority_reason"] = (
+                "day0_extreme_maturity_unavailable:no_intraday_extreme"
+            )
             return
         if classification == BoundClassification.DETERMINISTIC:
             payload["_edli_day0_model_bound_classification"] = "deterministic"
             payload["_edli_day0_model_bound_classification_role"] = (
                 "forecast_remaining_window_evidence_only"
             )
+        _record_day0_temporal_exit_authority(
+            payload=payload,
+            family=family,
+            metric=metric,
+            decision_time=decision_time,
+            world_conn=world_conn,
+        )
+    except Exception as exc:  # noqa: BLE001 - live exit authority fails closed.
+        payload["_edli_day0_exit_authority_status"] = "unavailable"
+        payload["_edli_day0_exit_authority_reason"] = (
+            f"day0_extreme_maturity_unavailable:{type(exc).__name__}:{exc}"
+        )
 
+
+def _record_day0_temporal_exit_authority(
+    *,
+    payload: dict[str, object],
+    family,
+    metric: str,
+    decision_time: "datetime | None",
+    world_conn: sqlite3.Connection | None = None,
+) -> None:
+    """Stamp held-position exit maturity on the current decision clock."""
+
+    status_key = "_edli_day0_exit_authority_status"
+    reason_key = "_edli_day0_exit_authority_reason"
+    payload[status_key] = "unavailable"
+    payload[reason_key] = "day0_extreme_maturity_unavailable:not_evaluated"
+    try:
+        if metric not in {"high", "low"}:
+            payload[reason_key] = (
+                f"day0_extreme_maturity_unavailable:unsupported_metric={metric}"
+            )
+            return
+        if _observed_day0_extreme_native(payload, metric) is None:
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:no_intraday_extreme"
+            )
+            return
+        if decision_time is None or decision_time.tzinfo is None:
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:decision_time_missing"
+            )
+            return
         city_obj = runtime_cities_by_name().get(str(family.city))
         timezone_name = str(getattr(city_obj, "timezone", "") or "")
         if not timezone_name:
-            payload[status_key] = "unavailable"
-            payload[reason_key] = "day0_extreme_maturity_unavailable:city_timezone_missing"
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:city_timezone_missing"
+            )
             return
+        from src.signal.day0_obs_latency import staleness_budget_minutes
+
+        observation_age_minutes = _day0_observation_age_minutes(
+            payload,
+            decision_time,
+        )
+        observation_budget_minutes = staleness_budget_minutes(str(family.city))
+        payload["_edli_day0_exit_observation_age_minutes"] = (
+            observation_age_minutes
+        )
+        payload["_edli_day0_exit_observation_budget_minutes"] = (
+            observation_budget_minutes
+        )
+        if observation_age_minutes is None:
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:observation_age_missing"
+            )
+            return
+        if observation_age_minutes > observation_budget_minutes:
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:observation_stale:"
+                f"age_minutes={observation_age_minutes:.1f},"
+                f"budget_minutes={observation_budget_minutes:.1f}"
+            )
+            return
+
+        from zoneinfo import ZoneInfo
+
         target = date.fromisoformat(str(family.target_date)[:10])
+        tz = ZoneInfo(timezone_name)
+        local_now = decision_time.astimezone(tz)
+        if local_now.date() != target:
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:decision_outside_target_date"
+            )
+            return
         try:
             from src.signal.diurnal import build_day0_temporal_context
 
@@ -36109,20 +36195,19 @@ def _record_day0_remaining_day_exit_authority(
                 str(family.city),
                 target,
                 timezone_name,
-                observation_time=(
-                    payload.get("_edli_day0_physical_frontier_observation_time")
-                    or payload.get("observation_time")
-                    or payload.get("observation_available_at")
-                ),
-                observation_source="day0_extreme_updated_event",
+                observation_time=decision_time,
+                observation_source="day0_exit_decision_clock",
                 conn=world_conn,
             )
         except Exception as exc:  # noqa: BLE001 - fail closed with reason evidence.
             temporal_context = None
-            payload["_edli_day0_temporal_context_error"] = f"{type(exc).__name__}:{exc}"
+            payload["_edli_day0_temporal_context_error"] = (
+                f"{type(exc).__name__}:{exc}"
+            )
         if temporal_context is None:
-            payload[status_key] = "unavailable"
-            payload[reason_key] = "day0_extreme_maturity_unavailable:temporal_context_missing"
+            payload[reason_key] = (
+                "day0_extreme_maturity_unavailable:temporal_context_missing"
+            )
             return
 
         if metric == "high":
@@ -36139,26 +36224,34 @@ def _record_day0_remaining_day_exit_authority(
             payload[status_key] = "immature"
             payload[reason_key] = (
                 "day0_high_extreme_not_mature:"
-                f"daypart={daypart or 'unknown'},post_peak_confidence={post_peak_confidence:.3f}"
+                f"daypart={daypart or 'unknown'},"
+                f"post_peak_confidence={post_peak_confidence:.3f}"
             )
             return
 
-        from zoneinfo import ZoneInfo
-
-        tz = ZoneInfo(timezone_name)
-        local_now = temporal_context.current_local_timestamp
-        local_end = datetime.combine(target + timedelta(days=1), time.min, tzinfo=tz)
-        hours_remaining = max(0.0, (local_end - local_now).total_seconds() / 3600.0)
+        local_end = datetime.combine(
+            target + timedelta(days=1),
+            time.min,
+            tzinfo=tz,
+        )
+        hours_remaining = max(
+            0.0,
+            (local_end - local_now).total_seconds() / 3600.0,
+        )
         payload["_edli_day0_hours_remaining"] = hours_remaining
         if hours_remaining <= _DAY0_LOW_EXTREME_AUTHORITY_HOURS:
             payload[status_key] = "mature"
             payload[reason_key] = "day0_low_extreme_terminal_window"
             return
         payload[status_key] = "immature"
-        payload[reason_key] = f"day0_low_extreme_not_terminal:hours_remaining={hours_remaining:.1f}"
+        payload[reason_key] = (
+            f"day0_low_extreme_not_terminal:hours_remaining={hours_remaining:.1f}"
+        )
     except Exception as exc:  # noqa: BLE001 - live exit authority fails closed.
         payload[status_key] = "unavailable"
-        payload[reason_key] = f"day0_extreme_maturity_unavailable:{type(exc).__name__}:{exc}"
+        payload[reason_key] = (
+            f"day0_extreme_maturity_unavailable:{type(exc).__name__}:{exc}"
+        )
 
 
 def _day0_shift_old_leg_exit_block_reason(

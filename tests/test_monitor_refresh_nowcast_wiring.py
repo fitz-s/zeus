@@ -717,6 +717,10 @@ def test_provisional_day0_monitor_uses_replacement_probability_without_hard_fact
         deterministic_condition_ids=frozenset(),
         day0_payload={
             "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "_edli_day0_exit_authority_status": "mature",
+            "_edli_day0_exit_authority_reason": (
+                "day0_low_extreme_terminal_window"
+            ),
         },
         metric="low",
         probability_authority=(
@@ -744,6 +748,11 @@ def test_provisional_day0_monitor_uses_replacement_probability_without_hard_fact
         "replacement_provisional_day0_global_probability_v1"
     )
     assert receipt["remaining_window"] is None
+    assert refreshed._day0_exit_authority_status == "mature"
+    assert refreshed._day0_exit_authority_reason == (
+        "day0_low_extreme_terminal_window"
+    )
+    assert "day0_low_extreme_terminal_window" in refreshed.applied_validations
     assert all(
         "day0_absorbing_hard_fact" not in validation
         for validation in refreshed.applied_validations

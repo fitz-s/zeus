@@ -4493,6 +4493,7 @@ def _materialize_current_global_day0_probability(
         )
     else:
         _stamp_day0_remaining_window_belief(refreshed, metric=snapshot.metric)
+    if not is_final_daily and not is_unobserved_prefix_replacement:
         maturity_status = str(
             snapshot.day0_payload.get("_edli_day0_exit_authority_status")
             or "unavailable"
