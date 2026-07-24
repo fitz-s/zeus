@@ -747,9 +747,12 @@ def upsert_position_current(
     # later projections (monitor refresh, chain rescue, close economics) are
     # built from runtime Position objects that do not carry them, so a plain
     # excluded.<col> would NULL-overwrite the entry stamp on every conflict.
+    # Existing-value-first COALESCE makes the stamp immutable (a later non-NULL
+    # can never overwrite it) while still back-filling a row created NULL by a
+    # recovery writer before the entry projection stamped identity.
     _write_once_cols = {"decision_law_id", "position_origin"}
     _update_set = ",\n            ".join(
-        f"{c}=COALESCE(excluded.{c}, {c})" if c in _write_once_cols else f"{c}=excluded.{c}"
+        f"{c}=COALESCE({c}, excluded.{c})" if c in _write_once_cols else f"{c}=excluded.{c}"
         for c in _update_cols
     )
     conn.execute(

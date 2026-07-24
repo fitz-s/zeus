@@ -901,9 +901,9 @@ def enqueue_live_redecisions(
     Recent full-economics no-value rejects block the same pair until price or q_lcb improves.
 
     Certificate validity (ultimate_alpha group D): a belief whose ``valid_until`` has passed is not a
-    valid decision basis — skipped exactly like stale freshness, logged once as CERT_EXPIRED. A stale
-    certificate never revives on book improvement; only a NEW belief (new forecast snapshot) re-opens
-    the pair.
+    valid decision basis — skipped exactly like stale freshness, logged as CERT_EXPIRED on each
+    screen cycle while it remains the latest belief. A stale certificate never revives on book
+    improvement; only a NEW belief (new forecast snapshot) re-opens the pair.
     """
     dt = _parse(decision_time)
     out: list[EnqueuedRedecision] = []
