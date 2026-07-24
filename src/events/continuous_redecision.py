@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import sqlite3
@@ -39,6 +40,8 @@ from src.data.replacement_forecast_readiness import (
     SOURCE_ID as LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
 )
 from src.events.opportunity_event import OpportunityEvent
+
+logger = logging.getLogger(__name__)
 
 
 def _fee_at(price: float) -> float:
@@ -836,6 +839,11 @@ def enqueue_live_redecisions(
     optional IN-MEMORY dict (the reactor holds it across cycles): a pair re-fires only when its edge
     improves past IMPROVE_DELTA vs the last acted edge — a short price wiggle does NOT re-fire.
     Recent full-economics no-value rejects block the same pair until price or q_lcb improves.
+
+    Certificate validity (ultimate_alpha group D): a belief whose ``valid_until`` has passed is not a
+    valid decision basis — skipped exactly like stale freshness, logged once as CERT_EXPIRED. A stale
+    certificate never revives on book improvement; only a NEW belief (new forecast snapshot) re-opens
+    the pair.
     """
     dt = _parse(decision_time)
     out: list[EnqueuedRedecision] = []
@@ -843,6 +851,13 @@ def enqueue_live_redecisions(
         conn,
         decision_time=decision_time,
     ):
+        if _belief_certificate_expired(belief, dt):
+            logger.info(
+                "EDLI entry screen: CERT_EXPIRED family=%s snapshot=%s valid_until=%s — "
+                "belief past certificate validity; awaiting next forecast issue",
+                belief.family_id, belief.snapshot_id, belief.valid_until,
+            )
+            continue
         family_key = _stable_family_screen_key(belief)
         for idx, label in enumerate(belief.bin_labels):
             if idx >= len(belief.p_posterior_vec):
@@ -918,6 +933,23 @@ def enqueue_live_redecisions(
                     acted_state[acted_key] = score
                 out.append(EnqueuedRedecision(belief.family_id, label, direction, score))
     return out
+
+
+def _belief_certificate_expired(belief: CachedBelief, now) -> bool:
+    """True when the belief's certificate validity boundary has passed.
+
+    ``valid_until`` is nullable (pre-migration rows / callers not yet
+    computing it): None means no validity boundary is declared and the
+    ordinary freshness gates alone govern — this helper only ENFORCES a
+    declared boundary, it never invents one (fail-closed on missing τ_next
+    happens where NEW forecast-conditioned exposure is created, not here).
+    """
+    if not belief.valid_until:
+        return False
+    try:
+        return _parse(belief.valid_until) <= now
+    except (TypeError, ValueError):
+        return True  # a declared-but-unparseable boundary is not a valid basis
 
 
 def _vec_float_at(values: list[float | None] | None, idx: int) -> float | None:

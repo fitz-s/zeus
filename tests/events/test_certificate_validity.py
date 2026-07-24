@@ -87,3 +87,77 @@ def test_tau_next_accepts_non_utc_now_and_normalizes() -> None:
     # now given in a +08:00 zone equal to 02:00 UTC must yield the same τ_next.
     now_local = datetime(2026, 7, 24, 10, 0, tzinfo=timezone(timedelta(hours=8)))
     assert next_authoritative_issue_at("ecmwf_open_data", "mx2t6_high", now_local) == _utc(h=10, mi=45)
+
+
+# ── CERT_EXPIRED enforcement in the entry screen ────────────────────────────────────────────────
+
+
+def _belief(valid_until: str | None) -> "object":
+    from src.events.continuous_redecision import CachedBelief
+
+    return CachedBelief(
+        family_id="hyp|update_reaction|NYC|2026-07-24|high|x",
+        city="NYC",
+        target_date="2026-07-24",
+        snapshot_id="snap-1",
+        calibrator_model_hash="cal-1",
+        bin_labels=["84-85°F"],
+        p_posterior_vec=[0.62],
+        recorded_at="2026-07-24T10:00:00+00:00",
+        condition_ids=["cond-1"],
+        q_lcb_yes_vec=[0.55],
+        q_lcb_no_vec=[0.30],
+        metric="high",
+        valid_until=valid_until,
+    )
+
+
+def _quote():
+    from src.events.continuous_redecision import PriceQuote
+
+    return PriceQuote(
+        price=0.30,
+        freshness_deadline="2026-07-24T23:59:00+00:00",
+        tick_size=0.01,
+    )
+
+
+def _screen(belief) -> list:
+    from src.events.continuous_redecision import enqueue_live_redecisions
+
+    key = (belief.family_id, "84-85°F", "buy_yes")
+    return enqueue_live_redecisions(
+        None,  # conn unused when beliefs= is supplied
+        decision_time="2026-07-24T12:00:00+00:00",
+        price_lookup={key: _quote()},
+        min_edge=0.0,
+        beliefs=[belief],
+    )
+
+
+def test_expired_certificate_belief_is_not_a_decision_basis(caplog) -> None:
+    """A belief past valid_until is skipped exactly like stale freshness and
+    logged CERT_EXPIRED; it does not revive however good the book is."""
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        out = _screen(_belief(valid_until="2026-07-24T11:00:00+00:00"))
+    assert out == []
+    assert "CERT_EXPIRED" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_valid_certificate_belief_still_screens() -> None:
+    out = _screen(_belief(valid_until="2026-07-24T20:00:00+00:00"))
+    assert len(out) == 1 and out[0].direction == "buy_yes"
+
+
+def test_null_valid_until_is_not_a_boundary() -> None:
+    """Pre-migration beliefs (valid_until=None) keep the ordinary freshness
+    gates — this helper enforces a declared boundary, never invents one."""
+    out = _screen(_belief(valid_until=None))
+    assert len(out) == 1
+
+
+def test_unparseable_valid_until_fails_closed() -> None:
+    out = _screen(_belief(valid_until="not-a-timestamp"))
+    assert out == []
