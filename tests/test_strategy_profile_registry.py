@@ -260,32 +260,6 @@ def test_ProfileNotFound_is_a_KeyError():
     assert issubclass(ProfileNotFound, KeyError)
 
 
-# ── phase override resolution (A6 preview) ──────────────────────────── #
-
-
-def test_settlement_capture_phase_overrides_match_PLAN_A6():
-    """PLAN.md §A6 phase-aware Kelly values, pinned by registry."""
-    profile = sp.get("settlement_capture")
-    assert profile.kelly_for_phase("pre_trading") == 0.0
-    assert profile.kelly_for_phase("pre_settlement_day") == 0.5
-    assert profile.kelly_for_phase("settlement_day") == 1.0
-    assert profile.kelly_for_phase("post_trading") == 0.0
-    assert profile.kelly_for_phase("resolved") == 0.0
-
-
-def test_kelly_for_phase_falls_back_to_default_for_unknown_phase():
-    """A made-up phase name should not crash; should return the default."""
-    profile = sp.get("settlement_capture")
-    assert profile.kelly_for_phase("not_a_real_phase") == profile.kelly_default_multiplier
-
-
-def test_kelly_for_phase_None_returns_default():
-    """Pre-A6 callers that don't yet pass market_phase get the legacy
-    per-strategy default — no behavior change from the pre-A6 path."""
-    profile = sp.get("settlement_capture")
-    assert profile.kelly_for_phase(None) == profile.kelly_default_multiplier
-
-
 def test_live_quality_floors_are_registry_backed() -> None:
     """One-law collapse (ultimate_alpha 2026-07-24): live keys carry the
     universal law values — venue band edge 0.05, zero absolute profit/density
@@ -511,7 +485,7 @@ def test_dispatch_matrix_per_strategy_constraint_combinations(
     profile = sp.get(key)
     direction_ok = profile.is_direction_allowed(direction)
     topology_ok = profile.is_bin_topology_allowed(topology)
-    phase_ok = profile.is_phase_allowed(phase)
+    phase_ok = phase in profile.allowed_market_phases
     actual_allowed = direction_ok and topology_ok and phase_ok
     assert actual_allowed is expected_allowed, (
         f"{key} (dir={direction}, topo={topology}, phase={phase}): "
@@ -528,6 +502,6 @@ def test_center_buy_supports_low_buy_yes_live_metric():
     assert profile.is_runtime_live()
     assert profile.is_direction_allowed("buy_yes")
     assert profile.is_bin_topology_allowed("finite_range")
-    assert profile.is_phase_allowed("pre_settlement_day")
+    assert "pre_settlement_day" in profile.allowed_market_phases
     assert profile.metric_is_live("high")
     assert profile.metric_is_live("low")

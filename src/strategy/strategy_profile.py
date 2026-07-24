@@ -27,8 +27,6 @@ How callers use it
 
     profile = get("settlement_capture")          # ProfileNotFound if unknown
     profile.kelly_default_multiplier             # 1.0
-    profile.kelly_for_phase("settlement_day")    # 1.0 (override) or default
-    profile.is_phase_allowed("post_trading")     # False
     profile.is_runtime_live()                    # True for live_status=="live"
 
     live_safe_keys()        # frozenset of boot-allowable strategies
@@ -146,14 +144,6 @@ class StrategyProfile:
         Equivalent to the pre-A4 ``key in LIVE_SAFE_STRATEGIES``."""
         return self.live_status == "live"
 
-    def is_phase_allowed(self, market_phase: str) -> bool:
-        """True iff the strategy is semantically valid in this market phase.
-
-        ``market_phase`` is the lowercase enum value
-        (``MarketPhase.SETTLEMENT_DAY.value`` etc.). Empty allow-list = no
-        phase passes; this is how blocked/dormant strategies stay dormant."""
-        return market_phase in self.allowed_market_phases
-
     def is_mode_allowed(self, discovery_mode: str) -> bool:
         return discovery_mode in self.allowed_discovery_modes
 
@@ -162,19 +152,6 @@ class StrategyProfile:
 
     def is_bin_topology_allowed(self, topology: str) -> bool:
         return topology in self.allowed_bin_topology
-
-    def kelly_for_phase(self, market_phase: Optional[str]) -> float:
-        """HISTORICAL DECODER ONLY (ultimate_alpha_2026-07-23 group B).
-
-        The live sizer no longer reads per-key/per-phase multipliers —
-        src.strategy.kelly.phase_aware_kelly_multiplier returns the one
-        GLOBAL_KELLY_FRACTION gated by identity/lifecycle/hard-veto. This
-        method survives for decoding historical decision_chain rows whose
-        open-time multiplier was resolved through the registry.
-        """
-        if market_phase is None:
-            return self.kelly_default_multiplier
-        return self.kelly_phase_overrides.get(market_phase, self.kelly_default_multiplier)
 
     def metric_is_live(self, temperature_metric: str) -> bool:
         """True iff entries on this metric reach the live order book.

@@ -441,7 +441,7 @@ def test_I8_oracle_penalty_picks_up_storage_root_override(monkeypatch, tmp_path)
 
 def test_end_to_end_resolver_through_registry_and_oracle(tmp_path):
     """Single-fixture probe that exercises:
-      - StrategyProfile registry (A4): kelly_for_phase lookup
+      - StrategyProfile registry (A4): kelly_default_multiplier lookup
       - Oracle evidence-grade (A3): n + mismatches -> Beta-binomial -> status
       - Phase-aware Kelly resolver (A6): combines registry + oracle +
         observed_fraction + phase_source

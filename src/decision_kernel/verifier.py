@@ -2017,7 +2017,7 @@ def _effective_live_entry_quality_floors(payload: dict) -> dict[str, float]:
     """
 
     floors = {
-        "min_entry_price": _live_entry_min_price_floor(payload),
+        "min_entry_price": live_entry_min_price_floor(),
         "min_expected_profit_usd": _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
         "min_submit_edge_density": _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
     }
@@ -2066,13 +2066,6 @@ def _entry_price_floor_decision_for_payload(
         q_live=payload.get("q_live"),
         q_lcb=payload.get("q_lcb_5pct"),
         limit_price=limit_price,
-    )
-
-
-def _live_entry_min_price_floor(payload: dict) -> float:
-    return live_entry_min_price_floor(
-        strategy_key=payload.get("strategy_key"),
-        direction=payload.get("direction"),
     )
 
 
