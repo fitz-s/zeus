@@ -16,7 +16,9 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -137,6 +139,7 @@ RETIRED_FILES = (
 
 WORLD_DB = "zeus-world.db"
 TRADES_DB = "zeus_trades.db"
+AUDIT_ARCHIVE_DB = "single_live_audit_archive.db"
 DECISION_TABLE = "decision_certificates"
 EDGE_TABLE = "decision_certificate_edges"
 SUPERSESSION_TABLE = "decision_certificate_supersessions"
@@ -212,7 +215,7 @@ CREATE TABLE decision_certificates_live_new (
     model_version_hash TEXT,
     payload_json TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
-    certificate_hash TEXT NOT NULL UNIQUE,
+    certificate_hash TEXT NOT NULL COLLATE NOCASE UNIQUE,
     verifier_status TEXT NOT NULL CHECK (
       verifier_status IN ('VERIFIED','REJECTED','SUPERSEDED','REVIEW_REQUIRED')
     ),
@@ -230,6 +233,74 @@ OPAQUE_REFERENCE_FIELDS = {
         "cost_basis_source_certificate_hash",
     ),
 }
+
+DEFAULT_PREFLIGHT_TIMEOUT_SECONDS = 300.0
+MIN_PREFLIGHT_TIMEOUT_SECONDS = 1.0
+MAX_PREFLIGHT_TIMEOUT_SECONDS = 900.0
+
+# Only state that can change this migration's decision is part of the logical
+# generation digest. Hashing every row in multi-billion-byte event/snapshot
+# tables made the fence itself an unbounded live outage without adding cutover
+# evidence.
+MIGRATION_DIGEST_COLUMNS: dict[str, tuple[str, ...] | None] = {
+    DECISION_TABLE: ("certificate_id", "certificate_hash", "mode"),
+    EDGE_TABLE: ("child_certificate_id", "parent_certificate_hash"),
+    SUPERSESSION_TABLE: ("old_certificate_hash", "new_certificate_hash"),
+    FAILURE_TABLE: ("mode",),
+    "position_current": ("position_id", "phase"),
+    "venue_commands": ("command_id", "position_id", "state"),
+    "position_decision_attribution": (
+        "position_id",
+        "command_id",
+        "decision_certificate_hash",
+        "resolution",
+    ),
+    "position_events": ("decision_id", "payload_json"),
+    "venue_command_events": ("payload_json",),
+    "decision_log": ("artifact_json",),
+    "edli_live_profit_audit": (
+        RETIRED_ELIGIBILITY_COLUMN,
+        "learning_eligible",
+        "expected_edge_source_certificate_hash",
+        "cost_basis_source_certificate_hash",
+    ),
+    RETIRED_TRANSFER_TABLE: (),
+    RETIRED_CONVERSION_TABLE: (),
+    RETIRED_CONVERSION_EVENTS: (),
+    RETIRED_EPOCH_TABLE: None,
+    "raw_forecast_artifacts": (RETIRED_AUTHORITY_COLUMN,),
+    "deterministic_forecast_anchors": (RETIRED_AUTHORITY_COLUMN,),
+    "forecast_posteriors": (RETIRED_AUTHORITY_COLUMN, "runtime_layer"),
+    "settlement_capture_verifications": ("evidence_tier",),
+    "edli_no_submit_receipts": RETIRED_RECEIPT_COLUMNS,
+    "risk_state": None,
+}
+
+
+class PreflightTimeout(RuntimeError):
+    """The bounded cutover proof exceeded its operator-visible wall budget."""
+
+
+class _Deadline:
+    def __init__(self, seconds: float, phase: str) -> None:
+        if not MIN_PREFLIGHT_TIMEOUT_SECONDS <= seconds <= MAX_PREFLIGHT_TIMEOUT_SECONDS:
+            raise ValueError(
+                "preflight timeout must be between "
+                f"{MIN_PREFLIGHT_TIMEOUT_SECONDS:g} and "
+                f"{MAX_PREFLIGHT_TIMEOUT_SECONDS:g} seconds"
+            )
+        self.ends_at = time.monotonic() + seconds
+        self.seconds = seconds
+        self.phase = phase
+
+    def expired(self) -> bool:
+        return time.monotonic() >= self.ends_at
+
+    def check(self) -> None:
+        if self.expired():
+            raise PreflightTimeout(
+                f"{self.phase} exceeded its {self.seconds:g}s wall-time budget"
+            )
 
 
 def live_writers() -> list[str]:
@@ -375,8 +446,18 @@ def target_release_identity(root: Path) -> dict[str, str]:
 _GENERATION_TABLE = "single_live_cutover_generation"
 
 
-def _digest_sqlite_migration_state(conn: sqlite3.Connection) -> str:
-    """Digest every user-owned schema object and row except this digest's marker."""
+def _digest_sqlite_migration_state(
+    conn: sqlite3.Connection,
+    *,
+    table_columns: dict[str, tuple[str, ...] | None] | None = None,
+    deadline: _Deadline | None = None,
+) -> str:
+    """Digest schema plus the normalized rowset that can affect this migration.
+
+    ``table_columns=None`` retains the exhaustive behavior for small fixtures
+    and direct callers. Canonical target identity passes the explicit cutover
+    projection above, excluding unrelated high-volume market evidence.
+    """
 
     digest = hashlib.sha256()
     digest.update(
@@ -421,7 +502,7 @@ def _digest_sqlite_migration_state(conn: sqlite3.Connection) -> str:
                 separators=(",", ":"),
             ).encode()
         )
-    tables = [
+    all_tables = [
         str(row[0])
         for row in conn.execute(
             """
@@ -435,7 +516,14 @@ def _digest_sqlite_migration_state(conn: sqlite3.Connection) -> str:
             (_GENERATION_TABLE,),
         )
     ]
+    tables = (
+        all_tables
+        if table_columns is None
+        else [table for table in all_tables if table in table_columns]
+    )
     for table in tables:
+        if deadline is not None:
+            deadline.check()
         table_sql = quote_identifier(table)
         columns = conn.execute(f"PRAGMA table_xinfo({table_sql})").fetchall()
         column_names = {str(row[1]).lower() for row in columns}
@@ -452,8 +540,22 @@ def _digest_sqlite_migration_state(conn: sqlite3.Connection) -> str:
         )
         if rowid_alias is not None:
             try:
+                requested = None if table_columns is None else table_columns[table]
+                selected = (
+                    [str(row[1]) for row in columns if len(row) < 7 or int(row[6]) == 0]
+                    if requested is None
+                    else [
+                        name
+                        for name in requested
+                        if name.lower() in column_names
+                    ]
+                )
+                select_list = ", ".join(
+                    [f"{rowid_alias} AS __cutover_rowid__"]
+                    + [quote_identifier(name) for name in selected]
+                )
                 cursor = conn.execute(
-                    f"SELECT {rowid_alias} AS __cutover_rowid__, * "
+                    f"SELECT {select_list} "
                     f"FROM {table_sql} ORDER BY {rowid_alias}"
                 )
             except sqlite3.OperationalError:
@@ -467,10 +569,30 @@ def _digest_sqlite_migration_state(conn: sqlite3.Connection) -> str:
             order = ", ".join(
                 quote_identifier(name) for _, name in sorted(primary_key)
             )
-            cursor = conn.execute(f"SELECT * FROM {table_sql} ORDER BY {order}")
+            requested = None if table_columns is None else table_columns[table]
+            selected = (
+                [str(row[1]) for row in columns if len(row) < 7 or int(row[6]) == 0]
+                if requested is None
+                else [
+                    name
+                    for name in requested
+                    if name.lower() in column_names
+                ]
+            )
+            select_list = ", ".join(
+                quote_identifier(name)
+                for name in dict.fromkeys(
+                    [name for _, name in sorted(primary_key)] + selected
+                )
+            )
+            cursor = conn.execute(
+                f"SELECT {select_list} FROM {table_sql} ORDER BY {order}"
+            )
         digest.update(json.dumps([table]).encode())
         digest.update(json.dumps([item[0] for item in cursor.description]).encode())
-        for row in cursor:
+        for row_index, row in enumerate(cursor):
+            if deadline is not None and row_index % 4096 == 0:
+                deadline.check()
             normalized = [
                 {"blob_sha256": hashlib.sha256(value).hexdigest()}
                 if isinstance(value, bytes)
@@ -483,12 +605,21 @@ def _digest_sqlite_migration_state(conn: sqlite3.Connection) -> str:
     return digest.hexdigest()
 
 
-def sqlite_target_identity(path: Path) -> dict[str, Any]:
+def sqlite_target_identity(
+    path: Path,
+    *,
+    deadline: _Deadline | None = None,
+) -> dict[str, Any]:
     resolved = path.resolve(strict=True)
     stat = resolved.stat()
     conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
     try:
         conn.execute("PRAGMA query_only=ON")
+        if deadline is None:
+            deadline = _Deadline(
+                DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
+                f"target identity for {path.name}",
+            )
         return {
             "path": str(path.absolute()),
             "resolved_path": str(resolved),
@@ -499,7 +630,11 @@ def sqlite_target_identity(path: Path) -> dict[str, Any]:
             "application_id": int(conn.execute("PRAGMA application_id").fetchone()[0]),
             "user_version": int(conn.execute("PRAGMA user_version").fetchone()[0]),
             "schema_version": int(conn.execute("PRAGMA schema_version").fetchone()[0]),
-            "migration_state_sha256": _digest_sqlite_migration_state(conn),
+            "migration_state_sha256": _digest_sqlite_migration_state(
+                conn,
+                table_columns=MIGRATION_DIGEST_COLUMNS,
+                deadline=deadline,
+            ),
         }
     finally:
         conn.close()
@@ -522,12 +657,38 @@ def settings_target_identity(path: Path) -> dict[str, Any]:
     }
 
 
-def target_state_identity(
-    root: Path, dbs: tuple[Path, ...], settings_path: Path
-) -> dict[str, Any]:
+def audit_archive_identity(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    resolved = path.resolve(strict=True)
+    file_stat = resolved.stat()
     return {
-        "databases": {path.name: sqlite_target_identity(path) for path in dbs},
+        "resolved_path": str(resolved),
+        "st_dev": file_stat.st_dev,
+        "st_ino": file_stat.st_ino,
+        "size": file_stat.st_size,
+        "mtime_ns": file_stat.st_mtime_ns,
+        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+    }
+
+
+def target_state_identity(
+    root: Path,
+    dbs: tuple[Path, ...],
+    settings_path: Path,
+    *,
+    timeout_seconds: float = DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    deadline = _Deadline(timeout_seconds, "target-state identity")
+    return {
+        "databases": {
+            path.name: sqlite_target_identity(path, deadline=deadline)
+            for path in dbs
+        },
         "settings": settings_target_identity(settings_path),
+        "audit_archive": audit_archive_identity(
+            root / "state" / AUDIT_ARCHIVE_DB
+        ),
         "runtime_json": runtime_json_identity(root),
         "retired_files_present": retired_files_identity(root),
     }
@@ -651,7 +812,19 @@ def mark_cutover_generation(
     )
     conn.execute(
         "INSERT OR REPLACE INTO single_live_cutover_generation VALUES (?, ?, ?, ?)",
-        (generation, stage, utc_now(), _digest_sqlite_migration_state(conn)),
+        (
+            generation,
+            stage,
+            utc_now(),
+            _digest_sqlite_migration_state(
+                conn,
+                table_columns=MIGRATION_DIGEST_COLUMNS,
+                deadline=_Deadline(
+                    DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
+                    f"generation digest for {stage}",
+                ),
+            ),
+        ),
     )
 
 
@@ -676,7 +849,14 @@ def has_cutover_generation(
         current_digest = (
             migration_state_sha256
             if migration_state_sha256 is not None
-            else _digest_sqlite_migration_state(conn)
+            else _digest_sqlite_migration_state(
+                conn,
+                table_columns=MIGRATION_DIGEST_COLUMNS,
+                deadline=_Deadline(
+                    DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
+                    f"generation verification for {stage}",
+                ),
+            )
         )
         return str(row[0]) == current_digest
     finally:
@@ -701,11 +881,50 @@ def _schema_table_exists(conn: sqlite3.Connection, schema: str, table: str) -> b
     ).fetchone() is not None
 
 
+def _graph_hashes_normalized(conn: sqlite3.Connection) -> bool:
+    return all(
+        int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {quote_identifier(table)} "
+                f"WHERE {quote_identifier(field)} COLLATE BINARY "
+                f"!= lower({quote_identifier(field)})"
+            ).fetchone()[0]
+        )
+        == 0
+        for table, field in (
+            (DECISION_TABLE, "certificate_hash"),
+            (EDGE_TABLE, "parent_certificate_hash"),
+            (SUPERSESSION_TABLE, "old_certificate_hash"),
+            (SUPERSESSION_TABLE, "new_certificate_hash"),
+        )
+    )
+
+
 def _materialize_retired_closure(conn: sqlite3.Connection) -> bool:
     """Build the graph closure once, indexed for every subsequent plan query."""
     query_only = bool(conn.execute("PRAGMA query_only").fetchone()[0])
     if query_only:
         conn.execute("PRAGMA query_only=OFF")
+    conn.execute("DROP TABLE IF EXISTS temp.single_live_edge_parent")
+    normalized = _graph_hashes_normalized(conn)
+    edge_source = EDGE_TABLE
+    seed_hash = "certificate_hash"
+    child_hash = "child.certificate_hash"
+    if not normalized:
+        conn.execute(
+            "CREATE TEMP TABLE single_live_edge_parent ("
+            "parent_certificate_hash TEXT NOT NULL, "
+            "child_certificate_id TEXT NOT NULL, "
+            "PRIMARY KEY (parent_certificate_hash, child_certificate_id)"
+            ") WITHOUT ROWID"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO temp.single_live_edge_parent "
+            f"SELECT lower(parent_certificate_hash), child_certificate_id FROM {EDGE_TABLE}"
+        )
+        edge_source = "temp.single_live_edge_parent"
+        seed_hash = "lower(certificate_hash)"
+        child_hash = "lower(child.certificate_hash)"
     conn.execute("DROP TABLE IF EXISTS temp.single_live_retired_closure")
     conn.execute(
         "CREATE TEMP TABLE single_live_retired_closure ("
@@ -719,29 +938,32 @@ def _materialize_retired_closure(conn: sqlite3.Connection) -> bool:
     )
     conn.execute(
         f"""
-        WITH RECURSIVE retired(certificate_id, certificate_hash) AS (
-            SELECT certificate_id, certificate_hash
-              FROM {DECISION_TABLE}
-             WHERE mode != ?
-            UNION
-            SELECT child.certificate_id, child.certificate_hash
-              FROM retired
-              JOIN {EDGE_TABLE} edge
-                ON lower(edge.parent_certificate_hash) = lower(retired.certificate_hash)
-              JOIN {DECISION_TABLE} child
-                ON child.certificate_id = edge.child_certificate_id
-        )
         INSERT OR IGNORE INTO temp.single_live_retired_closure(
             certificate_hash, certificate_id, is_seed
         )
-        SELECT lower(retired.certificate_hash), retired.certificate_id,
-               CASE WHEN cert.mode != ? THEN 1 ELSE 0 END
-          FROM retired
-          JOIN {DECISION_TABLE} cert
-            ON cert.certificate_id = retired.certificate_id
+        SELECT {seed_hash}, certificate_id, 1
+          FROM {DECISION_TABLE}
+         WHERE mode != ?
         """,
-        (LIVE_MODE, LIVE_MODE),
+        (LIVE_MODE,),
     )
+    while True:
+        before = conn.total_changes
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO temp.single_live_retired_closure(
+                certificate_hash, certificate_id, is_seed
+            )
+            SELECT {child_hash}, child.certificate_id, 0
+              FROM {edge_source} edge NOT INDEXED
+              CROSS JOIN temp.single_live_retired_closure parent
+              JOIN {DECISION_TABLE} child
+                ON child.certificate_id = edge.child_certificate_id
+             WHERE parent.certificate_hash = edge.parent_certificate_hash
+            """
+        )
+        if conn.total_changes == before:
+            break
     return query_only
 
 
@@ -765,6 +987,7 @@ def _closure_digest(hashes: set[str]) -> dict[str, Any]:
 
 def _drop_retired_closure(conn: sqlite3.Connection, restore_query_only: bool) -> None:
     conn.execute("DROP TABLE IF EXISTS temp.single_live_retired_closure")
+    conn.execute("DROP TABLE IF EXISTS temp.single_live_edge_parent")
     if restore_query_only:
         conn.execute("PRAGMA query_only=ON")
 
@@ -796,6 +1019,8 @@ def _rows_referencing_hashes(
     table: str,
     field: str,
     hashes: set[str],
+    *,
+    limit: int | None = None,
 ) -> set[int]:
     if not hashes:
         return set()
@@ -826,11 +1051,13 @@ def _rows_referencing_hashes(
         except (TypeError, json.JSONDecodeError):
             return references(text)
 
-    return {
-        int(row[0])
-        for row in rows
-        if row_references(row[1])
-    }
+    found: set[int] = set()
+    for row in rows:
+        if row_references(row[1]):
+            found.add(int(row[0]))
+            if limit is not None and len(found) >= limit:
+                break
+    return found
 
 
 def _opaque_reference_counts(conn: sqlite3.Connection, closure: set[str]) -> dict[str, int]:
@@ -851,6 +1078,24 @@ def _opaque_reference_counts(conn: sqlite3.Connection, closure: set[str]) -> dic
         for field in fields:
             if field not in present:
                 continue
+            if field not in {"payload_json", "artifact_json"}:
+                direct = conn.execute(
+                    f"""
+                    SELECT 1
+                      FROM trades.{quote_identifier(table)} source
+                     WHERE source.{quote_identifier(field)} IS NOT NULL
+                       AND EXISTS (
+                           SELECT 1
+                             FROM temp.single_live_retired_closure retired
+                            WHERE retired.certificate_hash =
+                                  CAST(source.{quote_identifier(field)} AS TEXT)
+                       )
+                     LIMIT 1
+                    """
+                ).fetchone()
+                if direct is not None:
+                    return {f"{table}.{field}": 1}
+                continue
             count = len(
                 _rows_referencing_hashes(
                     conn,
@@ -858,11 +1103,82 @@ def _opaque_reference_counts(conn: sqlite3.Connection, closure: set[str]) -> dic
                     table,
                     field,
                     closure,
+                    limit=1,
                 )
             )
             if count:
-                counts[f"{table}.{field}"] = count
+                return {f"{table}.{field}": count}
     return counts
+
+
+def _verified_archived_hashes(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    mode = path.stat().st_mode
+    if mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError(f"audit archive is writable: {path}")
+    conn = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        expected_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='audit_proof_bundles'"
+        ).fetchone()
+        if expected_sql is None:
+            raise RuntimeError(f"audit archive schema is missing: {path}")
+        archived: set[str] = set()
+        for row in conn.execute(
+            "SELECT root_hash, bundle_json, bundle_sha256 FROM audit_proof_bundles"
+        ):
+            root_hash = str(row["root_hash"]).lower()
+            raw = str(row["bundle_json"])
+            if hashlib.sha256(raw.encode()).hexdigest() != str(row["bundle_sha256"]):
+                raise RuntimeError(f"audit archive bundle digest mismatch: {root_hash}")
+            bundle = json.loads(raw)
+            if (
+                not isinstance(bundle, dict)
+                or str(bundle.get("root_hash") or "").lower() != root_hash
+                or bundle.get("graph_complete") is not True
+            ):
+                raise RuntimeError(f"audit archive bundle manifest is invalid: {root_hash}")
+            certificates = bundle.get("certificates")
+            edges = bundle.get("edges")
+            if not isinstance(certificates, list) or not isinstance(edges, list):
+                raise RuntimeError(f"audit archive graph is invalid: {root_hash}")
+            cert_hashes = {
+                str(item.get("certificate_hash") or "").lower()
+                for item in certificates
+                if isinstance(item, dict)
+            }
+            cert_ids = {
+                str(item.get("certificate_id") or "")
+                for item in certificates
+                if isinstance(item, dict)
+            }
+            if (
+                root_hash not in cert_hashes
+                or len(cert_hashes) != len(certificates)
+                or bundle.get("certificate_count") != len(certificates)
+                or bundle.get("edge_count") != len(edges)
+                or any(
+                    not isinstance(item, dict)
+                    or not set(DECISION_COLUMNS).issubset(item)
+                    for item in certificates
+                )
+                or any(
+                    not isinstance(edge, dict)
+                    or str(edge.get("child_certificate_id") or "") not in cert_ids
+                    or str(edge.get("parent_certificate_hash") or "").lower()
+                    not in cert_hashes
+                    for edge in edges
+                )
+            ):
+                raise RuntimeError(f"audit archive graph closure is invalid: {root_hash}")
+            archived.add(root_hash)
+        return archived
+    except (json.JSONDecodeError, sqlite3.Error) as exc:
+        raise RuntimeError(f"audit archive is unreadable: {path}: {exc}") from exc
+    finally:
+        conn.close()
 
 
 def _decision_schema_blockers(conn: sqlite3.Connection) -> list[str]:
@@ -895,6 +1211,23 @@ def _decision_schema_blockers(conn: sqlite3.Connection) -> list[str]:
                 inbound_fks.append(f"{table}.{fk[3]}->{DECISION_TABLE}.{fk[4]}")
     if inbound_fks:
         blockers.append(f"unmodeled inbound foreign keys: {sorted(inbound_fks)!r}")
+    parent_indexes = {
+        str(index_row[1])
+        for index_row in conn.execute(
+            f"PRAGMA index_list({quote_identifier(EDGE_TABLE)})"
+        )
+        if tuple(
+            str(column_row[2])
+            for column_row in conn.execute(
+                f"PRAGMA index_info({quote_identifier(str(index_row[1]))})"
+            )
+        )[:1]
+        == ("parent_certificate_hash",)
+    }
+    if not parent_indexes:
+        blockers.append(
+            f"{EDGE_TABLE} is missing a leading parent_certificate_hash index"
+        )
     residue = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE name='decision_certificates_live_new'"
     ).fetchone()
@@ -1026,6 +1359,7 @@ def _protected_position_attribution_preflight(
 def _trades_preflight(
     conn: sqlite3.Connection,
     closure: set[str],
+    archived_hashes: set[str],
     protected_details: dict[str, Any],
     *,
     include_opaque_references: bool,
@@ -1039,9 +1373,13 @@ def _trades_preflight(
         "nonterminal_command_retired_closure_refs": 0,
         **protected_details,
         "historical_opaque_reference_counts": (
-            _opaque_reference_counts(conn, closure)
+            _opaque_reference_counts(conn, closure - archived_hashes)
             if include_opaque_references
-            else {"status": "deferred_to_fenced_apply"}
+            else {}
+        ),
+        "immutable_archive_root_count": len(archived_hashes & closure),
+        "historical_opaque_reference_scan": (
+            "complete" if include_opaque_references else "deferred_to_fenced_apply"
         ),
     }
     required = ("position_current", "position_decision_attribution", "venue_commands")
@@ -1103,6 +1441,55 @@ def _trades_preflight(
         )
     terminal = sorted(TERMINAL_COMMAND_STATES)
     terminal_placeholders = ",".join("?" for _ in terminal)
+    command_event_columns = set(
+        _table_columns(conn, "trades", "venue_command_events")
+    )
+    terminal_partial_evidence_available = {
+        "command_id",
+        "sequence_no",
+        "event_type",
+        "payload_json",
+    }.issubset(command_event_columns)
+    terminal_partial_sql = (
+        """
+        AND NOT (
+            upper(COALESCE(cmd.state, '')) = 'PARTIAL'
+            AND EXISTS (
+                SELECT 1
+                  FROM trades.venue_command_events terminal_event
+                 WHERE terminal_event.command_id = cmd.command_id
+                   AND terminal_event.sequence_no = (
+                       SELECT MAX(latest_event.sequence_no)
+                         FROM trades.venue_command_events latest_event
+                        WHERE latest_event.command_id = cmd.command_id
+                   )
+                   AND terminal_event.event_type = 'PARTIAL_FILL_OBSERVED'
+                   AND json_valid(terminal_event.payload_json)
+                   AND json_extract(terminal_event.payload_json, '$.proof_class')
+                       = 'terminal_partial_order_fact'
+                   AND json_extract(terminal_event.payload_json, '$.command_id')
+                       = cmd.command_id
+                   AND CAST(json_extract(
+                       terminal_event.payload_json, '$.remaining_size'
+                   ) AS REAL) = 0
+                   AND json_extract(
+                       terminal_event.payload_json,
+                       '$.required_predicates.terminal_order_remainder_zero'
+                   ) = 1
+                   AND json_extract(
+                       terminal_event.payload_json,
+                       '$.required_predicates.canonical_trade_facts_match_terminal_order_fact'
+                   ) = 1
+                   AND json_extract(
+                       terminal_event.payload_json,
+                       '$.required_predicates.cumulative_fill_below_requested_size'
+                   ) = 1
+            )
+        )
+        """
+        if terminal_partial_evidence_available
+        else ""
+    )
     command_rows = conn.execute(
         f"""
         SELECT cmd.command_id, cmd.position_id, cmd.state,
@@ -1121,6 +1508,7 @@ def _trades_preflight(
           LEFT JOIN decision_certificates cert
             ON lower(cert.certificate_hash) = lower(pda.decision_certificate_hash)
          WHERE upper(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
+               {terminal_partial_sql}
          GROUP BY cmd.command_id, cmd.position_id, cmd.state
         """,
         tuple(terminal),
@@ -1175,7 +1563,17 @@ def _trades_preflight(
     return blockers, details
 
 
-def _kept_orphans(conn: sqlite3.Connection, closure: set[str]) -> list[dict[str, Any]]:
+def _kept_orphans(
+    conn: sqlite3.Connection,
+    closure: set[str],
+    *,
+    normalized_hashes: bool,
+) -> list[dict[str, Any]]:
+    parent_join = (
+        "parent.certificate_hash = edge.parent_certificate_hash"
+        if normalized_hashes
+        else "lower(parent.certificate_hash) = lower(edge.parent_certificate_hash)"
+    )
     rows = conn.execute(
         f"""
         SELECT edge.child_certificate_id, child.certificate_hash AS child_hash,
@@ -1185,7 +1583,7 @@ def _kept_orphans(conn: sqlite3.Connection, closure: set[str]) -> list[dict[str,
           JOIN {DECISION_TABLE} child
             ON child.certificate_id = edge.child_certificate_id
           LEFT JOIN {DECISION_TABLE} parent
-            ON lower(parent.certificate_hash) = lower(edge.parent_certificate_hash)
+            ON {parent_join}
          WHERE parent.certificate_hash IS NULL
         """
     ).fetchall()
@@ -1197,6 +1595,8 @@ def _kept_orphans(conn: sqlite3.Connection, closure: set[str]) -> list[dict[str,
 
 
 def _compile_failure_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return bounded operator evidence; the full retired rows are counted above."""
+
     return [
         dict(row)
         for row in conn.execute(
@@ -1209,7 +1609,8 @@ def _compile_failure_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
               FROM {FAILURE_TABLE}
              WHERE mode != ?
              GROUP BY stage, reason_code
-             ORDER BY stage, reason_code
+             ORDER BY count DESC, stage, reason_code
+             LIMIT 100
             """,
             (LIVE_MODE,),
         )
@@ -1221,9 +1622,16 @@ def plan_world_decision_graph(
     trades_path: Path,
     *,
     include_opaque_references: bool = True,
+    preflight_timeout_seconds: float = DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     conn = open_db(world_path, writable=False)
+    deadline = _Deadline(
+        preflight_timeout_seconds,
+        "WORLD decision-graph preflight",
+    )
+    conn.set_progress_handler(lambda: 1 if deadline.expired() else 0, 10_000)
     try:
+        deadline.check()
         schema_blockers = _decision_schema_blockers(conn)
         if schema_blockers:
             return {
@@ -1244,8 +1652,28 @@ def plan_world_decision_graph(
                 }
             restore_query_only = _materialize_retired_closure(conn)
             try:
+                normalized_hashes = _graph_hashes_normalized(conn)
+                parent_edge_join = (
+                    "parent.certificate_hash = edge.parent_certificate_hash"
+                    if normalized_hashes
+                    else "lower(parent.certificate_hash) = "
+                    "lower(edge.parent_certificate_hash)"
+                )
+                old_supersession_join = (
+                    "old.certificate_hash = s.old_certificate_hash"
+                    if normalized_hashes
+                    else "lower(old.certificate_hash) = lower(s.old_certificate_hash)"
+                )
+                new_supersession_join = (
+                    "new.certificate_hash = s.new_certificate_hash"
+                    if normalized_hashes
+                    else "lower(new.certificate_hash) = lower(s.new_certificate_hash)"
+                )
                 closure_rows = _retired_closure_rows(conn)
                 closure = {str(row["certificate_hash"]).lower() for row in closure_rows}
+                archived_hashes = _verified_archived_hashes(
+                    world_path.with_name(AUDIT_ARCHIVE_DB)
+                )
                 cert_count = int(
                     conn.execute(f"SELECT COUNT(*) FROM {DECISION_TABLE}").fetchone()[0]
                 )
@@ -1262,10 +1690,15 @@ def plan_world_decision_graph(
                 blockers, trades = _trades_preflight(
                     conn,
                     closure,
+                    archived_hashes,
                     protected_details,
                     include_opaque_references=include_opaque_references,
                 )
-                kept_orphans = _kept_orphans(conn, closure)
+                kept_orphans = _kept_orphans(
+                    conn,
+                    closure,
+                    normalized_hashes=normalized_hashes,
+                )
                 if kept_orphans:
                     blockers.append(
                         {
@@ -1299,11 +1732,11 @@ def plan_world_decision_graph(
                           LEFT JOIN {DECISION_TABLE} child
                             ON child.certificate_id = edge.child_certificate_id
                           LEFT JOIN {DECISION_TABLE} parent
-                            ON lower(parent.certificate_hash) = lower(edge.parent_certificate_hash)
+                            ON {parent_edge_join}
                           LEFT JOIN temp.single_live_retired_closure retired_child
-                            ON retired_child.certificate_hash = lower(child.certificate_hash)
+                            ON retired_child.certificate_hash = child.certificate_hash
                           LEFT JOIN temp.single_live_retired_closure retired_parent
-                            ON retired_parent.certificate_hash = lower(parent.certificate_hash)
+                            ON retired_parent.certificate_hash = parent.certificate_hash
                         """
                     ).fetchone(),
                 )
@@ -1313,13 +1746,13 @@ def plan_world_decision_graph(
                         SELECT COUNT(*)
                           FROM {SUPERSESSION_TABLE} s
                           LEFT JOIN {DECISION_TABLE} old
-                            ON lower(old.certificate_hash) = lower(s.old_certificate_hash)
+                            ON {old_supersession_join}
                           LEFT JOIN {DECISION_TABLE} new
-                            ON lower(new.certificate_hash) = lower(s.new_certificate_hash)
+                            ON {new_supersession_join}
                           LEFT JOIN temp.single_live_retired_closure retired_old
-                            ON retired_old.certificate_hash = lower(s.old_certificate_hash)
+                            ON retired_old.certificate_hash = s.old_certificate_hash
                           LEFT JOIN temp.single_live_retired_closure retired_new
-                            ON retired_new.certificate_hash = lower(s.new_certificate_hash)
+                            ON retired_new.certificate_hash = s.new_certificate_hash
                          WHERE old.certificate_hash IS NULL
                             OR new.certificate_hash IS NULL
                             OR retired_old.certificate_hash IS NOT NULL
@@ -1355,7 +1788,7 @@ def plan_world_decision_graph(
                     "removed_certificate_time_ranges": _time_range(
                         conn,
                         DECISION_TABLE,
-                        "lower(certificate_hash) IN ("
+                        "certificate_hash IN ("
                         "SELECT certificate_hash FROM temp.single_live_retired_closure)",
                         (),
                         "decision_time",
@@ -1384,6 +1817,7 @@ def plan_world_decision_graph(
                     },
                 }
                 for row in closure_rows:
+                    deadline.check()
                     key = "seed" if int(row["is_seed"]) else "dependent"
                     plan["closure_class_counts"][key] += 1
                 return plan
@@ -1391,7 +1825,14 @@ def plan_world_decision_graph(
                 _drop_retired_closure(conn, restore_query_only)
         finally:
             conn.execute("DETACH DATABASE trades")
+    except sqlite3.OperationalError as exc:
+        if deadline.expired() and "interrupt" in str(exc).lower():
+            raise PreflightTimeout(
+                "WORLD decision-graph preflight exceeded its bounded wall-time budget"
+            ) from exc
+        raise
     finally:
+        conn.set_progress_handler(None, 0)
         conn.close()
 
 
@@ -1414,7 +1855,7 @@ def _rebuild_world_decision_graph(conn: sqlite3.Connection) -> None:
         f"INSERT INTO decision_certificates_live_new ({cols}) "
         + f"SELECT {cols} FROM {DECISION_TABLE} cert "
         + "WHERE NOT EXISTS (SELECT 1 FROM temp.single_live_retired_closure retired "
-        + "WHERE retired.certificate_hash=lower(cert.certificate_hash))"
+        + "WHERE retired.certificate_hash=cert.certificate_hash)"
     )
     conn.execute(
         f"""
@@ -1425,7 +1866,7 @@ def _rebuild_world_decision_graph(conn: sqlite3.Connection) -> None:
                )
             OR NOT EXISTS (
                    SELECT 1 FROM decision_certificates_live_new parent
-                    WHERE lower(parent.certificate_hash) = lower({EDGE_TABLE}.parent_certificate_hash)
+                    WHERE parent.certificate_hash = {EDGE_TABLE}.parent_certificate_hash
                )
         """
     )
@@ -1434,11 +1875,11 @@ def _rebuild_world_decision_graph(conn: sqlite3.Connection) -> None:
         DELETE FROM {SUPERSESSION_TABLE}
          WHERE NOT EXISTS (
                    SELECT 1 FROM decision_certificates_live_new old
-                    WHERE lower(old.certificate_hash) = lower({SUPERSESSION_TABLE}.old_certificate_hash)
+                    WHERE old.certificate_hash = {SUPERSESSION_TABLE}.old_certificate_hash
                )
             OR NOT EXISTS (
                    SELECT 1 FROM decision_certificates_live_new new
-                    WHERE lower(new.certificate_hash) = lower({SUPERSESSION_TABLE}.new_certificate_hash)
+                    WHERE new.certificate_hash = {SUPERSESSION_TABLE}.new_certificate_hash
                )
         """
     )
@@ -1477,7 +1918,7 @@ def postcheck_world_decision_graph(conn: sqlite3.Connection) -> dict[str, Any]:
                   LEFT JOIN {DECISION_TABLE} child
                     ON child.certificate_id = edge.child_certificate_id
                   LEFT JOIN {DECISION_TABLE} parent
-                    ON lower(parent.certificate_hash) = lower(edge.parent_certificate_hash)
+                    ON parent.certificate_hash = edge.parent_certificate_hash
                  WHERE child.certificate_id IS NULL OR parent.certificate_hash IS NULL
                 """
             ).fetchone()[0]
@@ -1488,9 +1929,9 @@ def postcheck_world_decision_graph(conn: sqlite3.Connection) -> dict[str, Any]:
                 SELECT COUNT(*)
                   FROM {SUPERSESSION_TABLE} s
                   LEFT JOIN {DECISION_TABLE} old
-                    ON lower(old.certificate_hash) = lower(s.old_certificate_hash)
+                    ON old.certificate_hash = s.old_certificate_hash
                   LEFT JOIN {DECISION_TABLE} new
-                    ON lower(new.certificate_hash) = lower(s.new_certificate_hash)
+                    ON new.certificate_hash = s.new_certificate_hash
                  WHERE old.certificate_hash IS NULL OR new.certificate_hash IS NULL
                 """
             ).fetchone()[0]
@@ -1632,9 +2073,14 @@ def migrate_world_decision_graph(
     receipt_path: Path,
     *,
     generation: str | None = None,
+    preflight_timeout_seconds: float = DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     started_at = utc_now()
-    plan = plan_world_decision_graph(world_path, trades_path)
+    plan = plan_world_decision_graph(
+        world_path,
+        trades_path,
+        preflight_timeout_seconds=preflight_timeout_seconds,
+    )
     if plan.get("blockers"):
         raise RuntimeError(
             "WORLD decision graph migration refused: "
@@ -1823,7 +2269,6 @@ def mutation_blockers(path: Path) -> list[str]:
     try:
         blockers: list[str] = []
         for table in (
-            RETIRED_TRANSFER_TABLE,
             RETIRED_CONVERSION_TABLE,
             RETIRED_CONVERSION_EVENTS,
         ):
@@ -1938,8 +2383,17 @@ def mutate_db(
         try:
             if migrate_command_attribution_schema(conn):
                 changed.append("migrated command-exact decision attribution schema")
+            if table_exists(conn, RETIRED_TRANSFER_TABLE):
+                count = int(
+                    conn.execute(
+                        f"SELECT count(*) FROM {RETIRED_TRANSFER_TABLE}"
+                    ).fetchone()[0]
+                )
+                conn.execute(f"DROP TABLE {RETIRED_TRANSFER_TABLE}")
+                changed.append(
+                    f"dropped {RETIRED_TRANSFER_TABLE} ({count} retired rows)"
+                )
             for table in (
-                RETIRED_TRANSFER_TABLE,
                 RETIRED_CONVERSION_EVENTS,
                 RETIRED_CONVERSION_TABLE,
             ):
@@ -2314,7 +2768,28 @@ def main() -> int:
         default=None,
         help="Durable WORLD graph receipt path (default: state/migration_receipts/...).",
     )
+    parser.add_argument(
+        "--preflight-timeout-seconds",
+        type=float,
+        default=DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
+        help=(
+            "Hard wall-time budget for each decision-graph preflight "
+            f"({MIN_PREFLIGHT_TIMEOUT_SECONDS:g}-"
+            f"{MAX_PREFLIGHT_TIMEOUT_SECONDS:g}; default "
+            f"{DEFAULT_PREFLIGHT_TIMEOUT_SECONDS:g})."
+        ),
+    )
     args = parser.parse_args()
+    if not (
+        MIN_PREFLIGHT_TIMEOUT_SECONDS
+        <= args.preflight_timeout_seconds
+        <= MAX_PREFLIGHT_TIMEOUT_SECONDS
+    ):
+        parser.error(
+            "--preflight-timeout-seconds must be between "
+            f"{MIN_PREFLIGHT_TIMEOUT_SECONDS:g} and "
+            f"{MAX_PREFLIGHT_TIMEOUT_SECONDS:g}"
+        )
 
     root = args.root.resolve()
     state = root / "state"
@@ -2339,6 +2814,7 @@ def main() -> int:
         world_path,
         trades_path,
         include_opaque_references=True,
+        preflight_timeout_seconds=args.preflight_timeout_seconds,
     )
     print("WORLD decision graph plan:")
     print(json.dumps(graph_plan, indent=2, sort_keys=True))
@@ -2368,7 +2844,12 @@ def main() -> int:
         release_identity = target_release_identity(root)
         assert_writer_fence(root)
         def current_target_state() -> dict[str, Any]:
-            return target_state_identity(root, dbs, settings_path)
+            return target_state_identity(
+                root,
+                dbs,
+                settings_path,
+                timeout_seconds=args.preflight_timeout_seconds,
+            )
 
         initial_target_state = current_target_state()
         deterministic_blockers = [
@@ -2410,7 +2891,10 @@ def main() -> int:
 
     def graph_postcondition() -> None:
         plan = plan_world_decision_graph(
-            world_path, trades_path, include_opaque_references=True
+            world_path,
+            trades_path,
+            include_opaque_references=True,
+            preflight_timeout_seconds=args.preflight_timeout_seconds,
         )
         if plan.get("blockers") or int(plan.get("counts", {}).get("certificates_remove", 0)):
             raise RuntimeError(f"decision graph postcondition failed: {plan}")
@@ -2440,6 +2924,7 @@ def main() -> int:
                 trades_path,
                 receipt_path,
                 generation=generation,
+                preflight_timeout_seconds=args.preflight_timeout_seconds,
             ),
             precondition=lambda: assert_writer_fence(root),
             postcondition=graph_postcondition,

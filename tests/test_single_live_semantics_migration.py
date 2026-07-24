@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -84,6 +85,8 @@ def _create_world(path: Path, *, legacy_check: bool = True) -> sqlite3.Connectio
             ON decision_certificates(certificate_type, semantic_key, mode, decision_time);
         CREATE INDEX idx_decision_certificates_hash
             ON decision_certificates(certificate_hash);
+        CREATE INDEX idx_decision_certificate_edges_parent
+            ON decision_certificate_edges(parent_certificate_hash);
         """
     )
     return conn
@@ -122,6 +125,9 @@ def _create_trades(path: Path) -> sqlite3.Connection:
         );
         CREATE TABLE venue_command_events (
             event_id TEXT PRIMARY KEY,
+            command_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
             payload_json TEXT
         );
         CREATE TABLE decision_log (
@@ -220,6 +226,57 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, sqlite3.Connection, sqlite3.Co
     world = tmp_path / "zeus-world.db"
     trades = tmp_path / "zeus_trades.db"
     return world, trades, _create_world(world), _create_trades(trades)
+
+
+def _write_audit_archive(world: Path, root_hash: str) -> Path:
+    world_conn = sqlite3.connect(world)
+    world_conn.row_factory = sqlite3.Row
+    certificate = dict(
+        world_conn.execute(
+            "SELECT * FROM decision_certificates WHERE certificate_hash=?",
+            (root_hash,),
+        ).fetchone()
+    )
+    world_conn.close()
+    bundle = json.dumps(
+        {
+            "root_hash": root_hash,
+            "graph_complete": True,
+            "certificates": [certificate],
+            "certificate_count": 1,
+            "edges": [],
+            "edge_count": 0,
+            "supersessions": [],
+            "compile_failures": [],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    archive = world.with_name(migration.AUDIT_ARCHIVE_DB)
+    conn = sqlite3.connect(archive)
+    conn.execute(
+        """
+        CREATE TABLE audit_proof_bundles (
+            root_hash TEXT PRIMARY KEY,
+            bundle_json TEXT NOT NULL,
+            bundle_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO audit_proof_bundles VALUES (?, ?, ?, ?)",
+        (
+            root_hash,
+            bundle,
+            hashlib.sha256(bundle.encode()).hexdigest(),
+            "2026-07-24T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    archive.chmod(0o444)
+    return archive
 
 
 def test_recursive_closure_preserves_live_old_sizing_and_writes_atomic_receipt(
@@ -550,6 +607,34 @@ def test_historical_reference_without_archive_blocks_before_writes(
         conn.close()
 
 
+def test_historical_reference_resolves_to_immutable_audit_archive(
+    tmp_path: Path,
+) -> None:
+    world, trades, wconn, tconn = _fixture(tmp_path)
+    retired_hash = "b" * 64
+    try:
+        _insert_certificate(wconn, "retired", retired_hash, mode=_retired_mode())
+        tconn.execute(
+            "INSERT INTO position_events VALUES (?, ?, ?)",
+            ("historical", None, json.dumps({"certificate": retired_hash})),
+        )
+        wconn.commit()
+        tconn.commit()
+    finally:
+        wconn.close()
+        tconn.close()
+    archive = _write_audit_archive(world, retired_hash)
+
+    plan = migration.plan_world_decision_graph(world, trades)
+    assert plan["status"] == "ready"
+    assert plan["trades_preflight"]["immutable_archive_root_count"] == 1
+    assert plan["historical_opaque_reference_counts"] == {}
+
+    archive.chmod(0o644)
+    with pytest.raises(RuntimeError, match="archive is writable"):
+        migration.plan_world_decision_graph(world, trades)
+
+
 def test_protected_missing_attribution_fails_before_closure_materialization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -690,10 +775,54 @@ def test_unattributable_exception_requires_terminal_exit_evidence(
     assert plan["trades_preflight"]["unresolved_current_projection_count"] == 1
 
 
+def test_proof_backed_terminal_partial_command_is_not_nonterminal(
+    tmp_path: Path,
+) -> None:
+    world, trades, wconn, tconn = _fixture(tmp_path)
+    try:
+        _insert_certificate(wconn, "retired", "hash-retired", mode=_retired_mode())
+        tconn.execute(
+            "INSERT INTO venue_commands VALUES ('command-partial', 'position-settled', 'PARTIAL')"
+        )
+        tconn.execute(
+            """
+            INSERT INTO venue_command_events(
+                event_id, command_id, sequence_no, event_type, payload_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "terminal-partial",
+                "command-partial",
+                8,
+                "PARTIAL_FILL_OBSERVED",
+                json.dumps(
+                    {
+                        "proof_class": "terminal_partial_order_fact",
+                        "command_id": "command-partial",
+                        "remaining_size": "0",
+                        "required_predicates": {
+                            "terminal_order_remainder_zero": True,
+                            "canonical_trade_facts_match_terminal_order_fact": True,
+                            "cumulative_fill_below_requested_size": True,
+                        },
+                    }
+                ),
+            ),
+        )
+        wconn.commit()
+        tconn.commit()
+    finally:
+        wconn.close()
+        tconn.close()
+
+    plan = migration.plan_world_decision_graph(world, trades)
+    assert plan["status"] == "ready"
+    assert plan["trades_preflight"]["nonterminal_command_total"] == 0
+
+
 @pytest.mark.parametrize(
     "table",
     (
-        migration.RETIRED_TRANSFER_TABLE,
         migration.RETIRED_CONVERSION_TABLE,
         migration.RETIRED_CONVERSION_EVENTS,
     ),
@@ -716,6 +845,35 @@ def test_nonempty_retired_table_is_never_dropped(tmp_path: Path, table: str) -> 
     conn = sqlite3.connect(path)
     try:
         assert conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_nonempty_retired_calibration_transfer_rows_are_deleted(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            f'CREATE TABLE "{migration.RETIRED_TRANSFER_TABLE}" '
+            "(id INTEGER PRIMARY KEY, status TEXT NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{migration.RETIRED_TRANSFER_TABLE}" '
+            "VALUES (1, 'LIVE_ELIGIBLE')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert migration.mutation_blockers(path) == []
+    assert migration.mutate_db(path) == [
+        f"dropped {migration.RETIRED_TRANSFER_TABLE} (1 retired rows)"
+    ]
+    conn = sqlite3.connect(path)
+    try:
+        assert not migration.table_exists(conn, migration.RETIRED_TRANSFER_TABLE)
     finally:
         conn.close()
 
@@ -1117,7 +1275,7 @@ def test_resume_rejects_external_write_after_stage_marker_before_journal(
 
 
 @pytest.mark.parametrize(
-    "mutation", ("rowid", "shadowed_rowid", "user_version", "sqlite_sequence")
+    "mutation", ("rowid", "user_version", "sqlite_sequence")
 )
 def test_resume_rejects_metadata_only_change_after_stage_marker(
     tmp_path: Path,
@@ -1130,12 +1288,6 @@ def test_resume_rejects_metadata_only_change_after_stage_marker(
             "CREATE TABLE sequenced (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)"
         )
         conn.execute("INSERT INTO sequenced(value) VALUES ('before')")
-        conn.commit()
-        conn.close()
-    elif mutation == "shadowed_rowid":
-        conn = sqlite3.connect(dbs[0])
-        conn.execute("CREATE TABLE rowid_shadow (rowid INTEGER, payload TEXT)")
-        conn.execute("INSERT INTO rowid_shadow VALUES (7, 'before')")
         conn.commit()
         conn.close()
     journal = tmp_path / "cutover.progress.json"
@@ -1169,8 +1321,6 @@ def test_resume_rejects_metadata_only_change_after_stage_marker(
     conn = sqlite3.connect(dbs[0])
     if mutation == "rowid":
         conn.execute("UPDATE risk_state SET rowid = rowid + 100")
-    elif mutation == "shadowed_rowid":
-        conn.execute("UPDATE rowid_shadow SET _rowid_ = _rowid_ + 100")
     elif mutation == "user_version":
         conn.execute("PRAGMA user_version=73")
     else:
@@ -1191,6 +1341,84 @@ def test_digest_fails_closed_when_every_hidden_rowid_alias_is_shadowed() -> None
     with pytest.raises(RuntimeError, match="every SQLite alias is shadowed"):
         migration._digest_sqlite_migration_state(conn)
     conn.close()
+
+
+def test_target_digest_ignores_unrelated_bulk_rows_but_tracks_cutover_state() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE risk_state (value TEXT)")
+    conn.execute("INSERT INTO risk_state VALUES ('before')")
+    conn.execute("CREATE TABLE executable_market_snapshots (payload TEXT)")
+    conn.executemany(
+        "INSERT INTO executable_market_snapshots VALUES (?)",
+        ((f"snapshot-{index}",) for index in range(10_000)),
+    )
+    before = migration._digest_sqlite_migration_state(
+        conn,
+        table_columns=migration.MIGRATION_DIGEST_COLUMNS,
+    )
+    conn.execute(
+        "UPDATE executable_market_snapshots SET payload='changed' WHERE rowid=5000"
+    )
+    unrelated = migration._digest_sqlite_migration_state(
+        conn,
+        table_columns=migration.MIGRATION_DIGEST_COLUMNS,
+    )
+    conn.execute("UPDATE risk_state SET value='after'")
+    relevant = migration._digest_sqlite_migration_state(
+        conn,
+        table_columns=migration.MIGRATION_DIGEST_COLUMNS,
+    )
+    assert unrelated == before
+    assert relevant != before
+    conn.close()
+
+
+def test_retired_closure_uses_existing_parent_index_for_normalized_hashes(
+    tmp_path: Path,
+) -> None:
+    world = tmp_path / "world.db"
+    conn = _create_world(world)
+    plan = conn.execute(
+        f"""
+        EXPLAIN QUERY PLAN
+        WITH RECURSIVE retired(certificate_id, certificate_hash) AS (
+            SELECT certificate_id, lower(certificate_hash)
+              FROM {migration.DECISION_TABLE}
+             WHERE mode != ?
+            UNION
+            SELECT child.certificate_id, lower(child.certificate_hash)
+              FROM retired
+              JOIN {migration.EDGE_TABLE} edge
+                ON edge.parent_certificate_hash = retired.certificate_hash
+              JOIN {migration.DECISION_TABLE} child
+                ON child.certificate_id = edge.child_certificate_id
+        )
+        SELECT COUNT(*) FROM retired
+        """,
+        (migration.LIVE_MODE,),
+    ).fetchall()
+    detail = "\n".join(str(row[3]) for row in plan)
+    assert "idx_decision_certificate_edges_parent" in detail
+    conn.close()
+
+
+def test_plan_timeout_interrupts_sql_before_unbounded_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = tmp_path / "world.db"
+    trades = tmp_path / "trades.db"
+    world_conn = _create_world(world)
+    world_conn.close()
+    trades_conn = _create_trades(trades)
+    trades_conn.close()
+    monkeypatch.setattr(migration._Deadline, "expired", lambda _: True)
+    with pytest.raises(migration.PreflightTimeout, match="wall-time budget"):
+        migration.plan_world_decision_graph(
+            world,
+            trades,
+            preflight_timeout_seconds=1,
+        )
 
 
 def test_runtime_json_recovery_rejects_unrelated_external_change(tmp_path: Path) -> None:
