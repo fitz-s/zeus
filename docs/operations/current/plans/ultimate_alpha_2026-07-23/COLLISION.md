@@ -80,6 +80,24 @@ m_e = m_x = 1 tick(全局唯一摩擦边际,来自 spec)。
 - **C** evaluate_exit 统一(C3 形式)+ RiskGuard 全局化 + Day0 RED 豁免删除。
 - **D** certificate valid_until + release 边界撤单(continuous_redecision 接线;
   缺 next-issue 元数据 → 新预报条件敞口 fail closed)。
+  **executor-boundary taker check(considered, deferred to PR-2)**: measured
+  reachability 2026-07-24 — `valid_until` lives only on `CachedBelief`
+  (`_row_to_belief`, continuous_redecision.py) and is consumed by the entry
+  screen (`enqueue_live_redecisions`) and the resting-order pull trigger; it
+  is never threaded into `belief_payload`, `EventSubmissionReceipt`, or the
+  certificate chain (`DecisionCompiler.compile_authority_graph` →
+  `final_intent_cert`/`execution_command_cert`) that reaches
+  `execute_final_intent`/`_live_order` — adding the check at the taker submit
+  boundary today means inventing new plumbing across three files, which this
+  task refuses to do unbounded. The exposure this leaves open is narrow: a
+  taker submit follows its enqueue-time entry-screen certificate check by
+  seconds, not minutes; FC-03 (execution freshness) already re-fetches
+  executable-price truth at the submit boundary independent of the belief's
+  validity window; and the residual staleness window is bounded by tick
+  cadence, not by the forecast-issue cadence that `valid_until` guards
+  against. The check belongs with PR-2's executor rework, when the
+  certificate chain is rebuilt to carry belief provenance through to submit
+  rather than being bolted onto the current one-off lambda seam.
 - **E** 测试迁移(载重前十文件)+ replay_parity + schema fingerprint 重 pin +
   milestone PR。
 
