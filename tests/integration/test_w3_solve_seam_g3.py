@@ -19321,7 +19321,7 @@ def _adapter_sell_actuation(
         median_payoff_usd=proceeds,
         wealth_after_loss_usd=loss_after,
         wealth_after_win_usd=win_after,
-        expected_value_diagnostic_usd=robust_ev,
+        expected_value_usd=robust_ev,
     )
     expected_terminal = ExpectedTerminalWealthCertificate(
         probability_basis="POSTERIOR_PREDICTIVE_MEAN",
@@ -19431,7 +19431,6 @@ def test_global_sell_jit_rejects_regressed_day0_maturity(monkeypatch):
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
-        real_order_submit_enabled=True,
         preflight_only=True,
         preflight_receipt=None,
     )

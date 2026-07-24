@@ -121,8 +121,6 @@ from src.probability.outcome_space import (
     OutcomeSpaceError,
     compute_topology_hash,
 )
-from src.strategy import utility_ranker
-
 # ---------------------------------------------------------------------------
 # Typed no-trade / fault reasons unique to the bridge (the spine owns the rest).
 # ---------------------------------------------------------------------------
@@ -320,9 +318,6 @@ def _prepare_global_family(
     probability_authority: str | None = None,
     captured_at_utc: datetime,
     max_age: timedelta,
-    holdings_snapshot: Any | None = None,
-    solution_plan: Any | None = None,
-    solution_projection: Any | None = None,
     day0_exit_authority_status: str = "not_applicable",
     day0_exit_authority_reason: str = "non_day0_family",
 ) -> PreparedGlobalFamily:
@@ -428,9 +423,6 @@ def _prepare_global_family(
         candidate_seeds=tuple(seeds),
         posterior_id=posterior_id,
         probability_authority=probability_authority,
-        holdings_snapshot=holdings_snapshot,
-        solution_plan=solution_plan,
-        solution_projection=solution_projection,
         day0_exit_authority_status=exit_status,
         day0_exit_authority_reason=exit_reason,
         sell_action_authority_identity=sell_authority_identity,
@@ -1839,9 +1831,6 @@ def decide_family_via_spine(
                     ),
                     captured_at_utc=captured_at_utc,
                     max_age=global_probability_max_age,
-                    holdings_snapshot=holdings_snapshot,
-                    solution_plan=solution_plan,
-                    solution_projection=solution_projection,
                     day0_exit_authority_status=(
                         str(
                             payload.get("_edli_day0_exit_authority_status")
