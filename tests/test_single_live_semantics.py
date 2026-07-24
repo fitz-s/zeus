@@ -227,6 +227,23 @@ def test_cutover_deletion_constant_cannot_control_live_mutation(tmp_path: Path) 
     assert any("controls mutation of 'mode'" in item for item in violations(tmp_path))
 
 
+def test_cutover_helper_cannot_launder_deletion_constant_into_control(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "scripts" / "migrations" / "202607_single_live_semantics_cutover.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "RETIRED_CONFIG_KEYS = ('entry_forecast_' + 'rollout',)\n"
+        "CONTROL = 'mode'\n"
+        "config = {}\n"
+        "def apply(value):\n"
+        "    config[CONTROL] = value\n"
+        "apply(RETIRED_CONFIG_KEYS[0])\n",
+        encoding="utf-8",
+    )
+    assert any("flows into 'mode'" in item for item in violations(tmp_path))
+
+
 def test_cutover_deletion_constant_is_allowed_only_as_cleanup_target(tmp_path: Path) -> None:
     script = tmp_path / "scripts" / "migrations" / "202607_single_live_semantics_cutover.py"
     script.parent.mkdir(parents=True)

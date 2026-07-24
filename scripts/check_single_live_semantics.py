@@ -346,11 +346,14 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
 
     literal_bindings = _literal_bindings(tree, excluded=CUTOVER_RETIRED_ASSIGNMENTS)
     assignments: list[tuple[list[ast.expr], ast.expr]] = []
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             assignments.append((node.targets, node.value))
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             assignments.append(([node.target], node.value))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions[node.name] = node
 
     tainted = set(CUTOVER_RETIRED_ASSIGNMENTS)
     changed = True
@@ -364,6 +367,48 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                     if name not in tainted:
                         tainted.add(name)
                         changed = True
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            function = functions.get(node.func.id)
+            if function is None:
+                continue
+            positional = [*function.args.posonlyargs, *function.args.args]
+            for argument, parameter in zip(node.args, positional, strict=False):
+                if _expr_uses_names(argument, tainted) and parameter.arg not in tainted:
+                    tainted.add(parameter.arg)
+                    changed = True
+            if function.args.vararg is not None:
+                for argument in node.args[len(positional) :]:
+                    if (
+                        _expr_uses_names(argument, tainted)
+                        and function.args.vararg.arg not in tainted
+                    ):
+                        tainted.add(function.args.vararg.arg)
+                        changed = True
+            parameters = {
+                parameter.arg: parameter
+                for parameter in [*positional, *function.args.kwonlyargs]
+            }
+            for keyword in node.keywords:
+                if keyword.arg is None:
+                    continue
+                parameter = parameters.get(keyword.arg)
+                if (
+                    parameter is not None
+                    and _expr_uses_names(keyword.value, tainted)
+                    and parameter.arg not in tainted
+                ):
+                    tainted.add(parameter.arg)
+                    changed = True
+                elif (
+                    parameter is None
+                    and function.args.kwarg is not None
+                    and _expr_uses_names(keyword.value, tainted)
+                    and function.args.kwarg.arg not in tainted
+                ):
+                    tainted.add(function.args.kwarg.arg)
+                    changed = True
 
     out: list[str] = []
     for targets, value in assignments:
