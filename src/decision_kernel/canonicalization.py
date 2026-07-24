@@ -125,8 +125,8 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_terminal_median_payoff_usd",
     "global_terminal_wealth_after_loss_usd",
     "global_terminal_wealth_after_win_usd",
-    "global_cut_time_expected_value_diagnostic_usd",
-    "global_expected_value_diagnostic_usd",
+    "global_cut_time_expected_value_usd",
+    "global_expected_value_usd",
     "global_expected_value_semantics",
     "global_terminal_payoff_semantics",
 )
@@ -359,8 +359,8 @@ def qkernel_global_current_state_rejection_reason(
         "global_terminal_median_payoff_usd",
         "global_terminal_wealth_after_loss_usd",
         "global_terminal_wealth_after_win_usd",
-        "global_cut_time_expected_value_diagnostic_usd",
-        "global_expected_value_diagnostic_usd",
+        "global_cut_time_expected_value_usd",
+        "global_expected_value_usd",
     ):
         try:
             value = float(economics.get(field))
@@ -387,8 +387,8 @@ def qkernel_global_current_state_rejection_reason(
     median_payoff = numeric["global_terminal_median_payoff_usd"]
     wealth_after_loss = numeric["global_terminal_wealth_after_loss_usd"]
     wealth_after_win = numeric["global_terminal_wealth_after_win_usd"]
-    cut_ev = numeric["global_cut_time_expected_value_diagnostic_usd"]
-    expected_value = numeric["global_expected_value_diagnostic_usd"]
+    cut_ev = numeric["global_cut_time_expected_value_usd"]
+    expected_value = numeric["global_expected_value_usd"]
     if not (0.0 <= lcb <= point <= 1.0):
         return "probability_order"
     if not (0.0 < cost < 1.0 and edge > 0.0):
@@ -465,7 +465,7 @@ def qkernel_global_current_state_rejection_reason(
     ):
         return "global_terminal_payoff_identity"
     if economics["global_expected_value_semantics"] != (
-        "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+        "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
     ):
         return "global_expected_value_semantics"
     if economics["global_terminal_payoff_semantics"] != "BINARY_0_1":

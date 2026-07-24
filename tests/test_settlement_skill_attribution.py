@@ -984,6 +984,45 @@ def _seed_attribution_row(
     )
 
 
+def test_LXE_multiple_entry_certificates_are_explicitly_unattributable(tmp_path) -> None:
+    from src.analysis.settlement_skill_attribution import (
+        _position_decision_attribution_row,
+    )
+
+    world = sqlite3.connect(tmp_path / "world.db")
+    trades_path = tmp_path / "trades.db"
+    trades = sqlite3.connect(trades_path)
+    _seed_attribution_row(
+        trades,
+        position_id="position-ambiguous",
+        command_id="command-1",
+        resolution="ATTRIBUTED",
+        decision_certificate_hash="a" * 64,
+    )
+    trades.execute(
+        "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            "attr-position-ambiguous-2",
+            "position-ambiguous",
+            "command-2",
+            "b" * 64,
+            "ATTRIBUTED",
+            None,
+            "LIVE_DECISION",
+            "ENTRY",
+            "2026-06-20T00:01:00Z",
+            1,
+        ),
+    )
+    trades.commit()
+    trades.close()
+    world.execute("ATTACH DATABASE ? AS trades", (str(trades_path),))
+    assert _position_decision_attribution_row(
+        world, "position-ambiguous"
+    ) == ("UNATTRIBUTABLE", None)
+    world.close()
+
+
 def test_LXE_attribution_table_row_takes_precedence_over_legacy_bridge(tmp_path) -> None:
     """A position with an ATTRIBUTED position_decision_attribution row resolves its
     certificate hash from THAT row, even when the legacy (condition_id, direction)

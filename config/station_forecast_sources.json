@@ -18,7 +18,7 @@
       "settlement_aligned": true,
       "settlement_source_type": "wunderground_rcss_metar",
       "auth": "env CWA_API_KEY (forecast-live plist) or gitignored config/cwa_secret.json — NEVER committed",
-      "notes": "CWA 鄉鎮天氣預報 (F-D0047-063), Songshan district 松山區 which contains RCSS (Taipei-Songshan), the SAME station the Taipei market settles on (Wunderground RCSS METAR daily-max). Research-disabled until it has durable promotion evidence and an entry-authorized registry role.",
+      "notes": "CWA 鄉鎮天氣預報 (F-D0047-063), Songshan district 松山區 which contains RCSS (Taipei-Songshan), the SAME station the Taipei market settles on (Wunderground RCSS METAR daily-max). Live ingestion and source-role authority are defined by this row and the source registry.",
       "_grading_note": "CWA-vs-gridded-vs-settlement forward grading: scripts/grade_cwa_township_forward.py"
     },
     "hko_fnd": {

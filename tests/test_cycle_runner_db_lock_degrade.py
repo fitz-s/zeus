@@ -56,7 +56,6 @@ def _make_minimal_run_cycle_deps(monkeypatch):
     # Risk level — return GREEN so no early exits.
     from src.riskguard.risk_level import RiskLevel
     monkeypatch.setattr(cr, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(cr, "get_force_exit_review", lambda: False)
 
 
 # ---------------------------------------------------------------------------

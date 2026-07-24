@@ -14,7 +14,7 @@ Authority basis: external "Zeus Data Ingest + Collection Efficiency Refactor" sp
 Give Zeus a first-class **temporal control plane** over data collection: every source's
 time semantics (issue / release / safe-fetch / event-time vs write-time / freshness /
 expiry) become typed, queryable, and CI-lintable — so "data present but temporally wrong"
-(early, late, stale, shadow, backfilled, wrong-cycle, wrong-local-day) becomes a
+(early, late, stale, retired, backfilled, wrong-cycle, wrong-local-day) becomes a
 detectable, fail-closed category instead of a silent live-money failure.
 
 ## Phase 0 — Ground-truth audit verdict (COMPLETE 2026-05-24)
@@ -23,11 +23,11 @@ The spec author never ran the repo (GitHub-connector only, no tests). Audited lo
 claims against actual code/config. Verdicts:
 
 - VERIFIED: safe_fetch 485min + 00/12 full / 06/18 short (calendar L9-82); Open-Meteo
-  SHADOW_ONLY + TIGGE backfill_only (calendar L97-120); OpenData ownership env switch
+  NON_AUTHORITATIVE + TIGGE backfill_only (calendar L97-120); OpenData ownership env switch
   `_ingest_main_owns_opendata() = _forecast_live_owner() != "forecast_live"` (ingest_main:59-60);
   fast executor mw=4, UMA listener on `fast` writes DB via record_resolution (ingest_main:1463-1656);
   mx2t6 param deprecated → live fetch uses mx2t3 (`open_data_param:"mx2t3" # was mx2t6 … API ValueError`,
-  ecmwf_open_data.py:145); source_time_frontier table absent.
+  ecmwf_open_data.py:145); retired source-time table table absent.
 - REFUTED / OVERCLAIMED: UMA "scans from genesis / unbounded" — cursor + `_UMA_MAX_BLOCKS_PER_TICK=100_000`
   ALREADY exist (ingest_main:897,1017-1022). UMA work shrinks to era_end_block guard + fast-executor
   DB-write split only.
@@ -42,7 +42,7 @@ claims against actual code/config. Verdicts:
     * src/contracts/source_family.py, forecast_ingest_protocol.py (family/authority-tier)
   Methodology law forbids parallel wrapper layers. DECISION: do NOT author a new contract registry.
   The genuinely-missing piece is a TemporalPolicy that COMPUTES safe_fetch/freshness/expiry from
-  the EXISTING calendar, plus (PR2) the source_time_frontier table + report.
+  the EXISTING calendar, plus (PR2) the retired source-time table table + report.
 - CALENDAR DRIFT (real, pre-existing, OUT OF PR1 SCOPE): calendar still says `parameter: mx2t6` /
   `track: mx2t6_high` while code fetches mx2t3. Lint REPORTS it; a later scoped PR fixes the calendar.
   PR1 does not edit the calendar (source-routing change → planning-lock + behavior risk).
@@ -59,8 +59,8 @@ New files only. No scheduler / schema / ingestion-function / calendar edits.
 - `scripts/source_contract_lint.py` — INTER-REGISTRY COHERENCE (not a new registry). Assertions:
     1. calendar.source_id ⊆ data_sources_registry.sources[].id
     2. forecast_source_registry entry_primary ROLE ⇒ calendar live_authorization=true
-       (diagnostic-only / experimental-backfill ⇒ NOT live; keyed on allowed_roles + backfill_only, not tier)
-    3. partial_policy=SHADOW_ONLY ⇒ live_authorization=false
+       (read-only evidence / experimental-backfill ⇒ NOT live; keyed on allowed_roles + backfill_only, not tier)
+    3. partial_policy=NON_AUTHORITATIVE ⇒ live_authorization=false
     4. backfill_only=true ⇒ live_authorization=false
     5. code data_version param (snapshot_ingest_contract mx2t3) matches SDK param (ecmwf_open_data.py:145);
        MISMATCH vs calendar mx2t6 = drift report (advisory)
@@ -81,9 +81,9 @@ New files only. No scheduler / schema / ingestion-function / calendar edits.
 - PR2 (RESHAPED, as-built): collection_frontier.py + data_collection_frontier_report.py — IN-MEMORY
   frontier from existing surfaces (source_run/readiness_state/job_run/coverage + health/heartbeat JSON),
   read-only, NO new table. Freshness on SOURCE/EVENT time (backfill write-time cannot fake freshness);
-  missing data fails closed to UNKNOWN_BLOCKED. Reason: a persisted source_time_frontier is forecast-class
+  missing data fails closed to UNKNOWN_BLOCKED. Reason: a persisted retired source-time table is forecast-class
   → SCHEMA_FORECASTS_VERSION bump → live daemon schema-gate (SystemExit) → operator-gated, NOT zero-change.
-- PR2b (OPERATOR-GATED, deferred): persist source_time_frontier + source_time_variance_sample (forecast-class
+- PR2b (OPERATOR-GATED, deferred): persist retired source-time table + source_time_variance_sample (forecast-class
   for INV-37 same-DB write locality; deviates from spec world-class rec — documented for critic/operator) +
   SCHEMA_FORECASTS_VERSION bump + db_table_ownership + table_registry + live forecasts-DB migration (dry-run+rollback).
 - PR3: source_job_registry inventory of existing scheduled jobs (advisory lint, no scheduler replacement).
@@ -91,7 +91,7 @@ New files only. No scheduler / schema / ingestion-function / calendar edits.
 - PR5: source_watermarks + bounded backfill; UMA era_end_block guard (cursor/cap already exist).
 - PR6: scheduler adapter builds APScheduler from JobSpec; executor classes (live/backfill/derived/io/heartbeat).
 - PR7: row-level temporal provenance columns + live-reader gating (behind flag).
-- PR8: derived/diagnostic worker separation; move UMA DB-write off fast executor.
+- PR8: derived/evidence worker separation; move UMA DB-write off fast executor.
 
 ## Safety rails (whole program)
 
@@ -110,7 +110,7 @@ plane (requirements A–F with acceptance tests). Delivered as 3 structural deci
   trading scheduler is never rebuilt); SourceJobSpec.dispatch_kind + family; per-family singleton.
   Surfaced + verified the WU daily ACTIVE_DUPLICATE (tracked _KNOWN_OPEN, operator ownership
   decision pending: remove main.wu_daily vs add lock).
-- Decision 3 (C+D): compute_frontier federates over 8 families; persisted source_time_frontier
+- Decision 3 (C+D): compute_frontier federates over 8 families; persisted retired source-time table
   table (SCHEMA_FORECASTS_VERSION 6→7, idempotent UPSERT, backfill-cannot-refresh-live invariant).
 - Decision 1 (A+F): ZEUS_DATA_COLLECTION_MODE=registry (DEFAULT) | legacy (rollback); both ingest
   daemons build from the registry via a fail-fast boot assert (one spec source, two consumers).

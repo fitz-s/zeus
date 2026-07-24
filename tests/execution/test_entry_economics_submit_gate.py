@@ -84,9 +84,9 @@ def _current_state_econ(**overrides) -> dict:
         global_terminal_median_payoff_usd="0.55",
         global_terminal_wealth_after_loss_usd="99.55",
         global_terminal_wealth_after_win_usd="100.55",
-        global_cut_time_expected_value_diagnostic_usd=0.15,
-        global_expected_value_diagnostic_usd=0.15,
-        global_expected_value_semantics="DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN",
+        global_cut_time_expected_value_usd=0.15,
+        global_expected_value_usd=0.15,
+        global_expected_value_semantics="POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN",
         global_terminal_payoff_semantics="BINARY_0_1",
     )
     current.update(overrides)
@@ -1052,8 +1052,8 @@ def test_entry_economics_current_state_tail_price_requires_economics_not_nominal
         global_terminal_median_payoff_usd=str(shares - expected_cost),
         global_terminal_wealth_after_loss_usd=str(100.0 - expected_cost),
         global_terminal_wealth_after_win_usd=str(100.0 + (1.0 - price) * shares),
-        global_cut_time_expected_value_diagnostic_usd=edge * shares,
-        global_expected_value_diagnostic_usd=edge * shares,
+        global_cut_time_expected_value_usd=edge * shares,
+        global_expected_value_usd=edge * shares,
     )
     verdict = _entry_economics_component(
         _intent(
@@ -1103,8 +1103,8 @@ def test_entry_economics_current_state_tail_still_requires_positive_robust_utili
         global_terminal_median_payoff_usd=str((1.0 - price) * shares),
         global_terminal_wealth_after_loss_usd=str(100.0 - price * shares),
         global_terminal_wealth_after_win_usd=str(100.0 + (1.0 - price) * shares),
-        global_cut_time_expected_value_diagnostic_usd=edge * shares,
-        global_expected_value_diagnostic_usd=edge * shares,
+        global_cut_time_expected_value_usd=edge * shares,
+        global_expected_value_usd=edge * shares,
     )
     verdict = _entry_economics_component(
         _intent(

@@ -8,7 +8,7 @@
 #   distributions as DISTINCT ERAS (model terms, not filters), then does a pooled/free-era/EB-partial-
 #   pooling triple fit + era-effect LRT + parametric-bootstrap boundary test. SHIPPED estimator is
 #   ALWAYS EB partial pooling (addendum D1, supersedes the A5 pretest switch — pretest estimators have
-#   unbounded relative risk near the null); the LRT/bootstrap p stay as REPORTED DIAGNOSTICS only.
+#   unbounded relative risk near the null); the LRT/bootstrap p stay as REPORTED OBSERVATIONS only.
 #   This is the deploy unlock for the 6117 historical settlements. NOTE (won-bin provenance fix
 #   2026-06-13): the historical era matches its won bin by the calibration_pairs OWN outcome=1 label via
 #   EXACT equality — NOT the coarse market winning_bin and NOT _winning_index's substring search, which
@@ -1220,7 +1220,7 @@ def _run_era_mode(cells, k_old, w_old, seed: int = 17, bootstrap_reps: int = ERA
                                   reps=bootstrap_reps, seed=seed)
 
     # Decision-scale era impact (addendum A5): UCB95 of max traded-bin prob shift pooled vs free.
-    # REPORTED DIAGNOSTIC ONLY (addendum D1) — no longer a pool/no-pool switch.
+    # REPORTED OBSERVATION ONLY (addendum D1) — no longer a pool/no-pool switch.
     per_era_shift, shift_ucb95 = _max_traded_bin_shift_ucb(cells_by_era, pooled_b_by_city, k_pool,
                                                            free_blocks)
 
@@ -1229,14 +1229,14 @@ def _run_era_mode(cells, k_old, w_old, seed: int = 17, bootstrap_reps: int = ERA
     # near the null, so we never switch on the tests. Instead we ALWAYS ship EB: Sigma_era -> 0 makes EB
     # collapse to full pooling automatically (no era effect), real era effects make it near-separate, and
     # EB -> newest-era MLE as newest-era n grows. The LRT p, bootstrap p, and decision-scale shift stay
-    # in the artifact purely as DIAGNOSTICS (reported, never branched on).
+    # in the artifact purely as OBSERVATIONS (reported, never branched on).
     p_era = boot_p if math.isfinite(boot_p) else p_lrt
     verdict = "EB_PARTIAL_POOLING"
     verdict_reason = ("addendum D1: ALWAYS ship EB partial pooling — never pretest-switch full-vs-EB "
                       "(unbounded relative risk near the null). Sigma_era->0 auto-collapses EB to full "
                       "pooling; era effects make it near-separate. LRT/bootstrap p + decision-scale shift "
-                      "below are REPORTED DIAGNOSTICS only.")
-    # Diagnostic-only flags (what a pretest WOULD have said — for human review, not used by the fit).
+                      "below are REPORTED OBSERVATIONS only.")
+    # Observation-only flags (what a pretest WOULD have said — for human review, not used by the fit).
     diag_stat_absent = (math.isfinite(p_era) and p_era >= P_ERA_POOL)
     diag_pract_absent = (math.isfinite(shift_ucb95) and shift_ucb95 < EPSILON_POOL)
     diag_pretest_would_say = ("FULL_POOLING" if (diag_stat_absent and diag_pract_absent)

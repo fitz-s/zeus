@@ -333,23 +333,23 @@ The command journal enforces executable-truth and risk contracts; it must not
 categorically reject a sibling token merely because another family token is
 open (INV-45).
 
-### 10.4 Live / Backtest Boundary — NO SHADOW LANE
+### 10.4 Live / Backtest Boundary — NO PARALLEL_OBSERVE_ONLY LANE
 
 - Live may act.
 - Backtest may evaluate (walk-forward, settlement-truth graded, no
   market-price replay).
 
-There is NO shadow lane (operator law 2026-06-13 "不准再shadow了",
-reaffirmed 2026-07-19 "shadow不应该存在…从源头上就不存在"). A change is
+There is NO parallel observe-only lane (operator law 2026-06-13 "不准再parallel observe-only了",
+reaffirmed 2026-07-19 "parallel observe-only不应该存在…从源头上就不存在"). A change is
 proven by mathematics/statistics on already-settled history plus invariant
 tests, then goes LIVE DIRECT — or it is not made. Time-boxed parallel
-observation ("collect N days of shadow data", "keep cutover reversible for
+observation ("collect N days of parallel runtime data", "keep cutover reversible for
 N days") is a forbidden proposal shape: correctness is proven by evidence
 that already exists, never by waiting. Promotion to live requires that
 proof and explicit operator approval; rollback is a git revert, not a
 standing observation window.
 
-Replay is diagnostic until it has full market-price linkage, active sizing
+Replay is evidence check until it has full market-price linkage, active sizing
 parity, and selection-family parity with live control units.
 
 ### 10.5 Authority-Loss Degradation
@@ -443,7 +443,7 @@ runtime, or truth ownership, the following must be established:
 
 1. What truth Zeus is trading or protecting in this task.
 2. Which feed/surface determines the money path.
-3. Which surface is only evidence or diagnostics.
+3. Which surface is only evidence or evidence checks.
 4. Which current-fact surface must be fresh.
 5. Which fatal misread is most likely.
 6. Where to stop if current facts are stale or missing.

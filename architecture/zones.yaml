@@ -64,7 +64,7 @@ zones:
       - tests
       - replay_or_waiver
   K4_experimental:
-    description: Disposable experiments, notebooks, ad hoc diagnostics.
+    description: Disposable experiments, notebooks, ad hoc telemetry.
     directories:
       - notebooks
       - exploratory

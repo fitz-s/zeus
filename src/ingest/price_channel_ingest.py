@@ -130,13 +130,6 @@ _market_substrate_refresh_lock = threading.Lock()
 _held_quote_seed_refresh_lock = threading.Lock()
 _candidate_quote_seed_refresh_lock = threading.Lock()
 
-# Live-execution-mode constants (kept aligned with src/main.py) — needed by the
-# reconcile-runtime gate. Kept LOCAL here so the lane module never imports src.main.
-LIVE_EXECUTION_MODES = {
-    "legacy_cron",
-    "edli_live",
-    "disabled",
-}
 EDLI_EVENT_DRIVEN_MODES = {
     "edli_live",
 }
@@ -454,16 +447,9 @@ def _price_channel_quote_refresh_failed(
     return False, None
 
 
-# Required env for the user-channel WS (moved verbatim from src/main.py:1867).
-USER_CHANNEL_REQUIRED_ENV_VARS = (
-    "ZEUS_USER_CHANNEL_WS_ENABLED",
-    "POLYMARKET_USER_WS_CONDITION_IDS",
-)
-
-
 # ---------------------------------------------------------------------------
 # Small pure helpers (moved verbatim from src/main.py). _settings_section /
-# _live_execution_mode / _truthy_env / _edli_bounded_positive_int are tiny pure
+# _truthy_env / _edli_bounded_positive_int are tiny pure
 # utilities; the lane module carries its own copies so it never imports src.main.
 # (_edli_bounded_positive_int is ALSO used by staying src.main code, so src.main
 # keeps its copy too — both copies are byte-identical pure functions.)
@@ -485,13 +471,6 @@ def _settings_section(name: str, default=None):
             except KeyError:
                 pass
         return default
-
-
-def _live_execution_mode(edli_cfg: dict) -> str:
-    mode = str(edli_cfg.get("live_execution_mode") or "legacy_cron")
-    if mode not in LIVE_EXECUTION_MODES:
-        raise ValueError(f"UNSUPPORTED_LIVE_EXECUTION_MODE:{mode}")
-    return mode
 
 
 def _truthy_env(name: str) -> bool:
@@ -695,32 +674,22 @@ def _auto_derive_user_channel_condition_ids(
 
 
 # ---------------------------------------------------------------------------
-# PRODUCER 1: the user-channel WS ingestor thread (moved verbatim from
-# src/main.py:_start_user_channel_ingestor_if_enabled). THIS is the WS-failure
+# PRODUCER 1: the user-channel WS ingestor thread. THIS is the WS-failure
 # latch WRITER — in P3 its record_gap can only poison THIS process's
 # ws_gap_guard, never the order daemon's (the reduce_only-forever antibody).
 # ---------------------------------------------------------------------------
 
-def _start_user_channel_ingestor_if_enabled() -> None:
-    """Start M3 Polymarket user-channel ingest in a daemon thread when enabled.
+def _start_user_channel_ingestor() -> None:
+    """Start M3 Polymarket user-channel ingest in a daemon thread.
 
-    Disabled by default so M3 adds no live WebSocket side effect until an
-    operator explicitly enables `ZEUS_USER_CHANNEL_WS_ENABLED=1` and supplies
-    condition IDs or enables condition auto-derive. L2 API credentials come
-    from the Polymarket adapter's signer-bound SDK client, not static env. If
-    enabled but misconfigured, the WS guard records an auth/config gap so new
-    submits fail closed.
-
-    Live-blockers 2026-05-01: when the WS is NOT enabled (or required env
-    vars are missing) we now emit a single CLEAR WARNING line listing every
-    missing var. Today the silent skip leaves operators with the cryptic
-    ``ws_user_channel.gap_reason='not_configured'`` symptom and no surface
-    explanation of which env vars to add to the launchd plist before the
-    daemon can leave reduce_only mode.
+    Condition IDs must be supplied or auto-derived. L2 API credentials come
+    from the Polymarket adapter's signer-bound SDK client, not static env. A
+    condition-ID or credential failure records a WS gap so new submits fail
+    closed; transient connection failures retry in the ingestor thread.
 
     Auto-derive (2026-05-01): when ``ZEUS_USER_CHANNEL_WS_AUTO_DERIVE=1`` is
-    set together with the master toggle and ``POLYMARKET_USER_WS_CONDITION_IDS``
-    is empty, the subscription list is derived from the live market scanner
+    set and ``POLYMARKET_USER_WS_CONDITION_IDS`` is empty, the subscription
+    list is derived from the live market scanner
     so the daemon subscribes to exactly the markets it can trade, without
     a hardcoded plist value that would drift from on-chain truth as markets
     rotate (operator directive 2026-05-01: hardcoded values are structural
@@ -730,17 +699,6 @@ def _start_user_channel_ingestor_if_enabled() -> None:
     ``condition_ids_missing``, and no exception escapes boot.
     """
     global _user_channel_ingestor, _user_channel_thread
-    if not _truthy_env("ZEUS_USER_CHANNEL_WS_ENABLED"):
-        missing = [
-            name for name in USER_CHANNEL_REQUIRED_ENV_VARS
-            if not (os.environ.get(name) or "").strip()
-        ]
-        logger.warning(
-            "user-channel WS not configured: missing env vars %s; "
-            "daemon stays in reduce_only=True mode",
-            missing,
-        )
-        return
     if _user_channel_thread is not None and _user_channel_thread.is_alive():
         return
 
@@ -767,7 +725,10 @@ def _start_user_channel_ingestor_if_enabled() -> None:
                 "failed; check src.data.market_scanner."
             )
             return
-        raise RuntimeError("POLYMARKET_USER_WS_CONDITION_IDS is required when ZEUS_USER_CHANNEL_WS_ENABLED=1")
+        raise RuntimeError(
+            "POLYMARKET_USER_WS_CONDITION_IDS is required unless "
+            "ZEUS_USER_CHANNEL_WS_AUTO_DERIVE=1 yields condition IDs"
+        )
 
     from src.data.polymarket_client import PolymarketClient
     from src.control.ws_gap_guard import record_gap
@@ -1484,14 +1445,6 @@ def _edli_durable_fill_bridge_scan(
     return bridged
 
 
-def _edli_user_channel_reconcile_runtime_enabled(edli_cfg: dict) -> bool:
-    if not edli_cfg.get("enabled"):
-        return False
-    if bool(edli_cfg.get("edli_user_channel_reconcile_enabled", False)):
-        return True
-    return False
-
-
 # ---------------------------------------------------------------------------
 # PRODUCER 2: the user-channel / reconcile cycle (moved verbatim from
 # src/main.py:_edli_user_channel_reconcile_cycle). WRITES the durable fill
@@ -1502,16 +1455,14 @@ def _edli_user_channel_reconcile_runtime_enabled(edli_cfg: dict) -> bool:
 def _edli_user_channel_reconcile_cycle() -> None:
     """EDLI user-channel/reconcile service boundary.
 
-    Disabled by default. The live-order aggregate may only accept fill/lifecycle
-    facts from authenticated user channel or explicit reconcile writers; public
+    The live-order aggregate may only accept fill/lifecycle facts from
+    authenticated user channel or explicit reconcile writers; public
     market-channel data remains quote evidence only.
     """
     from src.observability.scheduler_health import _write_scheduler_health
     from src.state.db import get_world_connection_with_trades_required
 
     edli_cfg = _settings_section("edli_v1", {})
-    if not _edli_user_channel_reconcile_runtime_enabled(edli_cfg):
-        return
     max_messages = int(edli_cfg.get("edli_user_channel_reconcile_max_messages", 50))
     pending_limit = int(edli_cfg.get("edli_user_channel_reconcile_pending_limit", 50))
     now = datetime.now(timezone.utc)
@@ -3124,8 +3075,6 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
     from src.observability.scheduler_health import _write_scheduler_health
 
     edli_cfg = _settings_section("edli_v1", {})
-    if not edli_cfg.get("enabled") or not edli_cfg.get("market_channel_ingestor_enabled"):
-        return
     global _edli_market_channel_thread
     if _edli_market_channel_thread is not None and _edli_market_channel_thread.is_alive():
         candidate_refresh = _edli_refresh_candidate_priority_quote_evidence(
@@ -3154,7 +3103,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             )
         health = {
             "thread": "alive",
-            "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+            "quote_cache_enabled": True,
             "fill_authority": "user_channel_or_reconcile_only",
             "held_quote_refresh": "delegated_to_edli_held_quote_refresh",
             "candidate_quote_refresh": candidate_refresh,
@@ -3277,7 +3226,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
             "day0_priority_token_ids": len(day0_priority_token_ids),
             "seed_first_token_ids": len(seed_first_token_ids),
-            "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+            "quote_cache_enabled": True,
             "fill_authority": "user_channel_or_reconcile_only",
             "skipped": "no_priority_token_metadata",
         }
@@ -3362,7 +3311,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     find_weather_markets_or_raise,
                     refresh_executable_market_substrate_snapshots,
                 )
-                from src.data.dual_run_lock import acquire_lock
+                from src.data.job_lock import acquire_lock
                 from src.state.db import get_trade_connection
 
                 substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
@@ -3513,7 +3462,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
         "day0_priority_token_ids": len(day0_priority_token_ids),
         "seed_first_token_ids": len(seed_first_token_ids),
-        "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+        "quote_cache_enabled": True,
         "fill_authority": "user_channel_or_reconcile_only",
         "thread": "started",
         "rest_seed_status": "polymarket_public_orderbook",

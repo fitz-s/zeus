@@ -4,10 +4,10 @@
 **Current code path:** `src/signal`
 **Authority status:** Dense module reference for predictive signal generation, day0 routing, diurnal logic, and uncertainty features.
 
-> **Strategy of record (2026-06-09):** this module is now a diagnostic/comparison baseline producer. The live forecast authority is the replacement chain in `src/forecast/` + `src/data/replacement_forecast_*` (`bayes_precision_fusion.fuse_bayes_precision_posterior` → `emos.bin_probability_settlement`) — authority `docs/authority/replacement_final_form_2026_06_09.md`. This module's P_raw must not cap, floor, veto, or otherwise join back into live replacement q without new authority.
+> **Strategy of record (2026-06-09):** this module is now a offline evidence/comparison baseline producer. The live forecast authority is the replacement chain in `src/forecast/` + `src/data/replacement_forecast_*` (`bayes_precision_fusion.fuse_bayes_precision_posterior` → `emos.bin_probability_settlement`) — authority `docs/authority/replacement_final_form_2026_06_09.md`. This module's P_raw must not cap, floor, veto, or otherwise join back into live replacement q without new authority.
 
 ## 1. Module purpose
-Transform forecast ensembles and observation-derived context into raw predictive distributions and day0 signals that match Zeus's discrete-settlement market objects. (Diagnostic baseline path; the live q is built by the replacement chain — see banner.)
+Transform forecast ensembles and observation-derived context into raw predictive distributions and day0 signals that match Zeus's discrete-settlement market objects. (Offline evidence baseline path; the live q is built by the replacement chain — see banner.)
 
 ## 2. What this module is not
 - Not settlement law.

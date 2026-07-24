@@ -9,16 +9,13 @@ Answers the operator's core question in one place: "what is the latest USABLE da
 this source right now, and if it's not usable, WHY?" — a temporal debugger over the
 collection plane.
 
-PR2 is READ-ONLY and computes the frontier IN MEMORY from existing surfaces. It does NOT
-persist a table: a persisted ``source_time_frontier`` would be forecast-class and bump
-``SCHEMA_FORECASTS_VERSION`` (which the live daemon gates on, SystemExit on mismatch) —
-that is an operator-gated migration deferred to PR2b. Nothing here changes live behaviour
-or writes any DB/file.
+This report computes the frontier in memory from existing surfaces and never persists a
+second freshness authority. Nothing here changes live behaviour or writes any DB/file.
 
 Inputs (all existing):
   * config/source_release_calendar.yaml  -> TemporalPolicy (safe_fetch, freshness ladder)
   * zeus-forecasts.db: source_run, readiness_state, source_run_coverage, job_run, data_coverage
-  * state/source_health.json, state/daemon-heartbeat-ingest.json (best-effort diagnostics)
+  * state/source_health.json, state/daemon-heartbeat-ingest.json (best-effort auxiliary analysis)
 
 THE load-bearing correctness rule (spec §"Backfill can look fresh"): freshness age is measured
 on the SOURCE/EVENT-time plane (source_issue_time), NEVER on a write-time plane (captured_at/
@@ -41,7 +38,7 @@ _CALENDAR_PATH = Path(__file__).resolve().parents[2] / "config" / "source_releas
 # Role a source plays, derived from its TemporalPolicy authority axes.
 _LIVE = "live"
 _BACKFILL = "backfill"
-_DIAGNOSTIC = "diagnostic"
+_AUXILIARY = "auxiliary"
 
 
 def _utcnow() -> datetime:
@@ -65,7 +62,7 @@ def _role_of(policy: TemporalPolicy) -> str:
     if policy.backfill_only:
         return _BACKFILL
     if not policy.live_authorization:
-        return _DIAGNOSTIC
+        return _AUXILIARY
     return _LIVE
 
 
@@ -76,7 +73,7 @@ class FrontierRow:
     source_id: str
     track: str
     calendar_id: str
-    role: str                                   # live / backfill / diagnostic / derived
+    role: str                                   # live / backfill / auxiliary / derived
     family: str                                 # forecast / observation / market_topology / ... (PR #329 C)
     target_local_date: Optional[str]
 
@@ -86,8 +83,8 @@ class FrontierRow:
 
     latest_attempt_at: Optional[datetime]       # source_run.fetch_started_at / job_run.started_at
     latest_success_at: Optional[datetime]       # latest source_run with status ok
-    captured_at: Optional[datetime]             # WRITE-time (diagnostic only, never freshness)
-    imported_at: Optional[datetime]             # WRITE-time (diagnostic only, never freshness)
+    captured_at: Optional[datetime]             # WRITE-time provenance, never freshness
+    imported_at: Optional[datetime]             # WRITE-time provenance, never freshness
 
     completeness_status: Optional[str]
     readiness_status: Optional[str]
@@ -392,7 +389,7 @@ def _coverage_summary(
 # plane (target_date / settled_at / created_at), NEVER a write-time column — same load-bearing rule
 # as the forecast frontier (a row written now for an old event must not read as fresh). Families
 # whose truth lives outside the forecasts connection (executable_market snapshots in the trade DB,
-# venue_user_ws state, solar, diagnostics) have NO probe here: they degrade to an honest
+# venue_user_ws state, solar, auxiliary analysis) have NO probe here: they degrade to an honest
 # COVERAGE_UNKNOWN row (the family is COVERED — it appears — but its freshness is unproven from
 # this connection) rather than fabricating a freshness number. Non-forecast rows report PRESENCE +
 # event age, not calendar-grade staleness; a per-family freshness policy is future work.
@@ -418,7 +415,7 @@ def _registry_family_role(job_role: str) -> str:
         return _BACKFILL
     if job_role == "derived":
         return "derived"
-    return _DIAGNOSTIC
+    return _AUXILIARY
 
 
 def _family_frontier_rows(
@@ -587,7 +584,7 @@ def compute_frontier(
             ))
 
         # Non-forecast family federation (PR #329 C): observation / market_topology / settlement /
-        # executable_market / venue_user_ws / solar / diagnostic. Appended so the frontier spans
+        # executable_market / venue_user_ws / solar / auxiliary. Appended so the frontier spans
         # ALL live data families, not just the forecast release calendar.
         rows.extend(_family_frontier_rows(conn, now, role_filter))
     finally:

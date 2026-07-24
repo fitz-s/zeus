@@ -71,7 +71,6 @@ def _cache(conn, *, family_id="hyp|live|Wuhan|2026-06-12|high|disc", p_yes=0.99,
         condition_ids=["0xc29", cond],
     )
 
-
 def test_belief_reads_use_indexable_prefix_ranges_not_like_scans():
     world = _mem_world()
     family_id = "hyp|live|Wuhan|2026-06-12|high|disc"
@@ -1919,82 +1918,3 @@ def _redecision_event(*, event_type: str):
         payload=payload,
         causal_snapshot_id="snap-1",
     )
-
-
-def test_redecision_event_consumed_and_belief_persisted():
-    import json
-    from dataclasses import replace
-    from datetime import datetime, timezone
-
-    from src.events.event_store import EventStore
-    from src.events.reactor import (
-        EventSubmissionReceipt,
-        OpportunityEventReactor,
-        ReactorConfig,
-    )
-    from src.state.db import init_schema
-    from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
-    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
-
-    conn = sqlite3.connect(":memory:")
-    init_schema(conn)
-    store = EventStore(conn)
-    event = _redecision_event(event_type="EDLI_REDECISION_PENDING")
-    store.insert_or_ignore(event)
-
-    submitted: list[str] = []
-
-    def _submit(ev, _dt):
-        submitted.append(ev.event_id)
-        payload = json.loads(ev.payload_json)
-        receipt = EventSubmissionReceipt(
-            submitted=False, proof_accepted=True, event_id=ev.event_id,
-            causal_snapshot_id=ev.causal_snapshot_id,
-            city=payload.get("city"), target_date=payload.get("target_date"),
-            metric=payload.get("metric"), condition_id="condition-1", token_id="yes-1",
-            executable_snapshot_id="snapshot-exec-1", family_id="family-1",
-            trade_score_positive=True, fdr_pass=True, fdr_family_id="family-1",
-            fdr_hypothesis_count=2, kelly_pass=True,
-            kelly_execution_price_type="ExecutionPrice", kelly_price_fee_deducted=True,
-            kelly_size_usd=1.0, kelly_cost_basis_id="cost-1", kelly_decision_id="kelly-1",
-            risk_decision_id="risk-1", final_intent_id="intent-1",
-            # The captured belief the adapter would attach — the reactor must persist it.
-            belief_payload={
-                "family_id": "hyp|live|Chicago|2026-05-24|high|d", "city": "Chicago",
-                "target_date": "2026-05-24", "snapshot_id": "snap-1",
-                "calibrator_model_hash": "identity", "bin_labels": ["b73", "b74"],
-                "p_posterior_vec": [0.4, 0.6], "condition_ids": ["0xa", "0xb"],
-                "q_lcb_yes_vec": [0.35, 0.55], "q_lcb_no_vec": [0.60, 0.40],
-            },
-        )
-        return replace(
-            receipt,
-            decision_proof_bundle=build_test_no_submit_proof_bundle(ev, receipt, decision_time=_dt),
-        )
-
-    reactor = OpportunityEventReactor(
-        store,
-        source_truth_gate=lambda _e: True,
-        executable_snapshot_gate=lambda _e, _dt: True,
-        riskguard_gate=lambda _e: True,
-        final_intent_submit=_submit,
-        reject=lambda *_a: None,
-        config=ReactorConfig(reactor_mode="live_no_submit"),
-        regret_ledger=NoTradeRegretLedger(store.conn),
-    )
-    result = reactor.process_pending(
-        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
-    )
-
-    # The redecision event reached the SUBMIT path (was NOT fail-closed as an unknown type).
-    assert submitted == [event.event_id], "EDLI_REDECISION_PENDING must reach the forecast decision path"
-    assert result.dead_lettered == 0
-    # P1: the belief was persisted through the reactor's OWN conn (deadlock-free), now queryable.
-    belief_rows = conn.execute(
-        "SELECT decision_id, q_lcb_yes_json, q_lcb_no_json "
-        "FROM probability_trace_fact WHERE decision_id LIKE 'edli_belief:%'"
-    ).fetchall()
-    assert len(belief_rows) == 1, "the reactor must persist the receipt belief_payload (P1)"
-    assert "hyp|live|Chicago|2026-05-24|high|d" in belief_rows[0][0]
-    assert belief_rows[0][1] == "[0.35, 0.55]"
-    assert belief_rows[0][2] == "[0.6, 0.4]"

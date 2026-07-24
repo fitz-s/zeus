@@ -4,12 +4,12 @@
 #   docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR1 SourceContract precursor).
 """SourceContract — the target-namespace declarative registry for R3 (ingest contractualization).
 
-RELOCATION, NOT DUPLICATION. ``src/data/source_contracts.py`` already established the binding
+This module is the sole source-contract binding
 law for this name: a standalone contract registry that re-declares temporal/family/tier facts
 already owned by ``config/source_release_calendar.yaml`` / ``architecture/data_sources_registry_
 2026_05_08.yaml`` / ``src/data/forecast_source_registry.py`` would be a FOURTH source of truth
 (operator directive 2026-05-24, "don't reinvent what we have, drop or reshape if needed";
-enforced by tests/test_source_contracts_view.py's read-through antibodies). This module BUILDS
+enforced by its contract tests). This module builds
 INTO the target namespace (``src/ingest/``) by relocating that composing view here and extending
 it with exactly the fields the R3 packet asks for and the old view did not yet carry: ``clock_law``
 (gridded-ceiling vs station-own-clock — the dichotomy ``_replacement_cycle_availability_poll_if_
@@ -17,7 +17,7 @@ needed`` hard-coded per call site instead of declaring), ``dependents`` (the dow
 a source's arrival triggers), and ``fetch_ref`` / ``parse_ref`` / ``clock_check_ref`` (dotted-path
 pointers into the existing fetchers — this table does NOT re-implement fetch/parse, it POINTS at
 the fetchers that already exist elsewhere, honoring the same "compose, don't duplicate" law).
-``src/data/source_contracts.py`` becomes a one-line seam re-export (see that file).
+No compatibility re-export or second contract surface exists.
 
 CLOCK LAW (notepad law, verbatim): station sources (cwa/hko) carry their own provider cycle
 clock — they must NEVER be gated behind the gridded freshness ceiling. Concretely:

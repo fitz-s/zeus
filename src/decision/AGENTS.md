@@ -2,7 +2,7 @@
 
 Module book: none yet — `architecture/module_manifest.yaml` sets `module_book: null`.
 Machine registry: `architecture/module_manifest.yaml`
-Future authority: `docs/rebuild/order_engine_implementation_architecture_2026-07-02.md` §1-3
+Future authority: `architecture/invariants.yaml` §1-3
 governs this subtree's W3/W5 disposition. It is the authority for what survives, what gets
 swapped, and what gets deleted — not this file. Re-read it before touching any module here.
 
@@ -12,8 +12,7 @@ swapped, and what gets deleted — not this file. Re-read it before touching any
 how much, and why. `family_decision_engine.decide()` is the entry point; it is NOT a solver
 (per the architecture doc §1) and is a scheduled BUILD-swap target at W3 (new `src/solve/`
 module, seam at `src/engine/qkernel_spine_bridge.py:1332`). The selection machinery
-(`qlcb_reliability_guard.py`, `selection_calibrator.py`, `selection_curse_bound.py` +
-`selection_curse_bound_loader.py`) is a scheduled W5 deletion target. This package sat
+(`qlcb_reliability_guard.py`, `selection_calibrator.py`) is a scheduled W5 deletion target. This package sat
 unregistered in `module_manifest.yaml`/`source_rationale.yaml` until the W0.4 backfill
 packet — do not let new files land here without a registry row in the same commit.
 
@@ -27,8 +26,6 @@ packet — do not let new files land here without a registry row in the same com
 | `decision_receipt.py` | Typed carrier reconstructing forecast → q → route → size | HIGH — provenance for every live candidate |
 | `qlcb_reliability_guard.py` | Price-blind OOF empirical reliability guard | MEDIUM — W5 deletion target (superseded by `selection_calibrator.py`) |
 | `selection_calibrator.py` | Selection-aware settlement q_lcb calibrator | MEDIUM — W5 deletion target |
-| `selection_curse_bound.py` | Mid-price buy_no deflation toward realized settlement rate | MEDIUM — W5 deletion target |
-| `selection_curse_bound_loader.py` | Fail-soft artifact loader for `selection_curse_bound.py` | LOW — identity no-op on any bad artifact |
 | `city_skill_gate.py` | Per-city historical settlement-skill admission gate | MEDIUM — disposition not confirmed in architecture doc |
 
 ## Domain rules
@@ -36,12 +33,10 @@ packet — do not let new files land here without a registry row in the same com
 - `family_decision_engine.decide()` filter order is load-bearing: `direction_law_ok` ->
   `coherence_allows` -> (`edge_lcb>0` & `optimal_delta_u>0`) -> select by max total robust
   utility. Do not reorder without re-reading `docs/rebuild/consult_build_spec.md`.
-- The scalar `robust_trade_score` is telemetry only — it must never select a candidate.
-- Edge is the vector dot product `q @ payoff - route.avg_cost.value`; a scalar
-  `q_i - price` reduction must not be substituted for it (that is the pre-rebuild bug this
-  package replaced).
-- Selection-machinery files (`qlcb_reliability_guard.py`, `selection_calibrator.py`,
-  `selection_curse_bound*.py`) must degrade to identity (no-op) on missing/malformed
+- Edge is the vector dot product `q @ payoff - route.avg_cost.value`; it must not be
+  reduced to a single-bin calculation.
+- Selection-machinery files (`qlcb_reliability_guard.py`, `selection_calibrator.py`) must degrade
+  to identity (no-op) on missing/malformed
   artifacts — never fabricate a bound or silently widen admission.
 - `market_coherence.py` must never mutate the model `q`; it only blocks or (post-W3)
   reprioritizes — do not wire it into a q-adjustment path.

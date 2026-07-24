@@ -15,7 +15,7 @@ Two-Rail logic:
   Rail 2 — Continuous linear discount: D = min(0.09, 0.20 × shortfall)
             with 1.25× amplification when N_platt_samples < N_star
 
-σ is a diagnostic telemetry value only — it does NOT enter the trigger or
+σ is a telemetry telemetry value only — it does NOT enter the trigger or
 floor selection. See §X of the reference doc for the redesign rationale.
 
 Asymmetric loss preferences (Denver, Paris) belong in the Kelly multiplier
@@ -80,7 +80,7 @@ class DDDResult(NamedTuple):
                 'DISCOUNT' — Rail 2 discount applied (may be 0.0 if cov >= floor)
     discount:   float in [0.0, 0.09]; 0.0 for HALT (trading blocked separately)
     rail:       1 for absolute kill, 2 for relative discount, None if too early
-    diagnostic: dict with σ (if provided), shortfall, city_floor, N_star,
+    telemetry: dict with σ (if provided), shortfall, city_floor, N_star,
                 small_sample_amp, final_discount_pre_mismatch
                 σ is logged here for monitoring but never enters the trigger.
     """
@@ -88,7 +88,7 @@ class DDDResult(NamedTuple):
     action: Literal["HALT", "DISCOUNT"]
     discount: float
     rail: int | None
-    diagnostic: dict
+    telemetry: dict
 
 
 # ── config loading ────────────────────────────────────────────────────────────
@@ -187,7 +187,7 @@ def evaluate_ddd(
     mismatch_rate: float,
     city_floors_config: dict,
     n_star_config: dict,
-    sigma_diagnostic: float | None = None,
+    sigma_telemetry: float | None = None,
     cycle: str | None = None,
     source_id: str | None = None,
     horizon_profile: str | None = None,
@@ -208,17 +208,17 @@ def evaluate_ddd(
                         95% upper bound, not raw mismatches / n.
     city_floors_config: Loaded floors JSON dict (from load_city_floors)
     n_star_config:      Loaded N_star JSON dict (from load_nstar_config)
-    sigma_diagnostic:   σ of historical coverage (for monitoring only, NOT trigger)
+    sigma_telemetry:   σ of historical coverage (for monitoring only, NOT trigger)
     cycle:              Forecast cycle hour string, e.g. '00' or '12'. Stored in
-                        diagnostic for monitoring; not a trigger input.
+                        telemetry for monitoring; not a trigger input.
     source_id:          Forecast source identifier, e.g. 'tigge_mars' or
-                        'ecmwf_open_data'. Stored in diagnostic only.
+                        'ecmwf_open_data'. Stored as monitoring provenance.
     horizon_profile:    Horizon profile, e.g. 'full' or 'short'. Stored in
-                        diagnostic only.
+                        monitoring provenance.
 
     Returns
     -------
-    DDDResult with action, discount, rail, and diagnostic dict.
+    DDDResult with action, discount, rail, and telemetry dict.
 
     Raises
     ------
@@ -228,7 +228,7 @@ def evaluate_ddd(
     city_floor = get_city_floor(city, city_floors_config)
     n_star = get_n_star(city, track, n_star_config)
 
-    diagnostic: dict = {
+    telemetry: dict = {
         "city": city,
         "track": track,
         "current_cov": current_cov,
@@ -238,9 +238,9 @@ def evaluate_ddd(
         "N_star": n_star,
         "mismatch_rate": mismatch_rate,
         # σ is tracked for monitoring/dashboards but never enters the trigger
-        "sigma_diagnostic": sigma_diagnostic,
+        "sigma_telemetry": sigma_telemetry,
         "small_sample_amp_applied": False,
-        # Source-cycle provenance — monitoring/audit only, NOT trigger inputs.
+        # Source-cycle provenance — monitoring metadata, NOT trigger inputs.
         # Surfaces INV-17 risk: DDD trained on 00z TIGGE history must not be
         # silently applied to a 12z OpenData live forecast without visibility.
         "cycle": cycle,
@@ -250,10 +250,10 @@ def evaluate_ddd(
 
     # ── PRE-WINDOW: target-day observation absence is not yet evidence ─────
     if window_elapsed < WINDOW_ELAPSED_THRESHOLD:
-        diagnostic["rail_fired"] = None
-        diagnostic["shortfall"] = None
-        diagnostic["final_discount_pre_mismatch"] = 0.0
-        diagnostic["discount_deferred_reason"] = "observation_window_not_half_elapsed"
+        telemetry["rail_fired"] = None
+        telemetry["shortfall"] = None
+        telemetry["final_discount_pre_mismatch"] = 0.0
+        telemetry["discount_deferred_reason"] = "observation_window_not_half_elapsed"
         final_discount = max(mismatch_rate, 0.0)
         logger.debug(
             "DDD deferred: city=%s track=%s cov=%.3f floor=%.3f "
@@ -264,23 +264,23 @@ def evaluate_ddd(
             action="DISCOUNT",
             discount=final_discount,
             rail=None,
-            diagnostic=diagnostic,
+            telemetry=telemetry,
         )
-        _emit_diagnostic_log(result)
+        _emit_telemetry_log(result)
         return result
 
     # ── RAIL 1: Absolute hard kill ─────────────────────────────────────────
     # Physics: below 0.35, no probability claim about daily extreme is defensible.
     if current_cov < ABSOLUTE_KILL_FLOOR and window_elapsed > WINDOW_ELAPSED_THRESHOLD:
-        diagnostic["rail_fired"] = 1
-        diagnostic["shortfall"] = None
-        diagnostic["final_discount_pre_mismatch"] = None
+        telemetry["rail_fired"] = 1
+        telemetry["shortfall"] = None
+        telemetry["final_discount_pre_mismatch"] = None
         logger.warning(
             "DDD Rail 1 HALT: city=%s track=%s cov=%.3f window_elapsed=%.2f",
             city, track, current_cov, window_elapsed,
         )
-        result = DDDResult(action="HALT", discount=0.0, rail=1, diagnostic=diagnostic)
-        _emit_diagnostic_log(result)
+        result = DDDResult(action="HALT", discount=0.0, rail=1, telemetry=telemetry)
+        _emit_telemetry_log(result)
         return result
 
     # ── RAIL 2: Continuous linear discount ────────────────────────────────
@@ -292,11 +292,11 @@ def evaluate_ddd(
     small_sample = n_star is None or N_platt_samples < n_star
     if small_sample:
         discount = min(MAX_DISCOUNT, discount * SMALL_SAMPLE_AMPLIFIER)
-        diagnostic["small_sample_amp_applied"] = True
+        telemetry["small_sample_amp_applied"] = True
 
-    diagnostic["rail_fired"] = 2
-    diagnostic["shortfall"] = shortfall
-    diagnostic["final_discount_pre_mismatch"] = discount
+    telemetry["rail_fired"] = 2
+    telemetry["shortfall"] = shortfall
+    telemetry["final_discount_pre_mismatch"] = discount
 
     final_discount = max(mismatch_rate, discount)
 
@@ -311,37 +311,37 @@ def evaluate_ddd(
         action="DISCOUNT",
         discount=final_discount,
         rail=2,
-        diagnostic=diagnostic,
+        telemetry=telemetry,
     )
-    _emit_diagnostic_log(result)
+    _emit_telemetry_log(result)
     return result
 
 
-# ── structured diagnostic emission (σ sink) ──────────────────────────────────
+# ── structured telemetry emission (σ sink) ──────────────────────────────────
 
-def _emit_diagnostic_log(result: DDDResult) -> None:
-    """Always-on structured diagnostic emission (σ sink, 2026-05-03).
+def _emit_telemetry_log(result: DDDResult) -> None:
+    """Always-on structured telemetry emission (σ sink, 2026-05-03).
 
     Emits one INFO-level structured log record per DDD evaluation with
     city/track/cov/floor/σ/action/discount/N/N_star. Logging-aggregator-
     friendly: ``extra={"ddd_diag": {...}}`` keeps the field bag opaque to the
     text formatter while making every value queryable downstream.
 
-    This is the minimal-scope σ diagnostic sink from
-    RERUN_PLAN_v2.md §5 P2 #7. σ is computed and stored in the diagnostic dict
+    This is the minimal-scope σ telemetry sink from
+    RERUN_PLAN_v2.md §5 P2 #7. σ is computed and stored in the telemetry dict
     by callers; this emitter ensures it reaches the log stream so monitoring
     tools (Grafana, Loki, an operator dashboard) can detect regime shifts
     without any further wiring. Operator may later hook the same log key to a
     metrics emitter; the contract here is "always emit, never block".
     """
-    d = result.diagnostic
+    d = result.telemetry
     payload = {
         "city": d.get("city"),
         "track": d.get("track"),
         "cov": d.get("current_cov"),
         "floor": d.get("city_floor"),
         "shortfall": d.get("shortfall"),
-        "sigma": d.get("sigma_diagnostic"),
+        "sigma": d.get("sigma_telemetry"),
         "window_elapsed": d.get("window_elapsed"),
         "N_platt": d.get("N_platt_samples"),
         "N_star": d.get("N_star"),
@@ -369,7 +369,7 @@ def evaluate_ddd_from_files(
     mismatch_rate: float,
     floors_path: Path | None = None,
     nstar_path: Path | None = None,
-    sigma_diagnostic: float | None = None,
+    sigma_telemetry: float | None = None,
     cycle: str | None = None,
     source_id: str | None = None,
     horizon_profile: str | None = None,
@@ -390,7 +390,7 @@ def evaluate_ddd_from_files(
         mismatch_rate=mismatch_rate,
         city_floors_config=city_floors_config,
         n_star_config=n_star_config,
-        sigma_diagnostic=sigma_diagnostic,
+        sigma_telemetry=sigma_telemetry,
         cycle=cycle,
         source_id=source_id,
         horizon_profile=horizon_profile,

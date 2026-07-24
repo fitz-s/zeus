@@ -20,7 +20,7 @@ Boot sequence:
 5. Start APScheduler.
 6. Start 60s heartbeat tick writing state/daemon-heartbeat-ingest.json.
 
-Each K2 tick acquires the per-table advisory lock from src.data.dual_run_lock
+Each K2 tick acquires the per-table advisory lock from src.data.job_lock
 before running. If the monolith also tries to run the same tick, it will see
 the lock held and skip silently (skipped_lock_held). When the monolith is
 shut down (Phase 3), the ingest daemon acquires locks uncontested.
@@ -349,14 +349,12 @@ def _stage_day0_metar_commit(
     prefetch: Any,
     *,
     received_at: str,
-    day0_is_tradeable: bool,
     family_admission: Any | None = None,
 ) -> None:
     with _DAY0_METAR_COMMIT_LOCK:
         staged = (
             prefetch,
             received_at,
-            day0_is_tradeable,
             family_admission,
         )
         if len(_DAY0_METAR_PENDING_COMMITS) < 2:
@@ -508,7 +506,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
         if not _DAY0_METAR_PENDING_COMMITS:
             return {"status": "SOURCE_CURRENT"}
         staged = _DAY0_METAR_PENDING_COMMITS[0]
-        prefetch, received_at, day0_is_tradeable, family_admission = staged
+        prefetch, received_at, family_admission = staged
         emitter = _day0_metar_emitter()
         pending_reports = len(tuple(prefetch.ledger_reports or ()))
         if pending_reports == 0:
@@ -562,7 +560,6 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                     prefetch=prefetch,
                     received_at=received_at,
                     limit=max(50, len(prefetch.eligible) * 2),
-                    day0_is_tradeable=day0_is_tradeable,
                     family_admission=family_admission,
                     inserted_event_ids=inserted_event_ids,
                     inserted_families=inserted_families,
@@ -986,8 +983,8 @@ def _classify_result(result) -> tuple[bool, str | None]:
             return True, "source_run_permanent_failure:" + ",".join(permanent_sources)
     if status in _TRUTHFUL_FAIL_STATUSES:
         return True, status + (": " + str(result.get("error")) if result.get("error") else "")
-    # Inserted=0 on a stage-failure dict (e.g., DR-33-A flag-off harvester)
-    # is a legitimate noop — control_plane pause + empty noop must NOT be
+    # Inserted=0 on a stage-failure dict is a legitimate noop — control_plane
+    # pause + empty noop must NOT be
     # tagged failed.
     if status in {"paused_by_control_plane", "noop_no_dates"}:
         return False, None
@@ -1052,12 +1049,6 @@ def _forecasts_schema_current_lightweight() -> bool:
             }
             for table in ("forecast_posteriors", "raw_model_forecasts"):
                 if table not in tables:
-                    return False
-                columns = {
-                    str(row[1])
-                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-                }
-                if "trade_authority_status" in columns:
                     return False
             return True
         finally:
@@ -1236,7 +1227,7 @@ def _k2_daily_obs_tick():
 
     Acquires advisory lock before running. If monolith holds lock, skips silently.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.daily_obs_append import daily_tick
     # K1 P0: observations is forecasts-class BUT _write_atom_with_coverage also
     # writes data_coverage (world-class) in the same SAVEPOINT.  Use the
@@ -1257,7 +1248,7 @@ def _k2_hourly_instants_tick():
 
     Acquires advisory lock before running.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.hourly_instants_append import hourly_tick
     from src.state.db import get_world_connection
     with acquire_lock("hourly_instants") as acquired:
@@ -1278,7 +1269,7 @@ def _k2_solar_daily_tick():
 
     Acquires advisory lock before running.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.solar_append import daily_tick
     from src.state.db import get_world_connection
     with acquire_lock("solar_daily") as acquired:
@@ -1299,7 +1290,7 @@ def _k2_forecasts_daily_tick():
 
     Acquires advisory lock before running.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.forecasts_append import daily_tick
     from src.state.db import get_world_connection
     with acquire_lock("forecasts_daily") as acquired:
@@ -1320,7 +1311,7 @@ def _k2_hole_scanner_tick():
 
     Acquires advisory lock before running.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.hole_scanner import HoleScanner
     from src.state.db import get_world_connection, get_forecasts_connection
     with acquire_lock("hole_scanner") as acquired:
@@ -1355,7 +1346,7 @@ def _k2_obs_tick():
     add_job id (ingest_k2_obs), table_registry.get_job_id_matches mapping, and
     the db_table_ownership.yaml daemon_writer field all move together.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from pathlib import Path
 
     with acquire_lock("obs") as acquired:
@@ -1435,7 +1426,7 @@ def _k2_obs_fast_tick():
     entry needed (supplemental writer to the existing observation_instants
     table whose daemon_writer is already ingest_k2_obs_tick).
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from pathlib import Path
     from datetime import datetime as _dt, timezone as _tz
 
@@ -1493,20 +1484,10 @@ def _day0_metar_source_clock_tick():
     250ms without another HTTP fetch. The emitter does not acknowledge its
     publication identity until the ledger write succeeds.
     """
-    from src.config import runtime_cities, settings
-    from src.events.event_priority import day0_is_tradeable_for_scope
+    from src.config import runtime_cities
     from src.state.db import (
         get_world_connection_read_only,
     )
-
-    edli_cfg = settings["edli"]
-    if not (
-        edli_cfg.get("enabled")
-        and edli_cfg.get("event_writer_enabled")
-        and edli_cfg.get("day0_extreme_trigger_enabled")
-        and edli_cfg.get("day0_fast_obs_lane_enabled", True)
-    ):
-        return {"status": "DISABLED"}
 
     decision_time = datetime.now(timezone.utc)
     emitter = _day0_metar_emitter()
@@ -1573,9 +1554,6 @@ def _day0_metar_source_clock_tick():
     _stage_day0_metar_commit(
         prefetch,
         received_at=decision_time.isoformat(),
-        day0_is_tradeable=day0_is_tradeable_for_scope(
-            str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
-        ),
         family_admission=family_admission,
     )
     return _commit_or_schedule_day0_metar(origin="source_clock")
@@ -1594,7 +1572,7 @@ def _day0_oracle_anomaly_tick():
 
     import sqlite3
 
-    from src.config import runtime_cities, settings
+    from src.config import runtime_cities
     from src.data.day0_oracle_anomaly import (
         apply_day0_oracle_anomaly_action,
         wu_metar_anomaly_action,
@@ -1604,15 +1582,6 @@ def _day0_oracle_anomaly_tick():
         get_world_connection_read_only,
         world_write_mutex,
     )
-
-    edli_cfg = settings["edli"]
-    if not (
-        edli_cfg.get("enabled")
-        and edli_cfg.get("event_writer_enabled")
-        and edli_cfg.get("day0_extreme_trigger_enabled")
-        and edli_cfg.get("day0_fast_obs_lane_enabled", True)
-    ):
-        return {"status": "DISABLED"}
 
     cities = runtime_cities()
     decision_time = datetime.now(timezone.utc)
@@ -1732,11 +1701,10 @@ def _k2_hko_tick():
 
     import sqlite3
 
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from scripts.hko_ingest_tick import DEFAULT_LOG_PATH, project_accumulator_to_v2
-    from src.config import runtime_cities_by_name, settings
+    from src.config import runtime_cities_by_name
     from src.contracts.settlement_semantics import SettlementSemantics
-    from src.events.event_priority import day0_is_tradeable_for_scope
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
     from src.state.db import get_world_connection, world_write_mutex
@@ -1755,12 +1723,6 @@ def _k2_hko_tick():
     hko_city = runtime_cities_by_name()["Hong Kong"]
     family_admission = _day0_family_admission_for_scopes(
         (("Hong Kong", snapshot.target_date),)
-    )
-    edli_cfg = settings["edli"]
-    event_enabled = bool(
-        edli_cfg.get("enabled")
-        and edli_cfg.get("event_writer_enabled")
-        and edli_cfg.get("day0_extreme_trigger_enabled")
     )
     write_budget_s = _day0_metar_write_budget_seconds()
     write_deadline = time.monotonic() + write_budget_s
@@ -1798,49 +1760,42 @@ def _k2_hko_tick():
                     DEFAULT_LOG_PATH,
                     snapshot=snapshot,
                 )
-                if event_enabled:
-                    decision_time = datetime.now(timezone.utc)
-                    trigger = Day0ExtremeUpdatedTrigger(
-                        EventWriter(conn),
-                        day0_is_tradeable=day0_is_tradeable_for_scope(
-                            str(
-                                edli_cfg.get("edli_live_scope")
-                                or "forecast_plus_day0"
-                            )
-                        ),
-                        family_admission=family_admission,
-                        scan_cities=("Hong Kong",),
-                    )
-                    results = trigger.scan_observation_instants_rows(
-                        observation_conn=conn,
-                        settlement_semantics=SettlementSemantics.for_city(hko_city),
-                        decision_time=decision_time,
-                        received_at=decision_time.isoformat(),
-                        limit=4,
-                    )
-                    inserted_event_ids = tuple(
-                        result.event_id for result in results if result.inserted
-                    )
-                    if inserted_event_ids:
-                        placeholders = ",".join("?" for _ in inserted_event_ids)
-                        inserted_families = tuple(
-                            (
-                                str(city),
-                                str(target_date),
-                                str(metric).lower(),
-                            )
-                            for city, target_date, metric in conn.execute(
-                                f"""
-                                SELECT json_extract(payload_json, '$.city'),
-                                       json_extract(payload_json, '$.target_date'),
-                                       json_extract(payload_json, '$.metric')
-                                  FROM opportunity_events
-                                 WHERE event_id IN ({placeholders})
-                                """,
-                                inserted_event_ids,
-                            ).fetchall()
+                decision_time = datetime.now(timezone.utc)
+                trigger = Day0ExtremeUpdatedTrigger(
+                    EventWriter(conn),
+                    family_admission=family_admission,
+                    scan_cities=("Hong Kong",),
+                )
+                results = trigger.scan_observation_instants_rows(
+                    observation_conn=conn,
+                    settlement_semantics=SettlementSemantics.for_city(hko_city),
+                    decision_time=decision_time,
+                    received_at=decision_time.isoformat(),
+                    limit=4,
+                )
+                inserted_event_ids = tuple(
+                    result.event_id for result in results if result.inserted
+                )
+                if inserted_event_ids:
+                    placeholders = ",".join("?" for _ in inserted_event_ids)
+                    inserted_families = tuple(
+                        (
+                            str(city),
+                            str(target_date),
+                            str(metric).lower(),
                         )
-                    conn.commit()
+                        for city, target_date, metric in conn.execute(
+                            f"""
+                            SELECT json_extract(payload_json, '$.city'),
+                                   json_extract(payload_json, '$.target_date'),
+                                   json_extract(payload_json, '$.metric')
+                              FROM opportunity_events
+                             WHERE event_id IN ({placeholders})
+                            """,
+                            inserted_event_ids,
+                        ).fetchall()
+                    )
+                conn.commit()
                 write_lease.record_commit(
                     commit_ms=(time.monotonic() - commit_started) * 1000.0,
                     rows_changed=max(
@@ -1968,7 +1923,7 @@ def _k2_startup_catch_up():
                 "forecasts stale (%.1fh > %dh threshold) on boot — forcing daily_tick",
                 staleness_h, threshold_h,
             )
-            from src.data.dual_run_lock import acquire_lock
+            from src.data.job_lock import acquire_lock
             with acquire_lock("forecasts_daily") as acquired:
                 if not acquired:
                     logger.info("boot-forced forecasts daily_tick skipped_lock_held")
@@ -1995,7 +1950,7 @@ def _k2_startup_catch_up():
                 "solar_daily stale (%.1fh > %dh threshold) on boot — forcing daily_tick",
                 solar_staleness_h, threshold_h,
             )
-            from src.data.dual_run_lock import acquire_lock
+            from src.data.job_lock import acquire_lock
             with acquire_lock("solar_daily") as acquired:
                 if not acquired:
                     logger.info("boot-forced solar daily_tick skipped_lock_held")
@@ -2050,7 +2005,7 @@ def _run_opendata_track(
     _collector=None,
 ) -> dict:
     """Legacy ingest-main OpenData wrapper kept mutually exclusive with forecast-live-daemon."""
-    from src.data.dual_run_lock import acquire_opendata_track_lock
+    from src.data.job_lock import acquire_opendata_track_lock
     from src.data.ecmwf_open_data import SOURCE_ID, collect_open_ens_cycle
 
     if _is_source_paused(SOURCE_ID):
@@ -2140,7 +2095,7 @@ def _etl_recalibrate():
 
     Acquires advisory lock before running subprocess scripts.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     with acquire_lock("etl_recalibrate") as acquired:
         if not acquired:
             logger.info("ingest _etl_recalibrate skipped_lock_held")
@@ -2185,7 +2140,7 @@ def _etl_recalibrate_body():
     results["calibration_pairs"] = "SKIP: run rebuild_calibration_pairs_canonical post-fillback"
     results["platt_refit"] = "SKIP: run explicit post-fillback canonical refit"
 
-    # Replay is diagnostic, scans the complete historical WORLD DB, and writes
+    # Replay is telemetry, scans the complete historical WORLD DB, and writes
     # replay_results only after the scan. Running it inside the live data-ingest
     # daemon consumed a CPU and page cache for ten minutes every day while adding
     # no source truth. Keep scripts/run_replay.py operator/offline-only.
@@ -2200,9 +2155,8 @@ def _harvester_truth_writer_tick():
 
     Acquires advisory lock before running. Runs hourly. Writes settlement truth
     to forecasts DB independent of the trading daemon's lifecycle.
-    Feature-flagged: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" to do real work.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.ingest.harvester_truth_writer import write_settlement_truth_for_open_markets
     from src.state.db import get_forecasts_connection
     with acquire_lock("harvester_truth") as acquired:
@@ -2231,8 +2185,6 @@ def _replacement_maintenance_tick():
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
-    if not bool(cfg.get("download_current_targets_enabled", False)):
-        return None
     cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
     if cooldown_seconds > 0:
         _defer_replacement_maintenance(float(cooldown_seconds))
@@ -2337,8 +2289,6 @@ def _replacement_availability_poll_tick():
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
-    if not bool(cfg.get("download_current_targets_enabled", False)):
-        return None
     cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
     if cooldown_seconds > 0:
         # No source-clock payload can land during provider cooldown. Re-probing
@@ -2760,7 +2710,7 @@ def _replacement_availability_poll_tick():
 
 @_scheduler_job("ingest_automation_analysis")
 def _automation_analysis_cycle():
-    """Daily automation analysis diagnostic (ingest daemon copy)."""
+    """Daily automation analysis telemetry (ingest daemon copy)."""
     import subprocess
     venv_python = _etl_subprocess_python()
     script = Path(__file__).parent.parent / "scripts" / "automation_analysis.py"
@@ -2803,7 +2753,7 @@ def _source_health_probe_tick():
     open_meteo_archive / wu_pws and a skipped cycle starves DAY0_CAPTURE.
     """
     import time as _time
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.source_health_probe import probe_all_sources, write_source_health
     from src.config import state_path
     import json
@@ -2850,7 +2800,7 @@ def _station_migration_probe_tick():
     primary-source ``degraded_since`` on a mismatch. Never auto-rewrites
     cities.json — operator approves migrations consciously.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.station_migration_probe import run_probe
 
     with acquire_lock("station_migration_probe") as acquired:
@@ -2874,7 +2824,7 @@ def _drift_detector_tick():
     happen overnight. Writes state/refit_armed.json.
     Acquires advisory lock.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.calibration.drift_refit_arm import check_and_arm_refit
     from src.state.db import get_world_connection
 
@@ -2909,262 +2859,6 @@ _UMA_MAX_BLOCKS_PER_TICK = 100_000
 # Once the cursor passes era_end_block, the UMA era is exhausted for this process: latch so
 # subsequent ticks return immediately without repeating the eth_blockNumber RPC + DB open
 # (PR review #329). Reset only on process restart; default-off path never sets it.
-_uma_era_exhausted = False
-
-
-def _uma_optional_settings() -> tuple[str, str, int, int]:
-    """Read optional uma config without touching ``Settings._data`` private state.
-
-    Returns ``(polygon_rpc_url, oo_contract_address, initial_lookback, max_per_tick)``.
-    Empty strings / 0 means "not configured" — caller treats as default-OFF.
-    """
-    from src.config import settings
-
-    try:
-        uma_cfg = settings["uma"]
-    except KeyError:
-        return ("", "", _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS, _UMA_MAX_BLOCKS_PER_TICK)
-    if not isinstance(uma_cfg, dict):
-        return ("", "", _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS, _UMA_MAX_BLOCKS_PER_TICK)
-    return (
-        str(uma_cfg.get("polygon_rpc_url", "") or ""),
-        str(uma_cfg.get("oo_contract_address", "") or ""),
-        int(uma_cfg.get("initial_lookback_blocks", _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS)),
-        int(uma_cfg.get("max_blocks_per_tick", _UMA_MAX_BLOCKS_PER_TICK)),
-    )
-
-
-def _uma_era_end_block() -> int:
-    """Optional UMA-era end block (PR5 data_temporal_kernel).
-
-    UMA OO V2 weather settlement is HISTORICAL: post-2026-02-21 Polymarket uses the internal
-    automatic resolver (Gamma is canonical). Scanning Polygon past the UMA era wastes RPC
-    budget on blocks that can hold no relevant UMA settle event. When the operator configures
-    ``settings["uma"]["era_end_block"]`` (> 0), the listener will not scan past it.
-
-    Returns 0 when unconfigured — the listener then behaves EXACTLY as before (no era cap).
-    """
-    from src.config import settings
-
-    try:
-        uma_cfg = settings["uma"]
-    except KeyError:
-        return 0
-    if not isinstance(uma_cfg, dict):
-        return 0
-    try:
-        return max(0, int(uma_cfg.get("era_end_block", 0) or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-@_scheduler_job("ingest_uma_resolution_listener")
-def _uma_resolution_listener_tick():
-    """Poll Polygon RPC for UMA OO Settle events — 5-min interval.
-
-    Reads condition_ids from market_events, then calls poll_uma_resolutions
-    with the configured RPC client. When settings["uma"]["polygon_rpc_url"] is
-    absent or empty, the listener short-circuits (returns [] without writing)
-    per the default-OFF design in uma_resolution_listener.py.
-
-    Block window: the listener uses a persisted last-scanned-block cursor
-    (``uma_resolution_cursor`` table) to scan only new blocks per tick. First
-    tick after enabling: scans the most-recent ``initial_lookback_blocks``
-    (default 50 000 ≈ 7h on Polygon). Subsequent ticks advance the cursor and
-    cap the per-tick window at ``max_blocks_per_tick`` (default 100 000) so
-    backlogged ticks drain incrementally without blowing past RPC log limits.
-
-    Runs on "fast" executor: reads on-chain (HTTP), writes at most 1 row per
-    resolved market — no risk of DB writer starvation against the single-writer
-    default executor pool. Condition_id lookup uses a fresh read-only connection
-    that does not block writers.
-    """
-    global _uma_era_exhausted
-    # Era already exhausted this process — skip the RPC + DB open entirely (PR review #329).
-    if _uma_era_exhausted:
-        return
-
-    from src.state.uma_resolution_listener import (
-        UmaHttpRpcClient,
-        get_last_scanned_block,
-        poll_uma_resolutions,
-        run_late_revalidation_pass,
-        set_last_scanned_block,
-    )
-    from src.state.db import get_world_connection, ZEUS_FORECASTS_DB_PATH
-    import sqlite3
-
-    # Load optional uma settings (default-OFF when absent).
-    try:
-        polygon_rpc_url, oo_contract_address, initial_lookback, max_per_tick = (
-            _uma_optional_settings()
-        )
-    except Exception as exc:
-        logger.warning("ingest_uma_resolution_listener: settings load failed: %s", exc)
-        return
-
-    if not polygon_rpc_url or not oo_contract_address:
-        logger.debug(
-            "ingest_uma_resolution_listener: no RPC config; listener is default-OFF "
-            "(set settings.uma.polygon_rpc_url + oo_contract_address to activate)"
-        )
-        return
-
-    # Collect tracked condition_ids from market_events (read-only, forecasts DB post-K1).
-    condition_ids: list[str] = []
-    try:
-        ro_conn = sqlite3.connect(str(ZEUS_FORECASTS_DB_PATH), timeout=10)
-        ro_conn.row_factory = sqlite3.Row
-        try:
-            rows = ro_conn.execute(
-                "SELECT DISTINCT condition_id FROM market_events "
-                "WHERE condition_id IS NOT NULL AND condition_id != ''"
-            ).fetchall()
-            condition_ids = [str(r["condition_id"]) for r in rows]
-        finally:
-            ro_conn.close()
-    except Exception as exc:
-        logger.warning("ingest_uma_resolution_listener: condition_id fetch failed: %s", exc)
-        return
-
-    if not condition_ids:
-        logger.debug("ingest_uma_resolution_listener: no tracked condition_ids yet")
-        return
-
-    # Resolve block window via persisted cursor + RPC head, then poll.
-    try:
-        rpc_client = UmaHttpRpcClient(polygon_rpc_url)
-
-        # eth_blockNumber — head of chain.
-        head_block: int | None = None
-        try:
-            import httpx  # type: ignore[import]
-            resp = httpx.post(
-                polygon_rpc_url,
-                json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
-                timeout=10.0,
-            )
-            resp.raise_for_status()
-            head_hex = resp.json().get("result")
-            if isinstance(head_hex, str):
-                head_block = int(head_hex, 16)
-        except Exception as exc:  # noqa: BLE001 — fail-soft to skip-tick
-            logger.warning("ingest_uma_resolution_listener: eth_blockNumber failed: %s", exc)
-            return
-
-        if not head_block or head_block <= 0:
-            logger.warning("ingest_uma_resolution_listener: invalid head_block=%r", head_block)
-            return
-
-        write_conn = get_world_connection()
-        try:
-            cursor = get_last_scanned_block(write_conn, oo_contract_address)
-            if cursor is None:
-                from_block = max(head_block - initial_lookback, 0)
-            else:
-                from_block = cursor + 1
-            to_block = min(from_block + max_per_tick - 1, head_block)
-
-            # PR5 era guard: UMA OO V2 is historical (pre-2026-02-21 cutover to Gamma).
-            # When era_end_block is configured, never scan past it. era_end_block=0 disables
-            # the guard (behavior-identical to pre-PR5).
-            era_end_block = _uma_era_end_block()
-            if era_end_block > 0:
-                if from_block > era_end_block:
-                    _uma_era_exhausted = True   # latch: no RPC+DB on subsequent ticks
-                    logger.info(
-                        "ingest_uma_resolution_listener: from_block=%s past era_end_block=%s; "
-                        "UMA era exhausted — latching off for this process",
-                        from_block, era_end_block,
-                    )
-                    return
-                to_block = min(to_block, era_end_block)
-
-            if to_block < from_block:
-                logger.debug(
-                    "ingest_uma_resolution_listener: nothing to scan (cursor=%s head=%s)",
-                    cursor, head_block,
-                )
-                return
-
-            resolutions = poll_uma_resolutions(
-                condition_ids=condition_ids,
-                contract_address=oo_contract_address,
-                rpc_client=rpc_client,
-                conn=write_conn,
-                from_block=from_block,
-                to_block=to_block,
-            )
-            # Late-revalidation pass: check tentative rows (confirmations < required)
-            # against the chain. Any reorged rows are marked is_valid=0 so they
-            # cannot be used as settlement evidence via lookup_resolution().
-            invalidated = run_late_revalidation_pass(write_conn, rpc_client=rpc_client)
-            if invalidated:
-                logger.warning(
-                    "ingest_uma_resolution_listener: %d tentative row(s) invalidated "
-                    "by late-revalidation pass (probable Polygon reorg)",
-                    invalidated,
-                )
-            # Advance cursor regardless of resolution count — empty windows are
-            # legitimate progress and re-scanning them wastes RPC budget.
-            set_last_scanned_block(write_conn, oo_contract_address, to_block)
-            write_conn.commit()
-            if resolutions:
-                logger.info(
-                    "ingest_uma_resolution_listener: %d new resolution(s) "
-                    "(blocks %d→%d, head=%d)",
-                    len(resolutions), from_block, to_block, head_block,
-                )
-            else:
-                logger.debug(
-                    "ingest_uma_resolution_listener: no new resolutions "
-                    "(blocks %d→%d, head=%d)",
-                    from_block, to_block, head_block,
-                )
-        finally:
-            write_conn.close()
-    except Exception as exc:
-        logger.warning("ingest_uma_resolution_listener tick error: %s", exc)
-
-
-# ---------------------------------------------------------------------------
-# Task #4 (2026-05-07): forecast_skill ETL scheduler tick
-# ---------------------------------------------------------------------------
-
-@_scheduler_job("ingest_etl_forecast_skill")
-def _etl_forecast_skill_tick():
-    """Daily materialization of forecast_skill + model_bias from local forecasts table.
-
-    Runs scripts/etl_forecast_skill_from_forecasts.py as a subprocess so it
-    inherits the venv Python and produces its own log output. Idempotent — the
-    script uses INSERT OR REPLACE; repeated runs are safe.
-
-    Runs on default executor (it opens a write connection to zeus-world.db).
-    """
-    from src.state.db_writer_lock import WriteClass, subprocess_run_with_write_class
-    venv_python = _etl_subprocess_python()
-    script = Path(__file__).parent.parent / "scripts" / "etl_forecast_skill_from_forecasts.py"
-    if not script.exists():
-        logger.warning("ingest_etl_forecast_skill: script not found at %s", script)
-        return
-    r = subprocess_run_with_write_class(
-        [venv_python, str(script)],
-        WriteClass.BULK,
-        capture_output=True, text=True, timeout=300,
-    )
-    output = r.stdout.strip()
-    if output:
-        logger.info("[etl_forecast_skill]\n%s", output[-2000:])
-    if r.returncode != 0:
-        logger.warning(
-            "[etl_forecast_skill] FAILED (exit=%d): %s",
-            r.returncode, r.stderr[-500:] if r.stderr else "",
-        )
-    else:
-        logger.info("[etl_forecast_skill] OK (exit=0)")
-
-
-# ---------------------------------------------------------------------------
 # STALE fix (2026-05-07): market_events scan tick — feeds from Gamma API
 # so ingest daemon populates market_events when trading daemon is down.
 # ---------------------------------------------------------------------------
@@ -3214,7 +2908,7 @@ def _ingest_status_rollup_tick():
     (see write_ingest_status calls in K2 ticks below).
     Acquires advisory lock.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.ingest_status_writer import write_ingest_status
     from src.state.db import get_world_connection
 
@@ -3396,90 +3090,6 @@ def _bridge_oracle_startup_catch_up():
 
 
 # ---------------------------------------------------------------------------
-# F9: Calibration auto-promote tick — weekly Sun 04:30 UTC
-# ---------------------------------------------------------------------------
-
-_CALIBRATION_AUTO_PROMOTE_ENV = "ZEUS_CALIBRATION_AUTO_PROMOTE_ENABLED"
-_CALIBRATION_STAGE_DB_ENV = "ZEUS_CALIBRATION_STAGE_DB_PATH"
-
-
-@_scheduler_job("ingest_calibration_auto_promote")
-def _calibration_auto_promote_tick():
-    """F9: Auto-promote calibration_pairs when the readiness gate passes.
-
-    Gate: invokes ``promote_calibration.py inspect`` as a subprocess.
-    If the inspect exit code is 0 (all sentinels complete), invokes
-    ``promote_calibration.py promote --commit``.
-
-    Guarded by two env flags:
-
-    * ``ZEUS_CALIBRATION_AUTO_PROMOTE_ENABLED=true`` — must be set by the
-      operator after the first successful manual promotion validates the gate.
-      Default OFF to prevent accidental production writes before the gate is
-      verified.
-    * ``ZEUS_CALIBRATION_STAGE_DB_PATH`` — absolute path to the STAGE_DB that
-      was produced by ``rebuild_calibration_pairs.py``.  Must be set when
-      ENABLED=true; tick aborts with a warning if unset.
-
-    Runs on default executor (subprocess writes to zeus-forecasts.db via
-    the promote script; serialised with other DB writers via write-class lock).
-    """
-    import subprocess
-
-    enabled = os.environ.get(_CALIBRATION_AUTO_PROMOTE_ENV, "false").lower() == "true"
-    if not enabled:
-        logger.info(
-            "[AUTO_PROMOTE] skipped: %s not set to 'true'",
-            _CALIBRATION_AUTO_PROMOTE_ENV,
-        )
-        return
-
-    stage_db = os.environ.get(_CALIBRATION_STAGE_DB_ENV, "").strip()
-    if not stage_db:
-        logger.warning(
-            "[AUTO_PROMOTE] aborted: %s not set; cannot auto-promote without stage DB path",
-            _CALIBRATION_STAGE_DB_ENV,
-        )
-        return
-
-    venv_python = _etl_subprocess_python()
-    script = Path(__file__).parent.parent / "scripts" / "promote_calibration.py"
-    if not script.exists():
-        logger.warning("[AUTO_PROMOTE] script not found at %s", script)
-        return
-
-    # Phase 1: inspect — readiness gate (read-only, no lock needed)
-    inspect_r = subprocess.run(
-        [venv_python, str(script), "inspect", "--stage-db", stage_db],
-        capture_output=True, text=True, timeout=120,
-    )
-    if inspect_r.returncode != 0:
-        logger.info(
-            "[AUTO_PROMOTE] gate NOT READY (inspect exit=%d); skipping promote.\n%s",
-            inspect_r.returncode,
-            inspect_r.stdout[-500:] if inspect_r.stdout else "",
-        )
-        return
-
-    logger.info("[AUTO_PROMOTE] gate READY (inspect exit=0); invoking promote --commit")
-
-    # Phase 2: promote --commit (DB writer; serialise via write-class lock)
-    from src.state.db_writer_lock import WriteClass, subprocess_run_with_write_class
-    promote_r = subprocess_run_with_write_class(
-        [venv_python, str(script), "promote", "--stage-db", stage_db, "--commit"],
-        WriteClass.BULK,
-        capture_output=True, text=True, timeout=600,
-    )
-    if promote_r.returncode != 0:
-        logger.warning(
-            "[AUTO_PROMOTE] FAILED (exit=%d): %s",
-            promote_r.returncode, promote_r.stderr[-500:] if promote_r.stderr else "",
-        )
-    else:
-        logger.info("[AUTO_PROMOTE] SUCCESS (exit=0)")
-
-
-# ---------------------------------------------------------------------------
 # Weekly fitted-artifact refit — source-clock weights, staleness variance,
 # shape-age sigma, ens member dependence
 # ---------------------------------------------------------------------------
@@ -3633,10 +3243,6 @@ def _ingest_main_job_specs() -> list[tuple]:
             max_instances=1, coalesce=True, executor="fast")),
         (_write_ingest_heartbeat, "interval", dict(seconds=60, id="ingest_heartbeat",
             max_instances=1, coalesce=True, executor="fast")),
-        (_uma_resolution_listener_tick, "interval", dict(minutes=5, id="ingest_uma_resolution_listener",
-            max_instances=1, coalesce=True, executor="fast")),
-        (_etl_forecast_skill_tick, "cron", dict(hour=3, minute=0, id="ingest_etl_forecast_skill",
-            max_instances=1, coalesce=True, misfire_grace_time=3600)),
         (_market_scan_tick, "interval", dict(minutes=30, id="ingest_market_scan",
             max_instances=1, coalesce=True)),
         (_oracle_snapshot_tick, "cron", dict(hour=10, minute=0, id="ingest_oracle_snapshot",
@@ -3646,8 +3252,6 @@ def _ingest_main_job_specs() -> list[tuple]:
         (_bridge_oracle_startup_catch_up, "date", dict(run_date=now,
             id="ingest_oracle_bridge_startup_catch_up", max_instances=1, coalesce=True,
             misfire_grace_time=None, executor="fast")),
-        (_calibration_auto_promote_tick, "cron", dict(day_of_week="sun", hour=4, minute=30,
-            id="ingest_calibration_auto_promote", max_instances=1, coalesce=True, misfire_grace_time=3600)),
         # Weekly Mon 06:00 UTC (post-weekend settlements graded; mirrors the consult's
         # "activate weekly" cadence for the fitted serving artifacts).
         (_artifact_refit_tick, "cron", dict(day_of_week="mon", hour=6, minute=0,

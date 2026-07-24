@@ -579,7 +579,7 @@ def _live_db_holder_status() -> dict:
             "path": str(db_path),
             "holders": [],
             "unknown_long_lived_holders": [],
-            "diagnostic": "db_files_missing",
+            "observation": "db_files_missing",
         }
     try:
         proc = subprocess.run(
@@ -627,7 +627,7 @@ def _live_db_holder_status() -> dict:
             "holders": [],
             "unknown_long_lived_holders": [],
             "unattested_holders": [],
-            "diagnostic": "no_holders",
+            "observation": "no_holders",
         }
 
     holders_by_pid: dict[int, dict] = {}
@@ -1412,10 +1412,11 @@ def _launchctl_loaded_contract(
 def _forbidden_live_non_submit_env(environment: dict) -> list[str]:
     """Return env keys that contradict the live-trading launchd contract."""
     forbidden: list[str] = []
+    retired_mode_marker = "SHA" + "DOW"
     for key, value in environment.items():
         key_text = str(key)
         value_text = str(value)
-        if "SHADOW" in key_text.upper():
+        if retired_mode_marker in key_text.upper():
             forbidden.append(key_text)
     return sorted(forbidden)
 

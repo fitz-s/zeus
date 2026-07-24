@@ -239,7 +239,7 @@ def _grade_row_won(
 _PER_CITY_CW_ROI_TOLERANCE = -1e-9
 
 # Current live probability-regime provenance. Older receipts omitted q_source
-# for hash stability before #120; those rows are useful diagnostic settlement
+# for hash stability before #120; those rows are useful observation settlement
 # history, but they cannot license the current EMOS/honest-raw production
 # mechanism for real submit.
 CURRENT_ARM_Q_SOURCES = frozenset({"emos", "raw_honest"})
@@ -447,7 +447,7 @@ def _capital_weighted_arm_decision(
 def _current_regime_rows(rows: list[dict]) -> list[dict]:
     """Rows allowed to license the current live probability mechanism.
 
-    Missing q_source means pre-provenance history. Treat it as diagnostic only:
+    Missing q_source means pre-provenance history. Treat it as observation only:
     it must neither grant nor deny a current-regime ARM license. This keeps the
     boot gate fail-closed on new mechanisms until their own settled receipts
     exist, instead of mixing an older calibration era into live promotion.
@@ -815,7 +815,7 @@ ARM_ARTIFACT_REQUIRED_FIELDS = frozenset({
     "capital_weighted_ev",
     "production_n",
     # Deprecated compatibility alias for older readers. The measured cohort is
-    # production/all_rows, not the diagnostic mainstream gate-PASS subset.
+    # production/all_rows, not the observation mainstream gate-PASS subset.
     "gate_pass_n",
     "per_city_n",
     "ev_sigma",
@@ -1013,7 +1013,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     # and must NEVER wire into a production/arm decision. The ARM VERDICT is
     # computed on the PRODUCTION cohort for the CURRENT probability mechanism
     # (q_source in CURRENT_ARM_Q_SOURCES), NOT the gate-PASS subset and NOT old
-    # pre-provenance receipts. Legacy/no-q_source rows remain diagnostic only:
+    # pre-provenance receipts. Legacy/no-q_source rows remain observation only:
     # they cannot license current EMOS/honest-raw, and they cannot deny it by
     # being mixed into the current regime. If no current-regime settled rows
     # exist, arming fails closed as INSUFFICIENT.
@@ -1031,7 +1031,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(f"  pooled n                = {cw_verdict.n}")
         print(
             f"  legacy/unproven excluded= {len(legacy_or_unproven_rows)} "
-            "(diagnostic only; cannot license current regime)"
+            "(observation only; cannot license current regime)"
         )
         if cw_verdict.per_city_cw_roi:
             print("  per-city capital-weighted ROI:")

@@ -136,8 +136,7 @@ forbids advisory-only risk.
 
 **Invariant**: `get_current_level()` returns RED on: no risk_state row,
 row older than 5 minutes, or any DB error. RED behavior: cancel all
-pending orders, sweep all active positions. `force_exit_review` flag
-written to risk_state for cycle_runner to read.
+pending orders and sweep all active positions through the single risk-level authority.
 
 ### 3.4 Stale in-memory portfolio causing duplicate settlement
 
@@ -188,7 +187,7 @@ false-positive as a coverage hole.
 ### 4.4 Runtime truth-file authority collision
 
 **Failure**: Live runtime code consumes a JSON truth file carrying retired
-selector metadata or diagnostic/backtest provenance as if it were live runtime
+selector metadata or offline evidence/backtest provenance as if it were live runtime
 truth.
 
 **Invariant**: `read_runtime_truth_json()` reads only the code-authoritative live

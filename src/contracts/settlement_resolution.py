@@ -16,7 +16,7 @@
 """Typed resolution-truth object for replay/backtest SKILL scoring.
 
 A ``SettlementResolution`` answers one question unambiguously: *which ordered
-bin settled YES, and is this resolution clean enough to learn from / promote on?*
+bin settled YES, and is this resolution clean enough to learn from / learn from?*
 
 The load-bearing design decision (TRIBUNAL Finding 2): the winning bin is
 DERIVED from ``settlement_value`` via the canonical bin grid. The stored
@@ -28,8 +28,7 @@ denormalized label that can rot.
 
 Exceptional resolutions (50/50, disputed, unresolved, venue-unresolved) are
 classified via the existing ``SettlementOutcome`` state machine and marked
-``promotion_eligible = False`` / ``learning_eligible = False`` so they cannot
-silently enter a promotion or training set.
+``learning_eligible = False`` so they cannot enter training.
 """
 
 from __future__ import annotations
@@ -40,15 +39,15 @@ from src.contracts.calibration_bins import CanonicalBinGrid
 from src.contracts.settlement_outcome import SettlementOutcome
 from src.contracts.settlement_axes import (
     SettlementResolutionState,
-    is_promotion_eligible_resolution_state,
+    is_learning_eligible_resolution_state,
     legacy_outcome_type_to_resolution_state,
 )
 from src.types.market import Bin
 
 # Resolution states under which a settlement is a clean, single-winner outcome
-# eligible to feed promotion-grade scoring and calibration learning. Everything
+# eligible to feed learning-grade scoring and calibration learning. Everything
 # else (50/50, disputed, unresolved, venue-published-but-unresolved) is excluded.
-_PROMOTION_ELIGIBLE_OUTCOMES: frozenset[SettlementOutcome] = frozenset(
+_LEARNING_ELIGIBLE_OUTCOMES: frozenset[SettlementOutcome] = frozenset(
     {
         SettlementOutcome.PHYSICALLY_CONFIRMED,
         SettlementOutcome.VENUE_RESOLVED_WIN,
@@ -92,7 +91,6 @@ class SettlementResolution:
     truth_source: str  # always 'settlement_value_derived' on a determined object
     outcome_state: SettlementOutcome
     resolution_status: str  # 'resolved' | 'exceptional'
-    promotion_eligible: bool
     learning_eligible: bool
     provenance: dict = field(default_factory=dict)
 
@@ -157,10 +155,10 @@ class SettlementResolution:
         stored = str(stored) if stored not in (None, "") else None
         stored_matches = None if stored is None else (stored == winner_bin.label)
 
-        # A8 cutover (consult 6a42bc3d): promotion eligibility now reads the typed event
-        # lifecycle state. Behavior-preserving — is_promotion_eligible_resolution_state ∘
+        # A8 cutover (consult 6a42bc3d): learning eligibility now reads the typed event
+        # lifecycle state. Behavior-preserving — is_learning_eligible_resolution_state ∘
         # legacy_outcome_type_to_resolution_state is proven zero-diff vs the legacy
-        # _PROMOTION_ELIGIBLE_OUTCOMES gate across every outcome_type value (so the all-WIN
+        # _LEARNING_ELIGIBLE_OUTCOMES gate across every outcome_type value (so the all-WIN
         # backfill cannot change eligibility). Prefers an explicit resolution_state column
         # once the settlement_outcomes migration lands; else maps from the coerced state.
         _explicit_resolution_state = row.get("resolution_state")
@@ -169,7 +167,7 @@ class SettlementResolution:
             if _explicit_resolution_state
             else legacy_outcome_type_to_resolution_state(int(state))
         )
-        eligible = is_promotion_eligible_resolution_state(_resolution_state)
+        eligible = is_learning_eligible_resolution_state(_resolution_state)
         resolution_status = "resolved" if eligible else "exceptional"
 
         return cls(
@@ -187,7 +185,6 @@ class SettlementResolution:
             truth_source="settlement_value_derived",
             outcome_state=state,
             resolution_status=resolution_status,
-            promotion_eligible=eligible,
             learning_eligible=eligible,
             provenance={
                 "settlement_source": row.get("settlement_source"),

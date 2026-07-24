@@ -117,7 +117,7 @@ def _global_decision(
         ),
         wealth_after_loss_usd=wealth_decimal - cost_decimal,
         wealth_after_win_usd=wealth_decimal + shares_decimal - cost_decimal,
-        expected_value_diagnostic_usd=float(robust_ev),
+        expected_value_usd=float(robust_ev),
     )
     return SimpleNamespace(
         candidate=candidate,
@@ -179,9 +179,9 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         global_terminal_median_payoff_usd="19",
         global_terminal_wealth_after_loss_usd="99",
         global_terminal_wealth_after_win_usd="119",
-        global_cut_time_expected_value_diagnostic_usd=11.0,
-        global_expected_value_diagnostic_usd=11.0,
-        global_expected_value_semantics="DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN",
+        global_cut_time_expected_value_usd=11.0,
+        global_expected_value_usd=11.0,
+        global_expected_value_semantics="POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN",
         global_terminal_payoff_semantics="BINARY_0_1",
     )
     _seal_current_qkernel_cert(cert)
@@ -365,8 +365,8 @@ def _deterministic_day0_global_qkernel_cert() -> dict[str, object]:
         global_terminal_median_payoff_usd="3.2",
         global_terminal_wealth_after_loss_usd="83.2",
         global_terminal_wealth_after_win_usd="103.2",
-        global_cut_time_expected_value_diagnostic_usd=3.2,
-        global_expected_value_diagnostic_usd=3.2,
+        global_cut_time_expected_value_usd=3.2,
+        global_expected_value_usd=3.2,
     )
     _seal_current_qkernel_cert(cert)
     return cert
@@ -1158,8 +1158,6 @@ def _day0_admission_real_seam_event():
 
 
 def _full_pass_no_submit_receipt_for_real_seam(event):
-    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
-
     base = EventSubmissionReceipt(
         submitted=False,
         proof_accepted=True,
@@ -1187,12 +1185,13 @@ def _full_pass_no_submit_receipt_for_real_seam(event):
         side_effect_status="NO_SUBMIT",
         reason="event_bound_final_intent_no_submit",
     )
-    decision_time = datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc)
     return dataclass_replace(
         base,
-        decision_proof_bundle=build_test_no_submit_proof_bundle(
-            event, base, decision_time=decision_time
-        ),
+        # The command-certificate builder is the explicit seam under test and
+        # is monkeypatched to raise before it reads the typed proof. A non-null
+        # sentinel reaches that boundary without reviving the retired no-submit
+        # fixture graph.
+        decision_proof_bundle=object(),
     )
 
 
@@ -1204,7 +1203,6 @@ def _build_real_seam_live_adapter(monkeypatch, event, *, raising_exception: Base
     _build_live_execution_command_certificates monkeypatched to raise the EXACT
     production exception this fix classifies. executor_submit raises if ever called —
     a pre-venue abort must never reach the venue."""
-    from src.events.reactor import require_operator_arm
 
     monkeypatch.setattr(
         era,
@@ -1238,11 +1236,7 @@ def _build_real_seam_live_adapter(monkeypatch, event, *, raising_exception: Base
     submit = era.event_bound_live_adapter_from_trade_conn(
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=True,
-        durable_submit_outbox_enabled=True,
         executor_submit=_executor,
-        operator_arm=require_operator_arm({"edli_live_operator_authorized": True}),
-        edli_live_scope="forecast_plus_day0",
     )
     return submit, executor_called
 
@@ -1341,12 +1335,16 @@ def test_armed_day0_admission_rejection_persists_through_real_adapter_and_reacto
         riskguard_gate=lambda _event: True,
         final_intent_submit=plain_submit,
         reject=lambda _event, _stage, _reason: None,
-        config=ReactorConfig(
-            reactor_mode="live",
-            real_order_submit_enabled=True,
-            edli_live_operator_authorized=True,
-        ),
+        config=ReactorConfig(),
         regret_ledger=NoTradeRegretLedger(conn),
+    )
+    # The adapter's typed pre-venue classification and durable receipt ledger
+    # are this test's one behavior. The compiler contract has independent
+    # certificate tests; keep this seam free of the retired no-submit fixture.
+    reactor._decision_compiler = SimpleNamespace(
+        compile_pre_submit=lambda *_args, **_kwargs: SimpleNamespace(
+            status="VERIFIED", certificates=(), failures=()
+        )
     )
 
     result = reactor.process_pending(
@@ -1396,11 +1394,7 @@ def test_ordinary_live_no_submit_still_hard_fails_the_invariant() -> None:
         riskguard_gate=lambda _event: True,
         final_intent_submit=lambda _event, _decision_time: receipt,
         reject=lambda _event, _stage, _reason: None,
-        config=ReactorConfig(
-            reactor_mode="live",
-            real_order_submit_enabled=True,
-            edli_live_operator_authorized=True,
-        ),
+        config=ReactorConfig(),
         regret_ledger=None,
     )
     with pytest.raises(LiveLaneDarkInvariantError):
@@ -1878,7 +1872,6 @@ def test_current_state_marker_rejects_unsealed_economics_mutation():
 
 @pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
 def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
-    monkeypatch,
     side,
     direction,
 ):
@@ -1920,14 +1913,7 @@ def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
     assert current["sample_hash"] == witness.sample_matrix_identity
     assert era._qkernel_current_state_solve_economics(current) is True
 
-    def legacy_selection_curse_must_not_run(**_kwargs):
-        raise AssertionError("global current-band certificate was downgraded")
-
-    monkeypatch.setattr(
-        era,
-        "_event_bound_q_exec_lcb",
-        legacy_selection_curse_must_not_run,
-    )
+    assert not hasattr(era, "_event_bound_q_exec_lcb")
     proof = era._build_event_bound_taker_quality_proof(
         actionable_payload={
             "direction": direction,
@@ -1960,13 +1946,10 @@ def test_global_current_post_rest_escalation_uses_sealed_current_objective():
     assert era._global_current_taker_escalation(proof, more_expensive) is False
 
 
-def test_global_current_fresh_mode_does_not_reapply_selection_curse(monkeypatch):
+def test_global_current_fresh_mode_does_not_reapply_selection_curse():
     cert = _global_current_qkernel_cert(side="NO")
 
-    def historical_bound_must_not_run(**_kwargs):
-        raise AssertionError("sealed global current-state winner was historically retightened")
-
-    monkeypatch.setattr(era, "_event_bound_q_exec_lcb", historical_bound_must_not_run)
+    assert not hasattr(era, "_event_bound_q_exec_lcb")
     mode = era._fresh_rest_then_cross_mode(
         actionable_payload={
             "direction": "buy_no",
@@ -2205,7 +2188,7 @@ def test_global_current_band_rejects_terminal_certificate_incoherent_with_its_br
         median_payoff_usd=win_payoff,
         wealth_after_loss_usd=Decimal("1000") - cost,
         wealth_after_win_usd=Decimal("1000") + win_payoff,
-        expected_value_diagnostic_usd=float(Decimal("0.13") * shares - cost),
+        expected_value_usd=float(Decimal("0.13") * shares - cost),
     )
     decision = SimpleNamespace(
         candidate=None,
@@ -2344,8 +2327,8 @@ def test_global_current_certificate_accepts_live_complement_rounding(
         global_terminal_median_payoff_usd=win_payoff,
         global_terminal_wealth_after_loss_usd=100.0 - expected_cost,
         global_terminal_wealth_after_win_usd=100.0 + win_payoff,
-        global_cut_time_expected_value_diagnostic_usd=q_lcb * shares - expected_cost,
-        global_expected_value_diagnostic_usd=q_lcb * shares - expected_cost,
+        global_cut_time_expected_value_usd=q_lcb * shares - expected_cost,
+        global_expected_value_usd=q_lcb * shares - expected_cost,
     )
     _seal_current_qkernel_cert(cert)
 
@@ -2732,7 +2715,7 @@ def test_global_actuation_current_band_can_tighten_served_bound(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_legacy_served_bound_is_diagnostic_only(side):
+def test_global_actuation_legacy_served_bound_is_point_evidence_only(side):
     """A historical served shrink cannot veto the current source-clock band."""
 
     cert = _current_qkernel_cert(side=side)
@@ -2855,7 +2838,7 @@ def test_global_actuation_reauctions_prior_band_above_served_point(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_legacy_prior_below_majority_is_diagnostic_only(side):
+def test_global_actuation_legacy_prior_below_majority_is_point_evidence_only(side):
     cert = _current_qkernel_cert(side=side)
     cert.update(
         payoff_q_point=0.80,
@@ -4578,7 +4561,7 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(
         ],
     )
 
-    monkeypatch.setattr(era, "_replacement_authority_enabled", lambda: True)
+    assert not hasattr(era, "_replacement_authority_enabled")
     monkeypatch.setattr(
         era,
         "runtime_cities_by_name",

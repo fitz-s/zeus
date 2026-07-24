@@ -20,7 +20,7 @@
 #       a P4-side re-run cannot double-enqueue a redeem (the property that makes the
 #       producer/consumer split across processes safe — §8 Step 2 rollback note);
 #     - the exit-SUBMIT phase STAYS in src.main and still posts sell orders
-#       (exit_order_submit_enabled gate threaded through _execute_monitoring_phase);
+#       (the retired exit-actuation switch threaded through _execute_monitoring_phase);
 #     - src.main still imports + builds its scheduler (never break boot);
 #     - the chain-sync-before-monitoring COMMIT ORDERING is preserved — now as a
 #       cross-process invariant: P4 commits its chain-sync writes before returning, and
@@ -206,7 +206,7 @@ def test_no_regression_exit_submit_phase_stays_in_src_main():
 
     §4.3 CAVEAT: '_execute_monitoring_phase posts real sell orders on RED/force-exit;
     that is order-runtime and STAYS.' The exit job must still call the monitoring phase
-    and thread exit_order_submit_enabled through it.
+    and thread a separate exit-actuation switch through it.
 
     R4-b (2026-07-08, main.py slimming): the job BODY may now be a same-process,
     same-daemon extraction into its owning module (src.execution.exit_lifecycle,

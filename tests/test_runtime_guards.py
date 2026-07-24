@@ -30,22 +30,13 @@ import src.data.openmeteo_quota as openmeteo_quota
 import src.engine.cycle_runner as cycle_runner
 import src.engine.cycle_runtime as cycle_runtime
 import src.engine.evaluator as evaluator_module
-# STALE_LAW re-pin 2026-06-09: the BUY_NO_NATIVE_QUOTE_EVIDENCE_* flag-key constants moved from
-# src.engine.evaluator to src.strategy.family_exclusive_dedup (22dba73349 + slim bce3091a0d).
-from src.strategy.family_exclusive_dedup import (
-    BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG,
-    BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG,
-)
 import src.execution.exit_lifecycle as exit_lifecycle_module
 from src.backtest.economics import check_economics_readiness
 from src.data.observation_client import Day0ObservationContext
 from src.config import City, calibration_batch_rebuild_n_mc, ensemble_n_mc, settings
 from src.control import control_plane as control_plane_module
 from src.data.ecmwf_open_data import DATA_VERSION, collect_open_ens_cycle
-from src.data.calibration_transfer_policy import (
-    CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
-    _rebuild_complete_sentinel_key_for_transfer_evidence,
-)
+from src.calibration.store import CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
 from src.data.openmeteo_quota import (
     DAILY_LIMIT,
     HARD_THRESHOLD,
@@ -133,7 +124,6 @@ def _allow_entry_gates_for_runtime_test(monkeypatch) -> None:
     This helper is intentionally targeted (not autouse): runtime_guards also
     contains tests that verify entry blocking behavior.
     """
-    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cycle_runner.cutover_guard, "summary", lambda: {"state": "READY", "entry": {"allow_submit": True}})
     monkeypatch.setattr(
         "src.control.heartbeat_supervisor.summary",
@@ -153,13 +143,6 @@ def _allow_entry_gates_for_runtime_test(monkeypatch) -> None:
         lambda *args, **kwargs: {"entry": {"allow_submit": True}},
     )
     monkeypatch.setattr("src.runtime.posture.read_runtime_posture", lambda: "NORMAL")
-
-
-def _set_buy_no_native_quote_evidence_flags(monkeypatch, *, evidence: bool, submit: bool = False) -> None:
-    flags = dict(settings["feature_flags"])
-    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = evidence
-    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG] = submit
-    monkeypatch.setitem(settings._data, "feature_flags", flags)
 
 
 def _patch_mature_calibration(monkeypatch, *, level: int = 1) -> None:
@@ -525,7 +508,7 @@ def test_monitor_quote_refresh_parses_two_sided_book_once(monkeypatch):
     assert quote.best_ask == pytest.approx(0.44)
     assert quote.bid_size == pytest.approx(30.0)
     assert quote.ask_size == pytest.approx(10.0)
-    assert quote.diagnostic_market_price == pytest.approx(0.43)
+    assert quote.mark_price == pytest.approx(0.43)
     assert clob.orderbook_calls == 1
     assert clob.best_bid_ask_calls == 0
 
@@ -667,7 +650,7 @@ def test_day0_monitor_quote_refresh_uses_executable_bid_when_asks_absent(monkeyp
     assert quote.best_bid == pytest.approx(0.998)
     assert quote.best_ask is None
     assert quote.ask_size == pytest.approx(0.0)
-    assert quote.diagnostic_market_price == pytest.approx(0.998)
+    assert quote.mark_price == pytest.approx(0.998)
     assert clob.orderbook_calls == 1
     assert clob.best_bid_ask_calls == 0
 
@@ -687,7 +670,7 @@ def test_day0_monitor_quote_refresh_uses_zero_sell_value_when_bids_absent(monkey
     assert quote.best_ask == pytest.approx(0.001)
     assert quote.bid_size == pytest.approx(0.0)
     assert quote.ask_size == pytest.approx(100.0)
-    assert quote.diagnostic_market_price == pytest.approx(0.0)
+    assert quote.mark_price == pytest.approx(0.0)
     assert clob.orderbook_calls == 1
     assert clob.best_bid_ask_calls == 0
 
@@ -710,7 +693,7 @@ def test_target_local_day_active_position_uses_bid_only_quote_when_asks_absent(m
     assert quote is not None
     assert quote.best_bid == pytest.approx(0.998)
     assert quote.best_ask is None
-    assert quote.diagnostic_market_price == pytest.approx(0.998)
+    assert quote.mark_price == pytest.approx(0.998)
 
 
 def test_day0_refresh_keeps_current_market_fresh_with_bid_only_book(monkeypatch):
@@ -1081,7 +1064,6 @@ def test_entry_evaluator_uses_ask_only_buy_quote_when_yes_bid_is_absent(monkeypa
     """RELATIONSHIP: persisted executable BUY support must not require a YES bid."""
 
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
-    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=False, submit=False)
     captured: dict[str, object] = {}
 
     candidate = MarketCandidate(
@@ -1211,7 +1193,6 @@ def test_entry_evaluator_missing_ask_still_fails_closed(monkeypatch):
     """RELATIONSHIP: ask-only fallback must not make missing asks executable."""
 
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
-    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=False, submit=False)
 
     candidate = MarketCandidate(
         city=NYC,
@@ -2890,7 +2871,6 @@ def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, 
 
     monkeypatch.setattr(cycle_runner, "settings", _CycleSettingsStub())
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
@@ -7054,76 +7034,6 @@ def test_elevated_risk_still_runs_monitoring_and_reports_block_reason(monkeypatc
     assert summary["candidates"] == 0
 
 
-def test_force_exit_review_scope_is_entry_block_only(monkeypatch, tmp_path):
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-    init_schema_trade_only(conn)
-    conn.close()
-    portfolio = PortfolioState(positions=[_position(target_date="2026-12-01")])
-
-    class DummyClob:
-        def __init__(self):
-            pass
-
-        def get_balance(self):
-            return 100.0
-
-    monitored: list[str] = []
-
-    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: True)
-    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
-    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
-    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
-    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
-    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
-    monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
-    monkeypatch.setattr(
-        cycle_runner,
-        "_reconcile_pending_positions",
-        lambda *args, **kwargs: {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False},
-    )
-    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
-    monkeypatch.setattr(cycle_runner, "_cleanup_orphan_open_orders", lambda portfolio, clob: 0)
-    monkeypatch.setattr(
-        cycle_runner,
-        "_entry_bankroll_for_cycle",
-        lambda portfolio, clob: (100.0, {"portfolio_initial_bankroll_usd": 100.0}),
-    )
-
-    def _monitor(conn, clob, portfolio, artifact, tracker, summary):
-        monitored.extend(pos.trade_id for pos in portfolio.positions)
-        summary["monitors"] += len(portfolio.positions)
-        return False, False
-
-    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", _monitor)
-    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
-    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
-
-    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
-
-    # Phase 9B DT#2 / R-BV: scope widened from "entry_block_only" to
-    # "sweep_active_positions". Pre-P9B this test asserted entry-block-only
-    # scope; P9B lands the sweep so the assertion flips to
-    # "sweep_active_positions" AND the sweep mark is visible on the position.
-    # This is a critic-beth-style "stale antibody flip at guard-removal"
-    # update — the test is intentionally re-purposed for the new law.
-    assert monitored == ["t1"]
-    assert summary["force_exit_review"] is True
-    assert summary["force_exit_review_scope"] == "sweep_active_positions"
-    assert summary["force_exit_sweep"]["attempted"] == 1, (
-        f"Phase 9B R-BV: sweep should have marked 1 active position; "
-        f"got summary={summary.get('force_exit_sweep')!r}"
-    )
-    # Position must carry the sweep exit_reason (exit_lifecycle picks it up next cycle)
-    assert portfolio.positions[0].exit_reason == "red_force_exit"
-    assert summary["entries_blocked_reason"] == "force_exit_review_daily_loss_red"
-    assert summary["monitors"] == 1
-    assert summary["candidates"] == 0
-
-
 def test_entries_paused_reports_block_reason(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
@@ -7137,7 +7047,6 @@ def test_entries_paused_reports_block_reason(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
@@ -12409,7 +12318,6 @@ def test_monitoring_phase_pre_chain_refresh_skips_exit_preflight(monkeypatch):
         tracker=StrategyTracker(),
         summary=summary,
         deps=_monitor_chain_deps(datetime(2026, 3, 31, 20, 0, tzinfo=timezone.utc)),
-        exit_order_submit_enabled=False,
         run_exit_preflight=False,
     )
 

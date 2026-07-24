@@ -83,7 +83,7 @@ a shared module).
 ### (b) Pass `json_subdir` explicitly instead of mutating global dict (preferred)
 
 Add an optional `json_subdir_override: str | None = None` parameter to `ingest_track()`.
-When provided, shadow the dict lookup locally:
+When provided, bind the dict lookup locally:
 
 ```python
 subdir_name = json_subdir_override if json_subdir_override is not None else cfg["json_subdir"]

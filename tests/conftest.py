@@ -170,78 +170,6 @@ def r3_default_risk_allocator_for_unit_tests():
         ws_gap_guard.clear_for_test()
 
 
-@pytest.fixture(autouse=True)
-def _redeem_pivot_test_machinery_context(monkeypatch):
-    """Redeem submission FORBIDDEN in production (operator law 2026-06-10): there
-    is no env/override that re-arms it; ``assert_redeem_submission_allowed``
-    raises ``REDEEM_SUBMISSION_FORBIDDEN`` unconditionally.
-
-    But the receipt-CLASSIFICATION antibodies (standard-CTF receipt verification,
-    negRisk misroute reset, gamma fallback, world-attach) legitimately bootstrap
-    their REDEEM_TX_HASHED fixture state through ``submit_redeem`` before
-    asserting on ``reconcile_pending_redeems`` (pure chain-receipt accounting).
-    To keep that ACCOUNTING coverage alive without weakening the production law,
-    this autouse fixture monkeypatches the guard to a no-op for the test session
-    only. The production teeth — the unconditional raise and "no venue/RPC method
-    invoked" antibody — are pinned by tests/execution/test_redeem_pivot_antibody.py,
-    which does NOT use this fixture's patch (it imports the real guard) and so
-    sees the genuine unconditional raise.
-    """
-    import src.execution.settlement_commands as _sc
-
-    monkeypatch.setattr(
-        _sc, "assert_redeem_submission_allowed", lambda *_a, **_k: None
-    )
-
-
-@pytest.fixture(autouse=True)
-def _mainstream_gate_test_isolation(monkeypatch):
-    """Test-isolation antibody (#135): mainstream-agreement reference OFF by default in
-    tests, submit-enforcement OFF, and live Open-Meteo fetches forbidden.
-
-    The live reactor reads the MUTABLE operational flag
-    ``settings["edli"]["mainstream_agreement_reference_enabled"]`` (F1 rename of
-    the former ``mainstream_agreement_gate_enabled``) and dials
-    ``fetch_mainstream_point`` (Open-Meteo). Without this fixture, flipping that
-    flag ON for live shadow trading silently changed acceptance-suite behaviour:
-    the gate fired against the live network and excluded synthetic proof fixtures
-    (decision_proof_bundle=None). This is the same live-coupling category the
-    ``_bankroll_provider_test_isolation`` fixture above guards against — tests
-    must control their inputs through a seam, never inherit live config/network.
-
-    Default: reference flag OFF AND ``mainstream_agreement_enforce_on_submit`` OFF —
-    deterministic, independent of the live config value. The reference selector's own
-    behaviour is fully covered by tests/test_mainstream_agreement_gate.py against the
-    pure ``evaluate_mainstream_agreement`` (no flag, no network). A test that needs the
-    reference / enforce ON sets the flag explicitly AND patches fetch_mainstream_point.
-    Belt-and-suspenders: live fetch is forbidden so an opted-in test that forgets
-    to patch fails LOUDLY instead of dialing out.
-    """
-    from src.config import settings
-
-    data = getattr(settings, "_data", None)
-    edli_cfg = data.get("edli") if isinstance(data, dict) else None
-    if isinstance(edli_cfg, dict):
-        monkeypatch.setitem(edli_cfg, "mainstream_agreement_reference_enabled", False)
-        monkeypatch.setitem(edli_cfg, "mainstream_agreement_enforce_on_submit", False)
-        # SINGLE TRUTH (bias-maze strip 2026-06-17): the ``edli_emos_sole_calibrator_enabled``
-        # pin is DROPPED — the flag is removed and the EMOS/honest-raw regime is now
-        # unconditional for non-day0 cells (no legacy maze path to pin to OFF).
-
-    import src.data.mainstream_forecast_source as _ms
-
-    def _forbid_live_mainstream(*_args, **_kwargs):
-        raise AssertionError(
-            "fetch_mainstream_point was invoked from a test. Live Open-Meteo "
-            "queries are forbidden in unit tests; a gate-ON test must patch "
-            "src.data.mainstream_forecast_source.fetch_mainstream_point with a "
-            "deterministic stub."
-        )
-
-    monkeypatch.setattr(_ms, "fetch_mainstream_point", _forbid_live_mainstream)
-    yield
-
-
 # ---------------------------------------------------------------------------
 # Dual-DB fixture helper — Clusters A + D (G4 cleanup, 2026-05-18)
 # ---------------------------------------------------------------------------
@@ -379,11 +307,8 @@ _WLA_CANONICAL_INFRA_ALLOWLIST = frozenset({
 # All resolved: already_guarded scripts promoted to production allowlist;
 # verify_truth_surfaces promoted as read_only; _zeus_emergency_k2 dropped (file
 # deleted post-run); migrate_backtest_runs retrofitted with db_writer_lock wrap.
-# 2 daemon src/ sites remain — unresolved pending Track A.6.
+# No daemon src/ writer remains outside the cutover-aware connection contract.
 _WLA_RESIDUAL_ALLOWLIST = frozenset({
-    # --- src/ daemon sites: pending Track A.6 (#246) ---
-    "src/data/market_scanner.py",       # pending_track_a6: daemon INSERT writes to market_events; no db_writer_lock yet
-    "src/state/chunk_boundary_events.py",  # pending_track_a6: F11 daemon-thread observability write; intentionally separate conn from BulkChunker's conn to avoid lock-order conflict; failure-silent
     # --- scripts/ utilities: standalone CLI tools, not daemon src/ ---
     "scripts/revoke_bad_forecast_decisions.py",  # pending_track_a6: standalone revocation CLI; PR-E work in progress
     "scripts/build_ft_staging_db.py",               # pending_track_a6: Zeus #64 FT-ship operator staging script; one-shot CLI, not daemon src/
@@ -391,7 +316,6 @@ _WLA_RESIDUAL_ALLOWLIST = frozenset({
     "scripts/probe_full_live_path_to_submit.py", # pending_track_a6: standalone live-path probe script; operator diagnostic tool, not daemon src/
     "scripts/ops/health_probe.py",  # read_only liveness probe: connects mode=ro + PRAGMA query_only=ON, ZERO writes — cannot violate write-atomicity; standalone ops/cron diagnostic, not daemon src/ (authority: feedback_liveness_first_health_antibody)
     "scripts/ops/orderable_bias_pass_candidates.py",  # pending_track_a6: read-only arm-review observability query (order-able ∩ bias-pass); standalone ops script, not daemon src/
-    "scripts/validate_member_vote_smoothing_3way.py",  # read_only: standalone 3-way BAYES_PRECISION_FUSION smoothing settlement-validation diagnostic; mode=ro connections only, no writes; not daemon src/
     # backfill_bayes_precision_fusion_history_from_b0.py PROMOTED to the production allowlist
     # (db_writer_lock.SQLITE_CONNECT_ALLOWLIST, 2026-06-08): principled decision —
     # operator-invoked RW of the SHADOW_ONLY research-accrual table raw_model_forecasts

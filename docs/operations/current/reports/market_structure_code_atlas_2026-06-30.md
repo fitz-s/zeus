@@ -136,7 +136,7 @@ trade-class list names `settlement_commands`, not `settlement_outcomes`). Only t
 `settlement_commands` are trade-class. CHECK-constraint migrations stay single-DB (one SAVEPOINT per table).
 
 **Redundancy on this axis (verified):**
-- **Shadow ghosts — 144 of 259 registered (name,db) pairs (56%) are `schema_class: legacy_archived`**: a
+- **Retired ghosts — 144 of 259 registered (name,db) pairs (56%) are `schema_class: legacy_archived`**: a
   non-owner DB physically carries the table as a 0-row (or straggler) shell. MANAGED: excluded from set-equality,
   **scheduled DROP 2026-08-09** (K1 2026-05-11 + 90-day retention) via `scripts/drop_world_ghost_tables.py`.
 - **Straggler rows** in a few ghost copies (world.venue_commands=4, world.venue_order_facts=8,
@@ -146,7 +146,7 @@ trade-class list names `settlement_commands`, not `settlement_outcomes`). Only t
   opens created zero-byte DECOY files (`zeus_world.db`, `zeus_forecasts.db`, `zeus-trades.db`; inert since
   2026-06-18). A wrong-separator open silently makes a NEW empty DB instead of failing.
 - **Ghost-masks-a-bug (concrete):** `execution/settlement_commands.py` `submit_redeem` (~:869) reads
-  `FROM world.executable_market_snapshots` — the empty world shadow — instead of the 9.1M-row trades owner, so it
+  `FROM world.executable_market_snapshots` — the empty world retired — instead of the 9.1M-row trades owner, so it
   always misses and falls back to the Gamma network API. Had the ghost not existed, K1 cutover would have raised
   "no such table" and forced the fix. (Sibling `_lookup_market_neg_risk_authoritative` :1252 already has the
   trades fallback; submit_redeem was missed.) **NOW FIXED** — Tier-2 trades read added (commit `0f78630e6`,

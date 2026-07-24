@@ -106,10 +106,10 @@ def _sealed_global_current_buy_no_economics() -> dict[str, object]:
         "global_terminal_median_payoff_usd": "6.8",
         "global_terminal_wealth_after_loss_usd": "96.8",
         "global_terminal_wealth_after_win_usd": "106.8",
-        "global_cut_time_expected_value_diagnostic_usd": 2.9,
-        "global_expected_value_diagnostic_usd": 2.9,
+        "global_cut_time_expected_value_usd": 2.9,
+        "global_expected_value_usd": 2.9,
         "global_expected_value_semantics": (
-            "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+            "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
         ),
         "global_terminal_payoff_semantics": "BINARY_0_1",
     }

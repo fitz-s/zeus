@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Created: 2026-06-22
-# Last audited: 2026-06-22
+# Last audited: 2026-07-24
 # Authority basis: per-city historical settlement-skill gate
 #   (team-lead approved (a) 2026-06-22; live_order_pathology 2026-06-22). Walk-forward
 #   forward-validation harness. READ-ONLY over state/zeus-world.db (settlement_attribution). Writes a
-#   JSON report under docs/evidence/live_order_pathology/. The orchestrator owns promotion/deploy.
+#   document artifact under docs/evidence/live_order_pathology/. The orchestrator owns promotion/deploy.
 """Walk-forward forward-validation for the per-city historical settlement-skill gate (no look-ahead).
 
 THE BAR: at each bet's decision time T (= target_date), rebuild the per-city skill estimate on that
@@ -31,7 +31,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORLD_DEFAULT = os.path.join(REPO, "state", "zeus-world.db")
 OUT_DEFAULT = os.path.join(
     REPO, "docs", "evidence", "live_order_pathology",
-    "2026-06-22_city_skill_gate_forward_validation.json",
+    "2026-06-22_city_skill_gate_forward_validation.json.md",
 )
 
 

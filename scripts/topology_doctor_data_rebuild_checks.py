@@ -108,8 +108,8 @@ def run_data_rebuild(api: Any) -> Any:
     if "N/A" not in str(replay_rule.get("p_and_l_without_market_price", "")):
         issues.append(api._issue("data_rebuild_replay_pnl_unsafe", "p_and_l_without_market_price", "missing N/A rule"))
 
-    diagnostic = topology.get("offline_no_promotion") or {}
-    if diagnostic.get("authority_scope") != "offline_no_promotion":
+    offline = topology.get("offline_no_promotion") or {}
+    if offline.get("authority_scope") != "offline_no_promotion":
         issues.append(api._issue("data_rebuild_non_promotion_missing", "offline_no_promotion", "authority_scope must be offline_no_promotion"))
     for target in (
         "state/zeus_trades.db",
@@ -117,7 +117,7 @@ def run_data_rebuild(api: Any) -> Any:
         "live strategy thresholds",
         "calibration model activation",
     ):
-        if target not in (diagnostic.get("forbidden_promotions") or []):
+        if target not in (offline.get("forbidden_promotions") or []):
             issues.append(api._issue("data_rebuild_non_promotion_incomplete", target, "canonical target missing from forbidden promotions"))
 
     return api.StrictResult(ok=not issues, issues=issues)

@@ -39,7 +39,7 @@ from src.state.truth_files import current_runtime_state, read_runtime_truth_json
 
 
 OUT = PROJECT_ROOT / "equity_curve.png"
-LEGACY_DIAGNOSTIC_COHORT = "legacy_diagnostic"
+LEGACY_UNVERIFIED_COHORT = "legacy_unverified"
 _FILL_GRADE_AUTHORITIES = frozenset({
     FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
@@ -84,7 +84,7 @@ def _exit_economics_cohort(row: dict) -> str:
         or row.get("corrected_executable_economics_eligible") is True
     )
     if not corrected:
-        return LEGACY_DIAGNOSTIC_COHORT
+        return LEGACY_UNVERIFIED_COHORT
     ready = (
         row.get("entry_economics_authority") in _ENTRY_GRADE_AUTHORITIES
         and row.get("fill_authority") in _FILL_GRADE_AUTHORITIES
@@ -110,7 +110,7 @@ def _single_exit_economics_cohort(rows: list[dict]) -> tuple[str, dict[str, int]
             "mixed pricing semantics cohorts are forbidden in equity curve: "
             f"{sorted(counts)}"
         )
-    return next(iter(counts), LEGACY_DIAGNOSTIC_COHORT), counts
+    return next(iter(counts), LEGACY_UNVERIFIED_COHORT), counts
 
 
 def require_single_exit_economics_cohort(rows: list[dict]) -> str:

@@ -24,13 +24,13 @@
 ## Runtime contexts
 
 Zeus is live-only. The retired peer execution path was decommissioned in Phase 1; backtest and
-shadow are diagnostic contexts, not peer runtime modes.
+parallel observe-only are offline evidence contexts, not peer runtime modes.
 
 | Context | Authority | Purpose |
 |---------|-----------|---------|
 | `live` | `state/zeus_trades.db` + `state/zeus-world.db` | Real money trading on Polymarket |
-| `backtest` | `state/zeus_backtest.db` | Derived diagnostics and replay reports only |
-| `shadow` | DB-backed observation/instrumentation facts | Observe and compare without gating live execution |
+| `backtest` | `state/zeus_backtest.db` | Derived offline evidence checks and replay reports only |
+| `parallel observe-only` | DB-backed observation/instrumentation facts | Observe and compare without gating live execution |
 
 JSON status/position files are derived operator surfaces and must not be read
 back as runtime authority.

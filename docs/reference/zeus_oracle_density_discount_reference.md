@@ -303,7 +303,7 @@ the market of all alpha.
 
 ## §6 Canonical DDD formula — v2 Two-Rail design (operator-approved 2026-05-03)
 
-**Note on σ**: σ is computed and available for monitoring/diagnostics but does NOT
+**Note on σ**: σ is computed and available for monitoring/offline evidence checks but does NOT
 enter the trigger or floor selection. See §X for the v2 redesign rationale.
 
 **Note on asymmetric loss preferences**: city-specific asymmetric loss preferences
@@ -416,7 +416,7 @@ hours has statistical significance. Below this floor, regardless of historical
 baseline, no probability claim about daily max/min is defensible.
 
 **Note on σ in Day-0 context**: the v1 Rail 1 used `city_floor - 2σ` as the
-relative-drop threshold. In v2, σ is diagnostic-only and does NOT enter the
+relative-drop threshold. In v2, σ is offline evidence-only and does NOT enter the
 trigger. The relative trigger is simply `cov < city_floor` (Rail 2), and the
 absolute kill is `cov < 0.35` (Rail 1). σ is logged as telemetry for regime-shift
 detection (see §X).
@@ -479,7 +479,7 @@ Step 10: "Does σ-band trigger have an inverted incentive?"
          → yes — worse infra (higher σ) causes algorithm to LOWER floor to maintain
            FP rate, giving LESS DDD protection to bad stations (H1 / Denver empirical proof)
          → fix (v2): remove σ from trigger; floor = max(p05, 0.35) only
-         → σ retained as diagnostic / regime-shift telemetry
+         → σ retained as offline evidence / regime-shift telemetry
 
 Step 11: "Does 5-segment curve imply false precision?"
          → yes — Phase 1 v2 bootstrap CIs show mid-bins [0.10–0.50) are
@@ -506,7 +506,7 @@ verification audit before doing so.
 | Aspect | v1 | v2 |
 |---|---|---|
 | Trigger | `fire if cov < floor - σ` | Two-Rail: Rail 1 absolute kill `cov < 0.35`, Rail 2 `cov < floor` |
-| σ role | In trigger formula | Diagnostic-only; NOT in trigger or floor selection |
+| σ role | In trigger formula | Offline evidence-only; NOT in trigger or floor selection |
 | Curve | 5-segment linear table | Continuous `D = min(0.09, 0.20 × shortfall)` |
 | Floor basis | p05 + σ-aware adjustment | p05 only: `max(p05_train_directional_cov, 0.35)` |
 | Denver override | 0.85 (asymmetric loss) | REMOVED — algorithm output stands (p05 ≈ 0.879) |
@@ -521,7 +521,7 @@ the floor to maintain the FP constraint. A city with bad infrastructure
 therefore gets LESS DDD protection. Denver's H1 result (4 zero-cov training
 days → σ 0.064 → 0.158 → algorithm recommends floor 0.35) is the empirical proof.
 
-**σ is kept as out-of-band diagnostic**. It is logged and monitored to detect
+**σ is kept as out-of-band offline evidence**. It is logged and monitored to detect
 regime shifts (vendor flapping, infrastructure degradation), but it never enters
 the critical sizing path.
 

@@ -32,6 +32,7 @@ from datetime import datetime, timezone, date, timedelta
 
 import pytest
 
+pytest.importorskip("eccodes")
 from scripts.extract_tigge_mx2t6_localday_max import (
     extract_one_grib_file,
     compute_required_max_step,

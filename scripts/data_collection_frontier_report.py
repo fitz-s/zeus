@@ -11,7 +11,7 @@
 SCOPE (PR #329 review C): this report now FEDERATES over all live data families, not just the
 forecast release calendar. Forecast sources (ECMWF Open Data / Open-Meteo / TIGGE) get the rich
 calendar/source_run frontier; observation / market_topology / settlement families are probed on
-their own event-time tables; executable_market / venue_user_ws / solar / diagnostic families
+their own event-time tables; executable_market / venue_user_ws / solar / auxiliary families
 appear as honest COVERAGE_UNKNOWN rows where their truth lives outside the forecasts connection
 (trade DB, state files) — the family is COVERED (it appears) but its freshness is not yet
 calendar-graded. Non-forecast rows report presence + event age, not calendar-grade staleness.
@@ -119,7 +119,7 @@ def _render_explain(rows: list[FrontierRow], source: str) -> str:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Data-collection frontier report (read-only).")
-    parser.add_argument("--role", choices=["live", "backfill", "diagnostic", "derived"], default=None)
+    parser.add_argument("--role", choices=["live", "backfill", "auxiliary", "derived"], default=None)
     parser.add_argument("--source", default=None, help="filter/explain a single source_id or calendar_id")
     parser.add_argument("--json", action="store_true", help="emit JSON")
     parser.add_argument("--table", action="store_true", help="emit a table (default)")
@@ -141,14 +141,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             "scope": "all_live_data_families_federated",
             "scope_note": "forecast (rich calendar/source_run) + observation/market_topology/"
                           "settlement (event-time probed) + executable_market/venue_user_ws/solar/"
-                          "diagnostic (COVERAGE_UNKNOWN where truth is in trade DB / state files); "
+                          "auxiliary (COVERAGE_UNKNOWN where truth is in trade DB / state files); "
                           "non-forecast rows report presence + event age, not calendar-grade staleness",
             "rows": [_row_to_dict(r) for r in rows],
         }, indent=2))
         return 0
 
     print("SCOPE: all live data families (forecast = rich calendar frontier; observation/market/"
-          "settlement = event-time probed; executable_market/venue/solar/diagnostic = presence-only "
+          "settlement = event-time probed; executable_market/venue/solar/auxiliary = presence-only "
           "COVERAGE_UNKNOWN where truth is outside the forecasts DB).")
     print(_render_table(rows))
     return 0

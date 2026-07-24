@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-22
 # Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
 # Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
-# Purpose: Before/after measurement of PR-A forecast selection fix (read-only diagnostic).
+# Purpose: Before/after measurement of PR-A forecast selection fix (read-only observation).
 # Reuse: Run after PR-A merge to confirm contributing-run selection bias reduction for far-east cities.
 """
 PART 1: Before/after measurement of PR-A forecast selection fix.

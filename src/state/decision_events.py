@@ -27,7 +27,7 @@ class DecisionEventRow:
     observation_time, decision_seq.
     condition_id is nullable enrichment — NOT in PK.
 
-    decision_event_id is audit-only (deid_v1_ prefix; writer-side computed via
+    decision_event_id is a derived_identity (deid_v1_ prefix; writer-side computed via
     decision_event_id_v1_hash; trigger backstop fires on NULL with sentinel
     'deid_v1_BACKSTOP_NULL_WRITER_BYPASS').
 
@@ -45,7 +45,7 @@ class DecisionEventRow:
     # Nullable enrichment
     condition_id: Optional[str]
 
-    # Audit-only hash
+    # Derived identity hash
     decision_event_id: Optional[str]
 
     # Identity / time
@@ -383,7 +383,7 @@ def read_decision_event_by_event_id(
     *,
     conn: Optional[sqlite3.Connection] = None,
 ) -> list[DecisionEventRow]:
-    """Read rows by audit-only decision_event_id (idx_decision_events_event_id).
+    """Read rows by derived_identity decision_event_id (idx_decision_events_event_id).
 
     Lookup is by deid_v1_ prefixed hash — NOT dgid_v1_ (calibration namespace).
     Cross-namespace lookups raise ValueError to prevent silent sibling-table confusion.

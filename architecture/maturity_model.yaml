@@ -24,7 +24,7 @@ stages:
       - architecture gates run in CI
   - name: mature_project
     criteria:
-      - shadow persistence removed or demoted
+      - observation persistence removed or demoted
       - replay/parity gates block regressions
       - broad LLM coding cannot silently break kernel rules
   - name: durable_system

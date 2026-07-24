@@ -10,7 +10,7 @@ SessionStart injects only a prefix of this file; this digest keeps the whole law
 
 **Time law [§0].** Freshness gates fail closed (DATA_DEGRADED), never stale-as-fresh; re-fetch executable truth at submit (FC-03). Learning strictly walk-forward; decision probability frozen as immutable certificate; no look-ahead.
 
-**Probability authority [§0 + docs/authority/replacement_final_form_2026_06_09.md].** Replacement chain is strategy of record. On the source-clock live route, current provider center + latest causal target-specific ENS within-spread + absolute ENS-center disagreement + simultaneous provider between-spread produce one settlement-preimage q and current-evidence q bounds; missing current shape fails closed. Historical residual/floor/mixture transforms and legacy ENS/Platt are diagnostics-only on that route.
+**Probability authority [§0 + docs/authority/replacement_final_form_2026_06_09.md].** Replacement chain is strategy of record. On the source-clock live route, current provider center + latest causal target-specific ENS within-spread + absolute ENS-center disagreement + simultaneous provider between-spread produce one settlement-preimage q and current-evidence q bounds; missing current shape fails closed. Historical residual/floor/mixture transforms and legacy ENS/Platt are offline evidence only.
 
 **Proof discipline [§1 — both tables mandatory before any live/armed/safe claim].** Narrowest authoritative surface wins: direct instructions > AGENTS > executable law > authority docs > current facts > references > derived context (CodeGraph/CRG answer WHERE, never what is true) > archives. Stale surface = say stale, stop using it. Do not collapse §1's per-claim proof lines.
 
@@ -70,7 +70,7 @@ This decision-time current-evidence form is mandatory for source-clock live
 posteriors. A missing/invalid current ENS shape blocks the posterior; it must not
 fall back to historical residual sigma, constant/fitted floors, fitted uniform or
 city mixtures, or a fitted affine center shift. Older fusion/calibration machinery
-may remain as diagnostics or for explicitly non-source-clock carriers, never as a
+may remain as offline evidence, never as a
 silent alternate live probability regime.
 
 The current-evidence semantics revision is part of the persisted shape and
@@ -78,13 +78,13 @@ posterior identity. A shaped certificate from another revision is not current
 probability authority; the existing seed/materialization loop must recompute it
 before entry or held-position belief can consume it.
 
-Do not reintroduce market-anchor caps, submit-disabled state, shadow-only gates, version snapshots, bankrolls, or current Kelly multipliers into root law. Present behavior must be proven from executable source, active config, process state, canonical DB rows, and decision receipts at task time. If that proof changes durable strategy law, update the owning authority doc or manifest instead of encoding a runtime snapshot here.
+Do not reintroduce market-anchor caps, submit-disabled state, parallel observe-only gates, version snapshots, bankrolls, or current Kelly multipliers into root law. Present behavior must be proven from executable source, active config, process state, canonical DB rows, and decision receipts at task time. If that proof changes durable strategy law, update the owning authority doc or manifest instead of encoding a runtime snapshot here.
 
 Settlement-graded facts backing the chain: prior-label is algebraically irrelevant under diagonal Sigma; precision weights beat equal weights by 12x SE; legacy AIFS member-vote shape put zero probability on the winning bin in 28% of settled cells; fitted sigma-shape mixture values live in `state/sigma_scale_fit.json` and must be verified live before quoting numeric k/w.
 
-The legacy ENS/Platt/market-fusion baseline is diagnostics-only under the single-q regime. It may appear as receipt provenance such as `baseline_q_lcb_reference`; it is not a second live probability authority and must not be joined back onto the live path without new authority.
+The legacy ENS/Platt/market-fusion baseline is offline evidence only under the single-q regime. It is not a second live probability authority and must not be joined back onto the live path.
 
-Legacy diagnostic chain:
+Legacy offline chain:
 
 `51 ENS members -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt -> P_cal -> alpha-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly -> Position Size`
 
@@ -211,7 +211,7 @@ Durable trading rules:
   cumulative Kelly target. Command persistence may enforce executable truth and
   risk contracts, but it must not replace that capital objective with a blanket
   one-position or one-token family veto.
-- Live may act; backtest may evaluate — and only against verified settlement joins, never mixed regimes. Shadow modes are extirpated (operator directive 2026-06-12); do not reintroduce one as a staging tier.
+- Live may act; backtest may evaluate — and only against verified settlement joins, never mixed regimes. Parallel observe-only runtime modes are forbidden; do not reintroduce one as a staging tier.
 - Settlement values flow through `SettlementSemantics`.
 - DB commits precede derived JSON/report exports.
 - Authority loss degrades monitor/exit lanes to read-only; it does not kill the cycle.

@@ -30,6 +30,7 @@ from unittest.mock import patch
 
 import pytest
 
+pytest.importorskip("eccodes")
 from scripts.extract_tigge_mn2t6_localday_min import BoundaryClassification
 from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 from src.types.metric_identity import LOW_LOCALDAY_MIN

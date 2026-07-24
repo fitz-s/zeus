@@ -1,4 +1,4 @@
-# REPLAY IS APPROXIMATE AUDIT ONLY. See live/backtest boundary authority docs.
+# REPLAY IS APPROXIMATE OFFLINE EVALUATION. See live/backtest boundary authority docs.
 """Decision Replay Engine: replay historical facts without promoting them to truth.
 
 Backtest has two separate proof chains:
@@ -41,17 +41,17 @@ BACKTEST_AUTHORITY_SCOPE = "offline_no_promotion"
 WU_SWEEP_LANE = "wu_settlement_sweep"
 TRADE_HISTORY_LANE = "trade_history_audit"
 PROBABILITY_EPS = 1e-12
-DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
+TELEMETRY_REPLAY_REFERENCE_SOURCES = frozenset({
     "ensemble_snapshots.available_at",
     "forecasts_table_synthetic",
 })
-LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE = "outcome_fact_legacy_lifecycle_projection"
+LEGACY_OUTCOME_FACT_TELEMETRY_SOURCE = "outcome_fact_legacy_lifecycle_projection"
 LEGACY_OUTCOME_FACT_EVIDENCE_CLASS = "legacy_lifecycle_projection_not_settlement_authority"
-TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE = "verified_settlement_vs_legacy_outcome_fact"
+TRADE_HISTORY_TELEMETRY_TRUTH_SOURCE = "verified_settlement_vs_legacy_outcome_fact"
 
 
 class ReplayPreflightError(RuntimeError):
-    """Raised when replay cannot safely produce diagnostic output."""
+    """Raised when replay cannot safely produce telemetry output."""
 
 
 def _table_exists(conn, schema: str, table: str) -> bool:
@@ -277,18 +277,18 @@ def _replay_provenance_limitations(outcomes: list[ReplayOutcome]) -> dict:
         for outcome in outcomes
     )
     fallback_subjects = sum(1 for outcome in outcomes if outcome.hours_since_open_fallback)
-    diagnostic_subjects = sum(
+    telemetry_subjects = sum(
         1
         for outcome in outcomes
-        if outcome.decision_reference_source in DIAGNOSTIC_REPLAY_REFERENCE_SOURCES
+        if outcome.decision_reference_source in TELEMETRY_REPLAY_REFERENCE_SOURCES
     )
     total_subjects = len(outcomes)
     return {
         "decision_reference_source_counts": dict(sorted(decision_reference_source_counts.items())),
         "hours_since_open_source_counts": dict(sorted(hours_since_open_source_counts.items())),
-        "diagnostic_replay_subjects": diagnostic_subjects,
-        "diagnostic_replay_subject_rate": round(
-            diagnostic_subjects / max(1, total_subjects),
+        "telemetry_replay_subjects": telemetry_subjects,
+        "telemetry_replay_subject_rate": round(
+            telemetry_subjects / max(1, total_subjects),
             6,
         ),
         "hours_since_open_fallback_subjects": fallback_subjects,
@@ -459,7 +459,7 @@ class ReplayContext:
         decision_time: str,
         temperature_metric: Literal["high", "low"] = "high",
     ):
-        """Lightweight diagnostic reference lookup; full snapshot payload may not exist."""
+        """Lightweight telemetry reference lookup; full snapshot payload may not exist."""
         for table, source in (
             (self._snapshot_v2_table, "ensemble_snapshots"),
         ):
@@ -503,7 +503,7 @@ class ReplayContext:
         self, city_name: str, target_date: str,
         temperature_metric: Literal["high", "low"] = "high",
     ) -> list[dict]:
-        """Load diagnostic historical forecast rows for a replay fallback.
+        """Load telemetry historical forecast rows for a replay fallback.
 
         Phase 9C A1 (B093 half-2): conditional v2 read. When
         historical_forecasts is populated, query it with `AND
@@ -604,7 +604,7 @@ class ReplayContext:
         except sqlite3.OperationalError as exc:
             # Pre-F11 fixture/legacy DBs may not have the provenance column at
             # all. The F11 filter applies when the column exists; no-column
-            # schemas keep the earlier diagnostic replay behavior.
+            # schemas keep the earlier telemetry replay behavior.
             if "availability_provenance" not in str(exc):
                 return []
             rows = self.conn.execute(
@@ -678,7 +678,7 @@ class ReplayContext:
             "valid_time": f"{target_date}T00:00:00+00:00",
             "available_at": ref["decision_time"],
             "fetch_time": ref["decision_time"],
-            "data_version": "diagnostic_forecast_rows.v1",
+            "data_version": "audit_forecast_rows.v1",
             "n_members": len(member_values),
         }
 
@@ -973,7 +973,7 @@ def derive_outcome_from_settlement_value(
 
 
 def _probability_vector_from_values(values: list[float], bins: list[Bin], unit: str) -> np.ndarray:
-    """Build a diagnostic probability vector from native-unit forecast highs."""
+    """Build a telemetry probability vector from native-unit forecast highs."""
     if not values or not bins:
         return np.array([], dtype=float)
     probs = []
@@ -1505,7 +1505,6 @@ def _replay_one_settlement(
     from src.engine.evaluator import _default_weather_fee_rate, _size_at_execution_price_boundary
     from src.contracts.execution_price import polymarket_fee
     from src.strategy.market_analysis import MarketAnalysis
-    from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
     from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE, compute_alpha
     from src.calibration.manager import season_from_month
     from src.data.market_scanner import _parse_temp_range
@@ -1580,7 +1579,7 @@ def _replay_one_settlement(
 
     # Get calibrator — L3 Phase 9C: thread metric from replay public entry.
     # Wave7: replay may use Platt only when the snapshot proves the same
-    # calibration bucket source identity as live lookup. Diagnostic or legacy
+    # calibration bucket source identity as live lookup. Telemetry or legacy
     # data_versions without a bucket mapping stay uncalibrated instead of using
     # schema defaults.
     (
@@ -1669,8 +1668,7 @@ def _replay_one_settlement(
             # K1: replay/backtest measures the FULL tested family (the denominator the
             # live gate is calibrated against), so it stays exempt — the live sharpness
             # gate is live-q admission behavior, not an offline-measurement filter.
-            forecast_sharpness=ForecastSharpnessEvidence.exempt(unit=city.settlement_unit),
-        )
+                    )
         _n_bootstrap = edge_n_bootstrap()
         edges = analysis.find_edges(n_bootstrap=_n_bootstrap)
         # S6-FDR (2026-06-01): replay selection runs BH over the FULL tested
@@ -1724,8 +1722,8 @@ def _replay_one_settlement(
         f"decision_reference_source:{decision_reference_source}",
         f"hours_since_open_source:{hours_since_open_source}",
     ]
-    if decision_reference_source in DIAGNOSTIC_REPLAY_REFERENCE_SOURCES:
-        provenance_validations.append("diagnostic_reference")
+    if decision_reference_source in TELEMETRY_REPLAY_REFERENCE_SOURCES:
+        provenance_validations.append("telemetry_reference")
         provenance_validations.append(
             f"authority_scope:{decision_ref.get('authority_scope') or BACKTEST_AUTHORITY_SCOPE}"
         )
@@ -1745,12 +1743,6 @@ def _replay_one_settlement(
                 ci_width=ci_width,
                 lead_days=lead_days,
                 portfolio_heat=0.0,
-                # Wave 6 / K1 (PR #348): per-edge unified-budget gate (replay
-                # parity with the live evaluator ci_width seam). No-op at
-                # flag-OFF.
-                market_uncertainty_in_lcb=bool(
-                    getattr(edge, "market_cost_uncertainty_applied", False)
-                ),
             )
             # P10E: route through the evaluator seam so replay uses typed
             # ExecutionPrice (fee-adjusted) rather than a bare float.
@@ -1781,14 +1773,6 @@ def _replay_one_settlement(
                 kelly_multiplier=k_mult,
                 effective_context=None,
                 allow_missing_context=True,
-                market_uncertainty_in_lcb=bool(
-                    getattr(edge, "market_cost_uncertainty_applied", False)
-                ),
-                max_executable_shares=(
-                    float(edge.entry_quote_evidence.depth_at_target_size)
-                    if getattr(edge, "entry_quote_evidence", None) is not None
-                    else None
-                ),
             )
             size_usd = max(0.0, size_usd)
             if not market_price_linked:
@@ -2074,7 +2058,7 @@ def _assert_market_events_ready_for_replay(
     except sqlite3.OperationalError as exc:
         raise ReplayPreflightError(
             "no_market_events: replay requires market_events range labels "
-            f"for {lane} subjects before diagnostic output can be trusted"
+            f"for {lane} subjects before telemetry output can be trusted"
         ) from exc
 
     available_pairs = set()
@@ -2119,7 +2103,7 @@ def _assert_market_events_ready_for_replay(
         "no_market_events: replay requires market_events range labels "
         f"for {len(missing_subjects)}/{len(required_subjects)} {lane} settlement subjects "
         f"in {start_date}..{end_date}; missing={sample}; "
-        "use allow_snapshot_only_reference=True only for diagnostic fallback"
+        "use allow_snapshot_only_reference=True only for telemetry fallback"
     )
 
 
@@ -2181,7 +2165,7 @@ def run_wu_settlement_sweep(
         limitations={
             "storage": "zeus_backtest.db",
             "authority_scope": BACKTEST_AUTHORITY_SCOPE,
-            "promotion_authority": False,
+            "learning_authority": False,
             "lane_goal": "forecast_skill_not_pnl",
             "pnl_available": False,
             "pnl_unavailable_reason": "wu_settlement_sweep_scores_forecast_quality_not_trading_economics",
@@ -2406,7 +2390,7 @@ def _trade_subject_rows(conn) -> list[str]:
     return sorted({str(row["position_id"]) for row in rows if row["position_id"]})
 
 
-def _diagnostic_outcome_fact_projection(
+def _telemetry_outcome_fact_projection(
     row,
     *,
     expected_decision_snapshot_id: str | None,
@@ -2414,7 +2398,7 @@ def _diagnostic_outcome_fact_projection(
     """Return actual-trade fields only when legacy outcome_fact is linkable.
 
     outcome_fact predates settlement-authority provenance. The trade-history
-    lane may compare it diagnostically, but it must never turn into settlement,
+    lane may compare it for reporting, but it must never turn into settlement,
     learning, or promotion authority by omission.
     """
     expected_snapshot = str(expected_decision_snapshot_id or "").strip()
@@ -2424,7 +2408,6 @@ def _diagnostic_outcome_fact_projection(
         "actual_outcome_evidence_class": LEGACY_OUTCOME_FACT_EVIDENCE_CLASS,
         "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
         "actual_outcome_learning_eligible": False,
-        "actual_outcome_promotion_eligible": False,
         "expected_decision_snapshot_id": expected_snapshot,
         "outcome_fact_consumed_as_actual_trade_evidence": False,
     }
@@ -2461,9 +2444,9 @@ def _diagnostic_outcome_fact_projection(
 
     evidence.update(
         {
-            "actual_trade_outcome_source": LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE,
+            "actual_trade_outcome_source": LEGACY_OUTCOME_FACT_TELEMETRY_SOURCE,
             "actual_pnl_source": (
-                LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE if row["pnl"] is not None else "none"
+                LEGACY_OUTCOME_FACT_TELEMETRY_SOURCE if row["pnl"] is not None else "none"
             ),
             "outcome_fact_consumed_as_actual_trade_evidence": True,
         }
@@ -2484,15 +2467,14 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
         limitations={
             "storage": "zeus_backtest.db",
             "authority_scope": BACKTEST_AUTHORITY_SCOPE,
-            "promotion_authority": False,
+            "learning_authority": False,
             "lane_goal": "real_trade_outcome_divergence_not_hypothetical_pnl",
             "pnl_available": False,
             "pnl_unavailable_reason": "trade_history_audit_reports_actual_trade_pnl_rows_not_simulated_strategy_pnl",
-            "actual_trade_outcome_source": LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE,
+            "actual_trade_outcome_source": LEGACY_OUTCOME_FACT_TELEMETRY_SOURCE,
             "actual_outcome_evidence_class": LEGACY_OUTCOME_FACT_EVIDENCE_CLASS,
             "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
             "actual_outcome_learning_eligible": False,
-            "actual_outcome_promotion_eligible": False,
         },
     )
     _insert_backtest_run(backtest_conn, summary, status="running")
@@ -2514,7 +2496,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
                 subject_kind="position",
                 city=None,
                 target_date=None,
-                truth_source=TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE,
+                truth_source=TRADE_HISTORY_TELEMETRY_TRUTH_SOURCE,
                 divergence_status=divergence_status,
                 evidence={
                     "aliases": list(subject.aliases),
@@ -2523,7 +2505,6 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
                     "actual_pnl_source": "none",
                     "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
                     "actual_outcome_learning_eligible": False,
-                    "actual_outcome_promotion_eligible": False,
                 },
                 missing_reasons=[subject.missing_reason],
             )
@@ -2548,7 +2529,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
         ).fetchone()
         if current is None:
             actual_outcome, actual_pnl, outcome_evidence, outcome_missing = (
-                _diagnostic_outcome_fact_projection(
+                _telemetry_outcome_fact_projection(
                     outcome,
                     expected_decision_snapshot_id=None,
                 )
@@ -2561,7 +2542,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
                 subject_kind="position",
                 city=None,
                 target_date=None,
-                truth_source=TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE,
+                truth_source=TRADE_HISTORY_TELEMETRY_TRUTH_SOURCE,
                 divergence_status="trade_unresolved",
                 evidence={"resolved_source": subject.source, **outcome_evidence},
                 missing_reasons=["missing_position_current", *outcome_missing],
@@ -2569,7 +2550,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
             continue
 
         actual_outcome, actual_pnl, outcome_evidence, outcome_missing = (
-            _diagnostic_outcome_fact_projection(
+            _telemetry_outcome_fact_projection(
                 outcome,
                 expected_decision_snapshot_id=current["decision_snapshot_id"],
             )
@@ -2629,7 +2610,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
             derived_wu_outcome=wu_outcome,
             actual_trade_outcome=actual_outcome,
             actual_pnl=actual_pnl,
-            truth_source=TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE,
+            truth_source=TRADE_HISTORY_TELEMETRY_TRUTH_SOURCE,
             divergence_status=divergence,
             evidence={"resolved_source": subject.source, **outcome_evidence},
             missing_reasons=[*missing, *outcome_missing],
@@ -2650,7 +2631,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
 # Public API
 # ---------------------------------------------------------------------------
 
-@capability("backtest_diagnostic_write", lease=False)
+@capability("backtest_audit_write", lease=False)
 @protects("INV-04")
 def run_replay(
     start_date: str,
@@ -2876,14 +2857,14 @@ def run_replay(
     missing_parity = _missing_parity_dimensions(full_linkage)
 
     summary.limitations = {
-        "uniform_prior": "diagnostic_edge_ranking_only_when_market_vector_missing",
+        "uniform_prior": "telemetry_edge_ranking_only_when_market_vector_missing",
         "flat_sizing": False,
         "no_bootstrap_fdr": False,
         **linkage_info,
         **_replay_provenance_limitations(summary.outcomes),
         "forecast_rows_fallback": allow_snapshot_only_reference,
         "authority_scope": BACKTEST_AUTHORITY_SCOPE,
-        "promotion_authority": False,
+        "learning_authority": False,
         "missing_parity_dimensions": missing_parity,
     }
 

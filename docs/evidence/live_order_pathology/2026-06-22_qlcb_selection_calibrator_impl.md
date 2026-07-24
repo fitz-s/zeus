@@ -34,7 +34,7 @@ the loss is **adverse SELECTION** (the gate picks the toxic subset), not a unifo
 | `tests/decision/test_selection_calibrator_eb.py` | Weighted PAVA + EB beta-binomial lower bound + v2 serving (7 tests). |
 | `tests/test_fit_selection_calibrator.py` | Fitter no-leak + monotone + adverse-selection recovery + EB fit + learn_tau (11 tests). |
 | `src/state/db_writer_lock.py` | +2 allowlist lines (read-only `?mode=ro`, same posture as `fit_sigma_scale.py`). |
-| `docs/evidence/live_order_pathology/2026-06-22_qlcb_selection_forward_validation.json` | STEP-4 3-way walk-forward report (real shared data). |
+| `docs/evidence/live_order_pathology/2026-06-22_qlcb_selection_forward_validation.json.md` | STEP-4 3-way walk-forward report (real shared data). |
 
 ## 3. Method, features, fail-closed logic
 

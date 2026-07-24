@@ -3,9 +3,9 @@
 Module book: `docs/reference/modules/signal.md`
 Machine registry: `architecture/module_manifest.yaml`
 
-## Strategy of record (2026-06-09) — this zone is diagnostic baseline, not live authority
+## Strategy of record (2026-06-09) — this zone is telemetry baseline, not live authority
 
-Live forecast authority is the **replacement chain** (`docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block): per-model walk-forward de-bias (`src/forecast/bayes_precision_fusion.py` `eb_bias`) → T2 Bayesian precision fusion (`fuse_bayes_precision_posterior`) → settlement-preimage q (`src/calibration/emos.py` `bin_probability_settlement`, q_shape `fused_normal_direct`). The `src/signal/` 51-ENS→P_raw path (`ensemble_signal.py` `analytic_p_raw_vector_from_maxes`) is a diagnostic/comparison baseline and receipt provenance only. It must not cap, floor, veto, or otherwise join back into live replacement q without new authority. Edit here for the diagnostic baseline only; the live q lives in `src/forecast/` + `src/data/replacement_forecast_*`.
+Live forecast authority is the **replacement chain** (`docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block): per-model walk-forward de-bias (`src/forecast/bayes_precision_fusion.py` `eb_bias`) → T2 Bayesian precision fusion (`fuse_bayes_precision_posterior`) → settlement-preimage q (`src/calibration/emos.py` `bin_probability_settlement`, q_shape `fused_normal_direct`). The `src/signal/` 51-ENS→P_raw path (`ensemble_signal.py` `analytic_p_raw_vector_from_maxes`) is a telemetry/comparison baseline and receipt provenance only. It must not cap, floor, veto, or otherwise join back into live replacement q without new authority. Edit here for the telemetry baseline only; the live q lives in `src/forecast/` + `src/data/replacement_forecast_*`.
 
 ## WHY this zone matters
 
@@ -17,7 +17,7 @@ If you break the Monte Carlo or remove the sensor noise, P_raw becomes systemati
 
 | File | What it does | Danger level |
 |------|-------------|--------------|
-| `ensemble_signal.py` | 51 members → P_raw, closed-form Gaussian-mixture (`analytic_p_raw_vector_from_maxes`; 10k-MC `p_raw_vector_from_maxes` retired) | HIGH — diagnostic baseline engine, not primary q |
+| `ensemble_signal.py` | 51 members → P_raw, closed-form Gaussian-mixture (`analytic_p_raw_vector_from_maxes`; 10k-MC `p_raw_vector_from_maxes` retired) | HIGH — telemetry baseline engine, not primary q |
 | `day0_signal.py` | Day-0 observation replaces forecast | MEDIUM — hard floor logic |
 | `day0_window.py` | When to enter day-0 mode | LOW |
 | `forecast_uncertainty.py` | Bootstrap σ sources for CI | MEDIUM — feeds double-bootstrap |

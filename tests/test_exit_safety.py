@@ -4717,10 +4717,6 @@ def test_live_exit_snapshot_capture_exception_retries_after_intent(conn, monkeyp
         "src.riskguard.riskguard.get_current_level",
         lambda: RiskLevel.RED,
     )
-    monkeypatch.setattr(
-        "src.riskguard.riskguard.get_force_exit_review",
-        lambda: False,
-    )
 
     monkeypatch.setattr(
         exit_lifecycle,
@@ -5922,10 +5918,6 @@ def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypat
     monkeypatch.setattr(
         "src.riskguard.riskguard.get_current_level",
         lambda: RiskLevel.RED,
-    )
-    monkeypatch.setattr(
-        "src.riskguard.riskguard.get_force_exit_review",
-        lambda: False,
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -7550,10 +7542,6 @@ def test_execute_exit_preserves_adopted_order_when_bid_is_sub_floor(
         monkeypatch.setattr(
             "src.riskguard.riskguard.get_current_level",
             lambda: RiskLevel.RED,
-        )
-        monkeypatch.setattr(
-            "src.riskguard.riskguard.get_force_exit_review",
-            lambda: False,
         )
 
     class FakeClob:

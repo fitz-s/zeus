@@ -52,7 +52,7 @@ Settlement note: there is **no cryptographic settlement hash.** `SettlementCerti
 - Ledger **re-hashes stored `payload_json`** vs `payload_hash` on every idempotent re-insert (`ledger.py:210-228`) → summarization raises `DECISION_CERTIFICATE_PAYLOAD_HASH_CORRUPT`.
 - Recomputing `payload_hash` instead changes `certificate_hash` → dedup key fires `CertificateSemanticDriftError` (`ledger.py:106`); parent-edge FKs dangle (`verifier.py:980,1251`).
 - **Second frozen identity:** same `opportunity_book` → `edli_no_submit_receipts.receipt_hash` (`no_submit_receipts.py:48,281-282,355`) → `EdliReceiptHashDriftError`.
-- Fixable because **no verifier reads `opportunity_book`** (0 hits in `src/decision_kernel/`) — diagnostic-only yet hash-bound. `book_id` already commits only to `{event_id,family_id,candidate_ids,selected_candidate_id}` (`opportunity_book.py:379`), not rejected economics. **v1 rows never rewritten.**
+- Fixable because **no verifier reads `opportunity_book`** (0 hits in `src/decision_kernel/`) — read-only evidence yet hash-bound. `book_id` already commits only to `{event_id,family_id,candidate_ids,selected_candidate_id}` (`opportunity_book.py:379`), not rejected economics. **v1 rows never rewritten.**
 
 ### E1 — move the four `*_zlib_b64` to BLOB columns: **SAFE, under one invariant.**
 The base64 blobs are committed by no recomputable identity:

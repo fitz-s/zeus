@@ -218,6 +218,16 @@ def test_b71_actionable_certificate_authority_is_verifier_backed_and_fail_closed
             "UPDATE decision_certificates SET payload_json = ? WHERE certificate_hash = ?",
             (json.dumps(payload, sort_keys=True), cert_hash),
         )
+    conn.execute("ATTACH DATABASE ':memory:' AS world")
+    conn.execute(
+        "CREATE TABLE world.decision_certificates AS "
+        "SELECT * FROM main.decision_certificates WHERE 0"
+    )
+    conn.execute(
+        "INSERT INTO world.decision_certificates "
+        "SELECT * FROM main.decision_certificates WHERE certificate_hash = ?",
+        (cert_hash,),
+    )
 
     payload, resolved_hash = _verified_edli_actionable_certificate(
         conn, event_id="evt-b71-authority", token_id="token-b71"

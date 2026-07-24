@@ -992,7 +992,7 @@ entries:
   doc_class: module_reference
   default_read: false
   direct_reference_allowed: true
-  current_role: dense calibration module reference for Platt fitting, maturity gates, and diagnostic baseline metrics
+  current_role: dense calibration module reference for Platt fitting, maturity gates, and offline baseline metrics
   canonical_replaced_by: []
   next_action: keep
   lifecycle_state: durable
@@ -1962,7 +1962,7 @@ entries:
   doc_class: reference
   default_read: false
   direct_reference_allowed: true
-  current_role: strategy math spec (probability law superseded 2026-06-09; diagnostic only)
+  current_role: strategy math spec (probability law superseded 2026-06-09; offline analysis only)
   canonical_replaced_by: []
   next_action: keep
   lifecycle_state: durable

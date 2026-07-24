@@ -72,9 +72,6 @@ def scan_full_hypothesis_family(
     """
     if False: _ = analysis.entry_method; _ = analysis.selected_method  # Semantic Provenance Guard
     hypotheses: list[FullFamilyHypothesis] = []
-    # Wave-1 2026-06-12: the forecast-sharpness family-suppression branch that used to
-    # return an EMPTY family here is DELETED with the gate. The BH/FDR denominator now
-    # always reflects the genuinely tested hypotheses; no city is silently zeroed out.
     for idx, bin_obj in enumerate(analysis.bins):
         if not _is_executable_bin(analysis, idx):
             continue

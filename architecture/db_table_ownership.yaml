@@ -8,9 +8,8 @@
 #   name               — table name
 #   db                 — physical DB: world | forecasts | trade | risk_state | backtest
 #   schema_class       — forecast_class | world_class | trade_class | risk_class |
-#                        backtest_class | legacy_archived | inert_experimental | archive
+#                        backtest_class | legacy_archived | archive
 #                        (archive: table exists for audit/export only, no live writes)
-#                        (inert_experimental: retained contamination, never runtime authority)
 #   schema_version_owner — SCHEMA_VERSION | SCHEMA_FORECASTS_VERSION | none
 #   created_by         — init_schema | init_schema_forecasts | apply_canonical_schema |
 #                        scripts.migrations._ensure_ledger |
@@ -102,30 +101,6 @@ tables:
       assert_db_matches_registry(TRADE), so both fresh and already-migrated
       trade DBs carry the same registry-declared table.
 
-  - name: reduce_generations
-    db: trade
-    schema_class: inert_experimental
-    schema_version_owner: none
-    created_by: manual_materialize_generation_2026_07_13
-    pk_col: generation_id
-    notes: >
-      Non-owning LX-2R experimental materialization found on the live trade DB.
-      The active src/reduce contract is synthetic-fixture-only and no money-path
-      reader may consume this table. Retained for audit without blessing it as
-      trade_class; removal requires a separate explicit cleanup decision.
-
-  - name: reduce_position_economics
-    db: trade
-    schema_class: inert_experimental
-    schema_version_owner: none
-    created_by: manual_materialize_generation_2026_07_13
-    pk_col: generation_id,position_id
-    notes: >
-      Child rows of the inert LX-2R experimental generation. Non-owning and
-      unavailable through table_registry.owner(); retained only so boot can name
-      and quarantine the observed schema contamination without deleting evidence
-      or promoting it to canonical economics truth.
-
   # ---------------------------------------------------------------------------
   # FORECAST-CLASS tables (db: forecasts, authoritative in zeus-forecasts.db)
   # These 10 tables were moved from world.db → forecasts.db in K1 split
@@ -210,19 +185,6 @@ tables:
       verdicts for executable forecast consumption. Ghost copy on world.db
       declared legacy_archived below.
 
-  - name: source_time_frontier
-    db: forecasts
-    schema_class: forecast_class
-    schema_version_owner: SCHEMA_FORECASTS_VERSION
-    created_by: init_schema_forecasts
-    pk_col: source_id,family,partition_key
-    notes: >
-      Data Temporal Kernel 2026-05-24 (PR #329 D), SCHEMA_FORECASTS_VERSION 7. Persisted
-      source-time frontier authority: latest USABLE data per (source_id, family, partition).
-      Idempotent UPSERT keyed by the composite PK; writer (src.data.frontier_store.persist_frontier)
-      refuses to let a backfill/reconstructed authority overwrite a live
-      (DERIVED_FROM_DISSEMINATION) row. latest_event_time is event-time plane; computed_at is
-      write-time provenance only.
 
   - name: raw_forecast_artifacts
     db: forecasts
@@ -271,7 +233,7 @@ tables:
       apply_canonical_schema forecast_tables=True). Lives ONLY on
       zeus-forecasts.db (INV-37 single-DB); the history JOIN to settlement_outcomes
       (same DB) is intra-DB on one connection. Gated by
-      replacement_0_1_bayes_precision_fusion_capture_enabled; not a settlement, calibration,
+      the retired opt-in capture switch; not a settlement, calibration,
       or order truth table.
       UNIQUENESS (2026-06-08, BAYES_PRECISION_FUSION PR#400 BLOCKER 4 operator-sharpened): the row key
       is UNIQUE(model, product_id, request_url_hash, city, target_date, metric,
@@ -872,13 +834,6 @@ tables:
     created_by: init_schema
     pk_col: null
 
-  - name: forecast_skill
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema
-    pk_col: null
-
   - name: forecasts
     db: world
     schema_class: world_class
@@ -912,37 +867,6 @@ tables:
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
-
-  - name: model_bias
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema
-    pk_col: null
-    notes: >
-      W2 (2026-06-03): reclassified legacy_archived. Trained on deterministic
-      product; superseded by model_bias_ens (ENS posterior). No live writes
-      expected post-EMOS promotion path. Distinct from model_bias_ens.
-      DELETED_PENDING: candidate for drop once model_bias_ens is confirmed as
-      sole bias source.
-
-  - name: model_bias_ens
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema
-    pk_col: "(city, season, month, metric, live_data_version)"
-    notes: >
-      Zeus #64 FT-ship F6 (2026-05-26). ENS-product posterior-bias table for
-      full_transport_live error models. Base schema created by
-      init_ens_bias_schema() (called from init_schema). Canonical extension
-      columns (error_model_family, authority, bias_c, residual_sd_c, etc.) are
-      also applied idempotently by init_ens_bias_schema via PRAGMA-guarded ALTER.
-      authority='STAGING' rows written by fit_full_transport_error_models.py;
-      promoted to 'VERIFIED' by scripts/promote_model_bias_ens.py (operator).
-      Distinct from legacy model_bias (trained on deterministic product).
-      INTERIM (W2 2026-06-03): feeds bias-decay Kelly haircut only; not a
-      q-calibrator. Will be superseded when EMOS-σ promotion (#110) completes.
 
   # ---------------------------------------------------------------------------
   # observation_instants — CONSOLIDATED (2026-05-29)
@@ -1046,7 +970,7 @@ tables:
       _latest_authorized_day0_fact (the day0 absorbing-direction fact
       reduction). observation_instants + its monotone-widening branch are
       legacy compensation; retirement direction is ledger-alone once full
-      coverage + shadow parity.
+      coverage + observation parity.
 
   - name: opportunity_fact
     db: world
@@ -1218,28 +1142,17 @@ tables:
       # nullable (ALTER ADD COLUMN, no NOT NULL); matches live PRAGMA exactly.
       - {name: kelly_decision_id, type: TEXT, nullable: true}
       - {name: risk_decision_id, type: TEXT, nullable: true}
-      - {name: mainstream_agreement_pass, type: INTEGER, nullable: true}
-      - {name: mainstream_agreement_fail_reason, type: TEXT, nullable: true}
-      - {name: mainstream_point, type: REAL, nullable: true}
-      - {name: mainstream_delta, type: REAL, nullable: true}
-      - {name: mainstream_bin_label, type: TEXT, nullable: true}
-      - {name: mainstream_source, type: TEXT, nullable: true}
-      - {name: mainstream_fetched_at_utc, type: TEXT, nullable: true}
       - {name: alpha_gap, type: REAL, nullable: true}
       # C2 selection-shrinkage audit columns (task #60, 2026-06-13): the
       # writer INSERTs these on every adapter receipt (no_submit_receipts.py),
       # added to CREATE_TABLE + _ensure_column so a stale live DB FATALs at boot
       # rather than silently failing writes (same R4/#175 antibody intent).
-      - {name: lfsr, type: REAL, nullable: true}
-      - {name: edge_shrunk, type: REAL, nullable: true}
-      - {name: edge_shrunk_posterior_sd, type: REAL, nullable: true}
-      - {name: selection_authority, type: TEXT, nullable: true}
     notes: >
       EDLI v1 durable accepted no-submit receipt ledger. Rows preserve the
       event-bound proof projection without asserting executor or venue submission.
       Decision certificate rows are the authority for proof-carrying decisions.
-      required_columns includes the _ensure_column-migrated columns (mainstream_*,
-      alpha_gap, kelly/risk_decision_id) so a stale live DB FATALs at boot rather
+      required_columns includes the _ensure_column-migrated columns (alpha_gap,
+      kelly/risk_decision_id) so a stale live DB FATALs at boot rather
       than silently failing receipt writes (R4/#175).
 
   - name: decision_certificates
@@ -1335,7 +1248,7 @@ tables:
       - {name: schema_version, type: INTEGER, nullable: false}
     notes: >
       EDLI v1 durable pilot live-cap usage ledger. Full-live groundwork uses
-      this table for event-bound live canary reservation, release, and consume
+      this table for event-bound live probe reservation, release, and consume
       state before execution-command persistence.
 
   - name: edli_live_cap_day_slots
@@ -1355,7 +1268,7 @@ tables:
     notes: >
       Atomic live-cap day-slot guard. The composite primary key
       (cap_scope, cap_date, slot) prevents count-then-insert races from
-      oversubscribing tiny live-canary daily order capacity.
+      oversubscribing tiny live-probe daily order capacity.
 
   - name: edli_live_cap_rate_window
     db: world
@@ -1519,7 +1432,7 @@ tables:
       - {name: schema_version, type: INTEGER, nullable: false}
     notes: >
       Event-bound EDLI live realized-edge audit projection. Used by promotion
-      gates to block scaleout when canary lifecycle or economics are not proven.
+      gates to block scaleout when probe lifecycle or economics are not proven.
 
   - name: edli_live_profit_audit_supersessions
     db: world
@@ -1721,13 +1634,14 @@ tables:
     created_by: "src/state/schema/position_decision_attribution_schema.py (LX-E packet, 2026-07-13)"
     pk_col: "[attribution_id]"
     notes: >
-      Permanent position/command -> decision_certificate_hash link, written at ENTRY
-      command creation (src/state/venue_command_repo.py insert_command). Rehomes the
+      Permanent command -> decision_certificate_hash link. ENTRY records its exact
+      actionable certificate; later commands for the position inherit that same
+      unique certificate in src/state/venue_command_repo.py insert_command. Rehomes the
       certificate attribution OFF the settlement-time (condition_id, direction) ->
       latest edli_live_profit_audit row inference (docs/rebuild/local_ledger_excision_
       2026-07-12.md Round-2 delta §(c) — 14 (condition,direction) pairs map to >1
       distinct certificate hash there; "latest row" was a guess). Append-only:
-      UNIQUE(position_id) + ON CONFLICT DO NOTHING, never overwritten. Backfilled by
+      UNIQUE(command_id, position_id) + ON CONFLICT DO NOTHING, never overwritten. Backfilled by
       scripts/backfill_position_decision_attribution.py for pre-packet positions using
       an EXACT command_id -> edli_live_profit_audit.execution_command_id join only;
       ambiguous/absent exact links are marked resolution='UNATTRIBUTABLE' explicitly,
@@ -1807,31 +1721,6 @@ tables:
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
-
-  - name: ctf_conversion_commands
-    db: trade
-    schema_class: trade_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema_trade_only
-    pk_col: command_id
-    notes: >
-      W2.4 (2026-07-02): durable command ledger for CTF split/merge/convert.
-      DDL lives in src/execution/ctf_conversion_commands.py (imported once
-      into init_schema_trade_only, same pattern as settlement_commands).
-      Trade DB per db/schema_class routing decision documented in the module
-      docstring: condition_id/market_id-scoped like settlement_commands, not
-      world_class like wrap_unwrap_commands. INERT this packet — no
-      production writer yet.
-
-  - name: ctf_conversion_command_events
-    db: trade
-    schema_class: trade_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema_trade_only
-    pk_col: id
-    notes: >
-      W2.4 (2026-07-02): append-only event log for ctf_conversion_commands.
-      Same DDL co-location and INERT status as ctf_conversion_commands above.
 
   - name: settlement_command_events
     db: trade
@@ -1961,13 +1850,6 @@ tables:
       backtest reads only.
 
   - name: uma_resolution
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema
-    pk_col: null
-
-  - name: validated_calibration_transfers
     db: world
     schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
@@ -2105,23 +1987,6 @@ tables:
       tolerating this known non-money-path ghost until an audited cleanup
       migration drops it.
 
-  - name: evidence_tier_assignments_new
-    db: world
-    schema_class: legacy_archived
-    schema_version_owner: SCHEMA_VERSION
-    created_by: "src/state/schema/phase6_evidence_schema.py (rebuild-pattern transient table; renamed to evidence_tier_assignments at end of migration)"
-    pk_col: null
-    notes: >
-      Transient rebuild table used by the evidence_tier_assignments schema
-      migration (_migrate_evidence_tier_assignments_schema). Same rebuild
-      pattern as no_trade_events_new: created with the current column set +
-      widened schema_version CHECK, rows copied, old table dropped, then
-      renamed. Never live outside a migration transaction, so classed
-      legacy_archived — known to the check_db_table_delta gate, excluded from
-      assert_db_matches_registry on-disk coherence. Catalogued 2026-05-27
-      (PR #352 Part-5) when the schema_version CHECK list was extended to 40
-      and the gate re-scanned the touched phase6_evidence_schema.py.
-
   - name: shoulder_exposure_ledger
     db: world
     schema_class: world_class
@@ -2155,24 +2020,6 @@ tables:
       fit(UNKNOWN) raises ValueError (Phase 3 R-1 antibody).
       SCHEMA_VERSION 23→24.
 
-  - name: evidence_tier_assignments
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 26)"
-    pk_col: id
-    notes: >
-      Phase 6 T2 (2026-05-21): tier assignment audit trail for evidence ladder.
-      Columns: id, strategy_id, tier (INTEGER CHECK 0..7), assigned_at, rationale,
-      operator_ref, verdict_reason, schema_version, assignment_source, verdict_kind.
-      Index: idx_eta_strategy_assigned (strategy_id, assigned_at DESC).
-      Current tier is reduced by src/state/evidence_tier_assignments.py:
-      latest operator_override outranks latest tribunal assignment, then migration.
-      Written durably by LiveReadinessTribunal on PROMOTE/DEMOTE verdicts via
-      record_evidence_tier_assignment(..., commit=True). DDL owner:
-      src/state/schema/phase6_evidence_schema.py. INV-37.
-      SCHEMA_VERSION 24→25→26.
-
   - name: regret_decompositions
     db: world
     schema_class: world_class
@@ -2186,7 +2033,7 @@ tables:
       non_fill_error_usd, fee_error_usd, timing_error_usd,
       settlement_ambiguity_error_usd, total_regret_usd, computed_at.
       Sum invariant: 7 components == total_regret_usd within 1e-9.
-      DDL owner: src/state/schema/phase6_evidence_schema.py.
+      DDL owner: src/state/schema/regret_decompositions_schema.py.
       Writer: src/analysis/regret_decomposer.write_regret_decomposition(), INV-37.
       SCHEMA_VERSION 24→25; v26 no table-shape change.
 
@@ -2873,24 +2720,6 @@ tables:
     notes: >
       Sibling of the trade-DB schema_epoch entry above — see it for the law.
 
-  - name: truth_epoch
-    db: trade
-    schema_class: trade_class
-    schema_version_owner: null
-    created_by: "db.py:init_schema_trade_only via src.state.truth_epoch.ensure_truth_epoch_table"
-    pk_col: "[id]"
-    notes: >
-      LX-0R (docs/rebuild/local_ledger_excision_2026-07-12.md "契约+激活控制"):
-      single-row trade-DB truth-epoch marker, LEGACY default. Extends the
-      schema_epoch pattern above (same singleton-row idiom) but tracks a
-      DIFFERENT axis: schema_epoch answers "did the T5 migration run"; this
-      answers "who is the current economics authority"
-      (LEGACY/PREPARE/ACTIVE_NEW). Monotonic transition guard + read API in
-      src/state/truth_epoch.py; forbidden-column contract in
-      src/contracts/economics_ownership.py. Trade-DB only (unlike schema_epoch,
-      not stamped on world/forecasts — the economics authority question is
-      trade-DB-scoped). Inert this packet: stays LEGACY, no seam gates on it.
-
   - name: review_work_items
     db: trade
     schema_class: trade_class
@@ -3257,27 +3086,6 @@ tables:
       created in production DBs; the _v2 suffix is intentional artifact
       of the era this snapshot was taken. (PR #359)
 
-  - name: shadow_signals
-    db: world
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: tests/fixtures/before_p2_sqlite_master.sql
-    pk_col: null
-    notes: >
-      Historical schema snapshot table used in test fixtures only
-      (tests/fixtures/before_p2_sqlite_master.sql). Never created in
-      production DBs.
-
-  - name: shadow_experiments
-    db: world
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: tests/fixtures/before_p2_sqlite_master.sql
-    pk_col: null
-    notes: >
-      Historical schema snapshot table used in test fixtures only
-      (tests/fixtures/before_p2_sqlite_master.sql). Never created in
-      production DBs.
 
   # EDLI live-order aggregate tables: authoritative in zeus-world.db (db: world above,
   # lines 998-1079). These 4 tables were also created on zeus_trades.db because the
@@ -3362,3 +3170,35 @@ tables:
       Writer: data-ingest availability poll lane
       (src/data/replacement_cycle_advance_trigger.py). Lives on
       zeus-forecasts.db only; not settlement/calibration/order truth.
+
+  - name: single_live_cutover_generation
+    db: world
+    schema_class: world_class
+    schema_version_owner: none
+    created_by: migration_script_202607_single_live_semantics_cutover
+    pk_col: "[generation, stage]"
+    notes: Transactional generation receipt used only to distinguish a committed migration stage from external DB replacement during resume.
+
+  - name: single_live_cutover_generation
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: none
+    created_by: migration_script_202607_single_live_semantics_cutover
+    pk_col: "[generation, stage]"
+    notes: Transactional generation receipt used only to distinguish a committed migration stage from external DB replacement during resume.
+
+  - name: single_live_cutover_generation
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: none
+    created_by: migration_script_202607_single_live_semantics_cutover
+    pk_col: "[generation, stage]"
+    notes: Transactional generation receipt used only to distinguish a committed migration stage from external DB replacement during resume.
+
+  - name: single_live_cutover_generation
+    db: risk_state
+    schema_class: risk_class
+    schema_version_owner: none
+    created_by: migration_script_202607_single_live_semantics_cutover
+    pk_col: "[generation, stage]"
+    notes: Transactional generation receipt used only to distinguish a committed migration stage from external DB replacement during resume.

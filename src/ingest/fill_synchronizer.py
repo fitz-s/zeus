@@ -550,20 +550,12 @@ def sync_fills(
     }
 
 
-def fill_synchronizer_cycle() -> dict[str, Any] | None:
+def fill_synchronizer_cycle() -> dict[str, Any]:
     """Scheduler entry point (registered by ``price_channel_daemon``).
 
-    Disabled unless ``edli_v1.fill_synchronizer_enabled`` is set — mirrors the
-    other price-channel-ingest producers' settings-gated enablement. Opens its
-    own trade connection and the live venue adapter; never raises (a poller
-    fault must not crash the scheduler — the next tick retries).
+    Opens its own trade connection and the live venue adapter; never raises (a
+    poller fault must not crash the scheduler — the next tick retries).
     """
-
-    from src.ingest.price_channel_ingest import _settings_section
-
-    edli_cfg = _settings_section("edli_v1", {}) or {}
-    if not bool(edli_cfg.get("fill_synchronizer_enabled", False)):
-        return None
 
     from src.data.polymarket_client import PolymarketClient
     from src.state.db import get_trade_connection

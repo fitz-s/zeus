@@ -14,18 +14,13 @@ settlement_capture_verifications on zeus-forecasts.db under INV-37
 ATTACH+SAVEPOINT atomicity (caller-conn mode bypasses SAVEPOINT to avoid
 with-conn collision per MEMORY: feedback_with_conn_nested_savepoint_audit).
 
-Pre-promotion gate: resolution_window_maker / settlement_capture strategies
-require a configurable recent count of COHERENT verdicts before promotion.
-Threshold sourced from config/settings.json::settlement_capture_coherent_gate_n.
-Default 5 when key absent.
+The verifier records timestamp coherence only. It does not control strategy
+admission or live authority.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Optional
-
-from src.contracts.evidence_tier import EvidenceTier
-
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -43,7 +38,6 @@ class VerificationResult:
     redeemed_time: Optional[str]
     coherence_verdict: str  # 'COHERENT' | 'INCOHERENT' | 'INCOMPLETE'
     incoherence_reason: Optional[str]
-    evidence_tier: Optional[str]
 
 
 _VALID_VERDICTS = frozenset({"COHERENT", "INCOHERENT", "INCOMPLETE"})
@@ -131,7 +125,6 @@ class SettlementCaptureVerifier:
                 "source_published_time": getattr(position_or_dict, "source_published_time", None),
                 "venue_resolved_time": getattr(position_or_dict, "venue_resolved_time", None),
                 "redeemed_time": getattr(position_or_dict, "redeemed_time", None),
-                "evidence_tier": getattr(position_or_dict, "evidence_tier", None),
             }
         else:
             d = dict(position_or_dict)
@@ -140,14 +133,6 @@ class SettlementCaptureVerifier:
         source_published_time = d.get("source_published_time") or None
         venue_resolved_time = d.get("venue_resolved_time") or None
         redeemed_time = d.get("redeemed_time") or None
-
-        # Normalize evidence_tier to string
-        raw_tier = d.get("evidence_tier")
-        tier_str: Optional[str] = None
-        if isinstance(raw_tier, EvidenceTier):
-            tier_str = raw_tier.name
-        elif isinstance(raw_tier, str) and raw_tier:
-            tier_str = raw_tier
 
         verdict, reason = self.compute_verdict(
             fact_known_time, source_published_time, venue_resolved_time, redeemed_time,
@@ -163,7 +148,6 @@ class SettlementCaptureVerifier:
             redeemed_time=redeemed_time,
             coherence_verdict=verdict,
             incoherence_reason=reason,
-            evidence_tier=tier_str,
         )
 
     # ------------------------------------------------------------------
@@ -198,8 +182,8 @@ class SettlementCaptureVerifier:
                     (city, target_date, temperature_metric,
                      fact_known_time, source_published_time,
                      venue_resolved_time, redeemed_time,
-                     coherence_verdict, incoherence_reason, evidence_tier)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                     coherence_verdict, incoherence_reason)
+                VALUES (?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(city, target_date, temperature_metric) DO UPDATE SET
                     fact_known_time     = excluded.fact_known_time,
                     source_published_time = excluded.source_published_time,
@@ -207,7 +191,6 @@ class SettlementCaptureVerifier:
                     redeemed_time       = excluded.redeemed_time,
                     coherence_verdict   = excluded.coherence_verdict,
                     incoherence_reason  = excluded.incoherence_reason,
-                    evidence_tier       = excluded.evidence_tier,
                     recorded_at         = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
                 """,
                 (
@@ -220,7 +203,6 @@ class SettlementCaptureVerifier:
                     result.redeemed_time,
                     result.coherence_verdict,
                     result.incoherence_reason,
-                    result.evidence_tier,
                 ),
             )
 
@@ -236,55 +218,3 @@ class SettlementCaptureVerifier:
                 except Exception:
                     _conn.execute("ROLLBACK TO SAVEPOINT scv_write")
                     raise
-
-
-# ---------------------------------------------------------------------------
-# Pre-promotion gate
-# ---------------------------------------------------------------------------
-
-def check_pre_promotion_gate(
-    city: str,
-    temperature_metric: str,
-    *,
-    conn: Optional[Any] = None,
-    threshold: Optional[int] = None,
-) -> bool:
-    """Return True if recent COHERENT count meets the promotion threshold.
-
-    Threshold sourced from config/settings.json::settlement_capture_coherent_gate_n.
-    Default 5 when absent.
-
-    Args:
-        city: City to check.
-        temperature_metric: 'high' or 'low'.
-        conn: Optional pre-established connection. When None, opens a fresh
-              read-only connection to zeus-forecasts.db.
-        threshold: Override threshold (for testing). When None, reads from settings.
-
-    Returns:
-        True if COUNT(COHERENT) >= threshold for the given city+metric.
-    """
-    if threshold is None:
-        try:
-            from src.config import settings as _settings
-            threshold = int(_settings.get("settlement_capture_coherent_gate_n", 5))
-        except Exception:
-            threshold = 5
-
-    def _query(active_conn: Any) -> bool:
-        row = active_conn.execute(
-            """
-            SELECT COUNT(*) FROM settlement_capture_verifications
-            WHERE city = ? AND temperature_metric = ? AND coherence_verdict = 'COHERENT'
-            """,
-            (city, temperature_metric),
-        ).fetchone()
-        count = row[0] if row else 0
-        return int(count) >= threshold  # type: ignore[arg-type]
-
-    if conn is not None:
-        return _query(conn)
-
-    from src.state.db import get_forecasts_connection
-    with get_forecasts_connection() as _conn:
-        return _query(_conn)

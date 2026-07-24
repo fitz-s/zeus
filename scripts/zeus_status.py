@@ -595,17 +595,17 @@ def _screen_edges(fc: sqlite3.Connection, tr: sqlite3.Connection, today: str) ->
 
 
 # --------------------------------------------------------------------------
-# Section: SELECTION (C2 winner's-curse slope diagnostic) — read-only
+# Section: SELECTION (C2 winner's-curse slope audit) — read-only
 # --------------------------------------------------------------------------
 def section_selection() -> dict:
-    """Winner's-curse slope diagnostic (authority addendum 2026-06-13 D3).
+    """Winner's-curse slope audit (authority addendum 2026-06-13 D3).
 
     When >= 20 SETTLED traded receipts carry a non-NULL edge_shrunk, regress
     realized PnL/contract on the shrunk edge and report slope + intercept. A
     slope near 1 means the EB-shrunk edge is an unbiased predictor of realized
     edge (winner's curse corrected); slope << 1 means still under-shrinking;
     intercept != 0 means residual center bias. This is the settlement-graded
-    winner's-curse diagnostic over the EB-shrinkage audit columns (the
+    winner's-curse audit over the EB-shrinkage columns (the
     decision-replacement flag was removed 2026-06-13; the live selection gate is
     the BH/FDR pass unconditionally — these columns remain settlement telemetry).
 
@@ -1042,7 +1042,7 @@ def render_text(data: dict) -> str:
             )
     L.append("")
 
-    # SELECTION (C2 winner's-curse slope diagnostic)
+    # SELECTION (C2 winner's-curse slope audit)
     sel = data.get("selection", {})
     if sel.get("error"):
         L.append(f"SELECTION ERR {sel['error']}")

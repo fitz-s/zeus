@@ -52,7 +52,7 @@ before any live wiring goes in.
 | `src/state/portfolio.py::Position.evaluate_exit` | Insert deterministic-impossibility short-circuit (D5) AFTER the RED force-exit branch and BEFORE the missing-authority check | Live-safety |
 | `src/engine/cycle_runtime.py::_build_exit_context` | Resolve constraint from the latest persisted settlement_day_observation_authority row for (city, target_date, metric); thread into ExitContext | Live-safety |
 | `src/engine/cycle_runtime.py::execute_monitoring_phase` | Optional: pre-pass family grouping + ExitFamilyDecision cache so multi-bin families get joint cash-out decisions (D3 monitor wiring) | Performance (correctness via D5 short-circuit is already in place) |
-| `src/state/portfolio.py::Position.evaluate_exit` | D4: replace `current_market_price` with `best_bid` in the forward_edge call site for generic edge-reversal trigger. `current_market_price` stays diagnostic on ExitContext. | Live-safety |
+| `src/state/portfolio.py::Position.evaluate_exit` | D4: replace `current_market_price` with `best_bid` in the forward_edge call site for generic edge-reversal trigger. `current_market_price` stays telemetry on ExitContext. | Live-safety |
 | `src/state/portfolio.py::ExitContext.missing_authority_fields` | Audit interaction with new constraint field (advisory mode still needs fresh_prob; deterministic mode + impossible bin can bypass fresh_prob gate per operator §5 priority order) | Live-safety |
 
 ### Required new tests (follow-up PR)
@@ -63,7 +63,7 @@ before any live wiring goes in.
 - `test_evaluate_exit_observation_advisory_does_not_short_circuit` —
   advisory constraint NEVER yields IMPOSSIBLE reasons; existing branches drive
 - `test_evaluate_exit_observation_impossible_no_bid_holds` — impossible
-  + no bid returns HOLD with diagnostic reason (market closed)
+  + no bid returns HOLD with telemetry reason (market closed)
 - `test_evaluate_exit_forward_edge_uses_best_bid` — AST contract:
   evaluate_exit's `compute_forward_edge` call passes `NativeSidePrice(best_bid, direction)`, NOT `current_market_price`
 - `test_monitor_phase_family_grouping_runs_optimizer_once_per_family`
@@ -98,15 +98,15 @@ inside the family optimizer (D3) and the per-position
 `Position.evaluate_exit` chain.
 
 If a future revert ever re-introduces the F-1 regression, D5 must be
-gated OFF on canary and the entire family-grouping path stays OFF —
+gated OFF on probe and the entire family-grouping path stays OFF —
 the only safety improvement that can land then is the per-leg
 impossibility short-circuit on buy_yes, which can be ported into
 `evaluate_exit` directly without touching D2/D3.
 
 D3 monitor wiring ships behind `ZEUS_EXIT_FAMILY_OPTIMIZER_ENABLED=0`
 initially (default OFF) since it adds joint EV cash-out behaviour, and
-gets promoted after shadow-mode validation. D4 likewise behind
-`ZEUS_EXIT_FORWARD_EDGE_USES_BID=0` until canary-validated.
+gets promoted after observation-mode validation. D4 likewise behind
+`ZEUS_EXIT_FORWARD_EDGE_USES_BID=0` until probe-validated.
 
 ## Open questions for the follow-up
 
@@ -128,6 +128,6 @@ gets promoted after shadow-mode validation. D4 likewise behind
 ## Antibody discipline
 
 Both PRs land with AST-wiring antibody tests on the seams they touch,
-per PR #348's `test_pr348_unified_budget_seam_wiring.py` model. A unit
+with an AST seam check. A unit
 test passing in isolation does not prove the production seam is wired
 — the antibody is the contract.

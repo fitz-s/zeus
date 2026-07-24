@@ -10,7 +10,7 @@
 #       (fix/k1-reader-sweep-2026-05-17 + fix/k1-readers-batch-2-2026-05-17).
 #       At that point merge into one parametrized test covering all fixed scripts.
 #
-# NOTE: evaluate_calibration_transfer_oos.py K1-reader fix (F41) is covered by
+# NOTE: the retired calibration-transfer evaluator's K1-reader fix (F41) is covered by
 # tests/test_k1_reader_isolation.py. No allowlist needed here.
 
 import re

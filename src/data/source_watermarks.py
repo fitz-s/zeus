@@ -69,7 +69,7 @@ def compute_watermark(
     ``horizon_profile`` (PR review #329 R3 F5): 'full' or 'short' restricts the match to that
     horizon's expanded track (mx2t6_high_full_horizon vs _short_horizon), so a 06/18 short cycle
     cannot advance the live FULL-horizon watermark. None (default) matches any horizon — use it
-    only for diagnostics, never to drive live full-horizon catch-up.
+    only for offline analysis, never to drive live full-horizon catch-up.
     """
     conn.row_factory = sqlite3.Row
     et = _like_escape(track)

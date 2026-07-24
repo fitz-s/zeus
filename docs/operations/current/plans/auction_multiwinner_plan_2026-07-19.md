@@ -177,7 +177,7 @@ sequentially-created commands each recover independently. There is no singleton
 ## 3. Options evaluated, and recommendation
 
 Scoring axes: command-recovery replay correctness; collateral reservation races;
-FDR discipline; blast radius; operator no-artificial-caps / no-shadow law.
+FDR discipline; blast radius; operator no-artificial-caps / single-live law.
 
 ### (a) Top-K in one frozen epoch (per-family exclusion, existing risk caps)
 
@@ -213,10 +213,10 @@ one-shot actuator, fresh preflight, fresh reservation.
 - **FDR:** untouched (upstream, per-candidate).
 - **Blast radius:** ONE reactor decision point (`reactor.py:1208-1210`). Surfaces
   (A)(B)(C)(D)(F) and the entire money-path core are unchanged.
-- **No-caps / no-shadow law:** natural terminator is edge/cash/cap exhaustion —
+- **No-caps / single-live law:** natural terminator is edge/cash/cap exhaustion —
   the loop stops when the full-universe auction, sized against drawn-down cash and
   per-family risk caps, produces no positive-robust-EV winner. No hard K
-  opportunity cap. No shadow tier; lands direct.
+  opportunity cap. No retired tier; lands direct.
 
 **Recommend.**
 
@@ -323,8 +323,6 @@ the loop long before any such bound.
   do not weaken them. Add loop coverage separately.
 - `tests/integration/test_w3_solve_seam_g3.py` — auction seam + preflight
   re-auction fall-through (`:10324-10352`) unchanged.
-- `tests/money_path/test_edli_live_readiness.py` — single-epoch readiness
-  unchanged.
 
 ### Tests to CHANGE
 
@@ -372,7 +370,7 @@ edge/cash/cap/budget" and cite it from the new antibody tests.
 
 ### Land
 
-Direct land (no shadow tier — operator law). The change is behaviorally "run the
+Direct land (no retired tier — operator law). The change is behaviorally "run the
 existing epoch back-to-back within a wake instead of sleeping ~1 min between
 submits." Start with a conservative per-wake wall-clock budget so worst-case
 overrun is bounded to one in-flight epoch past the budget (the existing guard),

@@ -345,7 +345,7 @@ def evaluate_ddd_for_decision(
         mismatch_rate=mismatch_rate,
         city_floors_config=floors_cfg,
         n_star_config=nstar_cfg,
-        sigma_diagnostic=None,
+        sigma_telemetry=None,
         cycle=cycle,
         source_id=source_id,
         horizon_profile=horizon_profile,

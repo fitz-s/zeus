@@ -26,9 +26,10 @@ THE NO-LEAK GUARANTEE (IRON RULE #3, structural — not a comment):
     (degF) is converted to degC BEFORE the residual so forecast_value_c (always degC) and the
     settlement are unit-coherent (SPEC §7 "C/F unit mix" antibody).
 
-FAIL-SOFT (Protocol contract): the provider NEVER raises. Any error (closed connection,
-missing table, bad row) is caught and yields an EMPTY mapping for the affected model ->
-the capture treats it as "no history" -> anchor fallback / equal-weight (never a crash).
+FAIL-CLOSED AT THE MATERIALIZER: the provider NEVER raises, but any error (closed connection,
+missing table, bad row) yields an EMPTY mapping. The capture surfaces that absence and the
+materializer refuses to form a live posterior; it never revives a single-anchor or
+historical-width authority.
 """
 from __future__ import annotations
 

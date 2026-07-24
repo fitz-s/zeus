@@ -25,14 +25,6 @@ from src.state.db import init_schema
 UTC = timezone.utc
 
 
-@pytest.fixture(autouse=True)
-def _replacement_authority_disabled_by_default(monkeypatch):
-    monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
-        lambda: False,
-    )
-
-
 def _source_run(status: str = "SUCCESS", completeness: str = "COMPLETE") -> dict:
     return {
         "source_run_id": "run-1",

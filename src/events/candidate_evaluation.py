@@ -16,7 +16,7 @@ from src.strategy.live_inference.live_admission import (
 
 @dataclass(frozen=True)
 class CandidateEvaluation:
-    """One executable or diagnostic trade action in a family opportunity book."""
+    """One executable trade action in a family opportunity book."""
 
     candidate_id: str
     family_id: str

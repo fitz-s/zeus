@@ -227,7 +227,7 @@ evidence_surface_budgets:
   rule: >
     These are telemetry baselines for evidence/report surfaces, not hard
     blocking limits. They exist to show growth and extension drift before those
-    surfaces turn into shadow planners or hidden authority branches.
+    surfaces turn into observation planners or hidden authority branches.
   surfaces:
     - path: docs/reports
       role: active_generated_reports

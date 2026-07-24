@@ -15,8 +15,6 @@ Convert calibrated predictive information and market context into a portfolio of
 - Not a place to hide strategy-specific exceptions that should be general law.
 
 ## 3. Domain model
-- StrategyBenchmarkSuite supporting-evidence benchmarks and promotion-grade
-  economics gate (R3 A1).
 - Market analysis and family scan.
 - Correlation pruning and selection family logic.
 - FDR filter and statistical multiple-testing control.
@@ -61,7 +59,6 @@ Derived but economically central. Strategy code must stay downstream of contract
 | `kelly.py` | Sizing logic; dangerous if semantically untethered. |
 | `correlation.py` | Cross-market dependence control. |
 | `risk_limits.py / oracle_penalty.py / selection_family.py` | Strategy-side constraints and grouping. |
-| `benchmark_suite.py / data_lake.py` | R3 A1 evidence-only benchmark metrics, replay-corpus accessor, and diagnostic/simulated/read-only-live evidence gate. Promotion requires explicit promotion-grade economics evidence. |
 
 ## 10. Relevant tests
 - tests/test_alpha_target_coherence.py
@@ -71,13 +68,11 @@ Derived but economically central. Strategy code must stay downstream of contract
 - tests/test_cluster_taxonomy_backfill.py
 
 ## 11. Invariants
-- INV-NEW-Q: no strategy may be promoted to live unless StrategyBenchmarkSuite.promotion_decision() returns PROMOTE from promotion-grade economics evidence plus supporting diagnostic, simulated-venue, and read-only-live evidence.
 - Strategy logic must stay downstream of semantic truth, not infer its own contract/source law.
 - Multiple-testing and dependence control are part of economic safety, not optional optimization.
 - Sizing must remain coupled to calibrated uncertainty and risk limits.
 
 ## 12. Negative constraints
-- Read-only live evaluation is supporting evidence; it must not place orders, activate credentials, mutate production DB/state artifacts, or authorize CLOB cutover.
 - Blocked strategy registry entries are not executable alpha.
 - Do not let strategy modules reach into execution/state to patch economic truth directly.
 - Do not treat narrow historical strategy wins/losses as universal law.
@@ -113,7 +108,6 @@ Derived but economically central. Strategy code must stay downstream of contract
 
 ## 20. Verification commands
 ```bash
-pytest -q tests/test_strategy_benchmark.py
 pytest -q tests/test_alpha_target_coherence.py tests/test_correlation.py tests/test_center_buy_repair.py
 pytest -q tests/test_cluster_collapse.py tests/test_cluster_taxonomy_backfill.py
 python -m py_compile src/strategy/*.py

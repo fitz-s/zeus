@@ -3,11 +3,11 @@
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 #
-# Composite live-health: heartbeat OK AND latest run_mode OK AND
+# Composite live-health: heartbeat OK AND current scheduler job OK AND
 # status_summary fresh AND no surface is silently stale.
 #
 # Closes Relationship Finding F: scheduler can appear alive (heartbeat OK,
-# process running) while run_mode has failed. This module surfaces a
+# process running) while the current scheduler job has failed. This module surfaces a
 # composite signal so operators/healthcheck see the real picture.
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ FORECAST_PIPELINE_HEALTH_JOBS = (
     "replacement_forecast_download",
     "replacement_forecast_live_materialize",
 )
-LEGACY_CRON_RUN_MODE_PREFIX = "run_mode:"
+CURRENT_SCHEDULER_HEALTH_KEYS = ("edli_event_reactor",)
 ENTRY_Q_VERSION_LOOKBACK_SECONDS = 2 * 3600
 ENTRY_Q_VERSION_SAMPLE_LIMIT = 20
 PENDING_EXIT_RELEASE_LOOP_LOOKBACK_SECONDS = 30 * 60
@@ -568,39 +568,14 @@ def _forecast_pipeline_surface(scheduler_health: Optional[dict]) -> dict:
     return {"ok": True, "issue": None, "checked_jobs": checked}
 
 
-def _live_execution_mode() -> str:
-    try:
-        from src.config import settings
+def _current_scheduler_health_entries(scheduler_health: dict) -> list[tuple[str, dict]]:
+    """Return health rows for scheduler jobs registered by the live topology."""
 
-        edli = settings.get("edli", {}) if hasattr(settings, "get") else {}
-        if isinstance(edli, dict):
-            return str(edli.get("live_execution_mode") or "")
-    except Exception:  # noqa: BLE001
-        return ""
-    return ""
-
-
-def _run_mode_health_entries(scheduler_health: dict, *, live_execution_mode: str) -> list[tuple[str, dict]]:
-    """Return run-mode health rows relevant to the active scheduler topology.
-
-    In ``edli_live`` the legacy cron modes are not registered by ``src.main``. Old durable
-    ``run_mode:*`` rows may remain in scheduler_jobs_health.json, but consuming them as current
-    liveness turns history into a live signal. In ``legacy_cron`` those rows are active and remain
-    part of the surface.
-    """
-
-    entries: list[tuple[str, dict]] = []
-    include_legacy_mode_rows = live_execution_mode == "legacy_cron"
-    for key, value in scheduler_health.items():
-        key_str = str(key)
-        if not isinstance(value, dict):
-            continue
-        if key_str in {"_run_mode", "run_mode"}:
-            entries.append((key_str, value))
-            continue
-        if include_legacy_mode_rows and key_str.startswith(LEGACY_CRON_RUN_MODE_PREFIX):
-            entries.append((key_str, value))
-    return entries
+    return [
+        (key, value)
+        for key in CURRENT_SCHEDULER_HEALTH_KEYS
+        if isinstance((value := scheduler_health.get(key)), dict)
+    ]
 
 
 def _business_plane_surface(status_summary: Optional[dict]) -> dict:
@@ -5876,10 +5851,8 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
     none covers "a family with a live market has no fresh live posterior".
     This surface closes that gap.
 
-    Deliberately excluded from
-    ``src.engine.event_reactor_adapter._ENTRY_LIVE_HEALTH_REQUIRED_SURFACES``:
-    this is an ALERT, not a new gate. The existing freshness gates already
-    fail closed on the money path; this is the operator-visibility layer.
+    This is an operator alert, not an order gate. Current posterior freshness
+    is proved independently on the money path.
 
     Emits one structured ``ZEUS_POSTERIOR_STARVATION`` ERROR log line per
     starved (city, target_date, metric) scope per watchdog pass, in addition
@@ -6031,7 +6004,7 @@ def compute_composite_live_health(
       5. live_trading_watchdog — watchdog status does not falsely certify loaded-only launchd
       6. live_boot_prerequisites — required sidecars are fresh; code identity is observable
       7. process_code — src.main PID start time vs live-money source mtimes
-      8. run_mode  — scheduler_jobs_health.json entry for "_run_mode" job
+      8. run_mode  — scheduler_jobs_health.json entry for the live reactor job
       9. forecast_pipeline — current replacement/BPF scheduler health
       10. forecast_event_bridge — live posteriors reaching FSR event emission
       11. entry_q_version — recent entry orders retain q-authority identity
@@ -6162,7 +6135,7 @@ def compute_composite_live_health(
         )
 
     # ------------------------------------------------------------------ #
-    # Surface 3: run_mode (scheduler_jobs_health.json)                    #
+    # Surface 3: scheduler (scheduler_jobs_health.json)                   #
     # ------------------------------------------------------------------ #
     sj_path = sd / "scheduler_jobs_health.json"
     sj_data = _read_json(sj_path)
@@ -6170,14 +6143,7 @@ def compute_composite_live_health(
         rm_issue = "SCHEDULER_HEALTH_MISSING"
         rm_ok = False
     else:
-        # The decorator writes "run_mode"; _run_mode itself writes
-        # mode-specific keys such as "run_mode:opening_hunt" after catching
-        # exceptions. Mode-specific failures are the business-plane authority:
-        # the generic wrapper can still be OK because _run_mode swallows errors.
-        entries = _run_mode_health_entries(
-            sj_data,
-            live_execution_mode=_live_execution_mode(),
-        )
+        entries = _current_scheduler_health_entries(sj_data)
         failed_entries = [
             (key, value)
             for key, value in entries

@@ -750,7 +750,7 @@ def _risk_state_reference_from_row(row: sqlite3.Row) -> dict | None:
     # Pre-cutover risk_state rows could store config-literal capital plus PnL as
     # `effective_bankroll`. After cutover, `effective_bankroll` is the real
     # on-chain wallet. Without this guard, trailing-loss math could compare
-    # different economic objects and trigger false RED → force_exit_review.
+    # different economic objects and trigger false RED.
     # Only rows tagged with a live bankroll truth source are eligible
     # references. Old rows (no field, or any other value) are filtered out.
     if str(details.get("bankroll_truth_source") or "") not in _BANKROLL_TRUTH_SOURCES_OF_RECORD:
@@ -938,7 +938,7 @@ def _trailing_loss_snapshot(
     }
 
 
-def _realized_window_loss_diagnostic(
+def _realized_window_loss_telemetry(
     realized_exits: list[dict] | None,
     *,
     now: str,
@@ -955,13 +955,13 @@ def _realized_window_loss_diagnostic(
     current delta-log-wealth action solely because of when an earlier outcome
     settled.
 
-    The diagnostic remains settlement-based, not mark-to-market. The retired
+    The telemetry remains settlement-based, not mark-to-market. The retired
     delta calculation conflated three economically-distinct moves into "loss":
       (a) capital deployment            wallet cash -> open-position equity,
       (b) projection-pipeline reshuffle unprojected entry fill -> projected,
       (c) mark-to-market swings         of open prediction-market positions.
     This function therefore returns no RiskLevel. Missing history degrades the
-    diagnostic only; it cannot block a current-evidence decision.
+    record_only; it cannot block a current-evidence decision.
     """
     if degraded:
         return {
@@ -996,7 +996,7 @@ def _realized_window_loss_diagnostic(
             exit_dt = exit_dt.replace(tzinfo=timezone.utc)
         if cutoff_dt <= exit_dt <= now_dt:
             # Balance-only chain recovery proves inventory, not a Zeus-authored
-            # strategy outcome, so exclude it from the strategy diagnostic.
+            # strategy outcome, so exclude it from the strategy telemetry.
             if exit_row.get("loss_eligible") is False:
                 pnl = _coerce_finite_float(exit_row.get("pnl"))
                 if pnl is not None:
@@ -1453,7 +1453,7 @@ def _riskguard_brier_metric_rows(rows: list[dict], *, limit: int = RISKGUARD_SET
 
     A frozen probability value without its ``venue_commands.q_version`` is also
     not learning lineage. It cannot prove which q authorized the order, so it is
-    diagnostic-only and may not convict the currently executing probability
+    non_actuating and may not convict the currently executing probability
     system. ``_bind_brier_probability_identities`` establishes that proof before
     this filter runs.
     """
@@ -1912,6 +1912,9 @@ def init_risk_db(conn: sqlite3.Connection) -> None:
             checked_at TEXT NOT NULL
         );
     """)
+    from src.state.db import ensure_single_live_cutover_generation_table
+
+    ensure_single_live_cutover_generation_table(conn)
     # CATEGORY ANTIBODY (Fitz #5): executescript() can NULL the C-level busy
     # handler on some Python/SQLite builds, leaving this risk_state.db handle at a
     # 0 ms wait budget so the immediately-following reads/writes (every tick(),
@@ -1924,13 +1927,6 @@ def init_risk_db(conn: sqlite3.Connection) -> None:
         _apply_db_busy_timeout(conn)
     except Exception:  # noqa: BLE001 - never let timeout re-apply break schema init
         pass
-    # B5: Add force_exit_review column if missing (code-level migration, no raw ALTER)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(risk_state)").fetchall()}
-    if "force_exit_review" not in cols:
-        try:
-            conn.execute("ALTER TABLE risk_state ADD COLUMN force_exit_review INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass  # concurrent process already added it
 
 
 def _is_sqlite_database_locked(exc: BaseException) -> bool:
@@ -2028,7 +2024,7 @@ def _full_risk_row_is_fresh(row: sqlite3.Row, *, now: datetime) -> bool:
 def _latest_fresh_full_risk_row(conn: sqlite3.Connection, *, now: datetime) -> sqlite3.Row | None:
     rows = conn.execute(
         """
-        SELECT level, checked_at, details_json, force_exit_review
+        SELECT level, checked_at, details_json
         FROM risk_state
         ORDER BY id DESC
         LIMIT 20
@@ -2056,7 +2052,6 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
         previous_full = _latest_fresh_full_risk_row(risk_conn, now=now)
         if previous_full is None:
             level = RiskLevel.DATA_DEGRADED
-            force_exit_review = 0
             details = {
                 "status": "dependency_db_locked",
                 "riskguard_degraded_reason": "dependency_db_locked",
@@ -2080,9 +2075,6 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
             # are unaffected (they are >= DATA_DEGRADED; only GREEN was downgraded).
             previous_level = RiskLevel(previous_full["level"])
             level = previous_level
-            # force_exit_review is a halt signal — carry it forward (never clear it
-            # under degraded truth); a previous RED keeps its force-exit posture.
-            force_exit_review = int(previous_full["force_exit_review"] or 0)
             details = {
                 "status": "dependency_db_locked_previous_risk_level_preserved",
                 "riskguard_degraded_reason": "dependency_db_locked",
@@ -2095,14 +2087,13 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
             }
         risk_conn.execute(
             """
-            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
-            VALUES (?, NULL, NULL, NULL, ?, ?, ?)
+            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
+            VALUES (?, NULL, NULL, NULL, ?, ?)
             """,
             (
                 level.value,
                 json.dumps(details),
                 now_ts,
-                force_exit_review,
             ),
         )
         risk_conn.commit()
@@ -2142,14 +2133,13 @@ def _persist_tick_in_progress_attestation() -> None:
         }
         risk_conn.execute(
             """
-            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
-            VALUES (?, NULL, NULL, NULL, ?, ?, ?)
+            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
+            VALUES (?, NULL, NULL, NULL, ?, ?)
             """,
             (
                 previous_full["level"],
                 json.dumps(details),
                 now.isoformat(),
-                int(previous_full["force_exit_review"] or 0),
             ),
         )
         risk_conn.commit()
@@ -2232,8 +2222,8 @@ def _tick_once() -> RiskLevel:
             now_ts = datetime.now(timezone.utc).isoformat()
             risk_conn.execute(
                 """
-                INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
-                VALUES (?, NULL, NULL, NULL, ?, ?, 0)
+                INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
+                VALUES (?, NULL, NULL, NULL, ?, ?)
                 """,
                 (
                     RiskLevel.DATA_DEGRADED.value,
@@ -2671,14 +2661,14 @@ def _tick_once() -> RiskLevel:
         # second time as an admission veto would reject current positive-growth
         # actions based on sunk outcomes.
         loss_source = f"realized_settlement_window:{realized_truth_source}"
-        daily_loss_snapshot = _realized_window_loss_diagnostic(
+        daily_loss_snapshot = _realized_window_loss_telemetry(
             realized_exits,
             now=now,
             lookback=timedelta(hours=24),
             degraded=realized_degraded,
             source=loss_source,
         )
-        weekly_loss_snapshot = _realized_window_loss_diagnostic(
+        weekly_loss_snapshot = _realized_window_loss_telemetry(
             realized_exits,
             now=now,
             lookback=timedelta(days=7),
@@ -2715,13 +2705,9 @@ def _tick_once() -> RiskLevel:
             unresolved_exposure_level,
         )
 
-        # Legacy column retained for schema compatibility. Historical outcomes
-        # no longer create exit intent or block current positive-growth entries.
-        force_exit_review = 0
-
         risk_conn.execute("""
-            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, (
             level.value, b_score, d_accuracy, None,
             json.dumps({
@@ -2749,7 +2735,7 @@ def _tick_once() -> RiskLevel:
                 "unresolved_exposure_level": unresolved_exposure_level.value,
                 "daily_loss_level": daily_loss_level.value,
                 "weekly_loss_level": weekly_loss_level.value,
-                "trailing_loss_decision_role": "diagnostic_only",
+                "trailing_loss_decision_role": "record_only",
                 "daily_loss": None if daily_loss is None else round(float(daily_loss), 2),
                 "weekly_loss": None if weekly_loss is None else round(float(weekly_loss), 2),
                 "daily_loss_status": daily_loss_snapshot["status"],
@@ -2859,7 +2845,6 @@ def _tick_once() -> RiskLevel:
                 "strategy_health_stale_strategy_keys": list(strategy_health_snapshot.get("stale_strategy_keys", [])),
             }),
             now,
-            force_exit_review,
         ))
         zeus_conn.commit()
         risk_conn.commit()
@@ -3171,30 +3156,6 @@ def get_current_level() -> RiskLevel:
         # R4: DB error = fail closed → RED
         logger.error("RiskGuard DB error: %s. Fail-closed → RED.", e)
         return RiskLevel.RED
-
-
-def get_force_exit_review() -> bool:
-    """Read the legacy force_exit_review compatibility field.
-
-    New full ticks write zero because trailing realized loss is diagnostic-only.
-    Reading remains fail-closed so an unreadable control surface cannot silently
-    weaken a row written by an older loaded process during deployment.
-    """
-    conn = None
-    try:
-        conn = get_connection(RISK_DB_PATH, write_class=None)
-        row = conn.execute(
-            "SELECT force_exit_review FROM risk_state ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        if row is None:
-            return False
-        return bool(row["force_exit_review"])
-    except Exception:
-        return True  # fail-closed: assume exit review needed
-    finally:
-        if conn is not None:
-            conn.close()
-
 
 if __name__ == "__main__":
     """Run RiskGuard as standalone process."""

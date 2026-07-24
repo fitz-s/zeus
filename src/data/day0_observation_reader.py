@@ -102,7 +102,7 @@ class Day0ObservedExtrema:
     """Observation-side extrema for a single city/date/decision-time triple.
 
     high_so_far and low_so_far may be None when coverage_status == 'NO_DATA'.
-    current_temp is diagnostic only; may be None regardless of coverage.
+    current_temp is a non-actuating record; it may be None regardless of coverage.
 
     Attributes
     ----------
@@ -118,7 +118,7 @@ class Day0ObservedExtrema:
     low_so_far:
         MIN(running_min) over qualifying rows — the correct day-so-far low.
     current_temp:
-        Diagnostic only.  Latest temp_current value; may be NULL in DB.
+        Non-actuating record. Latest temp_current value; may be NULL in DB.
         MUST NOT be used to bound or lower the future max.
     row_count:
         Number of qualifying rows for the chosen source.
@@ -636,7 +636,7 @@ def read_day0_observed_extrema(
             cumulative_rows=chosen_source == _HKO_SOURCE,
         )
 
-    # Fetch latest temp_current for the chosen source (diagnostic only).
+    # Fetch latest temp_current for the chosen source as a non-actuating record.
     current_temp: Optional[float] = None
     if chosen_source is not None:
         source_sql, source_vals = _source_semantics(chosen_source)
@@ -753,9 +753,9 @@ def read_day0_observation_context_from_instants(
     This is the shared live source for entry and monitor when the settlement-grade
     observed-so-far surface is already materialized locally. The WU/ICAO and
     Ogimet writers store the authoritative running extrema but generally do not
-    store an exact ``temp_current``; current temperature is diagnostic for the
+    store an exact ``temp_current``; current temperature is telemetry for the
     high/low settlement math, so this adapter supplies a finite latest-hour
-    diagnostic value only to satisfy the typed context contract.
+    telemetry value only to satisfy the typed context contract.
     """
 
     from src.data.observation_client import Day0ObservationContext
@@ -892,7 +892,7 @@ def read_day0_observation_context_from_instants(
     ):
         current_temp = float("nan")
     else:
-        current_temp = _diagnostic_current_temp(
+        current_temp = _telemetry_current_temp(
             latest_current,
             latest_hi,
             latest_low,
@@ -922,7 +922,7 @@ def read_day0_observation_context_from_instants(
     )
 
 
-def _diagnostic_current_temp(
+def _telemetry_current_temp(
     current_temp: object,
     latest_high: object,
     latest_low: object,

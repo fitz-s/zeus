@@ -253,7 +253,6 @@ def _score_one_snapshot(
     from src.data.market_scanner import _parse_temp_range
     from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
     from src.strategy.market_analysis import MarketAnalysis
-    from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 
     _sem = SettlementSemantics.for_city(city)
 
@@ -477,8 +476,7 @@ def _score_one_snapshot(
         round_fn=_sem.round_values,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         # K1: coverage replay measures the full tested family — exempt (see replay.py).
-        forecast_sharpness=ForecastSharpnessEvidence.exempt(unit=city.settlement_unit),
-    )
+            )
 
     # -- LIVE FDR PATH: scan_full_hypothesis_family + apply_familywise_fdr
     # DO NOT call find_edges() or fdr_filter() here — that is replay.py:1628 legacy path
@@ -650,7 +648,7 @@ def run_selection_coverage(
         limitations={
             "storage": "zeus_backtest.db",
             "authority_scope": BACKTEST_AUTHORITY_SCOPE,
-            "promotion_authority": False,
+            "learning_authority": False,
             "lane_goal": "selection_coverage_not_pnl",
             "pnl_available": False,
             "pnl_unavailable_reason": "selection_coverage_scores_bin_selection_not_trading_economics",

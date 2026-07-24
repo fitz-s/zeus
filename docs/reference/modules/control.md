@@ -74,7 +74,7 @@ K1 governance surface. Control is allowed to change runtime behavior, but only t
 
 ## 13. Known failure modes
 - Control intent exists but is not durably recorded.
-- Control state becomes stale/shadowed across tables or files.
+- Control state becomes stale/masked across tables or files.
 - Gate decisions appear in status surfaces without actual runtime consumption.
 - A heartbeat failure writes a separate tombstone or only logs an alert instead of activating the fail-closed auto-pause path.
 

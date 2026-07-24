@@ -1,5 +1,5 @@
 # Created: 2026-06-17
-# Last audited: 2026-06-17
+# Last audited: 2026-07-24
 # Authority basis: operator design law "每个城市都应该有最好的天气预报 / per-city best near-airport
 #   source"; docs/polyweather_city_source_overlay_verified.csv. Read-only settlement-graded
 #   per-city per-model MAE/bias table — the empirical VALIDATOR for the per-city-best selection
@@ -12,7 +12,7 @@ settled value (unit-corrected: F-settled cities -> C), over all settled target_d
 n, bias, MAE. Ranks models per city -> the per-city BEST near-airport source by settlement fidelity.
 
 Output: docs/evidence/per_city_source/per_city_model_mae.md (table) +
-        docs/evidence/per_city_source/per_city_model_mae.json (machine-readable selection input).
+        docs/evidence/per_city_source/per_city_model_mae.json.md (machine-readable evidence).
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from pathlib import Path
 
 DB = "state/zeus-forecasts.db"
 OUT_MD = "docs/evidence/per_city_source/per_city_model_mae.md"
-OUT_JSON = "docs/evidence/per_city_source/per_city_model_mae.json"
+OUT_JSON = "docs/evidence/per_city_source/per_city_model_mae.json.md"
 LEAD = 1
 MIN_N = 8  # need at least this many settled comparisons to trust a model's MAE for a city
 

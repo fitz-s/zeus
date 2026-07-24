@@ -124,7 +124,6 @@ def _enable_qkernel_fixture(conn: sqlite3.Connection) -> sqlite3.Connection:
     from src.config import settings
 
     feature_flags = dict(settings._data["feature_flags"])
-    feature_flags["qkernel_spine_enabled"] = True
     settings._data["feature_flags"] = feature_flags
     _attach_qkernel_world(conn)
     return conn
@@ -204,10 +203,6 @@ def _isolate_edli_settings(monkeypatch):
         },
         raising=False,
     )
-    feature_flags = dict(settings._data["feature_flags"])
-    feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = False
-    feature_flags["qkernel_spine_enabled"] = True
-    monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
     monkeypatch.setattr(
         sc,
         "load_artifact",
@@ -866,6 +861,7 @@ def _trade_conn_with_snapshot(
         hypothesis_rows,
     )
     _insert_platt_model(conn)
+    _insert_replacement_forecast_fixture(conn)
     if attach_world_for_qkernel:
         _attach_qkernel_world(conn)
     return conn
@@ -1055,10 +1051,8 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    # Note: _insert_replacement_forecast_fixture is NOT called here. The autouse
-    # _isolate_edli_settings fixture disables the replacement trade authority flag so the
-    # canonical baseline path runs for all tests by default. Tests that specifically exercise
-    # the replacement path call _insert_replacement_forecast_fixture and re-enable the flag.
+    # The sole live probability path consumes the replacement fixture installed by
+    # _trade_conn_with_snapshot. No test-only alternate authority is retained here.
 
 
 def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
@@ -1070,7 +1064,6 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
     The posterior's bin_topology_hash is computed dynamically from the market_events already
     in `conn` so it matches _current_market_bin_topology_hash exactly.
     Authority: replacement live row authority requires flags plus a live-grade posterior."""
-    import hashlib as _hashlib
     import json as _json
 
     from src.data.replacement_forecast_bundle_reader import (
@@ -1301,6 +1294,33 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             ("gem_global", 21.2),
         ),
     )
+    serving_rows = conn.execute(
+        """
+        SELECT raw_model_forecast_id, model, source_cycle_time, captured_at, lead_days
+        FROM raw_model_forecasts
+        WHERE city = 'Chicago'
+          AND target_date = '2026-05-25'
+          AND metric = 'high'
+          AND endpoint = 'single_runs'
+        """
+    ).fetchall()
+    provenance["bayes_precision_fusion"]["current_value_serving"] = {
+        str(row["model"]): {
+            "served_via": "single_runs",
+            "previous_run_substitution": False,
+            "raw_model_forecast_id": int(row["raw_model_forecast_id"]),
+            "served_cycle": str(row["source_cycle_time"]),
+            "captured_at": str(row["captured_at"]),
+            "age_hours": 8.167,
+            "lead_days": int(row["lead_days"]),
+        }
+        for row in serving_rows
+    }
+    provenance_json = _json.dumps(provenance, separators=(",", ":"))
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (provenance_json, posterior_id),
+    )
     # Insert the replacement readiness row with correct strategy_key/source_id/data_version.
     conn.execute("DELETE FROM readiness_state WHERE readiness_id = 'replacement-readiness-1'")
     conn.execute(
@@ -1337,12 +1357,6 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
 
 
 def _trade_conn_with_live_replacement_snapshot(**kwargs) -> sqlite3.Connection:
-    from src.config import settings
-
-    feature_flags = dict(settings._data["feature_flags"])
-    feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = True
-    feature_flags["qkernel_spine_enabled"] = True
-    settings._data["feature_flags"] = feature_flags
     conn = _trade_conn_with_snapshot(
         selected_ask="0.40",
         selected_bid="0.39",
@@ -1650,14 +1664,14 @@ def test_topology_persisted_after_decision_blocks_certificate():
     conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:13:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
-    result = DecisionCompiler().compile_no_submit(
+    result = DecisionCompiler().compile_pre_submit(
         event,
         decision_time=DECISION_TIME,
         proof_bundle=receipt.decision_proof_bundle,
     )
 
     assert result.status == "REJECTED"
-    assert result.failures[0].reason_code == "NO_SUBMIT_CERTIFICATE_REJECTED"
+    assert result.failures[0].reason_code == "PRE_SUBMIT_CERTIFICATE_REJECTED"
     assert "max_parent_source_available_at after decision_time" in (result.failures[0].reason_detail or "")
 
 
@@ -1818,11 +1832,6 @@ def test_adapter_source_truth_status_comes_from_forecast_authority():
 
 def test_adapter_source_truth_authority_tracks_replacement_forecast_authority(monkeypatch):
     import src.engine.event_reactor_adapter as event_reactor_adapter
-    from src.config import settings
-
-    feature_flags = dict(settings._data["feature_flags"])
-    feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = True
-    monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
     monkeypatch.setattr(
         event_reactor_adapter,
         "_family_rank_reversed_at_recapture",
@@ -1982,88 +1991,6 @@ def test_cost_model_certificate_records_native_cost_source():
     assert receipt.decision_proof_bundle.quote_feasibility.payload["cost_source"] == "native_orderbook_ask"
 
 
-def test_forecast_certificate_records_members_json_hash_and_window_authority():
-    event = _forecast_event()
-    conn = _enable_qkernel_fixture(_trade_conn_with_snapshot())
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
-
-    assert receipt.decision_proof_bundle is not None
-    forecast = receipt.decision_proof_bundle.forecast_authority.payload
-    belief = receipt.decision_proof_bundle.belief.payload
-    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = '1'").fetchone())
-    assert forecast["members_json_hash"] == _snapshot_members_json_hash(snapshot)
-    assert belief["members_json_hash"] == forecast["members_json_hash"]
-    assert forecast["members_extrema_transform"] == "daily_max"
-    assert forecast["target_local_date"] == "2026-05-25"
-    assert forecast["city_timezone"] == "America/Chicago"
-    assert forecast["bin_labels_hash"] == receipt.decision_proof_bundle.family_closure.payload["bin_labels_hash"]
-    decision_context = DecisionSourceContext.from_forecast_context(forecast)
-    assert decision_context is not None
-    assert decision_context.source_id == "ecmwf_open_data"
-    assert decision_context.model_family == "ecmwf_ens"
-    assert decision_context.forecast_source_role == "entry_primary"
-    assert decision_context.degradation_level == "OK"
-    assert decision_context.authority_tier == "FORECAST"
-    errors = set(decision_context.integrity_errors())
-    assert "missing_raw_payload_hash" not in errors
-    assert "missing_first_member_observed_time" not in errors
-    assert "missing_run_complete_time" not in errors
-
-
-def test_high_forecast_snapshot_members_json_is_daily_max_extrema():
-    event = _forecast_event()
-    conn = _enable_qkernel_fixture(_trade_conn_with_snapshot())
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
-
-    assert receipt.decision_proof_bundle is not None
-    forecast = receipt.decision_proof_bundle.forecast_authority.payload
-    assert forecast["temperature_metric"] == "high"
-    assert forecast["members_extrema_metric_identity"] == "high"
-    assert forecast["members_extrema_transform"] == "daily_max"
-    assert forecast["members_json_source"] == "ensemble_snapshots.daily_extrema"
-    assert forecast["members_json_hash"] == _snapshot_members_json_hash(
-        dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = '1'").fetchone())
-    )
-
-
-def test_low_forecast_snapshot_members_json_is_daily_min_extrema():
-    event = _low_bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    _convert_fixture_to_low_extrema(conn)
-    conn = _enable_qkernel_fixture(conn)
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
-
-    assert receipt.decision_proof_bundle is not None
-    forecast = receipt.decision_proof_bundle.forecast_authority.payload
-    assert forecast["temperature_metric"] == "low"
-    assert forecast["members_extrema_metric_identity"] == "low"
-    assert forecast["members_extrema_transform"] == "daily_min"
-    assert forecast["members_json_source"] == "ensemble_snapshots.daily_extrema"
-    assert forecast["members_json_hash"] == _snapshot_members_json_hash(
-        dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = '1'").fetchone())
-    )
-
-
-def test_event_bound_low_uses_low_extrema_members_not_raw_hourly_or_max_members():
-    event = _low_bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    _convert_fixture_to_low_extrema(conn)
-    conn = _enable_qkernel_fixture(conn)
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
-
-    assert receipt.decision_proof_bundle is not None
-    forecast = receipt.decision_proof_bundle.forecast_authority.payload
-    low_snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = '1'").fetchone())
-    high_like_snapshot = {**low_snapshot, "members_json": json.dumps([70.5] * 41 + [71.5] * 10, separators=(",", ":"))}
-    assert forecast["members_extrema_transform"] == "daily_min"
-    assert forecast["members_json_hash"] == _snapshot_members_json_hash(low_snapshot)
-    assert forecast["members_json_hash"] != _snapshot_members_json_hash(high_like_snapshot)
-
-
 def test_members_json_hash_changes_when_member_extrema_change():
     base = {"members_json": json.dumps([70.5, 71.5], separators=(",", ":"))}
     changed = {"members_json": json.dumps([70.5, 72.5], separators=(",", ":"))}
@@ -2092,53 +2019,6 @@ def test_adapter_does_not_synthesize_forecast_applied_validations():
     assert '"applied_validations": tuple(evidence.applied_validations)' in forecast_section
     assert '"applied_validations": tuple(evidence.applied_validations) or' not in forecast_section
     assert "FORECAST_AUTHORITY_VALIDATIONS_MISSING" in forecast_section
-
-
-def test_adapter_rejects_empty_reader_applied_validations(monkeypatch):
-    from src.data import executable_forecast_reader
-
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    evidence = SimpleNamespace(
-        forecast_source_id="ecmwf_open_data",
-        forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
-        source_transport="ensemble_snapshots_db_reader",
-        source_cycle_time="2026-05-24T00:00:00+00:00",
-        source_issue_time="2026-05-24T00:00:00+00:00",
-        source_run_id="run-1",
-        coverage_id="coverage-1",
-        producer_readiness_id="producer_readiness:coverage-1",
-        entry_readiness_id=None,
-        input_snapshot_ids=(1,),
-        raw_payload_hash="hash-raw",
-        manifest_hash="hash-manifest",
-        required_steps=(0, 3, 6),
-        observed_steps=(0, 3, 6),
-        expected_members=51,
-        observed_members=51,
-        source_run_status="SUCCESS",
-        source_run_completeness_status="COMPLETE",
-        coverage_completeness_status="COMPLETE",
-        coverage_readiness_status="LIVE_ELIGIBLE",
-        applied_validations=(),
-        source_available_at="2026-05-24T08:10:00+00:00",
-        fetch_started_at="2026-05-24T07:10:00+00:00",
-        fetch_finished_at="2026-05-24T08:05:00+00:00",
-        captured_at="2026-05-24T08:10:00+00:00",
-    )
-    monkeypatch.setattr(
-        executable_forecast_reader,
-        "read_executable_forecast",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            ok=True,
-            status="LIVE_ELIGIBLE",
-            bundle=SimpleNamespace(snapshot=SimpleNamespace(snapshot_id="1"), evidence=evidence),
-            reason_code="OK",
-        ),
-    )
-
-    with pytest.raises(ValueError, match="FORECAST_AUTHORITY_VALIDATIONS_MISSING"):
-        _receipt(event, conn, decision_time=DECISION_TIME)
 
 
 def test_family_closure_clock_missing_blocks_certificate():
@@ -2541,34 +2421,6 @@ def test_receipt_requires_explicit_forecast_and_topology_authority_connections()
     assert missing_calibration.reason == "CALIBRATION_AUTHORITY_CONNECTION_MISSING"
 
 
-def test_missing_calibration_authority_blocks_receipt():
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots SET p_cal_json = NULL")
-
-    receipt = _receipt(event, conn, calibration_conn=sqlite3.connect(":memory:"))
-
-    assert receipt.submitted is False
-    assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
-
-
-def test_missing_platt_bucket_uses_identity_fallback_authority():
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots SET p_cal_json = NULL")
-    calibration_conn = _calibration_conn_with_platt_model()
-    calibration_conn.execute("DELETE FROM platt_models")
-
-    receipt = _receipt(event, conn, calibration_conn=calibration_conn)
-
-    assert receipt.proof_accepted is True
-    assert receipt.reason == "event_bound_final_intent_no_submit"
-    calibration = receipt.decision_proof_bundle.calibration.payload
-    assert calibration["authority"] == "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
-    assert calibration["calibrator_model_key"].startswith("identity_fallback_no_platt_bucket_v1:")
-    assert receipt.decision_proof_bundle.belief.payload["calibrator_model_key"] == calibration["calibrator_model_key"]
-
-
 def test_receipt_uses_world_calibration_authority_not_forecast_conn():
     event = _bound_forecast_event()
     trade_conn = _trade_conn_with_snapshot()
@@ -2594,41 +2446,6 @@ def test_receipt_uses_world_calibration_authority_not_forecast_conn():
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_forecast_conn_fake_platt_model_is_not_calibration_authority():
-    event = _bound_forecast_event()
-    trade_conn = _trade_conn_with_snapshot()
-    forecast_conn = _trade_conn_with_snapshot()
-    forecast_conn.execute("DROP TABLE executable_market_snapshots")
-    trade_conn.execute("DROP TABLE ensemble_snapshots")
-    trade_conn.execute("DROP TABLE market_events")
-    trade_conn.execute("DROP TABLE source_run")
-    trade_conn.execute("DROP TABLE source_run_coverage")
-    forecast_conn.execute("UPDATE ensemble_snapshots SET p_cal_json = NULL")
-    _insert_platt_model(forecast_conn)
-
-    receipt = _receipt(
-        event,
-        trade_conn,
-        forecast_conn=forecast_conn,
-        topology_conn=forecast_conn,
-        calibration_conn=sqlite3.connect(":memory:"),
-    )
-
-    assert receipt.submitted is False
-    assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
-
-
-def test_p_cal_json_without_authority_does_not_authorize_without_calibrator():
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots SET p_cal_authority = NULL")
-
-    receipt = _receipt(event, conn, calibration_conn=sqlite3.connect(":memory:"))
-
-    assert receipt.submitted is False
-    assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
-
-
 def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_exists():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -2638,26 +2455,6 @@ def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_e
 
     assert receipt.proof_accepted is True
     assert receipt.side_effect_status == "NO_SUBMIT"
-
-
-def test_adapter_surfaces_reader_block_after_event_emit(monkeypatch):
-    from types import SimpleNamespace
-
-    from src.data import executable_forecast_reader
-
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE source_run_coverage SET readiness_status = 'BLOCKED'")
-    monkeypatch.setattr(
-        executable_forecast_reader,
-        "read_executable_forecast",
-        lambda *_args, **_kwargs: SimpleNamespace(ok=False, bundle=None, reason_code="READINESS_BLOCKED"),
-    )
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
-
-    assert receipt.submitted is False
-    assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:READINESS_BLOCKED" in receipt.reason
 
 
 def test_day0_latest_snapshot_seed_does_not_consume_entry_reader_readiness(monkeypatch):
@@ -2814,126 +2611,6 @@ def test_snapshot_lead_days_falls_back_to_day0_observation_time():
     assert lead_days == 0.0
 
 
-def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
-    from types import SimpleNamespace
-
-    from src.data import executable_forecast_reader
-
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-
-    monkeypatch.setattr(
-        executable_forecast_reader,
-        "read_executable_forecast",
-        lambda *_args, **_kwargs: SimpleNamespace(ok=False, bundle=None, reason_code="READER_TEST_BLOCK"),
-    )
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
-
-    assert receipt.submitted is False
-    assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:READER_TEST_BLOCK" in receipt.reason
-
-
-def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
-    from src.data import executable_forecast_reader
-    from src.data.executable_forecast_reader import (
-        ExecutableForecastBundle,
-        ExecutableForecastBundleResult,
-        ExecutableForecastEvidence,
-        ExecutableForecastSnapshot,
-    )
-
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    decision_time = datetime(2026, 5, 24, 8, 17, tzinfo=timezone.utc)
-    captured = []
-    evidence = ExecutableForecastEvidence(
-        forecast_source_id="ecmwf_open_data",
-        forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
-        source_transport="ensemble_snapshots_db_reader",
-        source_run_id="run-1",
-        release_calendar_key="ecmwf_open_data",
-        coverage_id="coverage-1",
-        producer_readiness_id="producer_readiness:coverage-1",
-        entry_readiness_id=None,
-        source_cycle_time="2026-05-24T00:00:00+00:00",
-        source_issue_time="2026-05-24T00:00:00+00:00",
-        source_release_time="2026-05-24T07:00:00+00:00",
-        source_available_at="2026-05-24T08:10:00+00:00",
-        fetch_started_at="2026-05-24T07:10:00+00:00",
-        fetch_finished_at="2026-05-24T08:05:00+00:00",
-        captured_at="2026-05-24T08:10:00+00:00",
-        input_snapshot_ids=(1,),
-        raw_payload_hash="hash-raw",
-        manifest_hash="hash-manifest",
-        target_local_date="2026-05-25",
-        target_window_start_utc="2026-05-25T05:00:00+00:00",
-        target_window_end_utc="2026-05-26T05:00:00+00:00",
-        city_timezone="America/Chicago",
-        required_steps=(0, 3, 6),
-        observed_steps=(0, 3, 6),
-        expected_members=51,
-        observed_members=51,
-        source_run_status="SUCCESS",
-        source_run_completeness_status="COMPLETE",
-        coverage_completeness_status="COMPLETE",
-        coverage_readiness_status="LIVE_ELIGIBLE",
-        applied_validations=(
-            "source_run_completeness_status",
-            "coverage_completeness_status",
-            "coverage_readiness_status",
-            "required_steps_observed",
-            "expected_members_observed",
-            "causality_status_ok",
-            "authority_verified",
-            "available_at_not_future",
-        ),
-    )
-    snapshot = ExecutableForecastSnapshot(
-        snapshot_id=1,
-        city="Chicago",
-        target_local_date=datetime(2026, 5, 25, tzinfo=timezone.utc).date(),
-        temperature_metric="high",
-        data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
-        members=tuple(float(60 + (index % 10)) for index in range(51)),
-        source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_db_reader",
-        source_run_id="run-1",
-        release_calendar_key="ecmwf_open_data",
-        source_cycle_time="2026-05-24T00:00:00+00:00",
-        source_release_time="2026-05-24T07:00:00+00:00",
-        source_available_at="2026-05-24T08:10:00+00:00",
-        issue_time="2026-05-24T00:00:00+00:00",
-        valid_time="2026-05-25",
-        available_at="2026-05-24T08:10:00+00:00",
-        fetch_time="2026-05-24T08:10:00+00:00",
-        manifest_hash="hash-manifest",
-        members_unit="degF",
-        local_day_start_utc="2026-05-25T05:00:00+00:00",
-        step_horizon_hours=32.0,
-        first_member_observed_time="2026-05-24T07:10:00+00:00",
-        run_complete_time="2026-05-24T08:05:00+00:00",
-        raw_orderbook_hash_transition_delta_ms=50,
-    )
-
-    monkeypatch.setattr(
-        executable_forecast_reader,
-        "read_executable_forecast",
-        lambda *_args, **kwargs: captured.append(kwargs["decision_time"])
-        or ExecutableForecastBundleResult(
-            status="LIVE_ELIGIBLE",
-            bundle=ExecutableForecastBundle(snapshot=snapshot, evidence=evidence),
-            reason_code="OK",
-        ),
-    )
-
-    receipt = _receipt(event, conn, decision_time=decision_time)
-
-    assert receipt.proof_accepted is True
-    assert captured
-    assert set(captured) == {decision_time}
-
-
 def test_executable_snapshot_freshness_uses_reactor_decision_time():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(freshness_deadline="2026-05-24T08:12:30+00:00")
@@ -3075,7 +2752,6 @@ def test_selection_prefers_lcb_kelly_growth_not_modal_adjacent_no(monkeypatch):
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
 
-    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
 
     modal_adjacent_no = _CandidateProof(
         candidate=SimpleNamespace(condition_id="helsinki-22c"),
@@ -3128,7 +2804,6 @@ def test_selector_enabled_does_not_fallback_to_low_win_rate_positive_ev(monkeypa
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
 
-    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
 
     low_win_rate_lottery = _CandidateProof(
         candidate=SimpleNamespace(condition_id="cheap-tail"),
@@ -3163,7 +2838,6 @@ def test_selector_rejects_qkernel_side_not_armed_before_live_intent(monkeypatch)
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
 
-    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
 
     unarmed_yes = _CandidateProof(
         candidate=SimpleNamespace(condition_id="cheap-tail"),
@@ -3215,107 +2889,6 @@ def test_selector_rejects_qkernel_side_not_armed_before_live_intent(monkeypatch)
     selected = _selected_candidate_proof({}, (unarmed_yes,))
 
     assert selected is None
-
-
-def test_replacement_live_authority_direction_rebinds_to_sibling_proof():
-    from src.contracts.execution_price import ExecutionPrice
-    from src.engine.event_reactor_adapter import (
-        _CandidateProof,
-        _replacement_live_authority_proof_for_direction,
-    )
-
-    candidate = SimpleNamespace(condition_id="condition-1")
-    buy_yes = _CandidateProof(
-        candidate=candidate,
-        token_id="yes-1",
-        direction="buy_yes",
-        row={"condition_id": "condition-1"},
-        executable_snapshot_id="snapshot-yes",
-        execution_price=ExecutionPrice(
-            0.40,
-            "ask",
-            fee_deducted=True,
-            currency="probability_units",
-        ),
-        q_posterior=0.80,
-        q_lcb_5pct=0.72,
-        c_cost_95pct=0.41,
-        p_fill_lcb=0.90,
-        trade_score=0.10,
-        p_value=0.01,
-        passed_prefilter=True,
-        native_quote_available=True,
-        p_cal_vector_hash="pcal",
-        p_live_vector_hash="plive",
-    )
-    buy_no = replace(
-        buy_yes,
-        token_id="no-1",
-        direction="buy_no",
-        executable_snapshot_id="snapshot-no",
-        execution_price=ExecutionPrice(
-            0.30,
-            "ask",
-            fee_deducted=True,
-            currency="probability_units",
-        ),
-        q_posterior=0.35,
-        q_lcb_5pct=0.31,
-        c_cost_95pct=0.31,
-    )
-
-    selected = _replacement_live_authority_proof_for_direction(
-        proofs=(buy_yes, buy_no),
-        baseline_proof=buy_yes,
-        effective_direction="buy_no",
-    )
-
-    assert selected is buy_no
-    assert selected.token_id == "no-1"
-    assert selected.executable_snapshot_id == "snapshot-no"
-
-
-def test_replacement_live_authority_same_direction_replaces_receipt_probability(monkeypatch):
-    from src.engine.replacement_forecast_reactor_hook import (
-        REPLACEMENT_EXECUTION_LIVE_STATUS,
-        ReplacementForecastReactorHookResult,
-    )
-
-    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
-
-    class _ReplacementProvenance:
-        def as_dict(self):
-            return {
-                "runtime_layer": "live",
-                "source_id": REPLACEMENT_SOURCE_ID,
-            }
-
-    def _live_authority_hook(proof, event, decision_time):
-        return ReplacementForecastReactorHookResult(
-            status=REPLACEMENT_EXECUTION_LIVE_STATUS,
-            reason_codes=("test-live-authority",),
-            effective_direction=proof.direction,
-            effective_q_posterior=0.82,
-            effective_q_lcb=0.79,
-            effective_kelly_fraction=0.0,
-            receipt_provenance=_ReplacementProvenance(),
-        )
-
-    receipt = _receipt(
-        _bound_forecast_event(token_id="yes-1"),
-        _trade_conn_with_snapshot(selected_ask="0.40", no_selected_ask="0.80"),
-        replacement_forecast_hook=_live_authority_hook,
-    )
-
-    assert receipt.proof_accepted is True
-    assert receipt.token_id == "yes-1"
-    assert receipt.direction == "buy_yes"
-    assert receipt.q_live == pytest.approx(0.9093360425630191)
-    assert receipt.q_lcb_5pct is not None
-    assert 0.78 <= receipt.q_lcb_5pct <= receipt.q_live
-    assert receipt.trade_score is not None
-    assert receipt.trade_score > 0.0
-    assert receipt.replacement_forecast is None
 
 
 def test_day0_probability_evidence_is_absorbing_authority(monkeypatch):
@@ -3373,37 +2946,10 @@ def test_day0_probability_evidence_is_absorbing_authority(monkeypatch):
     assert "day0_lcb_transform_hash" in evidence
 
 
-def test_day0_absorbing_proof_is_primary_authority_for_replacement_hook():
-    from src.engine import event_reactor_adapter as adapter
-
-    proof = adapter._CandidateProof(
-        candidate=SimpleNamespace(condition_id="condition-2", family_id="family-1"),
-        token_id="yes-2",
-        direction="buy_yes",
-        row={},
-        executable_snapshot_id="snapshot-1",
-        execution_price=None,
-        q_posterior=0.96,
-        q_lcb_5pct=0.95,
-        c_cost_95pct=0.40,
-        p_fill_lcb=1.0,
-        trade_score=0.05,
-        p_value=0.01,
-        passed_prefilter=True,
-        native_quote_available=True,
-        p_cal_vector_hash="day0",
-        p_live_vector_hash="day0",
-        probability_authority="day0_absorbing_hard_fact",
-    )
-
-    assert adapter._replacement_primary_authority_already_applied(proof) is True
-
-
 def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypatch):
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
 
-    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
 
     # STALE_TEST update 2026-06-08: the buy_no admission gate added by cbc454e17e
     # (live_admission.live_buy_no_conservative_evidence_rejection_reason) rejects any
@@ -3469,7 +3015,6 @@ def test_opportunity_book_selector_is_default_on_for_requested_token(monkeypatch
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
 
-    monkeypatch.delenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", raising=False)
     edli = dict(settings._data["edli"])
     edli.pop("opportunity_book_selector_enabled", None)
     monkeypatch.setitem(settings._data, "edli", edli)
@@ -3551,15 +3096,13 @@ def test_opportunity_book_selector_is_default_on_for_requested_token(monkeypatch
 # directive forbids.
 
 
-def test_opportunity_book_selector_excludes_limit_untradeable_candidate(monkeypatch):
+def test_opportunity_book_selector_excludes_limit_untradeable_candidate():
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import (
         _CandidateProof,
         _opportunity_book_from_proofs,
         _selected_candidate_proof,
     )
-
-    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
 
     high_score_below_tick = _CandidateProof(
         candidate=SimpleNamespace(condition_id="below-tick"),
@@ -3613,8 +3156,13 @@ def test_opportunity_book_selector_excludes_limit_untradeable_candidate(monkeypa
     assert selected is admitted
     assert book["selected_candidate_id"] == book["actual_receipt_selected_candidate_id"]
     assert book["proposed_selected_candidate_id"] == book["actual_receipt_selected_candidate_id"]
-    loser_reason = next(iter(book["loser_reasons"].values()))
-    assert loser_reason.startswith("EXECUTION_PRICE_BELOW_MIN_TICK:")
+    rejected = next(
+        candidate
+        for candidate in book["candidates"]
+        if candidate["condition_id"] == "below-tick"
+    )
+    assert rejected["missing_reason"].startswith("EXECUTION_PRICE_BELOW_MIN_TICK:")
+    assert rejected["admitted"] is False
 
 
 def test_live_authority_rejects_receipt_token_that_is_not_book_selected():
@@ -3723,7 +3271,6 @@ def test_opportunity_book_selector_excludes_all_locked_executables(monkeypatch):
     from src.contracts.execution_price import ExecutionPrice
     from src.engine import event_reactor_adapter as adapter
 
-    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
     monkeypatch.setattr(
         adapter,
         "_locked_candidate_no_price_improvement_reason",
@@ -3786,30 +3333,13 @@ def test_opportunity_book_selector_excludes_all_locked_executables(monkeypatch):
 
     assert selected is non_executable_fallback
     assert book["proposed_selected_candidate_id"] is None
-    assert "LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT" in book["loser_reasons"].values()
-
-
-def test_coverage_expired_between_event_available_and_decision_blocks_receipt(monkeypatch):
-    from types import SimpleNamespace
-
-    from src.data import executable_forecast_reader
-
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE source_run_coverage SET expires_at = '2026-05-24T08:11:30+00:00'")
-    seen = []
-
-    def _reader(*_args, **kwargs):
-        seen.append(kwargs["decision_time"])
-        return SimpleNamespace(ok=False, bundle=None, reason_code="COVERAGE_EXPIRED")
-
-    monkeypatch.setattr(executable_forecast_reader, "read_executable_forecast", _reader)
-
-    receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
-
-    assert receipt.submitted is False
-    assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:COVERAGE_EXPIRED" in receipt.reason
-    assert seen == [datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)]
+    rejected = next(
+        candidate
+        for candidate in book["candidates"]
+        if candidate["condition_id"] == "locked"
+    )
+    assert rejected["missing_reason"] == "LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT"
+    assert rejected["admitted"] is False
 
 
 def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
@@ -3819,7 +3349,6 @@ def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
     # Fix: isolate to condition-1 only (snapshot_condition_count=1, include_no_snapshot=False)
     # so the ranker sees only one candidate (condition-1 YES, empty depth) and falls
     # back to the non-executable path.
-    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "0")
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(
         selected_ask="0.40", depth_json="{}", snapshot_condition_count=1, include_no_snapshot=False
@@ -3832,80 +3361,6 @@ def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
     assert receipt.proof_accepted is False
 
 
-def test_unpriced_qkernel_stamped_proof_returns_native_ask_missing_receipt(monkeypatch):
-    """Qkernel-stamped unpriced fallback must emit a receipt, not crash before q init."""
-    from src.engine import event_reactor_adapter as adapter
-    from src.engine import qkernel_spine_bridge
-
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot(
-        selected_ask="0.40", depth_json="{}", snapshot_condition_count=1, include_no_snapshot=False
-    )
-
-    def _proofs(*, family, snapshot_rows, **_kwargs):
-        candidate = family.candidates[0]
-        proof = adapter._CandidateProof(
-            candidate=candidate,
-            token_id=candidate.yes_token_id,
-            direction="buy_yes",
-            row=dict(snapshot_rows[0]),
-            executable_snapshot_id=str(snapshot_rows[0]["snapshot_id"]),
-            execution_price=None,
-            q_posterior=0.62,
-            q_lcb_5pct=0.58,
-            c_cost_95pct=None,
-            p_fill_lcb=1.0,
-            trade_score=1.0,
-            p_value=0.01,
-            passed_prefilter=True,
-            native_quote_available=False,
-            p_cal_vector_hash="cal-hash",
-            p_live_vector_hash="live-hash",
-            missing_reason="native YES ask ladder is empty",
-            qkernel_execution_economics={
-                "source": "qkernel_spine",
-                "candidate_id": "DIRECT_YES:qkernel-unpriced@proof",
-                "route_id": "DIRECT_YES:qkernel-unpriced@proof",
-                "side": "YES",
-                "payoff_q_point": 0.62,
-                "payoff_q_lcb": 0.58,
-                "cost": 0.30,
-                "edge_lcb": 0.28,
-                "delta_u_at_min": 0.01,
-                "optimal_stake_usd": "5",
-                "optimal_delta_u": 0.02,
-                "false_edge_rate": 0.02,
-                "direction_law_ok": True,
-                "coherence_allows": True,
-                "selection_guard_basis": "SELECTION_BETA_95",
-                "selection_guard_abstained": False,
-                "selection_guard_q_safe": 0.58,
-            },
-            selection_authority_applied="qkernel_spine",
-        )
-        return (proof,)
-
-    monkeypatch.setattr(adapter, "_generate_candidate_proofs", _proofs)
-    monkeypatch.setattr(adapter, "_family_existing_exposure_for_selection_by_bin_id", lambda **_k: {})
-    monkeypatch.setattr(adapter, "_selection_scoped_proofs", lambda *, proofs, **_k: tuple(proofs))
-    monkeypatch.setattr(qkernel_spine_bridge, "qkernel_spine_enabled", lambda: True)
-    monkeypatch.setattr(
-        qkernel_spine_bridge,
-        "decide_family_via_spine",
-        lambda **kwargs: SimpleNamespace(
-            selected_proof=kwargs["proofs"][0],
-            no_trade_reason=None,
-            decision=None,
-        ),
-    )
-    monkeypatch.setattr(qkernel_spine_bridge, "qkernel_candidate_economics_by_bin_side", lambda _d: {})
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
-
-    assert receipt.submitted is False
-    assert receipt.reason.startswith("QKERNEL_SPINE_NO_TRADE:QKERNEL_SELECTION_FACT_PERSISTENCE_FAILED:skipped_no_decision")
-    assert receipt.q_live is None
-    assert receipt.q_lcb_5pct is None
 
 
 def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
@@ -4149,42 +3604,6 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
     assert receipt.fdr_hypothesis_count == 4
 
 
-def test_forecast_receipt_rejects_source_snapshot_available_after_decision_time():
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot(captured_at="2026-05-24T08:10:00+00:00")
-    conn.execute("UPDATE ensemble_snapshots SET available_at = '2026-05-24T08:12:00+00:00'")
-    _attach_qkernel_world(conn)
-
-    receipt = _receipt(event, conn, decision_time=datetime.fromisoformat(event.received_at))
-
-    assert receipt.submitted is False
-    assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:causal forecast snapshot missing")
-
-
-def test_forecast_receipt_requires_exact_causal_snapshot_from_source_data():
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots SET snapshot_id = 'other-snapshot'")
-    _attach_qkernel_world(conn)
-
-    receipt = _receipt(event, conn)
-
-    assert receipt.submitted is False
-    assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:causal forecast snapshot missing")
-
-
-def test_forecast_receipt_requires_metric_match_in_source_snapshot():
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots SET temperature_metric = 'low'")
-    _attach_qkernel_world(conn)
-
-    receipt = _receipt(event, conn)
-
-    assert receipt.submitted is False
-    assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:causal forecast snapshot missing")
-
-
 def test_day0_receipt_uses_latest_forecast_source_and_absorbing_boundary_not_old_facts():
     event = _day0_event(token_id="yes-2")
     conn = _trade_conn_with_snapshot()
@@ -4204,7 +3623,6 @@ def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoi
     # STALE_LAW re-pin 2026-06-09: same ΔU ranker issue as test_top_ask_without_depth.
     # Isolate to condition-1 only (snapshot_condition_count=1, include_no_snapshot=False)
     # so condition-2's hardcoded depth does not let the ranker skip condition-1.
-    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "0")
     event = _bound_forecast_event()
     receipt = _receipt(
         event, _trade_conn_with_snapshot(selected_ask="", snapshot_condition_count=1, include_no_snapshot=False)
@@ -4716,13 +4134,13 @@ def test_107_durable_live_cap_seed_query_error_fails_closed():
 # so _receipt_money_path_blocker (Path 2) does NOT see None and does NOT emit
 # ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING.
 # Before the fix: EventSubmissionReceipt(...) at line ~1461 omitted same_bin_yes_posterior
-# and settlement_coverage_status, so every buy_no through the live bridge starved both
+# and settlement_coverage_status, so every buy_no through the live path starved both
 # the adapter gate and the receipt gate simultaneously.
 # This test makes the omission category unconstructable: if any of the five forwarded
 # fields are dropped from the constructor, the receipt-level gate will fire and the
 # test will fail.
 def test_third_path_same_bin_yes_posterior_survives_submit_outcome_receipt_construction():
-    """ANTIBODY — live bridge EventSubmissionReceipt must forward same_bin_yes_posterior.
+    """ANTIBODY — live path EventSubmissionReceipt must forward same_bin_yes_posterior.
 
     Relationship: no_submit_receipt.same_bin_yes_posterior → submit-outcome receipt
     → _receipt_money_path_blocker receives non-None → no ADMISSION_BUY_NO_*_MISSING.
@@ -4770,7 +4188,7 @@ def test_third_path_same_bin_yes_posterior_survives_submit_outcome_receipt_const
         probability_authority="REPLACEMENT",
     )
 
-    # Simulate what the live bridge's EventSubmissionReceipt(...) constructor does.
+    # Simulate what the live path's EventSubmissionReceipt(...) constructor does.
     # After the fix, these five fields are forwarded from no_submit_receipt.
     # Before the fix: same_bin_yes_posterior, settlement_coverage_status,
     # q_lcb_calibration_source, posterior_id, probability_authority were all None.

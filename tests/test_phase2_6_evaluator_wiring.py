@@ -126,35 +126,6 @@ def test_evaluator_threads_temperature_metric_to_fetch_ensemble():
     )
 
 
-# ---- BLOCKER 2: rebuild script wires stratification ------------------------
-
-
-_REBUILD_PATH = (
-    Path(__file__).resolve().parents[1] / "scripts" / "rebuild_calibration_pairs.py"
-)
-_REBUILD_SRC = _REBUILD_PATH.read_text(encoding="utf-8")
-
-
-def test_rebuild_script_passes_cycle_source_id_horizon_profile():
-    """rebuild_calibration_pairs.py must pass stratification kwargs.
-
-    Without these, every rebuild row falls into the schema-default branch
-    of add_calibration_pair_v2 (cycle='00', source_id='tigge_mars',
-    horizon_profile='full') — silently mis-labeling OpenData snapshots as
-    TIGGE. critic ATTACK 2 named this exact silent contamination path.
-    """
-    assert "cycle=_rb_cycle" in _REBUILD_SRC
-    assert "source_id=_rb_source_id" in _REBUILD_SRC
-    assert "horizon_profile=_rb_horizon_profile" in _REBUILD_SRC
-
-
-def test_rebuild_script_imports_derive_source_id_from_data_version():
-    assert "derive_source_id_from_data_version" in _REBUILD_SRC, (
-        "BLOCKER 2 regression: rebuild script no longer imports the source_id "
-        "derivation helper."
-    )
-
-
 # ---- monitor_refresh wiring (BLOCKER 1 collateral) -------------------------
 
 

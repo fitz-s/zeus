@@ -161,7 +161,7 @@ Consult(REQ-20260701-150857,答案 /tmp/cgc_answer_REQ-20260701-150857-127dc8.tx
 - **一句折入 SPOT 后删**:diagnose-order-emission("live-fire submit path first, bisect venue→backward")、monitor-exit-evaluate-exit("rebuild 前先 grep 现有 owner")、edge-measured(其余部分被 verify-alpha + no-fills 覆盖)
 - 8 处 [[diagnose-order-emission]] 引用统一重指 [[how-to-work-spot-plan-execute]];链接零 dangling;lint 全绿。
 
-**终态:memory 40→24 条(−40%),索引 3.05KB(起点 18.2KB,−83%),目录 196K→112K。** 留下的 24 条每条都能答出"删了会犯哪个具体的错":操作员法 8(no-caps/no-shadow/no-fixed-number/flag-freeze/ship-decision/redeem/backtest/forecast-gap-law-in-residual)、工作流契约 4(SPOT/auto-mode/consult-authorized/omc-fork)、活跃项目 2(EMOS/residual)、独有机制+诊断 10(3-gates/entries-pause/snapshots-DB/9router/deploy/blackout/backlog-drain/transcript-recovery/live-source-parity/alpha-winrate)。
+**终态:memory 40→24 条(−40%),索引 3.05KB(起点 18.2KB,−83%),目录 196K→112K。** 留下的 24 条每条都能答出"删了会犯哪个具体的错":操作员法 8(no-caps/single-live/no-fixed-number/flag-freeze/ship-decision/redeem/backtest/forecast-gap-law-in-residual)、工作流契约 4(SPOT/auto-mode/consult-authorized/omc-fork)、活跃项目 2(EMOS/residual)、独有机制+诊断 10(3-gates/entries-pause/snapshots-DB/9router/deploy/blackout/backlog-drain/transcript-recovery/live-source-parity/alpha-winrate)。
 
 ## 13. 第八轮:精工化 + 可执行项收尾 (2026-07-01,操作员定调"十四行诗")
 

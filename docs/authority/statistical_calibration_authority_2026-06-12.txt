@@ -801,23 +801,23 @@ Per-location b
 
 : raw per-location counts of 50–400 are enough only with shrinkage. Without shrinkage, locations with 50 samples will overfit location noise and contaminate k again.
 
-Failure modes and diagnostics
+Failure modes and evidence checks
 
-Wrong rounding preimage: produces systematic one-bin displacement. Diagnostic: PIT/rank histogram has alternating sawtooth or boundary spikes.
+Wrong rounding preimage: produces systematic one-bin displacement. Evidence check: PIT/rank histogram has alternating sawtooth or boundary spikes.
 
 Location bias time variation: static b
 ℓ
 	​
 
- averages regimes. Diagnostic: walk-forward residual signs by location have autocorrelation.
+ averages regimes. Evidence check: walk-forward residual signs by location have autocorrelation.
 
 Too-coarse bins: likelihood ridge between b
 ℓ
 	​
 
- and k. Diagnostic: profile likelihood contours elongated; Hessian condition number high.
+ and k. Evidence check: profile likelihood contours elongated; Hessian condition number high.
 
-Gaussian base misspecification: residual PIT U-shape after joint bias/scale. Diagnostic: tail bins over-realize even after b,k correction.
+Gaussian base misspecification: residual PIT U-shape after joint bias/scale. Evidence check: tail bins over-realize even after b,k correction.
 
 1.2 Mixture weight w: replace the uniform mixture
 Comparison
@@ -992,7 +992,7 @@ Use distance-tied Dirichlet calibration; do not use a global uniform m
 	​
 
 
-Tie-breaker: at n≈300 recent samples and n≈5,000–10,000 total samples, the recommended map uses only a few parameters, is fitted by proper log loss, can sharpen the mode, can thicken tails, and preserves most of the base distribution’s state-specific information. It directly addresses the sell-the-mode failure; Student-t is the second choice if diagnostics show only symmetric heavy tails.
+Tie-breaker: at n≈300 recent samples and n≈5,000–10,000 total samples, the recommended map uses only a few parameters, is fitted by proper log loss, can sharpen the mode, can thicken tails, and preserves most of the base distribution’s state-specific information. It directly addresses the sell-the-mode failure; Student-t is the second choice if evidence checks show only symmetric heavy tails.
 
 Estimator
 
@@ -1103,13 +1103,13 @@ def neg_logloss_cal(theta, q, y, dist_class, n_classes, lam_gamma=1.0, lam_beta=
         d2 = beta[2:] - 2 * beta[1:-1] + beta[:-2]
         loss += 0.5 * lam_beta * np.sum(d2 ** 2)
     return loss
-Failure modes and diagnostics
+Failure modes and evidence checks
 
-Overfitting distance classes: calibration improves in-sample but not walk-forward. Diagnostic: prequential log loss degrades after complexity penalty.
+Overfitting distance classes: calibration improves in-sample but not walk-forward. Evidence check: prequential log loss degrades after complexity penalty.
 
-Asymmetry hidden by absolute distance: warm-side and cold-side misses differ. Diagnostic: reliability by signed distance; if asymmetric, use signed distance classes.
+Asymmetry hidden by absolute distance: warm-side and cold-side misses differ. Evidence check: reliability by signed distance; if asymmetric, use signed distance classes.
 
-Market/event selection shift: calibration fitted on all forecasts but applied only to selected trades. Diagnostic: reliability on the selected-trade subset, not only all forecasts.
+Market/event selection shift: calibration fitted on all forecasts but applied only to selected trades. Evidence check: reliability on the selected-trade subset, not only all forecasts.
 
 1.3 Hierarchical shrinkage of location bias
 Empirical-Bayes model
@@ -2535,13 +2535,13 @@ def fit_power_gamma(raw, y):
 
     res = minimize_scalar(obj, bounds=(-3.0, 3.0), method="bounded")
     return float(np.exp(res.x)), res
-Failure modes and diagnostics
+Failure modes and evidence checks
 
-Fee convention mismatch: if exchange fees are charged differently from additive cost, all break-evens shift. Diagnostic: reconcile historical fills against realized P&L per contract.
+Fee convention mismatch: if exchange fees are charged differently from additive cost, all break-evens shift. Evidence check: reconcile historical fills against realized P&L per contract.
 
 Market price timestamps leak outcome information: use only quotes available at the decision time.
 
-Power transform too rigid: reliability curve still monotone-misfit after fitting γ. Diagnostic: residual calibration curve of actual frequency versus m
+Power transform too rigid: reliability curve still monotone-misfit after fitting γ. Evidence check: residual calibration curve of actual frequency versus m
 k
 	​
 
@@ -2960,9 +2960,9 @@ def derived_bound_from_fractional_kelly(theta_samples, cost, lambda_frac):
     gamma_star = float(np.mean(theta_samples <= theta_bound))
     f = float(kelly_fraction(theta_bound, cost))
     return theta_bound, gamma_star, f
-Failure modes and diagnostics
+Failure modes and evidence checks
 
-Posterior too narrow: realized coverage lower than nominal derived coverage. Diagnostic: rolling coverage of θ≥L
+Posterior too narrow: realized coverage lower than nominal derived coverage. Evidence check: rolling coverage of θ≥L
 θ
 	​
 
@@ -2972,9 +2972,9 @@ Ignoring ensemble family correlation: N
 eff
 	​
 
- wildly overstated. Diagnostic: estimate intraclass correlation of member residual indicators by model family.
+ wildly overstated. Evidence check: estimate intraclass correlation of member residual indicators by model family.
 
-Selected-trade conditioning: posterior calibrated on all events but applied to extreme selected edges. Diagnostic: reliability conditional on trade selection rule.
+Selected-trade conditioning: posterior calibrated on all events but applied to extreme selected edges. Evidence check: reliability conditional on trade selection rule.
 
 3.2 Fractional Kelly as a formula of measured estimation error
 Derivation
@@ -3275,17 +3275,17 @@ def approx_lambda(f_kelly, realized_ret):
     if den <= 1e-15:
         return 0.0
     return float(np.clip(num / den, 0.0, 1.0))
-Failure modes and diagnostics
+Failure modes and evidence checks
 
-Candidate-set bias: estimating λ only on trades selected by an old broken rule can understate future edge. Diagnostic: estimate λ on all candidate edges by bins of predicted edge, then on selected trades.
+Candidate-set bias: estimating λ only on trades selected by an old broken rule can understate future edge. Evidence check: estimate λ on all candidate edges by bins of predicted edge, then on selected trades.
 
-Nonstationarity: old λ too optimistic. Diagnostic: decay-weighted λ
+Nonstationarity: old λ too optimistic. Evidence check: decay-weighted λ
 t
 	​
 
  and posterior drift test.
 
-Tail dependence / simultaneous losses: independent Kelly overstates portfolio fraction. Diagnostic: cluster realized returns by realization day and cap total exposure by multivariate Kelly covariance, not by per-trade constants.
+Tail dependence / simultaneous losses: independent Kelly overstates portfolio fraction. Evidence check: cluster realized returns by realization day and cap total exposure by multivariate Kelly covariance, not by per-trade constants.
 
 3.3 Edge threshold after fees and bound coverage error
 
@@ -3429,7 +3429,7 @@ N
 ).
 
 Task 4 — Eliminate-the-constants audit
-Hardcoded constant class	Principled replacement	Estimator	Data needed	Update rule	Diagnostic
+Hardcoded constant class	Principled replacement	Estimator	Data needed	Update rule	Evidence check
 Spread floor σ≥1.0	Variance component s
 i
 2

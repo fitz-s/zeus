@@ -20,7 +20,7 @@ Provide human/operator-facing summaries and scheduler health without pretending 
 Reads canonical/derived runtime information and produces summaries or health signals for operators and other tooling.
 
 ## 5. Authority role
-Derived-only by design. This book exists mainly to prevent observability from drifting into shadow authority.
+Derived-only by design. This book exists mainly to prevent observability from drifting into parallel authority.
 
 ## 6. Read/write surfaces and canonical truth
 ### Canonical truth surfaces

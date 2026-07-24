@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-07-09; last_reviewed=2026-07-09; last_reused=2026-07-09
-# Purpose: read-only diagnostic for live position probability vs real settlement/PnL evidence.
+# Purpose: read-only observation for live position probability vs real settlement/PnL evidence.
 # Authority basis: AGENTS.md live-money proof gates; operator focus on probability/reality alignment.
 """Audit live position probabilities against real settled outcomes and monitor evidence.
 
-This diagnostic reads canonical trade/world DBs in read-only SQLite mode. It
+This observation reads canonical trade/world DBs in read-only SQLite mode. It
 does not mutate DB truth, contact venues, authorize live trading, or restart
 daemons.
 """

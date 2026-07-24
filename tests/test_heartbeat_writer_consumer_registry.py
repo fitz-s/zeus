@@ -216,7 +216,7 @@ class TestHeartbeatWriterConsumerRegistry:
         )
 
     def test_oracle_missing_check_wired_into_deep_heartbeat(self):
-        """check_oracle_missing must be registered in run_diagnostics checks list (F33)."""
+        """check_oracle_missing must be registered in run_checks checks list (F33)."""
         deep_hb = PROJECT_ROOT / "scripts" / "deep_heartbeat.py"
         assert deep_hb.exists(), "deep_heartbeat.py must exist"
         content = deep_hb.read_text()
@@ -224,7 +224,7 @@ class TestHeartbeatWriterConsumerRegistry:
             "check_oracle_missing() must be defined in deep_heartbeat.py (F33 fix)"
         )
         assert "check_oracle_missing()" in content, (
-            "check_oracle_missing() must be called in run_diagnostics checks list"
+            "check_oracle_missing() must be called in run_checks checks list"
         )
 
     def test_daemon_heartbeat_ingest_gap_documented(self):

@@ -413,7 +413,7 @@ def replay_family(
     # Randomized PIT of the realized settlement value over the discrete predictive q.
     # PIT = F(below settled bin) + U * q(settled bin), U~Uniform(0,1). For a
     # calibrated discrete predictive the PIT is ~Uniform(0,1) — the proper width /
-    # dispersion test (independent of the modal-mass diagnostic). Deterministic U
+    # dispersion test (independent of the modal-mass observation). Deterministic U
     # per family (seeded by index) so the report is reproducible.
     below = float(np.sum(q[:si]))
     rng_pit = np.random.default_rng(abs(hash(case.family_id)) % (2**32))
@@ -1027,7 +1027,7 @@ def write_report(*, settlements, results, eligible, skipped, rel, cov, pit, ev, 
       "after-cost EV of the dominant Zeus trade (buy_no on the modal/highest-YES "
       "sibling): `EV_mkt = (1 − modal_yes_ask) − no_ask`. This is the market's own "
       "price coherence, NOT a settlement grade — reported below as a coverage-bounded "
-      "diagnostic, not a verdict.")
+      "observation, not a verdict.")
     A("")
     if ev["results"]:
         evs = [r["ev_mkt"] for r in ev["results"]]

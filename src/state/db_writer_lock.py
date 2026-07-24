@@ -1,5 +1,5 @@
 # Created: 2026-05-07
-# Last reused or audited: 2026-05-12
+# Last reused or audited: 2026-07-24
 # Authority basis: .omc/plans/sqlite_contention_structural_design_v4_2026_05_07.md
 #                  §3.1 (mechanism), §3.1.2 (per-DB flock topology),
 #                  §3.1.5 (BulkChunker dual-channel watchdog),
@@ -38,6 +38,7 @@ import errno
 import fcntl
 import logging
 import os
+import sqlite3
 import subprocess
 import threading
 import time
@@ -81,6 +82,54 @@ def _lock_file_path(db_path: Path, write_class: WriteClass) -> Path:
     return db_path.with_name(db_path.name + _LOCK_FILE_SUFFIX[write_class])
 
 
+def cutover_lease_path(db_path: Path) -> Path:
+    """Return the per-DB gate shared by runtime writers and cutover tooling."""
+
+    return db_path.with_name(db_path.name + ".cutover-lease")
+
+
+class CutoverAwareConnection(sqlite3.Connection):
+    """SQLite connection that owns a shared cutover lease until close()."""
+
+    _cutover_fd: int | None = None
+    _cutover_path: Path | None = None
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            fd = self._cutover_fd
+            if fd is not None:
+                self._cutover_fd = None
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+
+def connect_with_cutover_lease(
+    database: str | Path,
+    *,
+    canonical_db_path: Path,
+    **kwargs: Any,
+) -> CutoverAwareConnection:
+    """Open SQLite only while holding the canonical DB's shared runtime lease."""
+
+    lease_path = cutover_lease_path(canonical_db_path)
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lease_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        conn = sqlite3.connect(
+            str(database), factory=CutoverAwareConnection, **kwargs
+        )
+    except BaseException:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        raise
+    conn._cutover_fd = fd
+    conn._cutover_path = lease_path
+    return conn
+
+
 # --------------------------------------------------------------------------
 # §3.1.2 — db_writer_lock(): fcntl.flock context manager
 # --------------------------------------------------------------------------
@@ -104,40 +153,66 @@ def db_writer_lock(
 
     Per plan §3.1.2.
     """
-    lock_path = _lock_file_path(db_path, write_class)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # Open in append mode so the file is always created and never truncated.
-    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    cutover_path = cutover_lease_path(db_path)
+    cutover_path.parent.mkdir(parents=True, exist_ok=True)
+    cutover_fd = os.open(str(cutover_path), os.O_RDWR | os.O_CREAT, 0o644)
+    cutover_flags = fcntl.LOCK_SH
+    if not blocking:
+        cutover_flags |= fcntl.LOCK_NB
     try:
-        flags = fcntl.LOCK_EX
-        if not blocking:
-            flags |= fcntl.LOCK_NB
         try:
-            fcntl.flock(fd, flags)
+            fcntl.flock(cutover_fd, cutover_flags)
         except BlockingIOError as exc:
-            # Non-blocking and the lock is held; surface clearly.
             _cnt_inc("db_writer_lock_contended_total")
             raise BlockingIOError(
                 errno.EWOULDBLOCK,
-                f"db_writer_lock(write_class={write_class.value}) "
-                f"contended on {lock_path}",
+                f"cutover lease contended on {cutover_path}",
             ) from exc
+
+        lock_path = _lock_file_path(db_path, write_class)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        # Open in append mode so the file is always created and never truncated.
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
         try:
-            yield
+            flags = fcntl.LOCK_EX
+            if not blocking:
+                flags |= fcntl.LOCK_NB
+            try:
+                fcntl.flock(fd, flags)
+            except BlockingIOError as exc:
+                # Non-blocking and the lock is held; surface clearly.
+                _cnt_inc("db_writer_lock_contended_total")
+                raise BlockingIOError(
+                    errno.EWOULDBLOCK,
+                    f"db_writer_lock(write_class={write_class.value}) "
+                    f"contended on {lock_path}",
+                ) from exc
+            try:
+                yield
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError as unlock_exc:
+                    logger.warning(
+                        "db_writer_lock unlock failed for %s: %r",
+                        lock_path,
+                        unlock_exc,
+                    )
         finally:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except OSError as unlock_exc:
-                logger.warning(
-                    "db_writer_lock unlock failed for %s: %r",
-                    lock_path,
-                    unlock_exc,
-                )
+                os.close(fd)
+            except OSError:
+                pass
     finally:
         try:
-            os.close(fd)
-        except OSError:
-            pass
+            fcntl.flock(cutover_fd, fcntl.LOCK_UN)
+        except OSError as unlock_exc:
+            logger.warning(
+                "cutover lease unlock failed for %s: %r",
+                cutover_path,
+                unlock_exc,
+            )
+        os.close(cutover_fd)
 
 
 # --------------------------------------------------------------------------
@@ -646,26 +721,30 @@ def subprocess_run_with_write_class(
 # verify_truth_surfaces.py promoted as read_only (0 DML writes; RISK_DB/DEFAULT_TRADE_DB/
 # SHARED_DB connects switched to mode=ro URIs in F26 cleanup; all SQL is SELECT-only);
 # _zeus_emergency_k2_obs_backfill_2026_05_10.py dropped (file deleted post-run).
-# Remaining residual: src/data/market_scanner.py (daemon INSERT, pending Track A.6)
-# + src/state/chunk_boundary_events.py (daemon thread write, separate conn by design).
+# Canonical runtime connections and the former daemon direct-connect sites now
+# hold the shared cutover lease for their complete connection lifetime.
 SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "src/state/db.py",  # canonical shim
         "src/state/db_writer_lock.py",  # this file — does not connect
+        "src/data/market_scanner.py",  # canonical writer uses connect_with_cutover_lease; remaining raw connects are mode=ro snapshot readers
         # Track A.6 (#246): daemon-path raw-connect sites — annotated below.
         # These are NOT in the world-db BULK lock universe; each is either
         # read-only or writes a separate DB (risk_state.db).
         "src/ingest_main.py",           # RO: reads condition_id for UMA listener, no write
         "src/main.py",                  # read_only_ro_uri: live boot structural checks on zeus-forecasts.db with mode=ro + query_only
-        "src/data/replacement_forecast_live_dry_run.py",  # read_only_ro_uri: replacement switch dry-run inventory opens forecasts DB mode=ro + query_only; SELECT-only
         "src/observability/status_summary.py",  # RO: status dashboard read-only
         "src/engine/position_belief.py",  # read_only_ro_uri: K1 single belief authority — held-position belief reads forecast_posteriors mode=ro, short-lived, SELECT-only (settlement-losses incident 2026-06-12)
-        "src/engine/qkernel_spine_bridge.py",  # read_only_ro_uri: settlement-residual cold-center de-bias provider opens zeus-forecasts.db mode=ro, process-cached, SELECT-only over settlement_outcomes(VERIFIED)+raw_model_forecasts; DEFAULT-OFF behind ZEUS_SPINE_SETTLE_RESID_DEBIAS=1 (docs/evidence/qkernel_rebuild/cold_center_bias_fix_2026-06-16.md)
+        "src/engine/qkernel_spine_bridge.py",  # read_only_ro_uri: current qkernel bridge reads forecast authority without writing it
         "src/data/replacement_cycle_advance_trigger.py",  # read_only_ro_uri: U5 step 2a re-mat trigger reads zeus_trades.position_current mode=ro for HELD-position prioritization, short-lived, SELECT-only (never writes trades; forecasts writes go through _connect live) — docs/evidence/freshness/2026-06-12
         "src/execution/exchange_reconcile.py",  # read_only_ro_uri: settled-external absorber reads canonical market_events (zeus-forecasts) mode=ro, short-lived, SELECT-only — docs/evidence/settlement_guard/2026-06-11_settled_external_absorber_plan.md
-        "scripts/verify_e2e_money_path.py",  # read_only_ro_uri: e2e money-path walker opens every DB mode=ro, SELECT-only (operator-demanded full-chain diagnostic, 2026-06-11)
+        "scripts/verify_e2e_money_path.py",  # read_only_ro_uri: e2e money-path walker opens every DB mode=ro, SELECT-only (operator-demanded full-chain telemetry, 2026-06-11)
         "scripts/check_live_restart_preflight.py",  # read_only_ro_uri: live restart gate opens world/trade DBs via file:...?mode=ro uri for SELECT-only readiness evidence; never writes canonical DBs
         "scripts/deploy_live.py",  # read_only_ro_uri: post-start live restart verification opens trade DB mode=ro to prove MONITOR_REFRESHED cadence after boot; SELECT-only, never writes canonical DBs
+        "src/reconcile/replay.py",  # isolated replay DBs supplied by caller; never a daemon canonical writer
+        "scripts/run_offline_calibration_rebuild.py",  # operator-invoked isolated calibration DB rebuild
+        "scripts/run_offline_platt_refit.py",  # operator-invoked isolated Platt refit DB
+        "scripts/seed_isolated_calibration_db.py",  # creates an explicitly isolated evidence DB, never canonical live state
         "scripts/audit_yes_no_selection_skew.py",  # read_only_ro_uri: opens trade DB mode=ro; SELECT-only over edli_live_order_events DecisionProofAccepted payloads to explain YES/NO selection skew; never writes canonical DBs
         "scripts/audit_live_probability_reality.py",  # read_only_ro_uri: opens trade/world DBs mode=ro; SELECT-only over settled positions, position_events, outcome_fact, and settlement_attribution to audit probability-vs-reality and monitor evidence; never writes canonical DBs
         "scripts/dev/replay_position_phase.py",  # read_only_ro_uri: INV-PROJ-1 replay-diff opens the trades DB via file:...?mode=ro uri; SELECT-only over position_current ⋈ position_events (phase vs latest event phase_after); never writes; atlas §5 projection-recomputability verifier (2026-06-30)
@@ -676,15 +755,13 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/backfill_wu_blind_window.py",  # operator_invoked + guarded: comparison connection is mode=ro (read-only); --apply writes observation_instants + observation_prints via scripts.obs_live_tick._write_rows under db_writer_lock(BULK); WU-sourced blind-window recovery re-fetch (2026-07-16)
         "scripts/query_decision_provenance.py",  # read_only_ro_uri: decision-provenance query opens zeus-world.db mode=ro, SELECT-only over regret/no_submit receipts — operator "一切可被溯源" query entry 2026-06-11 (docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md)
         "scripts/sigma_scale_before_after.py",  # read_only_ro_uri: sigma-scale before/after evidence table, opens forecasts/trades DBs mode=ro, SELECT-only (docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md)
-        "scripts/prune_terminal_opportunity_events.py",  # standalone one-time/maintenance retention sweep: own short-lived zeus-world.db connection with busy_timeout + batched-delete-with-backoff; runs OUTSIDE the daemon (cooperates via SQLite file lock), NOT a daemon-path writer (docs/evidence/settlement_guard/world_db_bloat_prune_and_forecast_lane_diagnosis_2026-06-16.md)
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
-        "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
         # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
         # the original single-script design. Each handles RO inspect/verify;
         # RW only with --commit, gated by BEGIN IMMEDIATE + rollback semantics.
         "scripts/promote_platt.py",       # RO inspect/verify; RW only with --commit (zeus-world.db)
         "scripts/promote_calibration.py",  # RO inspect/verify; RW only with --commit (zeus-forecasts.db)
-        # --- ARM-gate settlement win-rate measurement (2026-06-03, read-only diagnostic) ---
+        # --- ARM-gate settlement win-rate measurement (2026-06-03, read-only telemetry) ---
         "scripts/measure_arm_gate_settlement.py",  # read_only_ro_uri: opens world+forecasts DBs via file:...?mode=ro uri; SELECT-only; never writes; ARM MEASURE step tool
         "scripts/replay_downloaded_replacement_economic.py",  # read_only_ro_uri: replacement forecast economic replay opens forecasts+trade DBs with mode=ro/query_only; writes reports only
         "scripts/qkernel_arm_replay.py",  # read_only_ro_uri: opens world+forecasts+trades DBs via file:...?mode=ro uri (ro() helper); SELECT-only over settlement_outcomes(VERIFIED)+raw_model_forecasts+executable_market_snapshots; writes docs/rebuild/arm_replay_report.md only; q-kernel rebuild offline ARM settlement-validation replay (2026-06-15)
@@ -699,8 +776,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/fit_selection_calibrator.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over forecast_posteriors ⋈ settlement_outcomes(VERIFIED); writes state/selection_calibrator.json only; walk-forward selection-aware settlement q_lcb calibrator offline fit (frontier consult REQ-20260622-151741; live_order_pathology 2026-06-22)
         "scripts/selection_calibrator_forward_validation.py",  # read_only_ro_uri: opens forecasts+world DBs via file:...?mode=ro uri; SELECT-only over forecast_posteriors ⋈ settlement_outcomes(VERIFIED) + settlement_attribution; writes docs/evidence/live_order_pathology/*.json report only; walk-forward forward-validation harness for the selection q_lcb calibrator (frontier consult REQ-20260622-151741; 2026-06-22)
         "scripts/fit_city_skill_gate.py",  # read_only_ro_uri: opens world DB via file:...?mode=ro uri; SELECT-only over settlement_attribution; writes state/city_skill_gate.json only; walk-forward per-city historical settlement-skill gate offline fit (team-lead approved (a) 2026-06-22; live_order_pathology 2026-06-22)
-        "scripts/fit_selection_curse_bound.py",  # read_only_ro_uri: opens forecasts+trades DBs via file:...?mode=ro uri; re-materializes served q_lcb (compute_replacement_posterior_readonly) + joins executable_market_snapshots prices + settlement_outcomes(VERIFIED); writes state/selection_curse_bound.json only; price-conditioned buy_no selection-curse realized-rate bound, walk-forward (full-lifecycle-audit-impl 2026-06-23)
-        "scripts/percity_after_cost_ev_gate.py",  # read_only_ro_uri: opens forecasts+trades+world DBs via file:...?mode=ro + query_only; SELECT-only per-city after-cost EV diagnostic; writes /tmp/percity_ev_gate.md only (2026-06-29)
+        "scripts/percity_after_cost_ev_gate.py",  # read_only_ro_uri: opens forecasts+trades+world DBs via file:...?mode=ro + query_only; SELECT-only per-city after-cost EV telemetry; writes /tmp/percity_ev_gate.md only (2026-06-29)
         "scripts/city_skill_gate_forward_validation.py",  # read_only_ro_uri: opens world DB via file:...?mode=ro uri; SELECT-only over settlement_attribution; writes docs/evidence/live_order_pathology/*.json report only; walk-forward forward-validation harness for the per-city skill gate (2026-06-22)
         "scripts/fit_bias_scale.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over forecast_posteriors ⋈ settlement_outcomes(VERIFIED); writes state/bias_scale_fit.json only; JOINT per-city bias b_loc + global scale k interval-censored categorical MLE + EB shrinkage (statistical_calibration_authority_2026-06-12 Task 1.1 / Migration Step 1; supersedes the variance-only k that absorbed center bias)
         "scripts/fit_source_clock_city_weights.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over raw_model_forecasts(previous_runs, lead 0-2) ⋈ settlement_outcomes(VERIFIED); writes state/source_clock_weights/city_weights_<as_of>.json + ACTIVE.json pointer only; walk-forward-refit per-city-per-metric source-clock weight artifact generator, replacing the frozen never-refit grid_aware_retest_20260625 CSV (docs/evidence/upstream_physical_2026_07_17 basket-governance verdicts, 2026-07-17)
@@ -730,7 +806,6 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- BAYES_PRECISION_FUSION-Bayes walk-forward history seed (2026-06-08, operator-invoked offline) ---
         "scripts/backfill_bayes_precision_fusion_history_from_b0.py",  # operator_invoked: RW raw_model_forecasts training-history rows (training_allowed=0) only; INSERT OR IGNORE idempotent; never writes posterior/readiness/orders; --db REQUIRED; B0 seed 2026-06-08
         # --- read-only scripts: verified SELECT-only, named in PR #86 ---
-        "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
         "scripts/audit_divergence_exit_counterfactual.py",  # read_only (PR #86)
         "scripts/audit_realtime_pnl.py",                # read_only (PR #86)
         "scripts/build_correlation_matrix.py",          # read_only (PR #86)
@@ -755,11 +830,9 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/learning_loop_observation_weekly.py",  # read_only_ro_uri
         "scripts/check_schema_fingerprint.py",          # in_memory_only (":memory:" only — schema drift CI gate; B2 replaces check_schema_version.py)
         "scripts/check_data_pipeline_live_e2e.py",      # read_only_ro_uri (live E2E verifier; mode=ro only)
-        "scripts/check_edli_live_canary_gate.py",       # read_only_ro_uri (EDLI canary verifier; mode=ro only)
         "scripts/check_forecast_live_ready.py",         # read_only_ro_uri (forecast-live authority-chain verifier; mode=ro + query_only)
         "scripts/live_health_probe.py",                 # read_only_ro_uri (live health verifier; settlement truth SELECT-only)
         "scripts/check_live_order_e2e.py",              # read_only_ro_uri (live order verifier; mode=ro + query_only)
-        "scripts/check_live_release_gate.py",           # read_only_live + temp_fixture (release gate verifier; no canonical DB writes)
         "scripts/emit_live_release_paper_proof.py",     # read_only_ro_uri (release paper-proof emitter; SELECT-only over DBs, writes JSON artifact only)
         "scripts/check_full_transport_ship_readiness.py",  # read_only_ro_uri (full_transport ship-readiness gate; SELECT-only, no writes)
         "scripts/audit_error_model_row_reproducibility.py",  # read_only_ro_uri (row reproducibility audit; both DBs opened mode=ro, SELECT-only)
@@ -773,6 +846,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/migrations/202607_trade_decisions_drop_dangling_fk.py",  # operator_invoked + daemon-fenced: --dry-run default; --operator-confirms-fenced rebuilds trade_decisions (single-DB WAL, crash-atomic) + a rollback-capsule sidecar FILE; daemon never imports (W0-a)
         "scripts/migrations/202607_drop_redundant_trade_indexes.py",  # operator_invoked + daemon-fenced: --dry-run default; drops 2 redundant trade indexes with --apply; daemon never imports (F15)
         "scripts/migrations/202607_regret_decompositions_drop_dead_fk.py",  # operator_invoked + daemon-fenced: --dry-run default; drops the dead regret_decompositions FK with --apply (world DB, 0 rows); daemon never imports
+        "scripts/migrations/202607_single_live_semantics_cutover.py",  # operator_invoked + writer-fenced: read-only by default; --apply refuses while live writer processes exist and mutates one DB per immediate transaction
         "scripts/ops/reconcile_settlement_outcomes.py",  # read_only_ro_uri: opens trade+forecasts DBs via file:...?mode=ro&query_only; SELECT-only cross-DB settled-vs-outcome anti-join; writes stdout only; daemon never imports
         "scripts/ops/backup_canonical_dbs.py",  # operator_invoked: SQLite backup API reads each canonical DB (incl. WAL) into an EXTERNAL backup file + streamed SHA-256; never writes canonical DBs; daemon never imports
         "scripts/ops/archive_pre_epoch_trades.py",  # operator_invoked: dry-run default; --execute copies pre-epoch trade rows into a NEW archive DB then deletes them from zeus_trades.db in FK-ordered batches, gated on an open-position precondition + a same-day backup manifest ack; daemon never imports
@@ -827,9 +901,6 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- ENS full_transport_v1 offline staging tools (2026-05-24): isolated --db only,
         #     refuse the shared world DB via _resolve_isolated_calibration_write_db_path;
         #     single-process offline operator runs, never the live daemon path ---
-        "scripts/seed_isolated_calibration_db.py",          # operator_invoked: writes a NEW isolated staging DB; source opened mode=ro
-        "scripts/run_offline_calibration_rebuild.py",       # operator_invoked: isolated-DB rebuild driver; refuses shared world DB
-        "scripts/run_offline_platt_refit.py",               # operator_invoked: isolated-DB refit driver; refuses shared world DB
         "scripts/validate_ens_refit_oos.py",                # read_only: opens isolated DB mode=ro; 0 writes
         # --- already_guarded operator migration scripts ---
         "scripts/migrate_add_authority_column.py",          # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
@@ -869,35 +940,27 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- Phase 7 T4 (2026-05-21) ---
         "scripts/backfill_settlement_outcome_type.py",   # operator_invoked: backfills settlement_outcomes.outcome_type; writes under SAVEPOINT chunks when not --dry-run
         # --- Promotion readiness job (2026-05-22) ---
-        "src/analysis/promotion_readiness_job.py", # read_only_ro_uri: CLI opens world-db with mode=ro; pure-compute adjudicate (conn=None); no tier writes
         # --- P0 forecast extrema authority measurement script (2026-05-22) ---
         "scripts/verify_forecast_offset_fix.py",   # read_only_ro_uri: opens forecasts+world DBs via file:...?mode=ro uri; SELECT-only; never writes
-        # --- P0 follow-up bundle-layer selection diagnostic (2026-05-23) ---
+        # --- P0 follow-up bundle-layer selection telemetry (2026-05-23) ---
         "scripts/verify_forecast_bundle_selection.py",  # read_only_ro_uri: opens forecasts+world DBs via file:...?mode=ro uri; SELECT-only; never writes
         # --- Zeus #64 matched-date eval tool (2026-05-25) ---
         "scripts/audit_matched_date_proper_scores.py",  # read_only_ro_uri: opens isolated staging DB via file:...?mode=ro uri; SELECT-only; never writes
-        # --- Zeus #64 Phase 1a: model_bias_ens residual-cols migration (2026-05-25) ---
-        "scripts/migrate_model_bias_ens_add_residual_cols.py",  # operator_invoked: idempotent ALTER TABLE ADD COLUMN; --commit gated; targets zeus-forecasts.db; never daemon path
-        "scripts/migrate_model_bias_ens_canonical_fields.py",  # operator_invoked: idempotent ALTER TABLE ADD COLUMN per-column; --commit gated dry-run default; targets staging/copy only; Zeus #64/#68/#69
-        "scripts/fit_full_transport_error_models.py",  # operator_invoked: INSERT OR REPLACE into model_bias_ens; --commit gated dry-run default; --db must be staging/copy; Zeus #64/#69
         # --- Zeus #64 pre-existing analysis scripts (read-only, mode=ro) ---
-        "scripts/audit_refit_proper_scores.py",         # read_only_ro_uri: mode=ro SELECT-only; operator diagnostic; never daemon path
+        "scripts/audit_refit_proper_scores.py",         # read_only_ro_uri: mode=ro SELECT-only; operator telemetry; never daemon path
         "scripts/experiment_route6_transport_beta.py",  # read_only_ro_uri: mode=ro SELECT-only; operator experiment; never daemon path
         "scripts/experiment_route5_spread_scale.py",    # read_only_ro_uri: mode=ro SELECT-only; operator experiment; never daemon path
         # --- Zeus #64 Phase-2 replay-equivalence harness (2026-05-25) ---
-        "scripts/replay_equivalence_full_transport.py",  # read_only_ro_uri: all connects use file:...?mode=ro uri; SELECT-only; never writes; operator diagnostic tool
         # --- Wave 1 forensic audit script (2026-05-27) ---
         "scripts/audit_market_price_semantics.py",  # read_only: bare sqlite3.connect() only via --db-path override; canonical path uses get_trade_connection_read_only(); SELECT-only; never writes
         # --- Zeus #64 SD3: two-phase replay-consumption + gate-aware regen driver (2026-05-28) ---
-        "scripts/selective_refit_from_manifest.py",  # read_only_preflight: _read_stored_gate_hash opens staging DB mode=ro to read gate_set_hash; no writes in that helper; all MC regen writes go through rebuild_calibration_pairs_v2 (already_guarded)
         # --- Zeus #64 SD6: MC entry gate (P0-P3 code gates) (2026-05-28) ---
-        "scripts/mc_entry_gate.py",  # read_only_gate: P0 opens world DB mode=ro; P2 uses an isolated :memory: DB for the reader-behaviour check; never writes any production DB
         # --- one-shot admin: drain stale PARTIAL FSR events from opportunity_events (2026-05-31) ---
         "scripts/purge_partial_fsr_events.py",  # operator_invoked: drops/restores no_delete+no_update triggers; DELETE PARTIAL FSR rows only; ran once 2026-05-31 (941 rows); idempotent
         # --- ThePath P1 (2026-06-07): activate the Day0 nowcast lane / start the obs-timing clock ---
         "scripts/persist_day0_horizon_identity_fit.py",  # operator_invoked + already_guarded: the LIVE write goes through write_platt_fit -> get_forecasts_connection(LIVE) under db_writer_lock(LIVE); the bare sqlite3.connect() sites are ONLY the read-back/--verify (file:...?mode=ro uri, SELECT-only) and the --dry-run TEMP copy (throwaway file, never a canonical DB); persists a documented CONSERVATIVE/IDENTITY HorizonPlattFit (zero claimed skill)
         # --- e2e fill verification script (2026-06-10) ---
-        "scripts/verify_fill_e2e.py",  # read_only_ro_uri: opens trades+world DBs with mode=ro uri; SELECT-only; operator diagnostic; never daemon path
+        "scripts/verify_fill_e2e.py",  # read_only_ro_uri: opens trades+world DBs with mode=ro uri; SELECT-only; operator telemetry; never daemon path
         "scripts/verify_pipeline_liveness.py",  # read_only_ro_uri: data-supply e2e liveness check (forecasts+world, mode=ro, SELECT-only); antibody for the 2026-06-10 10h download dead-zone incident
         # --- big-direction ops file (2026-06-12): READ-ONLY money-funnel heartbeat ---
         "scripts/zeus_status.py",  # read_only_ro_uri: money-funnel heartbeat CLI; opens all 3 live DBs via file:...?mode=ro + PRAGMA query_only=ON; SELECT-only; never writes
@@ -905,16 +968,12 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/generate_schema_cheatsheet.py",  # read_only_ro_uri: schema-cheatsheet generator; opens all 3 live DBs via file:...?mode=ro; reads sqlite_master + PRAGMA table_info only; writes docs/reference/schema_cheatsheet.md
         # --- fee reconciliation evidence (2026-06-12): READ-ONLY fills scan ---
         "scripts/reconcile_realized_fees.py",  # read_only_ro_uri: venue_order_facts trade-level fee fields + position_current cost-basis arithmetic via file:...?mode=ro; SELECT-only; writes state/fee_reconciliation.json
-        # --- R2-core (2026-07-08): certificate/event-native replay harness (docs/rebuild/EXECUTION_MASTER_2026-07-07.md §E R2-a/R2-b item 6) ---
-        "src/reconcile/replay.py",  # read_only_ro_uri: main() demo/ops entry point opens trades+forecasts DBs via file:...?mode=ro uri; SELECT-only replay_window() call (apply=False always); never writes any canonical DB
         # --- allday improvement loop v3 (2026-07-08): sandboxed-tick query escrow ---
         "scripts/ops/loop_guard.py",  # read_only_ro_uri: run-queries opens forecasts/world/trades DBs via file:...?mode=ro uri + PRAGMA query_only + an authorizer denying ATTACH/DETACH; executes tick-authored SQL from loop/queries/pending/*.sql; SELECT-only, no canonical DB write path
         # --- T5 quarantine phase retirement offline migration (2026-07-12, BLOCKER-2) ---
         "scripts/migrations/2026_07_quarantine_phase_retirement.py",  # operator_invoked, deliberately OUTSIDE db_writer_lock/_connect(): BLOCKER-2 (docs/rebuild/quarantine_excision_2026-07-11.md) requires a DEDICATED non-WAL (journal_mode=DELETE) connection ATTACHing all three DBs in ONE transaction, crash-tested by tests/test_t5_quarantine_phase_retirement_migration.py's kill-point matrix — src.state.db._connect() would re-enable WAL, defeating the crash-atomicity guarantee this migration exists to provide; refuses to run unless the writer plane is fenced (--operator-confirms-fenced + a live-daemon process scan)
         # --- F2 position_events.event_type CHECK live-DB migration (2026-07-13, wave-1.5 C2 rework) ---
         "scripts/migrations/2026_07_position_identity_supersession_check.py",  # operator_invoked, deliberately OUTSIDE db_writer_lock/_connect(): follows the T5 pattern (writer-plane fence + single-transaction table rebuild), crash-tested by tests/test_position_events_identity_supersession_check_migration.py's kill-point matrix; single-file trade-DB table rebuild taking an exclusive table lock for its duration — refuses to run unless the writer plane is fenced (--operator-confirms-fenced + a live-daemon process scan)
-        # --- LX-3R economics-column write-firewall migration (2026-07-14, STAGED foundation only) ---
-        "scripts/migrations/2026_07_economics_column_firewall.py",  # operator_invoked, deliberately OUTSIDE db_writer_lock/_connect(): follows the F2/T5 pattern (writer-plane fence + single ONE-transaction DDL install), proved by tests/scripts/test_economics_column_firewall_migration.py; installs BEFORE INSERT/UPDATE OF triggers only (no table rebuild, no row copy) so no kill-point crash matrix is needed — see the script's own "WHY NO KILL-POINT MATRIX" docstring section; refuses to run unless the writer plane is fenced (--operator-confirms-fenced + a live-daemon process scan); STAGED ONLY — never applied to a live DB by the packet that introduced it
     }
 )
 

@@ -466,10 +466,10 @@ def test_superiority_substrate_producer_fires_on_staleness_regardless_of_backlog
     obs.money_path_substrate_priority_active = lambda: False
     obs.money_path_substrate_priority_families = lambda: []
     obs.money_path_substrate_priority_condition_ids = lambda: []
-    import src.data.dual_run_lock as dual_run_lock
+    import src.data.job_lock as job_lock
 
-    orig_lock = dual_run_lock.acquire_lock
-    dual_run_lock.acquire_lock = lambda _name: contextlib.nullcontext(True)
+    orig_lock = job_lock.acquire_lock
+    job_lock.acquire_lock = lambda _name: contextlib.nullcontext(True)
     # Make the staleness clock report STALE so the producer is due to fire.
     obs._market_discovery_last_completed_monotonic = None
     try:
@@ -484,7 +484,7 @@ def test_superiority_substrate_producer_fires_on_staleness_regardless_of_backlog
         obs.money_path_substrate_priority_active = monkeypatch_priority_active
         obs.money_path_substrate_priority_families = monkeypatch_priority_families
         obs.money_path_substrate_priority_condition_ids = monkeypatch_priority_conditions
-        dual_run_lock.acquire_lock = orig_lock
+        job_lock.acquire_lock = orig_lock
 
     assert captured["refresh_called"], (
         "the substrate producer must reach the snapshot-capture write path on staleness "
