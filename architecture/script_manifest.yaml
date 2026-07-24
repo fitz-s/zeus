@@ -598,6 +598,23 @@ scripts:
     required_helpers: [sqlite3]
     required_tests: [tests/test_repair_position_events_corruption.py]
     unguarded_write_rationale: "Single-DB WAL transaction rebuilds only the corrupt position_events table, preserves every readable row byte-for-byte and its rowid, recreates append-only indexes/triggers, and refuses any unreadable tail that could contain a money side effect."
+  repair_book_hash_transitions_corruption.py:
+    class: repair
+    lifecycle: long_lived
+    status: active
+    authority_scope: trade_substrate_derived_transition_corruption_repair
+    canonical_command: "python3 scripts/repair_book_hash_transitions_corruption.py --db EXPLICIT_APFS_CANDIDATE [--apply --operator-confirms-fenced --candidate-clone]"
+    read_targets: [explicit_trade_db_path]
+    write_targets: [explicit_trade_db_path, stdout]
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: "--db"
+    external_inputs: [operator_all_writer_fence, launchd_disabled_state, lsof_open_handle_state]
+    dangerous_if_run: true
+    promotion_barrier: "Apply is candidate-only and requires the writer fence, approved SQLite build, pinned schema/index set, dense primary-index identities, a bounded single-market unreadable tail, and zero surviving executable snapshot rows in the lost transition interval. Promotion requires separate full-DB integrity evidence."
+    required_helpers: [scripts.repair_position_events_corruption, scripts.repair_executable_snapshot_corruption]
+    required_tests: [tests/test_repair_book_hash_transitions_corruption.py]
+    unguarded_write_rationale: "Repairs only derived book-hash transition evidence whose source snapshot interval is already absent; preserves every readable row and rebuilds all indexes on an isolated candidate."
   repair_executable_snapshot_corruption.py:
     # Created: 2026-07-24
     # Last reused or audited: 2026-07-24

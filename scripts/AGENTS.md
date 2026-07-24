@@ -108,6 +108,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `repair_active_entry_q_versions.py` | Repair active ENTRY q_version stamps from existing FinalIntentCertificate evidence; no venue action or DB backup (dry-run/apply; created 2026-07-09) |
 | `repair_dust_exit_projection.py` | Repair dust pending-exit projections from existing canonical backoff evidence; no venue action (dry-run/apply; created 2026-06-18) |
 | `repair_position_events_corruption.py` | Crash-atomic repair for a bounded monitor-only corrupt tail in canonical position_events; refuses money-side-effect loss (dry-run/apply; created 2026-07-24) |
+| `repair_book_hash_transitions_corruption.py` | Candidate-only repair for a bounded derived book-hash transition tail whose snapshot interval is already absent (dry-run/apply; created 2026-07-24) |
 | `repair_executable_snapshot_corruption.py` | Candidate-only bounded-tail repair for executable snapshot evidence; retains readable history and rebuilds every index (dry-run/apply; created 2026-07-24) |
 | `replay_correctness_gate.py` | Enforcement gate for replay correctness per IMPLEMENTATION_PLAN Phase 0.G + ADR-5 (created 2026-05-14) |
 | `ritual_signal_aggregate.py` | Aggregate ritual signal metrics per ANTI_DRIFT_CHARTER §3 M1; report_writer (created 2026-05-06) |
