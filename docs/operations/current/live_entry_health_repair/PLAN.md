@@ -1159,3 +1159,47 @@ Restore truthful live entry admission after the global auction reached a real wi
   consolidator excludes opposite-token siblings and untyped legacy rows while
   retaining typed same-token duplicate repair; both positions receive fresh
   canonical monitor receipts.
+
+## Slice B72.1 -- Keep a Day0 raw-input HWM local to its family
+
+- Live proof: at `2026-07-24T09:44:15Z`, Seattle Jul24 HIGH received a newer
+  `06Z` raw input while its latest complete source-clock posterior remained
+  bound to `00Z`. The bundle reader correctly rejected that stale posterior
+  with `REPLACEMENT_RAW_INPUT_HWM`, but the Day0 source-clock wrapper surfaced
+  it as an untyped `ValueError`. One temporarily ineligible Seattle family
+  therefore produced `GLOBAL_PREPARED_FAMILY_INCOMPLETE` and stopped the whole
+  102-family auction; one event accumulated 76 retries while the reactor
+  repeatedly occupied the decision lane.
+- First-principles invariant: a family without a current q cannot enter the
+  feasible set, but it cannot erase current executable actions from unrelated
+  families. The full universe receipt must retain the excluded family and its
+  exact reason while the auction compares every other current-q family against
+  CASH/HOLD. A refreshable raw-input HWM must trigger the existing targeted
+  same-family materialization lane.
+- Minimal repair: classify
+  `GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:*` through the existing typed
+  `FamilyAuthorityUnavailable` path, and recognize the nested
+  `REPLACEMENT_RAW_INPUT_HWM` segment as posterior staleness for the existing
+  single-family cycle-advance drain. Do not accept the stale posterior and do
+  not remove the family from the full-scope identity.
+- Files authorized: `src/engine/event_reactor_adapter.py`,
+  `src/events/reactor.py`, `tests/integration/test_w3_solve_seam_g3.py`,
+  `tests/events/test_always_decidable_invariant.py`, and this packet.
+- Forbidden: stale-as-fresh probability, partial family q, whole-auction
+  fallback, history-derived q, market-price probability, forced orders,
+  operator pause changes, Wellington changes, canonical DB mutation/copy, or
+  interference with another runtime.
+- Acceptance: the production-shaped Day0 HWM error becomes one typed
+  family-local exclusion; the full scope and exclusion reason remain persisted;
+  another current family can still win and actuate; the excluded family causes
+  exactly one targeted cycle-advance enqueue and stays pending; unexpected
+  probability exceptions still fail the entire cut. Focused relationship,
+  integration, compilation, planning-lock, and diff checks pass before exact-SHA
+  deployment.
+- Pre-deploy verification: the production-shaped relationship checks pass
+  `9/9`; reactor/qkernel/raw-HWM coverage passes `330/330`; complete
+  W3 plus always-decidable coverage passes `288` tests and retains three fixture
+  failures reproduced identically on unmodified live `8c4aa329f` (two fake
+  `object()` connections and one incomplete in-memory executable-snapshot
+  schema). Compilation, planning lock, and `git diff --check` pass. Ruff is not
+  installed in the live virtualenv.

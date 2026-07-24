@@ -16968,6 +16968,16 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             ),
             True,
         ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
+                "REPLACEMENT_RAW_INPUT_HWM:"
+                "basis=used_raw_model_forecasts_late_input"
+            ),
+            True,
+        ),
     ),
 )
 def test_global_batch_excludes_typed_current_q_ineligible_family(
@@ -17077,7 +17087,13 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
         def prepare_family(event, **_kwargs):
             if event.event_id == event_a.event_id:
                 calls["ineligible_prepare"] += 1
-                raise sqlite3.OperationalError("database is locked")
+                if "database is locked" in ineligible_reason:
+                    raise sqlite3.OperationalError("database is locked")
+                raise ValueError(
+                    "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
+                    "REPLACEMENT_RAW_INPUT_HWM:"
+                    "basis=used_raw_model_forecasts_late_input"
+                )
             return prepared_b
 
         monkeypatch.setattr(

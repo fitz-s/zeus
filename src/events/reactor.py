@@ -4765,6 +4765,11 @@ _POSTERIOR_STALENESS_REASON_BASES = frozenset(
         # above. Old rows still need the same single-family reseed cure.
         "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
         "REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED",
+        # The bundle reader emits this exact nested segment when a newer raw
+        # input supersedes the served posterior.  Day0 source-clock binding may
+        # wrap it in GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED, but the cure stays
+        # a targeted same-family materialization rather than a global requeue.
+        "REPLACEMENT_RAW_INPUT_HWM",
     }
 )
 
