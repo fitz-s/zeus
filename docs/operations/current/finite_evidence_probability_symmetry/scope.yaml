@@ -121,7 +121,6 @@ in_scope:
 - tests/state/test_chain_mirror_settlement_preserves_booked_close_economics.py
 - tests/test_live_safety_invariants.py
 - tests/integration/test_w3_solve_seam_g3.py
-- tests/money_path/test_edli_live_readiness.py
 - tests/test_run_mode_failure_surfaces.py
 - tests/test_heartbeat_supervisor.py
 - tests/test_risk_allocator.py

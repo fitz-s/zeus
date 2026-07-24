@@ -211,9 +211,8 @@ test_trust_policy:
     tests/decision_kernel/test_taker_execution_law.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-07-15", note: "Event-bound no-bypass authority and execution contracts, including refusal of a shaped replacement posterior from an older probability-semantics revision."}
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/money_path/test_edli_live_readiness.py: {created: "2026-05-25", last_used: "2026-07-22", note: "Extended live entry provenance and startup-latency antibody: submit outcomes retain admitted qkernel economics and durable venue-command side-effect identity; recoverable global entry pauses retain events, and the durable wake listener starts before APScheduler."}
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/money_path/test_edli_live_bridge_allocator_refresh.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/money_path/test_edli_allocator_refresh.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/money_path/test_edli_bankroll_warm_cycle.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/money_path/test_edli_market_substrate_warm_cycle.py: {created: "2026-06-01", last_used: "2026-07-17", note: "Warm-lane decoupling and durable-wake relationship tests, including retaining event-backed wakes while their events remain retryable."}
     tests/money_path/test_edli_durable_fill_bridge_scan.py: {created: "2026-06-01", last_used: "2026-06-03"}

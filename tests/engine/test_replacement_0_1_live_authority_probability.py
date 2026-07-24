@@ -87,60 +87,11 @@ def _replacement_bundle() -> SimpleNamespace:
     )
 
 
-def _passing_evidence():
-    from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
-
-    return ReplacementForecastPromotionEvidence(
-        official_days=5,
-        official_rows=250,
-        after_cost_pnl=1.0,
-        q_lcb_coverage=0.95,
-        anti_lookahead_violations=0,
-        source_availability_violations=0,
-        unresolved_regression_clusters=0,
-        same_clob_replay_passed=True,
-        nested_walk_forward_passed=True,
-        same_clob_replay_scored_rows=250,
-        same_clob_replay_blocked_rows=0,
-        fee_depth_fill_evidence_passed=True,
-        unit_pnl_only=False,
-        nested_holdout_brier=0.20,
-        nested_holdout_log_loss=0.50,
-        nested_selected_anchor_weight=0.80,
-        nested_selected_anchor_sigma_c=3.00,
-        nested_guardrail_bucket_count=1,
-        nested_guardrail_bucket_min_rows=20,
-        product_specific_refit_passed=True,
-    )
-
-
-def _capital_objective_evidence():
-    from src.data.replacement_forecast_runtime_policy import (
-        EXPECTED_CAPITAL_OBJECTIVE_LABEL,
-        ReplacementForecastCapitalObjectiveEvidence,
-    )
-
-    return ReplacementForecastCapitalObjectiveEvidence(
-        selected_label=EXPECTED_CAPITAL_OBJECTIVE_LABEL,
-        replay_status="EMPIRICAL_WINNER",
-        after_cost_pnl=1.0,
-        source_availability_observed=True,
-        source_availability_violations=0,
-        anti_lookahead_violations=0,
-        same_clob_replay_passed=True,
-        fee_depth_fill_evidence_passed=True,
-        unit_pnl_only=False,
-        product_specific_refit_passed=True,
-    )
-
-
-
-
 def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refutes_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.data import replacement_forecast_bundle_reader as reader
-    from src.engine import replacement_forecast_hook_factory as hook_factory
+    from src.data import replacement_forecast_readiness as readiness_reader
 
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -194,8 +145,8 @@ def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refu
         "bin-28": [0.80] * 400,
     }
     monkeypatch.setattr(
-        hook_factory,
-        "_latest_replacement_readiness",
+        readiness_reader,
+        "latest_replacement_readiness",
         lambda *a, **k: object(),
     )
     monkeypatch.setattr(
@@ -418,7 +369,7 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
 ) -> None:
     from src.data import replacement_forecast_bundle_reader as reader
     from src.data import replacement_forecast_current_target_plan as target_plan
-    from src.engine import replacement_forecast_hook_factory as hook_factory
+    from src.data import replacement_forecast_readiness as readiness_reader
     from src.execution import day0_hard_fact_exit
 
     forecast = sqlite3.connect(":memory:")
@@ -519,8 +470,8 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
         lambda *_args, **_kwargs: fact_a,
     )
     monkeypatch.setattr(
-        hook_factory,
-        "_latest_replacement_readiness",
+        readiness_reader,
+        "latest_replacement_readiness",
         lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setattr(
@@ -632,85 +583,3 @@ def test_replacement_intermediate_cycles_keep_live_horizon_profile() -> None:
     assert adapter._posterior_horizon_profile("2026-06-18T06:00:00+00:00") == "full"
     assert adapter._posterior_horizon_profile("2026-06-18T12:00:00+00:00") == "full"
     assert adapter._posterior_horizon_profile("2026-06-18T18:00:00+00:00") == "full"
-
-
-def test_replacement_reactor_hook_success_status_is_plain_live(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.data.replacement_forecast_runtime_policy import ReplacementForecastRuntimePolicy
-    from src.data.replacement_forecast_switch_decision import ReplacementForecastSwitchDecision
-    from src.engine import replacement_forecast_reactor_hook as hook
-
-    monkeypatch.setattr(
-        hook,
-        "build_replacement_forecast_receipt_provenance",
-        lambda **_kwargs: SimpleNamespace(as_dict=lambda: {"runtime_layer": "live"}),
-    )
-    policy = ReplacementForecastRuntimePolicy(
-        status="live",
-        reason_codes=("REPLACEMENT_LIVE_ENABLED",),
-        live_enabled=True,
-        kelly_increase_enabled=False,
-        direction_flip_enabled=False,
-    )
-    switch = ReplacementForecastSwitchDecision(
-        status="live",
-        reason_codes=("REPLACEMENT_SWITCH_LIVE_ADMITTED",),
-        can_read_live_posterior=True,
-        can_apply_reactor_hook=True,
-        can_initiate_trade=True,
-        can_increase_kelly=False,
-        can_flip_direction=False,
-        readiness_id="ready-1",
-    )
-
-    result = hook.apply_replacement_forecast_reactor_hook(
-        policy=policy,
-        switch_decision=switch,
-        candidate={
-            "baseline_direction": "buy_yes:bin-28",
-            "baseline_q_posterior": 0.75,
-            "baseline_q_lcb": 0.65,
-            "baseline_kelly_fraction": 0.01,
-            "candidate_direction": "buy_yes:bin-28",
-            "candidate_q_posterior": 0.80,
-            "candidate_q_lcb": 0.70,
-            "candidate_kelly_fraction": 0.01,
-            "market_snapshot_id": "snap-1",
-            "condition_id": "cond-28",
-            "token_id": "yes-28",
-            "decision_time": "2026-06-18T06:05:00+00:00",
-        },
-        replacement_bundle=SimpleNamespace(
-            posterior_id=123,
-            product_id="openmeteo_ecmwf_ifs9_bayes_fusion_v1",
-            q={"bin-28": 0.80},
-        ),
-        readiness=object(),
-    )
-
-    assert result.status == "live"
-    assert result.as_receipt_tag() == {"runtime_layer": "live"}
-
-
-def test_replacement_0_1_primary_authority_skips_legacy_replacement_hook() -> None:
-    replacement_proof = SimpleNamespace(q_source="replacement_0_1")
-    replacement_probability_authority_proof = SimpleNamespace(
-        q_source=None,
-        probability_authority="replacement_0_1",
-    )
-    baseline_proof = SimpleNamespace(q_source="emos")
-    qkernel_selected_proof = SimpleNamespace(
-        q_source="emos",
-        selection_authority_applied="qkernel_spine",
-    )
-
-    assert adapter._replacement_primary_authority_already_applied(replacement_proof) is True
-    assert (
-        adapter._replacement_primary_authority_already_applied(
-            replacement_probability_authority_proof
-        )
-        is True
-    )
-    assert adapter._replacement_primary_authority_already_applied(baseline_proof) is False
-    assert adapter._replacement_primary_authority_already_applied(qkernel_selected_proof) is True

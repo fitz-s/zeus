@@ -3366,7 +3366,7 @@ def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
     assert_live_safe_strategies_under_live_mode(enabled_strategies)
 
 
-def _edli_refresh_global_allocator_for_live_bridge(conn, *, portfolio_snapshot=None) -> dict:
+def _edli_refresh_global_allocator(conn, *, portfolio_snapshot=None) -> dict:
     """Configure the process-wide risk allocator/governor for the EDLI live path.
 
     ROOT (see /tmp/edli_submit_gate_trace.md): the live ``_live_order`` submit path
@@ -3418,7 +3418,7 @@ def _edli_refresh_global_allocator_for_live_bridge(conn, *, portfolio_snapshot=N
         _bk = bankroll_provider.cached()
         if _bk is None:
             logger.error(
-                "EDLI live-bridge allocator refresh: on-chain bankroll cache is None "
+                "EDLI live-path allocator refresh: on-chain bankroll cache is None "
                 "(wallet unreachable) — drawdown untrustworthy; FAIL-CLOSED, blocking "
                 "live submit this cycle (no fake-0.0 drawdown)."
             )
@@ -3449,7 +3449,7 @@ def _edli_refresh_global_allocator_for_live_bridge(conn, *, portfolio_snapshot=N
             ws_status=_ws_gap_summary(),
         )
         logger.debug(
-            "EDLI live-bridge allocator refresh: CONFIGURED drawdown_pct=%.3f baseline=%.2f "
+            "EDLI live-path allocator refresh: CONFIGURED drawdown_pct=%.3f baseline=%.2f "
             "bankroll=%.2f",
             _drawdown_pct, _baseline, _current_bankroll,
         )
@@ -3465,7 +3465,7 @@ def _edli_refresh_global_allocator_for_live_bridge(conn, *, portfolio_snapshot=N
         except Exception:  # noqa: BLE001
             pass
         logger.error(
-            "EDLI live-bridge allocator refresh FAILED: %s; FAIL-CLOSED, blocking live "
+            "EDLI live-path allocator refresh FAILED: %s; FAIL-CLOSED, blocking live "
             "submit this cycle (degrade to no-submit).",
             _refresh_exc,
             exc_info=True,
@@ -4522,7 +4522,7 @@ def _edli_command_recovery_cycle() -> None:
     if _command_recovery_summary_mutated_allocator_inputs(summary):
         trade_conn = get_trade_connection_with_world_required(write_class=None)
         try:
-            allocator_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)
+            allocator_refresh = _edli_refresh_global_allocator(trade_conn)
         finally:
             trade_conn.close()
         logger.info(
@@ -4614,7 +4614,7 @@ def _edli_boot_command_recovery_once(*, boot_at: datetime | None = None) -> None
     if _command_recovery_summary_mutated_allocator_inputs(summary):
         trade_conn = get_trade_connection_with_world_required(write_class=None)
         try:
-            allocator_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)
+            allocator_refresh = _edli_refresh_global_allocator(trade_conn)
         finally:
             trade_conn.close()
         logger.info(

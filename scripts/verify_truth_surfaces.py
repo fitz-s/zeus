@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Diagnostic script: verify canonical truth surface consistency.
+Observation script: verify canonical truth surface consistency.
 
 Checks LIVE state of zeus.db, risk_state-live.db, and JSON state files.
 NOT pytest — run directly to get PASS/FAIL for each surface invariant.

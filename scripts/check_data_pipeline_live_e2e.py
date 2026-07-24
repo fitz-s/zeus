@@ -2,7 +2,7 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md
-"""Live data-pipeline end-to-end diagnostic.
+"""Live data-pipeline end-to-end observation.
 
 This checker is intentionally live-only: it reads the active process table and
 the runtime DB files used by Zeus. It never writes DB truth and never performs

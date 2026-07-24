@@ -184,7 +184,7 @@ def test_reconciler_cycle_drives_negrisk_misroute_to_operator_required(
 
     monkeypatch.setattr("src.main.acquire_lock", _fake_lock, raising=False)
     # Also patch the import inside the function
-    import src.data.dual_run_lock as _lock_mod
+    import src.data.job_lock as _lock_mod
     monkeypatch.setattr(_lock_mod, "acquire_lock", _fake_lock)
 
     # Patch get_trade_connection → wrapper that delegates but silences close()

@@ -101,7 +101,7 @@ def detrended_std(days: "np.ndarray", values: "np.ndarray") -> float:
     (driven by the trend) but a small RESIDUAL std (day-to-day noise about the trend). Fits
     ``value ≈ a + b·day`` by least squares, returns the two-parameter residual standard error
     sqrt(SSE/(n-2)). For < 3 points or a degenerate design falls back to the raw std. Kept because
-    downstream diagnostics + the legacy detrend relationship test still import it; the floor itself
+    downstream observations + the legacy detrend relationship test still import it; the floor itself
     now derives from forecast residuals (mad_sigma_about_zero), not the detrended settled-value std.
     """
     d = np.asarray(days, dtype=float)

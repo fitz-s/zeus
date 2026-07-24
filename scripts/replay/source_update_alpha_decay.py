@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-06-25
-# Purpose: Read-only source-availability latency-window replay diagnostic.
+# Purpose: Read-only source-availability latency-window replay observation.
 from __future__ import annotations
 
 import argparse

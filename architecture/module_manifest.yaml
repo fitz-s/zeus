@@ -197,7 +197,6 @@ modules:
       - tests/events/test_live_order_reconcile.py
       - tests/engine/test_event_reactor_no_bypass.py
       - tests/strategy/live_inference/test_no_trade_regret.py
-      - tests/money_path/test_edli_live_readiness.py
       - tests/money_path/test_edli_order_lifecycle.py
       - tests/state/test_edli_table_ownership.py
       - tests/data/test_source_run_arrived_event.py

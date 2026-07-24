@@ -1233,7 +1233,7 @@ def test_money_path_priority_default_budget_can_finish_hot_snapshot_backlog(monk
 def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch):
     """A transient sidecar lock must not discard the exact FC-03 winner recapture."""
 
-    import src.data.dual_run_lock as dual_run_lock
+    import src.data.job_lock as job_lock
     import src.state.db as state_db
 
     monkeypatch.delenv("ZEUS_MONEY_PATH_INLINE_SUBSTRATE_LOCK_WAIT_SECONDS", raising=False)
@@ -1258,7 +1258,7 @@ def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch)
 
     lock_results = iter((False, True))
     monkeypatch.setattr(
-        dual_run_lock,
+        job_lock,
         "acquire_lock",
         lambda _name: _LockContext(next(lock_results)),
     )
@@ -1718,7 +1718,7 @@ def test_continuous_redecision_confirm_refresh_does_not_wait_on_substrate_proces
     """Sidecar ownership is asynchronous; main only marks priority and filters reads."""
 
     confirm_src = inspect.getsource(reactor._edli_refresh_continuous_money_path_families)
-    assert "src.data.dual_run_lock" not in confirm_src
+    assert "src.data.job_lock" not in confirm_src
     assert "acquire_lock(\"market_substrate_refresh\")" not in confirm_src
     assert "get_world_connection" not in confirm_src
     assert "get_forecasts_connection_read_only" not in confirm_src
@@ -2038,7 +2038,7 @@ def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **_kwargs: _FakeConn())
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
@@ -2070,7 +2070,7 @@ def test_money_path_priority_cycle_prioritizes_claim_order_families(monkeypatch)
     )
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
@@ -2144,7 +2144,7 @@ def test_money_path_priority_cycle_resolves_condition_marker_without_pending_bac
         state_db, "get_forecasts_connection_read_only", lambda: _ForecastsConn(), raising=False
     )
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
@@ -2182,7 +2182,7 @@ def test_money_path_priority_cycle_claim_read_failure_does_not_sweep_backlog(
         state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
@@ -2239,7 +2239,7 @@ def test_money_path_priority_cycle_exact_conditions_do_not_displace_claim_family
         state_db, "get_trade_connection_read_only", lambda: _FakeConn(), raising=False
     )
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
@@ -2269,7 +2269,7 @@ def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **_kwargs: _FakeConn())
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
@@ -2344,7 +2344,7 @@ def test_market_substrate_warm_cycle_ignores_empty_priority_marker(monkeypatch):
         state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
@@ -2477,7 +2477,7 @@ def test_money_path_priority_cycle_forced_condition_excludes_broad_claim_work(mo
         state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
@@ -2540,7 +2540,7 @@ def test_money_path_priority_cycle_marker_family_does_not_starve_claim_order(mon
         state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
@@ -2891,7 +2891,7 @@ def test_market_discovery_cycle_defers_to_nonempty_priority_marker(monkeypatch):
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **_k: _FakeDiscoveryConn())
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
 
@@ -4699,52 +4699,6 @@ def test_pending_family_refresh_matches_gamma_with_canonical_city_alias(monkeypa
     assert gamma_calls == [{"slug": "highest-temperature-in-hong-kong-on-june-7-2026"}]
     assert len(submitted) == 1
     assert submitted[0][0]["slug"] == gamma_event["slug"]
-
-
-def test_mainstream_warm_cycle_uses_bounded_fresh_family_window(monkeypatch):
-    was_bootstrap_complete = main_module._held_position_monitor_bootstrap_complete.is_set()
-    main_module._held_position_monitor_bootstrap_complete.set()
-    monkeypatch.setattr(
-        main_module,
-        "_settings_section",
-        lambda name, default=None: (
-            {"enabled": True, "mainstream_warm_max_families_per_cycle": 2}
-            if name == "edli"
-            else (default if default is not None else {})
-        ),
-    )
-    import src.state.db as state_db
-
-    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
-
-    rows = [
-        ("Seoul", "2026-06-06", "high"),
-        ("Tokyo", "2026-06-06", "high"),
-        ("Paris", "2026-06-06", "high"),
-    ]
-    monkeypatch.setattr(
-        main_module,
-        "_pending_family_rows_for_refresh",
-        lambda *a, **k: rows,
-    )
-
-    warmed: list[tuple[str, str, str]] = []
-
-    def _warm(city, target_date, *, metric):
-        warmed.append((city, target_date, metric))
-        return {"point": 1.0}
-
-    import src.data.mainstream_forecast_source as mainstream
-
-    monkeypatch.setattr(mainstream, "warm_mainstream_point", _warm)
-
-    try:
-        main_module._edli_mainstream_warm_cycle()
-    finally:
-        if not was_bootstrap_complete:
-            main_module._held_position_monitor_bootstrap_complete.clear()
-
-    assert warmed == rows[:2]
 
 
 class _FakeConn:

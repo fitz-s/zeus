@@ -972,7 +972,7 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
 
@@ -1058,7 +1058,7 @@ def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkey
     monkeypatch.setattr(substrate_observer, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
@@ -1131,7 +1131,7 @@ def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):
     monkeypatch.setattr(substrate_observer, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     # P2: force STALE substrate so the staleness gate falls through to capture (order-independent).

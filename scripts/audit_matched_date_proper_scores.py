@@ -497,7 +497,7 @@ def main() -> int:
     matched_raw_global, matched_ft_global = _intersect_distributions(raw_dists, ft_dists)
     print(f"  matched pairs (global): {len(matched_raw_global):,}", file=sys.stderr)
 
-    # Diagnostic: (city, target_date)-only match count — helps distinguish post-Fix-A
+    # Observation: (city, target_date)-only match count — helps distinguish post-Fix-A
     # lead_days granularity mismatch (none=integer, full_transport_v1=finer) from
     # true domain gap.  If city+date > 0 but strict == 0, the intersection key
     # needs loosening (or lead_days alignment in Fix-A output).

@@ -11,7 +11,7 @@
 # WHO WRITES: nothing (read-only). WHO READS: the operator, ad hoc, to
 #   answer "is the loop alive and behaving." WHAT BREAKS IF THIS SILENTLY
 #   STOPS WORKING: nothing at runtime — it is not on the loop's own
-#   execution path, only an operator diagnostic.
+#   execution path, only an operator observation.
 #
 # USAGE:
 #   scripts/ops/loop_status.sh

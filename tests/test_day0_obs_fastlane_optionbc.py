@@ -900,7 +900,7 @@ class TestObsFastTickSchedulerRegistration:
     ):
         import scripts.hko_ingest_tick as hko_tick
         import src.config as config
-        import src.data.dual_run_lock as dual_run_lock
+        import src.data.job_lock as job_lock
         import src.events.event_priority as event_priority
         import src.events.event_writer as event_writer
         import src.events.triggers.day0_extreme_updated as day0_trigger
@@ -1008,7 +1008,7 @@ class TestObsFastTickSchedulerRegistration:
             lambda **_kwargs: timeline.append("bridge_and_wake"),
         )
         monkeypatch.setattr(hko_tick, "project_accumulator_to_v2", _project)
-        monkeypatch.setattr(dual_run_lock, "acquire_lock", _source_lock)
+        monkeypatch.setattr(job_lock, "acquire_lock", _source_lock)
         monkeypatch.setattr(
             config,
             "runtime_cities_by_name",

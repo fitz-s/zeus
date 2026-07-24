@@ -325,7 +325,7 @@ governance surfaces (INV-24/semgrep/NC-16) noted in brief W2_1.json.
   W2.2 MERGED → 9ba356a22; W2.3 MERGED → 15f16248f (both clean, pin 5eacf215 unmoved,
   50+69 tests green, manifest audit 0).
 - W2.4 DONE — 5ffe4097, deep verifier IN FLIGHT (K0-level compensating scrutiny: the packet
-  created a NEW trade-DB truth table ctf_conversion_commands WITHOUT a schema packet, justified by
+  created a NEW trade-DB truth table retired conversion-command table WITHOUT a schema packet, justified by
   redeem-symmetry precedent — settlement_commands-style own ledger, own closed state enum;
   IntentKind grammar deliberately NOT extended, order-shaped columns are a schema-fit mismatch for
   quantity-only conversions). On-chain determination evidence-backed (SDK lacks primitives; 5
@@ -435,10 +435,10 @@ w3-math-core (15 items: budget constraint in _feasible_hi/_repair/certificate; m
 min(max_shares, route.shares); phase-1 menu = direct native ONLY [basket/pair payoff projection
 via single instrument was WRONG — riskfree basket is constant-across-atoms]; chosen_source
 certificate parent; prefix positivity; CVaR zero-weight NaN; multi-dim brute force + gap
-diagnostics; row-sum all semantics; projector full-coverage; MIN_TAIL_DRAWS stamp; NO-ladder
+evidence; row-sum all semantics; projector full-coverage; MIN_TAIL_DRAWS stamp; NO-ladder
 quantization; price assignment stays with existing submit path in phase 1; PlannedOrder
 validation; real-consumer AST sentinel; packet rev-2 hygiene + coordinate-ascent-over-
-Rockafellar-Uryasev ruling recorded [RU = future hardening if gap diagnostics show stall]).
+Rockafellar-Uryasev ruling recorded [RU = future hardening if gap evidence show stall]).
 RE-SCOPED: build_wealth_by_atom minimal entry-side body now IN sub-slice 3 (not deferrable —
 evidence on underivable wealth is not evidence). α-sensitivity replay (α∈{.01,.05,.10}
 decision-stability) recorded as promotion-evidence-gate item.

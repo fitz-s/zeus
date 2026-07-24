@@ -6061,7 +6061,7 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     )
     monkeypatch.setattr(
         main_module,
-        "_edli_refresh_global_allocator_for_live_bridge",
+        "_edli_refresh_global_allocator",
         lambda conn: refresh_calls.append(conn) or {"configured": True},
     )
     monkeypatch.setattr(
@@ -6829,7 +6829,7 @@ def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> N
     )
     monkeypatch.setattr(
         main_module,
-        "_edli_refresh_global_allocator_for_live_bridge",
+        "_edli_refresh_global_allocator",
         lambda conn: refresh_calls.append(conn) or {"configured": True},
     )
     monkeypatch.setattr(
@@ -6939,7 +6939,7 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
     )
     monkeypatch.setattr(
         main_module,
-        "_edli_refresh_global_allocator_for_live_bridge",
+        "_edli_refresh_global_allocator",
         lambda conn: {"configured": True},
     )
     monkeypatch.setattr(

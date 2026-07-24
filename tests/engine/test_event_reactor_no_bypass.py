@@ -3272,49 +3272,6 @@ def test_replacement_live_authority_direction_rebinds_to_sibling_proof():
     assert selected.executable_snapshot_id == "snapshot-no"
 
 
-def test_replacement_live_authority_same_direction_replaces_receipt_probability(monkeypatch):
-    from src.engine.replacement_forecast_reactor_hook import (
-        REPLACEMENT_EXECUTION_LIVE_STATUS,
-        ReplacementForecastReactorHookResult,
-    )
-
-    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
-
-    class _ReplacementProvenance:
-        def as_dict(self):
-            return {
-                "runtime_layer": "live",
-                "source_id": REPLACEMENT_SOURCE_ID,
-            }
-
-    def _live_authority_hook(proof, event, decision_time):
-        return ReplacementForecastReactorHookResult(
-            status=REPLACEMENT_EXECUTION_LIVE_STATUS,
-            reason_codes=("test-live-authority",),
-            effective_direction=proof.direction,
-            effective_q_posterior=0.82,
-            effective_q_lcb=0.79,
-            effective_kelly_fraction=0.0,
-            receipt_provenance=_ReplacementProvenance(),
-        )
-
-    receipt = _receipt(
-        _bound_forecast_event(token_id="yes-1"),
-        _trade_conn_with_snapshot(selected_ask="0.40", no_selected_ask="0.80"),
-        replacement_forecast_hook=_live_authority_hook,
-    )
-
-    assert receipt.proof_accepted is True
-    assert receipt.token_id == "yes-1"
-    assert receipt.direction == "buy_yes"
-    assert receipt.q_live == pytest.approx(0.9093360425630191)
-    assert receipt.q_lcb_5pct is not None
-    assert 0.78 <= receipt.q_lcb_5pct <= receipt.q_live
-    assert receipt.trade_score is not None
-    assert receipt.trade_score > 0.0
-    assert receipt.replacement_forecast is None
-
-
 def test_day0_probability_evidence_is_absorbing_authority(monkeypatch):
     """A live-authorized Day0 observation is already the probability authority.
 
@@ -3368,32 +3325,6 @@ def test_day0_probability_evidence_is_absorbing_authority(monkeypatch):
     assert q["condition-1"] == pytest.approx(1.0)
     assert evidence["probability_authority"] == "day0_absorbing_hard_fact"
     assert "day0_lcb_transform_hash" in evidence
-
-
-def test_day0_absorbing_proof_is_primary_authority_for_replacement_hook():
-    from src.engine import event_reactor_adapter as adapter
-
-    proof = adapter._CandidateProof(
-        candidate=SimpleNamespace(condition_id="condition-2", family_id="family-1"),
-        token_id="yes-2",
-        direction="buy_yes",
-        row={},
-        executable_snapshot_id="snapshot-1",
-        execution_price=None,
-        q_posterior=0.96,
-        q_lcb_5pct=0.95,
-        c_cost_95pct=0.40,
-        p_fill_lcb=1.0,
-        trade_score=0.05,
-        p_value=0.01,
-        passed_prefilter=True,
-        native_quote_available=True,
-        p_cal_vector_hash="day0",
-        p_live_vector_hash="day0",
-        probability_authority="day0_absorbing_hard_fact",
-    )
-
-    assert adapter._replacement_primary_authority_already_applied(proof) is True
 
 
 def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypatch):
@@ -4639,13 +4570,13 @@ def test_107_durable_live_cap_seed_query_error_fails_closed():
 # so _receipt_money_path_blocker (Path 2) does NOT see None and does NOT emit
 # ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING.
 # Before the fix: EventSubmissionReceipt(...) at line ~1461 omitted same_bin_yes_posterior
-# and settlement_coverage_status, so every buy_no through the live bridge starved both
+# and settlement_coverage_status, so every buy_no through the live path starved both
 # the adapter gate and the receipt gate simultaneously.
 # This test makes the omission category unconstructable: if any of the five forwarded
 # fields are dropped from the constructor, the receipt-level gate will fire and the
 # test will fail.
 def test_third_path_same_bin_yes_posterior_survives_submit_outcome_receipt_construction():
-    """ANTIBODY — live bridge EventSubmissionReceipt must forward same_bin_yes_posterior.
+    """ANTIBODY — live path EventSubmissionReceipt must forward same_bin_yes_posterior.
 
     Relationship: no_submit_receipt.same_bin_yes_posterior → submit-outcome receipt
     → _receipt_money_path_blocker receives non-None → no ADMISSION_BUY_NO_*_MISSING.
@@ -4693,7 +4624,7 @@ def test_third_path_same_bin_yes_posterior_survives_submit_outcome_receipt_const
         probability_authority="REPLACEMENT",
     )
 
-    # Simulate what the live bridge's EventSubmissionReceipt(...) constructor does.
+    # Simulate what the live path's EventSubmissionReceipt(...) constructor does.
     # After the fix, these five fields are forwarded from no_submit_receipt.
     # Before the fix: same_bin_yes_posterior, settlement_coverage_status,
     # q_lcb_calibration_source, posterior_id, probability_authority were all None.

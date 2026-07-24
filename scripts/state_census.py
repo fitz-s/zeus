@@ -1,7 +1,7 @@
 # Created: 2026-05-05
 # Last reused or audited: 2026-05-05
 # Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1H/phase.json
-"""Zeus state census — read-only diagnostic across six classification axes.
+"""Zeus state census — read-only observation across six classification axes.
 
 Classifies every open position in zeus_trades.db across:
   1. position_truth    — open / review_required / closed

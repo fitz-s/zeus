@@ -1,5 +1,5 @@
 # Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
-# Purpose: Read-only operator diagnostic — bundle-layer selection vs latest-cycle for each city/date.
+# Purpose: Read-only operator observation — bundle-layer selection vs latest-cycle for each city/date.
 # Reuse: Run after the bundle-layer fix to confirm the SELECTED bundle is a contributing
 #   cycle (not the latest post-peak cycle) and to measure forecast-vs-observed bias.
 """Verify forecast bundle-layer selection (P0 follow-up §7).

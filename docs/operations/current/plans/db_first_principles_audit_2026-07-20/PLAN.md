@@ -44,7 +44,7 @@ DB 是 money path 的 truth 载体:`canonical DB/event truth outranks derived JS
 ### Q2 已知未知(问题已命名,答案要测)
 - 每表/每索引字节分布:218GB 到底在哪几张表?
 - 每表日增速 → 精确 ENOSPC ETA。
-- 重复写入地图:同一 fact 写几份?(trades snapshot vs world "empty shadow" 已知一例)
+- 重复写入地图:同一 fact 写几份?(trades snapshot vs world "empty retired" 已知一例)
 - 死表清单:代码零读者 ∪ 近 N 天零写入 ∪ ownership yaml 与 sqlite_master 双向 diff。
 - 解码成本:JSON/blob 列有哪些、单 cycle 解码量、最热反序列化路径、压缩空间。
 - 热路径 query plan 健康度;194 索引里多少从未被用;缺失索引。

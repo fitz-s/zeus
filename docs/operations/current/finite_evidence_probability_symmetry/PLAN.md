@@ -20,7 +20,7 @@ plateau information and contradict continuous-time redecision. That path is
 unchanged.
 
 Current temperature still cuts the remaining window, records the model
-innovation diagnostic, and participates in the absorbing frontier; its
+innovation evidence, and participates in the absorbing frontier; its
 innovation is not propagated into unseen hours without a validated temporal
 covariance law. Re-decision behavior is unchanged in shape: the next current
 Day0 auction rebuilds q from the corrected witness, and any resting order whose

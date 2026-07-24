@@ -2,12 +2,12 @@
 # Last reused/audited: 2026-07-09
 # Authority basis: /tmp/edli_submit_gate_trace.md (EDLI submit gate: allocator_not_configured
 #   root) + src/engine/cycle_runner.py:705-728 legacy refresh_global_allocator contract.
-"""Relationship test for the EDLI live-bridge risk-allocator refresh seam.
+"""Relationship test for the EDLI live-path risk-allocator refresh seam.
 
 Cross-module invariant under test (Fitz methodology — test the boundary, not a
 function):
 
-    WHEN the EDLI event-reactor cycle runs in ``live_bridge_mode``, the process
+    WHEN the EDLI event-reactor cycle runs in ``live_path``, the process
     singletons ``_GLOBAL_ALLOCATOR`` / ``_GLOBAL_GOVERNOR_STATE`` in
     ``src.risk_allocator.governor`` MUST be configured at the moment the live
     submit path calls ``select_global_order_type`` — i.e. a qualifying candidate
@@ -19,10 +19,10 @@ Background: the live ``_live_order`` submit path
 None. In EDLI/canary mode the daemon runs ``_edli_event_reactor_cycle`` (NOT the
 legacy discover cycle that calls ``refresh_global_allocator``), so before the fix
 the singletons stay None and every canary order silently blocks. The fix wires a
-live-bridge refresh into the EDLI cycle.
+live-path refresh into the EDLI cycle.
 
 The refresh is factored into the importable helper
-``src.main._edli_refresh_global_allocator_for_live_bridge`` so this relationship
+``src.main._edli_refresh_global_allocator`` so this relationship
 test can drive the real cross-module seam without booting the full daemon.
 
 The tests reset the singletons to None in setup to reproduce the unconfigured
@@ -81,8 +81,8 @@ def test_unconfigured_singletons_block_submit_path_with_allocator_not_configured
     assert excinfo.value.decision.reason == "allocator_not_configured"
 
 
-def test_live_bridge_refresh_configures_singletons_so_submit_path_does_not_deny(monkeypatch):
-    """RELATIONSHIP: after the EDLI live-bridge refresh, the submit path's
+def test_allocator_refresh_configures_singletons_so_submit_path_does_not_deny(monkeypatch):
+    """RELATIONSHIP: after the EDLI live-path refresh, the submit path's
     ``select_global_order_type`` no longer raises ``allocator_not_configured``.
 
     This is the exact cross-module boundary the live canary order crosses.
@@ -121,7 +121,7 @@ def test_live_bridge_refresh_configures_singletons_so_submit_path_does_not_deny(
         select_global_order_type(_empty_snapshot())
     assert pre.value.decision.reason == "allocator_not_configured"
 
-    summary = main._edli_refresh_global_allocator_for_live_bridge(conn)
+    summary = main._edli_refresh_global_allocator(conn)
 
     # The boundary invariant: the submit path no longer denies for LACK OF CONFIG.
     # A configured-but-healthy governor returns a concrete order type.
@@ -133,12 +133,12 @@ def test_live_bridge_refresh_configures_singletons_so_submit_path_does_not_deny(
     assert summary.get("entry", {}).get("reason") != "allocator_not_configured"
 
 
-def test_live_bridge_refresh_publishes_true_drawdown_when_baseline_positive(monkeypatch):
+def test_allocator_refresh_publishes_true_drawdown_when_baseline_positive(monkeypatch):
     """MATH-UNIT: when baseline IS positive, the drawdown driving the governor
     kill-switch must be the REAL value (baseline vs on-chain bankroll), not a
     hardcoded 0.0.  This test monkeypatches a positive baseline specifically to
     exercise the formula path; it is NOT the primary unblock test (baseline is
-    structurally 0.0 system-wide — see test_live_bridge_refresh_zero_baseline_proceeds).
+    structurally 0.0 system-wide — see test_allocator_refresh_zero_baseline_proceeds).
     """
     import src.main as main
     import src.runtime.bankroll_provider as bankroll_provider
@@ -159,7 +159,7 @@ def test_live_bridge_refresh_publishes_true_drawdown_when_baseline_positive(monk
         lambda *a, **k: BankrollOfRecord(value_usd=850.0, fetched_at="2026-05-31T00:00:00+00:00"),
     )
 
-    main._edli_refresh_global_allocator_for_live_bridge(conn)
+    main._edli_refresh_global_allocator(conn)
 
     import src.risk_allocator.governor as governor
 
@@ -167,7 +167,7 @@ def test_live_bridge_refresh_publishes_true_drawdown_when_baseline_positive(monk
     assert governor._GLOBAL_GOVERNOR_STATE.current_drawdown_pct == pytest.approx(15.0)
 
 
-def test_live_bridge_refresh_reuses_supplied_portfolio_snapshot(monkeypatch):
+def test_allocator_refresh_reuses_supplied_portfolio_snapshot(monkeypatch):
     """The EDLI reactor already loads PortfolioState for sizing; allocator refresh
     must reuse that cycle snapshot instead of loading the live DB a second time."""
     import src.control.heartbeat_supervisor as heartbeat_supervisor
@@ -190,7 +190,7 @@ def test_live_bridge_refresh_reuses_supplied_portfolio_snapshot(monkeypatch):
     monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"health": "HEALTHY"})
     monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {})
 
-    summary = main._edli_refresh_global_allocator_for_live_bridge(
+    summary = main._edli_refresh_global_allocator(
         conn,
         portfolio_snapshot=SimpleNamespace(daily_baseline_total=1000.0, bankroll=995.0),
     )
@@ -198,7 +198,7 @@ def test_live_bridge_refresh_reuses_supplied_portfolio_snapshot(monkeypatch):
     assert summary.get("configured") is True
 
 
-def test_live_bridge_refresh_fails_closed_when_bankroll_unavailable(monkeypatch):
+def test_allocator_refresh_fails_closed_when_bankroll_unavailable(monkeypatch):
     """FAIL-CLOSED: if the on-chain bankroll cache is None (wallet unreachable),
     drawdown is untrustworthy. The refresh must NOT configure an
     allow-everything allocator and must signal the live submit to skip — i.e.
@@ -219,7 +219,7 @@ def test_live_bridge_refresh_fails_closed_when_bankroll_unavailable(monkeypatch)
     # Wallet unreachable -> cached() returns None.
     monkeypatch.setattr(bankroll_provider, "cached", lambda *a, **k: None)
 
-    summary = main._edli_refresh_global_allocator_for_live_bridge(conn)
+    summary = main._edli_refresh_global_allocator(conn)
 
     assert summary.get("configured") is False
     assert summary.get("fail_closed") is True
@@ -228,7 +228,7 @@ def test_live_bridge_refresh_fails_closed_when_bankroll_unavailable(monkeypatch)
     assert excinfo.value.decision.reason == "allocator_not_configured"
 
 
-def test_live_bridge_refresh_zero_baseline_proceeds_with_zero_drawdown(monkeypatch):
+def test_allocator_refresh_zero_baseline_proceeds_with_zero_drawdown(monkeypatch):
     """MATH-UNIT: when daily_baseline_total is 0.0 (structurally true system-wide,
     verified live 2026-05-31), the helper mirrors the legacy cycle's behaviour
     (cycle_runner.py:711: ``_drawdown_pct = ... if _baseline > 0 else 0.0``) —
@@ -264,7 +264,7 @@ def test_live_bridge_refresh_zero_baseline_proceeds_with_zero_drawdown(monkeypat
     assert pre.value.decision.reason == "allocator_not_configured"
 
     # Run with REAL load_portfolio() → daily_baseline_total=0.0.
-    summary = main._edli_refresh_global_allocator_for_live_bridge(conn)
+    summary = main._edli_refresh_global_allocator(conn)
 
     # Must configure (not fail-closed), mirroring legacy drawdown=0.0 tolerance.
     assert summary.get("configured") is True, (
@@ -279,7 +279,7 @@ def test_live_bridge_refresh_zero_baseline_proceeds_with_zero_drawdown(monkeypat
     )
 
 
-def test_live_bridge_refresh_fails_closed_when_load_portfolio_raises(monkeypatch):
+def test_allocator_refresh_fails_closed_when_load_portfolio_raises(monkeypatch):
     """FAIL-CLOSED: any exception while sourcing drawdown must degrade to
     no-submit, never proceed to a live submit with an unconfigured-but-allowing
     allocator."""
@@ -301,7 +301,7 @@ def test_live_bridge_refresh_fails_closed_when_load_portfolio_raises(monkeypatch
         lambda *a, **k: BankrollOfRecord(value_usd=900.0, fetched_at="2026-05-31T00:00:00+00:00"),
     )
 
-    summary = main._edli_refresh_global_allocator_for_live_bridge(conn)
+    summary = main._edli_refresh_global_allocator(conn)
 
     assert summary.get("configured") is False
     assert summary.get("fail_closed") is True
@@ -310,7 +310,7 @@ def test_live_bridge_refresh_fails_closed_when_load_portfolio_raises(monkeypatch
     assert excinfo.value.decision.reason == "allocator_not_configured"
 
 
-def test_main_edli_cycle_wires_live_bridge_allocator_refresh_source():
+def test_main_edli_cycle_wires_live_path_allocator_refresh_source():
     """The sole live cycle refreshes allocation before building its adapter."""
     from pathlib import Path
 
@@ -318,7 +318,7 @@ def test_main_edli_cycle_wires_live_bridge_allocator_refresh_source():
     # from src/main.py to src.events.reactor.run_edli_event_reactor_cycle.
     source = Path("src/events/reactor.py").read_text()
 
-    refresh_call = source.index("_alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(")
+    refresh_call = source.index("_alloc_refresh = _edli_refresh_global_allocator(")
     adapter_build = source.index("submit_adapter = event_bound_live_adapter_from_trade_conn(")
     assert refresh_call < adapter_build
     assert 'if not _alloc_refresh.get("configured")' in source[refresh_call:adapter_build]

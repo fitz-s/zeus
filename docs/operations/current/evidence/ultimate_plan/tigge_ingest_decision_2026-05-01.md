@@ -44,7 +44,7 @@ latch, (4) auto-pause tombstone after chronic exception loop. All four
 fixed in same-day commits on `b4-resume-2026-05-01`. With those gates
 clear, the registry's `entry_primary` requirement was the final block.
 Without TIGGE active, the only available sources for `entry_primary` are
-`monitor_fallback`/`diagnostic`-only OpenMeteo sources whose
+`monitor_fallback`/`evidence`-only OpenMeteo sources whose
 `degradation_level=DEGRADED_FORECAST_FALLBACK` makes them unauthorized.
 Activating TIGGE is the design-correct path to live entries (not a
 workaround).

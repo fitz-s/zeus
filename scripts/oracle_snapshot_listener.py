@@ -6,7 +6,7 @@
 Captures WU ICAO API responses at the *same time window* that PM's UMA
 Oracle fetches its data, storing raw JSON in the oracle-time snapshot directory
 ``raw/oracle_time_snapshots/``.  These files are oracle-time evidence, not
-shadow authority.
+alternate authority.
 This enables post-hoc comparison
 between what the Oracle saw and what our normal ingestion pipeline records
 (which may include backfilled METAR data that wasn't available at Oracle

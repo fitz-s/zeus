@@ -86,7 +86,7 @@ Verdict legend: KEEP-AS-CANONICAL / MERGE-INTO / REDUNDANT-SYNONYM-OF / BANDAID(
 
 Full coupling detail: `scratchpad/coupling_impact_map.md`.
 
-## 7. Migration sequencing (reducer-first, adapter-first, verification-first; no caps/shadow/throttle)
+## 7. Migration sequencing (reducer-first, adapter-first, verification-first; no caps/retired/throttle)
 
 De-risked ordering (final ordering pending §8 round-2):
 1. Add canonical types + pure normalizers (`src/contracts/canonical_lifecycle.py`), no writer changes. Import-time assertion: every current frozenset value maps to exactly one canonical value or an explicit reason. **Low risk.**

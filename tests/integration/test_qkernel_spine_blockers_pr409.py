@@ -424,8 +424,8 @@ def _fully_licensed_reliability_cells(guard_mod, *, hit_rate: float = 0.95) -> d
 # ===========================================================================
 # BLOCKER 1 — live==replay forecast-case (source-cycle, emos_season, 24h bucket).
 # ===========================================================================
-def test_live_bridge_forecast_case_matches_arm_replay(monkeypatch, tmp_path):
-    """The live bridge ForecastCase season / metric / lead-bucket / regime match the
+def test_allocator_forecast_case_matches_arm_replay(monkeypatch, tmp_path):
+    """The live path ForecastCase season / metric / lead-bucket / regime match the
     ARM-replay case construction, built from the FORECAST SOURCE CYCLE (not
     decision_time), and the served sigma floor is a non-None REALIZED floor.
 

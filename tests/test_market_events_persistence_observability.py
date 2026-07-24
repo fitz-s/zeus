@@ -168,7 +168,7 @@ def test_trading_daemon_surfaces_persistence_failure(monkeypatch):
     monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
     monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _fake_refresh)
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
@@ -230,7 +230,7 @@ def test_market_discovery_persistence_failure_not_hidden_by_empty_priority_marke
     monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
     monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _fake_refresh)
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
@@ -287,7 +287,7 @@ def test_trading_daemon_healthy_when_persistence_ok(monkeypatch):
     monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
     monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _fake_refresh)
     monkeypatch.setattr(
-        "src.data.dual_run_lock.acquire_lock",
+        "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
     # Force STALE substrate so the staleness gate falls through to the capture path.

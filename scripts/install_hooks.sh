@@ -104,7 +104,7 @@ Companion config: .gitleaks.toml + SECURITY-FALSE-POSITIVES.md (root).
 
 To verify on next commit:
   git commit --allow-empty -m "test: hooks active"
-  # If pre-commit advisories fire, you'll see dispatch.py hook diagnostics.
+  # If pre-commit advisories fire, you'll see dispatch.py hook observations.
 
 To temporarily skip in an emergency:
   COMMIT_INVARIANT_TEST_SKIP=1 SECRETS_SCAN_SKIP=1 git commit ...

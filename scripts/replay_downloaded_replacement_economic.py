@@ -1252,7 +1252,7 @@ def _empirical_q_lcb_coverage_for_rows(rows: Sequence[ReplacementReplayRow], *, 
 
     The replay bridge does not yet carry the production q_lcb per replacement
     row. Using selected_wins is intentionally conservative for promotion: it can
-    improve the diagnostic from a hard-coded zero, but it will not pass a 0.95
+    improve the observation from a hard-coded zero, but it will not pass a 0.95
     coverage gate unless the settled replay itself is nearly perfect.
     """
 

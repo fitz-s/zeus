@@ -5715,7 +5715,7 @@ def run_edli_event_reactor_cycle(
         _edli_is_sqlite_lock_error,
         _edli_next_redecision_source,
         _edli_pending_entity_keys,
-        _edli_refresh_global_allocator_for_live_bridge,
+        _edli_refresh_global_allocator,
         _settings_section,
         _start_venue_background_maintenance_after_reactor_if_required,
     )
@@ -6209,7 +6209,7 @@ def run_edli_event_reactor_cycle(
                 "EDLI reactor: live entry blocked this cycle because portfolio_state_unavailable"
             )
         if _live_entry_block_reason is None:
-            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(
+            _alloc_refresh = _edli_refresh_global_allocator(
                 trade_conn,
                 portfolio_snapshot=_portfolio_snapshot,
             )
