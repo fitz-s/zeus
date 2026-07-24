@@ -376,6 +376,20 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
         if isinstance(node, ast.keyword) and node.arg in _LIVE_CONTROL_TARGETS:
             if _expr_uses_names(node.value, tainted):
                 out.append(f"retired deletion constant flows into keyword {node.arg!r}")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "setattr"
+            and len(node.args) >= 3
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and node.args[1].value.lower() in _LIVE_CONTROL_TARGETS
+            and _expr_uses_names(node.args[2], tainted)
+        ):
+            out.append(
+                "retired deletion constant flows into setattr control "
+                f"{node.args[1].value.lower()!r}"
+            )
         elif isinstance(node, ast.Dict):
             for key, value in zip(node.keys, node.values, strict=True):
                 if (
@@ -413,6 +427,13 @@ def _control_target(node: ast.AST) -> str | None:
         return node.id.lower()
     if isinstance(node, ast.Attribute) and node.attr.lower() in _LIVE_CONTROL_TARGETS:
         return node.attr.lower()
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, str)
+        and node.slice.value.lower() in _LIVE_CONTROL_TARGETS
+    ):
+        return node.slice.value.lower()
     return None
 
 
