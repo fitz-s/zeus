@@ -3939,42 +3939,12 @@ def _append_monitor_validation(position: Position, validation: str) -> None:
     position.applied_validations = validations
 
 
-_DAY0_ROBUST_SELL_CONFIRMATION = "day0_robust_sell_value_awaits_confirmation"
-
-
 def _clone_for_probability_refresh(position: Position) -> Position:
     """Start one probability cut without inheriting prior-cut evidence."""
 
     refreshed = copy.copy(position)
-    refreshed.applied_validations = (
-        [_DAY0_ROBUST_SELL_CONFIRMATION]
-        if _DAY0_ROBUST_SELL_CONFIRMATION
-        in (getattr(position, "applied_validations", []) or [])
-        else []
-    )
+    refreshed.applied_validations = []
     return refreshed
-
-
-def _replace_probability_validations_preserving_exit_confirmation(
-    position: Position,
-    refresh_position: Position,
-) -> None:
-    """Replace probability evidence without erasing a pending exit confirmation.
-
-    Probability validations are current-cut evidence and must replace the prior cut.  The
-    Day0 robust-sell marker is different: it identifies what ``neg_edge_count`` is counting
-    across cuts.  Dropping it before ``Position.evaluate_exit`` resets every qualifying cycle
-    to confirmation one, making the required second confirmation unreachable.
-    """
-
-    pending = _DAY0_ROBUST_SELL_CONFIRMATION in (
-        getattr(position, "applied_validations", []) or []
-    )
-    position.applied_validations = list(
-        getattr(refresh_position, "applied_validations", []) or []
-    )
-    if pending:
-        _append_monitor_validation(position, _DAY0_ROBUST_SELL_CONFIRMATION)
 
 
 def _bin_sort_key(outcome: dict) -> tuple[int, float]:
@@ -5330,7 +5300,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             day0_family_cache=day0_family_cache,
         )
         pos.selected_method = refresh_pos.selected_method
-        _replace_probability_validations_preserving_exit_confirmation(pos, refresh_pos)
+        pos.applied_validations = list(getattr(refresh_pos, "applied_validations", []) or [])
         # A1: Propagate bootstrap context from refresh_pos (may differ from pos for day0_window)
         _bootstrap_ctx = getattr(refresh_pos, "_bootstrap_context", None)
         if _bootstrap_ctx is not None:

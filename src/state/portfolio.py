@@ -147,7 +147,6 @@ _DECISION_SCOPED_VALIDATIONS: frozenset[str] = frozenset({
     "hold_terminal_value_excludes_exit_fee",
     "current_held_ci_invalid",
     "entry_held_ci_invalid",
-    "day0_robust_sell_value_awaits_confirmation",
     "predicted_bin_exit_law",
     "sell_reversal",
     "hold",
@@ -303,56 +302,6 @@ class ExitContext:
         if not self.position_state:
             missing.append("position_state")
         return missing
-
-
-def _compute_exit_correlation_crowding(
-    *,
-    this_cluster: str,
-    portfolio_positions: tuple,
-    bankroll: Optional[float],
-    shares: float,
-    best_bid: float,
-    crowding_rate: float,
-) -> float:
-    """T6.4-phase2: compute the dollar-denominated correlation-crowding cost
-    for an exit decision.
-
-    Formula:
-        exposure_ratio = Σ over OTHER held positions of
-            (other.effective_cost_basis_usd / bankroll) × get_correlation(this_cluster, other.cluster)
-        cost_usd = crowding_rate × exposure_ratio × shares × best_bid
-
-    Returns 0.0 safely when:
-        - portfolio_positions is empty (no co-held positions)
-        - bankroll is None or <= 0 (authority gap)
-        - crowding_rate is 0.0 (feature off by default)
-
-    Self-exclusion is already applied at the _build_exit_context layer
-    (trade_id filter). This function sums correlation × exposure across
-    whatever tuple it receives.
-    """
-    if crowding_rate <= 0.0:
-        return 0.0
-    if not portfolio_positions:
-        return 0.0
-    if bankroll is None or bankroll <= 0.0:
-        return 0.0
-
-    exposure_ratio = 0.0
-    for entry in portfolio_positions:
-        # entry is (cluster, effective_cost_basis_usd, trade_id) tuple per _build_exit_context
-        try:
-            other_cluster, other_size_usd, _trade_id = entry
-        except (TypeError, ValueError):
-            continue
-        try:
-            size_pct = float(other_size_usd) / float(bankroll)
-        except (TypeError, ValueError, ZeroDivisionError):
-            continue
-        corr = get_correlation(str(this_cluster), str(other_cluster))
-        exposure_ratio += size_pct * corr
-
-    return float(crowding_rate) * exposure_ratio * float(shares) * float(best_bid)
 
 
 # Administrative exit reasons — excluded from P&L calculations

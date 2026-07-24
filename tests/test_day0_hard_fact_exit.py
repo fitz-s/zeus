@@ -1197,10 +1197,6 @@ class TestLaneEndToEnd:
         source = open("src/engine/cycle_runtime.py", encoding="utf-8").read()
         assert "evaluate_hard_fact_exit" in source
         assert "DAY0_HARD_FACT_BIN_DEAD" in source
-        from src.engine.cycle_runtime import _D4_ASYMMETRIC_EXIT_TRIGGERS
-
-        # the hard-fact trigger must NOT be gated by the statistical-evidence gate
-        assert "DAY0_HARD_FACT_BIN_DEAD" not in _D4_ASYMMETRIC_EXIT_TRIGGERS
 
 
 # ===========================================================================

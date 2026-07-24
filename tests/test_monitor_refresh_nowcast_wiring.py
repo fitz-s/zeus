@@ -159,35 +159,16 @@ def _replacement_belief(
     )
 
 
-def test_probability_refresh_preserves_only_pending_robust_exit_confirmation() -> None:
-    """Fresh belief replacement must not make confirmation two unreachable."""
-
-    pending = "day0_robust_sell_value_awaits_confirmation"
-    position = SimpleNamespace(
-        applied_validations=["stale_probability_evidence", pending]
-    )
-    refreshed = SimpleNamespace(applied_validations=["current_probability_evidence"])
-
-    monitor_refresh_module._replace_probability_validations_preserving_exit_confirmation(
-        position,
-        refreshed,
-    )
-
-    assert position.applied_validations == ["current_probability_evidence", pending]
-
-
 def test_fresh_probability_refresh_drops_prior_cut_validations(monkeypatch) -> None:
     """A real dataclass refresh clone cannot relabel stale evidence as fresh."""
 
     from src.engine import position_belief
 
-    pending = "day0_robust_sell_value_awaits_confirmation"
     prior = _make_position()
     prior.applied_validations = [
         "monitor_probability_stale",
         "replacement_posterior_stale;age_h=12.50",
         "replacement_posterior_missing",
-        pending,
     ]
     refresh_input = replace(prior)
     belief = _replacement_belief()
@@ -222,7 +203,6 @@ def test_fresh_probability_refresh_drops_prior_cut_validations(monkeypatch) -> N
         monitor_refresh_module._MONITOR_PROBABILITY_FRESH_ATTR,
     ) is True
     assert refreshed.applied_validations == [
-        pending,
         "replacement_posterior",
         belief.freshness_validation(),
     ]

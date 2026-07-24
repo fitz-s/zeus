@@ -29,7 +29,7 @@ from typing import Any
 
 from src.config import get_mode, state_path
 from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
-from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
+from src.contracts.decision_evidence import DecisionEvidence
 from src.contracts.effective_kelly_context import EffectiveKellyContext
 from src.contracts.execution_intent import (
     DecisionSourceContext,
@@ -227,39 +227,6 @@ def _freeze_entries_after_shoulder_ledger_failure(error: str, *, logger) -> str 
         return f"entries_pause_failed_after_shoulder_ledger_error: {exc}"
 
 
-# D4: exit triggers whose statistical burden (2 consecutive negative cycles,
-# no FDR correction) is weaker than the entry-side burden (bootstrap CI +
-# BH-FDR). These are statistical hypotheses; force-majeure exits are excluded
-# because their evidence class is market/risk/settlement authority, not
-# entry-vs-exit statistical symmetry.
-#
-# Excluded triggers and their rationale:
-# - SETTLEMENT_IMMINENT / FLASH_CRASH_PANIC /
-#   RED_FORCE_EXIT / VIG_EXTREME — force-majeure exits
-#   driven by market-mechanics or risk-layer mandates, not statistical
-#   inference. Symmetry with a statistical entry burden is not a coherent
-#   question.
-# - DAY0_OBSERVATION_REVERSAL — single-cycle observation-authority exit
-#   fired when Day0 forward-edge drops below threshold while
-#   day0_active=True. It does NOT use a consecutive_confirmations gate,
-#   so the statistical weak-exit evidence template (sample_size=2,
-#   consecutive_confirmations=2) would misrepresent its actual burden.
-#   A future wave may introduce an observation-grade evidence variant.
-# LEGACY-ONLY (ultimate_alpha 2026-07-24): evaluate_exit now emits the unified
-# vocabulary {HOLD, SELL_REVERSAL, EVIDENCE_UNAVAILABLE, RED_FORCE_EXIT}; the
-# triggers below are no longer produced. SELL_REVERSAL is DELIBERATELY absent —
-# the consecutive-confirmation evidence template this gate enforces is the
-# repeated-cycle confirmation machinery FINAL_SPEC retires (a fresh
-# current-state value comparison is its own evidence). The set is kept only so
-# any in-flight legacy rows drain through the old burden; E-slice removes the
-# gate once the vocabulary migration completes.
-_D4_ASYMMETRIC_EXIT_TRIGGERS = frozenset({
-    "EDGE_REVERSAL",
-    "BUY_NO_EDGE_EXIT",
-    "BUY_NO_NEAR_EXIT",
-})
-
-
 def _deps_utcnow_iso(deps) -> str:
     utcnow = getattr(deps, "_utcnow", None)
     if utcnow is not None:
@@ -406,64 +373,6 @@ def _exit_evidence_gate_allows_statistical_exit(
             trigger=exit_trigger,
             reason=f"DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED:{day0_immature_reason}",
         )
-    if exit_trigger not in _D4_ASYMMETRIC_EXIT_TRIGGERS:
-        return True, None
-    if conn is None:
-        return _record_exit_evidence_gate_block(
-            summary,
-            deps,
-            trade_id=pos.trade_id,
-            trigger=exit_trigger,
-            reason="INCOMPLETE_EXIT_EVIDENCE:ENTRY_DECISION_EVIDENCE_DB_MISSING",
-        )
-
-    exit_evidence = DecisionEvidence(
-        evidence_type="exit",
-        statistical_method="consecutive_confirmation",
-        sample_size=2,
-        # No exit-side alpha/FDR exists for these triggers today; the semantic
-        # absence is represented by fdr_corrected=False.
-        confidence_level=1.0,
-        fdr_corrected=False,
-        consecutive_confirmations=2,
-    )
-    try:
-        from src.state.decision_chain import load_entry_evidence
-
-        entry_evidence = load_entry_evidence(conn, pos.trade_id)
-    except Exception as exc:
-        return _record_exit_evidence_gate_block(
-            summary,
-            deps,
-            trade_id=pos.trade_id,
-            trigger=exit_trigger,
-            reason="INCOMPLETE_EXIT_EVIDENCE:ENTRY_DECISION_EVIDENCE_LOAD_FAILED",
-            exit_evidence=exit_evidence,
-            error=str(exc),
-        )
-    if entry_evidence is None:
-        return _record_exit_evidence_gate_block(
-            summary,
-            deps,
-            trade_id=pos.trade_id,
-            trigger=exit_trigger,
-            reason="INCOMPLETE_EXIT_EVIDENCE:ENTRY_DECISION_EVIDENCE_MISSING",
-            exit_evidence=exit_evidence,
-        )
-    try:
-        exit_evidence.assert_symmetric_with(entry_evidence)
-    except EvidenceAsymmetryError as asym:
-        return _record_exit_evidence_gate_block(
-            summary,
-            deps,
-            trade_id=pos.trade_id,
-            trigger=exit_trigger,
-            reason="EXIT_EVIDENCE_ASYMMETRY_BLOCKED",
-            entry_evidence=entry_evidence,
-            exit_evidence=exit_evidence,
-            error=str(asym),
-        )
-
     summary["exit_evidence_gate_passed"] = summary.get("exit_evidence_gate_passed", 0) + 1
     return True, None
 
