@@ -295,6 +295,38 @@ def _connect(
         raise
 
 
+def connect_existing_trade_db_without_journal_bootstrap(
+    db_path: Path,
+) -> sqlite3.Connection:
+    """Open an existing trade DB for one latency-critical canonical write.
+
+    The normal factory ensures WAL mode and is the default for every runtime
+    owner.  A signed-order identity is persisted after its command transaction
+    has committed but immediately before venue POST.  Repeating
+    ``PRAGMA journal_mode=WAL`` at that boundary can itself contend for the WAL
+    writer lock before the caller's write retry is active.  This narrow helper
+    opens only an existing file, installs the canonical busy handler and
+    connection functions, and deliberately leaves journal mode unchanged.
+    """
+
+    path = db_path.resolve(strict=True)
+    timeout_ms = _db_busy_timeout_ms()
+    conn = sqlite3.connect(
+        path.as_uri() + "?mode=rw",
+        uri=True,
+        timeout=timeout_ms / 1000.0,
+    )
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        _install_connection_functions(conn)
+        _apply_busy_timeout(conn, busy_timeout_ms=timeout_ms)
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
 def _connect_read_only(db_path: Path) -> sqlite3.Connection:
     """Low-level read-only SQLite connection with bounded lock wait.
 

@@ -4179,9 +4179,9 @@ def _signed_identity_persistence_connection(
     if not path:
         return conn, False
 
-    from src.state.db import _connect
+    from src.state.db import connect_existing_trade_db_without_journal_bootstrap
 
-    return _connect(Path(path)), True
+    return connect_existing_trade_db_without_journal_bootstrap(Path(path)), True
 
 
 def _persist_final_submission_envelope_payload(

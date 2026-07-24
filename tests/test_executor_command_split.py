@@ -151,6 +151,13 @@ def test_pre_post_signed_identity_uses_fresh_file_connection(monkeypatch, tmp_pa
     outer.commit()
     outer.execute("PRAGMA busy_timeout = 1")
     seen = {}
+    statements = []
+    real_connect = sqlite3.connect
+
+    def _connect(*args, **kwargs):
+        fresh = real_connect(*args, **kwargs)
+        fresh.set_trace_callback(statements.append)
+        return fresh
 
     def _bind(conn, *, command_id, envelope):
         seen["conn"] = conn
@@ -161,6 +168,7 @@ def test_pre_post_signed_identity_uses_fresh_file_connection(monkeypatch, tmp_pa
         return "signed-envelope-id"
 
     sentinel = object()
+    monkeypatch.setattr(executor.sqlite3, "connect", _connect)
     monkeypatch.setattr(command_repo, "bind_signed_submission_identity", _bind)
     monkeypatch.setattr(
         adapter,
@@ -176,6 +184,10 @@ def test_pre_post_signed_identity_uses_fresh_file_connection(monkeypatch, tmp_pa
 
     assert receipt is sentinel
     assert seen["conn"] is not outer
+    assert not any(
+        statement.upper().startswith("PRAGMA JOURNAL_MODE")
+        for statement in statements
+    )
     from src.state.db import _db_busy_timeout_ms
 
     assert seen["busy_timeout_ms"] == _db_busy_timeout_ms()
@@ -183,6 +195,31 @@ def test_pre_post_signed_identity_uses_fresh_file_connection(monkeypatch, tmp_pa
         seen["conn"].execute("SELECT 1")
     assert outer.execute("PRAGMA busy_timeout").fetchone()[0] == 1
     outer.close()
+
+
+def test_pre_post_fresh_connection_opens_while_another_writer_is_active(tmp_path):
+    import src.execution.executor as executor
+
+    path = tmp_path / "trades.db"
+    outer = sqlite3.connect(path)
+    outer.execute("PRAGMA journal_mode=WAL")
+    outer.execute("CREATE TABLE command_marker (command_id TEXT PRIMARY KEY)")
+    outer.execute("INSERT INTO command_marker VALUES ('command-1')")
+    outer.commit()
+
+    locker = sqlite3.connect(path)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        fresh, owns_fresh = executor._signed_identity_persistence_connection(outer)
+        assert owns_fresh is True
+        assert fresh.execute(
+            "SELECT command_id FROM command_marker"
+        ).fetchone()[0] == "command-1"
+        fresh.close()
+    finally:
+        locker.rollback()
+        locker.close()
+        outer.close()
 
 
 def test_pre_post_signed_identity_helper_refuses_post_after_persistent_lock(monkeypatch):
