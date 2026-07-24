@@ -5926,6 +5926,32 @@ def _book_row_price_size(row: Any, side: str) -> tuple[Decimal, Decimal]:
     return price, size
 
 
+def _bid_ladder_from_book(
+    orderbook: dict, max_levels: int = 5
+) -> tuple[tuple[float, float], ...]:
+    """Held-side bid ladder: up to ``max_levels`` (price, size) rungs, price-descending,
+    same-price rows aggregated. Malformed rows are skipped so a partially-degraded book
+    still yields its executable prefix. Returns () when no valid bids exist.
+
+    Consumed by the depth-honest exit stopping law (Position._exit_bid_breakpoints)
+    to price the true fillable-prefix proceeds instead of held_shares * top_bid.
+    """
+    rows = orderbook.get("bids")
+    if not isinstance(rows, list) or not rows:
+        return ()
+    agg: dict[Decimal, Decimal] = {}
+    for row in rows:
+        try:
+            price, size = _book_row_price_size(row, "bids")
+        except ExecutableSnapshotCaptureError:
+            continue
+        agg[price] = agg.get(price, Decimal("0")) + size
+    if not agg:
+        return ()
+    levels = sorted(agg.items(), key=lambda kv: kv[0], reverse=True)[:max_levels]
+    return tuple((float(price), float(size)) for price, size in levels)
+
+
 def _top_book_level_decimal(orderbook: dict, side: str) -> tuple[Decimal, Decimal]:
     rows = orderbook.get(side)
     if not isinstance(rows, list) or not rows:

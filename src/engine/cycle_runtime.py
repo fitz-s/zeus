@@ -4830,6 +4830,8 @@ def _build_exit_context(
         current_market_price_is_fresh=bool(getattr(pos, "last_monitor_market_price_is_fresh", False)),
         best_bid=best_bid,
         best_ask=getattr(pos, "last_monitor_best_ask", None),
+        bid_size=getattr(pos, "last_monitor_bid_size", None),
+        bid_ladder=tuple(getattr(pos, "last_monitor_bid_ladder", ()) or ()),
         market_vig=getattr(pos, "last_monitor_market_vig", None),
         hours_to_settlement=hours_to_settlement,
         position_state=position_state,

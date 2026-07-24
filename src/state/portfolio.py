@@ -242,6 +242,13 @@ class ExitContext:
     current_market_price_is_fresh: bool = False
     best_bid: Optional[float] = None
     best_ask: Optional[float] = None
+    # Held-side executable depth, co-fresh with best_bid (same monitor cycle). The
+    # depth-honest exit stopping law prices the true fillable-prefix proceeds from
+    # bid_ladder instead of held_shares * best_bid. bid_size is the top-of-book size,
+    # used as the single-level cap when the full ladder is unavailable. Empty/None =>
+    # legacy single-level fallback (no behavior change for callers that omit them).
+    bid_size: Optional[float] = None
+    bid_ladder: tuple = ()
     market_vig: Optional[float] = None
     hours_to_settlement: Optional[float] = None
     position_state: str = ""
@@ -668,6 +675,11 @@ class Position:
     last_monitor_market_price_is_fresh: bool = False
     last_monitor_best_bid: Optional[float] = None
     last_monitor_best_ask: Optional[float] = None
+    # Held-side executable depth from the same-cycle monitor quote (in-memory only,
+    # not DB-persisted): top-of-book size and the top-rungs (price, size) ladder.
+    # Consumed by the depth-honest exit stopping law; absent => single-level fallback.
+    last_monitor_bid_size: Optional[float] = None
+    last_monitor_bid_ladder: tuple = ()
     last_monitor_market_vig: Optional[float] = None
     last_monitor_whale_toxicity: Optional[bool] = None
     last_monitor_at: str = ""
@@ -946,22 +958,62 @@ class Position:
     def _exit_bid_breakpoints(
         self, exit_context: ExitContext, held_shares: Decimal
     ) -> tuple[tuple[Decimal, Decimal], ...]:
-        """Net-of-fee sell-proceeds curve L(x) for the stop.
+        """Net-of-fee sell-proceeds curve L(x) for the stop — depth-honest.
 
-        ExitContext exposes only the top-of-book held-side bid, so the stop is
-        evaluated at the single all-shares breakpoint (partial exits need a depth
-        ladder the monitor does not thread). Proceeds are net of the executable
-        taker fee: L = shares·(bid − polymarket_fee(bid)). No bid → empty curve →
-        the law holds (except under RED). The paid entry price is sunk and never
-        enters here.
+        Actuation is ALL-shares (build_exit_intent hard-codes shares=effective_shares;
+        the partial-quantity path is the separate global-auction authority), so the
+        local stop is a boolean SELL, never a partial x*. The honest curve is the
+        single fillable-prefix breakpoint: walk the held-side bid ladder best-first,
+        x_fill = min(held, visible cumulative depth), proceeds = Σ rung·(price − fee).
+        Proceeds are NEVER extrapolated past visible depth — the unfillable remainder
+        (held − x_fill) is held on BOTH sides of predicted_bin_law's comparison
+        ((held−x)·q⁻ + L(x) vs held·q⁻) and cancels, so pricing the fillable prefix
+        against holding that same prefix is the true all-or-nothing comparison. Pricing
+        the whole position at the top bid (the prior law) overstated proceeds whenever
+        depth < held and manufactured false SELL dominance many multiples of the
+        one-tick hysteresis margin (100 held with a 0.30×10 / 0.20×90 book: the old
+        law priced $30, the true fillable value is ~$21).
+
+        Fallback chain: no ladder but a known top-of-book size → a single rung capped
+        at min(held, bid_size); no depth info at all → the legacy uncapped single rung
+        (held·(bid − fee)), preserving behavior for depth-blind callers/tests. No
+        finite bid → empty curve → the law holds (except under RED). The fee is per
+        rung, exactly as before. The paid entry price is sunk and never enters here.
         """
         if held_shares <= _ZERO_D or not ExitContext._is_finite(exit_context.best_bid):
             return ()
+
+        fee_rate = exit_fee_rate()
+
+        def _net_per_share(price: float) -> float:
+            clamped = min(max(price, _EXIT_BID_FEE_EPS), 1.0 - _EXIT_BID_FEE_EPS)
+            return price - polymarket_fee(clamped, fee_rate)
+
+        held = float(held_shares)
         bid = float(exit_context.best_bid)
-        clamped = min(max(bid, _EXIT_BID_FEE_EPS), 1.0 - _EXIT_BID_FEE_EPS)
-        fee_per_share = polymarket_fee(clamped, exit_fee_rate())
-        proceeds = float(held_shares) * (bid - fee_per_share)
-        return ((held_shares, Decimal(str(proceeds))),)
+
+        levels = [lvl for lvl in (exit_context.bid_ladder or ()) if lvl]
+        if levels:
+            remaining = held
+            proceeds = 0.0
+            filled = 0.0
+            for price, size in levels:
+                if remaining <= 0.0:
+                    break
+                take = min(remaining, max(0.0, float(size)))
+                if take <= 0.0:
+                    continue
+                proceeds += take * _net_per_share(float(price))
+                filled += take
+                remaining -= take
+            return ((Decimal(str(filled)), Decimal(str(proceeds))),)
+
+        bid_size = exit_context.bid_size
+        if bid_size is not None and float(bid_size) >= 0.0:
+            x_fill = min(held, float(bid_size))
+            return ((Decimal(str(x_fill)), Decimal(str(x_fill * _net_per_share(bid)))),)
+
+        return ((held_shares, Decimal(str(held * _net_per_share(bid)))),)
 
     def evaluate_exit(self, exit_context: ExitContext) -> ExitDecision:
         """Position knows how to exit ITSELF via the one predicted-bin stopping law.
