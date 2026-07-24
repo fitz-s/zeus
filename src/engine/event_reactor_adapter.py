@@ -1,3 +1,5 @@
+# Last reused/audited: 2026-07-24
+#   Single-live readiness owner binding after retired hook-factory removal.
 # Last reused/audited: 2026-06-12 (external deep-review fixes A-E: A taker depth
 #   twin-authority — fail closed LIVE_DEPTH_AUTHORITY_MISSING when the fresh-price
 #   witness does not match the swept snapshot depth; B free-cash bound under injected
@@ -29805,7 +29807,7 @@ def _prepare_current_global_probability_family(
         if probability_authority == "day0_remaining_day_global_probability_v1":
             bound_bundle = bundle
             if bound_bundle is None:
-                readiness = _latest_replacement_readiness(
+                readiness = latest_replacement_readiness(
                     forecast_conn,
                     city=family.city,
                     target_date=family.target_date,
