@@ -253,10 +253,6 @@ def test_recursive_closure_preserves_live_old_sizing_and_writes_atomic_receipt(
             "INSERT INTO decision_compile_failures VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ("live-failure", "event-live", "2026-07-22T12:07:00+00:00", "LIVE", "belief", "verify", "CURRENT", None, "[]", "2026-07-22T12:08:00+00:00"),
         )
-        tconn.execute(
-            "INSERT INTO position_events VALUES (?, ?, ?)",
-            ("historical", "old-decision", json.dumps({"certificate": "hash-retired"})),
-        )
         wconn.commit()
         tconn.commit()
     finally:
@@ -302,9 +298,7 @@ def test_recursive_closure_preserves_live_old_sizing_and_writes_atomic_receipt(
             "stage": "compile",
         }
     ]
-    assert receipt["historical_opaque_reference_counts"] == {
-        "position_events.payload_json": 1
-    }
+    assert receipt["historical_opaque_reference_counts"] == {}
     assert receipt["trades_ghost_decision_graph"]["pre_drop_counts"] == {
         "decision_certificate_edges": 1,
         "decision_certificate_supersessions": 1,
@@ -358,6 +352,179 @@ def test_active_position_attribution_refuses_without_writes(tmp_path: Path) -> N
     finally:
         conn.close()
     assert not receipt.exists()
+
+
+def _insert_nonterminal_command(
+    conn: sqlite3.Connection,
+    command_id: str,
+    position_id: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?, ?, 'SUBMITTING')",
+        (command_id, position_id),
+    )
+
+
+def _insert_attribution(
+    conn: sqlite3.Connection,
+    attribution_id: str,
+    position_id: str,
+    command_id: str,
+    certificate_hash: str | None,
+    *,
+    resolution: str = "ATTRIBUTED",
+) -> None:
+    conn.execute(
+        "INSERT INTO position_decision_attribution VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            attribution_id,
+            position_id,
+            command_id,
+            certificate_hash,
+            resolution,
+            None,
+            "LIVE_DECISION",
+            "ENTRY",
+            "2026-07-22T12:00:00+00:00",
+            1,
+        ),
+    )
+
+
+def _command_plan(
+    tmp_path: Path,
+    configure: object,
+) -> dict[str, object]:
+    world, trades, wconn, tconn = _fixture(tmp_path)
+    try:
+        _insert_certificate(wconn, "retired", "hash-retired", mode=_retired_mode())
+        _insert_certificate(wconn, "current", "hash-current")
+        configure(tconn)
+        wconn.commit()
+        tconn.commit()
+    finally:
+        wconn.close()
+        tconn.close()
+    return migration.plan_world_decision_graph(world, trades)
+
+
+def test_nonterminal_command_without_attribution_blocks_before_writes(
+    tmp_path: Path,
+) -> None:
+    plan = _command_plan(
+        tmp_path,
+        lambda conn: _insert_nonterminal_command(conn, "command-1", "position-1"),
+    )
+    assert plan["status"] == "blocked"
+    assert plan["trades_preflight"]["nonterminal_command_total"] == 1
+    assert plan["trades_preflight"]["nonterminal_command_unresolved"] == 1
+    assert "nonterminal_command_attribution_unresolved" in {
+        blocker["kind"] for blocker in plan["blockers"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("resolution", "certificate_hash"),
+    (("UNRESOLVED", "hash-current"), ("ATTRIBUTED", "missing-hash")),
+)
+def test_nonterminal_command_unresolved_or_missing_certificate_blocks(
+    tmp_path: Path,
+    resolution: str,
+    certificate_hash: str,
+) -> None:
+    def configure(conn: sqlite3.Connection) -> None:
+        _insert_nonterminal_command(conn, "command-1", "position-1")
+        _insert_attribution(
+            conn,
+            "attr-1",
+            "position-1",
+            "command-1",
+            certificate_hash,
+            resolution=resolution,
+        )
+
+    plan = _command_plan(tmp_path, configure)
+    assert plan["trades_preflight"]["nonterminal_command_unresolved"] == 1
+    assert "nonterminal_command_attribution_unresolved" in {
+        blocker["kind"] for blocker in plan["blockers"]
+    }
+
+
+def test_nonterminal_commands_bind_by_command_id_not_position_id(tmp_path: Path) -> None:
+    def configure(conn: sqlite3.Connection) -> None:
+        _insert_nonterminal_command(conn, "command-1", "position-1")
+        _insert_nonterminal_command(conn, "command-2", "position-1")
+        _insert_attribution(
+            conn,
+            "attr-2",
+            "position-1",
+            "command-2",
+            "hash-current",
+        )
+
+    plan = _command_plan(tmp_path, configure)
+    assert plan["trades_preflight"]["nonterminal_command_total"] == 2
+    assert plan["trades_preflight"]["nonterminal_command_attributed"] == 1
+    assert plan["trades_preflight"]["nonterminal_command_unresolved"] == 1
+
+
+def test_duplicate_command_attribution_blocks(tmp_path: Path) -> None:
+    def configure(conn: sqlite3.Connection) -> None:
+        _insert_nonterminal_command(conn, "command-1", "position-1")
+        _insert_attribution(conn, "attr-1", "position-1", "command-1", "hash-current")
+        _insert_attribution(conn, "attr-2", "position-1", "command-1", "hash-current")
+
+    plan = _command_plan(tmp_path, configure)
+    assert plan["trades_preflight"]["nonterminal_command_unresolved"] == 1
+    sample = plan["trades_preflight"]["nonterminal_command_unresolved_sample"]
+    assert sample[0]["attribution_count"] == 2
+
+
+@pytest.mark.parametrize("malformed", (False, True))
+def test_historical_reference_without_archive_blocks_before_writes(
+    tmp_path: Path,
+    malformed: bool,
+) -> None:
+    world, trades, wconn, tconn = _fixture(tmp_path)
+    receipt = tmp_path / "historical-refused.json"
+    retired_hash = "a" * 64
+    try:
+        _insert_certificate(wconn, "retired", retired_hash, mode=_retired_mode())
+        payload = (
+            f'{{"certificate":"{retired_hash}"'
+            if malformed
+            else json.dumps({"certificate": retired_hash})
+        )
+        tconn.execute(
+            "INSERT INTO position_events VALUES (?, ?, ?)",
+            ("historical", None, payload),
+        )
+        wconn.commit()
+        tconn.commit()
+    finally:
+        wconn.close()
+        tconn.close()
+
+    plan = migration.plan_world_decision_graph(
+        world,
+        trades,
+        include_opaque_references=True,
+    )
+    assert plan["status"] == "blocked"
+    assert "retired_closure_referenced_by_durable_history" in {
+        blocker["kind"] for blocker in plan["blockers"]
+    }
+    with pytest.raises(RuntimeError, match="durable_history"):
+        migration.migrate_world_decision_graph(world, trades, receipt)
+    assert not receipt.exists()
+    conn = sqlite3.connect(world)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM decision_certificates WHERE certificate_hash=?",
+            (retired_hash,),
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()
 
 
 def test_protected_missing_attribution_fails_before_closure_materialization(
@@ -649,6 +816,278 @@ def test_stage_journal_rejects_release_identity_drift(tmp_path: Path) -> None:
     drifted = {**identity, "target_head": "d" * 40}
     with pytest.raises(RuntimeError, match="does not match this migration target"):
         migration._open_stage_journal(journal, root, target_identity=drifted)
+
+
+def _target_fixture(tmp_path: Path) -> tuple[Path, tuple[Path, ...], Path]:
+    root = tmp_path / "root"
+    state = root / "state"
+    config = root / "config"
+    external = tmp_path / "external"
+    state.mkdir(parents=True)
+    config.mkdir()
+    external.mkdir()
+    dbs = tuple(state / name for name in (
+        "zeus-world.db", "zeus-forecasts.db", "zeus_trades.db", "risk_state.db"
+    ))
+    for path in dbs:
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE risk_state (value TEXT)")
+        conn.execute("INSERT INTO risk_state VALUES ('before')")
+        conn.commit()
+        conn.close()
+    target = external / "settings-a.json"
+    target.write_text("{}\n", encoding="utf-8")
+    settings = config / "settings.json"
+    settings.symlink_to(target)
+    return root, dbs, settings
+
+
+def test_resume_rejects_replaced_database_and_same_schema_content(
+    tmp_path: Path,
+) -> None:
+    root, dbs, settings = _target_fixture(tmp_path)
+    journal = tmp_path / "cutover.progress.json"
+    identity = {"target_head": "a" * 40}
+    initial = migration.target_state_identity(root, dbs, settings)
+    migration._open_stage_journal(
+        journal, root, target_identity=identity, target_state=initial
+    )
+    replacement = tmp_path / "replacement.db"
+    conn = sqlite3.connect(replacement)
+    conn.execute("CREATE TABLE risk_state (value TEXT)")
+    conn.execute("INSERT INTO risk_state VALUES ('different-generation')")
+    conn.commit()
+    conn.close()
+    dbs[1].unlink()
+    replacement.replace(dbs[1])
+    changed = migration.target_state_identity(root, dbs, settings)
+    with pytest.raises(RuntimeError, match="target generation changed"):
+        migration._open_stage_journal(
+            journal, root, target_identity=identity, target_state=changed
+        )
+
+
+def test_resume_rejects_settings_symlink_retarget(tmp_path: Path) -> None:
+    root, dbs, settings = _target_fixture(tmp_path)
+    journal = tmp_path / "cutover.progress.json"
+    initial = migration.target_state_identity(root, dbs, settings)
+    migration._open_stage_journal(journal, root, target_state=initial)
+    second = tmp_path / "external" / "settings-b.json"
+    second.write_text("{}\n", encoding="utf-8")
+    settings.unlink()
+    settings.symlink_to(second)
+    with pytest.raises(RuntimeError, match="target generation changed"):
+        migration._open_stage_journal(
+            journal,
+            root,
+            target_state=migration.target_state_identity(root, dbs, settings),
+        )
+
+
+def test_completed_stage_revalidates_postcondition(tmp_path: Path) -> None:
+    journal = tmp_path / "cutover.progress.json"
+    root = tmp_path / "root"
+    root.mkdir()
+    progress = migration._open_stage_journal(journal, root)
+    migration._run_journaled_stage(journal, progress, "db", lambda: None)
+    with pytest.raises(RuntimeError, match="restored pre-cutover state"):
+        migration._run_journaled_stage(
+            journal,
+            progress,
+            "db",
+            lambda: pytest.fail("completed action must not rerun"),
+            postcondition=lambda: (_ for _ in ()).throw(
+                RuntimeError("restored pre-cutover state")
+            ),
+        )
+
+
+def test_resume_accepts_own_transactional_generation_after_journal_gap(
+    tmp_path: Path,
+) -> None:
+    root, dbs, settings = _target_fixture(tmp_path)
+    journal = tmp_path / "cutover.progress.json"
+    def state() -> dict[str, object]:
+        return migration.target_state_identity(root, dbs, settings)
+
+    progress = migration._open_stage_journal(journal, root, target_state=state())
+    generation = progress["migration_generation"]
+    stage = "mutated:zeus-world.db"
+
+    def commit_then_interrupt() -> None:
+        conn = sqlite3.connect(dbs[0], isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
+        migration.mark_cutover_generation(
+            conn, generation=generation, stage=stage
+        )
+        conn.execute("COMMIT")
+        conn.close()
+        raise RuntimeError("killed after DB commit before journal update")
+
+    with pytest.raises(RuntimeError, match="after DB commit"):
+        migration._run_journaled_stage(
+            journal,
+            progress,
+            stage,
+            commit_then_interrupt,
+            current_target_state=state,
+        )
+    resumed = migration._open_stage_journal(journal, root, target_state=state())
+    assert resumed["recovering_stage_commit"] == stage
+    assert migration._run_journaled_stage(
+        journal,
+        resumed,
+        stage,
+        lambda: "converged",
+        postcondition=lambda: None,
+        current_target_state=state,
+    ) == "converged"
+
+
+def test_runtime_json_recovery_rejects_unrelated_external_change(tmp_path: Path) -> None:
+    root, dbs, settings = _target_fixture(tmp_path)
+    local = root / ".local"
+    local.mkdir()
+    unrelated = local / "unrelated.json"
+    unrelated.write_text('{"value":1}\n', encoding="utf-8")
+    journal = tmp_path / "cutover.progress.json"
+
+    def state() -> dict[str, object]:
+        return migration.target_state_identity(root, dbs, settings)
+
+    progress = migration._open_stage_journal(journal, root, target_state=state())
+    with pytest.raises(RuntimeError, match="interrupted"):
+        migration._run_journaled_stage(
+            journal,
+            progress,
+            "runtime_json",
+            lambda: (_ for _ in ()).throw(RuntimeError("interrupted")),
+            current_target_state=state,
+            expected_recovery_state=lambda: migration.expected_runtime_json_hashes(root),
+        )
+    unrelated.write_text('{"value":2}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="target generation changed"):
+        migration._open_stage_journal(journal, root, target_state=state())
+
+
+def test_config_recovery_accepts_exact_clean_hash_but_rejects_later_edit(
+    tmp_path: Path,
+) -> None:
+    root, dbs, settings = _target_fixture(tmp_path)
+    settings.resolve().write_text(
+        json.dumps({migration.CONFIG_KEYS[0]: True, "keep": 1}) + "\n",
+        encoding="utf-8",
+    )
+    journal = tmp_path / "cutover.progress.json"
+
+    def state() -> dict[str, object]:
+        return migration.target_state_identity(root, dbs, settings)
+
+    progress = migration._open_stage_journal(journal, root, target_state=state())
+
+    def clean_then_interrupt() -> None:
+        migration.clean_config(settings)
+        raise RuntimeError("interrupted after config replace")
+
+    with pytest.raises(RuntimeError, match="after config replace"):
+        migration._run_journaled_stage(
+            journal,
+            progress,
+            "config",
+            clean_then_interrupt,
+            current_target_state=state,
+            expected_recovery_state=lambda: migration.expected_settings_identity(settings),
+        )
+    resumed = migration._open_stage_journal(journal, root, target_state=state())
+    assert resumed["recovering_stage_commit"] == "config"
+    settings.resolve().write_text('{"keep":2}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="target generation changed"):
+        migration._open_stage_journal(journal, root, target_state=state())
+
+
+def test_cutover_lease_blocks_runtime_writer_after_fence(tmp_path: Path) -> None:
+    from src.state.db_writer_lock import WriteClass, db_writer_lock
+
+    root = tmp_path / "root"
+    db = root / "state" / "zeus-world.db"
+    db.parent.mkdir(parents=True)
+    sqlite3.connect(db).close()
+    with migration.cutover_lease(root, (db,)):
+        with pytest.raises(BlockingIOError, match="cutover lease contended"):
+            with db_writer_lock(db, WriteClass.LIVE, blocking=False):
+                pytest.fail("writer entered during exclusive cutover")
+    with db_writer_lock(db, WriteClass.LIVE, blocking=False):
+        pass
+
+
+def test_open_canonical_connection_blocks_exclusive_cutover(tmp_path: Path) -> None:
+    from src.state.db_writer_lock import connect_with_cutover_lease
+
+    root = tmp_path / "root"
+    db = root / "state" / "zeus-world.db"
+    db.parent.mkdir(parents=True)
+    conn = connect_with_cutover_lease(
+        str(db), canonical_db_path=db, timeout=0.0
+    )
+    try:
+        with pytest.raises(RuntimeError, match="canonical writer lease is held"):
+            with migration.cutover_lease(root, (db,)):
+                pytest.fail("exclusive cutover entered while canonical connection lived")
+    finally:
+        conn.close()
+
+
+def test_legacy_risk_and_collateral_factories_obey_cutover(tmp_path: Path) -> None:
+    from src.state.collateral_ledger import _connect_owned_collateral_db
+    from src.state.db import get_connection
+
+    root = tmp_path / "root"
+    risk_db = root / "state" / "risk_state.db"
+    trade_db = root / "state" / "zeus_trades.db"
+    risk = get_connection(risk_db, write_class="live")
+    collateral = _connect_owned_collateral_db(trade_db)
+    try:
+        with pytest.raises(RuntimeError, match="canonical writer lease is held"):
+            with migration.cutover_lease(root, (risk_db, trade_db)):
+                pytest.fail("cutover entered over live legacy factories")
+    finally:
+        risk.close()
+        collateral.close()
+
+
+def test_position_attribution_schema_migrates_to_command_exact(tmp_path: Path) -> None:
+    path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE position_decision_attribution (
+            attribution_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            command_id TEXT,
+            decision_certificate_hash TEXT,
+            resolution TEXT NOT NULL,
+            resolution_reason TEXT,
+            source TEXT NOT NULL,
+            intent_kind TEXT,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            UNIQUE(position_id)
+        );
+        INSERT INTO position_decision_attribution VALUES
+          ('a1','p1','c1','h1','ATTRIBUTED',NULL,'LIVE_DECISION','ENTRY','now',1);
+        """
+    )
+    conn.commit()
+    assert migration.migrate_command_attribution_schema(conn)
+    conn.execute(
+        "INSERT INTO position_decision_attribution VALUES "
+        "('a2','p1','c2','h1','ATTRIBUTED',NULL,'LIVE_DECISION','EXIT','later',1)"
+    )
+    conn.commit()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_decision_attribution WHERE position_id='p1'"
+    ).fetchone()[0] == 2
+    conn.close()
 
 
 def test_target_release_identity_refuses_foreign_checkout(tmp_path: Path) -> None:

@@ -6,45 +6,8 @@ name: money-path-release-gate
 on:
   pull_request:
     branches: [live]
-    paths:
-      - "src/**"
-      - "scripts/check_single_live_semantics.py"
-      - "scripts/migrations/202607_single_live_semantics_cutover.py"
-      - "tests/test_single_live_semantics.py"
-      - "tests/test_single_live_semantics_migration.py"
-      - "tests/state/test_table_registry_coherence.py"
-      - "tests/test_money_path_lifecycle_replay.py"
-      - "tests/test_pre_existing_failure_registry.py"
-      - "tests/test_monitor_refresh_nowcast_wiring.py"
-      - "tests/test_strategy_profile_registry.py"
-      - "tests/test_executable_market_snapshot.py"
-      - "tests/test_market_scanner_negrisk.py"
-      - "tests/test_decision_seq_cross_table_no_collision.py"
-      - "tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py"
-      - "tests/state/test_schema_current_invariant.py"
-      - "architecture/script_manifest.yaml"
-      - "architecture/test_topology.yaml"
-      - "architecture/pre_existing_failure_registry.yaml"
-      - "architecture/db_table_ownership.yaml"
-      - "architecture/docs_registry.yaml"
-      - "architecture/money_path_objects.yaml"
-      - "architecture/source_rationale.yaml"
-      - ".github/instructions/**"
-      - ".github/workflows/money-path-release-gate.yml"
   push:
     branches: [live]
-    paths:
-      - "src/**"
-      - "scripts/check_single_live_semantics.py"
-      - "scripts/migrations/202607_single_live_semantics_cutover.py"
-      - "tests/test_single_live_semantics.py"
-      - "tests/test_single_live_semantics_migration.py"
-      - "tests/state/test_table_registry_coherence.py"
-      - "architecture/docs_registry.yaml"
-      - "architecture/money_path_objects.yaml"
-      - "architecture/source_rationale.yaml"
-      - ".github/instructions/**"
-      - ".github/workflows/money-path-release-gate.yml"
   workflow_dispatch:
 
 permissions:

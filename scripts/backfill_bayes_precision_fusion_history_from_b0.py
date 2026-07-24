@@ -17,8 +17,8 @@ reaches T2_BAYES instead of EQUAL_WEIGHT on the very next materialize cycle.
 PROVENANCE / SAFETY:
   * Writes ONLY raw_model_forecasts training-history rows
     (training_allowed=0) — NOT a posterior/readiness, order, or training-truth table.
-    It changes NO posterior until
-    replacement_0_1_bayes_precision_fusion_enabled is flipped AND the BayesPrecisionFusionHistoryProvider reads it.
+    It changes no posterior; only BayesPrecisionFusionHistoryProvider may consume
+    these rows as causally available training history.
   * --db is REQUIRED and never defaults to the live path: the operator points it at
     the target zeus-forecasts.db explicitly. NEVER run against a DB you must not write.
   * No-leak is enforced at SERVE time by BayesPrecisionFusionHistoryProvider (target_date < decision_date);

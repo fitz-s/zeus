@@ -1051,7 +1051,11 @@ def _persist_market_events_to_db(
     resolved_path = Path(db_path) if db_path is not None else ZEUS_FORECASTS_DB_PATH
     inserted = 0
     try:
-        conn = sqlite3.connect(str(resolved_path), timeout=30)
+        from src.state.db_writer_lock import connect_with_cutover_lease
+
+        conn = connect_with_cutover_lease(
+            str(resolved_path), canonical_db_path=resolved_path, timeout=30
+        )
         try:
             for event in results:
                 market_slug = event.get("slug", "")

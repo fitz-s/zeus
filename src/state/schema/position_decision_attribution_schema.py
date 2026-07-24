@@ -9,13 +9,12 @@
 #   insert_command), never inferred after the fact.
 """position_decision_attribution schema owner — the permanent decision-certificate link.
 
-One row per POSITION, written at ENTRY command creation (the only command kind that
-carries a resolvable ActionableTradeCertificate hash; EXIT/other commands never write
-a row here — attribution is a property of the position's entry decision).
+One row per COMMAND. ENTRY records its actionable certificate; later commands reuse
+that exact position-entry certificate so every nonterminal venue action remains
+anchored to an extant decision proof.
 
-Append-only law: UNIQUE(position_id) + the writer uses
-``ON CONFLICT(position_id) DO NOTHING`` — an existing row is NEVER overwritten. A
-position gets exactly one attribution fact, forever.
+Append-only law: UNIQUE(command_id, position_id); a command's attribution is never
+overwritten by a later call.
 
 Two distinct resolutions, both explicit (never a silent NULL guess):
   ATTRIBUTED      — decision_certificate_hash is the exact hash resolved either at
@@ -50,9 +49,10 @@ CREATE TABLE IF NOT EXISTS position_decision_attribution (
     intent_kind TEXT,
     created_at TEXT NOT NULL,
     schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
-    UNIQUE(position_id),
+    UNIQUE(command_id, position_id),
     CHECK (
-        (resolution = 'ATTRIBUTED' AND decision_certificate_hash IS NOT NULL)
+        (resolution = 'ATTRIBUTED' AND command_id IS NOT NULL
+         AND decision_certificate_hash IS NOT NULL)
         OR
         (resolution = 'UNATTRIBUTABLE' AND decision_certificate_hash IS NULL)
     )

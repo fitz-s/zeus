@@ -716,9 +716,14 @@ class TestPositionDecisionAttributionAppendHook:
         assert row[4] == "LIVE_DECISION"
         assert row[5] == "ENTRY"
 
-    def test_hash_omitted_writes_no_row(self, conn):
-        """EXIT (and any command without a resolvable cert) writes no attribution
-        row — attribution is a property of the position's entry decision."""
+    def test_later_command_inherits_position_entry_certificate(self, conn):
+        _insert(
+            conn,
+            command_id="cmd-attr-2-entry",
+            position_id="pos-attr-2",
+            idempotency_key="idem-attr-2-entry",
+            decision_certificate_hash="cert-entry",
+        )
         _insert(
             conn,
             command_id="cmd-attr-2",
@@ -727,12 +732,17 @@ class TestPositionDecisionAttributionAppendHook:
             intent_kind="EXIT",
             decision_certificate_hash=None,
         )
-        assert _attribution_row(conn, "pos-attr-2") is None
+        rows = conn.execute(
+            "SELECT command_id, decision_certificate_hash FROM "
+            "position_decision_attribution WHERE position_id='pos-attr-2' "
+            "ORDER BY command_id"
+        ).fetchall()
+        assert [(row[0], row[1]) for row in rows] == [
+            ("cmd-attr-2", "cert-entry"),
+            ("cmd-attr-2-entry", "cert-entry"),
+        ]
 
-    def test_second_command_never_overwrites_existing_attribution(self, conn):
-        """Append-only law: UNIQUE(position_id) + ON CONFLICT DO NOTHING — a second
-        insert_command call for the SAME position (e.g. a re-decision) never
-        overwrites the first-written certificate hash."""
+    def test_distinct_commands_keep_distinct_exact_attributions(self, conn):
         _insert(
             conn,
             command_id="cmd-attr-3a",
@@ -751,8 +761,27 @@ class TestPositionDecisionAttributionAppendHook:
             "SELECT decision_certificate_hash FROM position_decision_attribution "
             "WHERE position_id = 'pos-attr-3'"
         ).fetchall()
-        assert len(rows) == 1
-        assert rows[0][0] == "cert-first"
+        assert [row[0] for row in rows] == ["cert-first", "cert-second"]
+
+    def test_live_exit_without_certificate_is_journaled_unattributable(
+        self, conn, monkeypatch
+    ):
+        monkeypatch.setenv("ZEUS_MODE", "live")
+        _insert(
+            conn,
+            command_id="cmd-live-orphan-exit",
+            position_id="pos-live-orphan-exit",
+            idempotency_key="idem-live-orphan-exit",
+            intent_kind="EXIT",
+        )
+        row = conn.execute(
+            "SELECT resolution, resolution_reason FROM position_decision_attribution "
+            "WHERE command_id='cmd-live-orphan-exit'"
+        ).fetchone()
+        assert tuple(row) == (
+            "UNATTRIBUTABLE",
+            "legacy_position_certificate_missing_or_ambiguous",
+        )
 
     def test_rollback_on_mid_transaction_failure_also_rolls_back_attribution(self, conn):
         """The attribution write shares the command's SAVEPOINT — if the command

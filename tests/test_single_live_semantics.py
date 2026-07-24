@@ -40,6 +40,64 @@ def test_gate_scans_selected_active_scripts_and_current_plan(tmp_path: Path) -> 
     assert len({item.split(":", 1)[0] for item in violations(tmp_path)}) == 4
 
 
+def test_gate_scans_arbitrary_executable_script(tmp_path: Path) -> None:
+    script = tmp_path / "scripts" / "new_runtime_tool.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("mode = 'shadow_veto_only'\n", encoding="utf-8")
+    assert any(item.startswith("scripts/new_runtime_tool.py:") for item in violations(tmp_path))
+
+
+def test_gate_scans_history_named_live_module(tmp_path: Path) -> None:
+    source = tmp_path / "src" / "history" / "bad.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("mode = 'shadow_veto_only'\n", encoding="utf-8")
+    assert any(item.startswith("src/history/bad.py:") for item in violations(tmp_path))
+
+
+def test_gate_scans_live_reachable_module_under_exact_exclusion(tmp_path: Path) -> None:
+    main = tmp_path / "src" / "main.py"
+    archived = tmp_path / "docs" / "archive" / "alternate.py"
+    main.parent.mkdir(parents=True)
+    archived.parent.mkdir(parents=True)
+    main.write_text("from docs.archive import alternate\n", encoding="utf-8")
+    archived.write_text("mode = 'shadow_veto_only'\n", encoding="utf-8")
+    assert any(item.startswith("docs/archive/alternate.py:") for item in violations(tmp_path))
+
+
+def test_gate_scans_dynamically_importable_python_under_exclusion(tmp_path: Path) -> None:
+    loader = tmp_path / "src" / "loader.py"
+    alternate = tmp_path / "docs" / "rebuild" / "alternate.py"
+    loader.parent.mkdir(parents=True)
+    alternate.parent.mkdir(parents=True)
+    loader.write_text(
+        "import importlib\nimportlib.import_module('docs.rebuild.alternate')\n",
+        encoding="utf-8",
+    )
+    alternate.write_text("mode = 'shadow_veto_only'\n", encoding="utf-8")
+    assert any(
+        item.startswith("docs/rebuild/alternate.py:") for item in violations(tmp_path)
+    )
+
+
+def test_gate_scans_new_config_deploy_and_workflow_surfaces(tmp_path: Path) -> None:
+    for relative in (
+        "config/new-runtime.toml",
+        "deploy/new-runtime.sh",
+        ".github/workflows/new-runtime.yml",
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("mode = 'shadow_veto_only'\n", encoding="utf-8")
+    assert len({item.split(":", 1)[0] for item in violations(tmp_path)}) == 3
+
+
+def test_ci_trigger_surface_covers_scanner_surface() -> None:
+    workflow = Path(".github/workflows/money-path-release-gate.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "paths:" not in workflow
+
+
 def test_gate_rejects_resurrected_inactive_lane(tmp_path: Path) -> None:
     source = tmp_path / "src"
     source.mkdir()
@@ -78,4 +136,11 @@ def test_gate_ignores_historical_and_migration_preview_surfaces(tmp_path: Path) 
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("mode = '" + "sha" + "dow'\n", encoding="utf-8")
+    assert violations(tmp_path) == []
+
+
+def test_gate_allows_legitimate_audit_and_replay_concepts(tmp_path: Path) -> None:
+    script = tmp_path / "scripts" / "audit_replay.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("mode = 'audit_only'\n# replay evidence\n", encoding="utf-8")
     assert violations(tmp_path) == []
