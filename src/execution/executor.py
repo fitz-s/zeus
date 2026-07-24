@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
+from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from src.config import get_mode, settings
@@ -4151,6 +4152,38 @@ class PreSubmitIdentityBindingError(RuntimeError):
     """Raised when a pre-submit envelope cannot bind canonical live identity."""
 
 
+def _signed_identity_persistence_connection(
+    conn: sqlite3.Connection,
+) -> tuple[sqlite3.Connection, bool]:
+    """Return a fresh file-backed connection for the final pre-POST write.
+
+    Reactor connections are long-lived and temporarily change connection-local
+    SQLite handlers.  Reusing one here can inherit a stale WAL snapshot or a
+    shortened busy handler, turning an executable order into an immediate
+    ``database is locked`` rejection.  A file-backed command is already committed
+    before this boundary, so a fresh connection sees the same canonical row while
+    starting with neither condition.  In-memory and test-double connections stay
+    on the caller connection because they have no separately addressable DB.
+    """
+
+    if not isinstance(conn, sqlite3.Connection) or conn.in_transaction:
+        return conn, False
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+        path = next(
+            (str(row[2] or "") for row in rows if str(row[1] or "") == "main"),
+            "",
+        )
+    except (IndexError, sqlite3.Error):
+        return conn, False
+    if not path:
+        return conn, False
+
+    from src.state.db import _connect
+
+    return _connect(Path(path)), True
+
+
 def _persist_final_submission_envelope_payload(
     conn: sqlite3.Connection,
     result,
@@ -4216,18 +4249,19 @@ def _persist_signed_submission_identity_before_post(
         _issue_signed_identity_persistence_receipt,
     )
 
+    persist_conn, close_persist_conn = _signed_identity_persistence_connection(conn)
     receipt = None
 
     def _persist_once() -> None:
         nonlocal receipt
         envelope_id = bind_signed_submission_identity(
-            conn,
+            persist_conn,
             command_id=command_id,
             envelope=envelope,
         )
-        conn.commit()
+        persist_conn.commit()
         receipt = _issue_signed_identity_persistence_receipt(
-            conn,
+            persist_conn,
             command_id=command_id,
             envelope_id=envelope_id,
         )
@@ -4236,18 +4270,21 @@ def _persist_signed_submission_identity_before_post(
         # Reactor preparation temporarily shortens this connection-wide handler.
         # Restore the canonical live write budget at the final pre-POST boundary;
         # otherwise every retry inherits the leaked short timeout and spins.
-        _apply_busy_timeout(conn)
+        _apply_busy_timeout(persist_conn)
         # This is still strictly pre-POST. Retrying only the local durable bind
         # cannot duplicate a venue order, while treating a transient writer lock
         # as a terminal submit rejection drops otherwise executable orders.
         _retry_persist_on_db_lock(
-            conn,
+            persist_conn,
             _persist_once,
             what="signed_identity_before_post",
         )
     except BaseException:
-        conn.rollback()
+        persist_conn.rollback()
         raise
+    finally:
+        if close_persist_conn:
+            persist_conn.close()
     if receipt is None:
         raise RuntimeError("signed identity persistence returned no receipt")
     return receipt

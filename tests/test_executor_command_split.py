@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-23; last_reused=2026-07-24
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-07-24
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
@@ -138,6 +138,51 @@ def test_pre_post_signed_identity_helper_retries_transient_lock_before_post(monk
     assert calls == ["busy_timeout", "rollback", "commit"]
     assert receipt.command_id == "command-1"
     assert receipt.order_id == "0xorder"
+
+
+def test_pre_post_signed_identity_uses_fresh_file_connection(monkeypatch, tmp_path):
+    import src.execution.executor as executor
+    import src.state.venue_command_repo as command_repo
+    import src.venue.polymarket_v2_adapter as adapter
+
+    outer = sqlite3.connect(tmp_path / "trades.db")
+    outer.execute("CREATE TABLE command_marker (command_id TEXT PRIMARY KEY)")
+    outer.execute("INSERT INTO command_marker VALUES ('command-1')")
+    outer.commit()
+    outer.execute("PRAGMA busy_timeout = 1")
+    seen = {}
+
+    def _bind(conn, *, command_id, envelope):
+        seen["conn"] = conn
+        seen["busy_timeout_ms"] = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert conn.execute(
+            "SELECT 1 FROM command_marker WHERE command_id = ?", (command_id,)
+        ).fetchone()[0] == 1
+        return "signed-envelope-id"
+
+    sentinel = object()
+    monkeypatch.setattr(command_repo, "bind_signed_submission_identity", _bind)
+    monkeypatch.setattr(
+        adapter,
+        "_issue_signed_identity_persistence_receipt",
+        lambda conn, **_kwargs: sentinel,
+    )
+
+    receipt = executor._persist_signed_submission_identity_before_post(
+        outer,
+        "signed-envelope",
+        command_id="command-1",
+    )
+
+    assert receipt is sentinel
+    assert seen["conn"] is not outer
+    from src.state.db import _db_busy_timeout_ms
+
+    assert seen["busy_timeout_ms"] == _db_busy_timeout_ms()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        seen["conn"].execute("SELECT 1")
+    assert outer.execute("PRAGMA busy_timeout").fetchone()[0] == 1
+    outer.close()
 
 
 def test_pre_post_signed_identity_helper_refuses_post_after_persistent_lock(monkeypatch):
