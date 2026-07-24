@@ -12280,6 +12280,62 @@ def test_day0_separated_reversal_monetizes_expected_value_before_ucb_strands_leg
     assert "exit_fee_applied_to_sell_value" in decision.applied_validations
 
 
+def test_day0_separated_zero_q_sells_before_static_edge_threshold_strands_leg(
+    monkeypatch,
+):
+    """A recoverable bid strictly dominates a zero-value held leg.
+
+    This is the Guangzhou 36C NO shape: current held q and its full current
+    sample band were zero while the executable bid remained 0.08. The legacy
+    edge threshold treated the smaller negative edge as a reason to hold,
+    making exit less likely as the bid approached the legal venue floor.
+    """
+
+    pos = _make_position(
+        direction="buy_no",
+        p_posterior=0.999999999,
+        entry_price=0.34,
+        entry_ci_width=0.14,
+        shares=5.2,
+        cost_basis_usd=1.768,
+    )
+    monkeypatch.setattr(
+        "src.state.portfolio.hold_value_exit_costs_enabled",
+        lambda: False,
+    )
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.0,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.08,
+            current_market_price_is_fresh=True,
+            best_bid=0.08,
+            best_ask=0.11,
+            hours_to_settlement=10.0,
+            position_state="day0_window",
+            day0_active=True,
+            day0_zero_probability_exit_authority=False,
+            day0_exit_authority_status="mature",
+            day0_exit_authority_reason=(
+                "day0_high_extreme_mature:"
+                "daypart=post_peak,post_peak_confidence=0.99"
+            ),
+            entry_posterior=0.999999999,
+            entry_ci=(0.93, 1.0),
+            current_ci=(0.0, 0.0),
+        )
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "CI_SEPARATED_REVERSAL"
+    assert "sell_value_precedes_edge_threshold" in decision.applied_validations
+    assert (
+        "ci_separated_edge_within_threshold_hold"
+        not in decision.applied_validations
+    )
+
+
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
 def test_day0_low_price_high_expected_value_remains_a_hold(monkeypatch, direction):
     """Low price alone cannot liquidate a fresh high-value held claim."""

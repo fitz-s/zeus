@@ -61,7 +61,7 @@ def mem_db():
             market_id TEXT,
             city TEXT,
             bin_label TEXT,
-            direction TEXT NOT NULL DEFAULT 'buy_yes',
+            direction TEXT DEFAULT 'buy_yes',
             shares REAL DEFAULT 0,
             chain_shares REAL DEFAULT 0,
             cost_basis_usd REAL DEFAULT 0,
@@ -196,6 +196,97 @@ def test_pending_exit_does_not_block_different_token(mem_db):
     """Gate is token-specific: pending_exit on TOKEN_X must not block OTHER_TOKEN."""
     _insert_position(mem_db, "0a0e3b72-46e", "pending_exit", TOKEN_X)
     assert has_same_token_open_db(mem_db, OTHER_TOKEN) is False
+
+
+def test_opposite_outcome_token_is_not_the_same_held_token(mem_db):
+    """A held NO leg cannot absorb or block a distinct YES sibling holding."""
+    _insert_position(
+        mem_db,
+        "held-no-position",
+        "day0_window",
+        token_id=TOKEN_X,
+        direction="buy_no",
+        no_token_id=TOKEN_X_NO,
+        shares=5.2,
+        cost_basis_usd=1.768,
+    )
+
+    assert has_same_token_open_db(mem_db, TOKEN_X_NO) is True
+    assert has_same_token_open_db(mem_db, TOKEN_X) is False
+    assert _layer7_dedup_fires(
+        mem_db,
+        PortfolioState(),
+        TOKEN_X,
+    ) is False
+
+    admission = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="new-yes-position",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert admission["allowed"] is True
+    assert admission["reason"] == "allowed"
+    assert admission["increment_position_id"] == ""
+
+
+def test_executor_fails_closed_on_ambiguous_selected_token_identity(mem_db):
+    _insert_position(
+        mem_db,
+        "ambiguous-position",
+        "active",
+        token_id=TOKEN_X,
+        direction="unknown",
+        no_token_id=TOKEN_X_NO,
+        shares=5.2,
+        cost_basis_usd=1.768,
+    )
+
+    admission = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="new-position",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert admission["allowed"] is False
+    assert admission["reason"] == "position_selected_token_identity_invalid"
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
+
+    mem_db.execute(
+        """UPDATE position_current
+              SET direction='buy_no', no_token_id=NULL
+            WHERE position_id='ambiguous-position'"""
+    )
+    mem_db.commit()
+
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
+    missing_held_token = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="new-position",
+        allow_reconciled_position_increment=True,
+    )
+    assert missing_held_token["allowed"] is False
+    assert (
+        missing_held_token["reason"]
+        == "position_selected_token_identity_invalid"
+    )
+
+    mem_db.execute(
+        """UPDATE position_current
+              SET direction=NULL, no_token_id=?
+            WHERE position_id='ambiguous-position'""",
+        (TOKEN_X_NO,),
+    )
+    mem_db.commit()
+
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+    assert has_same_token_open_db(mem_db, TOKEN_X_NO) is True
+    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
 
 
 def test_economically_closed_allows_reentry(mem_db):

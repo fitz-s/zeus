@@ -2298,7 +2298,8 @@ def _entry_duplicate_same_token_component(
         phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_NON_OPEN_PHASES)
         rows = conn.execute(
             f"""
-            SELECT position_id, phase, order_id, shares, cost_basis_usd
+            SELECT position_id, phase, order_id, shares, cost_basis_usd,
+                   direction, token_id, no_token_id
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
               AND position_id != ?
@@ -2322,9 +2323,51 @@ def _entry_duplicate_same_token_component(
             position_cost = (
                 row["cost_basis_usd"] if isinstance(row, sqlite3.Row) else row[4]
             )
+            direction = str(
+                (
+                    row["direction"]
+                    if isinstance(row, sqlite3.Row)
+                    else row[5]
+                )
+                or ""
+            ).strip().lower()
+            yes_token = str(
+                (
+                    row["token_id"]
+                    if isinstance(row, sqlite3.Row)
+                    else row[6]
+                )
+                or ""
+            ).strip()
+            no_token = str(
+                (
+                    row["no_token_id"]
+                    if isinstance(row, sqlite3.Row)
+                    else row[7]
+                )
+                or ""
+            ).strip()
             position_order_id = str(
                 row["order_id"] if isinstance(row, sqlite3.Row) else row[2]
             )
+            if (
+                direction not in {"buy_yes", "buy_no"}
+                or not yes_token
+                or not no_token
+                or yes_token == no_token
+            ):
+                return {
+                    "component": "entry_duplicate_same_token",
+                    "allowed": False,
+                    "reason": "position_selected_token_identity_invalid",
+                    "existing_position_id": position_id,
+                    "existing_phase": phase,
+                }
+            selected_token = no_token if direction == "buy_no" else yes_token
+            if selected_token != token:
+                # The candidate is the opposite outcome token. Sibling holdings
+                # are distinct capital legs and must never share a position id.
+                continue
             if (
                 allow_reconciled_position_increment
                 and phase in _ENTRY_INCREMENTABLE_POSITION_PHASES

@@ -1467,29 +1467,11 @@ class Position:
                                 applied_validations=list(self.applied_validations),
                                 trigger="DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
                             )
-                if evidence_edge >= edge_threshold:
-                    self.neg_edge_count = 0
-                    if forward_edge > 0.0:
-                        hold_reason = "CI_SEPARATED_POSITIVE_EDGE_HOLD"
-                        applied.append("ci_separated_positive_edge_hold")
-                    else:
-                        hold_reason = "CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD"
-                        applied.append("ci_separated_edge_within_threshold_hold")
-                    self.applied_validations = _dedupe_validations(applied)
-                    return ExitDecision(
-                        False,
-                        hold_reason,
-                        selected_method=self.selected_method or self.entry_method,
-                        applied_validations=list(self.applied_validations),
-                        trigger=hold_reason,
-                    )
-                # CI separation is already the confidence gate.  For Day0, the
-                # current observation plus remaining-window model defines the
-                # expected terminal payoff; its UCB is an uncertainty envelope,
-                # not an alternative expectation.  Substituting that optimistic
-                # tail here can strand a reversed leg until its bid is
-                # unexecutable.  Preserve the UCB comparison for non-Day0 cuts,
-                # whose posterior has no Day0 observation authority.
+                # CI separation is already the confidence gate. Capital must
+                # compare the executable sale with terminal hold value before
+                # the legacy edge-magnitude threshold: when q and bid collapse
+                # together, that threshold otherwise becomes less likely to
+                # fire precisely as the recoverable sale value disappears.
                 hold_probability = (
                     current_held
                     if exit_context.day0_active
@@ -1508,6 +1490,38 @@ class Position:
                     portfolio_positions=exit_context.portfolio_positions,
                     bankroll=exit_context.bankroll,
                 )
+                if sell_value_dominates is True:
+                    self.neg_edge_count = 0
+                    applied.append("ci_separated_reversal")
+                    applied.append("sell_value_precedes_edge_threshold")
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        True,
+                        (
+                            "CI_SEPARATED_REVERSAL "
+                            f"(entry={float(exit_context.entry_posterior):.4f}, "
+                            f"current={current_held:.4f})"
+                        ),
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                        trigger="CI_SEPARATED_REVERSAL",
+                    )
+                if evidence_edge >= edge_threshold:
+                    self.neg_edge_count = 0
+                    if forward_edge > 0.0:
+                        hold_reason = "CI_SEPARATED_POSITIVE_EDGE_HOLD"
+                        applied.append("ci_separated_positive_edge_hold")
+                    else:
+                        hold_reason = "CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD"
+                        applied.append("ci_separated_edge_within_threshold_hold")
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        False,
+                        hold_reason,
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                        trigger=hold_reason,
+                    )
                 if sell_value_dominates is False:
                     self.neg_edge_count = 0
                     applied.append("ci_separated_hold_value_dominates")
@@ -1530,17 +1544,6 @@ class Position:
                         applied_validations=list(self.applied_validations),
                         trigger="CI_SEPARATED_EXIT_CONTEXT_INCOMPLETE_HOLD",
                     )
-                # Disjoint AND moved against the held side → genuine evidence reversal → EXIT.
-                self.neg_edge_count = 0
-                applied.append("ci_separated_reversal")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    True,
-                    f"CI_SEPARATED_REVERSAL (entry={float(exit_context.entry_posterior):.4f}, current={current_held:.4f})",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger="CI_SEPARATED_REVERSAL",
-                )
             # The interval may overlap entry, but HOLD still competes with an
             # executable sale on this same current cut. Day0 must retain its
             # observation/consecutive-confirmation gate and known exit trigger
@@ -3819,14 +3822,34 @@ def has_same_token_open(state: PortfolioState, token_id: str) -> bool:
     non-terminal state. Keys by token_id (outcome-specific, direction-specific) not
     city+bin_label text. Used when conn is None (paper mode, test fixtures).
 
-    Checks BOTH token_id (YES side) and no_token_id (NO side) so buy_no positions
-    are not invisible to the dedup gate.
+    Selects the held token from the position direction. The sibling outcome is
+    a distinct admissible capital leg, not duplicate exposure.
     """
-    return any(
-        (p.token_id == token_id or p.no_token_id == token_id)
-        and _is_runtime_open_position(p)
-        for p in state.positions
-    )
+    for position in state.positions:
+        if not _is_runtime_open_position(position):
+            continue
+        direction = str(getattr(position, "direction", "") or "").strip().lower()
+        yes_token = str(getattr(position, "token_id", "") or "").strip()
+        no_token = str(getattr(position, "no_token_id", "") or "").strip()
+        if (
+            token_id in {yes_token, no_token}
+            and (
+                direction not in {"buy_yes", "buy_no"}
+                or not yes_token
+                or not no_token
+                or yes_token == no_token
+            )
+        ):
+            return True
+        if direction == "buy_yes":
+            selected_token = yes_token
+        elif direction == "buy_no":
+            selected_token = no_token
+        else:
+            continue
+        if selected_token == token_id:
+            return True
+    return False
 
 
 # Non-open runtime phases used by the direct DB dedup query. This is intentionally
@@ -3841,8 +3864,9 @@ def has_same_token_open_db(conn, token_id: str) -> bool:
       phantom_not_on_chain, and any future open state.
     Non-open (excluded): voided, economically_closed, settled, admin_closed.
 
-    Checks BOTH token_id (YES side) and no_token_id (NO side) columns so buy_no
-    positions are not invisible to the dedup gate.
+    Selects the held outcome token from ``direction``. A valid opposite-token
+    sibling does not block; a malformed direction that names the candidate in
+    either token column fails closed.
 
     Uses a parameterized NOT IN — placeholders built from the fixed-length
     _NON_OPEN_PHASES tuple (internal constant, not user input). This f-string
@@ -3872,14 +3896,34 @@ def has_same_token_open_db(conn, token_id: str) -> bool:
     params: list[object] = [token_id, token_id, *_NON_OPEN_PHASES]
     if positive_chain_clause:
         params.extend([_POSITIVE_CHAIN_EXPOSURE_EPS, *chain_state_values])
-    row = conn.execute(
-        f"""SELECT 1 FROM position_current
+    rows = conn.execute(
+        f"""SELECT direction, token_id, no_token_id
+            FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
             AND (phase NOT IN ({placeholders}){positive_chain_clause})
-            LIMIT 1""",
+            """,
         tuple(params),
-    ).fetchone()
-    return row is not None
+    ).fetchall()
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            direction = str(row["direction"] or "").strip().lower()
+            yes_token = str(row["token_id"] or "").strip()
+            no_token = str(row["no_token_id"] or "").strip()
+        else:
+            direction = str(row[0] or "").strip().lower()
+            yes_token = str(row[1] or "").strip()
+            no_token = str(row[2] or "").strip()
+        if (
+            direction not in {"buy_yes", "buy_no"}
+            or not yes_token
+            or not no_token
+            or yes_token == no_token
+        ):
+            return True
+        selected_token = no_token if direction == "buy_no" else yes_token
+        if selected_token == token_id:
+            return True
+    return False
 
 
 def has_inflight_exit_for_token(conn, token_id: str) -> bool:

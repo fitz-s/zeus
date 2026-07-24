@@ -128,6 +128,68 @@ Restore truthful live entry admission after the global auction reached a real wi
   their existing direct paths; no new local EXIT command is created by the
   handoff.
 
+## Slice B70 -- Preserve token-typed holdings and sell dominated live legs
+
+- Current proof: Guangzhou position `02a8db2c-c2e` first filled `5.2` NO
+  shares at `0.34`. A later certified YES BUY for `6.5` shares at `0.88`
+  reused that NO position id because the executor's same-token query matched
+  either token column of the binary market. The projection now says
+  `direction=buy_no`, `token_id=YES`, `shares=11.7`, which is not one
+  executable holding. Separately, held NO q became `0` while its executable
+  bid remained `0.08`; CI separation nevertheless returned
+  `CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD`, and the same static threshold
+  stops proposing an exit as the recoverable bid falls toward the venue floor.
+- First-principles invariant: a position is one held outcome token, not a
+  condition-level netting bucket. Sibling outcome BUYs are admissible only as
+  distinct token-typed holdings and are compared together through the exact
+  portfolio payoff endowment. Once current CI has separated against a held
+  leg, immediate executable net sale value and terminal hold value are the
+  capital alternatives; a static edge threshold cannot veto a strictly
+  dominant sale merely because the bid has already fallen.
+- Minimal repair: resolve increment identity from the position's selected
+  held token (`direction=buy_yes -> token_id`, `direction=buy_no ->
+  no_token_id`) and require exact equality with the candidate token before a
+  command may reuse a position id. In the separated-reversal lane, evaluate
+  current-cut sell-versus-hold value before the legacy edge threshold; retain
+  CI separation, probability/book freshness, consecutive Day0 confirmation
+  where applicable, global-auction ownership, maturity authority, exact
+  inventory, and the inclusive live `[0.05, 0.95]` venue band.
+- Existing mixed holdings: repair only through authenticated command/trade
+  facts and append-first canonical events with deterministic identities.
+  Never rewrite or split a row manually, infer ownership from a projection,
+  or issue an operator order. This part may land separately if its
+  truth-path proof is broader than the preventive hot-fix.
+- Files authorized for the preventive hot-fix:
+  `src/execution/executor.py`, `src/engine/evaluator.py`,
+  `src/state/portfolio.py`,
+  `tests/test_dedup_gate_token.py`, `tests/test_live_safety_invariants.py`,
+  this packet, and required existing registry rows only.
+- Forbidden: condition-level one-position veto, local statistical SELL
+  bypass, stop-loss price heuristics, stale q/book acceptance, lowering the
+  legal venue floor, selling more than exact token inventory, changing
+  lifecycle strings, synthetic fills, manual SQL, canonical DB copies, or
+  forced venue actions.
+- Acceptance: an opposite-token sibling BUY receives a distinct position id;
+  a genuine same-token certified increment still reuses its exact reconciled
+  position; ambiguous/malformed direction-token rows fail closed. For a
+  separated current held distribution whose sale value strictly exceeds hold
+  value, the evaluator proposes a statistical exit even when the old edge
+  threshold would hold; equal/inferior sale value still holds. Downstream
+  global authority and executable-price gates remain unchanged. Focused
+  tests, planning lock, compilation, registry checks, and `git diff --check`
+  must pass before hot-fix cherry-pick and exact-SHA live deployment.
+- Pre-deploy verification: token-dedup plus live-safety coverage passes
+  `329 passed, 1 xpassed`; compilation, planning lock, source-rationale delta,
+  freshness/map checks, and `git diff --check` pass. A wider evaluator/hold
+  batch passes `80` tests and reproduces three failures identically on the
+  unmodified live tree (two retired `mx2t6/mn2t6` data-version expectations
+  and one missing isolated forecast-DB fixture). Independent review found and
+  closed malformed NULL/missing held-token fail-open cases. A separate
+  authority review confirmed that zero-probability direct authority and a
+  mature global statistical proposal are distinct: this slice creates no
+  local SELL actuator and preserves full predictive samples, maturity,
+  portfolio, book, inventory, and venue-band gates.
+
 ## Slice B4 -- Bounded live working-set reads
 
 - Current runtime proof: the reactor run started at `18:46:50Z`, completed `pending_prune` at `18:46:57Z`, and then emitted no `forecast_snapshot_build` completion for more than ten minutes. That stage spans `_edli_pending_entity_keys` plus the forecast builder, so the log anchors alone do not isolate one call. The pending-key query had no SQLite progress deadline and its plan allowed an unbounded status scan, per-row event PK lookup, and temporary DISTINCT tree. `sqlite_stat1` was stale (2,520,044 estimated rows); a later exact read found 10,801,165 processing rows but only 1,018 pending and 12 processing. Hot read-only timing was 179ms for the old query and 94ms for the bounded query; this is a structural I/O amplifier, not proven as the sole ten-minute root. The separately budgeted forecast builder was 52ms hot after recovery.

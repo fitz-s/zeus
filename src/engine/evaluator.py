@@ -3326,7 +3326,8 @@ def _pending_entry_terminal_no_fill_cleared(conn, row) -> bool:
 def _has_same_token_blocking_open_db(conn, token_id: str) -> bool:
     phase_placeholders = ",".join("?" for _ in _ENTRY_DEDUP_NON_OPEN_PHASES)
     rows = conn.execute(
-        f"""SELECT position_id, phase, order_id, shares, cost_basis_usd
+        f"""SELECT position_id, phase, order_id, shares, cost_basis_usd,
+                   direction, token_id, no_token_id
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
             AND phase NOT IN ({phase_placeholders})""",
@@ -3335,7 +3336,24 @@ def _has_same_token_blocking_open_db(conn, token_id: str) -> bool:
     for row in rows:
         if _pending_entry_terminal_no_fill_cleared(conn, row):
             continue
-        return True
+        if hasattr(row, "keys"):
+            direction = str(row["direction"] or "").strip().lower()
+            yes_token = str(row["token_id"] or "").strip()
+            no_token = str(row["no_token_id"] or "").strip()
+        else:
+            direction = str(row[5] or "").strip().lower()
+            yes_token = str(row[6] or "").strip()
+            no_token = str(row[7] or "").strip()
+        if (
+            direction not in {"buy_yes", "buy_no"}
+            or not yes_token
+            or not no_token
+            or yes_token == no_token
+        ):
+            return True
+        selected_token = no_token if direction == "buy_no" else yes_token
+        if selected_token == token_id:
+            return True
     return False
 
 
