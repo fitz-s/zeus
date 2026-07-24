@@ -116,6 +116,28 @@ def test_gate_rejects_literal_split_dormant_token(tmp_path: Path) -> None:
     assert any(item.startswith("src/bad.py:") for item in violations(tmp_path))
 
 
+def test_gate_rejects_literal_fstring_dormant_token(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "bad.py").write_text(
+        "mode = f\"entry_forecast_{'rollout'}\"\n",
+        encoding="utf-8",
+    )
+    assert any(item.startswith("src/bad.py:") for item in violations(tmp_path))
+
+
+def test_gate_rejects_bound_literal_dormant_token(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "bad.py").write_text(
+        "prefix = 'entry_forecast_'\n"
+        "suffix = 'rollout'\n"
+        "mode = prefix + suffix\n",
+        encoding="utf-8",
+    )
+    assert any(item.startswith("src/bad.py:") for item in violations(tmp_path))
+
+
 def test_cutover_exemption_rejects_arbitrary_retired_assignment(tmp_path: Path) -> None:
     script = tmp_path / "scripts" / "migrations" / "202607_single_live_semantics_cutover.py"
     script.parent.mkdir(parents=True)
@@ -169,6 +191,16 @@ def test_gate_rejects_extended_alternate_concept_variants(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     assert violations(tmp_path)
+
+
+def test_gate_rejects_persisted_parallel_freshness_authority(tmp_path: Path) -> None:
+    source = tmp_path / "src" / "data"
+    source.mkdir(parents=True)
+    (source / "bad.py").write_text(
+        "table = 'source_time_' + 'frontier'\n",
+        encoding="utf-8",
+    )
+    assert any(item.startswith("src/data/bad.py:") for item in violations(tmp_path))
 
 
 def test_gate_ignores_historical_and_migration_preview_surfaces(tmp_path: Path) -> None:

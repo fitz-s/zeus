@@ -9,11 +9,8 @@ Answers the operator's core question in one place: "what is the latest USABLE da
 this source right now, and if it's not usable, WHY?" — a temporal debugger over the
 collection plane.
 
-PR2 is READ-ONLY and computes the frontier IN MEMORY from existing surfaces. It does NOT
-persist a table: a persisted ``source_time_frontier`` would be forecast-class and bump
-``SCHEMA_FORECASTS_VERSION`` (which the live daemon gates on, SystemExit on mismatch) —
-that is an operator-gated migration deferred to PR2b. Nothing here changes live behaviour
-or writes any DB/file.
+This report computes the frontier in memory from existing surfaces and never persists a
+second freshness authority. Nothing here changes live behaviour or writes any DB/file.
 
 Inputs (all existing):
   * config/source_release_calendar.yaml  -> TemporalPolicy (safe_fetch, freshness ladder)
