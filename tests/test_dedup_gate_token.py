@@ -578,7 +578,18 @@ def test_evaluator_rejects_when_only_inflight_exit_present(mem_db):
     )
 
 
-def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(mem_db):
+@pytest.mark.parametrize(
+    ("chain_shares", "chain_state"),
+    [
+        (0.0, None),
+        (12.5, "chain_confirmed_zero"),
+    ],
+)
+def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(
+    mem_db,
+    chain_shares,
+    chain_state,
+):
     _insert_position(
         mem_db,
         "stale-pending",
@@ -586,6 +597,8 @@ def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(mem
         token_id=TOKEN_X_NO,
         direction="buy_no",
         no_token_id=TOKEN_X,
+        chain_shares=chain_shares,
+        chain_state=chain_state,
     )
     mem_db.execute(
         """INSERT INTO venue_commands
@@ -614,7 +627,19 @@ def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(mem
     assert result["allowed"] is True
 
 
-def test_terminal_no_fill_cannot_clear_current_chain_exposure(mem_db):
+@pytest.mark.parametrize(
+    ("chain_state", "drop_chain_state_column"),
+    [
+        ("synced", False),
+        (None, False),
+        (None, True),
+    ],
+)
+def test_terminal_no_fill_cannot_clear_unresolved_chain_exposure(
+    mem_db,
+    chain_state,
+    drop_chain_state_column,
+):
     _insert_position(
         mem_db,
         "chain-held-pending",
@@ -623,8 +648,10 @@ def test_terminal_no_fill_cannot_clear_current_chain_exposure(mem_db):
         direction="buy_no",
         no_token_id=TOKEN_X,
         chain_shares=12.5,
-        chain_state="synced",
+        chain_state=chain_state,
     )
+    if drop_chain_state_column:
+        mem_db.execute("ALTER TABLE position_current DROP COLUMN chain_state")
     mem_db.execute(
         """INSERT INTO venue_commands
            (command_id, position_id, token_id, intent_kind, side, venue_order_id,

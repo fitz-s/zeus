@@ -240,6 +240,23 @@ Restore truthful live entry admission after the global auction reached a real wi
   reports its pre-existing unbaselined drift; this slice changes parameters
   inside two already-counted dynamic queries and adds no dynamic-SQL site.
 
+## Slice B70.3 -- Fail closed on unresolved positive Chain exposure
+
+- Independent-review counterexample: B70.2 blocked an explicit current-risk
+  `chain_state`, but a positive `chain_shares` row with NULL/unknown state or
+  a legacy schema without the state column still reached terminal-no-fill
+  clearing. Missing authority was incorrectly treated as proof of no exposure.
+- First-principles invariant: positive Chain shares may be dismissed only by
+  an explicit `NO_CURRENT_MONEY_RISK_CHAIN_STATES` fact. NULL, unknown, and
+  absent state are unresolved contradictions and must block duplicate entry.
+- Acceptance: explicit current state, NULL state, and absent state-column
+  variants all remain blocked across the canonical helper, evaluator Layer 7,
+  and executor boundary; explicit no-current-risk or zero-Chain facts preserve
+  the existing efficient redecision lane.
+- Verification: five exact positive/negative variants pass together; the
+  combined token-dedup/live-safety suite passes `333 passed, 1 xpassed`;
+  compilation and `git diff --check` pass.
+
 ## Slice B4 -- Bounded live working-set reads
 
 - Current runtime proof: the reactor run started at `18:46:50Z`, completed `pending_prune` at `18:46:57Z`, and then emitted no `forecast_snapshot_build` completion for more than ten minutes. That stage spans `_edli_pending_entity_keys` plus the forecast builder, so the log anchors alone do not isolate one call. The pending-key query had no SQLite progress deadline and its plan allowed an unbounded status scan, per-row event PK lookup, and temporary DISTINCT tree. `sqlite_stat1` was stale (2,520,044 estimated rows); a later exact read found 10,801,165 processing rows but only 1,018 pending and 12 processing. Hot read-only timing was 179ms for the old query and 94ms for the bounded query; this is a structural I/O amplifier, not proven as the sole ten-minute root. The separately budgeted forecast builder was 52ms hot after recovery.

@@ -83,7 +83,10 @@ from src.contracts.day0_payoff_truth import (
     Day0PayoffTruth,
     classify_day0_payoff_truth,
 )
-from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+from src.contracts.position_truth import (
+    CURRENT_MONEY_RISK_CHAIN_STATES,
+    NO_CURRENT_MONEY_RISK_CHAIN_STATES,
+)
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.polymarket_client import PolymarketClient
 from src.engine.discovery_mode import DiscoveryMode
@@ -3311,7 +3314,7 @@ def _pending_entry_terminal_no_fill_cleared(conn, row) -> bool:
     ).strip()
     if (
         chain_shares > Decimal("0.000001")
-        and chain_state in CURRENT_MONEY_RISK_CHAIN_STATES
+        and chain_state not in NO_CURRENT_MONEY_RISK_CHAIN_STATES
     ):
         return False
     position_id = str(row["position_id"] if hasattr(row, "keys") else row[0] or "")

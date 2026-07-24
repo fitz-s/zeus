@@ -46,7 +46,10 @@ from src.contracts.execution_intent import (
     POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
 )
 from src.contracts.venue_submission_envelope import assert_live_order_unit_price
-from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+from src.contracts.position_truth import (
+    CURRENT_MONEY_RISK_CHAIN_STATES,
+    NO_CURRENT_MONEY_RISK_CHAIN_STATES,
+)
 from src.types import BinEdge
 from src.architecture.decorators import capability, protects
 from src.decision.family_decision_engine import (
@@ -558,7 +561,7 @@ def _pending_entry_terminal_no_fill_allows_entry(
     ).strip()
     if (
         chain_shares > Decimal("0.000001")
-        and chain_state in CURRENT_MONEY_RISK_CHAIN_STATES
+        and chain_state not in NO_CURRENT_MONEY_RISK_CHAIN_STATES
     ):
         return False
     position_id = str(row["position_id"] if isinstance(row, sqlite3.Row) else row[0] or "")
