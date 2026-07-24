@@ -44,6 +44,7 @@ from src.contracts.freshness_registry import FreshnessLevel, registry as _freshn
 from src.state.ledger import (
     _ensure_position_current_authority_columns,
     apply_architecture_kernel_schema,
+    append_many_and_project,
 )
 from src.state.projection import POSITION_EVENT_ENVS
 from src.state.market_topology_repo import write_market_topology_state
@@ -6833,7 +6834,6 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             authority TEXT,
             evidence_class TEXT,
             learning_eligible INTEGER,
-            learning_eligible INTEGER,
             provenance_json TEXT
         );
 
@@ -13414,7 +13414,6 @@ def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict[str, Any]:
             "pnl_total": 0.0,
             "authority_scope": LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE,
             "learning_eligible": False,
-            "learning_eligible": False,
         },
         "settlement_authority": _settlement_authority_smoke_summary(conn),
         "separation": {
@@ -13487,7 +13486,6 @@ def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict[str, Any]:
             "wins": int(row["wins"] or 0),
             "pnl_total": float(row["pnl_total"] or 0.0),
             "authority_scope": LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE,
-            "learning_eligible": False,
             "learning_eligible": False,
         }
     summary["separation"]["execution_vs_outcome_gap"] = max(

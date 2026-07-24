@@ -29,5 +29,5 @@ shared_runtime_path:
 
 required_tests:
   - tests/test_runtime_guards.py
-  - tests/test_fdr.py
+  - tests/test_fdr_family_scope.py
   - tests/test_day0_runtime_observation_context.py

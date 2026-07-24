@@ -43,8 +43,7 @@ from dataclasses import dataclass
 class ForbiddenEconomicsColumn:
     """One column that is CHAIN-DERIVABLE (disease test per
     docs/rebuild/local_ledger_excision_2026-07-12.md "Disease definition") and
-    therefore forbidden as a durable local economics authority once the trade
-    DB's truth epoch reaches ACTIVE_NEW."""
+    therefore not a durable local economics authority."""
 
     table: str
     column: str

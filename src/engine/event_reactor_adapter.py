@@ -13295,7 +13295,6 @@ def _build_event_bound_no_submit_receipt_core(
                 if opportunity_book is not None
                 else None
             ),
-            **_missing_mav_fields,  # type: ignore[arg-type]
         )
     candidate = proof.candidate
     selected_token_id = proof.token_id

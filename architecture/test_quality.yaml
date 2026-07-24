@@ -43,12 +43,12 @@ tests:
     falsifying_proof:
       type: semantic_diff_fixture
       description: "ALTER ADD COLUMN DEFAULT VERIFIED/gamma_explicit/LIVE_ELIGIBLE fails as authority fabrication."
-  tests/money_path/test_edli_online_invariants.py:
-    category: money_path
-    protects: [MP-SCH-001, MP-SCH-002, MP-ECO-001]
+  tests/test_single_live_semantics.py:
+    category: governance
+    protects: [MP-SCH-001, MP-SCH-002]
     falsifying_proof:
       type: negative_fixture
-      description: "Config or source mutation enabling stale-book directional trading, taker FOK/FAK live, removing scheduler jobs, or adding observation_* EDLI modules fails."
+      description: "Executable, config, deployment, or workflow surfaces cannot restore dormant alternate-runtime semantics or route cutover deletion constants into live controls."
   tests/money_path/test_edli_live_readiness.py:
     category: money_path
     protects: [MP-SCH-001, MP-SCH-002, MP-ECO-001]

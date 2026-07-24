@@ -138,7 +138,7 @@ state_machines:
     invariant_tests:
       - tests/money_path/test_003_redeem_receipt_classifier.py
       - tests/test_harvester_settlement_redeem.py
-      - tests/test_polymarket_v2_adapter_negrisk_redeem.py
+      - tests/test_negrisk_redeem_payout_proof.py
     overloaded_states:
       REDEEM_OPERATOR_REQUIRED:
         risk: "Manual-required and autoretryable error classes may be conflated."
@@ -419,7 +419,7 @@ state_machines:
       - REDEEM_STANDARD_CTF_ZERO_PAYOUT
     invariant_tests:
       - tests/test_negrisk_redeem_payout_proof.py
-      - tests/test_redeem_cascade_liveness.py
+      - tests/test_settlement_commands_ux_review_required.py
       - tests/test_settlement_commands.py
   venue_submit_error_code:
     owner: src/execution/batch_order_submission.py
@@ -469,7 +469,7 @@ state_machines:
       - ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS
       - ZEUS_USER_CHANNEL_WS_MARKET_EVENTS_FALLBACK_MAX_AGE_HOURS
     invariant_tests:
-      - tests/test_inv_family_exclusive_sizing.py
+      - tests/engine/test_multiwinner_wealth_composition.py
       - tests/test_executor.py
       - tests/money_path/test_edli_live_readiness.py
   business_plane_health:
@@ -618,34 +618,6 @@ state_machines:
       - tests/test_fact_revocation.py
       - tests/test_fact_revocation_extended.py
       - tests/test_fact_revocation_crossdb.py
-  replacement_forecast_authority:
-    owner: src/engine/replacement_forecast_reactor_hook.py
-    description: >
-      Replacement forecast runtime/dry-run/report/intent-immutability labels
-      for Open-Meteo ECMWF ecmwf_ifs 9km/0.1 soft spatial anchor plus AIFS ENS
-      sampled-2t posterior integration. These are not venue command states.
-      They classify terrain-review blocks, rollback-plan findings, and
-      same-snapshot intent immutability checks before replacement forecast
-      authority can affect event-reactor no-submit/live receipts.
-    states:
-      - OM9_TERRAIN_ELEVATION_REVIEW_REQUIRED
-      - REPLACEMENT_GO_LIVE_ROLLBACK_PLAN_MISSING_FLAG_UPDATES
-      - REPLACEMENT_GO_LIVE_ROLLBACK_MAY_DELETE_BLOCKED_ROWS
-      - REPLACEMENT_INTENT_CLOB_SNAPSHOT_CHANGED
-      - REPLACEMENT_INTENT_CONDITION_CHANGED
-      - REPLACEMENT_INTENT_NATIVE_TOKEN_CHANGED
-      - REPLACEMENT_INTENT_DIRECTION_CHANGED
-      - REPLACEMENT_INTENT_LIMIT_PRICE_CHANGED
-      - REPLACEMENT_INTENT_KELLY_INCREASED
-      - REPLACEMENT_INTENT_SIZE_INCREASED
-      - REPLACEMENT_INTENT_IMMUTABILITY_PASS
-    invariant_tests:
-      - tests/test_openmeteo_ecmwf_ifs9_precision_guard.py
-      # deleted with the go_live_report verdict module. REPLACEMENT_INTENT_IMMUTABILITY_PASS
-      # coverage retained by the two sibling tests below. The GO_LIVE_ROLLBACK_* states above
-      # are now orphaned (emitting modules deleted) — flagged for topology/map-maintenance.
-      - tests/test_replacement_forecast_intent_immutability.py
-      - tests/test_replacement_forecast_reactor_hook.py
   edli_opportunity_event_processing:
     owner: src/events/event_store.py
     states:
@@ -784,7 +756,6 @@ state_machines:
       - POSTERIOR_BACKED_NOT_LIVE_ELIGIBLE
     invariant_tests:
       - tests/events/test_forecast_snapshot_ready.py
-      - tests/test_replacement_forecast_reactor_hook.py
 
   forecast_center_method:
     owner: src/forecast/center.py
@@ -894,8 +865,7 @@ state_machines:
       - PARTIAL_CURRENT
       - STALE_HISTORY_ONLY
     invariant_tests:
-      - tests/test_replacement_q_mode_authority.py
-      - tests/test_replacement_qlcb_materialization.py
+      - tests/test_replacement_fused_q_shape.py
 
   venue_order_fact_cancel_states:
     owner: src/state/db.py
@@ -1098,7 +1068,7 @@ state_machines:
     invariant_tests:
       - tests/test_v2_adapter.py
       - tests/test_venue_envelope_live_bound.py
-      - tests/test_settlement_axes_a8_a9.py
+      - tests/test_hk_settlement_preimage_contract.py
 
   event_store_recovery_telemetry:
     owner: src/events/event_store.py
@@ -1208,17 +1178,6 @@ schema_objects:
         aggregate event log after crashes or partial writes.
       required_tests:
         - tests/events/test_live_order_aggregate.py
-    edli_live_profit_audit:
-      db: world
-      pk: audit_id
-      writer: src/events/live_profit_audit.py::LiveProfitAuditLedger.insert_record
-      meaning: >
-        Event-bound EDLI live realized-edge audit projection. Promotion gates
-        consume it to require clean probe lifecycle evidence, zero unresolved
-        unknown side effects, and positive realized-edge telemetry before
-        scaleout.
-      required_tests:
-        - tests/events/test_live_profit_audit.py
     # OBS-AUTHORITY-FOUNDATION 2026-05-23. Persisted, auditable settlement-day
     # observation authority. Observability only — these objects record runtime
     # observation truth + per-edge day0 classification so the operator can audit
@@ -1270,7 +1229,7 @@ external_truth_sources:
   polygon_rpc:
     authority_tier: chain_truth
     endpoint_patterns: [polygon-rpc, eth_sendRawTransaction, eth_call]
-    required_tests: [tests/test_polymarket_v2_adapter_negrisk_redeem.py]
+    required_tests: [tests/test_negrisk_redeem_payout_proof.py]
   polymarket_docs:
     # Documentation-only reference (SCH-W2.3 rate budget cites the published
     # CLOB rate-limit table at docs.polymarket.com/api-reference/rate-limits).

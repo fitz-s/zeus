@@ -59,10 +59,10 @@ invariants:
     description: "Redeem receipt classifier preserves NegRisk vs standard CTF route semantics."
     tests:
       - tests/money_path/test_003_redeem_receipt_classifier.py
-      - tests/test_polymarket_v2_adapter_negrisk_redeem.py
+      - tests/test_negrisk_redeem_payout_proof.py
   MP-RED-002:
     description: "Redeem confirmed/review/operator states have non-overloaded report eligibility."
-    tests: [tests/test_harvester_settlement_redeem.py, tests/test_redeem_cascade_liveness.py]
+    tests: [tests/test_harvester_settlement_redeem.py, tests/test_negrisk_redeem_payout_proof.py]
   MP-SCH-001:
     description: "Schema migrations cannot fabricate historical authority."
     tests:
@@ -122,7 +122,7 @@ invariants:
   MP-STR-002:
     description: "Offline decision evidence remains isolated from live evidence queries."
     tests:
-      - tests/analysis/test_evidence_report_cohort_scope.py
+      - tests/test_backtest_purpose_contract.py
       - tests/test_p1_findings_evidence_risk.py
   MP-RSK-001:
     description: "Cluster exposure cap checks use all dimensions: weather_family_key, outcome_label (YES/NO), strategy_key. Collapsing dimensions allows factor-2 over-concentration."
@@ -186,8 +186,8 @@ segments:
     relationship_tests:
       - tests/money_path/test_003_redeem_receipt_classifier.py
       - tests/test_harvester_settlement_redeem.py
-      - tests/test_polymarket_v2_adapter_negrisk_redeem.py
-      - tests/test_redeem_cascade_liveness.py
+      - tests/test_negrisk_redeem_payout_proof.py
+      - tests/test_settlement_commands_ux_review_required.py
     future_object_rules:
       new_settlement_state: requires_receipt_classifier_test
       new_error_code: requires_report_eligibility_test
@@ -236,11 +236,11 @@ segments:
       - tests/events/test_reactor.py
       - tests/events/test_live_cap.py
       - tests/events/test_live_order_aggregate.py
-      - tests/events/test_live_profit_audit.py
+      - tests/test_settlement_skill_attribution.py
       - tests/engine/test_event_reactor_no_bypass.py
       - tests/strategy/live_inference/test_no_trade_regret.py
-      - tests/analysis/test_event_opportunity_report.py
-      - tests/money_path/test_edli_online_invariants.py
+      - tests/test_decision_evidence_entry_emission.py
+      - tests/test_single_live_semantics.py
       - tests/money_path/test_edli_live_readiness.py
       - tests/money_path/test_edli_order_lifecycle.py
     future_object_rules:
@@ -309,7 +309,7 @@ segments:
     relationship_tests:
       - tests/test_evaluator_strategy_key_failclosed.py
       - tests/test_architecture_contracts.py
-      - tests/analysis/test_evidence_report_cohort_scope.py
+      - tests/test_backtest_purpose_contract.py
     future_object_rules:
       new_strategy_dimension: requires_registry_first_architecture_review
       new_observation_source: requires_live_evidence_isolation_test

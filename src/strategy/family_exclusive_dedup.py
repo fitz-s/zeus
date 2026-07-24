@@ -1677,7 +1677,7 @@ def dedup_mutually_exclusive_families(
                 f"dropped_bin={_decision_bin_label(d)!r} "
                 f"existing_exposure_bin={existing_label!r} "
                 f"existing_position_id={existing_position!r} "
-                f"({ENV_FLAG}=1; existing family exposure; no scoped rebalance intent)"
+                "existing family exposure has no scoped rebalance intent"
             )
             logger.info(
                 "[MUTUALLY_EXCLUSIVE_FAMILY_DEDUP] family=%s|%s|%s dropped_bin=%r "
@@ -1762,7 +1762,7 @@ def dedup_mutually_exclusive_families(
                 f"dropped_bin={dropped_label!r} kept_bin={best_label!r} "
                 f"kept_size_usd={kept_size:.2f} "
                 f"kept_expected_net_profit_usd={_decision_family_selection_score(best):.6f} "
-                f"({ENV_FLAG}=1; scalar family safety gate; no portfolio intent)"
+                "scalar family candidate has no portfolio intent"
             )
             logger.info(
                 "[MUTUALLY_EXCLUSIVE_FAMILY_DEDUP] family=%s|%s|%s dropped_bin=%r "

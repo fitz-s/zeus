@@ -2398,7 +2398,7 @@ def _telemetry_outcome_fact_projection(
     """Return actual-trade fields only when legacy outcome_fact is linkable.
 
     outcome_fact predates settlement-authority provenance. The trade-history
-    lane may compare it telemetryally, but it must never turn into settlement,
+    lane may compare it for reporting, but it must never turn into settlement,
     learning, or promotion authority by omission.
     """
     expected_snapshot = str(expected_decision_snapshot_id or "").strip()
@@ -2407,7 +2407,6 @@ def _telemetry_outcome_fact_projection(
         "actual_pnl_source": "none",
         "actual_outcome_evidence_class": LEGACY_OUTCOME_FACT_EVIDENCE_CLASS,
         "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
-        "actual_outcome_learning_eligible": False,
         "actual_outcome_learning_eligible": False,
         "expected_decision_snapshot_id": expected_snapshot,
         "outcome_fact_consumed_as_actual_trade_evidence": False,
@@ -2476,7 +2475,6 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
             "actual_outcome_evidence_class": LEGACY_OUTCOME_FACT_EVIDENCE_CLASS,
             "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
             "actual_outcome_learning_eligible": False,
-            "actual_outcome_learning_eligible": False,
         },
     )
     _insert_backtest_run(backtest_conn, summary, status="running")
@@ -2506,7 +2504,6 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
                     "actual_trade_outcome_source": "none",
                     "actual_pnl_source": "none",
                     "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
-                    "actual_outcome_learning_eligible": False,
                     "actual_outcome_learning_eligible": False,
                 },
                 missing_reasons=[subject.missing_reason],
