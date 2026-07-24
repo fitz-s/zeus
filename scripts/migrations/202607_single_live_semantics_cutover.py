@@ -41,6 +41,11 @@ RETIRED_REPLAY_MODE = "REPLAY_" + "COUNTERFACTUAL"
 RETIRED_SIZING_CERTIFICATE = "Kelly" + "DryRunCertificate"
 RETIRED_PRE_SUBMIT_DECISION_CERTIFICATE = "NoSubmit" + "DecisionCertificate"
 RETIRED_PRE_SUBMIT_MODE_CERTIFICATE = "NoSubmit" + "ModeCertificate"
+RETIRED_CERTIFICATE_TYPES = (
+    RETIRED_SIZING_CERTIFICATE,
+    RETIRED_PRE_SUBMIT_DECISION_CERTIFICATE,
+    RETIRED_PRE_SUBMIT_MODE_CERTIFICATE,
+)
 RETIRED_RECEIPT_COLUMNS = (
     "q_live_" + "raw",
     "q_lcb_" + "raw",
@@ -944,8 +949,9 @@ def _materialize_retired_closure(conn: sqlite3.Connection) -> bool:
         SELECT {seed_hash}, certificate_id, 1
           FROM {DECISION_TABLE}
          WHERE mode != ?
+            OR certificate_type IN (?, ?, ?)
         """,
-        (LIVE_MODE,),
+        (LIVE_MODE, *RETIRED_CERTIFICATE_TYPES),
     )
     while True:
         before = conn.total_changes
@@ -1755,11 +1761,11 @@ def plan_world_decision_graph(
                         """
                     ).fetchone()[0]
                 )
-                preserved_old_sizing = int(
+                retired_live_type_seeds = int(
                     conn.execute(
                         f"SELECT COUNT(*) FROM {DECISION_TABLE} "
-                        "WHERE mode=? AND certificate_type=?",
-                        (LIVE_MODE, RETIRED_SIZING_CERTIFICATE),
+                        "WHERE mode=? AND certificate_type IN (?, ?, ?)",
+                        (LIVE_MODE, *RETIRED_CERTIFICATE_TYPES),
                     ).fetchone()[0]
                 )
                 plan = {
@@ -1777,7 +1783,7 @@ def plan_world_decision_graph(
                         "supersessions_remove": removed_supersessions,
                         "compile_failures_pre": failure_count,
                         "compile_failures_remove": removed_failures,
-                        "preserved_live_old_sizing_predecessors": preserved_old_sizing,
+                        "retired_live_type_seeds": retired_live_type_seeds,
                     },
                     "closure_class_counts": {"seed": 0, "dependent": 0},
                     "removed_certificate_time_ranges": _time_range(
@@ -1898,6 +1904,13 @@ def postcheck_world_decision_graph(conn: sqlite3.Connection) -> dict[str, Any]:
         "non_live_certificate_count": int(
             conn.execute(
                 f"SELECT COUNT(*) FROM {DECISION_TABLE} WHERE mode != ?", (LIVE_MODE,)
+            ).fetchone()[0]
+        ),
+        "retired_certificate_type_count": int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {DECISION_TABLE} "
+                "WHERE certificate_type IN (?, ?, ?)",
+                RETIRED_CERTIFICATE_TYPES,
             ).fetchone()[0]
         ),
         "non_live_compile_failure_count": int(

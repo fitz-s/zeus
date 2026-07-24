@@ -279,7 +279,7 @@ def _write_audit_archive(world: Path, root_hash: str) -> Path:
     return archive
 
 
-def test_recursive_closure_preserves_live_old_sizing_and_writes_atomic_receipt(
+def test_recursive_closure_removes_live_retired_type_and_writes_atomic_receipt(
     tmp_path: Path,
 ) -> None:
     world, trades, wconn, tconn = _fixture(tmp_path)
@@ -328,12 +328,9 @@ def test_recursive_closure_preserves_live_old_sizing_and_writes_atomic_receipt(
         kept = conn.execute(
             "SELECT certificate_id, certificate_type FROM decision_certificates ORDER BY certificate_id"
         ).fetchall()
-        assert kept == [
-            ("kept", "BeliefCertificate"),
-            ("old-sizing", migration.RETIRED_SIZING_CERTIFICATE),
-        ]
-        assert conn.execute("SELECT COUNT(*) FROM decision_certificate_edges").fetchone()[0] == 1
-        assert conn.execute("SELECT supersession_id FROM decision_certificate_supersessions").fetchall() == [("keep",)]
+        assert kept == []
+        assert conn.execute("SELECT COUNT(*) FROM decision_certificate_edges").fetchone()[0] == 0
+        assert conn.execute("SELECT supersession_id FROM decision_certificate_supersessions").fetchall() == []
         assert conn.execute("SELECT failure_id FROM decision_compile_failures").fetchall() == [("live-failure",)]
         schema = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='decision_certificates'"
@@ -346,9 +343,9 @@ def test_recursive_closure_preserves_live_old_sizing_and_writes_atomic_receipt(
 
     durable = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert durable == receipt
-    assert receipt["counts"]["certificates_remove"] == 3
-    assert receipt["counts"]["preserved_live_old_sizing_predecessors"] == 1
-    assert receipt["closure_class_counts"] == {"dependent": 2, "seed": 1}
+    assert receipt["counts"]["certificates_remove"] == 5
+    assert receipt["counts"]["retired_live_type_seeds"] == 1
+    assert receipt["closure_class_counts"] == {"dependent": 3, "seed": 2}
     assert receipt["removed_compile_failure_summary"] == [
         {
             "count": 1,
