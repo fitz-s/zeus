@@ -1037,32 +1037,13 @@ files:
       READINESS_BLOCKED/NOT_LIVE_AUTHORIZED/UNKNOWN_BLOCKED). PR #329 C: now FEDERATES over all
       live data families (observation/market_topology/settlement probed on their own event-time
       tables; executable_market/venue_user_ws/solar/operator_state degrade to honest COVERAGE_UNKNOWN
-      where truth is outside the forecasts conn). Reads forecasts DB best-effort. The COMPUTE is
-      read-only; persistence lives in frontier_store (PR #329 D). NOT_DAEMON_WIRED.
+      where truth is outside the forecasts conn). Reads forecasts DB best-effort and remains
+      an on-demand read-only report; it does not persist a second freshness authority.
     hazards:
     - NOT_DAEMON_WIRED
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
     - scripts/data_collection_frontier_report.py
-    - src/data/frontier_store.py
-  src/data/frontier_store.py:
-    zone: K2_runtime
-    authority_role: source_time_frontier_writer
-    why: >
-      PR #329 D of data_temporal_kernel. Persists the computed frontier into the
-      source_time_frontier table (SCHEMA_FORECASTS_VERSION 7) and reads it back, so live health
-      reads a stored authority instead of recomputing in ad-hoc scripts. persist_frontier UPSERTs
-      idempotently by (source_id, family, partition_key) and enforces the backfill-cannot-refresh-
-      live invariant in the UPSERT WHERE clause (a non-live authority never overwrites a live
-      DERIVED_FROM_DISSEMINATION row). latest_event_time = event-time plane; computed_at =
-      write-time provenance only. WRITER is callable but NOT yet daemon-wired (operator-gated
-      activation); the schema bump itself gates the live daemon on restart until migrated.
-    hazards:
-    - NOT_DAEMON_WIRED
-    - SCHEMA_VERSION_BUMP_DAEMON_HALT
-    - SOURCE_TRUTH_PLANE_COLLAPSE
-    downstream:
-    - src/state/db.py::_create_source_time_frontier
   src/data/source_job_registry.py:
     zone: K2_runtime
     authority_role: scheduled_job_inventory

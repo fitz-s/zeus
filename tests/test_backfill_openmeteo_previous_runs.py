@@ -6,8 +6,6 @@
 # Authority basis: R3 F1 forecast provenance wiring + historical backfill packet; K1 typed connection API accepts write_class.
 from __future__ import annotations
 
-from pathlib import Path
-
 from scripts import backfill_openmeteo_previous_runs as backfill
 from scripts import onboard_cities
 from src.config import City
@@ -142,18 +140,19 @@ def test_run_backfill_writes_forecasts_idempotently(tmp_path, monkeypatch):
     assert row["authority_tier"] == "FORECAST"
 
 
-def test_onboarding_pipeline_materializes_forecast_surfaces_after_source_backfill():
+def test_onboarding_pipeline_excludes_retired_skill_tables_after_source_backfill():
     step_ids = [step["id"] for step in onboard_cities.PIPELINE_STEPS]
     steps = {step["id"]: step for step in onboard_cities.PIPELINE_STEPS}
 
-    assert step_ids.index("openmeteo_previous_runs") < step_ids.index("forecast_skill")
-    assert step_ids.index("forecast_skill") < step_ids.index("historical_forecasts")
+    assert step_ids.index("openmeteo_previous_runs") < step_ids.index("historical_forecasts")
+    assert "forecast_skill" not in step_ids
     assert "900" in steps["wu_daily"]["extra_args"]
     assert "900" in steps["hourly_openmeteo"]["extra_args"]
     assert "900" in steps["openmeteo_previous_runs"]["extra_args"]
     assert "ukmo_global_deterministic_10km" in ",".join(
         steps["openmeteo_previous_runs"]["extra_args"]
     )
-    assert "forecasts" in onboard_cities._verification_tables()
-    assert "forecast_skill" in onboard_cities._verification_tables()
-    assert "model_bias" in onboard_cities._verification_tables()
+    world_tables, _ = onboard_cities._verification_tables()
+    assert "forecasts" in world_tables
+    assert "forecast_skill" not in world_tables
+    assert "model_bias" not in world_tables

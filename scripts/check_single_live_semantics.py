@@ -99,6 +99,7 @@ _FORBIDDEN = (
     "openmeteo_ecmwf_ifs9_bayes_fusion_live_" + "enabled",
     "openmeteo_ecmwf_ifs9_bayes_fusion_kelly_increase_" + "enabled",
     "openmeteo_ecmwf_ifs9_bayes_fusion_direction_flip_" + "enabled",
+    "source_time_" + "frontier",
 )
 _RUNTIME_CATEGORY_FORBIDDEN = (
     "telemetry_only",
@@ -260,16 +261,24 @@ def _static_python_strings(
         tree = ast.parse(source)
     except SyntaxError:
         return set()
+    bindings = _literal_bindings(tree, excluded=allowed_retired_assignments)
     collector = _StaticStringCollector(
-        allowed_retired_assignments=allowed_retired_assignments
+        allowed_retired_assignments=allowed_retired_assignments,
+        bindings=bindings,
     )
     collector.visit(tree)
     return collector.values
 
 
 class _StaticStringCollector(ast.NodeVisitor):
-    def __init__(self, *, allowed_retired_assignments: frozenset[str]) -> None:
+    def __init__(
+        self,
+        *,
+        allowed_retired_assignments: frozenset[str],
+        bindings: dict[str, str],
+    ) -> None:
         self.allowed_retired_assignments = allowed_retired_assignments
+        self.bindings = bindings
         self.values: set[str] = set()
 
     def visit_Assign(self, node: ast.Assign) -> None:
@@ -290,10 +299,41 @@ class _StaticStringCollector(ast.NodeVisitor):
         self.generic_visit(node)
 
     def generic_visit(self, node: ast.AST) -> None:
-        value = _literal_string(node)
+        value = _literal_string(node, self.bindings)
         if value is not None:
             self.values.add(value.lower())
         super().generic_visit(node)
+
+
+def _literal_bindings(tree: ast.AST, *, excluded: frozenset[str]) -> dict[str, str]:
+    assignments: dict[str, list[ast.AST]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and target.id not in excluded:
+                assignments.setdefault(target.id, []).append(node.value)
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id not in excluded
+            and node.value is not None
+        ):
+            assignments.setdefault(node.target.id, []).append(node.value)
+
+    bindings: dict[str, str] = {}
+    for _ in range(len(assignments)):
+        added = False
+        for name, value_nodes in assignments.items():
+            if name in bindings:
+                continue
+            values = [_literal_string(value_node, bindings) for value_node in value_nodes]
+            resolved = {value for value in values if value is not None}
+            if values and len(resolved) == 1 and len(resolved) == len(values):
+                bindings[name] = resolved.pop()
+                added = True
+        if not added:
+            break
+    return bindings
 
 
 def _retired_assignment_control_violations(source: str) -> list[str]:
@@ -376,19 +416,33 @@ def _control_target(node: ast.AST) -> str | None:
     return None
 
 
-def _literal_string(node: ast.AST) -> str | None:
+def _literal_string(node: ast.AST, bindings: dict[str, str] | None = None) -> str | None:
+    bindings = bindings or {}
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
+    if isinstance(node, ast.Name):
+        return bindings.get(node.id)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left = _literal_string(node.left)
-        right = _literal_string(node.right)
+        left = _literal_string(node.left, bindings)
+        right = _literal_string(node.right, bindings)
         return left + right if left is not None and right is not None else None
     if isinstance(node, ast.JoinedStr):
         parts: list[str] = []
         for value in node.values:
-            if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+                continue
+            if (
+                isinstance(value, ast.FormattedValue)
+                and value.conversion in {-1, ord("s")}
+                and value.format_spec is None
+            ):
+                rendered = _literal_string(value.value, bindings)
+                if rendered is not None:
+                    parts.append(rendered)
+                    continue
                 return None
-            parts.append(value.value)
+            return None
         return "".join(parts)
     if (
         isinstance(node, ast.Call)
@@ -397,11 +451,11 @@ def _literal_string(node: ast.AST) -> str | None:
         and node.func.attr == "join"
         and len(node.args) == 1
     ):
-        separator = _literal_string(node.func.value)
+        separator = _literal_string(node.func.value, bindings)
         values = node.args[0]
         if separator is None or not isinstance(values, (ast.List, ast.Tuple)):
             return None
-        parts = [_literal_string(item) for item in values.elts]
+        parts = [_literal_string(item, bindings) for item in values.elts]
         if any(part is None for part in parts):
             return None
         return separator.join(part for part in parts if part is not None)
