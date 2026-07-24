@@ -1300,23 +1300,23 @@ def _run_era_mode(cells, k_old, w_old, seed: int = 17, bootstrap_reps: int = ERA
         "shipped_estimator": "eb_partial_pooling",   # addendum D1: EB is ALWAYS the shipped estimate
         "lrt": {"stat": round(stat, 4) if math.isfinite(stat) else None, "df": df,
                 "p_value": round(p_lrt, 5) if math.isfinite(p_lrt) else None,
-                "role": "REPORTED_DIAGNOSTIC_ONLY (addendum D1; never branched on)",
+                "role": "REPORTED_REFERENCE_ONLY (addendum D1; never branched on)",
                 "definition": "2*(ll_free - ll_pooled) ~ chi2_{(E-1)p}, p=2 (b0,log k) per era"},
         "boundary_bootstrap": {"reps": bootstrap_reps, "p_value": round(boot_p, 5) if math.isfinite(boot_p) else None,
-                               "role": "REPORTED_DIAGNOSTIC_ONLY (addendum D1; never branched on)",
+                               "role": "REPORTED_REFERENCE_ONLY (addendum D1; never branched on)",
                                "definition": "parametric bootstrap under pooled fit (Self-Liang boundary test for Sigma_era=0)"},
         "decision_scale_shift": {"per_era_ucb95": per_era_shift, "max_ucb95": round(shift_ucb95, 5) if math.isfinite(shift_ucb95) else None,
-                                 "epsilon_pool": EPSILON_POOL, "role": "REPORTED_DIAGNOSTIC_ONLY (addendum D1)"},
+                                 "epsilon_pool": EPSILON_POOL, "role": "REPORTED_REFERENCE_ONLY (addendum D1)"},
         "decision_rule": {
             "verdict": verdict, "reason": verdict_reason,
             "law": "addendum_D1_always_eb",
-            "p_era_used_for_diagnostic": round(p_era, 5) if math.isfinite(p_era) else None,
+            "p_era_reference": round(p_era, 5) if math.isfinite(p_era) else None,
             "p_era_source": "bootstrap" if math.isfinite(boot_p) else "lrt_chi2",
             "pretest_would_have_said": diag_pretest_would_say,
             "pretest_superseded_note": ("the A5 pretest full-vs-EB switch is SUPERSEDED by D1: pretest "
                                         "estimators have unbounded relative risk near the null; we always "
                                         "ship EB (it auto-collapses to full pooling when Sigma_era->0)."),
-            "thresholds_for_diagnostic": {"p_era_min": P_ERA_POOL, "epsilon_pool": EPSILON_POOL, "epsilon_edge": EPSILON_EDGE},
+            "reference_thresholds": {"p_era_min": P_ERA_POOL, "epsilon_pool": EPSILON_POOL, "epsilon_edge": EPSILON_EDGE},
             "newest_era_only_note": ("EB -> newest-era MLE as newest-era n grows (shrinkage O(1/n)); "
                                      "EB partial pooling dominates newest-only at n in 300-500 (A5)."),
         },

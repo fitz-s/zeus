@@ -5,10 +5,11 @@
 # canonical venue/order/position facts are owned by separate tables.
 """Repair a narrowly fingerprinted corrupt executable snapshot table tail.
 
-The command never edits the canonical DB. It raw-bridges only the unreadable
-right tail in an explicit APFS candidate clone, then rebuilds every index from
-the readable table. The full table is not copied, so a large append-only history
-can be retained without requiring a second table-sized allocation.
+Apply requires the operator to identify the target as a candidate clone and to
+confirm the writer fence; the command cannot independently prove clone identity.
+It raw-bridges only the unreadable right tail, then rebuilds every index from the
+readable table. The full table is not copied, so a large append-only history can
+be retained without requiring a second table-sized allocation.
 """
 
 from __future__ import annotations
@@ -51,7 +52,6 @@ EXPECTED_EXPLICIT_INDEXES = frozenset(
     }
 )
 _FIXTURE_ENV = "ZEUS_EXECUTABLE_SNAPSHOT_REPAIR_ALLOW_FIXTURE_SCHEMA"
-_SKIP_FENCE_ENV = "ZEUS_POSITION_EVENTS_REPAIR_SKIP_FENCE"
 
 
 @dataclass(frozen=True)
@@ -352,11 +352,12 @@ def _hide_explicit_indexes(
     version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
     conn.execute("PRAGMA writable_schema=ON")
     conn.execute("BEGIN IMMEDIATE")
-    conn.executemany(
-        "DELETE FROM sqlite_schema WHERE type='index' AND name=?",
-        ((name,) for name in explicit),
+    placeholders = ", ".join("?" for _ in explicit)
+    conn.execute(
+        f"DELETE FROM sqlite_schema WHERE type='index' AND name IN ({placeholders})",
+        tuple(explicit),
     )
-    if int(conn.execute("SELECT changes()").fetchone()[0]) != 1:
+    if int(conn.execute("SELECT changes()").fetchone()[0]) != len(explicit):
         raise RuntimeError("explicit executable snapshot index schema deletion failed")
     conn.execute("COMMIT")
     conn.execute(f"PRAGMA schema_version={version + 1}")
@@ -410,7 +411,7 @@ def apply_repair(
         raise RuntimeError("REFUSED: corruption fingerprint changed before apply")
     bridge = _prepare_table_tail_bridge(path, inspection)
 
-    conn = _connect(path, read_only=False)
+    conn: sqlite3.Connection | None = _connect(path, read_only=False)
     try:
         _schema_fingerprint(conn)
         explicit = _index_sql(conn)
@@ -420,6 +421,7 @@ def apply_repair(
         conn.execute("PRAGMA fullfsync=ON")
         _hide_explicit_indexes(conn, explicit)
         conn.close()
+        conn = None
         conn = _connect(path, read_only=False)
         conn.execute("PRAGMA synchronous=FULL")
         conn.execute("PRAGMA fullfsync=ON")
@@ -459,8 +461,12 @@ def apply_repair(
                 raise
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
-        conn.execute("PRAGMA writable_schema=OFF")
-        conn.close()
+        if conn is not None:
+            try:
+                conn.execute("PRAGMA writable_schema=OFF")
+            except sqlite3.Error:
+                pass
+            conn.close()
 
     verify = _connect(path, read_only=True)
     try:
