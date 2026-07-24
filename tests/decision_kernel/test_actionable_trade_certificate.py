@@ -1634,7 +1634,7 @@ def _parent_payloads() -> dict[str, dict]:
         },
         claims.TESTING_PROTOCOL: {"protocol": "live_canary"},
         claims.FDR: {"fdr_family_id": "family-1", "selected_hypotheses": ("family-1:yes-1",)},
-        claims.KELLY_DRY_RUN: {"kelly_decision_id": "kelly-1", "cost_basis_id": "cost-1", "passed": True},
+        claims.SIZING: {"kelly_decision_id": "kelly-1", "cost_basis_id": "cost-1", "passed": True},
         claims.RISK_LEVEL: {"risk_decision_id": "risk-1", "passed": True},
         claims.LIVE_CAP: {
             "usage_id": "cap-1",
