@@ -208,7 +208,11 @@ tables:
     notes: >
       Live data-daemon authority-chain follow-up 2026-05-15. Producer readiness
       verdicts for executable forecast consumption. Ghost copy on world.db
-      declared legacy_archived below.
+      declared legacy_archived below. COLLISION.md A2 (2026-07-24): gained
+      decision_law_id TEXT (nullable, unconstrained ADD COLUMN; taxonomy
+      enforced by db.assert_law_identity). strategy_key was already nullable
+      on every live DDL variant (db.py:2751/4254/4694) — no NOT NULL
+      relaxation needed here.
 
   - name: source_time_frontier
     db: forecasts
@@ -799,7 +803,7 @@ tables:
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: "[market_slug, temperature_metric, target_date, observation_time, decision_seq]"
-    notes: "T1 Path D natural-key instrumentation table (PHASE_1_ULTRAPLAN.md §4.2 v3). condition_id is nullable enrichment (not in PK). decision_event_id is audit-only deid_v1_ hash (distinct from calibration dgid_v1_). SCHEMA_VERSION 13."
+    notes: "T1 Path D natural-key instrumentation table (PHASE_1_ULTRAPLAN.md §4.2 v3). condition_id is nullable enrichment (not in PK). decision_event_id is audit-only deid_v1_ hash (distinct from calibration dgid_v1_). SCHEMA_VERSION 13. COLLISION.md A2 (2026-07-24): gained decision_law_id TEXT (nullable, unconstrained ADD COLUMN; taxonomy enforced by db.assert_law_identity); strategy_key relaxed from NOT NULL to nullable via table-rebuild idiom (data preserved)."
 
   - name: diurnal_curves
     db: world
@@ -864,6 +868,10 @@ tables:
       src/state/db.py:5738; runtime conn: get_trade_connection_with_world
       (src/execution/executor.py:1991). Manifest 2026-05-14 erroneously
       declared db: world.
+    notes: >
+      COLLISION.md A2 (2026-07-24): gained decision_law_id TEXT (nullable,
+      unconstrained ADD COLUMN; taxonomy enforced by db.assert_law_identity).
+      strategy_key was already nullable — no NOT NULL relaxation needed here.
 
   - name: exit_mutex_holdings
     db: world
@@ -1713,6 +1721,12 @@ tables:
     cutover_note: >
       Re-owned trade per 2026-05-17 audit. Writer:
       src/state/projection.py:103.
+    notes: >
+      COLLISION.md A2 (2026-07-24): gained decision_law_id TEXT + position_origin
+      TEXT (both nullable, unconstrained ADD COLUMN; taxonomies enforced by
+      db.assert_law_identity — position_origin distinguishes zeus_decision /
+      operator_cotrade / external_wallet). strategy_key relaxed from NOT NULL
+      to nullable via table-rebuild idiom (data preserved).
 
   - name: position_decision_attribution
     db: trade
@@ -1741,7 +1755,12 @@ tables:
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
-    notes: Position lifecycle events (canonical, architecture kernel). Append-only.
+    notes: >
+      Position lifecycle events (canonical, architecture kernel). Append-only.
+      COLLISION.md A2 (2026-07-24): gained decision_law_id TEXT + position_origin
+      TEXT (both nullable, unconstrained ADD COLUMN; taxonomies enforced by
+      db.assert_law_identity). strategy_key relaxed from NOT NULL to nullable
+      via table-rebuild idiom (data + append-only triggers preserved).
     cutover_note: >
       Re-owned trade per 2026-05-17 audit. Writers:
       src/state/ledger.py:156, :266; src/state/chain_reconciliation.py:463.
@@ -1959,6 +1978,10 @@ tables:
       no longer writes to trade_decisions; canonical entry truth is in
       position_events / position_current. Table retained for replay /
       backtest reads only.
+      COLLISION.md A2 (2026-07-24): gained decision_law_id TEXT (nullable,
+      unconstrained ADD COLUMN; taxonomy enforced by db.assert_law_identity).
+      strategy (the ALTER-added column, distinct in name from strategy_key on
+      the other 9 tables) was already nullable — no NOT NULL relaxation.
 
   - name: uma_resolution
     db: world
@@ -3086,7 +3109,12 @@ tables:
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+    notes: >
+      Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop
+      after 2026-08-09. COLLISION.md A2 (2026-07-24): gained decision_law_id
+      TEXT (nullable, unconstrained ADD COLUMN; taxonomy enforced by
+      db.assert_law_identity). strategy_key was already nullable — no NOT
+      NULL relaxation needed here.
 
   - name: outcome_fact
     db: trade
@@ -3098,7 +3126,11 @@ tables:
       Repoint 2 (fix/prearm-fill-exit-readiness 2026-06-03): canonical writer is
       harvester.py log_settlement_event → log_outcome_fact, which receives
       trade_conn (zeus_trades.db). 18 live rows confirmed on zeus_trades.db per
-      probe-ownership.md; world.db had 0 rows. DDL is in
+      probe-ownership.md; world.db had 0 rows.
+      COLLISION.md A2 (2026-07-24): gained decision_law_id TEXT (nullable,
+      unconstrained ADD COLUMN; taxonomy enforced by db.assert_law_identity).
+      strategy_key was already nullable — no NOT NULL relaxation needed here.
+      DDL is in
       architecture/2026_04_02_architecture_kernel.sql (applied to trade.db at boot
       as a legacy ghost via pre-PR-S4b init_schema; ghost table now the canonical
       home). Riskguard reads via get_trade_connection_with_world_required —
@@ -3154,7 +3186,12 @@ tables:
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+    notes: >
+      Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop
+      after 2026-08-09. COLLISION.md A2 (2026-07-24): gained decision_law_id
+      TEXT (nullable, unconstrained ADD COLUMN; taxonomy enforced by
+      db.assert_law_identity); strategy_key relaxed from NOT NULL to nullable
+      via table-rebuild idiom (data preserved).
 
   - name: selection_family_fact
     db: trade
@@ -3194,7 +3231,14 @@ tables:
     schema_version_owner: null
     created_by: init_schema_pre_pr_s4b
     pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+    notes: >
+      Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop
+      after 2026-08-09. COLLISION.md A2 (2026-07-24): gained decision_law_id
+      TEXT (nullable, unconstrained ADD COLUMN — taxonomy enforced at the
+      write boundary by db.assert_law_identity, not a CHECK); strategy_key
+      relaxed from NOT NULL to nullable via table-rebuild idiom (data
+      preserved). See src/state/db.py _migrate_decision_law_identity_columns
+      / _migrate_law_identity_strategy_key_nullable.
 
   - name: token_price_log
     db: trade

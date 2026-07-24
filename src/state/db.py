@@ -1798,6 +1798,47 @@ def assert_schema_epoch_not_mixed(
 SCHEMA_VERSION = 43  # 2026-07-11 T2b (docs/rebuild/quarantine_excision_2026-07-11.md §T2b): settlements.authority + observations.authority CHECK literal QUARANTINED -> DISPUTED. Prior: 42 = position_current chain_avg_price/chain_cost_basis_usd (F1).
 
 
+# ---------------------------------------------------------------------------
+# Decision-law identity (COLLISION.md 2026-07-23 A2 / FINAL_SPEC.md §唯一决策律).
+#
+# Two independent identity axes stamped on new rows going forward:
+#   decision_law_id  — which decision LAW produced a Zeus-originated decision.
+#     Currently a single member: the unified predicted_bin_ev_v1 law. NULL for
+#     every historical row (strategy_key-era) and for any non-Zeus position.
+#   position_origin  — WHO/WHAT opened a position (position_current /
+#     position_events only): a Zeus decision, an operator co-trade on the
+#     shared wallet, or a wallet observed to hold a token Zeus never ordered.
+#
+# Both columns are added as plain nullable TEXT (no CHECK — see the ADD COLUMN
+# helper below for why); the taxonomy is enforced here, at the write boundary,
+# mirroring CAPTURE_TRIGGER_TAXONOMY in src/state/snapshot_repo.py.
+# ---------------------------------------------------------------------------
+DECISION_LAW_IDS: frozenset[str] = frozenset({"predicted_bin_ev_v1"})
+POSITION_ORIGINS: frozenset[str] = frozenset({
+    "zeus_decision", "operator_cotrade", "external_wallet",
+})
+
+
+def assert_law_identity(decision_law_id: str | None, position_origin: str | None) -> None:
+    """Validate decision-law identity pair at the write boundary.
+
+    None is always allowed for either field (historical strategy_key-era rows,
+    or an axis that doesn't apply to this write). A non-None value must be a
+    member of the fixed taxonomy above — raises ValueError otherwise, same
+    posture as insert_snapshot's capture_trigger check in snapshot_repo.py.
+    """
+    if decision_law_id is not None and decision_law_id not in DECISION_LAW_IDS:
+        raise ValueError(
+            f"assert_law_identity: decision_law_id {decision_law_id!r} is not in "
+            f"the FINAL_SPEC.md §唯一决策律 taxonomy {sorted(DECISION_LAW_IDS)}."
+        )
+    if position_origin is not None and position_origin not in POSITION_ORIGINS:
+        raise ValueError(
+            f"assert_law_identity: position_origin {position_origin!r} is not in "
+            f"the taxonomy {sorted(POSITION_ORIGINS)}."
+        )
+
+
 def _migrate_authority_tier_disputed(conn: "sqlite3.Connection", table: str) -> None:
     """Idempotent REOPEN-2-style table rebuild: authority CHECK literal
     'QUARANTINED' -> 'DISPUTED' on `table`, with a CASE-mapped data migration of
@@ -3661,6 +3702,13 @@ def init_schema(
     _migrate_market_scan_authority_checks(conn)
     _migrate_readiness_state_status_checks(conn)
 
+    # COLLISION.md A2 (2026-07-23): decision-law identity columns on every
+    # strategy-identity table, and strategy_key NOT NULL relaxed on the 5
+    # world-side tables that still declare it (COLLISION.md, FINAL_SPEC.md
+    # §唯一决策律). Additive/idempotent; safe to run on every boot.
+    _migrate_decision_law_identity_columns(conn)
+    _migrate_law_identity_strategy_key_nullable(conn)
+
     # Phase 3 T3 (2026-05-21): shoulder_exposure_ledger table (SCHEMA_VERSION 23).
     from src.state.schema.shoulder_exposure_ledger_schema import ensure_table as _ensure_shoulder_exposure_ledger_table
     _ensure_shoulder_exposure_ledger_table(conn)
@@ -4564,6 +4612,58 @@ def _ensure_venue_commands_q_version_column(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE venue_commands ADD COLUMN q_version TEXT;")
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, coltype: str = "TEXT"
+) -> None:
+    """Idempotent ADD COLUMN: no-op if the table or the column already exists.
+
+    Plain nullable, UNCONSTRAINED column — same idiom as the capture_trigger
+    migration in src/state/snapshot_repo.py:176-198. A CHECK-constrained ADD
+    COLUMN forces SQLite (>=3.37) to scan and validate every existing row
+    (O(rows), heavy cold I/O on the ~110GB live money DB); a plain nullable
+    ADD COLUMN is O(1) metadata-only. Domain enforcement lives at the write
+    boundary instead (see assert_law_identity above).
+    """
+    if not _table_exists(conn, table):
+        return
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column in columns:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype};")
+
+
+# The 10 strategy-identity tables that gain decision_law_id (COLLISION.md A2 /
+# SURFACE_INVENTORY.md §需 schema 迁移). position_current + position_events
+# additionally gain position_origin (who/what opened the position).
+_LAW_IDENTITY_TABLES: tuple[str, ...] = (
+    "strategy_health",
+    "decision_events",
+    "readiness_state",
+    "position_events",
+    "position_current",
+    "execution_fact",
+    "outcome_fact",
+    "opportunity_fact",
+    "risk_actions",
+    "trade_decisions",
+)
+_POSITION_ORIGIN_TABLES: tuple[str, ...] = ("position_current", "position_events")
+
+
+def _migrate_decision_law_identity_columns(conn: sqlite3.Connection) -> None:
+    """Additive law-identity columns on every strategy-identity table.
+
+    Called from both init_schema (world.db) and init_schema_trade_only
+    (zeus_trades.db); _add_column_if_missing no-ops on a table absent from
+    the given connection (e.g. decision_events/readiness_state don't exist
+    on the trade DB), so a single call site list is safe on both.
+    """
+    for tname in _LAW_IDENTITY_TABLES:
+        _add_column_if_missing(conn, tname, "decision_law_id", "TEXT")
+    for tname in _POSITION_ORIGIN_TABLES:
+        _add_column_if_missing(conn, tname, "position_origin", "TEXT")
+
+
 def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
     """Remove stale hardcoded strategy_key CHECK from world-class tables.
 
@@ -5010,6 +5110,81 @@ def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
             conn.execute(idx_sql)
 
 
+def _migrate_law_identity_strategy_key_nullable(conn: sqlite3.Connection) -> None:
+    """Relax strategy_key NOT NULL -> nullable (COLLISION.md A2, 2026-07-23).
+
+    New-law Zeus rows write decision_law_id="predicted_bin_ev_v1",
+    strategy_key=NULL (FINAL_SPEC.md §唯一决策律 — the unified law carries no
+    per-strategy identity). readiness_state/execution_fact/outcome_fact/
+    opportunity_fact/trade_decisions.strategy are already nullable on every
+    live DDL variant; only these 5 tables' CREATE TABLE still declares
+    strategy_key NOT NULL and would reject that write.
+
+    Same detect-then-rebuild + trigger/index-preserve idiom as
+    _migrate_trade_strategy_key_checks / _migrate_world_strategy_key_checks,
+    generalized to strip "NOT NULL" instead of a CHECK clause. Detection uses
+    PRAGMA table_info's notnull flag directly (not a sentinel string), so it
+    is correct regardless of which CHECK-migration state a table is in.
+    Historical rows keep their existing strategy_key values untouched.
+    """
+    import re as _re  # noqa: F811
+    for tname in (
+        "strategy_health",
+        "decision_events",
+        "position_events",
+        "position_current",
+        "risk_actions",
+    ):
+        if not _table_exists(conn, tname):
+            continue
+        col_info = {
+            row[1]: row[3]  # name -> notnull flag
+            for row in conn.execute(f"PRAGMA table_info({tname})").fetchall()
+        }
+        if not col_info.get("strategy_key"):
+            continue  # column absent or already nullable
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tname,)
+        ).fetchone()
+        old_sql = str(row[0])
+        triggers = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND sql IS NOT NULL",
+            (tname,),
+        ).fetchall()
+        indexes = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+            (tname,),
+        ).fetchall()
+        new_create = _re.sub(
+            r"(strategy_key\s+TEXT)\s+NOT\s+NULL",
+            r"\1",
+            old_sql,
+        )
+        # tname may appear quoted in sqlite_master (e.g. the trade-only heritage
+        # DDL uses "strategy_health"); \b immediately after a quote character
+        # never matches (quote and following whitespace/paren are both
+        # non-word), so the quoted and bare forms need separate alternatives
+        # rather than a single `"?...\b` that silently leaves the quote behind.
+        new_create = _re.sub(
+            rf'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(?:"{_re.escape(tname)}"|{_re.escape(tname)}\b)',
+            f"CREATE TABLE {tname}_new",
+            new_create,
+        )
+        conn.execute(f"DROP TABLE IF EXISTS {tname}_new")
+        conn.execute(new_create)
+        conn.execute(f"INSERT INTO {tname}_new SELECT * FROM {tname}")
+        conn.execute(f"DROP TABLE {tname}")
+        _legacy_alter_was_enabled = _legacy_alter_table_enabled(conn)
+        _set_legacy_alter_table(conn, True)
+        try:
+            conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
+        finally:
+            _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
+        for (trg_sql,) in triggers:
+            conn.execute(trg_sql)
+        for (idx_sql,) in indexes:
+            conn.execute(idx_sql)
+
 
 def _create_source_time_frontier(conn: sqlite3.Connection) -> None:
     """Create the persisted source-time frontier table (PR #329 D). Idempotent.
@@ -5221,6 +5396,12 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     _create_source_run_coverage(conn)
     _create_readiness_state(conn)
     _migrate_readiness_state_status_checks(conn)
+    # COLLISION.md A2 (2026-07-23): readiness_state is one of the 10
+    # law-identity tables. Unconditional so it lands regardless of whether
+    # this conn took the ATTACH-copy branch (already current if world.db was
+    # migrated first) or the static-fallback branch (_create_readiness_state
+    # above, which predates this column).
+    _add_column_if_missing(conn, "readiness_state", "decision_law_id", "TEXT")
 
     # Post-condition equivalence (Option A, 2026-05-14):
     # The ATTACH branch above copies indexes from world_src.sqlite_master; if
@@ -6335,6 +6516,14 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     _ensure_position_current_authority_columns(conn)
     _ensure_venue_commands_q_version_column(conn)
     _migrate_trade_strategy_key_checks(conn)
+
+    # COLLISION.md A2 (2026-07-23): decision-law identity columns + NOT NULL
+    # relaxation, trade-DB side (position_events, position_current, risk_actions,
+    # strategy_health heritage copy; decision_events/readiness_state absent on
+    # trade.db, both helpers no-op for them). Additive/idempotent.
+    _migrate_decision_law_identity_columns(conn)
+    _migrate_law_identity_strategy_key_nullable(conn)
+
     # Executable market substrate is live execution evidence. The market
     # discovery scheduler passes this same trade connection to snapshot_repo and
     # book_hash_transitions so snapshot rows and hash transitions commit together.
