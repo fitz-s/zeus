@@ -51,6 +51,22 @@ def utc_iso_now() -> str:
     Returns strings of the form: '2026-06-16T12:34:56.789012+00:00'
     """
     return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_single_live_cutover_generation_table(conn: sqlite3.Connection) -> None:
+    """Create the transaction-bound migration generation receipt table."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS single_live_cutover_generation (
+            generation TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            committed_at TEXT NOT NULL,
+            migration_state_sha256 TEXT NOT NULL,
+            PRIMARY KEY (generation, stage)
+        )
+        """
+    )
 from src.contracts.semantic_types import ExitState
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.state.ledger import (
@@ -256,7 +272,11 @@ def _connect(
         if timeout_ms < 0:
             raise ValueError(f"busy_timeout_ms must be >= 0; got {timeout_ms}")
     timeout_s = timeout_ms / 1000.0
-    conn = sqlite3.connect(str(db_path), timeout=timeout_s)
+    from src.state.db_writer_lock import connect_with_cutover_lease
+
+    conn = connect_with_cutover_lease(
+        str(db_path), canonical_db_path=db_path, timeout=timeout_s
+    )
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
@@ -1739,7 +1759,11 @@ def get_connection(
     db_path.parent.mkdir(parents=True, exist_ok=True)
     # T1E: timeout read from ZEUS_DB_BUSY_TIMEOUT_MS env var (ms→s); default 30s.
     timeout_s = _db_busy_timeout_s()
-    conn = sqlite3.connect(str(db_path), timeout=timeout_s)
+    from src.state.db_writer_lock import connect_with_cutover_lease
+
+    conn = connect_with_cutover_lease(
+        str(db_path), canonical_db_path=db_path, timeout=timeout_s
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -3714,6 +3738,8 @@ def init_schema(
     from src.state.schema.fact_revocations_schema import ensure_table as _ensure_fact_revocations_table
     _ensure_fact_revocations_table(conn)
 
+    ensure_single_live_cutover_generation_table(conn)
+
     if own_conn:
         conn.commit()
         conn.close()
@@ -4281,6 +4307,7 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
 
 
 _FORECAST_TABLES = (
+    "single_live_cutover_generation",
     "ensemble_snapshots",
     "source_run",
     "job_run",
@@ -5280,6 +5307,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # never created on world/trade DBs (keeps boot-time registry equality aligned).
     from src.state.schema.fact_revocations_schema import ensure_table as _ensure_fact_revocations_table
     _ensure_fact_revocations_table(conn)
+    ensure_single_live_cutover_generation_table(conn)
 
     conn.commit()
 
@@ -6405,6 +6433,7 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # _TRADE_CLASS_DDL, and SETTLEMENT_COMMAND_SCHEMA. Uses subset (not equality)
     # because Path B
     # leaves legacy_archived ghost tables on zeus_trades.db.
+    ensure_single_live_cutover_generation_table(conn)
     _actual_tables = {
         row[0]
         for row in conn.execute(
@@ -7562,7 +7591,11 @@ def log_forward_market_substrate(
     if recorded_at_value is None:
         return {"status": "refused_missing_recorded_at", "tables": _FORWARD_MARKET_REQUIRED_TABLES}
 
-    conn = sqlite3.connect(str(resolved_path), timeout=30)
+    from src.state.db_writer_lock import connect_with_cutover_lease
+
+    conn = connect_with_cutover_lease(
+        str(resolved_path), canonical_db_path=resolved_path, timeout=30
+    )
     conn.row_factory = sqlite3.Row
     try:
         missing_tables = [

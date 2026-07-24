@@ -1912,6 +1912,9 @@ def init_risk_db(conn: sqlite3.Connection) -> None:
             checked_at TEXT NOT NULL
         );
     """)
+    from src.state.db import ensure_single_live_cutover_generation_table
+
+    ensure_single_live_cutover_generation_table(conn)
     # CATEGORY ANTIBODY (Fitz #5): executescript() can NULL the C-level busy
     # handler on some Python/SQLite builds, leaving this risk_state.db handle at a
     # 0 ms wait budget so the immediately-following reads/writes (every tick(),

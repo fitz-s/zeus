@@ -38,6 +38,7 @@ import errno
 import fcntl
 import logging
 import os
+import sqlite3
 import subprocess
 import threading
 import time
@@ -81,6 +82,54 @@ def _lock_file_path(db_path: Path, write_class: WriteClass) -> Path:
     return db_path.with_name(db_path.name + _LOCK_FILE_SUFFIX[write_class])
 
 
+def cutover_lease_path(db_path: Path) -> Path:
+    """Return the per-DB gate shared by runtime writers and cutover tooling."""
+
+    return db_path.with_name(db_path.name + ".cutover-lease")
+
+
+class CutoverAwareConnection(sqlite3.Connection):
+    """SQLite connection that owns a shared cutover lease until close()."""
+
+    _cutover_fd: int | None = None
+    _cutover_path: Path | None = None
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            fd = self._cutover_fd
+            if fd is not None:
+                self._cutover_fd = None
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+
+def connect_with_cutover_lease(
+    database: str | Path,
+    *,
+    canonical_db_path: Path,
+    **kwargs: Any,
+) -> CutoverAwareConnection:
+    """Open SQLite only while holding the canonical DB's shared runtime lease."""
+
+    lease_path = cutover_lease_path(canonical_db_path)
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lease_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        conn = sqlite3.connect(
+            str(database), factory=CutoverAwareConnection, **kwargs
+        )
+    except BaseException:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        raise
+    conn._cutover_fd = fd
+    conn._cutover_path = lease_path
+    return conn
+
+
 # --------------------------------------------------------------------------
 # §3.1.2 — db_writer_lock(): fcntl.flock context manager
 # --------------------------------------------------------------------------
@@ -104,40 +153,66 @@ def db_writer_lock(
 
     Per plan §3.1.2.
     """
-    lock_path = _lock_file_path(db_path, write_class)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # Open in append mode so the file is always created and never truncated.
-    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    cutover_path = cutover_lease_path(db_path)
+    cutover_path.parent.mkdir(parents=True, exist_ok=True)
+    cutover_fd = os.open(str(cutover_path), os.O_RDWR | os.O_CREAT, 0o644)
+    cutover_flags = fcntl.LOCK_SH
+    if not blocking:
+        cutover_flags |= fcntl.LOCK_NB
     try:
-        flags = fcntl.LOCK_EX
-        if not blocking:
-            flags |= fcntl.LOCK_NB
         try:
-            fcntl.flock(fd, flags)
+            fcntl.flock(cutover_fd, cutover_flags)
         except BlockingIOError as exc:
-            # Non-blocking and the lock is held; surface clearly.
             _cnt_inc("db_writer_lock_contended_total")
             raise BlockingIOError(
                 errno.EWOULDBLOCK,
-                f"db_writer_lock(write_class={write_class.value}) "
-                f"contended on {lock_path}",
+                f"cutover lease contended on {cutover_path}",
             ) from exc
+
+        lock_path = _lock_file_path(db_path, write_class)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        # Open in append mode so the file is always created and never truncated.
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
         try:
-            yield
+            flags = fcntl.LOCK_EX
+            if not blocking:
+                flags |= fcntl.LOCK_NB
+            try:
+                fcntl.flock(fd, flags)
+            except BlockingIOError as exc:
+                # Non-blocking and the lock is held; surface clearly.
+                _cnt_inc("db_writer_lock_contended_total")
+                raise BlockingIOError(
+                    errno.EWOULDBLOCK,
+                    f"db_writer_lock(write_class={write_class.value}) "
+                    f"contended on {lock_path}",
+                ) from exc
+            try:
+                yield
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError as unlock_exc:
+                    logger.warning(
+                        "db_writer_lock unlock failed for %s: %r",
+                        lock_path,
+                        unlock_exc,
+                    )
         finally:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except OSError as unlock_exc:
-                logger.warning(
-                    "db_writer_lock unlock failed for %s: %r",
-                    lock_path,
-                    unlock_exc,
-                )
+                os.close(fd)
+            except OSError:
+                pass
     finally:
         try:
-            os.close(fd)
-        except OSError:
-            pass
+            fcntl.flock(cutover_fd, fcntl.LOCK_UN)
+        except OSError as unlock_exc:
+            logger.warning(
+                "cutover lease unlock failed for %s: %r",
+                cutover_path,
+                unlock_exc,
+            )
+        os.close(cutover_fd)
 
 
 # --------------------------------------------------------------------------
@@ -646,12 +721,13 @@ def subprocess_run_with_write_class(
 # verify_truth_surfaces.py promoted as read_only (0 DML writes; RISK_DB/DEFAULT_TRADE_DB/
 # SHARED_DB connects switched to mode=ro URIs in F26 cleanup; all SQL is SELECT-only);
 # _zeus_emergency_k2_obs_backfill_2026_05_10.py dropped (file deleted post-run).
-# Remaining residual: src/data/market_scanner.py (daemon INSERT, pending Track A.6)
-# + src/state/chunk_boundary_events.py (daemon thread write, separate conn by design).
+# Canonical runtime connections and the former daemon direct-connect sites now
+# hold the shared cutover lease for their complete connection lifetime.
 SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "src/state/db.py",  # canonical shim
         "src/state/db_writer_lock.py",  # this file — does not connect
+        "src/data/market_scanner.py",  # canonical writer uses connect_with_cutover_lease; remaining raw connects are mode=ro snapshot readers
         # Track A.6 (#246): daemon-path raw-connect sites — annotated below.
         # These are NOT in the world-db BULK lock universe; each is either
         # read-only or writes a separate DB (risk_state.db).

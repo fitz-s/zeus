@@ -1634,13 +1634,14 @@ tables:
     created_by: "src/state/schema/position_decision_attribution_schema.py (LX-E packet, 2026-07-13)"
     pk_col: "[attribution_id]"
     notes: >
-      Permanent position/command -> decision_certificate_hash link, written at ENTRY
-      command creation (src/state/venue_command_repo.py insert_command). Rehomes the
+      Permanent command -> decision_certificate_hash link. ENTRY records its exact
+      actionable certificate; later commands for the position inherit that same
+      unique certificate in src/state/venue_command_repo.py insert_command. Rehomes the
       certificate attribution OFF the settlement-time (condition_id, direction) ->
       latest edli_live_profit_audit row inference (docs/rebuild/local_ledger_excision_
       2026-07-12.md Round-2 delta §(c) — 14 (condition,direction) pairs map to >1
       distinct certificate hash there; "latest row" was a guess). Append-only:
-      UNIQUE(position_id) + ON CONFLICT DO NOTHING, never overwritten. Backfilled by
+      UNIQUE(command_id, position_id) + ON CONFLICT DO NOTHING, never overwritten. Backfilled by
       scripts/backfill_position_decision_attribution.py for pre-packet positions using
       an EXACT command_id -> edli_live_profit_audit.execution_command_id join only;
       ambiguous/absent exact links are marked resolution='UNATTRIBUTABLE' explicitly,
@@ -3169,3 +3170,35 @@ tables:
       Writer: data-ingest availability poll lane
       (src/data/replacement_cycle_advance_trigger.py). Lives on
       zeus-forecasts.db only; not settlement/calibration/order truth.
+
+  - name: single_live_cutover_generation
+    db: world
+    schema_class: world_class
+    schema_version_owner: none
+    created_by: migration_script_202607_single_live_semantics_cutover
+    pk_col: "[generation, stage]"
+    notes: Transactional generation receipt used only to distinguish a committed migration stage from external DB replacement during resume.
+
+  - name: single_live_cutover_generation
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: none
+    created_by: migration_script_202607_single_live_semantics_cutover
+    pk_col: "[generation, stage]"
+    notes: Transactional generation receipt used only to distinguish a committed migration stage from external DB replacement during resume.
+
+  - name: single_live_cutover_generation
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: none
+    created_by: migration_script_202607_single_live_semantics_cutover
+    pk_col: "[generation, stage]"
+    notes: Transactional generation receipt used only to distinguish a committed migration stage from external DB replacement during resume.
+
+  - name: single_live_cutover_generation
+    db: risk_state
+    schema_class: risk_class
+    schema_version_owner: none
+    created_by: migration_script_202607_single_live_semantics_cutover
+    pk_col: "[generation, stage]"
+    notes: Transactional generation receipt used only to distinguish a committed migration stage from external DB replacement during resume.

@@ -929,7 +929,7 @@ files:
   src/riskguard/riskguard.py:
     zone: K1_governance
     authority_role: risk_runtime
-    why: Independent risk process; risk output must change trading behavior.
+    why: Independent risk process; risk output must change trading behavior. Its canonical risk DB schema includes the transaction-bound cutover generation receipt used for crash-safe migration resume.
     downstream:
     - src/engine/cycle_runner.py
     - src/observability/status_summary.py
@@ -1211,7 +1211,7 @@ files:
   src/data/market_scanner.py:
     zone: K2_runtime
     authority_role: market_discovery
-    why: Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh accepts a per-row persist context so CLOB/network work stays outside the unified trade write lease.
+    why: Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh accepts a per-row persist context so CLOB/network work stays outside the unified trade write lease. Its direct market-events writer opens through the canonical shared cutover lease.
     write_routes:
     - runtime_trade_write_coordinator
     downstream:
@@ -2489,7 +2489,7 @@ files:
   src/state/venue_command_repo.py:
     zone: K2_runtime
     authority_role: venue_command_journal
-    why: Durable venue command/event journal; insert_command rejects order-creating BUY/SELL commands outside inclusive [0.05,0.95] before persistence while preserving CANCEL; R3 Z4 terminal command transitions release collateral reservations atomically; authenticated already-canceled zero-fill clearance validates command-specific absence without confusing an older same-position fill for exposure from the canceled increment; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
+    why: Durable venue command/event journal; insert_command rejects order-creating BUY/SELL commands outside inclusive [0.05,0.95] before persistence while preserving CANCEL; every live nonterminal command records one exact decision-certificate attribution, with later position commands inheriting the unique entry certificate or failing closed; R3 Z4 terminal command transitions release collateral reservations atomically; authenticated already-canceled zero-fill clearance validates command-specific absence without confusing an older same-position fill for exposure from the canceled increment; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
     write_routes:
     - venue_command_write
     downstream:
@@ -2578,7 +2578,7 @@ files:
   src/state/db.py:
     zone: K2_runtime
     authority_role: db_connection_schema_runtime
-    why: SQLite connections, schema setup, canonical DB queries, and raw provenance projection initialization. Confirmed positive entry execution facts contribute their actual shares and cost to the runtime portfolio whether the command is fully filled or still has a resting partial remainder. Owns the token-suppression reason vocabulary and separates review resolution, permanent ignore, and external-drift suppression semantics.
+    why: SQLite connections, schema setup, canonical DB queries, and raw provenance projection initialization. Every writable canonical connection holds the shared cutover lease for its full lifetime; all canonical schemas own the transaction-bound cutover generation receipt. Confirmed positive entry execution facts contribute their actual shares and cost to the runtime portfolio whether the command is fully filled or still has a resting partial remainder. Owns the token-suppression reason vocabulary and separates review resolution, permanent ignore, and external-drift suppression semantics.
     write_routes:
     - canonical_position_write
     - settlement_write
@@ -2611,7 +2611,7 @@ files:
   src/state/write_coordinator.py:
     zone: K2_runtime
     authority_role: db_write_coordination_contract
-    why: Runtime DB write coordinator for declared DB-set leases, same-file writer serialization across LIVE/BULK classes, single-DB BEGIN IMMEDIATE transactions, and telemetry. Price-channel world+trade write units are migrated; remaining production writers still need coverage.
+    why: Runtime DB write coordinator for declared DB-set leases, same-file writer serialization across LIVE/BULK classes, single-DB BEGIN IMMEDIATE transactions, and telemetry. Its unified writer gate is separate from the shared cutover-lease file, so a pre-opened canonical connection cannot self-contend when a coordinated write unit starts.
     write_routes:
     - canonical_db_write_coordination
     downstream:
@@ -2620,6 +2620,20 @@ files:
     - src/events/triggers/market_channel_ingestor.py
     - src/data/substrate_observer.py
     - src/riskguard/riskguard.py
+  src/state/db_writer_lock.py:
+    zone: K2_runtime
+    authority_role: db_writer_cutover_lease
+    why: Provides class writer locks plus the universal shared canonical-connection lease and exclusive cutover gate; lease ownership lives exactly as long as the SQLite connection and is reentrant only under a declared WriteCoordinator exclusive lease.
+    downstream:
+    - src/state/db.py
+    - src/state/write_coordinator.py
+    - scripts/migrations/202607_single_live_semantics_cutover.py
+  src/state/chunk_boundary_events.py:
+    zone: K2_runtime
+    authority_role: db_chunk_boundary_observability
+    why: Failure-silent daemon-thread chunk-boundary event writer; its dedicated SQLite connection obeys the same shared cutover lease as every canonical writer.
+    downstream:
+    - src/state/db_writer_lock.py
   src/state/decision_chain.py:
     zone: K2_runtime
     authority_role: decision_fact_logging

@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -14,6 +16,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -216,6 +219,7 @@ CREATE TABLE decision_certificates_live_new (
 )
 """
 OPAQUE_REFERENCE_FIELDS = {
+    "position_decision_attribution": ("decision_certificate_hash",),
     "position_events": ("decision_id", "payload_json"),
     "venue_command_events": ("payload_json",),
     "decision_log": ("artifact_json",),
@@ -306,6 +310,44 @@ def assert_writer_fence(root: Path) -> None:
         raise RuntimeError("live writer fence is not durable:\n  " + "\n  ".join(detail))
 
 
+def _cutover_lock_paths(root: Path, dbs: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Return every lock surface used by canonical SQLite writers."""
+
+    paths = {root / "state" / ".single-live-cutover.lock"}
+    for db in dbs:
+        paths.update(
+            {
+                Path(f"{db}.writer-lock"),
+                Path(f"{db}.writer-lock.live"),
+                Path(f"{db}.writer-lock.bulk"),
+                Path(f"{db}.cutover-lease"),
+            }
+        )
+    return tuple(sorted(paths, key=str))
+
+
+@contextlib.contextmanager
+def cutover_lease(root: Path, dbs: tuple[Path, ...]) -> Any:
+    """Hold the canonical writer locks exclusively for the complete cutover."""
+
+    handles: list[Any] = []
+    try:
+        for path in _cutover_lock_paths(root, dbs):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = path.open("a+")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                handle.close()
+                raise RuntimeError(f"canonical writer lease is held: {path}") from exc
+            handles.append(handle)
+        yield
+    finally:
+        for handle in reversed(handles):
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
+
 def target_release_identity(root: Path) -> dict[str, str]:
     """Bind apply/resume to the checkout that owns this exact migration code."""
 
@@ -326,6 +368,173 @@ def target_release_identity(root: Path) -> dict[str, str]:
         "migration_script_sha256": script_hash,
         "schema_fingerprint": schema_fingerprint,
     }
+
+
+_IDENTITY_TABLES = (
+    "decision_certificates",
+    "decision_certificate_edges",
+    "decision_certificate_supersessions",
+    "decision_compile_failures",
+    "position_current",
+    "position_decision_attribution",
+    "venue_commands",
+    "position_events",
+    "venue_command_events",
+    "decision_log",
+    "edli_live_profit_audit",
+    TRANSFER_TABLE,
+    CONVERSION_TABLE,
+    CONVERSION_EVENTS,
+    "raw_forecast_artifacts",
+    "deterministic_forecast_anchors",
+    "forecast_posteriors",
+    "settlement_capture_verifications",
+    "edli_no_submit_receipts",
+    "risk_state",
+)
+
+
+def _digest_sqlite_migration_state(conn: sqlite3.Connection) -> str:
+    digest = hashlib.sha256()
+    for table in _IDENTITY_TABLES:
+        if not table_exists(conn, table):
+            continue
+        table_sql = quote_identifier(table)
+        schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        digest.update(json.dumps([table, schema[0] if schema else None]).encode())
+        cursor = conn.execute(f"SELECT * FROM {table_sql} ORDER BY rowid")
+        digest.update(json.dumps([item[0] for item in cursor.description]).encode())
+        for row in cursor:
+            normalized = [
+                {"blob_sha256": hashlib.sha256(value).hexdigest()}
+                if isinstance(value, bytes)
+                else value
+                for value in row
+            ]
+            digest.update(
+                json.dumps(normalized, sort_keys=True, default=str, separators=(",", ":")).encode()
+            )
+    return digest.hexdigest()
+
+
+def sqlite_target_identity(path: Path) -> dict[str, Any]:
+    resolved = path.resolve(strict=True)
+    stat = resolved.stat()
+    conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        return {
+            "path": str(path.absolute()),
+            "resolved_path": str(resolved),
+            "st_dev": stat.st_dev,
+            "st_ino": stat.st_ino,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "application_id": int(conn.execute("PRAGMA application_id").fetchone()[0]),
+            "user_version": int(conn.execute("PRAGMA user_version").fetchone()[0]),
+            "schema_version": int(conn.execute("PRAGMA schema_version").fetchone()[0]),
+            "migration_state_sha256": _digest_sqlite_migration_state(conn),
+        }
+    finally:
+        conn.close()
+
+
+def settings_target_identity(path: Path) -> dict[str, Any]:
+    link_stat = path.lstat()
+    resolved = path.resolve(strict=True)
+    target_stat = resolved.stat()
+    return {
+        "path": str(path.absolute()),
+        "is_symlink": path.is_symlink(),
+        "symlink_target": os.readlink(path) if path.is_symlink() else None,
+        "link_st_dev": link_stat.st_dev,
+        "link_st_ino": link_stat.st_ino,
+        "resolved_path": str(resolved),
+        "target_st_dev": target_stat.st_dev,
+        "target_st_ino": target_stat.st_ino,
+        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+    }
+
+
+def target_state_identity(
+    root: Path, dbs: tuple[Path, ...], settings_path: Path
+) -> dict[str, Any]:
+    runtime_json = {
+        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted((root / ".local").rglob("*.json"))
+        if path.is_file()
+    } if (root / ".local").exists() else {}
+    return {
+        "databases": {path.name: sqlite_target_identity(path) for path in dbs},
+        "settings": settings_target_identity(settings_path),
+        "runtime_json": runtime_json,
+        "retired_files_present": {
+            rel: hashlib.sha256((root / rel).read_bytes()).hexdigest()
+            for rel in sorted(RETIRED_FILES)
+            if (root / rel).is_file()
+        },
+    }
+
+
+def expected_runtime_json_hashes(root: Path) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    base = root / ".local"
+    if not base.exists():
+        return expected
+    for path in sorted(base.rglob("*.json")):
+        if not path.is_file():
+            continue
+        raw = path.read_bytes()
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            expected[str(path.relative_to(root))] = hashlib.sha256(raw).hexdigest()
+            continue
+        if isinstance(payload, dict) and REMOVED_MANIFEST_FIELD in payload:
+            del payload[REMOVED_MANIFEST_FIELD]
+            raw = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+        expected[str(path.relative_to(root))] = hashlib.sha256(raw).hexdigest()
+    return expected
+
+
+def _cleaned_config(path: Path) -> tuple[dict[str, object], list[str]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"settings must contain a JSON object: {path}")
+    removed: list[str] = []
+    retired = set((*CONFIG_NOTES, *CONFIG_KEYS))
+    retired_paths = set(CONFIG_PATHS)
+
+    def strip(mapping: dict[str, object], prefix: str = "") -> None:
+        for key in tuple(mapping):
+            path_key = f"{prefix}.{key}" if prefix else key
+            if key in retired or path_key in retired_paths:
+                del mapping[key]
+                removed.append(path_key)
+            elif isinstance(mapping[key], dict):
+                strip(mapping[key], path_key)
+
+    strip(payload)
+    return payload, removed
+
+
+def normalized_settings_identity(identity: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in identity.items()
+        if key not in {"target_st_dev", "target_st_ino"}
+    }
+
+
+def expected_settings_identity(path: Path) -> dict[str, Any]:
+    identity = normalized_settings_identity(settings_target_identity(path))
+    payload, _ = _cleaned_config(path)
+    identity["sha256"] = hashlib.sha256(
+        (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    ).hexdigest()
+    return identity
 
 
 def utc_now() -> str:
@@ -353,6 +562,41 @@ def open_db(path: Path, *, writable: bool) -> sqlite3.Connection:
     else:
         conn.execute("PRAGMA query_only=ON")
     return conn
+
+
+def mark_cutover_generation(
+    conn: sqlite3.Connection, *, generation: str, stage: str
+) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS single_live_cutover_generation (
+            generation TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            committed_at TEXT NOT NULL,
+            migration_state_sha256 TEXT NOT NULL,
+            PRIMARY KEY (generation, stage)
+        )
+        """
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO single_live_cutover_generation VALUES (?, ?, ?, ?)",
+        (generation, stage, utc_now(), _digest_sqlite_migration_state(conn)),
+    )
+
+
+def has_cutover_generation(path: Path, *, generation: str, stage: str) -> bool:
+    conn = open_db(path, writable=False)
+    try:
+        if not _schema_table_exists(conn, "main", "single_live_cutover_generation"):
+            return False
+        row = conn.execute(
+                "SELECT migration_state_sha256 FROM single_live_cutover_generation "
+                "WHERE generation=? AND stage=?",
+                (generation, stage),
+            ).fetchone()
+        return row is not None and str(row[0]) == _digest_sqlite_migration_state(conn)
+    finally:
+        conn.close()
 
 
 def _table_columns(conn: sqlite3.Connection, schema: str, table: str) -> tuple[str, ...]:
@@ -506,6 +750,13 @@ def _rows_referencing_hashes(
 
 
 def _opaque_reference_counts(conn: sqlite3.Connection, closure: set[str]) -> dict[str, int]:
+    """Count durable rows that would dangle if ``closure`` were deleted.
+
+    This deliberately scans JSON in Python so malformed historical payloads
+    containing a certificate hash are still detected. Invalid JSON is not a
+    license to erase the referenced proof object.
+    """
+
     counts: dict[str, int] = {}
     if not closure:
         return counts
@@ -516,28 +767,15 @@ def _opaque_reference_counts(conn: sqlite3.Connection, closure: set[str]) -> dic
         for field in fields:
             if field not in present:
                 continue
-            table_sql = quote_identifier(table)
-            field_sql = quote_identifier(field)
-            if field.endswith("_json"):
-                count = int(
-                    conn.execute(
-                        f"SELECT COUNT(DISTINCT source.rowid) "
-                        f"FROM trades.{table_sql} source, "
-                        f"json_tree(source.{field_sql}) leaf "
-                        "JOIN temp.single_live_retired_closure retired "
-                        "ON retired.certificate_hash=lower(CAST(leaf.value AS TEXT)) "
-                        f"WHERE source.{field_sql} IS NOT NULL "
-                        f"AND json_valid(source.{field_sql})"
-                    ).fetchone()[0]
+            count = len(
+                _rows_referencing_hashes(
+                    conn,
+                    "trades",
+                    table,
+                    field,
+                    closure,
                 )
-            else:
-                count = int(
-                    conn.execute(
-                        f"SELECT COUNT(*) FROM trades.{table_sql} source "
-                        "JOIN temp.single_live_retired_closure retired "
-                        f"ON retired.certificate_hash=lower(CAST(source.{field_sql} AS TEXT))"
-                    ).fetchone()[0]
-                )
+            )
             if count:
                 counts[f"{table}.{field}"] = count
     return counts
@@ -664,7 +902,10 @@ def _trades_preflight(
     blockers: list[dict[str, Any]] = []
     details: dict[str, Any] = {
         "active_position_attribution_count": 0,
-        "nonterminal_command_count": 0,
+        "nonterminal_command_total": 0,
+        "nonterminal_command_attributed": 0,
+        "nonterminal_command_unresolved": 0,
+        "nonterminal_command_retired_closure_refs": 0,
         **protected_details,
         "historical_opaque_reference_counts": (
             _opaque_reference_counts(conn, closure)
@@ -711,27 +952,68 @@ def _trades_preflight(
     command_rows = conn.execute(
         f"""
         SELECT cmd.command_id, cmd.position_id, cmd.state,
-               pda.decision_certificate_hash
+               COUNT(pda.attribution_id) AS attribution_count,
+               SUM(CASE WHEN upper(COALESCE(pda.resolution, '')) = 'ATTRIBUTED'
+                         THEN 1 ELSE 0 END) AS attributed_count,
+               MIN(pda.resolution) AS resolution,
+               MIN(pda.decision_certificate_hash) AS decision_certificate_hash,
+               SUM(CASE WHEN cert.certificate_hash IS NOT NULL THEN 1 ELSE 0 END)
+                   AS extant_certificate_count
           FROM trades.venue_commands cmd
-          JOIN trades.position_decision_attribution pda
-            ON pda.position_id = cmd.position_id
+          LEFT JOIN trades.position_decision_attribution pda
+            ON pda.command_id = cmd.command_id
+           AND pda.position_id = cmd.position_id
+          LEFT JOIN decision_certificates cert
+            ON lower(cert.certificate_hash) = lower(pda.decision_certificate_hash)
          WHERE upper(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
+         GROUP BY cmd.command_id, cmd.position_id, cmd.state
         """,
         tuple(terminal),
     ).fetchall()
+    command_details = [dict(row) for row in command_rows]
+    unresolved_commands = [
+        row
+        for row in command_details
+        if int(row["attribution_count"] or 0) != 1
+        or int(row["attributed_count"] or 0) != 1
+        or str(row["resolution"] or "").upper() != "ATTRIBUTED"
+        or not str(row["decision_certificate_hash"] or "").strip()
+        or int(row["extant_certificate_count"] or 0) != 1
+    ]
     command_refs = [
         dict(row)
-        for row in command_rows
+        for row in command_details
         if str(row["decision_certificate_hash"] or "").lower() in closure
     ]
-    details["nonterminal_command_count"] = len(command_refs)
-    details["nonterminal_command_sample"] = command_refs[:25]
+    details["nonterminal_command_total"] = len(command_details)
+    details["nonterminal_command_attributed"] = len(command_details) - len(unresolved_commands)
+    details["nonterminal_command_unresolved"] = len(unresolved_commands)
+    details["nonterminal_command_retired_closure_refs"] = len(command_refs)
+    details["nonterminal_command_unresolved_sample"] = unresolved_commands[:25]
+    details["nonterminal_command_retired_closure_sample"] = command_refs[:25]
+    if unresolved_commands:
+        blockers.append(
+            {
+                "kind": "nonterminal_command_attribution_unresolved",
+                "count": len(unresolved_commands),
+                "sample": unresolved_commands[:25],
+            }
+        )
     if command_refs:
         blockers.append(
             {
                 "kind": "retired_closure_referenced_by_nonterminal_command",
                 "count": len(command_refs),
                 "sample": command_refs[:25],
+            }
+        )
+    opaque_refs = details["historical_opaque_reference_counts"]
+    if isinstance(opaque_refs, dict) and opaque_refs:
+        blockers.append(
+            {
+                "kind": "retired_closure_referenced_by_durable_history",
+                "count": sum(int(value) for value in opaque_refs.values()),
+                "references": opaque_refs,
             }
         )
     return blockers, details
@@ -1121,7 +1403,12 @@ def _trades_ghost_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
-def drop_trades_ghost_decision_graph(trades_path: Path) -> dict[str, Any]:
+def drop_trades_ghost_decision_graph(
+    trades_path: Path,
+    *,
+    generation: str | None = None,
+    stage: str = "decision_graphs",
+) -> dict[str, Any]:
     pre_conn = open_db(trades_path, writable=False)
     try:
         pre = _trades_ghost_snapshot(pre_conn)
@@ -1150,6 +1437,8 @@ def drop_trades_ghost_decision_graph(trades_path: Path) -> dict[str, Any]:
             )
             if pda_count != pre["position_decision_attribution_count"]:
                 raise RuntimeError("position_decision_attribution changed")
+            if generation is not None:
+                mark_cutover_generation(conn, generation=generation, stage=stage)
             conn.execute("COMMIT")
         except BaseException:
             if conn.in_transaction:
@@ -1185,6 +1474,8 @@ def migrate_world_decision_graph(
     world_path: Path,
     trades_path: Path,
     receipt_path: Path,
+    *,
+    generation: str | None = None,
 ) -> dict[str, Any]:
     started_at = utc_now()
     plan = plan_world_decision_graph(world_path, trades_path)
@@ -1212,6 +1503,10 @@ def migrate_world_decision_graph(
             finally:
                 _drop_retired_closure(conn, restore_query_only)
             transaction_checks = postcheck_world_decision_graph(conn)
+            if generation is not None:
+                mark_cutover_generation(
+                    conn, generation=generation, stage="decision_graphs"
+                )
             conn.execute("COMMIT")
             committed = True
         except BaseException:
@@ -1222,7 +1517,9 @@ def migrate_world_decision_graph(
         conn.close()
 
     try:
-        trades_ghost = drop_trades_ghost_decision_graph(trades_path)
+        trades_ghost = drop_trades_ghost_decision_graph(
+            trades_path, generation=generation
+        )
     except BaseException as exc:
         if committed:
             raise RuntimeError(
@@ -1416,7 +1713,63 @@ def mutation_blockers(path: Path) -> list[str]:
         conn.close()
 
 
-def mutate_db(path: Path) -> list[str]:
+def migrate_command_attribution_schema(conn: sqlite3.Connection) -> bool:
+    """Replace the position-wide uniqueness rule with command-exact attribution."""
+
+    if not table_exists(conn, "position_decision_attribution"):
+        return False
+    schema_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        ("position_decision_attribution",),
+    ).fetchone()
+    schema = str(schema_row[0] or "") if schema_row else ""
+    if "UNIQUE(position_id)" not in schema.replace(" ", ""):
+        return False
+    conn.execute(
+        """
+        CREATE TABLE position_decision_attribution_single_live_new (
+            attribution_id TEXT NOT NULL PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            command_id TEXT,
+            decision_certificate_hash TEXT,
+            resolution TEXT NOT NULL CHECK (resolution IN ('ATTRIBUTED', 'UNATTRIBUTABLE')),
+            resolution_reason TEXT,
+            source TEXT NOT NULL CHECK (source IN ('LIVE_DECISION', 'BACKFILL')),
+            intent_kind TEXT,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+            UNIQUE(command_id, position_id),
+            CHECK (
+                (resolution = 'ATTRIBUTED' AND command_id IS NOT NULL
+                 AND decision_certificate_hash IS NOT NULL)
+                OR
+                (resolution = 'UNATTRIBUTABLE' AND decision_certificate_hash IS NULL)
+            )
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_decision_attribution_single_live_new "
+        "SELECT * FROM position_decision_attribution"
+    )
+    conn.execute("DROP TABLE position_decision_attribution")
+    conn.execute(
+        "ALTER TABLE position_decision_attribution_single_live_new "
+        "RENAME TO position_decision_attribution"
+    )
+    conn.execute(
+        "CREATE INDEX idx_position_decision_attribution_command "
+        "ON position_decision_attribution(command_id)"
+    )
+    return True
+
+
+def mutate_db(
+    path: Path,
+    *,
+    generation: str | None = None,
+    stage: str | None = None,
+) -> list[str]:
     conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True, timeout=0.0, isolation_level=None)
     changed: list[str] = []
     try:
@@ -1426,6 +1779,8 @@ def mutate_db(path: Path) -> list[str]:
             raise RuntimeError(f"could not keep foreign_keys enabled for {path}")
         conn.execute("BEGIN IMMEDIATE")
         try:
+            if migrate_command_attribution_schema(conn):
+                changed.append("migrated command-exact decision attribution schema")
             for table in (
                 TRANSFER_TABLE,
                 CONVERSION_EVENTS,
@@ -1511,6 +1866,8 @@ def mutate_db(path: Path) -> list[str]:
 
             if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise RuntimeError(f"integrity_check failed for {path}")
+            if generation is not None and stage is not None:
+                mark_cutover_generation(conn, generation=generation, stage=stage)
             conn.execute("COMMIT")
         except BaseException:
             if conn.in_transaction:
@@ -1546,36 +1903,127 @@ def rewrite_json_without_field(path: Path, field: str) -> None:
 
 
 def clean_config(path: Path) -> list[str]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    removed: list[str] = []
+    payload, removed = _cleaned_config(path)
+    if removed:
+        target = path.resolve(strict=True) if path.is_symlink() else path
+        tmp = target.with_name(target.name + ".single-live.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, target)
+    return removed
 
+
+def config_retired_paths(path: Path) -> list[str]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"settings must contain a JSON object: {path}")
+    found: list[str] = []
     retired = set((*CONFIG_NOTES, *CONFIG_KEYS))
     retired_paths = set(CONFIG_PATHS)
 
-    def strip(mapping: dict[str, object], prefix: str = "") -> None:
-        for key in tuple(mapping):
+    def walk(mapping: dict[str, object], prefix: str = "") -> None:
+        for key, value in mapping.items():
             path_key = f"{prefix}.{key}" if prefix else key
             if key in retired or path_key in retired_paths:
-                del mapping[key]
-                removed.append(path_key)
-                continue
-            value = mapping[key]
-            if isinstance(value, dict):
-                strip(value, path_key)
+                found.append(path_key)
+            elif isinstance(value, dict):
+                walk(value, path_key)
 
-    strip(payload)
-    if removed:
-        tmp = path.with_name(path.name + ".single-live.tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
-    return removed
+    walk(payload)
+    return sorted(found)
+
+
+def verify_mutated_db(path: Path) -> None:
+    residual = [*mutation_blockers(path), *describe_db(path)]
+    if residual:
+        raise RuntimeError(f"database cutover postcondition failed for {path}: {residual}")
+
+
+def verify_runtime_json(root: Path) -> None:
+    residual = json_files_with_field(root / ".local")
+    if residual:
+        raise RuntimeError(f"runtime JSON postcondition failed: {residual}")
+
+
+def verify_retired_files_absent(root: Path) -> None:
+    residual = [rel for rel in RETIRED_FILES if (root / rel).exists()]
+    if residual:
+        raise RuntimeError(f"retired runtime files remain: {residual}")
+
+
+def verify_config_clean(path: Path) -> None:
+    residual = config_retired_paths(path)
+    if residual:
+        raise RuntimeError(f"retired settings remain: {residual}")
+
+
+def recoverable_in_progress_target(
+    root: Path,
+    progress: dict[str, Any],
+    current: dict[str, Any],
+) -> bool:
+    """Accept only stage-owned post-commit drift after an interrupted journal write."""
+
+    stage = str(progress.get("current_stage") or "")
+    if not stage or stage in set(progress.get("completed_stages") or ()):
+        return False
+    expected = progress.get("expected_target_state")
+    generation = str(progress.get("migration_generation") or "")
+    if not isinstance(expected, dict) or not generation:
+        return False
+    changed_top = {key for key in current if current.get(key) != expected.get(key)}
+    if stage == "decision_graphs":
+        allowed = {"databases"}
+        allowed_dbs = {WORLD_DB, TRADES_DB}
+    elif stage.startswith("mutated:"):
+        allowed = {"databases"}
+        allowed_dbs = {stage.split(":", 1)[1]}
+    elif stage == "runtime_json":
+        post = progress.get("stage_expected_post_states", {}).get(stage)
+        return (
+            changed_top == {"runtime_json"}
+            and current.get("runtime_json") == post
+        )
+    elif stage == "runtime_files":
+        post = progress.get("stage_expected_post_states", {}).get(stage)
+        return (
+            changed_top == {"retired_files_present"}
+            and current.get("retired_files_present") == post
+        )
+    elif stage == "config":
+        post = progress.get("stage_expected_post_states", {}).get(stage)
+        current_settings = current.get("settings")
+        return (
+            changed_top == {"settings"}
+            and isinstance(current_settings, dict)
+            and normalized_settings_identity(current_settings) == post
+        )
+    else:
+        return False
+    if not changed_top or not changed_top <= allowed:
+        return False
+    expected_dbs = expected.get("databases", {})
+    current_dbs = current.get("databases", {})
+    changed_dbs = {
+        name for name in current_dbs if current_dbs.get(name) != expected_dbs.get(name)
+    }
+    if not changed_dbs or not changed_dbs <= allowed_dbs:
+        return False
+    return all(
+        has_cutover_generation(
+            root / "state" / name,
+            generation=generation,
+            stage=stage if stage.startswith("mutated:") else "decision_graphs",
+        )
+        for name in changed_dbs
+    )
 
 
 def _open_stage_journal(
     progress_path: Path,
     root: Path,
     *,
-    target_identity: dict[str, str] | None = None,
+    target_identity: dict[str, Any] | None = None,
+    target_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Open a durable, target-bound journal without erasing interrupted state."""
     if progress_path.exists():
@@ -1584,7 +2032,7 @@ def _open_stage_journal(
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"unreadable migration stage journal: {progress_path}: {exc}") from exc
         expected = {
-            "schema_version": 2 if target_identity else 1,
+            "schema_version": 3 if target_state else (2 if target_identity else 1),
             "migration": "202607_single_live_semantics_cutover",
             "root": str(root),
             **(target_identity or {}),
@@ -1596,20 +2044,29 @@ def _open_stage_journal(
         completed = progress.get("completed_stages")
         if not isinstance(completed, list) or any(not isinstance(stage, str) for stage in completed):
             raise RuntimeError(f"stage journal has invalid completed_stages: {progress_path}")
+        if target_state is not None and progress.get("expected_target_state") != target_state:
+            if not recoverable_in_progress_target(root, progress, target_state):
+                raise RuntimeError(
+                    f"stage journal target generation changed: {progress_path}"
+                )
+            progress["recovering_stage_commit"] = progress.get("current_stage")
         if progress.get("status") == "complete":
             return progress
         progress["status"] = "running"
         progress["resumed_at"] = utc_now()
     else:
         progress = {
-            "schema_version": 2 if target_identity else 1,
+            "schema_version": 3 if target_state else (2 if target_identity else 1),
             "migration": "202607_single_live_semantics_cutover",
             "root": str(root),
             **(target_identity or {}),
             "status": "running",
             "started_at": utc_now(),
             "completed_stages": [],
+            "migration_generation": str(uuid.uuid4()),
         }
+        if target_state is not None:
+            progress["expected_target_state"] = target_state
     progress["updated_at"] = utc_now()
     _write_receipt_atomic(progress_path, progress)
     return progress
@@ -1636,13 +2093,34 @@ def _run_journaled_stage(
     action: Any,
     *,
     precondition: Any | None = None,
+    postcondition: Any | None = None,
+    current_target_state: Any | None = None,
+    expected_recovery_state: Any | None = None,
 ) -> Any:
+    if current_target_state is not None:
+        current = current_target_state()
+        if current != progress.get("expected_target_state"):
+            if progress.get("recovering_stage_commit") != stage:
+                raise RuntimeError(f"stage journal target generation changed before {stage}")
+            progress["expected_target_state"] = current
+            progress.pop("recovering_stage_commit", None)
+            _record_stage_journal(progress_path, progress, stage, complete=False)
     if stage in progress["completed_stages"]:
+        if postcondition is not None:
+            postcondition()
         return None
+    if expected_recovery_state is not None:
+        post_states = progress.setdefault("stage_expected_post_states", {})
+        if stage not in post_states:
+            post_states[stage] = expected_recovery_state()
     if precondition is not None:
         precondition()
     _record_stage_journal(progress_path, progress, stage, complete=False)
     result = action()
+    if postcondition is not None:
+        postcondition()
+    if current_target_state is not None:
+        progress["expected_target_state"] = current_target_state()
     _record_stage_journal(progress_path, progress, stage, complete=True)
     return result
 
@@ -1687,7 +2165,7 @@ def main() -> int:
     graph_plan = plan_world_decision_graph(
         world_path,
         trades_path,
-        include_opaque_references=args.apply,
+        include_opaque_references=True,
     )
     print("WORLD decision graph plan:")
     print(json.dumps(graph_plan, indent=2, sort_keys=True))
@@ -1700,21 +2178,6 @@ def main() -> int:
         return 0
     if not args.operator_confirms_fenced:
         raise SystemExit("REFUSED: --apply requires --operator-confirms-fenced")
-    try:
-        release_identity = target_release_identity(root)
-        assert_writer_fence(root)
-    except RuntimeError as exc:
-        raise SystemExit(f"REFUSED: {exc}") from exc
-
-    deterministic_blockers = [
-        blocker for path in dbs for blocker in mutation_blockers(path)
-    ]
-    if deterministic_blockers:
-        raise SystemExit(
-            "REFUSED: mutation preflight failed before first commit:\n  "
-            + "\n  ".join(deterministic_blockers)
-        )
-
     receipt_path = args.receipt
     if receipt_path is None:
         receipt_path = (
@@ -1725,23 +2188,71 @@ def main() -> int:
     elif not receipt_path.is_absolute():
         receipt_path = root / receipt_path
     progress_path = receipt_path.with_name(receipt_path.stem + ".progress.json")
-    progress = _open_stage_journal(
-        progress_path,
-        root,
-        target_identity=release_identity,
-    )
-    if progress["status"] == "complete":
-        print(f"APPLY ALREADY COMPLETE: journal={progress_path}")
-        return 0
-    progress["mutation_preflight"] = "passed"
-    _record_stage_journal(progress_path, progress, "preflight", complete=True)
+    settings_path = root / "config" / "settings.json"
     try:
+        lease = cutover_lease(root, dbs)
+        lease.__enter__()
+        release_identity = target_release_identity(root)
+        assert_writer_fence(root)
+        def current_target_state() -> dict[str, Any]:
+            return target_state_identity(root, dbs, settings_path)
+
+        initial_target_state = current_target_state()
+        deterministic_blockers = [
+            blocker for path in dbs for blocker in mutation_blockers(path)
+        ]
+        if deterministic_blockers:
+            raise RuntimeError(
+                "mutation preflight failed before first commit:\n  "
+                + "\n  ".join(deterministic_blockers)
+            )
+        progress = _open_stage_journal(
+            progress_path,
+            root,
+            target_identity=release_identity,
+            target_state=initial_target_state,
+        )
+    except RuntimeError as exc:
+        if "lease" in locals():
+            lease.__exit__(None, None, None)
+        raise SystemExit(f"REFUSED: {exc}") from exc
+
+    def graph_postcondition() -> None:
+        plan = plan_world_decision_graph(
+            world_path, trades_path, include_opaque_references=True
+        )
+        if plan.get("blockers") or int(plan.get("counts", {}).get("certificates_remove", 0)):
+            raise RuntimeError(f"decision graph postcondition failed: {plan}")
+
+    def complete_postconditions() -> None:
+        graph_postcondition()
+        for db in dbs:
+            verify_mutated_db(db)
+        verify_runtime_json(root)
+        verify_retired_files_absent(root)
+        verify_config_clean(settings_path)
+
+    try:
+        if progress["status"] == "complete":
+            complete_postconditions()
+            print(f"APPLY ALREADY COMPLETE AND REVALIDATED: journal={progress_path}")
+            return 0
+        progress["mutation_preflight"] = "passed"
+        _record_stage_journal(progress_path, progress, "preflight", complete=True)
+        generation = str(progress["migration_generation"])
         receipt = _run_journaled_stage(
             progress_path,
             progress,
             "decision_graphs",
-            lambda: migrate_world_decision_graph(world_path, trades_path, receipt_path),
+            lambda: migrate_world_decision_graph(
+                world_path,
+                trades_path,
+                receipt_path,
+                generation=generation,
+            ),
             precondition=lambda: assert_writer_fence(root),
+            postcondition=graph_postcondition,
+            current_target_state=current_target_state,
         )
         if receipt is not None:
             print(
@@ -1762,8 +2273,14 @@ def main() -> int:
                 progress_path,
                 progress,
                 f"mutated:{path.name}",
-                lambda path=path: mutate_db(path),
+                lambda path=path: mutate_db(
+                    path,
+                    generation=generation,
+                    stage=f"mutated:{path.name}",
+                ),
                 precondition=lambda: assert_writer_fence(root),
+                postcondition=lambda path=path: verify_mutated_db(path),
+                current_target_state=current_target_state,
             )
             if changed is not None:
                 for line in changed:
@@ -1774,6 +2291,9 @@ def main() -> int:
             "runtime_json",
             lambda: [rewrite_json_without_field(path, REMOVED_MANIFEST_FIELD) for path in json_paths],
             precondition=lambda: assert_writer_fence(root),
+            postcondition=lambda: verify_runtime_json(root),
+            current_target_state=current_target_state,
+            expected_recovery_state=lambda: expected_runtime_json_hashes(root),
         )
         def remove_retired_files() -> list[Path]:
             removed: list[Path] = []
@@ -1789,6 +2309,9 @@ def main() -> int:
             "runtime_files",
             remove_retired_files,
             precondition=lambda: assert_writer_fence(root),
+            postcondition=lambda: verify_retired_files_absent(root),
+            current_target_state=current_target_state,
+            expected_recovery_state=lambda: {},
         )
         if removed_files is not None:
             for path in removed_files:
@@ -1797,9 +2320,13 @@ def main() -> int:
             progress_path,
             progress,
             "config",
-            lambda: clean_config(root / "config" / "settings.json"),
+            lambda: clean_config(settings_path),
             precondition=lambda: assert_writer_fence(root),
+            postcondition=lambda: verify_config_clean(settings_path),
+            current_target_state=current_target_state,
+            expected_recovery_state=lambda: expected_settings_identity(settings_path),
         )
+        complete_postconditions()
         progress["status"] = "complete"
         _record_stage_journal(progress_path, progress, "complete", complete=True)
         print(f"rewritten json files: {len(json_paths)}")
@@ -1810,6 +2337,8 @@ def main() -> int:
         progress["error"] = f"{type(exc).__name__}: {exc}"
         _record_stage_journal(progress_path, progress, "failed", complete=False)
         raise
+    finally:
+        lease.__exit__(None, None, None)
     return 0
 
 

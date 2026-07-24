@@ -622,9 +622,22 @@ def _position_decision_attribution_row(
     try:
         return world_conn.execute(
             """
-            SELECT resolution, decision_certificate_hash
+            SELECT
+                CASE
+                    WHEN COUNT(DISTINCT decision_certificate_hash) = 1
+                     AND SUM(CASE WHEN resolution != 'ATTRIBUTED' THEN 1 ELSE 0 END) = 0
+                    THEN 'ATTRIBUTED'
+                    ELSE 'UNATTRIBUTABLE'
+                END AS resolution,
+                CASE
+                    WHEN COUNT(DISTINCT decision_certificate_hash) = 1
+                     AND SUM(CASE WHEN resolution != 'ATTRIBUTED' THEN 1 ELSE 0 END) = 0
+                    THEN MIN(decision_certificate_hash)
+                    ELSE NULL
+                END AS decision_certificate_hash
             FROM trades.position_decision_attribution
-            WHERE position_id = ?
+            WHERE position_id = ? AND intent_kind = 'ENTRY'
+            HAVING COUNT(*) > 0
             """,
             (position_id,),
         ).fetchone()
