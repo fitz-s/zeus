@@ -1,7 +1,11 @@
 # Created: 2026-06-12
-# Last reused/audited: 2026-07-20
+# Last reused/audited: 2026-07-24
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Purpose: Protect Day0 fast-observation source, coverage, and scheduler contracts.
+# Reuse: Run when WU, same-station fast-tail, or Day0 source-clock routing changes.
 # Authority basis: day0_obs_fastlane_plan.md §4.2 (Option B) and §4.3 (Option C);
-#   operator task brief /tmp/day0_obs_fastlane_plan.md.
+#   operator task brief /tmp/day0_obs_fastlane_plan.md; live_entry_health_repair
+#   Slice B66.
 """Antibody tests for Day0 observation fast-lane Options B and C.
 
 Option B: _fetch_wu_observation may use the same-station fast-tail in-process
@@ -20,8 +24,10 @@ Relationship contracts tested:
       coverage_status reflects METAR-computed value.
   B6. coverage-incomplete WU + fast lane has late first_obs_time →
       coverage_status remains WINDOW_INCOMPLETE.
-  B7. fresh WU result (not stale, not coverage-incomplete) → fast lane NOT
-      consulted; WU result returned.
+  B7. fresh WU result is retained unless a newer exact-station fast observation
+      strictly strengthens its monotone HIGH or LOW extreme.
+  B8. canonical WU prefix truth obeys the same strengthening rule without
+      promoting the fast lane to final settlement truth.
 
   C1. ingest_k2_obs_fast_tick is registered in the APScheduler job list.
   C2. _active_window_cities returns only cities in the local active window.
@@ -30,6 +36,7 @@ Relationship contracts tested:
 """
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from contextlib import contextmanager
@@ -397,8 +404,8 @@ class TestGetCurrentObservationFastTail:
 
         assert result.source == "wu_api"
 
-    def test_fresh_wu_fast_lane_not_consulted(self):
-        """B7: fresh WU result → fast lane NOT consulted."""
+    def test_fresh_wu_without_stronger_tail_stays_wu_context(self):
+        """B7: a fresh WU result remains authoritative without a stronger tail."""
         city = _wu_icao_city()
         ref = datetime(2026, 6, 12, 18, 0, tzinfo=UTC)
         from src.data.observation_client import Day0ObservationContext
@@ -410,17 +417,24 @@ class TestGetCurrentObservationFastTail:
             observation_available_at=ref.isoformat(),
         )
 
-        mock_emitter = MagicMock()
+        fast_tail = MagicMock(return_value=None)
 
         with (
+            patch(
+                "src.data.observation_client._fetch_canonical_observation_from_instants",
+                return_value=None,
+            ),
             patch("src.data.observation_client._fetch_wu_observation", return_value=fresh_wu),
-            patch("src.data.day0_fast_obs.get_fast_obs_emitter", return_value=mock_emitter),
+            patch(
+                "src.data.observation_client._fetch_same_station_fast_tail_observation",
+                fast_tail,
+            ),
         ):
             from src.data.observation_client import get_current_observation
             result = get_current_observation(city, target_date=date(2026, 6, 12), reference_time=ref)
 
         assert result.source == "wu_api"
-        mock_emitter.latest_extremes.assert_not_called()
+        fast_tail.assert_called_once()
 
 
 class TestLiveWuObservation:
@@ -2149,6 +2163,134 @@ class TestWuPrefixMetarTailFusion:
         assert out.high_so_far == 91.0
         assert out.low_so_far == 60.0
         assert "prefix=wu_api" in (out.provider_reported_time or "")
+
+    def _wsss(self, **tail_overrides):
+        city = _wu_icao_city(
+            name="Singapore", station="WSSS", tz="Asia/Singapore", unit="C"
+        )
+        canonical = self._ctx(
+            current_temp=31.0,
+            high_so_far=31.0,
+            low_so_far=26.0,
+            source="wu_icao_history",
+            observation_time="2026-07-24T04:00:00+00:00",
+            last_sample_time="2026-07-24T04:00:00+00:00",
+            unit="C",
+            station_id="WSSS",
+            sample_count=13,
+            first_sample_time=None,
+            sample_times_utc=None,
+            observation_available_at="2026-07-24T04:13:05+00:00",
+            source_role="historical_hourly",
+            source_authority="VERIFIED",
+            data_version="v1.wu-native",
+            training_allowed=True,
+        )
+        tail = {
+            "current_temp": 32.0,
+            "high_so_far": 32.0,
+            "low_so_far": 30.0,
+            "source": "same_station_fast_tail",
+            "observation_time": "2026-07-24T04:30:00+00:00",
+            "unit": "C",
+            "station_id": "WSSS",
+            "coverage_status": "WINDOW_INCOMPLETE",
+            "sample_count": 2,
+            "first_sample_time": None,
+            "sample_times_utc": None,
+            "observation_available_at": "2026-07-24T04:30:57+00:00",
+        }
+        tail.update(tail_overrides)
+        return city, canonical, self._ctx(**tail)
+
+    @staticmethod
+    def _canonical_read(monkeypatch, city, canonical, fast):
+        import src.data.observation_client as oc
+
+        monkeypatch.setattr(
+            oc, "_fetch_canonical_observation_from_instants", lambda *_a, **_k: canonical
+        )
+        monkeypatch.setattr(
+            oc, "_fetch_same_station_fast_tail_observation", lambda *_a, **_k: fast
+        )
+        return oc.get_current_observation(
+            city,
+            target_date=date(2026, 7, 24),
+            reference_time=datetime(2026, 7, 24, 4, 55, tzinfo=UTC),
+        )
+
+    def test_newer_wsss_high_strengthens_canonical_wu_context(self, monkeypatch):
+        """B66 Singapore replay: canonical 31C cannot hide newer WSSS 32C."""
+        city, canonical, fast = self._wsss()
+        out = self._canonical_read(monkeypatch, city, canonical, fast)
+
+        assert (out.high_so_far, out.low_so_far) == (32.0, 26.0)
+        assert out.source == "wu_api+same_station_fast_tail"
+        assert out.coverage_status == "OK"
+        assert out.observation_time == "2026-07-24T04:30:00+00:00"
+        assert out.observation_available_at == "2026-07-24T04:30:57+00:00"
+        assert (
+            out.source_role,
+            out.source_authority,
+            out.data_version,
+            out.training_allowed,
+        ) == ("historical_hourly", "VERIFIED", "v1.wu-native", True)
+        assert "prefix=wu_icao_history" in (out.provider_reported_time or "")
+
+    def test_newer_same_station_low_strengthens_canonical_wu_context(self, monkeypatch):
+        city, canonical, fast = self._wsss(
+            current_temp=25.0, high_so_far=30.0, low_so_far=25.0
+        )
+        out = self._canonical_read(monkeypatch, city, canonical, fast)
+        assert (out.high_so_far, out.low_so_far) == (31.0, 25.0)
+
+    @pytest.mark.parametrize(
+        ("tail_overrides", "prefix_station"),
+        [
+            ({"observation_time": "2026-07-24T03:59:00+00:00"}, "WSSS"),
+            ({"high_so_far": 31.0, "low_so_far": 26.0}, "WSSS"),
+            ({"station_id": "WSSL"}, "WSSS"),
+            ({"unit": "F"}, "WSSS"),
+            ({"current_temp": float("nan")}, "WSSS"),
+            ({"causality_status": "REQUIRES_SOURCE_REAUDIT"}, "WSSS"),
+            ({}, ""),
+        ],
+    )
+    def test_unqualified_tail_cannot_override_canonical_wu(
+        self,
+        monkeypatch,
+        tail_overrides,
+        prefix_station,
+    ):
+        city, canonical, fast = self._wsss(**tail_overrides)
+        canonical = dataclasses.replace(canonical, station_id=prefix_station)
+        out = self._canonical_read(monkeypatch, city, canonical, fast)
+        assert out is canonical
+
+        wrong_prefix = dataclasses.replace(canonical, station_id="WSSL")
+        assert self._canonical_read(monkeypatch, city, wrong_prefix, fast) is wrong_prefix
+
+    def test_fresh_live_wu_is_strengthened_by_newer_exact_station_tail(self, monkeypatch):
+        import src.data.observation_client as oc
+
+        city, wu, fast = self._wsss()
+        wu = dataclasses.replace(wu, source="wu_api")
+        monkeypatch.setattr(
+            oc, "_fetch_canonical_observation_from_instants", lambda *_a, **_k: None
+        )
+        monkeypatch.setattr(oc, "_fetch_wu_observation", lambda *_a, **_k: wu)
+        monkeypatch.setattr(
+            oc, "_fetch_same_station_fast_tail_observation", lambda *_a, **_k: fast
+        )
+        out = oc.get_current_observation(
+            city,
+            target_date=date(2026, 7, 24),
+            reference_time=datetime(2026, 7, 24, 4, 55, tzinfo=UTC),
+        )
+        assert (out.source, out.high_so_far) == (
+            "wu_api+same_station_fast_tail",
+            32.0,
+        )
 
 
 class TestFastTickCityRotation:

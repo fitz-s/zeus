@@ -1260,7 +1260,10 @@ files:
   src/data/observation_client.py:
     zone: K2_runtime
     authority_role: observation_reader
-    why: Reads current observations for day0/monitor logic.
+    why: Reads current observations for Day0/monitor logic; exact configured
+      WU stations may combine a strictly newer same-station fast tail only
+      when it strengthens the monotone running HIGH or LOW, while canonical
+      prefix coverage and source provenance remain explicit.
     downstream:
     - src/data/day0_coverage_proof.py
     - src/data/day0_observation_reader.py

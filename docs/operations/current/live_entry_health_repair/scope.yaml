@@ -12,6 +12,7 @@ in_scope:
 - src/engine/global_auction_universe.py
 - src/signal/ensemble_signal.py
 - src/data/polymarket_request_governor.py
+- src/data/observation_client.py
 - src/data/station_forecast_adapter.py
 - src/data/replacement_fusion_upgrade_trigger.py
 - src/state/schema/v2_schema.py
@@ -48,6 +49,7 @@ in_scope:
 - tests/test_live_safety_invariants.py
 - tests/test_ensemble_signal.py
 - tests/test_polymarket_request_governor.py
+- tests/test_day0_obs_fastlane_optionbc.py
 - tests/test_command_recovery.py
 - tests/test_fill_synchronizer.py
 - tests/test_station_forecast_live_ingest_wiring.py

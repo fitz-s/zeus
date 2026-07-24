@@ -1,7 +1,8 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-07-24
 # Authority basis: Day0 real-time observation; F3 PR 2/3 typed temperature
-#                  boundary per Path A (src/types/temperature.py).
+#                  boundary per Path A (src/types/temperature.py);
+#                  live_entry_health_repair Slice B66.
 #   + review5.23 P1-1: coverage window-completeness proof.
 """Real-time observation client for Day0 signal.
 
@@ -15,6 +16,7 @@ Contract:
 """
 
 import logging
+import math
 import sqlite3
 import warnings
 from dataclasses import dataclass
@@ -498,10 +500,16 @@ def _fuse_wu_prefix_with_same_station_tail(
         getattr(fast_tail, "sample_times_utc", None)
     )
     combined_times = tuple(sorted(set(wu_times) | set(tail_times)))
+    exposed_times = combined_times if wu_times else ()
     coverage_status = wu_cov
     max_gap_minutes = getattr(wu, "max_gap_minutes", None)
     gap_suspect_metrics = getattr(wu, "gap_suspect_metrics", None)
-    if city is not None and target_day is not None and reference_utc is not None:
+    if (
+        wu_times
+        and city is not None
+        and target_day is not None
+        and reference_utc is not None
+    ):
         first = min(combined_times) if combined_times else None
         if first is not None:
             coverage_status, max_gap_minutes, gap_suspect_metrics, combined_times = (
@@ -528,8 +536,9 @@ def _fuse_wu_prefix_with_same_station_tail(
         else:
             gap_suspect_metrics = tuple(sorted(set(wu_metrics) | set(tail_metrics)))
 
+    prefix_source = str(getattr(wu, "source", "") or "wu_api")
     annotation = (
-        f"{fast_tail.provider_reported_time or ''};prefix=wu_api"
+        f"{fast_tail.provider_reported_time or ''};prefix={prefix_source}"
         f";prefix_coverage={wu_cov}"
         f";prefix_last={getattr(wu, 'last_sample_time', None) or getattr(wu, 'observation_time', None)}"
     )
@@ -540,24 +549,120 @@ def _fuse_wu_prefix_with_same_station_tail(
         source=COMBINED_WU_FAST_TAIL_SOURCE,
         coverage_status=coverage_status,
         first_sample_time=(
-            combined_times[0].isoformat()
-            if combined_times
+            exposed_times[0].isoformat()
+            if exposed_times
             else getattr(wu, "first_sample_time", None)
         ),
         sample_count=(
-            len(combined_times)
-            if combined_times
+            len(exposed_times)
+            if exposed_times
             else int(getattr(wu, "sample_count", 0) or 0)
             + int(getattr(fast_tail, "sample_count", 0) or 0)
         ),
         max_gap_minutes=max_gap_minutes,
         gap_suspect_metrics=gap_suspect_metrics,
         sample_times_utc=(
-            tuple(instant.isoformat() for instant in combined_times)
-            if combined_times
+            tuple(instant.isoformat() for instant in exposed_times)
+            if exposed_times
             else None
         ),
         provider_reported_time=annotation,
+        source_role=(
+            str(getattr(wu, "source_role", "") or "")
+            or str(getattr(fast_tail, "source_role", "") or "")
+        ),
+        source_authority=(
+            str(getattr(wu, "source_authority", "") or "")
+            or str(getattr(fast_tail, "source_authority", "") or "")
+        ),
+        data_version=(
+            str(getattr(wu, "data_version", "") or "")
+            or str(getattr(fast_tail, "data_version", "") or "")
+        ),
+        training_allowed=(
+            getattr(wu, "training_allowed", None)
+            if getattr(wu, "training_allowed", None) is not None
+            else getattr(fast_tail, "training_allowed", None)
+        ),
+    )
+
+
+def _newer_same_station_tail_strengthens(
+    wu: Day0ObservationContext,
+    fast_tail: Day0ObservationContext,
+    *,
+    city: City,
+) -> bool:
+    """Whether a causal exact-station tail advances a running WU extreme."""
+
+    if str(getattr(city, "settlement_source_type", "") or "") != "wu_icao":
+        return False
+    if str(getattr(fast_tail, "source", "") or "") != SAME_STATION_FAST_TAIL_SOURCE:
+        return False
+    if str(getattr(fast_tail, "causality_status", "") or "OK") != "OK":
+        return False
+    expected_station = str(getattr(city, "wu_station", "") or "").strip().upper()
+    wu_station = str(getattr(wu, "station_id", "") or "").strip().upper()
+    tail_station = str(getattr(fast_tail, "station_id", "") or "").strip().upper()
+    if not expected_station or tail_station != expected_station:
+        return False
+    if not _wu_station_matches(wu_station, expected_station):
+        return False
+    if str(getattr(wu, "unit", "") or "") != str(
+        getattr(fast_tail, "unit", "") or ""
+    ):
+        return False
+    expected_unit = str(getattr(city, "settlement_unit", "") or "")
+    if expected_unit and str(getattr(wu, "unit", "") or "") != expected_unit:
+        return False
+
+    wu_time = _parse_sample_times_utc(
+        (
+            getattr(wu, "observation_time", None),
+            getattr(wu, "last_sample_time", None),
+        )
+    )
+    tail_time = _parse_sample_times_utc(
+        (getattr(fast_tail, "observation_time", None),)
+    )
+    if not wu_time or not tail_time or tail_time[0] <= wu_time[-1]:
+        return False
+    try:
+        wu_high = float(wu.high_so_far)
+        wu_low = float(wu.low_so_far)
+        tail_high = float(fast_tail.high_so_far)
+        tail_low = float(fast_tail.low_so_far)
+        tail_current = float(fast_tail.current_temp)
+    except (TypeError, ValueError):
+        return False
+    if not all(
+        math.isfinite(value)
+        for value in (wu_high, wu_low, tail_high, tail_low, tail_current)
+    ):
+        return False
+    return tail_high > wu_high or tail_low < wu_low
+
+
+def _strengthen_wu_with_same_station_tail(
+    wu: Day0ObservationContext,
+    fast_tail: Optional[Day0ObservationContext],
+    *,
+    city: City,
+    target_day: date,
+    reference_utc: datetime,
+) -> Optional[Day0ObservationContext]:
+    if fast_tail is None or not _newer_same_station_tail_strengthens(
+        wu,
+        fast_tail,
+        city=city,
+    ):
+        return None
+    return _fuse_wu_prefix_with_same_station_tail(
+        wu,
+        fast_tail,
+        city=city,
+        target_day=target_day,
+        reference_utc=reference_utc,
     )
 
 
@@ -760,6 +865,30 @@ def get_current_observation(
         reference_utc=reference_utc,
     )
     if canonical is not None:
+        if city.settlement_source_type == "wu_icao":
+            fast_result = _fetch_same_station_fast_tail_observation(
+                city,
+                target_day=target_day,
+                reference_utc=reference_utc,
+            )
+            strengthened = _strengthen_wu_with_same_station_tail(
+                canonical,
+                fast_result,
+                city=city,
+                target_day=target_day,
+                reference_utc=reference_utc,
+            )
+            if strengthened is not None:
+                logger.info(
+                    "DAY0_OBS_CANONICAL_WU_STRENGTHENED city=%s target_date=%s "
+                    "prefix_source=%s source=%s observation_time=%s",
+                    city.name,
+                    target_day.isoformat(),
+                    canonical.source,
+                    strengthened.source,
+                    strengthened.observation_time,
+                )
+                return strengthened
         return canonical
 
     if city.settlement_source_type == "wu_icao":
@@ -768,10 +897,20 @@ def get_current_observation(
         # stale, or coverage-incomplete (the three blocking failure modes
         # identified in the day0_obs_fastlane_plan §1.4). No HTTP in this path.
         fast_tail_reason = _wu_result_needs_fast_tail(result, reference_utc=reference_utc)
-        if fast_tail_reason:
-            fast_result = _fetch_same_station_fast_tail_observation(
-                city, target_day=target_day, reference_utc=reference_utc
+        fast_result = _fetch_same_station_fast_tail_observation(
+            city, target_day=target_day, reference_utc=reference_utc
+        )
+        if result is not None and not fast_tail_reason:
+            strengthened = _strengthen_wu_with_same_station_tail(
+                result,
+                fast_result,
+                city=city,
+                target_day=target_day,
+                reference_utc=reference_utc,
             )
+            if strengthened is not None:
+                return strengthened
+        if fast_tail_reason:
             if fast_result is not None:
                 # Prefix fusion (Denver incident 2026-06-12): a stale-but-
                 # coverage-proving WU result + a fresh-but-prefixless METAR
