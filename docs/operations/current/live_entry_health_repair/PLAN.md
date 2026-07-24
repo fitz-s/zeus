@@ -1203,3 +1203,46 @@ Restore truthful live entry admission after the global auction reached a real wi
   `object()` connections and one incomplete in-memory executable-snapshot
   schema). Compilation, planning lock, and `git diff --check` pass. Ruff is not
   installed in the live virtualenv.
+
+## Slice B72.2 -- Let held-position monitoring preempt a slow scope scan
+
+- Live proof: after full held-book coverage recovered, an active EDLI reactor
+  still made `exit_monitor` defer after its 30-second handoff budget. The same
+  current run spent 78.336 seconds in the global scope scan; 72-hour logs
+  contain scans up to 610.927 seconds. The 41 held positions were fresh at the
+  sample, but correctness still depended on the entry reactor finishing before
+  the next material belief/book reversal.
+- First-principles invariant: the reactor may finish an atomic venue side
+  effect, but a read-only scope construction cannot outrank capital already at
+  risk. Once monitor priority is claimed, scope SQL and event construction must
+  cooperatively cancel, return no partial scope, release the reactor boundary,
+  and let the next reactor cycle re-decide from current truth.
+- Minimal repair: pass the existing held-monitor cancellation signal through
+  global scope construction; use a scope-owned watcher and SQLite
+  `Connection.interrupt()` to stop long world/forecast reads without replacing
+  a caller-owned progress handler, plus explicit checks between Python
+  row-build phases. Convert only an observed monitor cancellation into the
+  existing `GLOBAL_SELECTION_CANCELLED` requeue receipt. Do not run monitor and
+  reactor venue work concurrently.
+- Files authorized: `src/engine/global_batch_runtime.py`,
+  `src/engine/global_auction_universe.py`,
+  `src/events/triggers/forecast_snapshot_ready.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`,
+  `tests/events/test_forecast_snapshot_ready.py`, and this packet plus its
+  scope sidecar.
+- Acceptance: a monitor handoff interrupts a deliberately long scope SQL,
+  forecast-event construction returns no partial carrier, the batch persists
+  the existing cancellation/requeue reason with zero candidate preparation and
+  zero venue actuation, existing global-auction behavior remains green, and a
+  live exact-SHA restart shows no monitor defer under another slow scope scan.
+- Verification: real `threading.Event` antibodies interrupt forecast SQL and
+  Day0 Python filtering within one second, preserve a caller-owned SQLite
+  progress handler, join the watcher, and keep a failed cancellation probe
+  fail-soft. Forecast-trigger coverage passes `31/31`, global-batch coverage
+  `50/50`, handoff coverage `4/4`, and combined dedup/live-safety coverage
+  `333 passed, 1 xpassed`; schema fingerprint, compilation, and
+  `git diff --check` pass. A read-only scan of the canonical live world and
+  forecast DBs cancelled in `0.069822s`. Two wider scope-fixture tests fail
+  identically on live because they pass `object()` into `EventWriter`; neither
+  reaches this cancellation path. Independent review found no P0/P1/P2 and
+  returned LAND.

@@ -823,6 +823,7 @@ class ForecastSnapshotReadyTrigger:
         restrict_to_families: set[tuple[str, str, str]] | None = None,
         phase_filter_exempt_families: set[tuple[str, str, str]] | None = None,
         suppress_recent_no_value_refutations: bool = False,
+        cancelled: Callable[[], bool] | None = None,
     ) -> list[OpportunityEvent]:
         """Build opportunity events from committed source_run/source_run_coverage/snapshot rows.
 
@@ -837,6 +838,17 @@ class ForecastSnapshotReadyTrigger:
         the world write mutex and keep the live event writer's critical section short.
         """
 
+        def _raise_if_cancelled() -> None:
+            if cancelled is None:
+                return
+            try:
+                requested = bool(cancelled())
+            except Exception:
+                return
+            if requested:
+                raise InterruptedError("FORECAST_SNAPSHOT_SCAN_CANCELLED")
+
+        _raise_if_cancelled()
         # mx2t3 carrier-decouple (GATE-1 C-A2): under the replacement lane readiness rides
         # ``forecast_posteriors`` (mx2t3-independent), so the required-table guard switches to it —
         # otherwise this scan early-returns ``[]`` once the cold ensemble tables freeze/absent.
@@ -1150,6 +1162,7 @@ class ForecastSnapshotReadyTrigger:
                         _decision_iso,
                     ),
                 )
+            _raise_if_cancelled()
         else:
             replacement_filter = ""
             if _replacement_live_enabled():
@@ -1257,6 +1270,7 @@ class ForecastSnapshotReadyTrigger:
                     *_replacement_params,
                 ),
             )
+            _raise_if_cancelled()
         rows = _filter_rows_to_restricted_families(rows, restrict_to_families)
         pending_skip = already_pending_keys or set()
         if pending_skip and rows:
@@ -1287,12 +1301,14 @@ class ForecastSnapshotReadyTrigger:
                 cycle_index=0 if limit is None else _cycle_index,
             ).select_rows(rows)
         if _posterior_lane and rows:
+            _raise_if_cancelled()
             rows = _with_posterior_raw_member_counts(
                 forecasts_conn,
                 rows,
                 decision_iso=_decision_iso,
                 min_members=3,
             )
+            _raise_if_cancelled()
         # WAVE-1 W1-T1 intake phase filter. For one-shot catch-up this remains
         # gated by edli.edli_intake_phase_filter_enabled (default OFF). For
         # continuous re-decision (source is per-cycle) it is mandatory: same-day
@@ -1307,6 +1323,7 @@ class ForecastSnapshotReadyTrigger:
         # remains the authority either way.
         results: list[OpportunityEvent] = []
         for row in reversed(rows):
+            _raise_if_cancelled()
             source_run = _source_run_from_join(row)
             coverage = _coverage_from_join(row)
             snapshot = _snapshot_from_join(row)

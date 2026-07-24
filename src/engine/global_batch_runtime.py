@@ -22,6 +22,7 @@ from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.engine.global_auction_universe import (
     CurrentGlobalAuctionScope,
     CurrentGlobalBookEpoch,
+    GlobalAuctionScopeCancelled,
     current_global_book_epoch_identity,
     current_global_auction_scope_from_events,
     current_portfolio_wealth_witness,
@@ -3211,14 +3212,24 @@ def process_current_global_batch(
                 for event in event_tuple
             )
         )
-        full_scope = scan_current_global_auction_scope(
-            world_conn=world_conn,
-            forecasts_conn=forecast_conn,
-            decision_at_utc=scope_at,
-            held_families=held_families,
-            restrict_to_families=(restricted_families or None),
-            day0_only=day0_only_scope,
-        )
+        try:
+            full_scope = scan_current_global_auction_scope(
+                world_conn=world_conn,
+                forecasts_conn=forecast_conn,
+                decision_at_utc=scope_at,
+                held_families=held_families,
+                restrict_to_families=(restricted_families or None),
+                day0_only=day0_only_scope,
+                cancelled=selection_cancelled,
+            )
+        except GlobalAuctionScopeCancelled:
+            _LOG.info(
+                "global batch preempted during scope scan for held-position monitor: "
+                "elapsed_s=%.3f events=%d",
+                time.monotonic() - batch_started,
+                len(event_tuple),
+            )
+            return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         log_stage("scope_scan", families=len(full_scope.events_by_family))
         if cancelled("scope_scan"):
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")

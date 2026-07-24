@@ -10905,6 +10905,173 @@ def test_global_scope_refuses_a_held_family_without_probability_carrier(
     }
 
 
+def test_global_scope_interrupts_forecast_sql_for_monitor_handoff(monkeypatch):
+    class SlowTrigger:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def build_committed_snapshot_events(self, **kwargs):
+            kwargs["forecasts_conn"].execute(
+                """
+                WITH RECURSIVE counter(value) AS (
+                    VALUES(0)
+                    UNION ALL
+                    SELECT value + 1 FROM counter WHERE value < 100000000
+                )
+                SELECT SUM(value) FROM counter
+                """
+            ).fetchone()
+            pytest.fail("monitor cancellation must interrupt the scope SQL")
+
+    monkeypatch.setattr(universe, "ForecastSnapshotReadyTrigger", SlowTrigger)
+    monkeypatch.setattr(
+        universe,
+        "executable_forecast_live_eligible_reader",
+        lambda _conn: lambda *_args, **_kwargs: True,
+    )
+
+    world_conn = sqlite3.connect(":memory:")
+    forecasts_conn = sqlite3.connect(":memory:")
+    prior_handler_calls = 0
+
+    def prior_progress_handler():
+        nonlocal prior_handler_calls
+        prior_handler_calls += 1
+        return 0
+
+    forecasts_conn.set_progress_handler(prior_progress_handler, 1_000)
+    monitor_pending = threading.Event()
+    timer = threading.Timer(0.05, monitor_pending.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(
+            universe.GlobalAuctionScopeCancelled,
+            match="GLOBAL_SELECTION_CANCELLED",
+        ):
+            universe.scan_current_global_auction_scope(
+                world_conn=world_conn,
+                forecasts_conn=forecasts_conn,
+                decision_at_utc=_dt.datetime(
+                    2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
+                ),
+                cancelled=monitor_pending.is_set,
+            )
+    finally:
+        timer.cancel()
+        timer.join()
+
+    assert time.monotonic() - started < 1.0
+    calls_before_probe = prior_handler_calls
+    forecasts_conn.execute(
+        """
+        WITH RECURSIVE counter(value) AS (
+            VALUES(0)
+            UNION ALL
+            SELECT value + 1 FROM counter WHERE value < 10000
+        )
+        SELECT SUM(value) FROM counter
+        """
+    ).fetchone()
+    assert prior_handler_calls > calls_before_probe
+    assert not any(
+        thread.name == "global-scope-monitor-handoff" and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def test_current_day0_scope_cooperatively_cancels_python_filtering(monkeypatch):
+    import src.config as config
+
+    decision_at = _dt.datetime(2026, 7, 10, 11, 30, tzinfo=_dt.timezone.utc)
+    cities = tuple(f"City{index:03d}" for index in range(100))
+    monkeypatch.setattr(
+        config,
+        "runtime_cities_by_name",
+        lambda: {city: SimpleNamespace(timezone="UTC") for city in cities},
+    )
+    original_current = universe._day0_event_is_current_for_entry
+
+    def slow_current(*args, **kwargs):
+        time.sleep(0.002)
+        return original_current(*args, **kwargs)
+
+    monkeypatch.setattr(
+        universe,
+        "_day0_event_is_current_for_entry",
+        slow_current,
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_opportunity_events_table(conn)
+    for city in cities:
+        _insert_event(
+            conn,
+            _current_day0_scope_event(
+                city=city,
+                target_date="2026-07-10",
+                available_at="2026-07-10T11:00:00+00:00",
+            ),
+        )
+
+    monitor_pending = threading.Event()
+    timer = threading.Timer(0.03, monitor_pending.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(
+            universe.GlobalAuctionScopeCancelled,
+            match="GLOBAL_SELECTION_CANCELLED",
+        ):
+            _current_day0_events(
+                conn,
+                decision_at_utc=decision_at,
+                cancelled=monitor_pending.is_set,
+            )
+    finally:
+        timer.cancel()
+        timer.join()
+
+    assert time.monotonic() - started < 1.0
+
+
+def test_global_scope_ignores_a_failed_cancellation_probe(monkeypatch):
+    event = _global_scope_event(city="Alpha", source_run_id="run-alpha")
+
+    class CurrentTrigger:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def build_committed_snapshot_events(self, **_kwargs):
+            return (event,)
+
+    monkeypatch.setattr(universe, "ForecastSnapshotReadyTrigger", CurrentTrigger)
+    monkeypatch.setattr(
+        universe,
+        "executable_forecast_live_eligible_reader",
+        lambda _conn: lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        universe,
+        "_current_day0_events",
+        lambda *_args, **_kwargs: (),
+    )
+
+    def failed_probe():
+        raise RuntimeError("probe unavailable")
+
+    scope = universe.scan_current_global_auction_scope(
+        world_conn=sqlite3.connect(":memory:"),
+        forecasts_conn=sqlite3.connect(":memory:"),
+        decision_at_utc=_dt.datetime(
+            2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
+        ),
+        cancelled=failed_probe,
+    )
+
+    assert scope.events == (event,)
+
+
 def test_global_scope_unions_restricted_wake_with_all_held_obligations(monkeypatch):
     trigger_calls = []
     day0_calls = []
@@ -16436,6 +16603,56 @@ def test_global_batch_requeues_claimed_epoch_when_new_durable_fact_arrives(
     assert result.winner_event_id is None
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT"
+    )
+
+
+def test_global_batch_requeues_when_monitor_preempts_scope_scan(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    observed = {}
+    cancellation_probes = 0
+
+    def monitor_pending():
+        nonlocal cancellation_probes
+        cancellation_probes += 1
+        return cancellation_probes >= 2
+
+    def preempted_scope(**kwargs):
+        observed["cancelled"] = kwargs["cancelled"]
+        assert kwargs["cancelled"]() is True
+        raise universe.GlobalAuctionScopeCancelled("GLOBAL_SELECTION_CANCELLED")
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        preempted_scope,
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=lambda *_: pytest.fail(
+            "preempted scope must not prepare a candidate"
+        ),
+        actuate_winner=lambda *_: pytest.fail(
+            "preempted scope must not actuate"
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        selection_cancelled=monitor_pending,
+    )
+
+    assert observed["cancelled"] is monitor_pending
+    assert result.venue_submit_count == 0
+    assert result.winner_event_id is None
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
     )
 
 

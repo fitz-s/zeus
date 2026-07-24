@@ -6,6 +6,7 @@ in_scope:
 - src/control/live_health.py
 - src/main.py
 - src/events/reactor.py
+- src/events/triggers/forecast_snapshot_ready.py
 - src/engine/event_reactor_adapter.py
 - src/engine/cycle_runtime.py
 - src/engine/global_batch_runtime.py
@@ -40,6 +41,7 @@ in_scope:
 - tests/events/test_claim_lock_storm.py
 - tests/events/test_continuous_redecision_emit.py
 - tests/events/test_reactor.py
+- tests/events/test_forecast_snapshot_ready.py
 - tests/integration/test_w3_solve_seam_g3.py
 - tests/test_risk_allocator.py
 - tests/test_riskguard.py
