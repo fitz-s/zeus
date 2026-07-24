@@ -11767,11 +11767,16 @@ class TestRecoveryResolutionTable:
             "entry_price": 0.55,
         }
 
-    def test_terminal_filled_entry_repair_canonicalizes_legacy_imminent_strategy_key(
+    def test_terminal_filled_entry_repair_preserves_registry_known_imminent_strategy_key(
         self,
         conn,
         mock_client,
     ):
+        """One-law update (ultimate_alpha group B): _CANONICAL_STRATEGY_KEYS is
+        now registry-driven, and imminent_open_capture has its own registry
+        profile (#205) — so recovery PRESERVES it instead of collapsing it to
+        opening_inertia. The legacy alias map still guards keys the registry
+        never knew."""
         _insert(conn, size=5.0, price=0.34)
         _advance_to_acked(conn, venue_order_id="ord-001")
         from src.state.venue_command_repo import append_event
@@ -11819,7 +11824,7 @@ class TestRecoveryResolutionTable:
             "cost_basis_usd": 1.7,
             "entry_price": 0.34,
             "order_status": "filled",
-            "strategy_key": "opening_inertia",
+            "strategy_key": "imminent_open_capture",
         }
         event = conn.execute(
             """
@@ -11831,7 +11836,7 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert dict(event) == {
             "event_type": "ENTRY_ORDER_FILLED",
-            "strategy_key": "opening_inertia",
+            "strategy_key": "imminent_open_capture",
             "command_id": "cmd-001",
             "order_id": "ord-001",
         }

@@ -130,15 +130,19 @@ _LIVE_TERMINAL_ORDER_FACT_SOURCES = frozenset({
     "DATA_API",
     "CHAIN",
 })
-_CANONICAL_STRATEGY_KEYS = frozenset({
-    "settlement_capture",
-    "day0_nowcast_entry",
-    "shoulder_sell",
-    "center_buy",
-    "forecast_qkernel_entry",
-    "opening_inertia",
-})
+# Registry-driven, same source as the other three canonical-key definitions
+# (db.py:94, portfolio.py:76, cycle_runtime.py:108). Closes the
+# documented-unfixed gap from live_money_path_risk_audit_2026-05-22.md §102-106:
+# the previous module-local hardcoded 6-value frozenset silently misclassified
+# any key added to the registry after it was written (ultimate_alpha group B;
+# the pattern itself is outlawed by test_authority_rebuild_invariants).
+from src.state.db import CANONICAL_STRATEGY_KEYS as _CANONICAL_STRATEGY_KEYS
+
 _LEGACY_STRATEGY_KEY_ALIASES = {
+    # Dead-map guard only: imminent_open_capture has its own registry profile
+    # since #205 and is in the canonical set, so this alias no longer fires for
+    # it; retained solely for historical rows carrying keys the registry never
+    # knew. New aliases must not be added — register the key instead.
     "imminent_open_capture": "opening_inertia",
 }
 _ACKED_ORDER_STATES = frozenset({
