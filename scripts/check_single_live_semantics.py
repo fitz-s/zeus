@@ -524,9 +524,8 @@ def _path_import_aliases(tree: ast.AST) -> dict[str, str]:
                 if target not in {
                     "os.path",
                     "os.path.join",
-                    "pathlib.Path",
                     "posixpath.join",
-                }:
+                } | _PATHLIB_CONSTRUCTORS:
                     continue
                 aliases[item.asname or item.name] = target
     return aliases
@@ -845,6 +844,24 @@ def _mutated_controls(node: ast.AST, bindings: dict[str, str]) -> set[str]:
     return controls
 
 
+_PATHLIB_CONSTRUCTORS = frozenset(
+    {
+        "Path",
+        "PosixPath",
+        "PurePath",
+        "PurePosixPath",
+        "PureWindowsPath",
+        "WindowsPath",
+        "pathlib.Path",
+        "pathlib.PosixPath",
+        "pathlib.PurePath",
+        "pathlib.PurePosixPath",
+        "pathlib.PureWindowsPath",
+        "pathlib.WindowsPath",
+    }
+)
+
+
 def _literal_string(node: ast.AST, bindings: dict[str, str] | None = None) -> str | None:
     bindings = bindings or {}
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -903,7 +920,7 @@ def _literal_string(node: ast.AST, bindings: dict[str, str] | None = None) -> st
                     for index, part in enumerate((base, *parts))
                 )
         name = _bound_call_name(node.func, bindings)
-        if name in {"Path", "pathlib.Path"} and node.args:
+        if name in _PATHLIB_CONSTRUCTORS and node.args:
             parts = _literal_call_parts(node.args, bindings)
             if parts is not None:
                 return "/".join(
@@ -948,10 +965,9 @@ def _bound_call_name(node: ast.AST, bindings: dict[str, str]) -> str:
         "os.path",
         "os.path.join",
         "pathlib",
-        "pathlib.Path",
         "posixpath",
         "posixpath.join",
-    }:
+    } | _PATHLIB_CONSTRUCTORS:
         return name
     return f"{bound}.{tail}" if separator else bound
 

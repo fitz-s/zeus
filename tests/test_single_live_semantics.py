@@ -334,6 +334,43 @@ def test_gate_rejects_starred_os_join_into_excluded_subtree(
     )
 
 
+def test_gate_rejects_pure_path_into_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    loader = tmp_path / "src" / "config_loader.py"
+    loader.parent.mkdir(parents=True)
+    loader.write_text(
+        "from pathlib import PurePath\n"
+        "with open(PurePath('docs', 'archive', 'historical.md')) as handle:\n"
+        "    config = handle.read()\n",
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith("src/config_loader.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_aliased_pure_path_joinpath_into_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    loader = tmp_path / "src" / "config_loader.py"
+    loader.parent.mkdir(parents=True)
+    loader.write_text(
+        "from pathlib import PurePath as P\n"
+        "target = P('docs').joinpath('archive', 'historical.md')\n"
+        "with open(target) as handle:\n"
+        "    config = handle.read()\n",
+        encoding="utf-8",
+    )
+    assert any(
+        item.startswith("src/config_loader.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
 def test_gate_allows_plain_historical_markdown_under_excluded_subtree(
     tmp_path: Path,
 ) -> None:
