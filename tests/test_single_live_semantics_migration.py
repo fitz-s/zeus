@@ -604,6 +604,92 @@ def test_unknown_position_attribution_blocks_before_any_graph_write(
     assert not receipt.exists()
 
 
+def test_filled_economically_closed_unattributable_does_not_block_graph_cutover(
+    tmp_path: Path,
+) -> None:
+    world, trades, wconn, tconn = _fixture(tmp_path)
+    try:
+        _insert_certificate(wconn, "retired", "hash-retired", mode=_retired_mode())
+        tconn.execute("ALTER TABLE position_events ADD COLUMN position_id TEXT")
+        tconn.execute("ALTER TABLE position_events ADD COLUMN event_type TEXT")
+        tconn.execute(
+            "INSERT INTO position_current VALUES ('position-closed', 'economically_closed')"
+        )
+        tconn.execute(
+            """
+            INSERT INTO position_decision_attribution VALUES (
+                'attr-closed', 'position-closed', NULL, NULL, 'UNATTRIBUTABLE',
+                'no_entry_command_found', 'BACKFILL', 'ENTRY',
+                '2026-07-24T00:00:00+00:00', 1
+            )
+            """
+        )
+        tconn.execute(
+            """
+            INSERT INTO position_events(event_id, position_id, event_type, payload_json)
+            VALUES ('exit-filled', 'position-closed', 'EXIT_ORDER_FILLED',
+                    '{"fill_price":"0.16"}')
+            """
+        )
+        wconn.commit()
+        tconn.commit()
+    finally:
+        wconn.close()
+        tconn.close()
+
+    plan = migration.plan_world_decision_graph(world, trades)
+
+    assert plan["status"] == "ready"
+    assert plan["trades_preflight"]["unresolved_current_projection_count"] == 0
+    assert plan["trades_preflight"]["terminal_unattributable_exit_count"] == 1
+
+
+@pytest.mark.parametrize("counterexample", ("active", "missing_fill", "nonterminal_command"))
+def test_unattributable_exception_requires_terminal_exit_evidence(
+    tmp_path: Path,
+    counterexample: str,
+) -> None:
+    world, trades, wconn, tconn = _fixture(tmp_path)
+    try:
+        _insert_certificate(wconn, "retired", "hash-retired", mode=_retired_mode())
+        tconn.execute("ALTER TABLE position_events ADD COLUMN position_id TEXT")
+        tconn.execute("ALTER TABLE position_events ADD COLUMN event_type TEXT")
+        phase = "active" if counterexample == "active" else "economically_closed"
+        tconn.execute("INSERT INTO position_current VALUES ('position-1', ?)", (phase,))
+        tconn.execute(
+            """
+            INSERT INTO position_decision_attribution VALUES (
+                'attr-1', 'position-1', NULL, NULL, 'UNATTRIBUTABLE',
+                'no_entry_command_found', 'BACKFILL', 'ENTRY',
+                '2026-07-24T00:00:00+00:00', 1
+            )
+            """
+        )
+        if counterexample != "missing_fill":
+            tconn.execute(
+                """
+                INSERT INTO position_events(event_id, position_id, event_type, payload_json)
+                VALUES ('exit-filled', 'position-1', 'EXIT_ORDER_FILLED',
+                        '{"fill_price":"0.16"}')
+                """
+            )
+        if counterexample == "nonterminal_command":
+            tconn.execute(
+                "INSERT INTO venue_commands VALUES ('command-1', 'position-1', 'PENDING')"
+            )
+        wconn.commit()
+        tconn.commit()
+    finally:
+        wconn.close()
+        tconn.close()
+
+    plan = migration.plan_world_decision_graph(world, trades)
+
+    assert plan["status"] == "blocked"
+    assert plan["fast_fail"] == "protected_position_attribution"
+    assert plan["trades_preflight"]["unresolved_current_projection_count"] == 1
+
+
 @pytest.mark.parametrize(
     "table",
     (

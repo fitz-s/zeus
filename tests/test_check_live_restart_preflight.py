@@ -4737,7 +4737,7 @@ def test_preflight_qlcb_check_uses_preflight_state_dir(monkeypatch, tmp_path):
     assert result.evidence["path"] == str(state_dir / "qlcb_oof_reliability.json")
 
 
-def test_preflight_blocks_live_family_portfolio_max_legs_gt_one(monkeypatch, tmp_path):
+def test_preflight_does_not_reintroduce_retired_single_leg_family_veto(monkeypatch, tmp_path):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
@@ -4761,10 +4761,10 @@ def test_preflight_blocks_live_family_portfolio_max_legs_gt_one(monkeypatch, tmp
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
-    max_legs = next(c for c in result["checks"] if c["name"] == "family_portfolio_single_leg_cutover")
-    assert max_legs["ok"] is False
-    assert max_legs["evidence"]["effective_max_legs"] == 2
+    assert all(
+        check["name"] != "family_portfolio_single_leg_cutover"
+        for check in result["checks"]
+    )
 
 
 def test_preflight_blocks_absent_qlcb_artifact(monkeypatch, tmp_path):

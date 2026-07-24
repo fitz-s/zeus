@@ -608,39 +608,6 @@ def _src_main_boot_guard_check() -> CheckResult:
     )
 
 
-def _family_portfolio_single_leg_check() -> CheckResult:
-    try:
-        from src.strategy.family_exclusive_dedup import (
-            ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE,
-            _family_portfolio_max_legs,
-        )
-
-        max_legs = _family_portfolio_max_legs()
-        raw = os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE)
-    except Exception as exc:  # noqa: BLE001
-        return CheckResult(
-            "family_portfolio_single_leg_cutover",
-            False,
-            "family portfolio max-legs check failed",
-            {"error": str(exc)},
-        )
-    ok = max_legs == 1
-    return CheckResult(
-        "family_portfolio_single_leg_cutover",
-        ok,
-        (
-            "live family portfolio execution is constrained to one leg"
-            if ok
-            else "live family portfolio max_legs exceeds 1 without portfolio execution state machine"
-        ),
-        {
-            "env": ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE,
-            "raw_value": raw,
-            "effective_max_legs": max_legs,
-        },
-    )
-
-
 def _qlcb_reliability_artifact_check() -> CheckResult:
     try:
         from src.decision import qlcb_reliability_guard as qlcb_guard
@@ -6734,7 +6701,6 @@ def evaluate() -> dict[str, Any]:
         ),
         _clob_signature_type_config_check(required=True),
         _src_main_boot_guard_check(),
-        _family_portfolio_single_leg_check(),
         _qlcb_reliability_artifact_check(),
         _forecast_sidecar_health(),
         _posterior_summary(),

@@ -938,6 +938,8 @@ def _protected_position_attribution_preflight(
     details: dict[str, Any] = {
         "unresolved_current_projection_count": 0,
         "unresolved_current_projection_sample": [],
+        "terminal_unattributable_exit_count": 0,
+        "terminal_unattributable_exit_sample": [],
     }
     required = ("position_current", "position_decision_attribution")
     missing = [table for table in required if not _schema_table_exists(conn, "trades", table)]
@@ -946,23 +948,68 @@ def _protected_position_attribution_preflight(
 
     protected = sorted(PROTECTED_POSITION_PHASES)
     placeholders = ",".join("?" for _ in protected)
+    event_columns = set(_table_columns(conn, "trades", "position_events"))
+    command_columns = set(_table_columns(conn, "trades", "venue_commands"))
+    terminal_exit_evidence_available = {
+        "position_id",
+        "event_type",
+        "payload_json",
+    }.issubset(event_columns) and {
+        "position_id",
+        "state",
+    }.issubset(command_columns)
+    terminal = sorted(TERMINAL_COMMAND_STATES)
+    terminal_placeholders = ",".join("?" for _ in terminal)
+    terminal_exit_sql = (
+        f"""
+        CASE WHEN lower(pc.phase) = 'economically_closed'
+              AND upper(COALESCE(pda.resolution, '')) = 'UNATTRIBUTABLE'
+              AND pda.command_id IS NULL
+              AND pda.decision_certificate_hash IS NULL
+              AND EXISTS (
+                    SELECT 1
+                      FROM trades.position_events pe
+                     WHERE pe.position_id = pc.position_id
+                       AND pe.event_type = 'EXIT_ORDER_FILLED'
+                       AND CAST(json_extract(pe.payload_json, '$.fill_price') AS REAL) > 0
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                      FROM trades.venue_commands cmd
+                     WHERE cmd.position_id = pc.position_id
+                       AND upper(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
+              )
+             THEN 1 ELSE 0 END
+        """
+        if terminal_exit_evidence_available
+        else "0"
+    )
     rows = conn.execute(
         f"""
         SELECT pc.position_id, pc.phase, pda.command_id,
-               pda.decision_certificate_hash, pda.resolution
+               pda.decision_certificate_hash, pda.resolution,
+               {terminal_exit_sql} AS terminal_unattributable_exit
           FROM trades.position_current pc
           LEFT JOIN trades.position_decision_attribution pda
             ON pda.position_id = pc.position_id
          WHERE lower(pc.phase) IN ({placeholders})
         """,
-        tuple(protected),
+        (*terminal, *protected) if terminal_exit_evidence_available else tuple(protected),
     ).fetchall()
+    terminal_unattributable = [
+        dict(row) for row in rows if int(row["terminal_unattributable_exit"] or 0) == 1
+    ]
     unresolved = [
         dict(row)
         for row in rows
-        if str(row["resolution"] or "").upper() != "ATTRIBUTED"
-        or not str(row["decision_certificate_hash"] or "").strip()
+        if int(row["terminal_unattributable_exit"] or 0) != 1
+        and (
+            str(row["resolution"] or "").upper() != "ATTRIBUTED"
+            or not str(row["decision_certificate_hash"] or "").strip()
+        )
     ]
+    details["terminal_unattributable_exit_count"] = len(terminal_unattributable)
+    details["terminal_unattributable_exit_sample"] = terminal_unattributable[:25]
     details["unresolved_current_projection_count"] = len(unresolved)
     details["unresolved_current_projection_sample"] = unresolved[:25]
     if not unresolved:
