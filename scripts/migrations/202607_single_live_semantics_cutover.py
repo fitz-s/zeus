@@ -1032,24 +1032,12 @@ def _rows_referencing_hashes(
     )
     digest = re.compile(r"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])", re.IGNORECASE)
 
-    def references(value: Any) -> bool:
-        if isinstance(value, str):
-            lowered = value.lower()
-            return lowered in normalized or any(
-                token.lower() in normalized for token in digest.findall(value)
-            )
-        if isinstance(value, dict):
-            return any(references(item) for item in value.values())
-        if isinstance(value, list):
-            return any(references(item) for item in value)
-        return False
-
     def row_references(raw: object) -> bool:
         text = str(raw)
-        try:
-            return references(json.loads(text))
-        except (TypeError, json.JSONDecodeError):
-            return references(text)
+        lowered = text.lower()
+        return lowered in normalized or any(
+            token.lower() in normalized for token in digest.findall(text)
+        )
 
     found: set[int] = set()
     for row in rows:
