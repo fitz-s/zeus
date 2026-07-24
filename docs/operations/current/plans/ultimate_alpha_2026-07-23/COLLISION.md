@@ -103,3 +103,19 @@ m_e = m_x = 1 tick(全局唯一摩擦边际,来自 spec)。
 
 PR-2(联合资本):结构 Σ + joint_kelly.py + allocation_epoch + ΔJ 注入 exit +
 SELL_REALLOCATE + 停写 strategy_key + registry/晋升机器归档。
+
+## 勘误(2026-07-24)—— CI-width haircut 是非 global 路径的 INV-40 single count
+
+PR body 曾称 "CI-width/lead-time stages (the INV-40 double-count, collapsed
+unconditionally)"。此说对**非 global 路径错误**。INV-40 要求不确定性在 sizing
+中恰好计一次:current-q global-solver 路径由保守 q-band 消费 ci_width,故
+`SizingContext.for_current_q_global_solver()` 将 ci_width 归零(记入
+`counted_ci_width`),Kelly 不得再 haircut——只有这一路的 double-count 被移除
+(归零 helper 已负责)。但 `global_actuation=None` 的非 global 路径
+(`build_event_bound_no_submit_receipt` 默认即此,live 可达)保留 ci_width>0,
+此时 `dynamic_kelly_mult` 的 ci_width/lead haircut **是唯一那一次计数**;无条件
+删除它使不确定性计数为**零**,与 double-count 同样违反 INV-40。修复
+(`src/strategy/kelly.py::dynamic_kelly_mult`):恢复 stepwise ci_width
+(>0.10→×0.7,>0.15→×0.5)与 lead(≥5→×0.6,≥3→×0.8)两级,按值门控——global
+路径 ci_width=0 令其自动 no-op,等价于按上下文门控。GLOBAL_KELLY_FRACTION=1.0
+与 strategy-label 折叠不变;这是不确定性核算,非 label 经济学。

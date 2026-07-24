@@ -230,15 +230,25 @@ def dynamic_kelly_mult(
 ) -> float:
     """Kelly fraction under the one decision law (ultimate_alpha 2026-07-23).
 
-    One-law form: the CI-width, lead-time, per-strategy, and per-city
-    multiplicative stages are DELETED — each rescaled uncertainty that the
-    robust q_lcb bound already carries into the edge (the same double-count
-    INV-40 flagged for ci_width when the unified budget is on; the one law
-    consumes q_lcb everywhere, so the collapse is now unconditional).
-    ``ci_width`` / ``lead_days`` / ``city`` / ``market_uncertainty_in_lcb``
-    remain in the signature for call-site stability; they no longer scale
-    the fraction. ``strategy_key`` survives only as the identity fail-closed
-    gate (unknown key → 0.0 upstream via strategy_kelly_multiplier).
+    One-law form: the per-strategy and per-city multiplicative stages are
+    DELETED — each rescaled uncertainty that the robust q_lcb bound already
+    carries into the edge (label economics collapse to GLOBAL_KELLY_FRACTION).
+    ``city`` / ``market_uncertainty_in_lcb`` remain in the signature for
+    call-site stability; they no longer scale the fraction. ``strategy_key``
+    survives only as the identity fail-closed gate (unknown key → 0.0 upstream
+    via strategy_kelly_multiplier).
+
+    ``ci_width`` / ``lead_days`` SURVIVE as the INV-40 single count (repair
+    2026-07-24 vs the earlier "collapsed unconditionally" claim). On the
+    current-q global-solver path the conservative q-band already consumes the
+    posterior CI width, so ``SizingContext.for_current_q_global_solver`` zeroes
+    ``ci_width`` (moving it to ``counted_ci_width``) and these stepwise stages
+    become no-ops — counted once, in the q-band. On the NON-global path
+    (``global_actuation=None``) the context keeps ``ci_width > 0`` and these
+    stages ARE the single count; deleting them made uncertainty count ZERO
+    times, violating INV-40 exactly as double-counting does. The stages are
+    thus gated by value (ci_width=0 / short lead → identity), which is
+    equivalent to gating on the context that produced them.
 
     NAMED PR-1 EXCEPTION — ``portfolio_heat`` STAYS: it is the only
     portfolio-correlation pressure control until the PR-2 joint allocator
@@ -251,9 +261,28 @@ def dynamic_kelly_mult(
     # C1/INV-13: provenance check — kelly_mult is registered in provenance_registry.yaml
     require_provenance("kelly_mult")
 
-    del ci_width, lead_days, city, market_uncertainty_in_lcb  # no longer sizing inputs
+    del city, market_uncertainty_in_lcb  # no longer sizing inputs
 
     m = base
+
+    # CI-width haircut (INV-40 single count on the non-global path): wider
+    # posterior uncertainty → smaller size when that width has NOT already
+    # entered the sizing objective. The current-q global solver consumes the
+    # same width through its conservative q-band and presents ci_width=0 here
+    # (retaining it as counted_ci_width provenance), so these stepwise stages
+    # no-op on that path. Non-global callers keep ci_width>0 → single count.
+    if ci_width > 0.10:
+        m *= 0.7
+    if ci_width > 0.15:
+        m *= 0.5
+
+    # Lead-time haircut: longer forecast lead → less reliable forecast → smaller
+    # size. Lead uncertainty is not consumed by the q-band, so it applies on
+    # both paths (for_current_q_global_solver preserves lead_days).
+    if lead_days >= 5:
+        m *= 0.6
+    elif lead_days >= 3:
+        m *= 0.8
 
     # Portfolio concentration: positive heat → reduce marginal sizing (soft
     # reciprocal attenuation, not a hard cap). PR-1 survivor — see docstring.
