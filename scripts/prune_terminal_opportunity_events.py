@@ -57,7 +57,7 @@ def _prune_connection(
     *,
     busy_timeout_ms: int,
 ) -> Iterator[sqlite3.Connection]:
-    """Hold the shared cutover lease and BULK writer lock until close."""
+    """Hold the shared cutover lease until the connection closes."""
 
     conn = connect_with_cutover_lease(
         db_path,
@@ -66,13 +66,16 @@ def _prune_connection(
     )
     conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     try:
-        with db_writer_lock(db_path, WriteClass.BULK):
-            yield conn
+        yield conn
     finally:
         conn.close()
 
 
-def _prune(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
+def _prune(
+    args: argparse.Namespace,
+    conn: sqlite3.Connection,
+    db_path: Path,
+) -> int:
     """Run the retention sweep inside the caller-held writer critical section."""
 
     fk = _count(conn, "PRAGMA foreign_keys")
@@ -112,15 +115,16 @@ def _prune(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
         backoff = 1.0
         while True:
             try:
-                cur = conn.execute(
-                    f"DELETE FROM {table} WHERE rowid IN ("
-                    f"  SELECT rowid FROM {table} t "
-                    f"  WHERE t.event_id NOT IN (SELECT event_id FROM _keep_event_ids){where_extra} "
-                    f"  LIMIT ?)",
-                    (batch,),
-                )
-                n = cur.rowcount
-                conn.commit()
+                with db_writer_lock(db_path, WriteClass.BULK):
+                    cur = conn.execute(
+                        f"DELETE FROM {table} WHERE rowid IN ("
+                        f"  SELECT rowid FROM {table} t "
+                        f"  WHERE t.event_id NOT IN (SELECT event_id FROM _keep_event_ids){where_extra} "
+                        f"  LIMIT ?)",
+                        (batch,),
+                    )
+                    n = cur.rowcount
+                    conn.commit()
                 return n
             except sqlite3.OperationalError as ex:
                 msg = str(ex).lower()
@@ -176,7 +180,8 @@ def _prune(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
 
     if args.vacuum:
         print("VACUUM (reclaim file space)...", flush=True)
-        conn.execute("VACUUM")
+        with db_writer_lock(db_path, WriteClass.BULK):
+            conn.execute("VACUUM")
         print("VACUUM done", flush=True)
 
     print(f"DONE in {time.monotonic()-start:.0f}s. proc_deleted={p} events_deleted={e} keep={keep_n}", flush=True)
@@ -206,7 +211,7 @@ def main() -> int:
         db_path,
         busy_timeout_ms=args.busy_timeout_ms,
     ) as conn:
-        return _prune(args, conn)
+        return _prune(args, conn, db_path)
 
 
 if __name__ == "__main__":
