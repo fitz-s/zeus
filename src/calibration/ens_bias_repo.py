@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import statistics
 from datetime import datetime, timezone
@@ -745,6 +746,44 @@ def read_bias_model(
         return row
 
     return conn.execute(base_sql, base_params).fetchone()
+
+
+def honest_residual_sigma_native(row: sqlite3.Row, settlement_unit: str) -> float:
+    """Full forward-predictive residual σ (native settlement unit) stamped on a
+    VERIFIED ``edli_per_city_v1`` bias row — the widening term the D2 bias-family
+    unify must fold into q_lcb ALONGSIDE the ``effective_bias_c`` shift, so the
+    corrected-domain CI stays honest (iron rule 6; #89 honest-q_lcb). Dropping it
+    was the D2 under-shrink: the shift moved the member MEAN but never widened.
+
+    Selection mirrors ``event_reactor_adapter._edli_representativeness_sigma_native``'s
+    row path EXACTLY so entry / exit / reactor widen identically (D2 three-site lockstep):
+    prefer ``total_residual_sd_c`` (σ_resid·sqrt(1+1/n) — the mean-estimation-inflated
+    predictive σ), fall back to ``residual_sd_c`` for pre-#89 rows, floor the choice at
+    ``residual_sd_c`` (a predictive σ narrower than the in-sample scatter is not honest).
+    ``*_sd_c`` are degC; F-settled cities carry degF members → ×1.8.
+
+    Returns 0.0 when the row carries no usable σ (both fields NULL/≤0/non-finite): the
+    caller then applies the bias SHIFT with no widening, byte-identical to today's MC —
+    the same outcome the reactor produces for a σ-less row.
+    """
+    keys = set(row.keys())
+
+    def _pos(field: str) -> "float | None":
+        v = row[field] if field in keys else None
+        try:
+            f = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return f if f > 0.0 and math.isfinite(f) else None
+
+    resid = _pos("residual_sd_c")
+    total = _pos("total_residual_sd_c")
+    chosen = total if total is not None else resid
+    if chosen is None:
+        return 0.0
+    if resid is not None:
+        chosen = max(chosen, resid)  # predictive σ never narrower than in-sample scatter
+    return chosen * (1.8 if settlement_unit == "F" else 1.0)
 
 
 def _parse_coverage_months(raw: object) -> set[int] | None:

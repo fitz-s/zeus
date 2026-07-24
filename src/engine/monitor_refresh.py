@@ -86,7 +86,7 @@ from src.types import Bin
 from src.types.market import BinTopologyError, validate_bin_topology
 from src.types.metric_identity import MetricIdentity
 from src.types.temperature import TemperatureDelta
-from src.calibration.ens_bias_repo import read_bias_model
+from src.calibration.ens_bias_repo import honest_residual_sigma_native, read_bias_model
 
 logger = logging.getLogger(__name__)
 _MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
@@ -1722,12 +1722,14 @@ def _resolve_unified_exit_bias_native(
     city,
     target_d: date,
     metric_str: str,
-) -> "float | None":
+) -> "tuple[float, float] | None":
     """D2 bias-family unify (2026-06-03): EXIT-side analogue of the LIVE EDLI reactor's
     entry bias correction (``event_reactor_adapter._maybe_apply_edli_bias_correction``).
 
-    Returns the native-unit per-city bias SHIFT to subtract from the member extrema BEFORE
-    p_raw on the exit/monitor path, so the exit belief matches the entry belief — or None.
+    Returns ``(bias_shift_native, repr_sigma_native)`` or None. ``bias_shift_native`` is the
+    per-city SHIFT to subtract from the member extrema BEFORE p_raw on the exit/monitor path,
+    so the exit belief matches the entry belief; ``repr_sigma_native`` is the forward-
+    predictive residual σ (native unit) the caller folds into the exit q_lcb bootstrap.
 
     The live flag ``feature_flags.exit_bias_family_unify_enabled`` reads the SAME populated VERIFIED
     family the reactor entry uses (``event_reactor_adapter._EDLI_BIAS_FAMILY`` =
@@ -1736,14 +1738,18 @@ def _resolve_unified_exit_bias_native(
     The legacy ft read shape (month=0, lead_bucket=computed) 0-row-missed these rows because
     the stored rows are ``lead_bucket='LEGACY_POOLED'`` and ``month`` ∈ {target months}.
 
-    A4 lockstep (do not ship a half-fix): this is a bias-SHIFT only — NO residual widening
-    (matches the entry's ``_maybe_apply_edli_bias_correction``, which residual-widening does
-    NOT do). The caller MUST also apply identity-Platt on the corrected domain (skip
-    ``calibrate_and_normalize``), because the Platt models were fit on the UNCORRECTED p_raw
-    domain (same reasoning as ``event_reactor_adapter._snapshot_p_cal``). The legacy
-    full_transport (FT) error-model path - removed 2026-06-14 (retired 0-row experiment) -
-    residual-widened AND ran real Platt, which on a bias-shifted domain would be a
-    DIFFERENT, NEW asymmetry; this helper is deliberately a separate bias-shift-only path.
+    A4 lockstep (do not ship a half-fix): bias-SHIFT on the members + residual widening
+    (``total_residual_sd_c`` → ``honest_residual_sigma_native``), the SAME pair the reactor
+    entry applies (shift via ``_maybe_apply_edli_bias_correction`` + σ via
+    ``_edli_representativeness_sigma_native``). Shipping the shift WITHOUT the widening was
+    the D2 under-shrink; σ is 0.0 for a σ-less row (shift-only, byte-identical MC). The caller
+    MUST also apply identity-Platt on the corrected domain (skip ``calibrate_and_normalize``),
+    because the Platt models were fit on the UNCORRECTED p_raw domain (same reasoning as
+    ``event_reactor_adapter._snapshot_p_cal``), and fold ``repr_sigma_native`` into the CI via
+    ``MarketAnalysis(representativeness_sigma=...)``. The legacy full_transport (FT) error-model
+    path - removed 2026-06-14 (retired 0-row experiment) - residual-widened AND ran real Platt,
+    which on a bias-shifted domain would be a DIFFERENT, NEW asymmetry; this helper keeps the
+    identity-Platt corrected domain and folds σ into the bootstrap only.
 
     UNIT: ``effective_bias_c`` is degC; F-settled cities (members carry the city's settlement
     unit) need ×1.8 before subtraction — same conversion the reactor entry applies.
@@ -1791,11 +1797,13 @@ def _resolve_unified_exit_bias_native(
             return None
         unit = getattr(city, "settlement_unit", "C")
         eff_native = float(eff) * 1.8 if unit == "F" else float(eff)
+        repr_sigma_native = honest_residual_sigma_native(row, unit)
         logger.info(
-            "exit_bias_family_unify applied city=%s season=%s metric=%s unit=%s eff_bias_c=%.3f eff_native=%.3f",
-            city.name, season, metric_str, unit, float(eff), eff_native,
+            "exit_bias_family_unify applied city=%s season=%s metric=%s unit=%s "
+            "eff_bias_c=%.3f eff_native=%.3f repr_sigma_native=%.3f",
+            city.name, season, metric_str, unit, float(eff), eff_native, repr_sigma_native,
         )
-        return eff_native
+        return eff_native, repr_sigma_native
     except Exception as exc:  # fail-closed: never break the exit decision path
         try:
             logger.warning("exit_bias_family_unify skipped (fail-closed): %s", exc)
@@ -1922,10 +1930,16 @@ def _refresh_ens_member_counting(
     # EMOS sole regime this must be skipped entirely; otherwise monitor and
     # entry would use different probability builders for the same held market.
     _unified_exit_bias_native = None
+    # Residual widening (native σ) the exit resolver returns alongside the SHIFT; folded into
+    # the exit q_lcb bootstrap via MarketAnalysis(representativeness_sigma=...) so the corrected
+    # domain stays honest. 0.0 = no widening (EMOS regime, no unified bias, or a σ-less row).
+    _unified_exit_repr_sigma_native = 0.0
     if not _monitor_emos_regime:
-        _unified_exit_bias_native = _resolve_unified_exit_bias_native(
+        _unified_exit = _resolve_unified_exit_bias_native(
             conn, city, target_d, _position_metric_str,
         )
+        if _unified_exit is not None:
+            _unified_exit_bias_native, _unified_exit_repr_sigma_native = _unified_exit
 
     if using_period_extrema:
         expected_members_unit = "degC" if city.settlement_unit == "C" else "degF"
@@ -2348,6 +2362,7 @@ def _refresh_ens_member_counting(
         "calibrator": cal,
         "lead_days": float(lead_days),
         "unit": city.settlement_unit,
+        "representativeness_sigma": _unified_exit_repr_sigma_native,
         "bootstrap_probability_sampler": _bootstrap_probability_sampler,
         "bootstrap_signal_type": (
             "monitor_emos_sole_calibrator"
@@ -5637,6 +5652,10 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 lead_days=bootstrap_ctx["lead_days"],
                 unit=bootstrap_ctx["unit"],
                 posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+                # D2 unify: honest q_lcb widening on the bias-corrected exit domain (iron rule
+                # 6), matching the entry fold. 0.0 unless the exit resolver returned a residual
+                # σ for this cell. Older bootstrap contexts without the key default to 0.0.
+                representativeness_sigma=bootstrap_ctx.get("representativeness_sigma", 0.0),
                 bootstrap_probability_sampler=bootstrap_ctx.get("bootstrap_probability_sampler"),
                 bootstrap_signal_type=bootstrap_ctx.get("bootstrap_signal_type", "monitor_forecast"),
                 # K1: this path recomputes CI for a HELD position via _bootstrap_bin

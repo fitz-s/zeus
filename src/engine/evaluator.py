@@ -50,6 +50,7 @@ from src.calibration.manager import edge_threshold_multiplier, get_calibrator
 from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
 from src.calibration.ens_bias_repo import read_bias_model as _read_bias_model_for_entry
+from src.calibration.ens_bias_repo import honest_residual_sigma_native
 from src.config import (
     CONFIG_DIR,
     City,
@@ -3442,24 +3443,31 @@ def _resolve_unified_entry_bias_native(
     city,
     target_date: str,
     metric_str: str,
-) -> "float | None":
+) -> "tuple[float, float] | None":
     """D2 bias-family unify (2026-06-03): cycle-evaluator analogue of the LIVE EDLI
     reactor entry bias correction (``event_reactor_adapter._maybe_apply_edli_bias_correction``)
     and ``monitor_refresh._resolve_unified_exit_bias_native``.
 
-    Returns the native-unit per-city bias SHIFT to subtract from member extrema BEFORE p_raw,
-    or None. The live flag ``feature_flags.exit_bias_family_unify_enabled`` keeps entry,
-    evaluator, and monitor on the same populated VERIFIED family the
-    reactor entry uses (``event_reactor_adapter._EDLI_BIAS_FAMILY`` = 'edli_per_city_v1')
-    with the reactor's EXACT read shape (month=target_month, target_month=target_month,
-    authority='VERIFIED', lead_bucket=None) — the legacy ft read shape (month=0,
-    lead_bucket=computed) 0-row-missed the stored lead_bucket='LEGACY_POOLED' rows.
+    Returns ``(bias_shift_native, repr_sigma_native)`` or None. ``bias_shift_native`` is the
+    per-city SHIFT to subtract from member extrema BEFORE p_raw; ``repr_sigma_native`` is the
+    forward-predictive residual σ (native unit) the caller folds into the q_lcb bootstrap so
+    the corrected-domain CI stays honest. The live flag
+    ``feature_flags.exit_bias_family_unify_enabled`` keeps entry, evaluator, and monitor on
+    the same populated VERIFIED family the reactor entry uses
+    (``event_reactor_adapter._EDLI_BIAS_FAMILY`` = 'edli_per_city_v1') with the reactor's EXACT
+    read shape (month=target_month, target_month=target_month, authority='VERIFIED',
+    lead_bucket=None) — the legacy ft read shape (month=0, lead_bucket=computed) 0-row-missed
+    the stored lead_bucket='LEGACY_POOLED' rows.
 
-    A4 lockstep: bias-SHIFT only (NO residual widening). The caller MUST apply identity-Platt
-    on the corrected domain (Platt models were fit on the UNCORRECTED p_raw domain). FAIL-CLOSED:
-    missing flag/config/row/field or any error → None (caller uses today's plain-p_raw + real
-    Platt path). Mirrors monitor_refresh._resolve_unified_exit_bias_native exactly so entry and
-    exit share ONE treatment. Authority: D2 bias-family unify / wiring verdict 2026-06-03.
+    A4 lockstep: bias-SHIFT on the members + identity-Platt on the corrected domain (Platt
+    models were fit on the UNCORRECTED p_raw domain), PLUS the residual widening
+    (``total_residual_sd_c`` → ``honest_residual_sigma_native``) the reactor entry folds via
+    ``_edli_representativeness_sigma_native`` — dropping that σ was the D2 under-shrink. σ is
+    0.0 for a row that carries none (shift-only, byte-identical MC — the reactor's own σ-less
+    outcome). FAIL-CLOSED: missing flag/config/row/field or any error → None (caller uses
+    today's plain-p_raw + real Platt path, which carries its own shrink). Mirrors
+    monitor_refresh._resolve_unified_exit_bias_native exactly so entry and exit share ONE
+    treatment. Authority: D2 bias-family unify / wiring verdict 2026-06-03.
     """
     try:
         if not bool(settings["feature_flags"].get("exit_bias_family_unify_enabled", False)):
@@ -3499,7 +3507,9 @@ def _resolve_unified_entry_bias_native(
         if eff is None or float(wl or 0.0) <= 0.0:
             return None
         unit = getattr(city, "settlement_unit", "C")
-        return float(eff) * 1.8 if unit == "F" else float(eff)
+        shift_native = float(eff) * 1.8 if unit == "F" else float(eff)
+        repr_sigma_native = honest_residual_sigma_native(row, unit)
+        return shift_native, repr_sigma_native
     except Exception:  # fail-closed: never break the entry decision path
         return None
 
@@ -3547,6 +3557,10 @@ def evaluate_candidate(
     # When True, the calibration step below uses identity-Platt (A4 lockstep) so this
     # entry path's belief matches the EDLI reactor entry belief. Default False → unchanged.
     _unified_bias_applied = False
+    # Residual widening (native σ) the unified bias resolver returns alongside the SHIFT;
+    # folded into the q_lcb bootstrap via MarketAnalysis(representativeness_sigma=...) so the
+    # corrected-domain CI stays honest. 0.0 = no widening (no unified bias, or a σ-less row).
+    _unified_repr_sigma_native = 0.0
     _pre_day0_low_carryover_context: dict | None = None
     _pre_day0_low_carryover_applied = False
     selected_method = (
@@ -4334,12 +4348,14 @@ def evaluate_candidate(
                     rejection_reason_enum=NoTradeReason.EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID,
                     rejection_reason_detail="EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID",
                 )]
-            # D2 unify: bias-SHIFT only (no residual widening) when the new flag is ON;
-            # takes precedence over the legacy ft model. Identity-Platt set downstream.
-            _unified_bias_native = _resolve_unified_entry_bias_native(
+            # D2 unify: bias-SHIFT + residual widening when the new flag is ON; takes
+            # precedence over the legacy ft model. Identity-Platt set downstream; σ folded
+            # into the CI via MarketAnalysis(representativeness_sigma=...) below.
+            _unified = _resolve_unified_entry_bias_native(
                 conn, city, target_date, temperature_metric.temperature_metric,
             )
-            if _unified_bias_native is not None:
+            if _unified is not None:
+                _unified_bias_native, _unified_repr_sigma_native = _unified
                 member_extrema = member_extrema - float(_unified_bias_native)
                 p_raw = p_raw_vector_from_maxes(
                     member_extrema,
@@ -4379,11 +4395,12 @@ def evaluate_candidate(
             )
         else:
             assert ens is not None
-            # D2 unify: bias-SHIFT only (no residual widening) when the new flag is ON.
-            _unified_bias_native = _resolve_unified_entry_bias_native(
+            # D2 unify: bias-SHIFT + residual widening when the new flag is ON.
+            _unified = _resolve_unified_entry_bias_native(
                 conn, city, target_date, temperature_metric.temperature_metric,
             )
-            if _unified_bias_native is not None:
+            if _unified is not None:
+                _unified_bias_native, _unified_repr_sigma_native = _unified
                 _shifted = np.asarray(ens.member_extrema, dtype=float) - float(_unified_bias_native)
                 p_raw = p_raw_vector_from_maxes(
                     _shifted,
@@ -5518,6 +5535,10 @@ def evaluate_candidate(
         calibrator=cal,
         lead_days=lead_days_for_calibration,
         unit=city.settlement_unit,
+        # D2 unify: honest q_lcb widening on the bias-corrected domain (iron rule 6). 0.0
+        # unless the unified bias resolver returned a residual σ for this cell — same fold
+        # the reactor entry applies via representativeness_sigma. Does not touch the point q.
+        representativeness_sigma=_unified_repr_sigma_native,
         round_fn=settlement_semantics.round_values,
         city_name=city.name,
         season=season,
