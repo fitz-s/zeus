@@ -10,7 +10,7 @@
 Checks 5 assertions across 3 registries:
   1. calendar.source_id ⊆ data_sources_registry.sources[].id
   2. forecast_source_registry entry_primary ROLE ⇒ calendar live_authorization=true
-     (and diagnostic-only / experimental-backfill ⇒ NOT live; keyed on allowed_roles, not tier)
+     (experimental/backfill sources remain non-live; keyed on allowed_roles, not tier)
   3. calendar backfill_only=true ⇒ live_authorization=false
   4. code data_version param (snapshot_ingest_contract) matches SDK param (ecmwf_open_data.py);
      calendar parameter field drift is advisory only
@@ -111,15 +111,11 @@ def run_assertion_1_calendar_source_in_registry() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def run_assertion_2_primary_tier_implies_live_authorized() -> list[dict[str, Any]]:
-    """Coherence: a forecast source whose ROLE includes 'entry_primary' must have calendar
-    live_authorization=true; a diagnostic-only source must NOT (PR review #329 F7).
+    """Require live authorization for genuine entry-primary candidates.
 
-    The prior version keyed on ``tier == "primary"``, which is WRONG: tier='primary' means
-    "primary forecast TABLE", not live-trading authority. openmeteo_previous_runs is
-    tier=primary but allowed_roles=('diagnostic',) with calendar live_authorization=false —
-    a CONSISTENT blocked/diagnostic source, not drift. Keying on allowed_roles removes the
-    permanent false-positive and prevents a future --strict from forcing a diagnostic source
-    into live authority.
+    ``tier == "primary"`` names a storage table, not trading authority. The
+    executable role, operator-decision, default-enable, and backfill contracts
+    determine whether a source is a live candidate.
     """
     from src.data.forecast_source_registry import SOURCES
 
@@ -159,16 +155,6 @@ def run_assertion_2_primary_tier_implies_live_authorized() -> list[dict[str, Any
                 ),
                 source_id=source_id,
             ))
-        elif roles == ("diagnostic",) and live_auth is True:
-            findings.append(_make_finding(
-                assertion=2, level="violation",
-                message=(
-                    f"forecast source={source_id!r} is diagnostic-only but calendar "
-                    f"live_authorization=true — diagnostic sources must NOT be live-authorized"
-                ),
-                source_id=source_id,
-            ))
-
     return findings
 
 

@@ -896,6 +896,25 @@ scripts:
     apply_flag: "--no-dry-run"
     target_db: "--db"
     required_tests: [tests/test_calibration_bins_canonical.py, tests/test_replay_time_provenance.py]
+  rebuild_calibration_pairs.py:
+    class: repair
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--no-dry-run --force"
+    target_db: explicit_isolated_staging_db
+    read_targets: [state/zeus-forecasts.db, explicit_isolated_staging_db]
+    write_targets: [explicit_isolated_staging_db]
+    authority_scope: isolated_calibration_rebuild
+    lifecycle: long_lived
+    status: active
+    delete_policy: retain_until_superseded
+    reuse_when: "Rebuild calibration_pairs_v2 only into an explicit isolated staging DB."
+    do_not_use_when: "Never target a canonical DB or treat staged rows as live calibration authority."
+    canonical_command: "python3 scripts/rebuild_calibration_pairs.py --db PATH --no-dry-run --force"
+    promotion_barrier: "Staged rows require a separate operator-reviewed promotion."
+    required_helpers: [scripts.rebuild_calibration_pairs._resolve_isolated_calibration_write_db_path]
+    required_tests: [tests/test_rebuild_live_sentinel.py, tests/test_sqlite_busy_timeout.py]
+    unguarded_write_rationale: "Write mode requires an explicit isolated DB plus both --no-dry-run and --force."
   # K1-batch2 fix 2026-05-17: dry-run reads ZEUS_FORECASTS_DB_PATH (forecast_class);
   # write mode still requires explicit isolated staging DB.
   fit_selection_calibrator.py: {class: config_writer, dangerous_if_run: false, dry_run_default: false, apply_flag: implicit, target_db: state/selection_calibrator.json, read_targets: [state/zeus-forecasts.db], write_targets: [state/selection_calibrator.json, stdout], authority_scope: selection_calibration_config_generation, reuse_when: "Refresh the HIGH-only walk-forward selection q_lcb artifact from forecast_posteriors joined to VERIFIED settlement_outcomes; the artifact explicitly stamps temperature_metrics=[high] so it cannot license LOW entries.", do_not_use_when: "Do not treat the artifact as a live-entry or restart authorization; LOW requires its own metric-scoped evidence, and live submit still requires RiskGuard GREEN plus all restart/pre-submit gates.", canonical_command: "PYTHONPATH=. python3 scripts/fit_selection_calibrator.py [--fcst PATH] [--out PATH] [--min-n N]", external_inputs: [], promotion_barrier: "Generated config only; runtime remains fail-closed on posterior-version, side, cell-support, and metric-scope mismatch, and live restart requires independent health/risk/order proof.", required_helpers: [src.decision.selection_calibrator, scripts.fit_sigma_scale], required_tests: [tests/decision/test_selection_calibrator.py, tests/decision/test_family_decision_engine.py], unguarded_write_rationale: "Reads forecast-class forecast_posteriors and VERIFIED settlement_outcomes via SQLite mode=ro; writes only the declared JSON config artifact through atomic replace."}

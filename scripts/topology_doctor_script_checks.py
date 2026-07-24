@@ -237,7 +237,9 @@ def run_scripts(api: Any) -> Any:
     actual = api._top_level_scripts()
     declared = set((manifest.get("scripts") or {}).keys())
     required = manifest.get("required_effective_fields") or []
-    diagnostic_allowed = set(manifest.get("diagnostic_allowed_write_targets") or [])
+    evidence_allowed = set(
+        manifest.get("read_only_evidence_allowed_write_targets") or []
+    )
     canonical_targets = set(manifest.get("canonical_db_targets") or [])
     issues: list[Any] = []
 
@@ -256,19 +258,21 @@ def run_scripts(api: Any) -> Any:
 
         write_targets = set(effective.get("write_targets") or [])
         authority_scope = str(effective.get("authority_scope", ""))
-        is_diagnostic_scope = authority_scope.startswith(
+        is_evidence_scope = authority_scope.startswith(
             "offline_no_promotion"
         ) or authority_scope.startswith("report_artifact_non_promotion")
-        if is_diagnostic_scope:
+        if is_evidence_scope:
             forbidden_writes = sorted(
-                target for target in write_targets if not write_target_allowed(target, diagnostic_allowed)
+                target
+                for target in write_targets
+                if not write_target_allowed(target, evidence_allowed)
             )
             if forbidden_writes:
                 issues.append(
                     api._issue_with_admission_severity(
-                        "script_diagnostic_forbidden_write_target",
+                        "script_evidence_forbidden_write_target",
                         rel,
-                        f"diagnostic writes forbidden targets {forbidden_writes}",
+                        f"read-only evidence writes forbidden targets {forbidden_writes}",
                     )
                 )
             script_path = api.ROOT / rel
@@ -278,25 +282,25 @@ def run_scripts(api: Any) -> Any:
             if any(helper in text for helper in CANONICAL_WRITE_HELPERS):
                 issues.append(
                     api._issue(
-                        "script_diagnostic_imports_canonical_write_helper",
+                        "script_evidence_imports_canonical_write_helper",
                         rel,
-                        "diagnostic script references canonical write helper",
+                        "read-only evidence script references canonical write helper",
                     )
                 )
             if SQL_MUTATION_PATTERN.search(text) and write_targets - {"state/zeus_backtest.db", "stdout", "temp"}:
                 issues.append(
                     api._issue(
-                        "script_diagnostic_mutates_canonical_surface",
+                        "script_evidence_mutates_canonical_surface",
                         rel,
-                        "diagnostic script contains SQL mutation outside diagnostic targets",
+                        "read-only evidence script contains SQL mutation outside allowed targets",
                     )
                 )
             if FILE_WRITE_PATTERN.search(text) and write_targets <= {"stdout"}:
                 issues.append(
                     api._issue(
-                        "script_diagnostic_untracked_file_write",
+                        "script_evidence_untracked_file_write",
                         rel,
-                        "diagnostic script appears to write files but manifest declares stdout only",
+                        "read-only evidence script appears to write files but manifest declares stdout only",
                     )
                 )
 
@@ -327,12 +331,12 @@ def run_scripts(api: Any) -> Any:
                 if not effective.get("target_db"):
                     issues.append(api._issue("script_dangerous_missing_target_db", rel, "dangerous script needs explicit target DB metadata"))
 
-        if write_targets & canonical_targets and is_diagnostic_scope:
+        if write_targets & canonical_targets and is_evidence_scope:
             issues.append(
                 api._issue(
-                    "script_diagnostic_writes_canonical_db",
+                    "script_evidence_writes_canonical_db",
                     rel,
-                    f"diagnostic write targets canonical DB {sorted(write_targets & canonical_targets)}",
+                    f"read-only evidence writes canonical DB {sorted(write_targets & canonical_targets)}",
                 )
             )
 

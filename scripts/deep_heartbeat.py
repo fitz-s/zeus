@@ -1,4 +1,4 @@
-"""Deep heartbeat diagnostics for Venus.
+"""Deep heartbeat evidence for Venus.
 
 Goes beyond healthcheck.py's surface-level checks (daemon alive? status fresh?)
 to audit *semantic correctness* of the trading system's internal state:
@@ -414,7 +414,7 @@ def check_oracle_missing() -> dict:
 # Runner
 # ---------------------------------------------------------------------------
 
-def run_diagnostics() -> dict:
+def run_checks() -> dict:
     """Run all deep heartbeat checks and return structured results."""
     mode = _mode()
     now = _utc_now().isoformat()
@@ -469,6 +469,6 @@ def exit_code_for(results: dict) -> int:
 
 
 if __name__ == "__main__":
-    results = run_diagnostics()
+    results = run_checks()
     print(json.dumps(results, indent=2))
     sys.exit(exit_code_for(results))
