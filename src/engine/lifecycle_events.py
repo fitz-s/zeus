@@ -326,6 +326,13 @@ def build_position_current_projection(position: Any) -> dict:
             else None
         ),
         "exit_reason": _nullable(getattr(position, "exit_reason", "")),
+        # ultimate_alpha 2026-07-24: law-identity dual-stamp. A runtime
+        # Position built by the live entry path carries these attributes
+        # (entry callers set them); every other projection source (monitor
+        # refresh, rescue, close) leaves None and the upsert's COALESCE
+        # preserves the entry stamp (write-once semantics).
+        "decision_law_id": _nullable(getattr(position, "decision_law_id", "")),
+        "position_origin": _nullable(getattr(position, "position_origin", "")),
     }
 
 

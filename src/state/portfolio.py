@@ -660,6 +660,12 @@ class Position:
     strategy: str = ""  # "settlement_capture" | "shoulder_sell" | "center_buy" | "opening_inertia"
     edge_source: str = ""
     discovery_mode: str = ""
+    # ultimate_alpha 2026-07-24: law-identity dual-stamp (write-once at entry;
+    # projections COALESCE-preserve). "" = unstamped (historical/foreign rows,
+    # projection coerces to NULL). Taxonomies: db.DECISION_LAW_IDS /
+    # db.POSITION_ORIGINS, validated at the write boundary.
+    decision_law_id: str = ""
+    position_origin: str = ""
     market_hours_open: float = 0.0
     fill_quality: float = 0.0  # (exec_price - vwmp) / vwmp
 

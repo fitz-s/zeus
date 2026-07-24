@@ -844,6 +844,12 @@ def _build_bridge_position(
         entry_fill_verified=True,
         fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
         chain_state="local_only",
+        # ultimate_alpha 2026-07-24: law-identity dual-stamp at the PRIMARY
+        # Zeus entry materialization (EDLI fill → canonical position). The
+        # legacy strategy_key above stays stamped through PR-1 for
+        # attribution continuity; the law identity is the new causal axis.
+        decision_law_id="predicted_bin_ev_v1",
+        position_origin="zeus_decision",
     )
     # Token placement by direction so chain reconciliation matches by token.
     if direction == "buy_yes":

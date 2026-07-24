@@ -81,6 +81,15 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "settlement_price",
     "settled_at",
     "exit_reason",
+    # ultimate_alpha 2026-07-24 (COLLISION.md group B dual-stamp): the two
+    # law-identity axes. decision_law_id = which decision law authorized a
+    # Zeus-originated entry (constant "predicted_bin_ev_v1" for new rows, NULL
+    # historical/foreign); position_origin = who opened the position
+    # (zeus_decision / operator_cotrade / external_wallet; NULL historical).
+    # Nullable ADD COLUMNs (db.py _migrate_decision_law_identity_columns);
+    # taxonomy enforced by db.assert_law_identity at the write boundary.
+    "decision_law_id",
+    "position_origin",
 )
 
 
@@ -686,7 +695,15 @@ def upsert_position_current(
     # durable-authority guarantee. Generating the set makes that drift category
     # impossible: any future canonical column is updated on conflict automatically.
     _update_cols = [c for c in CANONICAL_POSITION_CURRENT_COLUMNS if c != "position_id"]
-    _update_set = ",\n            ".join(f"{c}=excluded.{c}" for c in _update_cols)
+    # Law-identity columns are stamped once at entry and immutable after:
+    # later projections (monitor refresh, chain rescue, close economics) are
+    # built from runtime Position objects that do not carry them, so a plain
+    # excluded.<col> would NULL-overwrite the entry stamp on every conflict.
+    _write_once_cols = {"decision_law_id", "position_origin"}
+    _update_set = ",\n            ".join(
+        f"{c}=COALESCE(excluded.{c}, {c})" if c in _write_once_cols else f"{c}=excluded.{c}"
+        for c in _update_cols
+    )
     conn.execute(
         f"""
         INSERT INTO {table_name} ({", ".join(CANONICAL_POSITION_CURRENT_COLUMNS)})
