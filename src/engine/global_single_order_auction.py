@@ -215,7 +215,7 @@ def _global_decision_economics_identity(
             terminal.median_payoff_usd,
             terminal.wealth_after_loss_usd,
             terminal.wealth_after_win_usd,
-            repr(terminal.expected_value_diagnostic_usd),
+            repr(terminal.expected_value_usd),
         )
     else:
         raise ValueError("global decision lacks action economics")

@@ -75,13 +75,8 @@ from src.contracts.venue_submission_envelope import (
     LIVE_ORDER_MIN_UNIT_PRICE,
 )
 from src.solve.exits import ZeroWealthOutcomeError
-from src.solve.scenario_service import ScenarioService
 from src.solve.types import (
-    JointOutcomeScenarioSet,
     MenuItem,
-    PlannedOrder,
-    RepairCertificate,
-    SolutionPlan,
     SolveMenu,
     WealthStateByAtom,
 )
@@ -2741,7 +2736,7 @@ class GlobalSingleOrderDecision:
                 or robust_terminal.loss_payoff_usd != -self.cost_usd
                 or robust_terminal.win_payoff_usd != self.cash_proceeds_usd
                 or not math.isclose(
-                    robust_terminal.expected_value_diagnostic_usd,
+                    robust_terminal.expected_value_usd,
                     self.robust_ev_usd,
                     rel_tol=0.0,
                     abs_tol=1e-12,
