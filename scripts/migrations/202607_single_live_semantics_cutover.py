@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import time
 import uuid
@@ -138,6 +139,7 @@ RETIRED_FILES = (
 
 WORLD_DB = "zeus-world.db"
 TRADES_DB = "zeus_trades.db"
+AUDIT_ARCHIVE_DB = "single_live_audit_archive.db"
 DECISION_TABLE = "decision_certificates"
 EDGE_TABLE = "decision_certificate_edges"
 SUPERSESSION_TABLE = "decision_certificate_supersessions"
@@ -655,6 +657,21 @@ def settings_target_identity(path: Path) -> dict[str, Any]:
     }
 
 
+def audit_archive_identity(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    resolved = path.resolve(strict=True)
+    file_stat = resolved.stat()
+    return {
+        "resolved_path": str(resolved),
+        "st_dev": file_stat.st_dev,
+        "st_ino": file_stat.st_ino,
+        "size": file_stat.st_size,
+        "mtime_ns": file_stat.st_mtime_ns,
+        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+    }
+
+
 def target_state_identity(
     root: Path,
     dbs: tuple[Path, ...],
@@ -669,6 +686,9 @@ def target_state_identity(
             for path in dbs
         },
         "settings": settings_target_identity(settings_path),
+        "audit_archive": audit_archive_identity(
+            root / "state" / AUDIT_ARCHIVE_DB
+        ),
         "runtime_json": runtime_json_identity(root),
         "retired_files_present": retired_files_identity(root),
     }
@@ -1091,6 +1111,76 @@ def _opaque_reference_counts(conn: sqlite3.Connection, closure: set[str]) -> dic
     return counts
 
 
+def _verified_archived_hashes(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    mode = path.stat().st_mode
+    if mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError(f"audit archive is writable: {path}")
+    conn = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        expected_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='audit_proof_bundles'"
+        ).fetchone()
+        if expected_sql is None:
+            raise RuntimeError(f"audit archive schema is missing: {path}")
+        archived: set[str] = set()
+        for row in conn.execute(
+            "SELECT root_hash, bundle_json, bundle_sha256 FROM audit_proof_bundles"
+        ):
+            root_hash = str(row["root_hash"]).lower()
+            raw = str(row["bundle_json"])
+            if hashlib.sha256(raw.encode()).hexdigest() != str(row["bundle_sha256"]):
+                raise RuntimeError(f"audit archive bundle digest mismatch: {root_hash}")
+            bundle = json.loads(raw)
+            if (
+                not isinstance(bundle, dict)
+                or str(bundle.get("root_hash") or "").lower() != root_hash
+                or bundle.get("graph_complete") is not True
+            ):
+                raise RuntimeError(f"audit archive bundle manifest is invalid: {root_hash}")
+            certificates = bundle.get("certificates")
+            edges = bundle.get("edges")
+            if not isinstance(certificates, list) or not isinstance(edges, list):
+                raise RuntimeError(f"audit archive graph is invalid: {root_hash}")
+            cert_hashes = {
+                str(item.get("certificate_hash") or "").lower()
+                for item in certificates
+                if isinstance(item, dict)
+            }
+            cert_ids = {
+                str(item.get("certificate_id") or "")
+                for item in certificates
+                if isinstance(item, dict)
+            }
+            if (
+                root_hash not in cert_hashes
+                or len(cert_hashes) != len(certificates)
+                or bundle.get("certificate_count") != len(certificates)
+                or bundle.get("edge_count") != len(edges)
+                or any(
+                    not isinstance(item, dict)
+                    or not set(DECISION_COLUMNS).issubset(item)
+                    for item in certificates
+                )
+                or any(
+                    not isinstance(edge, dict)
+                    or str(edge.get("child_certificate_id") or "") not in cert_ids
+                    or str(edge.get("parent_certificate_hash") or "").lower()
+                    not in cert_hashes
+                    for edge in edges
+                )
+            ):
+                raise RuntimeError(f"audit archive graph closure is invalid: {root_hash}")
+            archived.add(root_hash)
+        return archived
+    except (json.JSONDecodeError, sqlite3.Error) as exc:
+        raise RuntimeError(f"audit archive is unreadable: {path}: {exc}") from exc
+    finally:
+        conn.close()
+
+
 def _decision_schema_blockers(conn: sqlite3.Connection) -> list[str]:
     blockers: list[str] = []
     for table in (DECISION_TABLE, EDGE_TABLE, SUPERSESSION_TABLE, FAILURE_TABLE):
@@ -1269,6 +1359,7 @@ def _protected_position_attribution_preflight(
 def _trades_preflight(
     conn: sqlite3.Connection,
     closure: set[str],
+    archived_hashes: set[str],
     protected_details: dict[str, Any],
     *,
     include_opaque_references: bool,
@@ -1282,10 +1373,11 @@ def _trades_preflight(
         "nonterminal_command_retired_closure_refs": 0,
         **protected_details,
         "historical_opaque_reference_counts": (
-            _opaque_reference_counts(conn, closure)
+            _opaque_reference_counts(conn, closure - archived_hashes)
             if include_opaque_references
             else {}
         ),
+        "immutable_archive_root_count": len(archived_hashes & closure),
         "historical_opaque_reference_scan": (
             "complete" if include_opaque_references else "deferred_to_fenced_apply"
         ),
@@ -1579,6 +1671,9 @@ def plan_world_decision_graph(
                 )
                 closure_rows = _retired_closure_rows(conn)
                 closure = {str(row["certificate_hash"]).lower() for row in closure_rows}
+                archived_hashes = _verified_archived_hashes(
+                    world_path.with_name(AUDIT_ARCHIVE_DB)
+                )
                 cert_count = int(
                     conn.execute(f"SELECT COUNT(*) FROM {DECISION_TABLE}").fetchone()[0]
                 )
@@ -1595,6 +1690,7 @@ def plan_world_decision_graph(
                 blockers, trades = _trades_preflight(
                     conn,
                     closure,
+                    archived_hashes,
                     protected_details,
                     include_opaque_references=include_opaque_references,
                 )

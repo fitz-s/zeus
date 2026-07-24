@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -225,6 +226,57 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, sqlite3.Connection, sqlite3.Co
     world = tmp_path / "zeus-world.db"
     trades = tmp_path / "zeus_trades.db"
     return world, trades, _create_world(world), _create_trades(trades)
+
+
+def _write_audit_archive(world: Path, root_hash: str) -> Path:
+    world_conn = sqlite3.connect(world)
+    world_conn.row_factory = sqlite3.Row
+    certificate = dict(
+        world_conn.execute(
+            "SELECT * FROM decision_certificates WHERE certificate_hash=?",
+            (root_hash,),
+        ).fetchone()
+    )
+    world_conn.close()
+    bundle = json.dumps(
+        {
+            "root_hash": root_hash,
+            "graph_complete": True,
+            "certificates": [certificate],
+            "certificate_count": 1,
+            "edges": [],
+            "edge_count": 0,
+            "supersessions": [],
+            "compile_failures": [],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    archive = world.with_name(migration.AUDIT_ARCHIVE_DB)
+    conn = sqlite3.connect(archive)
+    conn.execute(
+        """
+        CREATE TABLE audit_proof_bundles (
+            root_hash TEXT PRIMARY KEY,
+            bundle_json TEXT NOT NULL,
+            bundle_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO audit_proof_bundles VALUES (?, ?, ?, ?)",
+        (
+            root_hash,
+            bundle,
+            hashlib.sha256(bundle.encode()).hexdigest(),
+            "2026-07-24T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    archive.chmod(0o444)
+    return archive
 
 
 def test_recursive_closure_preserves_live_old_sizing_and_writes_atomic_receipt(
@@ -553,6 +605,34 @@ def test_historical_reference_without_archive_blocks_before_writes(
         ).fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_historical_reference_resolves_to_immutable_audit_archive(
+    tmp_path: Path,
+) -> None:
+    world, trades, wconn, tconn = _fixture(tmp_path)
+    retired_hash = "b" * 64
+    try:
+        _insert_certificate(wconn, "retired", retired_hash, mode=_retired_mode())
+        tconn.execute(
+            "INSERT INTO position_events VALUES (?, ?, ?)",
+            ("historical", None, json.dumps({"certificate": retired_hash})),
+        )
+        wconn.commit()
+        tconn.commit()
+    finally:
+        wconn.close()
+        tconn.close()
+    archive = _write_audit_archive(world, retired_hash)
+
+    plan = migration.plan_world_decision_graph(world, trades)
+    assert plan["status"] == "ready"
+    assert plan["trades_preflight"]["immutable_archive_root_count"] == 1
+    assert plan["historical_opaque_reference_counts"] == {}
+
+    archive.chmod(0o644)
+    with pytest.raises(RuntimeError, match="archive is writable"):
+        migration.plan_world_decision_graph(world, trades)
 
 
 def test_protected_missing_attribution_fails_before_closure_materialization(
