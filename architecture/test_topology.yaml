@@ -56,13 +56,13 @@ test_trust_policy:
     tests/engine/test_position_belief_authority.py: {created: "2026-06-12", last_used: "2026-07-20", note: "Held-position belief reads the same replacement authority as entry, excludes future-computed rows at causal replay cuts, and refuses old current-evidence probability semantics."}
     tests/execution/test_venue_sync_contract.py: {created: "2026-06-11", last_used: "2026-07-15", note: "Three-phase command-recovery DB/venue synchronization antibodies, including default canonical WORLD+TRADE blocking flocks and live-tick opt-in nonblocking flock plus zero SQLite busy timeout."}
     tests/test_finite_evidence_probability_symmetry.py: {created: "2026-07-11", last_used: "2026-07-11", note: "INV-06/INV-41 current-evidence probability antibody: source-clock YES/NO share one coherent simplex carrier widened by exact settlement-preimage member-hit Clopper-Pearson and distribution-free current-moment tail ambiguity limits; historical far-tail floors are unreachable; Day0 absorbing truth dominates."}
-    tests/test_replacement_fused_q_shape.py: {created: "2026-06-09", last_used: "2026-07-15", note: "Probability authority antibody: absolute current ENS member-center disagreement cannot be recentered out while the same members remain absolute settlement-bin evidence; aligned evidence preserves the within-plus-between decomposition; YES/NO remain exact complements; source-clock current q cannot consult historical k/w/floor/city transforms."}
+    tests/test_replacement_fused_q_shape.py: {created: "2026-06-09", last_used: "2026-07-23", note: "Probability authority antibody: absolute current ENS member-center disagreement cannot be recentered out while the same members remain absolute settlement-bin evidence; aligned evidence preserves the within-plus-between decomposition; YES/NO remain exact complements."}
     tests/test_replacement_seed_coverage_gate.py: {created: "2026-06-10", last_used: "2026-07-20", note: "Replacement input-HWM and seed coverage contracts, including product-cycle indexed frozen artifact selection that ignores malformed unrelated older cycles."}
     tests/solve/test_solver_properties.py: {created: "2026-07-03", last_used: "2026-07-22", note: "Current global-auction properties: symmetric YES/NO terminal wealth, exact payoff and token binding, partial-held SELL optimality, current universe/book/wealth authority, executable-depth oracles, Fractional Kelly, and complete BUY/SELL/CASH comparisons."}
+    tests/integration/test_w3_solve_seam_g3.py: {created: "2026-07-03", last_used: "2026-07-23", note: "Current global-auction integration: exact probability and wealth generations, correlated family endowment, deterministic winner selection, preflight zero-side-effect contract, JIT actuation, and receipt-before-external-I/O ordering."}
     tests/engine/test_native_holdings.py: {created: "2026-07-22", last_used: "2026-07-22", note: "Current reconciled YES/NO inventory and pending-entry obligations bind to exact family condition, token, and ledger identities before auction scoring."}
     tests/decision_kernel/test_k1_shared_authority_predicates.py: {created: "2026-06-10", last_used: "2026-07-19", note: "Shared verifier/compiler calibration authority set and maturity predicate, including typed Day0 remaining-window and deterministic-payoff credentials."}
     tests/engine/test_s3_native_side_candidate_materialization.py: {created: "2026-06-08", last_used: "2026-07-14", note: "Native YES/NO candidate materialization, including global-auction refusal of scalar execution-price fallback and full economic-curve equality at winner JIT while allowing evidence-carrier-only churn."}
-    tests/engine/test_tick_size_provenance_cert_contract.py: {created: "2026-06-01", last_used: "2026-07-19", note: "INV-34 executable evidence antibody: hydrated snapshot owns tick/min-size/neg-risk, and deterministic Day0 candidate evidence binds the selected native proof token rather than an ambiguous family candidate token."}
     tests/solve/test_contract_validator.py: {created: "2026-07-03", last_used: "2026-07-03", note: "Current FamilyDecision consumer-contract antibody: validate_family_decision_contract catches missing/nulled/wrong-type consumer fields loudly BEFORE the getattr-with-default facts writer degrades attribution silently — proven with a sentinel facts-writer that records which fields fell back to a default; enforces non-null decision_id/receipt_hash, candidate_decisions tuple, and exactly-one selected/no_trade_reason. REV-2 follow-up: an AST sentinel statically extracts every getattr(decision, ...) field the REAL _record_qkernel_selection_family_facts consumer reads and asserts the validator's required-field list is a superset (a new uncovered consumer breaks the test)."}
     tests/venue/test_rate_budget.py: {created: "2026-07-02", last_used: "2026-07-02", note: "Current venue rate-budget antibody: shared token-bucket venue call budget honors a cancel-priority reserve floor (SUBMIT may not drain past it, CANCEL may), per-class 429/Retry-After cooldown (header honored, default fallback, extends-never-shortens), linear refill capped at capacity, and thread-safe grant accounting under a 220-thread race (no over-reserve)."}
     tests/venue/test_batch_submit.py: {created: "2026-07-02", last_used: "2026-07-02", note: "Current batch-submit mapping antibody: chunk_orders boundaries (1/15/16/45), compute_safe_prefixes safe-prefix property + degenerate empty/single-unacceptable/all-unacceptable cases, map_batch_items fail-closed precedence (echo-id, index+strict-length, non-array/length-mismatch/partial-echo -> unmapped)."}
@@ -108,32 +108,25 @@ test_trust_policy:
     tests/scripts/test_backfill_wu_blind_window.py: {created: "2026-07-16", last_used: "2026-07-16", note: "WU blind-window recovery antibody: bounded contiguous date chunks, failed fetch reporting, would-widen/missing-local comparison, default dry-run zero-write behavior, explicit apply through the live observation writer, and WU-city-only scope."}
     tests/test_repair_review_required_no_venue_exposure.py: {created: "2026-07-04", last_used: "2026-07-23", note: "REVIEW_REQUIRED no-venue-exposure repair antibody: dry-run candidate triage blocks any local exposure trace, requires authenticated zero matching open orders/trades before clearance, and keeps --apply impossible without venue proof; command recovery accepts only sub-micro venue price normalization around a submitted limit; no venue action or DB copy."}
     tests/test_repair_review_required_matched_order_fact.py: {created: "2026-07-04", last_used: "2026-07-04", note: "REVIEW_REQUIRED matched-order repair antibody: dry-run proof accepts authenticated top-level taker trade truth, apply requires venue proof plus one command id, and delegates only that command to append-first matched-order recovery; no venue action or DB copy."}
-    tests/test_replacement_forecast_live_schema.py: {created: "2026-06-06", last_used: "2026-06-18", note: "Replacement forecast live-support schema compatibility: forecast_posteriors migrates legacy legacy_status to runtime_layer='live' and drops the old column; live support tables stay forecast-class only."}
     tests/test_zeus_status_block_classification.py: {created: "2026-06-28", last_used: "2026-07-02", note: "Operator status projection antibody: retired observation-only residue is not classified as normal transient substrate, current missing-input blockers remain transient, and missing live-trading is surfaced even when stale heartbeat JSON still claims alive."}
     tests/execution/test_inv37_harvester_atomicity.py: {created: "2026-06-14", last_used: "2026-06-14", note: "INV-37 harvester atomicity RED-on-revert (ChatGPT PR#408 B1). T1: pre-fix two-independent-commit pattern leaves partial state (forecasts commits, trades does not) on injected crash — proves the violation was real. T2: post-fix ATTACH+SAVEPOINT rolls back BOTH sides atomically on injected exception after forecasts write — RED if reverted to two-conn pattern. T3: happy-path commit persists both sides. T4: SAVEPOINT spans both MAIN and ATTACHed schemas. Authority: docs/archive/2026-Q2/operations_historical/inv37_harvester_fix_2026-06-14.md"}
     tests/engine/test_post_refresh_reelect_fresh_at_none.py: {created: "2026-06-14", last_used: "2026-06-14", note: "RED-on-revert RT: post-refresh re-elect in _build_event_bound_no_submit_receipt_core MUST pass fresh_at=None (NOT decision_time). The bug excluded refresher rows (captured_at > decision_time) via the captured_at ceiling -> stale re-election -> _snapshot_price_stale_reason fires again -> permanent STALE requeue -> 0 EDLI receipts 2026-06-12 to 2026-06-14. T1: DB contract (fresh_at=None returns post-decision row; fresh_at=decision_time excludes it). T2: source-level call-site guard (reverted arg -> RED immediately). Authority: docs/evidence/deadloop_2026-06-14/diagnosis.md"}
     tests/riskguard/test_no_network_io_under_conn.py: {created: "2026-06-13", last_used: "2026-06-13", note: "T0-1 conn-across-IO RED-on-revert RT: in riskguard._tick_once the bankroll NETWORK fetch (bankroll_provider.current) MUST precede opening either write-class DB conn (_get_runtime_trade_connection/get_connection); sentinel fires on conn-open, asserts fetch recorded first. Authority: t0_live_problem_report_2026-06-13 T0-1 + dimension-#4"}
     tests/test_fit_bias_scale.py: {created: "2026-06-12", last_used: "2026-06-12", note: "Task 1.1 identifiability + bias-absorption regression: joint (b_loc,k) interval-censored categorical MLE recovers known (b=+1.2,k=1.1); k-only fit on same data inflates k>1.1 (proves k_wrong^2=k_true^2+(delta/sigma)^2); Monte-Carlo pins the theorem; EB shrinkage pulls low-n city toward pool"}
     tests/test_fit_model_staleness_variance.py: {created: "2026-07-17", last_used: "2026-07-17", note: "Walk-forward staleness-variance artifact generator: strict walk-forward boundary (target_date==as_of excluded); v(lag)=cummax(max(0,m2(lead)-m2(freshest))) monotone/non-negative/zero-at-freshest; MIN_CELL_N floor drops thin lead cells from v (m2/n kept for transparency); F->C settlement conversion; city pooling; determinism (same DB+as_of+generated_at => byte-identical artifact+pointer)."}
-    tests/test_staleness_variance_serving.py: {created: "2026-07-17", last_used: "2026-07-17", note: "Serving staleness variance + between-spread cohort antibodies: v_for fail-open zeros (absent artifact/sha mismatch/unknown model/bad lag), bucket mapping freshest+floor(age/24) with clamp; materializer center weights byte-identical when artifact absent or all members cycle-fresh; stale-served member downweighted never excluded with staleness_m2 stamped only for it; _current_evidence_shape_from_values provider_cycles freshest-coherent-cohort (±3h) between-term with fail-open to all providers on absent/unparseable cycles or cohort<2, shape_hash byte-identical when filter inactive, <2-weighted-providers ValueError condition-identical."}
     tests/test_fit_source_clock_city_weights.py: {created: "2026-07-17", last_used: "2026-07-17", note: "Walk-forward source-clock weight artifact generator: weight-math parity vs src.forecast.center.raw_second_moment_weights (imported, not reimplemented); exact-lead preference (smallest of lead 0/1/2 wins per cell); F->C settlement conversion; strict walk-forward boundary (target_date==as_of excluded); >=60/30-59/<30 CITY_SPECIFIC/REGION_POOLED/GLOBAL_CORE data-availability tiers; determinism (same DB state+as_of => byte-identical); weights keyed by exact model id."}
     tests/test_fit_ens_member_dependence.py: {created: "2026-07-17", last_used: "2026-07-17", note: "Walk-forward ENS member-dependence artifact fitter (COVERAGE-CALIBRATED operational rho, ICC as rho_icc provenance): perfect-forecast synthetic => calibrated rho~0; overconfident synthetic (settlement outside all-member support 50% of events) => violated_k_at_zero contains 0 => rho>0; perfectly-dependent-members + perfect forecast => rho_icc=1 while operational rho=0 (the ICC-vs-coverage distinction, cp_coverage 2026-07-17); strict walk-forward boundary; serving-side snapshot filter + quarantined-null/MIN_MEMBERS exclusion; determinism incl. seeded target-clustered bootstrap (byte-identical); thin-metric max(own,pooled) fallback."}
     tests/test_ens_member_dependence_serving.py: {created: "2026-07-17", last_used: "2026-07-17", note: "CP effective-n member-dependence serving contract: artifact-absent/rho=0/sha256-mismatch => byte-identical integer Clopper-Pearson (fail-open identity); conservativeness grid UCB_rho>=UCB_0 for rho in {0.1,0.3,0.7}, k in 0..n, n in {10,51}; monotone in rho; k==n stays exactly 1.0; zero-hit floor widens to 1-alpha^(1/n_eff); per-metric rho with pooled MAX-rho fallback for None/unknown metric; clamp to [0,1]."}
     tests/test_anchor_representativeness_debias.py: {created: "2026-06-14", last_used: "2026-06-14", note: "RED-on-revert for the per-city anchor representativeness de-bias δ_city (law-8 foundation fix). T1: a well-sampled activated city (Seoul, n=834) returns a finite δ that pulls the anchor toward settlement and crosses the winning 1°C bin (REDs if reverted to bias_shift_c=None). T2: a thin city (Ankara, n=23<n_min=30) is NOT activated → None → family-level fallback (the do-no-harm guard the prior naive version lacked). T3: fitter↔loader artifact round-trip. T4: LOW/non-high fails closed + a do_no_harm=False family is not applied. T5: missing artifact → None → byte-identical to today. Roots: cold_bias_metadata_root.md / percity_corrected_oos.md / percity_debias_impl.md"}
     tests/calibration/test_member_correlation.py: {created: "2026-06-12", last_used: "2026-06-12", note: "Unit tests for measure_member_correlation.py: ANOVA ICC estimator on BetaBinomial synthetic data recovers known ρ_w to within 0.05; between-family ρ_b monotonicity; N_eff authority formula edge cases (statistical_calibration_authority_2026-06-12.txt Task 3.1)"}
-    tests/strategy/test_james_stein_blend.py: {created: "2026-06-12", last_used: "2026-06-12", note: "C3 RT: R1 idempotent (model==market); R2 lambda->0 at large chi2 (JS defers to MODEL — sign check); R3 smaller n_eff -> larger lambda; R4 N_eff correction widens q_lcb; R5 artifact degrade paths; R6 flag-OFF byte-identity. Authority: statistical_calibration_addendum_2026-06-13 A10/C3."}
     tests/engine/test_no_authority_market_independent.py: {created: "2026-06-13", last_used: "2026-06-13", note: "no-order root de-hack: native-NO authority q_lcb_no=1-q_ucb_yes is forecast-derived/market-independent; a non-executable YES side must NOT zero the buy_no bound (the 286/286 q_lcb_no=0 -> 0 orders structural killer). bin_yes_probability_samples keeps its executability guard; forecast_yes_probability_samples does not."}
     tests/test_replacement_forecast_bundle_reader_tradeable_latest.py: {created: "2026-06-10", last_used: "2026-06-13", note: "tradeable-latest read semantics (bounds-less clobber category) + q_ucb CARRIER DEFECT (2026-06-13 R5): a newer row with q_lcb but MISSING q_ucb_json must NOT clobber an older both-bounds row — the live bounds gate + _replacement_no_lcb_for_bin both require q_ucb, so serving the q_ucb-less freshest row (Wellington 06-14 twin-authority) fail-closes EVERY buy_no to q_lcb_no=0.0. _row_is_tradeable_grade now requires BOTH bounds, aligning the reader predicate with the adapter gate. RED-on-revert: drop the q_ucb_json guard -> R5 serves the q_ucb-less row."}
     tests/engine/test_maker_quote_p_fill_not_taker_zero.py: {created: "2026-06-13", last_used: "2026-06-13", note: "no-order root: maker-quote lane must not return taker-shaped p_fill_lcb=0.0 (zeroes trade_score=p_fill*edge for every maker buy_no); uses MAKER_FILL_PROBABILITY_PRIOR; strong-edge maker candidate gets positive trade_score. The taker-shaped-checks-strangle-makers class."}
-    tests/strategy/test_horse_race_kelly.py: {created: "2026-06-13", last_used: "2026-06-13", note: "Q2/P1 task #63 relationship test: R1 not-overround -> f_k=q_k,s=0; R2 overround budget closes + active-set property (f_k>0 iff q_k/p_k>s*, endogenous threshold); R3 no-bet -> all cash; R4 GROWTH-DOMINANCE (the TRUE overbetting-correction invariant — horse-race exp-log-growth >= any per-candidate sizing, 400k random families; the task-brief 'sum horse f <= sum naive f' is FALSE, per-bin Kelly UNDER-bets exclusive bins); R5 YES(a)+NO(b) dominance LP (P5); R6 cross-family QP signs (P2); degenerate/normalize/error pins. Authority exit_portfolio_execution_authority_2026-06-13 P1-P2,P5."}
-    tests/strategy/test_exit_policy.py: {created: "2026-06-13", last_used: "2026-06-13", note: "Exit capability (consult-3 Q1, task #52) relationship tests: E1 cost-basis independence (no c in the signature, same state -> same fraction); E4 stop-loss-not-distinct (exit fires iff sell-dominance holds with updated q, no % stop); E6 partial-exit FOC matches the closed-form x0 on constant depth AND is a fraction not all-or-nothing; E6 depth-aware proceeds never assume hidden liquidity (caps at fillable depth, concave VWAP); E3 take-profit = sell-dominance boundary (bar below q); E5a q_exit blend defers/follows market and degrades to agent when unlicensed; E5b e-process h* is cost-derived (not 20), unit-martingale under null, fires on the Denver class, increment sign accumulates against the agent. Authority: exit_portfolio_execution_authority_2026-06-13 E1-E6."}
     tests/test_boot_guard_pin_shape.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_boot_guard_settings_object.py: {created: "2026-06-03", last_used: "2026-06-03", note: "W0-T2+T3: Settings-object antibody + --validate-boot"}
     tests/test_edli_market_channel_refresh_authority.py: {created: "2026-06-03", last_used: "2026-06-03", note: "P1-1: scan_authority=VERIFIED contract; trigger reason separate (relationship test)"}
     tests/test_market_events_persistence_observability.py: {created: "2026-06-03", last_used: "2026-06-03", note: "P2-2: market_events persistence failure surfaces to scheduler health (relationship test)"}
     tests/test_calibration_manager_w0.py: {created: "2026-06-03", last_used: "2026-06-03"}
-    tests/test_calibration_bin_source_fix1.py: {created: "2026-06-03", last_used: "2026-06-03", note: "FIX-1 antibody: canonical_v2 bin_source wiring + flag-OFF byte-identity + count/fit population agreement"}
-    tests/test_unblock_w1_cert_dual_chain.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_unblock_w1_intake_phase_filter.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_unblock_w1_low_identity_platt.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_w2_settlement_unit_writer.py: {created: "2026-06-03", last_used: "2026-06-03"}
@@ -144,29 +137,21 @@ test_trust_policy:
     tests/test_settlement_unit_trigger_deployment_2026_06_03.py: {created: "2026-06-03", last_used: "2026-06-03", note: "deployment RT: settlement_unit VERIFIED triggers on EXISTING DB via migration"}
     tests/events/test_coverage_fairness_emit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "B4 RT: CoverageFairnessRequest round-robin covers all cities within ceil(N/limit) cycles; flag-OFF==legacy ORDER BY"}
     tests/test_b4_live_caller_round_robin_advances.py: {created: "2026-06-03", last_used: "2026-06-03", note: "B4 fix RT: LIVE caller cycle-N source advances round-robin (was ISO-timestamp -> ValueError -> frozen at 0); distinct per cycle for idempotency"}
-    tests/contracts/test_bias_treatment.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K2 RT: BiasTreatment corrected XOR haircut (kills N1 double-penalty) + provenance/stale fail-close + D4 shift_se"}
-    tests/engine/test_bias_treatment_v2_wiring.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K2 RT: bias_treatment_v2 live wiring; flag-OFF byte-identical to legacy correction+haircut"}
-    tests/test_k2_d4_no_double_count_one_over_n.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K2 fix RT: D4 fold bases on in-sample residual_sd_c (no 1/n) -> composed sigma == total_residual_sd_c, NOT double-counted (~6% over-wide at n=7); flag-OFF byte-identical"}
     tests/test_qlcb_provenance_type.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: QlcbProvenance typed carrier antibody + clamp-not-raise on finite out-of-range tail"}
     tests/test_k3_qlcb_clamp_legacy_family_formation.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 fix RT: deep-OTM negative q_lcb clamps to [0,1] (clamped=True) instead of raising -> family still forms; decision-equivalent to legacy raw negative"}
     tests/test_settlement_backward_coverage.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: settlement-backward coverage check + isotonic realized rate + ARM-gate coverage predicate"}
     tests/test_qlcb_coverage_flag_and_armgate.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: settlement-coverage shrink-only behavior + ARM gate reads coverage verdict unconditionally"}
     tests/engine/test_qlcb_coverage_adapter_wiring.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: carrier helpers round-trip float and live coverage shrink stays carrier-local"}
     tests/engine/test_qlcb_coverage_live_application.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: live coverage application via grade_receipt loader; flag-OFF byte-identical; deep-OTM write does not collapse family"}
-    tests/calibration/test_retired_coverage_branch.py: {created: "2026-07-04", last_used: "2026-07-04", note: "F1 RT: Jeffreys beta-binomial estimator audit anchors (16/36, 12/17) + cohort hierarchy selection (exact-cell shield, strategy bucket/superbucket, cross-strategy + global heterogeneity controls) + prefix/walk-forward replay + dedup"}
-    tests/engine/test_event_reactor_retired_coverage_branch.py: {created: "2026-07-04", last_used: "2026-07-04", note: "F1 RT: money-path choke point wiring — flag-OFF byte-identical zero-DB-read pass-through; flag-ON enriched observation build + hierarchy shrink reaching the executable pair; QLCB_COVERAGE_AUTHORITY_FAULT fail-closed on structural read fault; dedup"}
     tests/engine/test_k3_selection_byte_identity_integration.py: {created: "2026-06-03", last_used: "2026-06-03", note: "HARDEN-2 integration antibody: real _generate_candidate_proofs->_selected_candidate_proof path; two negative-raw-q_lcb bins select legacy-correct bin (tok-B-yes); RED-on-revert proven via clamped-reader patch"}
     tests/test_arm_gate_direction_law.py: {created: "2026-06-03", last_used: "2026-06-03", note: "Direction Law antibody: buy_yes/buy_no win-logic unconstructably correct — all 4 cases + complement + known losses"}
     tests/test_emos_sole_calibrator.py: {created: "2026-06-04", last_used: "2026-06-04", note: "INV-6 antibody + q-seam relationship test: one EMOS N(mu,sigma) feeds both p_cal and q_lcb bootstrap; season-keying + corrector-creep guard; flag-OFF byte-identical"}
     tests/test_graded_receipt.py: {created: "2026-06-03", last_used: "2026-06-03", note: "D1 keystone RT: grade_receipt unit TypeError + BinKind dispatch + fractional membership; Direction Law win"}
-    tests/test_arm_gate_settlement_capital_weight.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: capital-weighted ARM verdict — row-democracy wr>51% but cw_roi<0 -> DENIED; MISSING_SIZE fail-closed; per-city negative cluster veto"}
-    tests/test_arm_gate_artifact_emit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "H3 producer antibody: --emit-artifact writes schema-versioned JSON artifact; _is_populated_world_db guard; artifact path resolves from ZEUS_STATE_DIR"}
     tests/test_attribution_receipt_repoint.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: attribution reads edli_no_submit_receipts (live writer) not dead decision_events; empty input raises (silent-zero=failure)"}
     tests/test_harvester_resolver_settles_and_enqueues_redeem.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: VERIFIED settlement -> position settled + REDEEM_INTENT_CREATED"}
     tests/engine/test_emos_seam_serve_loud.py: {created: "2026-06-04", last_used: "2026-06-04", note: "RT (live seam): served=emos engages through _market_analysis_from_event_snapshot (q_source=emos); EMOS build failure is LOUD (distinct EMOS_SERVE_FAILED log w/ cell identity) not silently swallowed (#149 fail-open-inert antibody); served=raw quiet legacy fallback"}
     tests/engine/test_emos_seam_sigma_floor.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT (seam boundary): honest-raw σ-floor (max(raw_σ, emos_σ)) propagates from build_honest_raw_q through _market_analysis_from_event_snapshot into the N(mu,sigma) lcb bootstrap sampler; floored σ asserted in sampler closure; antibody: floor removal turns test RED (#390/#388/#389)"}
     tests/strategy/test_sigma_shape_ring_calibration.py: {created: "2026-06-13", last_used: "2026-06-13", note: "GATE-2 RT (RED-on-revert): RT-1 ring-calibration invariant — the near-center ring q must carry its realized mass; the live uniform-pedestal σ-shape leaves dist-2 grossly under-weighted (synthetic ratio 4.15, real ratio 1.31), GREEN ONLY under the refit regime-aware σ-FLOOR shape (scripts/fit_sigma_shape_kernel.py, floor≈1.8 step; reverting floor_steps=0 turns it RED). RT-2 market-anchor-cap blind spot — q_anchor_no=a*q_model_no+(1-a)*mkt; out=min(in,anchor) is one-sided so it CANNOT veto a confident NO whose market also leans NO (pins the algebra so no one re-claims the cap fixes GATE-2; the fix must be upstream at q production). Authority: workflow A4 calibration diagnosis 2026-06-13 + statistical_calibration_addendum."}
-    tests/engine/test_bias_decay_kelly_haircut.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_multiclass_skill_scoring.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_settlement_resolution_contract.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_selection_coverage_settlement_truth.py: {created: "2026-05-29", last_used: "2026-05-29"}
@@ -203,8 +188,6 @@ test_trust_policy:
     tests/events/test_continuous_redecision_resurrection.py: {created: "2026-06-12", last_used: "2026-06-26", note: "Continuous redecision resurrection/deadlock antibodies; extended 2026-06-26 to prove open-maker token->condition resolution reads executable_market_snapshot_latest without append scans when latest rows exist."}
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-07-17"}
     tests/events/test_continuous_redecision_exit.py: {created: "2026-05-31", last_used: "2026-05-31"}
-    tests/events/test_edge_zone_admission_102.py: {created: "2026-06-04", last_used: "2026-06-05", note: "RT (#102): book-wide EV-per-dollar edge-zone admission — positive after-cost EV admitted / negative rejected regardless of arrival order; flag-gated last money-path step"}
-    tests/engine/test_market_disagreement_buy_no_guard.py: {created: "2026-06-04", last_used: "2026-06-05", note: "Antibody: cheap-NO buy_no with non-overwhelming NO-space q_lcb is unconstructable (settlement-grounded 0/12 loser); escape only on high NO-space q_lcb (DIRECTION LAW / Fitz #4)"}
     tests/test_reactor_family_keying_antibody.py: {created: "2026-06-04", last_used: "2026-06-05", note: "Antibody (Fitz #4): NULL/empty condition_id sibling at the reactor family seam fails LOUD (FamilyKeyingError), never silently shrinks the MECE family"}
     tests/test_chain_shares_persist_synced.py: {created: "2026-05-31", last_used: "2026-07-19", note: "Fresh exact local/chain token aggregate match resolves only chain-only review debt atomically; repeat is idempotent and later absence reopens."}
     tests/state/test_inv_chain_only_review_lifecycle.py: {created: "2026-05-27", last_used: "2026-07-19", note: "Typed ChainOnlyFact review lifecycle, including automatic exact-match resolution without operator provenance."}
@@ -217,21 +200,15 @@ test_trust_policy:
     tests/events/test_live_cap.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/events/test_live_order_aggregate.py: {created: "2026-05-25", last_used: "2026-07-18", note: "EDLI live-order aggregate law, including current-state-independent economic and provenance validation."}
     tests/events/test_live_order_reconcile.py: {created: "2026-05-26", last_used: "2026-05-26"}
-    tests/events/test_live_profit_audit.py: {created: "2026-05-26", last_used: "2026-05-26"}
-    tests/events/test_arm_gate_artifact_boot_binding.py: {created: "2026-06-03", last_used: "2026-06-03", note: "PR-2 (A) D2 ARM-artifact boot binding: armed boot (probe/live) fails-closed without HEAD-bound positive-EV coverage-licensed ARM evidence artifact"}
     tests/decision_kernel/test_certificate_time_filtration.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_certificate_hashing.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/decision_kernel/test_pre_submit_theorems.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_no_bypass.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_certificate_ledger.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_actionable_trade_certificate.py: {created: "2026-05-25", last_used: "2026-07-13", note: "Actionable certificate closure, including symmetric YES/NO admission for a current Day0 replacement posterior bound to the exact posterior and current canonical observation, plus fail-closed posterior mismatch and replacement-calibration routing."}
     tests/decision_kernel/test_execution_command_certificate.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_taker_execution_law.py: {created: "2026-05-31", last_used: "2026-05-31"}
-    tests/decision_kernel/test_probe_force_taker_gate.py: {created: "2026-05-31", last_used: "2026-05-31"}
-    tests/decision_kernel/test_pre_submit_compiler.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-07-15", note: "Event-bound no-bypass authority and execution contracts, including refusal of a shaped replacement posterior from an older probability-semantics revision."}
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/money_path/test_edli_live_readiness.py: {created: "2026-05-25", last_used: "2026-07-22", note: "Extended live entry provenance and startup-latency antibody: submit outcomes retain admitted qkernel economics and durable venue-command side-effect identity; recoverable global entry pauses retain events, and the durable wake listener starts before APScheduler."}
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_edli_live_bridge_allocator_refresh.py: {created: "2026-05-31", last_used: "2026-05-31"}
@@ -284,7 +261,6 @@ test_trust_policy:
     tests/test_forecast_calibration_domain.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_low_contract_window_backfill.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_oracle_posterior.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_entry_forecast_evaluator_cutover.py: {created: "2026-05-03", last_used: "2026-05-14"}
     tests/test_ensemble_snapshots_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
     # End-to-end sign / window / transport invariant audit for the FT-ship
@@ -363,7 +339,6 @@ test_trust_policy:
     tests/test_day0_exit_gate.py: {created: "2026-04-07", last_used: "2026-07-19"}
     tests/test_day0_admission.py: {created: "2026-06-17", last_used: "2026-07-19", note: "Day0 live admission contracts, including strict quote-after-observation ordering, current source-health classification, final-localday no-entry geometry, one-bin stress, and maker-only routing."}
     tests/test_day0_extreme_updated_materialization_bridge.py: {created: "2026-07-19", last_used: "2026-07-20", note: "Non-blocking coalesced Day0 posterior rematerialization bridge: scoped manifests, same-cycle observation advance, and no family drop under burst."}
-    tests/test_day0_exposure_cap_kernel.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-07-21", note: "Fast METAR publication persistence and Day0 hourly-vector fairness: held capital keeps critical-quota priority while a busy trading lane reserves one normal-quota slot for a pending same-day family, preventing new-entry authority starvation without sweeping the unprioritized universe."}
     tests/test_day0_obs_fastlane_optionbc.py: {created: "2026-06-12", last_used: "2026-07-24", note: "Day0 METAR/HKO source-clock scheduling, conditional HKO validator commit coupling, isolated executor lanes, bounded commit retry, commit-before-wake ordering, and exact-station monotone WU-context strengthening."}
     tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-07-16"}
@@ -389,7 +364,6 @@ test_trust_policy:
     tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-07-24"}
     tests/test_executor_db_target.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-27"}
-    tests/test_fdr.py: {created: "2026-03-30", last_used: "2026-04-29"}
     tests/test_hk_rejects_vhhh_source.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_hk_settlement_floor_rounding.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_hourly_clients_parse.py: {created: "2026-04-21", last_used: "2026-04-21"}
@@ -406,8 +380,6 @@ test_trust_policy:
     tests/test_scanner_archived_filter.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_market_phase.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_market_phase_persistence.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_market_phase_dispatch.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_market_phase_d_a_unification.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_main_scheduler_timezone.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_no_deprecated_make_family_id_calls.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_onboard_pipeline_completeness.py: {created: "2026-05-25", last_used: "2026-05-25"}
@@ -449,7 +421,6 @@ test_trust_policy:
     tests/test_digest_profiles_equivalence.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_digest_regression_false_positive.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_admission_kernel_hardening.py: {created: "2026-04-25", last_used: "2026-04-25"}
-    tests/test_decision_evidence_runtime_invocation.py: {created: "2026-04-23", last_used: "2026-04-29"}
     tests/test_exit_evidence_audit.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_harvester_dr33_live_enablement.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_harvester_metric_identity.py: {created: "2026-04-24", last_used: "2026-04-29"}
@@ -511,13 +482,11 @@ test_trust_policy:
     tests/test_fake_polymarket_venue.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-07-14"}
     tests/test_live_readiness_gates.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_entry_forecast_config.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_executable_forecast_reader.py: {created: "2026-05-03", last_used: "2026-05-24"}
     tests/test_executable_forecast_reader_member_floor.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_executable_forecast_bundle_selection.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-05-03"}
-    tests/test_live_entry_status.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_opendata_release_calendar_selection.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_opendata_writes_v2_table.py: {created: "2026-05-02", last_used: "2026-05-03"}
     tests/test_opendata_future_target_contract.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -558,7 +527,6 @@ test_trust_policy:
     tests/test_forecast_target_contract_horizon.py: {created: "2026-05-08", last_used: "2026-05-08"}
     # F1 subprocess hardening — retry + timeout + stderr (REPORT §6.2).
     tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-14"}
-    tests/test_forecast_live_daemon.py: {created: "2026-05-14", last_used: "2026-07-20", note: "Forecast daemon ownership plus reactor wake routing, including family-bearing Day0 wakes and held-family rescue from newer entry-only wake starvation."}
     # 2026-05-23 schedule fix: cron triggers must fire after safe_fetch windows (a0d51d480b507f324 root-cause).
     tests/test_ecmwf_opendata_ingest_schedule.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_check_data_pipeline_live_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
@@ -569,7 +537,6 @@ test_trust_policy:
     tests/test_backfill_harvester_settlements_isolation.py: {created: "2026-05-11", last_used: "2026-05-11"}
     tests/test_backtest_runs_schema_lane_allowlist.py: {created: "2026-05-07", last_used: "2026-05-07"}
     # 2026-05-21 P0 live-money antibody: mutually-exclusive weather family bins must not emit independent live orders.
-    tests/test_inv_family_exclusive_sizing.py: {created: "2026-05-20", last_used: "2026-05-21"}
     # Task #107 portfolio/multi Kelly — INV-K1..K8 relationship antibodies (2026-06-03)
     tests/test_portfolio_kelly_relationships.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_calibration_pin_eligibility.py: {created: "2026-05-07", last_used: "2026-05-07"}
@@ -622,7 +589,6 @@ test_trust_policy:
     tests/test_operator_record_redeem.py: {created: "2026-05-01", last_used: "2026-05-16"}
     tests/test_oracle_low_failclosed.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_override_health.py: {created: "2026-05-06", last_used: "2026-05-06"}
-    tests/test_phase1_critic_opus_fixes_2026_05_06.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_phase2_6_evaluator_wiring.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_phase2_6_metric_identity_source_family.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_phase2_review_round1_fixes_part2.py: {created: "2026-05-04", last_used: "2026-05-04"}
@@ -732,6 +698,7 @@ test_trust_policy:
     tests/events/test_sizing_proof_receipt.py: {created: "2026-06-04", last_used: "2026-07-23", note: "Sizing-proof receipt fields and positive-edge capital-pressure behavior."}
     tests/test_job_lock_obeyed.py: {created: "2026-04-30", last_used: "2026-07-23", note: "Cross-process writer-lock exclusion and release antibody."}
     tests/support/forecast_fixtures.py: {created: "2026-07-23", last_used: "2026-07-23", note: "Non-production forecast value objects shared by materializer tests."}
+    tests/support/qkernel_family_fixtures.py: {created: "2026-07-23", last_used: "2026-07-23", note: "Non-production family, proof, and payload fixtures shared by current global-auction integration tests."}
     # 2026-05-21 live release proof P0-4: integrated crash/restart money-path lifecycle replay.
     tests/test_money_path_lifecycle_replay.py: {created: "2026-05-21", last_used: "2026-05-24"}
     # 2026-05-21 live release proof P2-2: runtime schema columns must remain registry-visible.
@@ -745,12 +712,8 @@ test_trust_policy:
     tests/test_regime_correlation_store.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_cluster_exposure_shrunk.py: {created: "2026-05-21", last_used: "2026-05-21"}
     # Phase 4 T4 (2026-05-21): cross_market_correlation_hedge + neg_risk_basket candidate relationship tests.
-    tests/test_phase4_t4_candidates.py: {created: "2026-05-21", last_used: "2026-05-21"}
     # Phase 6 T1+T2+T3+T4 (2026-05-21): EvidenceTier + RegretDecomposer + LiveReadinessTribunal.
-    tests/test_shoulder_buy_evt.py: {created: "2026-05-22", last_used: "2026-05-22"}
-    tests/test_cross_market_portfolio_relationships.py: {created: "2026-05-22", last_used: "2026-05-22"}
     # C-EPIC combination candidates wave (2026-05-23)
-    tests/test_cepic_combination_candidates.py: {created: "2026-05-23", last_used: "2026-05-23"}
     # LIVE-PROB-P0 apply-metrics enforcement antibodies (2026-05-24, PR #323)
     tests/test_prob_gate_apply_list.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # Market-cost-seam upgrade R1..R6 relationship-test antibodies (2026-05-27, PR #348)
@@ -759,7 +722,6 @@ test_trust_policy:
     tests/test_R2_bin_edge_executable_provenance.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_R4_family_optimizer_dominates_stage_a_when_max_legs_gt_1.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_R6_model_only_posterior_blocks_market_blending.py: {created: "2026-05-27", last_used: "2026-05-27"}
-    tests/test_wave4_family_portfolio_activation.py: {created: "2026-05-27", last_used: "2026-05-27"}
     # PR #353 exit-strategy D1+D2+D3 pure-math layer tests (2026-05-27) removed 2026-07-08
     # (R0-c zero-caller corpse purge — exit_observation_constraint/exit_constrained_posterior/
     # exit_family_optimizer were never wired into the live path).
@@ -796,7 +758,6 @@ test_trust_policy:
     tests/engine/test_day0_mask_runtime_gate.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P3 RT: runtime DAY0_MASK_CONTRADICTS_OBSERVATION fail-closed gate — surviving bin contradicting rounded_value raises; future inversion fails CLOSED"}
     tests/engine/test_no_loss_class_nonexecutable_yes_gate.py: {created: "2026-06-13", last_used: "2026-06-13", note: "RED-on-revert antibody for the buy-NO loss-class gate in _canonical_probability_and_fdr_proof: a NON-executable-YES far bin emits q_lcb_no=0.0/p=1.0/prefilter=False (profitable-era gate), while an EXECUTABLE-YES bin's buy_no stays reconciled via the native NO edge (GOOD-fill path). RED-on-revert proven by temporarily restoring the 745aa10c6f forecast-NO else-branch (q_lcb_no jumps to 0.775). Authority: settled-data loss-class replay 2026-06-13, n=485, 98.1% admit; git regression 745aa10c6f"}
     tests/engine/test_no_calibration_loss_class_coverage.py: {created: "2026-06-13", last_used: "2026-06-13", note: "settled_data guard: reproduces forecast_posteriors JOIN settlement_outcomes replay (q_lcb_no=1-q_ucb_yes on the winning bin); unguarded forecast-NO admits the loss class on ~98% of settled winners, the gate admits ZERO (98%->0). Read-only state/zeus-forecasts.db?mode=ro with graceful pytest.skip when absent; synthetic-data twin always enforces the gate. Authority: settled-data loss-class replay 2026-06-13, n=485, 98.1% admit; git regression 745aa10c6f"}
-    # tests/test_replacement_materializer_soft_anchor_qlcb.py RETIRED 2026-07-03 (fixture-hygiene):
     # a1c2163e4 ("fix(live): unify replacement forecast runtime semantics", 2026-06-18) deleted the
     # entire Wilson-over-AIFS-member-votes mechanism it tested (_QLCB_SOFT_ANCHOR_BASIS,
     # _build_soft_anchor_wilson_lcb/_ucb, _wilson_lower_bound/_upper_bound all removed from
@@ -805,7 +766,6 @@ test_trust_policy:
     # rows were NEVER live-eligible even with the Wilson bound present (the bound existed solely for
     # observation-accrual/coverage measurement per the deleted test's own docstring; the live gate admits
     # only FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis — materializer.py:3078).
-    # tests/test_replacement_forecast_materializer_no_point_q_as_lcb.py (unregistered, same fate,
     # same commit) also deleted.
     # PR #400 compliance additions — operator-directed TDD tests (2026-06-08)
     tests/test_no_internal_version_suffixes.py: {created: "2026-06-11", last_used: "2026-06-12", note: "PR#405 rename ban-test: no internal _v[0-9] suffixes (allowlist external SDK names; grandfather shrinks only); u0r=0 occurrences pin"}
@@ -826,17 +786,9 @@ test_trust_policy:
     tests/test_raw_model_forecasts_requires_product_identity.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 RT: raw_model_forecasts must carry product-identity columns; no provenance -> must not train live-money posterior"}
     tests/test_raw_model_forecasts_rejects_same_key_different_request_hash.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 (operator-sharpened) RT: same logical key + DIFFERENT request_url_hash/product_id is REJECTED (RawModelForecastRequestConflict + audit row), never silently INSERT-OR-IGNORE dropped; stale value never silently survives a corrected request"}
     tests/test_raw_model_forecasts_does_not_ignore_changed_cell_selection.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 (operator-sharpened) RT: a changed cell_selection (-> changed request_url_hash/product_id) under the same logical key is surfaced (conflict + audit), not silently ignored; cross-module download->persist relationship test"}
-    tests/test_bayes_precision_fusion_materializer_uses_persisted_current_rows_not_network.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 5 RT: BAYES_PRECISION_FUSION fusion override reads persisted current single_runs rows, never network-fetches inside q path"}
-    tests/test_bayes_precision_fusion_current_capture_missing_blocks_or_falls_back_with_reason.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 5 RT: missing persisted current capture -> logged reason + single-anchor path, never silent network fetch"}
-    tests/test_bayes_precision_fusion_posterior_records_raw_model_forecast_dependency_ids.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 5 RT: fused posterior records raw_model_forecast_ids for full q reconstructability"}
     tests/test_bayes_precision_fusion_lead_days_uses_city_local_date_not_utc.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 6 RT: lead_days computed against city-local date, not UTC (off-by-one in cross-timezone cases)"}
-    tests/test_bayes_precision_fusion_history_provider_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 end-to-end RT: real BayesPrecisionFusionHistoryProvider at materializer seam; persisted previous_runs + VERIFIED settlement yields T2_BAYES"}
-    tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-07-14", note: "Source-clock current-shape wiring: current causal ENS carrier is required for fixed-scheme and station-augmented centers; any missing shape or source-clock exception fails closed instead of falling back to historical q; legacy flag/wiring coverage retained."}
-    tests/test_replacement_sigma_floor_steps_wiring.py: {created: "2026-06-13", last_used: "2026-06-13", note: "σ-refit task #69 RT: q-construction consumer honors absolute σ-floor (σ_core=max(σ_impl·k, floor_steps·step)) when the FITTED artifact carries floor_steps; artifact WITHOUT floor_steps (current live) is byte-identical (q + identity hash); floor binds an over-sharp σ (flattens mode) and is inert when σ already wide. RED-on-revert: removing max() ⇒ floor never binds ⇒ widens-test flips"}
     tests/test_bayes_precision_fusion_model_selection_gate.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 F4 RT: regional polygon gate + alias dedup; icon_d2 in-polygon enters; out-of-polygon absent; icon_seamless deduped"}
-    tests/test_switch_decision_live_policy_requires_capital_evidence_object.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 8 RT: evaluate_replacement_forecast_switch_decision must not trust upstream LIVE_AUTHORITY without capital evidence object"}
     tests/test_replacement_forecast_topology_settlement_identity.py: {created: "2026-06-07", last_used: "2026-06-07", note: "H4 antibody RT: settlement_unit/rounding_rule in topology-core equivalence; mismatched settlement semantics never share a market"}
-    tests/test_replacement_forecast_reactor_hook.py: {created: "2026-06-06", last_used: "2026-06-13", note: "task #62 RT: ReplacementForecastCandidateView admits BARE canonical direction (buy_no/buy_yes) as the real producer emits — bin-id requirement scoped to consumers; malformed side still raises; bare candidate no-ops the DIRECTION-LAW recheck. RED-on-revert vs pre-2026-06-13 :bin fail-close that zeroed orders (UNKNOWN_REVIEW_REQUIRED)"}
     tests/test_no_computed_at_date_utc_lead_ast_guard.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 6 AST guard: no computed_at.date() (UTC) in lead_days computation — enforces city-local ZoneInfo date at the AST level"}
     tests/test_raw_model_forecasts_does_not_ignore_changed_cell_selection.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 (sharpened) RT: changed cell_selection on same logical key must not be silently discarded by INSERT OR IGNORE"}
     tests/test_raw_model_forecasts_rejects_same_key_different_request_hash.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 (sharpened) RT: same logical key with different request_url_hash must be REJECTED, not silently discarded"}
@@ -905,7 +857,6 @@ categories:
     - tests/test_runtime_n_mc_floor.py
     - tests/test_evaluator_explicit_n_mc.py
     - tests/test_evaluator_strategy_key_failclosed.py
-    - tests/test_inv_family_exclusive_sizing.py
     - tests/test_portfolio_kelly_relationships.py
     - tests/test_cross_module_invariants.py
     - tests/test_cross_module_relationships.py
@@ -915,7 +866,6 @@ categories:
     - tests/test_ensemble_signal.py
     - tests/test_execution_price.py
     - tests/test_expiring_assumption.py
-    - tests/test_fdr.py
     - tests/test_cutover_guard.py
     - tests/test_heartbeat_supervisor.py
     - tests/test_v2_adapter.py
@@ -949,13 +899,13 @@ categories:
     - tests/test_live_readiness_gates.py
     - tests/test_money_path_lifecycle_replay.py
     - tests/test_pre_existing_failure_registry.py
-    - tests/test_entry_forecast_config.py
     - tests/test_ingest_boot_time_semantics.py
     - tests/test_opendata_release_calendar_selection.py
     - tests/test_opendata_writes_v2_table.py
     - tests/test_opendata_future_target_contract.py
     - tests/test_ecmwf_open_data_subprocess_hardening.py
-    - tests/test_forecast_live_daemon.py
+    - tests/test_forecast_live_daemon_boot_schema.py
+    - tests/test_forecast_live_opendata_producer_required_for_fsr.py
     - tests/test_ecmwf_opendata_ingest_schedule.py
     - tests/test_ecmwf_open_data_step_hours.py
     - tests/test_forecast_target_contract_horizon.py
@@ -1016,7 +966,6 @@ categories:
     - tests/test_digest_regression_false_positive.py
     - tests/test_admission_kernel_hardening.py
     - tests/test_truth_surface_health.py
-    - tests/test_tigge_snapshot_p_raw_backfill.py
     - tests/test_wallet_source.py
     - tests/test_phase10a_hygiene.py
     - tests/test_phase10b_dt_seam_cleanup.py
@@ -1041,7 +990,6 @@ categories:
     - tests/test_canonical_position_current_schema_alignment.py
     - tests/test_decision_evidence_entry_emission.py
     - tests/test_decision_evidence_persistence.py
-    - tests/test_decision_evidence_runtime_invocation.py
     - tests/test_executor_command_split.py
     - tests/test_executor_db_target.py
     - tests/test_executor_typed_boundary.py
@@ -1126,9 +1074,7 @@ categories:
     - tests/test_calibration_manager_w0.py
     # FIX-1 calibration bin_source: canonical_v2 wiring antibody (flag-OFF byte-identity
     # + flag-ON own-fit + count/fit population agreement).
-    - tests/test_calibration_bin_source_fix1.py
     # W1 certificate dual-chain source_run binding (benign 00Z->12Z passes; fabricated fails).
-    - tests/test_unblock_w1_cert_dual_chain.py
     # W1 LOW identity-Platt registration: get_calibrator('low') -> (cal, 1).
     - tests/test_unblock_w1_low_identity_platt.py
     # W2 settlement_outcomes unit-writer + VERIFIED-unit guard + P&L resolver repoint.
@@ -1204,7 +1150,6 @@ categories:
     - tests/test_phase4_ingest.py
     - tests/test_phase4_platt_v2.py
     - tests/test_phase4_rebuild.py
-    - tests/test_phase4_t4_candidates.py
     - tests/test_phase5_fixpack.py
     - tests/test_phase5_gate_d_low_purity.py
     - tests/test_phase5b_low_historical_lane.py
@@ -1217,7 +1162,6 @@ categories:
     - tests/test_riskguard.py
     - tests/test_solar_etl.py
     - tests/test_tracker_integrity.py
-    - tests/test_advisory_boundary.py
     - tests/test_wu_scheduler.py
     - tests/test_dt1_commit_ordering.py
     - tests/test_dt1_savepoint_integration.py
@@ -1265,7 +1209,6 @@ categories:
     - tests/test_ecmwf_open_data_source_failover.py
     - tests/test_ensemble_snapshots_ingest_backend.py
     - tests/test_entries_block_registry.py
-    - tests/test_entry_forecast_evaluator_cutover.py
     - tests/test_executable_forecast_reader.py
     - tests/test_execution_harvester_paginator.py
     - tests/test_extractor_east_asia_c12_boundary.py
@@ -1286,14 +1229,11 @@ categories:
     - tests/test_hourly_local_time_contract_ast.py
     - tests/test_ingest_main_boot_resilience.py
     - tests/test_lifecycle_field_orthogonality.py
-    - tests/test_live_entry_status.py
     - tests/test_live_health_probe_forecast_owner.py
     - tests/test_load_platt_v2_frozen_as_of.py
     - tests/test_main_scheduler_timezone.py
     - tests/test_manifest_drift_replace.py
     - tests/test_market_phase.py
-    - tests/test_market_phase_d_a_unification.py
-    - tests/test_market_phase_dispatch.py
     - tests/test_market_phase_evidence.py
     - tests/test_market_phase_persistence.py
     - tests/test_migration_redeem_operator_required.py
@@ -1304,7 +1244,6 @@ categories:
     - tests/test_oracle_evidence_status.py
     - tests/test_oracle_low_failclosed.py
     - tests/test_override_health.py
-    - tests/test_phase1_critic_opus_fixes_2026_05_06.py
     - tests/test_phase2_6_evaluator_wiring.py
     - tests/test_phase2_6_metric_identity_source_family.py
     - tests/test_phase2_review_round1_fixes.py
@@ -1370,7 +1309,6 @@ categories:
   telemetry:
     - tests/test_ops_scripts_smoke.py
     - tests/test_audit_city_data_readiness.py
-    - tests/test_automation_analysis.py
     - tests/test_bayesian_sigma_evaluation.py
     - tests/test_center_buy_repair.py
     - tests/test_divergence_exit_counterfactual.py
@@ -1421,7 +1359,6 @@ categories:
     - tests/test_ensemble_signal.py
     - tests/test_calibration_bins_canonical.py
     - tests/test_alpha_target_coherence.py
-    - tests/test_fdr.py
     - tests/test_entry_exit_symmetry.py
     - tests/test_day0_exit_gate.py
     - tests/test_platt.py
@@ -1506,24 +1443,22 @@ law_gate:
       - docs/operations/task_2026-04-26_ultimate_plan/r3/frozen_interfaces/G1.md
   ENTRY_FORECAST_CONFIG:
     tests:
-      - tests/test_entry_forecast_config.py
     protects:
       - docs/operations/task_2026-05-02_live_entry_data_contract/PLAN_v4.md
       - config/settings.json
       - src/config.py
   DATA_DAEMON_READINESS_CONTRACT:
     tests:
-      - tests/test_entry_forecast_evaluator_cutover.py
       - tests/test_executable_forecast_reader.py
       - tests/test_forecast_fetch_plan.py
       - tests/test_ingest_boot_time_semantics.py
       - tests/test_ingest_grib_source_run_context.py
-      - tests/test_live_entry_status.py
       - tests/test_opendata_release_calendar_selection.py
       - tests/test_opendata_writes_v2_table.py
       - tests/test_opendata_future_target_contract.py
       - tests/test_ecmwf_open_data_subprocess_hardening.py
-      - tests/test_forecast_live_daemon.py
+      - tests/test_forecast_live_daemon_boot_schema.py
+      - tests/test_forecast_live_opendata_producer_required_for_fsr.py
       - tests/test_ecmwf_opendata_ingest_schedule.py
       - tests/test_check_data_pipeline_live_e2e.py
       - tests/test_check_live_order_e2e.py
@@ -1571,7 +1506,6 @@ law_gate:
     tests:
       - tests/test_ensemble_signal.py
       - tests/test_structural_linter.py
-      - tests/test_tigge_snapshot_p_raw_backfill.py
       - tests/test_runtime_n_mc_floor.py
       - tests/test_evaluator_explicit_n_mc.py
     protects:
@@ -1589,7 +1523,6 @@ law_gate:
       - src/calibration/manager.py
   FDR_FAMILY:
     tests:
-      - tests/test_fdr.py
       - tests/test_architecture_contracts.py
     protects:
       - src/strategy/selection_family.py
@@ -3269,7 +3202,6 @@ test_metadata:
       - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
       - docs/rebuild/quarantine_excision_2026-07-11.md
     notes: >
-      DIQ packet (owner-local reshape) — supersedes tests/test_decision_integrity_quarantine.py.
       Unit tests for revoke_decisions_for_noncontributing_forecast: only
       contributes=0 and UNKNOWN attribution rows revoked; contributes=1 rows
       skipped; NULL contributes (legacy) passed through untouched; idempotency
@@ -3299,7 +3231,6 @@ test_metadata:
       - docs/rebuild/quarantine_excision_2026-07-11.md
     notes: >
       DIQ packet (owner-local reshape) — supersedes
-      tests/test_decision_integrity_quarantine_extended.py. Extended (PR-E)
       revocation: tag-coverage tests for calibration_pairs, probability_trace_fact,
       selection_family_fact, selection_hypothesis_fact, decision_events (each
       owner-local, co-located with the fact table it tags). Downstream exclusion
@@ -3326,7 +3257,6 @@ test_metadata:
       - docs/rebuild/quarantine_excision_2026-07-11.md
     notes: >
       DIQ packet (owner-local reshape) — supersedes
-      tests/test_decision_integrity_quarantine_crossdb.py. Cross-DB integration
       tests with separate world/trade/forecasts tempfile SQLite DBs ATTACHed as
       production does; the owner-local reshape supersedes PR-E's single
       trade-DB-only quarantine shape — most revocable tables now write LOCALLY
@@ -3495,30 +3425,6 @@ test_metadata:
     created: 2026-05-25
     last_reused_or_audited: 2026-05-25
 
-  tests/test_check_full_transport_ship_readiness.py:
-    cohort: ship_gate_antibody
-    trust: trusted
-    authority_docs:
-      - docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
-    notes: >
-      Unit tests for check_full_transport_ship_readiness. Verifies gate returns FAIL
-      today (nothing shipped yet) and check function names match the 9 spec items exactly.
-    created: 2026-05-25
-    last_reused_or_audited: 2026-05-25
-
-  tests/test_full_transport_live_wiring.py:
-    cohort: law_antibody
-    trust: trusted
-    authority_docs:
-      - docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
-    notes: >
-      Relationship tests for full_transport_live wiring in monitor_refresh (Zeus #64).
-      Three invariants: (a) flag OFF = p_raw byte-identical to plain path; (b) flag ON +
-      model present = p_raw differs from plain and matches direct p_raw_vector_with_error_model;
-      (c) flag ON + no model row = plain fallback + WARNING logged.
-    created: 2026-05-25
-    last_reused_or_audited: 2026-05-25
-
   # PR #400 operator-directed TDD tests — 2026-06-08
   tests/test_bayes_precision_fusion_covariance_uses_common_target_dates_only.py:
     cohort: law_antibody
@@ -3651,42 +3557,6 @@ test_metadata:
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_bayes_precision_fusion_materializer_uses_persisted_current_rows_not_network.py:
-    cohort: law_antibody
-    trust: trusted
-    authority_docs:
-      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
-    notes: >
-      BLOCKER 5 RT: the BAYES_PRECISION_FUSION fusion override must read persisted current single_runs
-      rows from raw_model_forecasts, never network-fetch inside the q path.
-      Reconstructability invariant: traded q must map to exact persisted inputs.
-    created: 2026-06-08
-    last_reused_or_audited: 2026-06-08
-
-  tests/test_bayes_precision_fusion_current_capture_missing_blocks_or_falls_back_with_reason.py:
-    cohort: law_antibody
-    trust: trusted
-    authority_docs:
-      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
-    notes: >
-      BLOCKER 5 RT: a missing persisted current capture must produce a logged reason
-      and route to the single-anchor path (byte-identical to pre-fusion), never a
-      silent network fetch. Missing dependency must be observable.
-    created: 2026-06-08
-    last_reused_or_audited: 2026-06-08
-
-  tests/test_bayes_precision_fusion_posterior_records_raw_model_forecast_dependency_ids.py:
-    cohort: law_antibody
-    trust: trusted
-    authority_docs:
-      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
-    notes: >
-      BLOCKER 5 RT: the fused posterior must record the raw_model_forecast_ids it
-      consumed so the q is reconstructable to exact persisted inputs (models, URL,
-      params, payload, source_available_at). Fitz Constraint #4.
-    created: 2026-06-08
-    last_reused_or_audited: 2026-06-08
-
   tests/test_bayes_precision_fusion_lead_days_uses_city_local_date_not_utc.py:
     cohort: law_antibody
     trust: trusted
@@ -3699,32 +3569,6 @@ test_metadata:
       decision date.
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
-
-  tests/test_bayes_precision_fusion_history_provider_materializer_wiring.py:
-    cohort: law_antibody
-    trust: trusted
-    authority_docs:
-      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
-    notes: >
-      End-to-end RT: real BayesPrecisionFusionHistoryProvider wired at the materializer seam reaches
-      T2_BAYES via _insert_posterior when persisted previous_runs rows + VERIFIED
-      settlement are present on the same connection. INV-37 (single forecasts DB).
-    created: 2026-06-08
-    last_reused_or_audited: 2026-06-08
-
-  tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py:
-    cohort: law_antibody
-    trust: trusted
-    authority_docs:
-      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
-    notes: >
-      RT: (a) flag-OFF materialized posterior byte-identical to today; (b) flag-ON
-      fused mu*/sigma replace single-anchor center/spread and get own EMOS cell
-      identity (F6); (c) source-clock current q requires a causal target-specific
-      ENS shape and source-clock exceptions cannot fall back to historical q;
-      (d) dropped global/regional routing coverage remains.
-    created: 2026-06-08
-    last_reused_or_audited: 2026-07-14
 
   tests/test_replacement_fused_q_shape.py:
     cohort: law_antibody
@@ -3796,19 +3640,6 @@ test_metadata:
       F4 regional polygon gate + alias dedup RT: icon_d2 in-polygon (Paris/London/
       Munich) ENTERS; Moscow out-of-polygon ABSENT (zero-leak); arome France-only;
       dedup drops icon_seamless; lead>1 excludes regional. BAYES_PRECISION_FUSION_PROOF_RESULT.md proof.
-    created: 2026-06-08
-    last_reused_or_audited: 2026-06-08
-
-  tests/test_switch_decision_live_policy_requires_capital_evidence_object.py:
-    cohort: law_antibody
-    trust: trusted
-    authority_docs:
-      - docs/the_path/RESTART_RUNBOOK.md
-    notes: >
-      BLOCKER 8 RT: evaluate_replacement_forecast_switch_decision must not trust that
-      the runtime-policy resolver was the only producer of a LIVE_AUTHORITY status.
-      A LIVE_AUTHORITY arriving at this consuming boundary without a capital evidence
-      object is a structural hole — must fail closed.
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 

@@ -134,6 +134,7 @@ modules:
       - tests/test_riskguard_red_durable_cmd.py
       - tests/test_risk_allocator.py
       - tests/test_evaluator_strategy_key_failclosed.py
+      - tests/integration/test_w3_solve_seam_g3.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   events:
@@ -186,7 +187,6 @@ modules:
       - tests/events/test_market_event_coalescer.py
       - tests/events/test_forecast_snapshot_ready.py
       - tests/events/test_day0_extreme_updated_trigger.py
-      - tests/strategy/live_inference/test_day0_absorbing_boundary.py
       - tests/strategy/live_inference/test_live_bin_inference.py
       - tests/strategy/live_inference/test_executable_cost.py
       - tests/strategy/live_inference/test_trade_score.py
@@ -197,8 +197,6 @@ modules:
       - tests/events/test_live_order_reconcile.py
       - tests/engine/test_event_reactor_no_bypass.py
       - tests/strategy/live_inference/test_no_trade_regret.py
-      - tests/analysis/test_event_opportunity_report.py
-      - tests/money_path/test_edli_online_invariants.py
       - tests/money_path/test_edli_live_readiness.py
       - tests/money_path/test_edli_order_lifecycle.py
       - tests/state/test_edli_table_ownership.py
@@ -451,7 +449,8 @@ modules:
       - docs/operations/task_2026-04-26_ultimate_plan/r3/reference_excerpts/polymarket_user_ws_2026-04-27.md
       - docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/INDEX.md
     required_tests:
-      - tests/test_forecast_live_daemon.py
+      - tests/test_forecast_live_daemon_boot_schema.py
+      - tests/test_forecast_live_opendata_producer_required_for_fsr.py
       - tests/test_user_channel_ingest.py
       - tests/test_digest_profile_matching.py::test_r3_m3_user_channel_routes_to_m3_profile
       - tests/test_ingest_source_contract_scheduler.py
@@ -548,7 +547,6 @@ modules:
       - docs/operations/current_data_state.md
     required_tests:
       - tests/test_market_analysis.py
-      - tests/test_fdr.py
       - tests/test_kelly.py
       - tests/test_kelly_cascade_bounds.py
       - tests/strategy/live_inference/test_source_clock_vnext.py

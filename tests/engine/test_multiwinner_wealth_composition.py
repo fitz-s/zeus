@@ -10,12 +10,15 @@ import json
 import sqlite3
 from decimal import Decimal
 
+import numpy as np
 import pytest
 
+from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.engine.global_auction_universe import (
     current_portfolio_wealth_witness,
     probe_inflight_buy_ambiguity,
 )
+from src.solve import solver as solve
 from src.state.collateral_ledger import init_collateral_schema
 from src.state.portfolio import PortfolioState
 
@@ -87,6 +90,112 @@ def _witness(conn: sqlite3.Connection):
             authority_scope="runtime_exposure",
         ),
     )
+
+
+def test_family_joint_never_spends_fixed_fraction_above_kelly_target():
+    """Minimum marketability cannot override the shared fractional-Kelly target."""
+    family = "family-joint-weak-edge"
+    candidate_id = "family-joint-weak-edge"
+    token = "token-family-joint-weak-edge"
+    condition = "condition-family-joint-weak-edge"
+    captured_at = _AT - dt.timedelta(milliseconds=100)
+    curve = ExecutableCostCurve(
+        token_id=token,
+        side="NO",
+        snapshot_id="book-family-joint-weak-edge",
+        book_hash="hash-family-joint-weak-edge",
+        levels=(BookLevel(price=Decimal("0.78"), size=Decimal("57.5")),),
+        fee_model=FeeModel(fee_rate=Decimal("0.05")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("5"),
+        quote_ttl=dt.timedelta(seconds=1),
+    )
+    bindings = (
+        solve.OutcomeTokenBinding(
+            bin_id="bin",
+            condition_id=condition,
+            yes_token_id="yes-family-joint-weak-edge",
+            no_token_id=token,
+        ),
+        solve.OutcomeTokenBinding(
+            bin_id="other",
+            condition_id="condition-family-joint-other",
+            yes_token_id="yes-family-joint-other",
+            no_token_id="no-family-joint-other",
+        ),
+    )
+    payoff_q = 0.8125733672356523
+    yes_samples = np.tile(np.array([1.0 - payoff_q, payoff_q]), (400, 1))
+    witness_fields = {
+        "family_key": family,
+        "bindings": bindings,
+        "q_version": "q-family-joint-weak-edge",
+        "resolution_identity": "resolution-family-joint-weak-edge",
+        "topology_identity": "topology-family-joint-weak-edge",
+        "posterior_identity_hash": "posterior-family-joint-weak-edge",
+        "source_truth_identity": "source-family-joint-weak-edge",
+        "authority_certificate_hash": "certificate-family-joint-weak-edge",
+        "band_alpha": 0.05,
+        "band_basis": "joint_q_band_samples",
+        "yes_point_q": np.mean(yes_samples, axis=0),
+        "yes_q_samples": yes_samples,
+        "captured_at_utc": captured_at,
+    }
+    witness = solve.JointOutcomeProbabilityWitness(
+        **witness_fields,
+        max_age=dt.timedelta(seconds=1),
+        witness_identity=solve.joint_probability_witness_identity(**witness_fields),
+    )
+    candidate = solve.GlobalSingleOrderCandidate(
+        candidate_id=candidate_id,
+        family_key=family,
+        bin_id="bin",
+        condition_id=condition,
+        side="NO",
+        token_id=token,
+        probability_witness_identity=witness.witness_identity,
+        book_snapshot_id=curve.snapshot_id,
+        book_captured_at_utc=captured_at,
+        execution_curve_identity=solve.executable_curve_identity(curve),
+        ledger_snapshot_id="ledger-current",
+        executable_cost_curve=curve,
+        resolution_identity=witness.resolution_identity,
+    )
+    endowment = solve.FamilyPortfolioEndowment(
+        family_key=family,
+        payout_by_bin_usd=tuple(
+            (bin_id, Decimal("0")) for bin_id in witness.bin_ids
+        ),
+        current_token_shares=(),
+        wealth_floor_usd=Decimal("465.531417"),
+        spendable_cash_usd=Decimal("465.531417"),
+        portfolio_capital_usd=Decimal("1450"),
+        committed_capital_usd=Decimal("0"),
+        ledger_snapshot_id="ledger-current",
+    )
+
+    full = solve.plan_family_joint_buy_targets(
+        (candidate,),
+        probability_witness=witness,
+        endowment=endowment,
+        capital_limit_by_candidate={candidate_id: Decimal("1450")},
+        fractional_kelly_multiplier=Decimal("1"),
+    )
+    fractional = solve.plan_family_joint_buy_targets(
+        (candidate,),
+        probability_witness=witness,
+        endowment=endowment,
+        capital_limit_by_candidate={candidate_id: Decimal("1450")},
+        fractional_kelly_multiplier=Decimal("0.03125"),
+    )
+
+    assert full.primary_candidate_id == candidate_id
+    assert full.targets[0].shares > Decimal("55")
+    assert full.targets[0].full_kelly_target_shares == full.targets[0].shares
+    assert full.targets[0].full_kelly_target_shares * Decimal("0.03125") < Decimal("5")
+    assert fractional.primary_candidate_id is None
+    assert fractional.targets == ()
+    assert fractional.no_trade_reason == "FAMILY_JOINT_NO_POSITIVE_TARGET"
 
 
 def _record_bounded_winner(

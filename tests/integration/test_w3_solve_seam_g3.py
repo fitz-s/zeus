@@ -1,33 +1,17 @@
 # Created: 2026-07-03
 # Last reused/audited: 2026-07-23
-# Authority basis: W3 SOLVE design packet, global fractional-Kelly repair,
-#                  current Day0 global-cut routing, and auditable SELL holding bindings
-"""G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
-
-Proves the promotion flag is a SAFE, reversible, single-point cutover before any live enablement:
-  (a) absent-vs-OFF byte-identity — the flag key absent vs explicitly False produce identical
-      SpineDecisionResults over a fixture corpus (the OFF path is a no-op);
-  (b) single-divergence-point — `w3_solve_enabled` is consumed at EXACTLY one code site (the guard);
-  (c) ON-mode integration — with the flag ON the shim runs and every decision passes
-      validate_family_decision_contract (no getattr-default consumer field fired);
-  (d) OFF-path import-isolation — a decide call with the flag OFF does not import src.solve.
-
-Fixtures are reused from tests/integration/test_qkernel_spine_routing.py (the realistic family +
-proofs the legacy spine path is tested against).
-"""
+# Authority basis: current global auction, fractional-Kelly repair,
+#                  Day0 global-cut routing, and auditable SELL holding bindings
+"""Current global auction, q-kernel, and live actuation integration contracts."""
 
 from __future__ import annotations
 
-import ast
 import base64
 import datetime as _dt
 import hashlib
 import inspect
 import json
 import sqlite3
-import subprocess
-import sys
-import textwrap
 import threading
 import time
 import zlib
@@ -106,7 +90,6 @@ from src.solve.solver import (
     joint_probability_witness_identity,
     portfolio_wealth_identity,
     _score_global_single_order,
-    validate_family_decision_contract,
 )
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.contracts.executable_market_snapshot import (
@@ -127,7 +110,7 @@ from src.state.schema.opportunity_events_schema import (
     ensure_table as ensure_opportunity_events_table,
 )
 from src.types.market import Bin
-from tests.integration import test_qkernel_spine_routing as R
+from tests.support import qkernel_family_fixtures as R
 
 _BRIDGE_PATH = bridge.__file__
 
@@ -185,7 +168,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         median_payoff_usd=Decimal("-5.88"),
         wealth_after_loss_usd=Decimal("94.12"),
         wealth_after_win_usd=Decimal("106.12"),
-        expected_value_diagnostic_usd=0.08,
+        expected_value_usd=0.08,
     )
     sell_point_counterfactual = GlobalSellPointCounterfactual(
         status="POSITIVE",
@@ -211,7 +194,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             median_payoff_usd=Decimal("10"),
             wealth_after_loss_usd=Decimal("110"),
             wealth_after_win_usd=Decimal("110"),
-            expected_value_diagnostic_usd=7.532,
+            expected_value_usd=7.532,
         ),
     )
     buy_expected_growth = ExpectedGrowthComparison(
@@ -285,7 +268,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 median_payoff_usd=Decimal("-2.34"),
                 wealth_after_loss_usd=Decimal("97.66"),
                 wealth_after_win_usd=Decimal("110"),
-                expected_value_diagnostic_usd=-1.106,
+                expected_value_usd=-1.106,
             ),
             sell_point_counterfactual=sell_point_counterfactual,
         ),
@@ -2230,28 +2213,28 @@ def _payload_with_joint_samples(proofs, payload, *, draws=64):
 
 def test_global_prepare_empty_scope_names_admission_classes_without_changing_scope():
     _family, proofs, _payload = _corpus()[0]
-    ordinary_diagnostic: dict[str, object] = {}
+    ordinary_telemetry: dict[str, object] = {}
     ordinary = era._selection_scoped_proofs(
         proofs=proofs,
         honor_admission_rejections=False,
         enforce_win_rate_floor=False,
-        diagnostic_out=ordinary_diagnostic,
+        telemetry_out=ordinary_telemetry,
     )
     assert ordinary == tuple(proofs)
-    assert ordinary_diagnostic == {}
+    assert ordinary_telemetry == {}
 
     blocked = tuple(
         replace(proof, missing_reason="BUY_NO_CONSERVATIVE_EVIDENCE_MISSING")
         for proof in proofs
     )
-    blocked_diagnostic: dict[str, object] = {}
+    blocked_telemetry: dict[str, object] = {}
     assert era._selection_scoped_proofs(
         proofs=blocked,
         honor_admission_rejections=False,
         enforce_win_rate_floor=False,
-        diagnostic_out=blocked_diagnostic,
+        telemetry_out=blocked_telemetry,
     ) == ()
-    assert blocked_diagnostic == {
+    assert blocked_telemetry == {
         "empty_reason": (
             "SELECTION_SCOPE_EMPTY:admission:"
             f"input={len(blocked)}:classes=BUY_NO_CONSERVATIVE_EVIDENCE_MISSING="
@@ -3368,106 +3351,6 @@ def test_global_day0_candidate_caps_preserve_immature_finite_yes_before_auction(
     )
     assert scored.candidate is not None
     assert scored.no_trade_reason is None
-
-
-def test_global_day0_components_never_parse_full_day_members_when_remaining_vectors_exist(
-    monkeypatch,
-):
-    bins = (
-        Bin(low=22.0, high=22.0, unit="C", label="22C"),
-        Bin(low=23.0, high=None, unit="C", label="23C or above"),
-    )
-    family = SimpleNamespace(
-        family_id="Moscow|2026-07-10|high",
-        city="Moscow",
-        target_date="2026-07-10",
-        metric="high",
-        bins=bins,
-        candidates=(
-            SimpleNamespace(condition_id="condition-22", bin=bins[0]),
-            SimpleNamespace(condition_id="condition-23-plus", bin=bins[1]),
-        ),
-    )
-    invalid_full_day_snapshot = {
-        "snapshot_id": "full-day-boundary-ambiguous",
-        "source_cycle_time": "2026-07-10T12:00:00+00:00",
-        "available_at": "2026-07-10T12:30:00+00:00",
-        "settlement_unit": "C",
-        "temperature_metric": "high",
-        "members_json": "[null, null, null]",
-        "members_precision": 1.0,
-    }
-    monkeypatch.setattr(
-        era,
-        "_forecast_snapshot_row_for_event",
-        lambda *_args, **_kwargs: invalid_full_day_snapshot,
-    )
-    monkeypatch.setattr(
-        era,
-        "_day0_seed_members_multimodel",
-        lambda *_args, **_kwargs: None,
-    )
-
-    def remaining_members(*, payload, **_kwargs):
-        payload["_edli_day0_remaining_models"] = 3
-        payload["_edli_day0_remaining_model_names"] = ["ecmwf", "gfs", "ukmo"]
-        payload["_edli_day0_remaining_capture_times_utc"] = [
-            "2026-07-10T19:30:00+00:00"
-        ]
-        return np.asarray([24.0, 25.0, 26.0], dtype=float)
-
-    monkeypatch.setattr(era, "_day0_remaining_day_members", remaining_members)
-    payload = {
-        "event_type": "DAY0_EXTREME_UPDATED",
-        "city": "Moscow",
-        "target_date": "2026-07-10",
-        "metric": "high",
-        "rounded_value": 23,
-        "high_so_far": 23.0,
-        "observation_time": "2026-07-10T19:00:00+00:00",
-        "observation_available_at": "2026-07-10T19:05:00+00:00",
-        "source_authorized_status": "AUTHORIZED",
-        "live_authority_status": "live",
-    }
-    forecast = sqlite3.connect(":memory:")
-    calibration = sqlite3.connect(":memory:")
-    samples, point, basis = era._day0_remaining_global_probability_components(
-        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
-        forecast_conn=forecast,
-        calibration_conn=calibration,
-        family=family,
-        payload=payload,
-        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
-    )
-
-    assert samples.shape[1] == 2
-    assert np.allclose(samples.sum(axis=1), 1.0)
-    assert point.tolist() == pytest.approx([0.0, 1.0])
-    assert basis == "current_coherent_day0_remaining_model_bootstrap_v3"
-    assert payload["_edli_q_source"] == "day0_remaining_day"
-
-    monkeypatch.setattr(
-        era,
-        "_day0_remaining_day_members",
-        lambda **_kwargs: None,
-    )
-    with pytest.raises(ValueError, match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"):
-        era._day0_remaining_global_probability_components(
-            SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
-            forecast_conn=forecast,
-            calibration_conn=calibration,
-            family=family,
-            payload={
-                key: value
-                for key, value in payload.items()
-                if not key.startswith("_edli_")
-            },
-            decision_time=_dt.datetime(
-                2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
-            ),
-        )
-    forecast.close()
-    calibration.close()
 
 
 def test_global_day0_current_band_accepts_only_bound_absorbing_certainty():
@@ -5219,49 +5102,6 @@ def test_post_day_wu_hourly_observation_conn_builds_exact_global_simplex(
     forecast.close()
 
 
-def test_current_forecast_global_probability_still_requires_replacement_readiness(
-    monkeypatch,
-):
-    import src.engine.replacement_forecast_hook_factory as hook_factory
-
-    forecast = sqlite3.connect(":memory:")
-    forecast.row_factory = sqlite3.Row
-    forecast.execute(
-        """
-        CREATE TABLE market_events (
-            city TEXT, target_date TEXT, temperature_metric TEXT,
-            condition_id TEXT, token_id TEXT, market_slug TEXT,
-            range_label TEXT, range_low REAL, range_high REAL
-        )
-        """
-    )
-    forecast.executemany(
-        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            ("Dallas", "2026-07-11", "high", "c0", "yes0", "a", "69F or below", None, 69.0),
-            ("Dallas", "2026-07-11", "high", "c1", "yes1", "b", "70-71F", 70.0, 71.0),
-            ("Dallas", "2026-07-11", "high", "c2", "yes2", "c", "72F or above", 72.0, None),
-        ),
-    )
-    monkeypatch.setattr(
-        hook_factory,
-        "_latest_replacement_readiness",
-        lambda *_args, **_kwargs: None,
-    )
-
-    with pytest.raises(ValueError, match="GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"):
-        era._prepare_current_global_probability_family(
-            _global_scope_event(city="Dallas", source_run_id="run-dallas"),
-            forecast_conn=forecast,
-            topology_conn=forecast,
-            decision_time=_dt.datetime(
-                2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc
-            ),
-            max_age=_dt.timedelta(seconds=30),
-        )
-    forecast.close()
-
-
 @pytest.mark.parametrize(
     "event_factory",
     [_global_scope_event, _global_day0_scope_event],
@@ -5281,7 +5121,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     topology.execute("CREATE TABLE market_events (marker TEXT NOT NULL)")
     topology.execute("INSERT INTO market_events VALUES ('current-topology')")
     world.execute("CREATE TABLE readiness_state (marker TEXT NOT NULL)")
-    world.execute("INSERT INTO readiness_state VALUES ('stale-world-shadow')")
+    world.execute("INSERT INTO readiness_state VALUES ('stale-world-copy')")
     world.execute("CREATE TABLE opportunity_events (marker TEXT NOT NULL)")
     world.execute("INSERT INTO opportunity_events VALUES ('authorized-day0')")
     captured = {}
@@ -10884,21 +10724,25 @@ def test_global_scope_refuses_a_held_family_without_probability_carrier(
     )
     monkeypatch.setattr(universe, "_current_day0_events", lambda *_args, **_kwargs: ())
 
-    with pytest.raises(
-        ValueError,
-        match=(
-            "GLOBAL_HELD_FAMILY_PROBABILITY_CARRIER_MISSING:"
-            r"Held\|2026-07-08\|high"
-        ),
-    ):
-        universe.scan_current_global_auction_scope(
-            world_conn=object(),
-            forecasts_conn=object(),
-            decision_at_utc=_dt.datetime(
-                2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
+    world = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(
+            ValueError,
+            match=(
+                "GLOBAL_HELD_FAMILY_PROBABILITY_CARRIER_MISSING:"
+                r"Held\|2026-07-08\|high"
             ),
-            held_families=(("Held", "2026-07-08", "high"),),
-        )
+        ):
+            universe.scan_current_global_auction_scope(
+                world_conn=world,
+                forecasts_conn=object(),
+                decision_at_utc=_dt.datetime(
+                    2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
+                ),
+                held_families=(("Held", "2026-07-08", "high"),),
+            )
+    finally:
+        world.close()
 
     assert calls[0]["phase_filter_exempt_families"] == {
         ("Held", "2026-07-08", "high")
@@ -10935,18 +10779,22 @@ def test_global_scope_unions_restricted_wake_with_all_held_obligations(monkeypat
     )
     monkeypatch.setattr(universe, "_current_day0_events", current_day0)
 
-    scope = universe.scan_current_global_auction_scope(
-        world_conn=object(),
-        forecasts_conn=object(),
-        decision_at_utc=_dt.datetime(
-            2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
-        ),
-        held_families=(
-            ("Alpha", "2026-07-11", "high"),
-            ("Beta", "2026-07-11", "high"),
-        ),
-        restrict_to_families=(("Alpha", "2026-07-11", "high"),),
-    )
+    world = sqlite3.connect(":memory:")
+    try:
+        scope = universe.scan_current_global_auction_scope(
+            world_conn=world,
+            forecasts_conn=object(),
+            decision_at_utc=_dt.datetime(
+                2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
+            ),
+            held_families=(
+                ("Alpha", "2026-07-11", "high"),
+                ("Beta", "2026-07-11", "high"),
+            ),
+            restrict_to_families=(("Alpha", "2026-07-11", "high"),),
+        )
+    finally:
+        world.close()
 
     assert set(scope.events) == {alpha, beta}
     assert trigger_calls[0]["restrict_to_families"] == {
@@ -11065,185 +10913,6 @@ def _serialize(result) -> str:
     return "|".join(parts)
 
 
-def _set_flag(value):
-    """Set the flag dict entry (None => absent). Returns a restore callable."""
-    from src.config import settings
-
-    ff = settings["feature_flags"]
-    had = "w3_solve_enabled" in ff
-    prev = ff.get("w3_solve_enabled")
-    if value is None:
-        ff.pop("w3_solve_enabled", None)
-    else:
-        ff["w3_solve_enabled"] = value
-
-    def _restore():
-        if had:
-            ff["w3_solve_enabled"] = prev
-        else:
-            ff.pop("w3_solve_enabled", None)
-
-    return _restore
-
-
-# --- (a) absent-vs-OFF byte-identity ----------------------------------------
-
-def test_g3_absent_vs_off_byte_identical():
-    corpus = _corpus()
-    restore = _set_flag(None)  # absent
-    try:
-        assert bridge.w3_solve_enabled() is False
-        absent = [_serialize(_drive(f, p, pl)) for f, p, pl in corpus]
-    finally:
-        restore()
-    restore = _set_flag(False)  # explicit OFF
-    try:
-        assert bridge.w3_solve_enabled() is False
-        off = [_serialize(_drive(f, p, pl)) for f, p, pl in corpus]
-    finally:
-        restore()
-    assert absent == off, f"absent vs OFF diverged:\n absent={absent}\n off={off}"
-    # the corpus must run the real pipeline (a FamilyDecision produced), not a trivial input-fault
-    assert any("decision_id=" in s for s in off), "corpus did not exercise the engine pipeline"
-
-
-def test_g3_off_ignores_joint_samples_and_keeps_v1_band_identity():
-    restore = _set_flag(None)
-    try:
-        result = _drive(*_corpus()[0])
-    finally:
-        restore()
-
-    assert result.decision is not None
-    band = result.decision.band
-    assert band is not None
-    assert band.samples.shape[0] == 1
-    expected = hashlib.sha256()
-    expected.update(b"REACTOR_SERVED_POSTERIOR_DETERMINISTIC_BAND_V1")
-    expected.update(result.decision.joint_q.identity_hash.encode("utf-8"))
-    expected.update(f"alpha={float(band.alpha):.12f}".encode("utf-8"))
-    assert band.sample_hash == expected.hexdigest()
-
-
-# --- (b) single divergence point --------------------------------------------
-
-def test_g3_flag_consumed_at_exactly_one_site():
-    tree = ast.parse(open(_BRIDGE_PATH).read())
-    calls = [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "w3_solve_enabled"
-    ]
-    wraps = [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_wrap_engine_with_solve_shim"
-    ]
-    assert len(calls) == 1, f"w3_solve_enabled() must be consumed at EXACTLY one site, found {len(calls)}"
-    assert len(wraps) == 1, f"_wrap_engine_with_solve_shim must be called exactly once, found {len(wraps)}"
-
-
-# --- (c) ON-mode integration ------------------------------------------------
-
-_SOLVER_ORIGIN_REASONS = (
-    "NO_IMPROVING_DISCRETE_PLAN", "NO_EXECUTABLE_MENU_ITEMS", "UNSAFE_PREFIX_DECOMPOSITION",
-    "BUDGET_EXCEEDED", "PHASE1_PRIMARY_LEG",
-)
-
-
-def test_g3_on_mode_shim_runs_and_is_contract_valid():
-    corpus = _corpus()
-    restore = _set_flag(True)
-    try:
-        assert bridge.w3_solve_enabled() is True
-        ran_solver = False
-        for f, p, pl in corpus:
-            result = _drive(f, p, pl)
-            if result.decision is None:
-                continue
-            # every emitted FamilyDecision satisfies the frozen consumer contract (no getattr
-            # default would fire in the facts writer / overlay)
-            validate_family_decision_contract(result.decision)
-            if result.decision.selected is not None:
-                ran_solver = True
-                # projection stamped: selected carries the standalone ΔU value
-                assert result.decision.selected.optimal_delta_u is not None
-            elif result.no_trade_reason and any(k in result.no_trade_reason for k in _SOLVER_ORIGIN_REASONS):
-                ran_solver = True  # a solver-origin no-trade proves the solver selection path ran
-        # the ON branch physically imported + executed the solver
-        assert "src.solve.solver" in sys.modules
-        assert ran_solver, "ON-mode did not exercise the solver selection path"
-    finally:
-        restore()
-
-
-def test_g3_on_mode_selection_diverges_from_off():
-    # The whole point of the seam: ON runs the current-state solver while OFF retains the
-    # legacy empirical-guard selector.  A route becoming honestly executable may make both
-    # paths trade, so divergence is proven by decision authority rather than by requiring
-    # one path to manufacture a no-trade reason.
-    trade = _corpus()[0]
-    restore = _set_flag(None)
-    try:
-        off = _drive(*trade)
-    finally:
-        restore()
-    restore = _set_flag(True)
-    try:
-        on = _drive(*trade)
-    finally:
-        restore()
-    assert off.decision is not None and on.decision is not None
-    assert all(
-        candidate.q_lcb_guard_basis != "CURRENT_POSTERIOR_BAND"
-        for candidate in off.decision.candidate_decisions
-    )
-    assert on.decision.candidate_decisions
-    assert all(
-        candidate.q_lcb_guard_basis == "CURRENT_POSTERIOR_BAND"
-        for candidate in on.decision.candidate_decisions
-    )
-    assert any(k in (on.no_trade_reason or "") for k in _SOLVER_ORIGIN_REASONS) or on.decision.selected is not None
-
-
-def test_g3_on_mode_never_reads_historical_decision_guards(monkeypatch):
-    from src.decision.family_decision_engine import FamilyDecisionEngine
-
-    def _history_read_forbidden(*args, **kwargs):
-        raise AssertionError("W3_CURRENT_STATE_SOLVE_MUST_NOT_READ_HISTORICAL_GUARDS")
-
-    monkeypatch.setattr(
-        FamilyDecisionEngine,
-        "_apply_qlcb_reliability_guard",
-        _history_read_forbidden,
-    )
-    monkeypatch.setattr(
-        FamilyDecisionEngine,
-        "_apply_selection_calibrator_guard",
-        _history_read_forbidden,
-    )
-    restore = _set_flag(True)
-    try:
-        result = _drive(*_corpus()[0])
-    finally:
-        restore()
-
-    assert result.decision is not None
-    validate_family_decision_contract(result.decision)
-
-
-def test_g3_on_mode_fails_closed_without_joint_posterior_samples():
-    family, proofs, payload = _corpus()[0]
-    payload = dict(payload)
-    payload.pop("_edli_spine_served_joint_q_samples_by_condition", None)
-    restore = _set_flag(True)
-    try:
-        result = _drive(family, proofs, payload)
-    finally:
-        restore()
-
-    assert result.decision is None
-    assert result.no_trade_reason == "SPINE_INPUTS_UNAVAILABLE:SERVED_JOINT_SAMPLES_MISSING"
-
-
 def test_global_selected_proof_binds_exact_prepared_posterior_parent():
     _family, proofs, _payload = _corpus()[0]
     proof = replace(proofs[0], posterior_id=None, probability_authority=None)
@@ -11293,9 +10962,7 @@ def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
     payload = _payload_with_joint_samples(proofs, payload, draws=400)
     payload["_edli_spine_posterior_id"] = 42
     payload["_edli_spine_probability_authority"] = "replacement_0_1"
-    restore = _set_flag(False)
-    try:
-        result = bridge.decide_family_via_spine(
+    result = bridge.decide_family_via_spine(
             family=family,
             payload=payload,
             proofs=proofs,
@@ -11313,8 +10980,6 @@ def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
             per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
             extra_exposure_by_bin_id=None,
         )
-    finally:
-        restore()
 
     assert result.global_prepare_reason is None
     prepared = result.global_family
@@ -14332,15 +13997,13 @@ def test_two_prepared_families_choose_one_globally_unique_order():
     )
 
     prepared_by_event = {}
-    restore = _set_flag(False)
-    try:
-        for suffix, family_key in zip(("a", "b"), current_scope.family_keys):
-            scoped_family = replace(
-                family,
-                family_id=family_key,
-                event_id=f"event-{suffix}",
-            )
-            result = bridge.decide_family_via_spine(
+    for suffix, family_key in zip(("a", "b"), current_scope.family_keys):
+        scoped_family = replace(
+            family,
+            family_id=family_key,
+            event_id=f"event-{suffix}",
+        )
+        result = bridge.decide_family_via_spine(
                 family=scoped_family,
                 payload=payload,
                 proofs=proofs,
@@ -14358,10 +14021,8 @@ def test_two_prepared_families_choose_one_globally_unique_order():
                 per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
                 extra_exposure_by_bin_id=None,
             )
-            assert result.global_family is not None
-            prepared_by_event[f"event-{suffix}"] = result.global_family
-    finally:
-        restore()
+        assert result.global_family is not None
+        prepared_by_event[f"event-{suffix}"] = result.global_family
 
     prepared_by_event = global_batch_runtime._bind_selection_holdings(
         prepared_by_event,
@@ -16663,7 +16324,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             median_payoff_usd=Decimal("6"),
             wealth_after_loss_usd=Decimal("96"),
             wealth_after_win_usd=Decimal("106"),
-            expected_value_diagnostic_usd=2.0,
+            expected_value_usd=2.0,
         ),
     )
     wealth_economic_identity = "wealth-economic"
@@ -19589,44 +19250,6 @@ def test_global_selection_schema_reads_are_cached_only_inside_owned_snapshot():
     assert sum(statement == "PRAGMA TABLE_INFO(SAMPLE)" for statement in normalized) == 2
 
 
-# --- (d) OFF-path import-isolation (subprocess) -----------------------------
-
-def test_g3_off_path_does_not_import_src_solve():
-    script = textwrap.dedent(
-        """
-        import sys, datetime
-        from decimal import Decimal
-        from src.config import settings
-        settings["feature_flags"].pop("w3_solve_enabled", None)  # OFF/absent
-        import src.engine.qkernel_spine_bridge as bridge
-        import src.engine.event_reactor_adapter as era
-        from src.strategy import utility_ranker
-        bridge.SPINE_BAND_DRAWS = 400
-        from tests.integration import test_qkernel_spine_routing as R
-        fam, _ = R._three_bin_family()
-        proofs = R._proofs_for(fam, yes_asks=[0.05,0.20,0.20,0.05], no_asks=[0.92,0.75,0.75,0.92],
-                               q_by_bin=[0.05,0.45,0.40,0.10], q_lcb_by_bin=[0.02,0.32,0.28,0.05])
-        payload = R._payload_with_spine_inputs(mu=20.4, sigma=1.2, members=[19.8,20.1,20.5,21.0,20.7])
-        assert bridge.w3_solve_enabled() is False
-        _ = bridge.decide_family_via_spine(  # a full decide with the flag OFF
-            family=fam, payload=payload, proofs=proofs,
-            decision_time=datetime.datetime(2026,6,13,12,0,tzinfo=datetime.timezone.utc),
-            native_side_candidate_from_proof=era._native_side_candidate_from_proof,
-            candidate_bin_id=era._candidate_bin_id,
-            payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
-            exposure_builder=era._robust_marginal_utility_exposure,
-            baseline_usd_provider=lambda: Decimal("1000"),
-            per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs), extra_exposure_by_bin_id=None,
-        )
-        leaked = [m for m in sys.modules if m.startswith('src.solve')]
-        assert not leaked, f'OFF path imported src.solve: {leaked}'
-        print('ISOLATION_OK')
-        """
-    )
-    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, cwd=".")
-    assert "ISOLATION_OK" in proc.stdout, f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}"
-
-
 def _adapter_sell_actuation(
     event,
     *,
@@ -19941,7 +19564,6 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
-        real_order_submit_enabled=True,
         preflight_only=True,
         preflight_receipt=None,
     )
@@ -19955,7 +19577,6 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
-        real_order_submit_enabled=True,
         preflight_only=False,
         preflight_receipt=preflight,
     )
@@ -19991,7 +19612,6 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
-        real_order_submit_enabled=True,
         preflight_only=False,
         preflight_receipt=preflight,
     )
@@ -20023,7 +19643,6 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
-        real_order_submit_enabled=True,
         preflight_only=False,
         preflight_receipt=preflight,
     )
@@ -20058,7 +19677,6 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
-        real_order_submit_enabled=True,
         preflight_only=False,
         preflight_receipt=preflight,
     )
@@ -20074,7 +19692,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
 
     source = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
     assert source.index("if _global_sell_candidate(global_actuation) is not None") < source.index(
-        "if real_order_submit_enabled and not durable_submit_outbox_enabled"
+        "if entry_submit_block_reason is not None"
     )
     assert "executor_submit" not in inspect.getsource(era._submit_current_global_sell)
 
@@ -20337,12 +19955,13 @@ def test_global_sell_fak_reaches_exit_envelope_and_sdk_when_allocator_is_gtc(
 ):
     from tests import test_executor as executor_fixtures
     from src.execution.executor import create_exit_order_intent, execute_exit_order
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     init_schema(conn)
+    init_schema_trade_only(conn)
     old_test_conn = executor_fixtures._TEST_CONN
     executor_fixtures._TEST_CONN = conn
     captured = {}
@@ -20350,9 +19969,13 @@ def test_global_sell_fak_reaches_exit_envelope_and_sdk_when_allocator_is_gtc(
     class DummyClient:
         def __init__(self):
             self.bound_envelope = None
+            self.persist_signed_identity = None
 
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persist):
+            self.persist_signed_identity = persist
 
         def place_limit_order(self, *, token_id, price, size, side, order_type):
             captured.update(
@@ -20363,10 +19986,22 @@ def test_global_sell_fak_reaches_exit_envelope_and_sdk_when_allocator_is_gtc(
                 order_type=order_type,
                 envelope_order_type=self.bound_envelope.order_type,
             )
-            return executor_fixtures._final_submit_result(
+            result = executor_fixtures._final_submit_result(
                 self.bound_envelope,
                 order_id="global-sell-fak-1",
             )
+            from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+            signed_order = b"global-sell-fak-signed-order"
+            self.persist_signed_identity(
+                VenueSubmissionEnvelope.from_dict(
+                    result["_venue_submission_envelope"]
+                ).with_updates(
+                    signed_order=signed_order,
+                    signed_order_hash=hashlib.sha256(signed_order).hexdigest(),
+                )
+            )
+            return result
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
     monkeypatch.setattr(
