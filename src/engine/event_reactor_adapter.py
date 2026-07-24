@@ -13051,7 +13051,8 @@ def _current_global_actuation_prepared_family(
             == "SELL"
         ),
         allow_provisional_day0_replacement=(
-            getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED"
+            str(getattr(candidate, "action", "BUY") or "BUY").upper()
+            == "SELL"
         ),
         entry_authority=(
             str(getattr(candidate, "action", "BUY") or "BUY").upper()

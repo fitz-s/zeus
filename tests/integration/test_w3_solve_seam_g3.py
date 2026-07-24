@@ -2370,10 +2370,10 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
             reason=maturity_reason,
         ),
     )
-    required_conditions: list[str] = []
+    preparation_calls: list[dict[str, object]] = []
 
     def current_family_for_condition(*_args, **kwargs):
-        required_conditions.append(kwargs["required_condition_id"])
+        preparation_calls.append(dict(kwargs))
         return current_family
 
     monkeypatch.setattr(
@@ -2384,10 +2384,12 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
     conn = sqlite3.connect(":memory:")
     actuation = SimpleNamespace(
         probability_witness=selected,
-        decision=SimpleNamespace(candidate=SimpleNamespace(condition_id="c0")),
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(condition_id="c0", action="BUY")
+        ),
     )
     rebound, current_day0_payload = era._current_global_actuation_prepared_family(
-        SimpleNamespace(),
+        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
         global_actuation=actuation,
         forecast_conn=conn,
         topology_conn=conn,
@@ -2405,7 +2407,29 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
         )
     )
     assert current_day0_payload == {}
-    assert required_conditions == ["c0"]
+    assert len(preparation_calls) == 1
+    assert preparation_calls[0]["required_condition_id"] == "c0"
+    assert preparation_calls[0]["allow_unobserved_day0_replacement"] is False
+    assert preparation_calls[0]["allow_provisional_day0_replacement"] is False
+
+    sell_actuation = SimpleNamespace(
+        probability_witness=selected,
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(condition_id="c0", action="SELL")
+        ),
+    )
+    sell_rebound, _sell_payload = era._current_global_actuation_prepared_family(
+        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        global_actuation=sell_actuation,
+        forecast_conn=conn,
+        topology_conn=conn,
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert sell_rebound.probability_witness is selected
+    assert len(preparation_calls) == 2
+    assert preparation_calls[1]["allow_unobserved_day0_replacement"] is True
+    assert preparation_calls[1]["allow_provisional_day0_replacement"] is True
 
     monkeypatch.setattr(
         era,
