@@ -161,3 +161,125 @@ def test_null_valid_until_is_not_a_boundary() -> None:
 def test_unparseable_valid_until_fails_closed() -> None:
     out = _screen(_belief(valid_until="not-a-timestamp"))
     assert out == []
+
+
+# ── DERIVE-ON-CONSTRUCT: valid_until populated from τ_next at belief load ────────────────────────
+# A belief read back from the cache carries a real valid_until derived from its metric-mapped
+# ecmwf_open_data track and its recorded_at (the reactor stamps this with the decision time). None
+# only when the calendar cannot vouch (unknown metric / RECONSTRUCTED-tier source).
+
+
+def _world_with_belief(*, family_id: str, metric: str, recorded_at: str, snapshot_id: str = "snap1"):
+    import sqlite3
+
+    import src.events.continuous_redecision as cr
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    cr.ensure_belief_cache_schema(conn)
+    cr.cache_belief(
+        conn,
+        family_id=family_id,
+        city="NYC",
+        target_date="2026-07-24",
+        snapshot_id=snapshot_id,
+        calibrator_model_hash="identity",
+        bin_labels=["b1"],
+        p_posterior_vec=[0.62],
+        recorded_at=recorded_at,
+        temperature_metric=metric,
+        condition_ids=["0xc1"],
+    )
+    return conn
+
+
+def test_construction_populates_valid_until_when_calendar_answers() -> None:
+    import src.events.continuous_redecision as cr
+
+    world = _world_with_belief(
+        family_id="hyp|live|NYC|2026-07-24|high|d",
+        metric="high",
+        recorded_at="2026-07-24T00:00:00+00:00",
+    )
+    belief = cr.latest_cached_belief(world, family_id="hyp|live|NYC|2026-07-24|high|d")
+    # recorded 00:00 → next ecmwf cycle 06:00 + 285-min short-profile lag = 10:45 UTC.
+    assert belief is not None
+    assert belief.valid_until == "2026-07-24T10:45:00+00:00"
+    assert belief.next_authoritative_issue_at == "2026-07-24T10:45:00+00:00"
+
+
+def test_construction_valid_until_none_for_unknown_metric() -> None:
+    import src.events.continuous_redecision as cr
+
+    world = _world_with_belief(
+        family_id="hyp|live|NYC|2026-07-24|na|d",
+        metric="",
+        recorded_at="2026-07-24T00:00:00+00:00",
+    )
+    belief = cr.latest_cached_belief(world, family_id="hyp|live|NYC|2026-07-24|na|d")
+    # No high/low metric → no calendar track can vouch → never expires by this mechanism.
+    assert belief is not None
+    assert belief.valid_until is None
+    assert belief.next_authoritative_issue_at is None
+
+
+# ── CERT_EXPIRY_PULL: a resting maker order is pulled once its belief certificate expires ─────────
+
+
+def _rest(*, family_id: str, snapshot_id: str = "snap1"):
+    import src.events.continuous_redecision as cr
+
+    return cr.OpenRest(
+        command_id="cmd1",
+        venue_order_id="vo1",
+        family_id=family_id,
+        bin_label="b1",
+        side="buy_yes",
+        condition_id="0xc1",
+        resting_posterior=0.62,
+        resting_snapshot_id=snapshot_id,
+        limit_price=0.30,
+        quote_age_ms=0.0,
+    )
+
+
+def test_cert_expiry_pull_fires_on_expired_rest() -> None:
+    import sqlite3
+
+    import src.events.continuous_redecision as cr
+
+    family_id = "hyp|live|NYC|2026-07-24|high|d"
+    world = _world_with_belief(
+        family_id=family_id, metric="high", recorded_at="2026-07-24T00:00:00+00:00"
+    )
+    trade = sqlite3.connect(":memory:")  # no book rows needed; cert pull fires before any quote read
+    # valid_until = 10:45; screen at 11:00 → past the certificate boundary → CERT_EXPIRY_PULL.
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[_rest(family_id=family_id)],
+        decision_time="2026-07-24T11:00:00+00:00",
+    )
+    assert len(pulls) == 1
+    _rest_out, decision = pulls[0]
+    assert decision.reason == "CERT_EXPIRY_PULL"
+    assert decision.action == "CANCEL_REPLACE"
+
+
+def test_no_cert_expiry_pull_when_valid_until_none() -> None:
+    import sqlite3
+
+    import src.events.continuous_redecision as cr
+
+    family_id = "hyp|live|NYC|2026-07-24|na|d"
+    world = _world_with_belief(
+        family_id=family_id, metric="", recorded_at="2026-07-24T00:00:00+00:00"
+    )
+    trade = sqlite3.connect(":memory:")
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[_rest(family_id=family_id)],
+        decision_time="2026-07-24T11:00:00+00:00",
+    )
+    assert pulls == []

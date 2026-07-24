@@ -34,6 +34,7 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
 from src.contracts.probability_arithmetic import one_minus
 from src.data.replacement_forecast_readiness import (
@@ -582,6 +583,59 @@ def _has_temperature_metric_column(conn: sqlite3.Connection) -> bool:
     return "temperature_metric" in cols
 
 
+# Certificate validity (ultimate_alpha group D). ``ecmwf_open_data`` is the live authoritative
+# forecast source (forecast_live_daemon FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS); its release-calendar
+# cycle schedule bounds a belief's validity (τ_next). Its two ingest tracks map 1:1 to the
+# temperature metric. Kept as the calendar's own key strings (release_calendar is the authority and
+# treats these opaquely; src/data/ecmwf_open_data.py::TRACKS is the canonical definition).
+_CERT_FORECAST_SOURCE_ID: str = "ecmwf_open_data"
+_CERT_TRACK_BY_METRIC: dict[str, str] = {"high": "mx2t6_high", "low": "mn2t6_low"}
+
+
+@lru_cache(maxsize=1)
+def _cert_calendar_entries():
+    """Process-lifetime cache of the release-calendar registry (deployed machine law, static per
+    process). Loaded once so deriving valid_until per belief row never re-parses the YAML — a belief
+    scan constructs up to ZEUS_REDECISION_BELIEF_SCAN_LIMIT rows per tick. None on load failure →
+    valid_until fails closed to None (never blocks belief construction)."""
+    try:
+        from src.data.release_calendar import load_calendar_config
+
+        return load_calendar_config()
+    except Exception:
+        return None
+
+
+def _derive_valid_until(metric: str, recorded_at: str) -> str | None:
+    """τ_next-derived certificate validity for a belief (ultimate_alpha group D).
+
+    ``valid_until`` = the next authoritative ``ecmwf_open_data`` forecast issue strictly after the
+    belief's own issue instant (its ``recorded_at`` — the reactor stamps this with the decision
+    time). Once that instant passes a newer authoritative issue SHOULD exist, so the belief is no
+    longer a valid decision basis (enqueue/screen treat it as CERT_EXPIRED; a resting order is pulled
+    CERT_EXPIRY_PULL). Returns None — the belief never expires by THIS mechanism, ordinary freshness
+    gates alone govern — when the calendar cannot vouch: unknown metric, a RECONSTRUCTED-tier source
+    (next_authoritative_issue_at fails closed), or an unparseable recorded_at."""
+    track = _CERT_TRACK_BY_METRIC.get(str(metric or "").strip())
+    if track is None:
+        return None
+    entries = _cert_calendar_entries()
+    if entries is None:
+        return None
+    issue_ts = _decision_time_utc(recorded_at)
+    if issue_ts is None:
+        return None
+    try:
+        from src.data.release_calendar import next_authoritative_issue_at
+
+        tau_next = next_authoritative_issue_at(
+            _CERT_FORECAST_SOURCE_ID, track, issue_ts, entries=entries
+        )
+    except Exception:
+        return None
+    return tau_next.isoformat() if tau_next is not None else None
+
+
 def _row_to_belief(row: sqlite3.Row) -> CachedBelief | None:
     parsed = _parse_belief_decision_id(row["decision_id"])
     if parsed is None or not row["p_posterior_json"] or not row["bin_labels_json"]:
@@ -608,6 +662,10 @@ def _row_to_belief(row: sqlite3.Row) -> CachedBelief | None:
     q_lcb_yes_vec = json.loads(q_lcb_yes_raw) if q_lcb_yes_raw else None
     q_lcb_no_vec = json.loads(q_lcb_no_raw) if q_lcb_no_raw else None
     metric = row_metric or _metric_from_family_id(family_id) or _metric_from_bin_labels(bin_labels)
+    # DERIVE-ON-CONSTRUCT: valid_until is a pure function of (metric-derived source track, issue
+    # instant), not a persisted column. next_authoritative_issue_at == valid_until here (τ_next with
+    # no Δ_cancel buffer); the field stays the raw τ_next so a future min-formula can diverge.
+    valid_until = _derive_valid_until(metric, str(row["recorded_at"] or ""))
     return CachedBelief(
         family_id=family_id,
         city=row["city"] or "",
@@ -621,6 +679,8 @@ def _row_to_belief(row: sqlite3.Row) -> CachedBelief | None:
         q_lcb_yes_vec=list(q_lcb_yes_vec) if q_lcb_yes_vec is not None else None,
         q_lcb_no_vec=list(q_lcb_no_vec) if q_lcb_no_vec is not None else None,
         metric=metric,
+        valid_until=valid_until,
+        next_authoritative_issue_at=valid_until,
     )
 
 
@@ -2595,6 +2655,22 @@ def screen_resting_orders(
             # the remaining held shares are below the venue min_order_size.
             continue
         belief = beliefs_by_family.get(str(rest.family_id or ""))
+        # 0) Certificate-expiry pull. The belief backing this rest is past its validity boundary
+        # (a newer authoritative forecast issue SHOULD now exist), so its priced favorable quote is
+        # no longer a valid basis — PULL and re-decide through the same cancel/cert path. No age
+        # floor: τ_next is a forecast-issue boundary crossed exactly once, not microstructure noise,
+        # so there is no thrash to damp. Fail-safe, not cancel-forever: the entry screen's
+        # CERT_EXPIRED gate then withholds re-entry until a fresh forecast issue lands a new belief,
+        # so this cannot loop. valid_until=None (calendar cannot vouch) never pulls.
+        if belief is not None and _belief_certificate_expired(belief, screen_time):
+            out.append((
+                rest,
+                RepriceDecision(
+                    family_id=rest.family_id, bin_label=rest.bin_label, side=rest.side,
+                    action="CANCEL_REPLACE", reason="CERT_EXPIRY_PULL",
+                ),
+            ))
+            continue
         # 1) Belief-decay pull (evidence-gated, anti-twitch by snapshot identity).
         decision = screen_reprice(
             world_conn,

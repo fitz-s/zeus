@@ -619,7 +619,11 @@ def test_rest_pull_does_not_cancel_by_order_age_alone():
         limit_price=0.70, quote_age_ms=120_000.0,
     )
 
-    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+    # Pin the screen clock to the belief's own cycle so the certificate is still valid — this test
+    # isolates a non-cert pull trigger, not certificate expiry (belief recorded 2026-06-12).
+    pulls = cr.screen_resting_orders(
+        world, trade, open_rests=[rest], decision_time="2026-06-12T00:05:00+00:00"
+    )
 
     assert pulls == [], "resting order age alone is not confirmed trading value or cancel evidence"
 
@@ -1180,7 +1184,11 @@ def test_rest_pull_does_not_treat_normal_spread_as_book_moved():
         limit_price=0.70, quote_age_ms=0.0,
     )
 
-    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+    # Pin the screen clock to the belief's own cycle so the certificate is still valid — this test
+    # isolates a non-cert pull trigger, not certificate expiry (belief recorded 2026-06-12).
+    pulls = cr.screen_resting_orders(
+        world, trade, open_rests=[rest], decision_time="2026-06-12T00:05:00+00:00"
+    )
 
     assert pulls == []
 
