@@ -6059,6 +6059,9 @@ def check_pending_exits(
                     stats["retried"] += 1
                     stats["released_no_order"] = stats.get("released_no_order", 0) + 1
                     continue
+                if _pending_exit_no_order_waits_for_liquidity(pos, conn=conn):
+                    stats["unchanged"] += 1
+                    continue
                 if not _last_exit_order_id(pos, conn=conn):
                     pos.exit_state = ""
                     if str(getattr(pos, "order_status", "") or "") == "exit_intent":
@@ -6085,6 +6088,9 @@ def check_pending_exits(
             if release_pending_exit_without_order_if_retryable(pos, conn=conn):
                 stats["retried"] += 1
                 stats["released_no_order"] = stats.get("released_no_order", 0) + 1
+                continue
+            if _pending_exit_no_order_waits_for_liquidity(pos, conn=conn):
+                stats["unchanged"] += 1
                 continue
             _mark_exit_retry(pos, reason="SELL_NO_ORDER_ID", error="no_order_id", conn=conn)
             if conn is not None:
@@ -6595,6 +6601,8 @@ def release_pending_exit_without_order_if_retryable(
         return False
     if _last_exit_order_id(position, conn=conn):
         return False
+    if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
+        return False
     if exit_state in _EXIT_LIFECYCLE_IN_FLIGHT_STATES and conn is None:
         return False
     previous_next_retry_at = str(getattr(position, "next_exit_retry_at", "") or "")
@@ -6618,6 +6626,27 @@ def release_pending_exit_without_order_if_retryable(
             caused_by="pending_exit_no_order_released",
         )
     return True
+
+
+def _pending_exit_no_order_waits_for_liquidity(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+) -> bool:
+    """Keep a rejected no-order exit pending until fresh in-band liquidity returns."""
+
+    previous_error = _latest_exit_reject_error(conn, position)
+    if not _is_exit_liquidity_wait_error(previous_error):
+        return False
+    snapshot = _latest_exit_snapshot_context(
+        conn,
+        _asset_id_for_position(position),
+        require_sell_bid=False,
+    )
+    snapshot_bid = _positive_decimal(
+        snapshot.get("executable_snapshot_orderbook_top_bid")
+    )
+    return snapshot_bid is None or snapshot_bid < LIVE_ORDER_MIN_UNIT_PRICE
 
 
 def _check_order_fill(clob, order_id: str) -> tuple[str, object]:

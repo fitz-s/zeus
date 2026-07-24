@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-19; last_reused=2026-07-20
+# Lifecycle: created=2026-04-28; last_reviewed=2026-07-24; last_reused=2026-07-24
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-20
+# Last reused/audited: 2026-07-24
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -14561,6 +14561,87 @@ def test_check_pending_exits_releases_loaded_pre_exit_state_bare_exit_intent_wit
         "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND intent_kind = 'EXIT'",
         (pos.trade_id,),
     ).fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "error",
+    ["exit_no_executable_bid", "exit_no_in_band_bid"],
+)
+def test_check_pending_exits_keeps_no_order_liquidity_rejection_pending_until_fresh_in_band_bid(
+    tmp_path,
+    error,
+):
+    conn = get_connection(tmp_path / f"pending-exit-liquidity-wait-{error}.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    now = datetime.now(timezone.utc)
+    pos = _position(
+        trade_id=f"pending-exit-liquidity-wait-{error}",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id=f"snapshot-low-bid-{error}",
+        selected_outcome_token_id=pos.token_id,
+        yes_token_id=pos.token_id,
+        no_token_id=pos.no_token_id,
+        top_bid="0.049",
+        top_ask="0.051",
+        captured_at=now,
+    )
+    assert exit_lifecycle_module._dual_write_canonical_pending_exit_if_available(
+        conn,
+        pos,
+        reason="DAY0_HARD_FACT_BIN_DEAD",
+        error=error,
+        extra_payload={"status": "liquidity_wait"},
+    )
+
+    stats = exit_lifecycle_module.check_pending_exits(
+        PortfolioState(positions=[pos]),
+        clob=None,
+        conn=conn,
+    )
+
+    assert stats["unchanged"] == 1
+    assert stats.get("released_no_order", 0) == 0
+    assert pos.state == "pending_exit"
+    assert pos.exit_state == "exit_intent"
+    assert pos.order_status == "exit_intent"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND intent_kind = 'EXIT'",
+        (pos.trade_id,),
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT event_type FROM position_events WHERE position_id = ? ORDER BY sequence_no DESC LIMIT 1",
+        (pos.trade_id,),
+    ).fetchone()[0] == "EXIT_ORDER_REJECTED"
+
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id=f"snapshot-in-band-bid-{error}",
+        selected_outcome_token_id=pos.token_id,
+        yes_token_id=pos.token_id,
+        no_token_id=pos.no_token_id,
+        top_bid="0.05",
+        top_ask="0.051",
+        captured_at=now + timedelta(seconds=1),
+    )
+
+    stats = exit_lifecycle_module.check_pending_exits(
+        PortfolioState(positions=[pos]),
+        clob=None,
+        conn=conn,
+    )
+
+    assert stats["released_no_order"] == 1
+    assert pos.state == "day0_window"
+    assert pos.exit_state == ""
+    assert pos.order_status == "filled"
     conn.close()
 
 
