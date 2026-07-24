@@ -975,6 +975,40 @@ def test_retired_truth_epoch_table_is_deleted(tmp_path: Path) -> None:
     finally:
         conn.close()
 
+
+def test_mutation_integrity_check_is_limited_to_changed_tables(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE risk_state "
+            "(id INTEGER PRIMARY KEY, force_exit_review INTEGER NOT NULL)"
+        )
+        conn.execute("INSERT INTO risk_state VALUES (1, 0)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    traced: list[str] = []
+    real_connect = sqlite3.connect
+
+    def traced_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        traced_conn = real_connect(*args, **kwargs)
+        traced_conn.set_trace_callback(traced.append)
+        return traced_conn
+
+    monkeypatch.setattr(migration.sqlite3, "connect", traced_connect)
+    assert migration.mutate_db(path) == ["dropped risk_state.force_exit_review"]
+
+    normalized = [" ".join(statement.upper().split()) for statement in traced]
+    assert 'PRAGMA MAIN.INTEGRITY_CHECK("RISK_STATE")' in normalized
+    assert "PRAGMA QUICK_CHECK" not in normalized
+    assert "PRAGMA INTEGRITY_CHECK" not in normalized
+
+
 def test_retired_attribution_hash_matching_is_case_insensitive(tmp_path: Path) -> None:
     world, trades, wconn, tconn = _fixture(tmp_path)
     try:

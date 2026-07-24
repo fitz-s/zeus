@@ -2377,6 +2377,7 @@ def mutate_db(
 ) -> list[str]:
     conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True, timeout=0.0, isolation_level=None)
     changed: list[str] = []
+    check_tables: set[str] = set()
     try:
         conn.execute("PRAGMA busy_timeout=0")
         conn.execute("PRAGMA foreign_keys=ON")
@@ -2386,6 +2387,7 @@ def mutate_db(
         try:
             if migrate_command_attribution_schema(conn):
                 changed.append("migrated command-exact decision attribution schema")
+                check_tables.add("position_decision_attribution")
             if table_exists(conn, RETIRED_TRANSFER_TABLE):
                 count = int(
                     conn.execute(
@@ -2420,6 +2422,7 @@ def mutate_db(
                 if table_exists(conn, table) and RETIRED_AUTHORITY_COLUMN in columns(conn, table):
                     conn.execute(f"ALTER TABLE {table} DROP COLUMN {RETIRED_AUTHORITY_COLUMN}")
                     changed.append(f"dropped {table} retired authority column")
+                    check_tables.add(table)
 
             table = "forecast_posteriors"
             if table_exists(conn, table):
@@ -2453,11 +2456,13 @@ def mutate_db(
                 if has_old_authority:
                     conn.execute(f"ALTER TABLE forecast_posteriors DROP COLUMN {RETIRED_AUTHORITY_COLUMN}")
                     changed.append("migrated forecast_posteriors to the live runtime layer")
+                    check_tables.add(table)
 
             table = "settlement_capture_verifications"
             if table_exists(conn, table) and "evidence_tier" in columns(conn, table):
                 conn.execute(f"ALTER TABLE {table} DROP COLUMN evidence_tier")
                 changed.append(f"dropped {table}.evidence_tier")
+                check_tables.add(table)
 
             table = "edli_no_submit_receipts"
             if table_exists(conn, table):
@@ -2465,6 +2470,7 @@ def mutate_db(
                     if column in columns(conn, table):
                         conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
                         changed.append(f"dropped {table}.{column}")
+                        check_tables.add(table)
 
             table = "edli_live_profit_audit"
             if table_exists(conn, table):
@@ -2489,14 +2495,24 @@ def mutate_db(
                         "CREATE INDEX IF NOT EXISTS idx_edli_live_profit_audit_learning "
                         "ON edli_live_profit_audit(learning_eligible, order_lifecycle_state, created_at)"
                     )
+                    check_tables.add(table)
 
             table = "risk_state"
             if table_exists(conn, table) and RETIRED_FORCE_EXIT_COLUMN in columns(conn, table):
                 conn.execute(f"ALTER TABLE {table} DROP COLUMN {RETIRED_FORCE_EXIT_COLUMN}")
                 changed.append(f"dropped {table}.{RETIRED_FORCE_EXIT_COLUMN}")
+                check_tables.add(table)
 
-            if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-                raise RuntimeError(f"quick_check failed for {path}")
+            for table in sorted(check_tables):
+                result = str(
+                    conn.execute(
+                        f"PRAGMA main.integrity_check({quote_identifier(table)})"
+                    ).fetchone()[0]
+                )
+                if result != "ok":
+                    raise RuntimeError(
+                        f"integrity_check failed for {path}:{table}: {result}"
+                    )
             if generation is not None and stage is not None:
                 mark_cutover_generation(conn, generation=generation, stage=stage)
             conn.execute("COMMIT")
