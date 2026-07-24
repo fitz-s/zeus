@@ -74,6 +74,32 @@ def test_edli_recovery_refs_prefer_world_authority_over_trade_ghosts():
         conn.close()
 
 
+def test_mixed_token_entry_rows_excludes_same_token_refills(monkeypatch):
+    """B71: ordinary same-token refills never enter certificate reconstruction."""
+    from src.execution import command_recovery as recovery
+
+    rows = [
+        {"position_id": "same", "command_id": "same-1", "token_id": "token-a"},
+        {"position_id": "same", "command_id": "same-2", "token_id": "token-a"},
+        {"position_id": "mixed", "command_id": "mixed-1", "token_id": "token-a"},
+        {"position_id": "mixed", "command_id": "mixed-2", "token_id": "token-b"},
+    ]
+
+    class Result:
+        def fetchall(self):
+            return rows
+
+    class Connection:
+        def execute(self, _sql):
+            return Result()
+
+    monkeypatch.setattr(recovery, "_table_exists", lambda *_args: True)
+
+    assert recovery._mixed_token_entry_rows(Connection()) == {
+        "mixed": rows[2:]
+    }
+
+
 def test_mixed_token_entry_repair_splits_authenticated_groups_idempotently_and_rolls_back(monkeypatch):
     """B71 / INV-03 / INV-08: token partition is atomic and replayable."""
     from src.execution import command_recovery as recovery

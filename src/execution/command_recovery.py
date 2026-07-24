@@ -5569,7 +5569,11 @@ def _mixed_token_entry_rows(conn: sqlite3.Connection) -> dict[str, list[dict]]:
     for row in conn.execute(sql).fetchall():
         item = _dict_row(row)
         roots.setdefault(str(item["position_id"]), []).append(item)
-    return {root: rows for root, rows in roots.items() if len(rows) > 1}
+    return {
+        root: rows
+        for root, rows in roots.items()
+        if len({str(row.get("token_id") or "") for row in rows}) > 1
+    }
 
 
 def _split_repair_review(conn: sqlite3.Connection, root: str, rows: list[dict], detail: str) -> None:
