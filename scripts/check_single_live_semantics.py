@@ -406,6 +406,30 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                         "retired deletion constant flows into mapping key "
                         f"{control!r}"
                     )
+        condition: ast.AST | None = None
+        branches: list[ast.AST] = []
+        if isinstance(node, (ast.If, ast.While)):
+            condition = node.test
+            branches = [*node.body, *node.orelse]
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            condition = node.iter
+            branches = [*node.body, *node.orelse]
+        elif isinstance(node, ast.Match):
+            condition = node.subject
+            branches = [item for case in node.cases for item in case.body]
+        if condition is not None and _expr_uses_names(condition, tainted):
+            controls = sorted(
+                {
+                    control
+                    for branch in branches
+                    for control in _mutated_controls(branch, literal_bindings)
+                }
+            )
+            for control in controls:
+                out.append(
+                    "retired deletion constant controls mutation of "
+                    f"{control!r}"
+                )
     return sorted(set(out))
 
 
@@ -438,6 +462,37 @@ def _control_target(node: ast.AST, bindings: dict[str, str]) -> str | None:
     ):
         return (_literal_string(node.slice, bindings) or "").lower()
     return None
+
+
+def _mutated_controls(node: ast.AST, bindings: dict[str, str]) -> set[str]:
+    controls: set[str] = set()
+    for child in ast.walk(node):
+        targets: list[ast.AST] = []
+        if isinstance(child, ast.Assign):
+            targets = list(child.targets)
+        elif isinstance(child, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            targets = [child.target]
+        for target in targets:
+            control = _control_target(target, bindings)
+            if control is not None:
+                controls.add(control)
+        if (
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Name)
+            and child.func.id == "setattr"
+            and len(child.args) >= 2
+        ):
+            control = (_literal_string(child.args[1], bindings) or "").lower()
+            if control in _LIVE_CONTROL_TARGETS:
+                controls.add(control)
+        elif isinstance(child, ast.Dict):
+            for key in child.keys:
+                if key is None:
+                    continue
+                control = (_literal_string(key, bindings) or "").lower()
+                if control in _LIVE_CONTROL_TARGETS:
+                    controls.add(control)
+    return controls
 
 
 def _literal_string(node: ast.AST, bindings: dict[str, str] | None = None) -> str | None:

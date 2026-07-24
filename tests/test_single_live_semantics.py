@@ -215,6 +215,18 @@ def test_cutover_bound_setattr_key_cannot_receive_deletion_constant(
     assert any("setattr control 'mode'" in item for item in violations(tmp_path))
 
 
+def test_cutover_deletion_constant_cannot_control_live_mutation(tmp_path: Path) -> None:
+    script = tmp_path / "scripts" / "migrations" / "202607_single_live_semantics_cutover.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "RETIRED_CONFIG_KEYS = ('entry_' + 'forecast_rollout',)\n"
+        "if RETIRED_CONFIG_KEYS:\n"
+        "    mode = 'live'\n",
+        encoding="utf-8",
+    )
+    assert any("controls mutation of 'mode'" in item for item in violations(tmp_path))
+
+
 def test_cutover_deletion_constant_is_allowed_only_as_cleanup_target(tmp_path: Path) -> None:
     script = tmp_path / "scripts" / "migrations" / "202607_single_live_semantics_cutover.py"
     script.parent.mkdir(parents=True)
