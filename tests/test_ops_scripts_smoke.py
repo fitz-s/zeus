@@ -2925,6 +2925,64 @@ def test_deploy_live_post_start_monitor_wait_is_per_position(
     assert "pos-2" in detail
 
 
+def test_deploy_live_post_start_monitor_wait_accepts_one_coverage_tranche(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_monitor_cadence_wait_tranche", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT
+        )
+        """
+    )
+    for index in range(6):
+        conn.execute(
+            "INSERT INTO position_current VALUES (?, 'active', 1.0, 1.0)",
+            (f"pos-{index}",),
+        )
+    for sequence_no, position_id in enumerate(("pos-0", "pos-1"), start=1):
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                sequence_no, position_id, event_type, occurred_at
+            ) VALUES (?, ?, 'MONITOR_REFRESHED', ?)
+            """,
+            (sequence_no, position_id, datetime.now(timezone.utc).isoformat()),
+        )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "progress_positions=2" in detail
+    assert "required_progress=2" in detail
+    assert "remaining_for_continuous_coverage=4" in detail
+
+
 def test_deploy_live_post_start_monitor_wait_rejects_future_monitor_event(
     monkeypatch, tmp_path
 ):
@@ -3006,6 +3064,7 @@ def test_deploy_live_monitor_wait_budget_covers_runtime_coverage_contract(
     )
     dl = _load("deploy_live_monitor_wait_budget", "deploy_live.py")
 
+    assert dl.LIVE_MONITOR_FULL_COVERAGE_CYCLES == 3
     assert dl.LIVE_MONITOR_CADENCE_CONTRACT_SECONDS == 3 * 2 * 60
     assert (
         dl.LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS
