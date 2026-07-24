@@ -124,6 +124,22 @@ def _winning_position(trade_id="cca68b44", city="Shanghai", target_date="2026-05
     return portfolio, pos
 
 
+def test_missing_optional_named_column_does_not_fall_through_to_position():
+    """Legacy SQLite rows must default fields added only to Gamma dict rows."""
+    from src.execution.harvester_pnl_resolver import _row_value
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    row = db.execute(
+        "SELECT 'city' AS city, 'date' AS target_date, 'slug' AS market_slug, "
+        "'bin' AS winning_bin, 'high' AS temperature_metric, "
+        "'VERIFIED' AS authority, 'wu' AS settlement_source, 27.0 AS settlement_value"
+    ).fetchone()
+    db.close()
+
+    assert _row_value(row, "settlement_scope", 8, "family") == "family"
+
+
 def test_resolver_settles_position_and_enqueues_redeem_intent(
     trade_conn, forecasts_conn_with_verified_settlement, monkeypatch
 ):

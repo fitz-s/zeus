@@ -28,11 +28,11 @@ logger = logging.getLogger(__name__)
 
 
 def _row_value(row, key: str, index: int, default=None):
-    if hasattr(row, "keys") and key in row.keys():
-        return row[key]
+    if hasattr(row, "keys"):
+        return row[key] if key in row.keys() else default
     try:
         return row[index]
-    except (IndexError, TypeError):
+    except (IndexError, KeyError, TypeError):
         return default
 
 
