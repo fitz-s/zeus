@@ -2150,6 +2150,48 @@ def test_global_current_entry_feasibility_enforces_owner_strategy_floor(side):
     ) is None
 
 
+def test_global_current_entry_feasibility_rechecks_mutable_strategy_policy(
+    monkeypatch,
+):
+    candidate = SimpleNamespace(
+        action="BUY",
+        side="NO",
+        executable_cost_curve=SimpleNamespace(
+            levels=(SimpleNamespace(price=Decimal("0.30")),)
+        ),
+        native_bid_levels=(SimpleNamespace(price=Decimal("0.29")),),
+    )
+    calls = []
+
+    def current_policy_block(conn, strategy_key):
+        calls.append((conn, strategy_key))
+        return (
+            "STRATEGY_POLICY_GATED:"
+            f"{strategy_key}:sources=risk_action:gate"
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_entry_strategy_policy_blocks_live_submit",
+        current_policy_block,
+    )
+    conn = object()
+    cache = {}
+
+    for _ in range(2):
+        assert era._global_current_entry_feasibility_rejection_reason(
+            candidate,
+            strategy_key="settlement_capture",
+            strategy_policy_conn=conn,
+            strategy_policy_cache=cache,
+        ) == (
+            "STRATEGY_POLICY_GATED:"
+            "settlement_capture:sources=risk_action:gate"
+        )
+
+    assert calls == [(conn, "settlement_capture")]
+
+
 @pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_taker_candidate_requires_measurable_tight_spread(side):
     def candidate(bids):

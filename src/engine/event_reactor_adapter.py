@@ -5075,6 +5075,8 @@ def _global_current_entry_feasibility_rejection_reason(
     candidate: object,
     *,
     strategy_key: str | None = None,
+    strategy_policy_conn: sqlite3.Connection | None = None,
+    strategy_policy_cache: dict[str, str | None] | None = None,
 ) -> str | None:
     """Reject BUY actions the global taker-limit solver cannot execute.
 
@@ -5129,6 +5131,23 @@ def _global_current_entry_feasibility_rejection_reason(
         return f"GLOBAL_ENTRY_TAKER_INADMISSIBLE:{taker_rejection}"
     normalized_strategy = str(strategy_key or "").strip()
     if normalized_strategy:
+        if strategy_policy_conn is not None:
+            if strategy_policy_cache is None:
+                strategy_block = _entry_strategy_policy_blocks_live_submit(
+                    strategy_policy_conn,
+                    normalized_strategy,
+                )
+            else:
+                if normalized_strategy not in strategy_policy_cache:
+                    strategy_policy_cache[normalized_strategy] = (
+                        _entry_strategy_policy_blocks_live_submit(
+                            strategy_policy_conn,
+                            normalized_strategy,
+                        )
+                    )
+                strategy_block = strategy_policy_cache[normalized_strategy]
+            if strategy_block is not None:
+                return strategy_block
         floors = _event_bound_strategy_live_quality_floors(normalized_strategy)
         floor = Decimal(str(floors["min_entry_price"]))
         if best_ask + Decimal("1e-12") < floor:
@@ -8601,6 +8620,8 @@ def event_bound_live_adapter_from_trade_conn(
                 correlation_key=_global_candidate_correlation_key(candidate),
             )
 
+        strategy_policy_cache: dict[str, str | None] = {}
+
         def _current_entry_candidate_policy(candidate):
             action = str(
                 getattr(candidate, "action", "BUY") or "BUY"
@@ -8629,6 +8650,8 @@ def event_bound_live_adapter_from_trade_conn(
             return _global_current_entry_feasibility_rejection_reason(
                 candidate,
                 strategy_key=strategy_key,
+                strategy_policy_conn=trade_conn,
+                strategy_policy_cache=strategy_policy_cache,
             )
 
         try:
