@@ -7,7 +7,7 @@
 # Reuse: Referenced by regression suite; last touched 2026-05-08 for Wave28
 #        (HIGH→v2 route). Apply v2 schema in test fixtures when asserting
 #        post-harvest pair rows.
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-24
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 """Tests for exit triggers and harvester."""
 
@@ -1369,6 +1369,208 @@ def test_chain_reconciliation_restores_terminal_no_fill_void_when_chain_holds_to
     assert row["exit_reason"] is None
     assert [event["event_type"] for event in events] == ["REVIEW_REQUIRED"]
     assert events[0]["details"]["reason"] == "chain_held_after_terminal_projection"
+
+
+def test_chain_reconciliation_restores_unique_net_fill_owner_not_newer_zero_fill_row(
+    tmp_path,
+):
+    """Same-token recovery follows exactly-once net fills, never row recency."""
+
+    import hashlib
+
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.fill_dedup import economic_trade_facts_for_command
+    from src.state.venue_command_repo import append_trade_fact
+
+    conn = get_connection(tmp_path / "terminal_chain_owner_net_fills.db")
+    init_schema(conn)
+    token_id = "tok-terminal-owner-no"
+    condition_id = "cond-terminal-owner"
+    common = {
+        "direction": "buy_no",
+        "token_id": "tok-terminal-owner-yes",
+        "no_token_id": token_id,
+        "condition_id": condition_id,
+        "strategy_key": "center_buy",
+        "strategy": "center_buy",
+        "env": "live",
+        "unit": "C",
+    }
+    true_owner = _make_position(
+        **common,
+        trade_id="true-owner",
+        state="economically_closed",
+        chain_state="synced",
+        shares=25.48,
+        chain_shares=0.0,
+        cost_basis_usd=48.93,
+        size_usd=48.93,
+        entry_price=0.70,
+        entered_at="2026-07-23T20:34:49+00:00",
+        order_id="ord-partial-exit",
+        order_status="filled",
+        exit_price=0.75,
+        pnl=-29.82,
+        exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+    )
+    zero_fill_newer = _make_position(
+        **common,
+        trade_id="zero-fill-newer",
+        state="voided",
+        chain_state="local_only",
+        shares=66.3,
+        chain_shares=0.0,
+        cost_basis_usd=45.75,
+        size_usd=45.75,
+        entry_price=0.69,
+        entered_at="2026-07-23T20:35:00+00:00",
+        order_id="ord-zero-fill",
+        order_status="expired",
+        exit_reason="venue_terminal_no_fill",
+    )
+
+    for position in (true_owner, zero_fill_newer):
+        projection = build_position_current_projection(position)
+        columns = tuple(projection)
+        conn.execute(
+            f"""
+            INSERT INTO position_current ({", ".join(columns)})
+            VALUES ({", ".join("?" for _ in columns)})
+            """,
+            tuple(projection[column] for column in columns),
+        )
+
+    commands = (
+        ("cmd-entry-owner", true_owner.trade_id, "ENTRY", "BUY", 69.9, 0.70, "ord-entry-owner", "FILLED"),
+        ("cmd-partial-exit-owner", true_owner.trade_id, "EXIT", "SELL", 44.42, 0.75, "ord-partial-exit", "FILLED"),
+        ("cmd-zero-fill-newer", zero_fill_newer.trade_id, "ENTRY", "BUY", 66.3, 0.69, "ord-zero-fill", "EXPIRED"),
+    )
+    for command_id, position_id, intent, side, size, price, order_id, state in commands:
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, created_at, updated_at
+            ) VALUES (?, 'snap-owner', 'env-owner', ?, 'decision-owner', ?,
+                      ?, 'market-owner', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                command_id,
+                position_id,
+                f"idem-{command_id}",
+                intent,
+                token_id,
+                side,
+                size,
+                price,
+                order_id,
+                state,
+                "2026-07-23T20:00:00+00:00",
+                "2026-07-25T01:01:03+00:00",
+            ),
+        )
+
+    fills = (
+        # Entry aggregate + child are one 69.9-share economic fill.
+        (
+            "cmd-entry-owner",
+            "ord-entry-owner",
+            "0xentry-owner",
+            "MATCHED",
+            "69.9",
+            "0.70",
+            "0xentry-owner",
+            "2026-07-23T20:34:49+00:00",
+        ),
+        (
+            "cmd-entry-owner",
+            "ord-entry-owner",
+            "entry-owner-child",
+            "CONFIRMED",
+            "69.9",
+            "0.70",
+            "0xentry-owner",
+            "2026-07-23T20:34:58+00:00",
+        ),
+        # MATCHED -> CONFIRMED revisions of one partial exit also count once.
+        (
+            "cmd-partial-exit-owner",
+            "ord-partial-exit",
+            "partial-exit-child",
+            "MATCHED",
+            "44.42",
+            "0.75",
+            "0xpartial-exit-owner",
+            "2026-07-25T01:00:25+00:00",
+        ),
+        (
+            "cmd-partial-exit-owner",
+            "ord-partial-exit",
+            "partial-exit-child",
+            "CONFIRMED",
+            "44.42",
+            "0.75",
+            "0xpartial-exit-owner",
+            "2026-07-25T01:01:03+00:00",
+        ),
+    )
+    for command_id, order_id, trade_id, state, size, price, tx_hash, observed_at in fills:
+        append_trade_fact(
+            conn,
+            trade_id=trade_id,
+            venue_order_id=order_id,
+            command_id=command_id,
+            state=state,
+            filled_size=size,
+            fill_price=price,
+            source="REST",
+            observed_at=observed_at,
+            tx_hash=tx_hash,
+            raw_payload_hash=hashlib.sha256(
+                f"{command_id}:{trade_id}:{state}:{observed_at}".encode()
+            ).hexdigest(),
+        )
+    conn.commit()
+
+    assert len(economic_trade_facts_for_command(conn, "cmd-entry-owner")) == 1
+    assert len(economic_trade_facts_for_command(conn, "cmd-partial-exit-owner")) == 1
+    stats = reconcile(
+        PortfolioState(positions=[zero_fill_newer, true_owner]),
+        [
+            ChainPosition(
+                token_id=token_id,
+                size=25.48,
+                avg_price=0.70,
+                cost=17.836,
+                condition_id=condition_id,
+            )
+        ],
+        conn=conn,
+    )
+    conn.commit()
+
+    rows = {
+        row["position_id"]: dict(row)
+        for row in conn.execute(
+            """
+            SELECT position_id, phase, shares, chain_shares, chain_state
+              FROM position_current
+             WHERE position_id IN (?, ?)
+            """,
+            (true_owner.trade_id, zero_fill_newer.trade_id),
+        ).fetchall()
+    }
+    conn.close()
+
+    assert stats["terminal_chain_exposure_restored"] == 1
+    assert stats.get("terminal_chain_owner_unresolved", 0) == 0
+    assert rows[true_owner.trade_id]["phase"] == "active"
+    assert rows[true_owner.trade_id]["shares"] == pytest.approx(25.48)
+    assert rows[true_owner.trade_id]["chain_shares"] == pytest.approx(25.48)
+    assert rows[true_owner.trade_id]["chain_state"] == "synced"
+    assert rows[zero_fill_newer.trade_id]["phase"] == "voided"
 
 
 def test_chain_reconciliation_phantom_void_allows_legacy_unknown_phase_before(tmp_path):

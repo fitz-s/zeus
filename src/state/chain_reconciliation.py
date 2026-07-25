@@ -39,6 +39,7 @@ from src.contracts.position_truth import (
 from src.contracts.review_work_item import ReviewReasonCode
 from src.contracts.semantic_types import LifecycleState
 from src.state.chain_state import ChainSnapshotCompleteness, classify_chain_state
+from src.state.fill_dedup import canonical_trade_fact_cte, economic_trade_fact_cte
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     phase_for_runtime_position,
@@ -1626,6 +1627,66 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         except (TypeError, ValueError):
             return 0.0
 
+    def _confirmed_net_shares_by_position(token_id: str) -> dict[str, Decimal] | None:
+        """Fold exactly-once authenticated token fills by their position owner.
+
+        ``None`` means no canonical connection was supplied. An empty mapping
+        means there is no authenticated economic fill for this token.
+        """
+        if conn is None:
+            return None
+        states = tuple(sorted(FILL_TRADE_FACT_STATES))
+        sources = tuple(sorted(LIVE_TRADE_FACT_SOURCES))
+        state_marks = ", ".join("?" for _ in states)
+        source_marks = ", ".join("?" for _ in sources)
+        sql = (
+            "WITH "
+            + canonical_trade_fact_cte()
+            + ", "
+            + economic_trade_fact_cte()
+            + f"""
+            SELECT command.position_id, command.side, fact.filled_size
+              FROM economic_trade_fact fact
+              JOIN venue_commands command
+                ON command.command_id = fact.command_id
+             WHERE command.token_id = ?
+               AND UPPER(COALESCE(fact.state, '')) IN ({state_marks})
+               AND UPPER(COALESCE(fact.source, '')) IN ({source_marks})
+            """
+        )
+        try:
+            rows = conn.execute(sql, (token_id, *states, *sources)).fetchall()
+        except Exception as exc:
+            raise RuntimeError(
+                f"terminal chain-owner fill fold failed for token_id={token_id}"
+            ) from exc
+
+        net: dict[str, Decimal] = {}
+        for row in rows:
+            position_id = str(
+                row["position_id"] if hasattr(row, "keys") else row[0]
+            ).strip()
+            side = str(row["side"] if hasattr(row, "keys") else row[1]).upper()
+            raw_size = row["filled_size"] if hasattr(row, "keys") else row[2]
+            try:
+                size = Decimal(str(raw_size))
+            except (InvalidOperation, ValueError) as exc:
+                raise RuntimeError(
+                    f"invalid terminal chain-owner fill size {raw_size!r}"
+                ) from exc
+            if not position_id or not size.is_finite() or size <= 0:
+                continue
+            if side == "BUY":
+                delta = size
+            elif side == "SELL":
+                delta = -size
+            else:
+                raise RuntimeError(
+                    f"invalid terminal chain-owner command side {side!r}"
+                )
+            net[position_id] = net.get(position_id, Decimal("0")) + delta
+        return net
+
     def _restore_terminal_chain_exposure_if_available(
         token_id: str,
         chain: ChainPosition,
@@ -1636,8 +1697,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if _held_token_id(position) != token_id:
                 continue
             state_value = getattr(position.state, "value", position.state)
-            if str(state_value) == "economically_closed":
-                continue
             if str(state_value) not in INACTIVE_RUNTIME_STATES:
                 continue
             if (
@@ -1649,15 +1708,59 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             candidates.append(position)
         if not candidates:
             return False
-        restored = sorted(
-            candidates,
-            key=lambda p: (
-                str(getattr(p, "entered_at", "") or ""),
-                str(getattr(p, "order_posted_at", "") or ""),
-                str(getattr(p, "trade_id", "") or ""),
-            ),
-            reverse=True,
-        )[0]
+
+        needs_fill_owner = len(candidates) > 1 or any(
+            str(getattr(position.state, "value", position.state))
+            == LifecyclePhase.ECONOMICALLY_CLOSED.value
+            for position in candidates
+        )
+        if needs_fill_owner:
+            net_by_position = _confirmed_net_shares_by_position(token_id) or {}
+            try:
+                chain_size = Decimal(str(chain.size))
+            except (InvalidOperation, ValueError):
+                chain_size = Decimal("-1")
+            tolerance = Decimal(str(_ALLOCATE_DUST))
+            candidate_net = {
+                str(getattr(position, "trade_id", "") or ""): net_by_position.get(
+                    str(getattr(position, "trade_id", "") or ""),
+                    Decimal("0"),
+                )
+                for position in candidates
+            }
+            matching = [
+                position
+                for position in candidates
+                if candidate_net[str(getattr(position, "trade_id", "") or "")] > 0
+                and abs(
+                    candidate_net[str(getattr(position, "trade_id", "") or "")]
+                    - chain_size
+                )
+                <= tolerance
+            ]
+            if len(matching) != 1:
+                stats["terminal_chain_owner_unresolved"] = (
+                    stats.get("terminal_chain_owner_unresolved", 0) + 1
+                )
+                logger.error(
+                    "TERMINAL_CHAIN_OWNER_UNRESOLVED: token=%s chain=%s "
+                    "candidate_net=%s matching=%s",
+                    token_id,
+                    chain.size,
+                    {position_id: str(net) for position_id, net in candidate_net.items()},
+                    [
+                        str(getattr(position, "trade_id", "") or "")
+                        for position in matching
+                    ],
+                )
+                return False
+            restored = matching[0]
+        else:
+            # Preserve the legacy single non-economic-terminal recovery. Any
+            # competing identity or economic-close contradiction requires
+            # exact fill ownership and never falls back to row recency.
+            restored = candidates[0]
+
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
         # LAW, critic I-1): chain proves this position still holds real
         # inventory despite a terminal/inactive local record — restore its
