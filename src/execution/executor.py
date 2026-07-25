@@ -6859,43 +6859,53 @@ def execute_exit_order(
         # 'database is locked' instead of degrading a good order to unknown_side_effect
         # (which trips the governor kill-switch). See _retry_persist_on_db_lock.
         def _persist_exit_ack_facts() -> None:
-            append_event(
+            if not _submit_ack_already_persisted(
                 conn,
                 command_id=command_id,
-                event_type="SUBMIT_ACKED",
-                occurred_at=ack_time,
-                payload={
-                    "venue_order_id": order_id,
-                    "order_type": order_type,
-                    **final_envelope_payload,
-                },
-            )
-            append_order_fact(
-                conn,
-                venue_order_id=order_id,
-                command_id=command_id,
-                state=order_fact_state,
-                remaining_size=remaining_size,
-                matched_size=matched_size,
-                source="REST",
-                observed_at=ack_time,
-                # C4 telemetry-truth: REST ACK response carries no server matchTime;
-                # venue_timestamp=None (honest absence). ack_time is Zeus receipt
-                # wall-clock only, labelled via observed_at.
-                venue_timestamp=None,
-                raw_payload_hash=_canonical_payload_hash(
-                    {
-                        "command_id": command_id,
+                order_id=order_id,
+            ):
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_ACKED",
+                    occurred_at=ack_time,
+                    payload={
                         "venue_order_id": order_id,
-                        "submit_result": result,
-                    }
-                ),
-                raw_payload_json={
-                    "venue_order_id": order_id,
-                    "submit_result": _jsonable_payload(result),
-                    "source": "place_limit_order_ack",
-                },
-            )
+                        "order_type": order_type,
+                        **final_envelope_payload,
+                    },
+                )
+            if not _order_fact_already_persisted(
+                conn,
+                command_id=command_id,
+                order_id=order_id,
+            ):
+                append_order_fact(
+                    conn,
+                    venue_order_id=order_id,
+                    command_id=command_id,
+                    state=order_fact_state,
+                    remaining_size=remaining_size,
+                    matched_size=matched_size,
+                    source="REST",
+                    observed_at=ack_time,
+                    # C4 telemetry-truth: REST ACK response carries no server matchTime;
+                    # venue_timestamp=None (honest absence). ack_time is Zeus receipt
+                    # wall-clock only, labelled via observed_at.
+                    venue_timestamp=None,
+                    raw_payload_hash=_canonical_payload_hash(
+                        {
+                            "command_id": command_id,
+                            "venue_order_id": order_id,
+                            "submit_result": result,
+                        }
+                    ),
+                    raw_payload_json={
+                        "venue_order_id": order_id,
+                        "submit_result": _jsonable_payload(result),
+                        "source": "place_limit_order_ack",
+                    },
+                )
             if fill_event_type and fill_trade_id:
                 if not _trade_fact_already_persisted(
                     conn,

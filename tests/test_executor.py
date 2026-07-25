@@ -2040,6 +2040,9 @@ class TestExecutor:
             def bind_submission_envelope(self, envelope):
                 self.bound_envelope = envelope
 
+            def bind_signed_submission_identity_persister(self, persister):
+                self.signed_identity_persister = persister
+
             def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
                 return _final_submit_result(self.bound_envelope, order_id="ack-fail-sell-1")
 
@@ -2047,6 +2050,17 @@ class TestExecutor:
             raise sqlite3.OperationalError("simulated exit order fact write failure")
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda conn, **_kwargs: {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda token_id, shares, conn: {"component": "collateral_sell_preflight", "allowed": True},
+        )
         monkeypatch.setattr("src.state.venue_command_repo.append_order_fact", fail_order_fact)
 
         result = execute_exit_order(
@@ -2076,6 +2090,83 @@ class TestExecutor:
                 (command["command_id"],),
             ).fetchone()[0]
             == 0
+        )
+
+    def test_exit_ack_lock_after_committed_ack_resumes_without_duplicate(self, monkeypatch):
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.signed_identity_persister = persister
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                return _final_submit_result(self.bound_envelope, order_id="ack-resume-sell-1")
+
+        from src.state import venue_command_repo
+
+        real_append_order_fact = venue_command_repo.append_order_fact
+        calls = {"n": 0}
+
+        def lock_once_after_ack(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real_append_order_fact(*args, **kwargs)
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda conn, **_kwargs: {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda token_id, shares, conn: {"component": "collateral_sell_preflight", "allowed": True},
+        )
+        monkeypatch.setattr(venue_command_repo, "append_order_fact", lock_once_after_ack)
+        monkeypatch.setattr("src.execution.executor.time.sleep", lambda *_args: None)
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-exit-ack-resume",
+                token_id="yes-token",
+                shares=12.349,
+                current_price=0.50,
+                best_bid=0.49,
+                **_snapshot_kwargs("yes-token"),
+            ),
+            conn=_TEST_CONN,
+        )
+
+        assert result.status == "pending"
+        command = _TEST_CONN.execute(
+            "SELECT command_id, state, venue_order_id FROM venue_commands WHERE position_id = ?",
+            ("trade-exit-ack-resume",),
+        ).fetchone()
+        assert command["state"] == "ACKED"
+        assert command["venue_order_id"] == "ack-resume-sell-1"
+        event_types = [
+            row["event_type"]
+            for row in _TEST_CONN.execute(
+                "SELECT event_type FROM venue_command_events WHERE command_id = ? "
+                "ORDER BY sequence_no",
+                (command["command_id"],),
+            ).fetchall()
+        ]
+        assert event_types.count("SUBMIT_ACKED") == 1
+        assert "REVIEW_REQUIRED" not in event_types
+        assert (
+            _TEST_CONN.execute(
+                "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+                (command["command_id"],),
+            ).fetchone()[0]
+            == 1
         )
 
     def test_execute_exit_order_rejects_missing_order_id_response(self, monkeypatch):
