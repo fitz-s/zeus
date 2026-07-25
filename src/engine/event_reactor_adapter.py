@@ -20429,6 +20429,7 @@ def _forecast_authority_payload_from_posterior(
         members_native = _posterior_bound_multimodel_members(
             conn,
             family=family,
+            decision_time=decision_time,
             source_cycle_time=p_source_cycle_time,
             provenance=p_provenance,
         )
@@ -20593,6 +20594,7 @@ def _posterior_bound_multimodel_members(
     conn: sqlite3.Connection,
     *,
     family,
+    decision_time: datetime,
     source_cycle_time: object,
     provenance: Mapping[str, object],
 ) -> tuple[float, ...] | None:
@@ -20634,6 +20636,7 @@ def _posterior_bound_multimodel_members(
         metric=family.metric,
         target_date=family.target_date,
         source_cycle_time_iso=str(source_cycle_time),
+        decision_time_iso=decision_time.astimezone(UTC).isoformat(),
         include_station_sources=True,
     )
     unit = str(
@@ -20669,6 +20672,7 @@ def _posterior_bound_spine_inputs(
     conn: sqlite3.Connection,
     *,
     family,
+    decision_time: datetime,
     source_cycle_time: object,
     provenance: Mapping[str, object],
 ) -> tuple[tuple[float, ...], str, tuple[float, ...] | None] | None:
@@ -20685,6 +20689,7 @@ def _posterior_bound_spine_inputs(
     members = _posterior_bound_multimodel_members(
         conn,
         family=family,
+        decision_time=decision_time,
         source_cycle_time=source_cycle_time,
         provenance=provenance,
     )
@@ -24224,6 +24229,7 @@ def _generate_candidate_proofs(
                     _posterior_spine = _posterior_bound_spine_inputs(
                         forecast_conn,
                         family=family,
+                        decision_time=decision_time,
                         source_cycle_time=_replacement_cycle,
                         provenance=_replacement_provenance,
                     )

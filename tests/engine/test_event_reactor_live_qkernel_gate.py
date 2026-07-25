@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-25
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -4706,9 +4706,9 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
                 (
                     3,
                     "c",
-                    "2026-07-13T01:50:00+00:00",
-                    "2026-07-13T01:50:00+00:00",
-                    "2026-07-13T02:23:00+00:00",
+                    "2026-07-13T12:00:00+00:00",
+                    "2026-07-13T12:00:00+00:00",
+                    "2026-07-13T12:05:00+00:00",
                     35.0,
                 ),
             )
@@ -4729,6 +4729,7 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
         target_date="2026-07-13",
         metric="high",
     )
+    decision_time = datetime(2026, 7, 13, 13, 0, tzinfo=timezone.utc)
     provenance = {
         "bayes_precision_fusion": {
             "used_models": ["a", "b", "c"],
@@ -4746,7 +4747,7 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
                 "c": {
                     "raw_model_forecast_id": 3,
                     "served_via": "single_runs",
-                    "served_cycle": "2026-07-13T01:50:00+00:00",
+                    "served_cycle": "2026-07-13T12:00:00+00:00",
                 },
             },
         }
@@ -4754,6 +4755,7 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
     members = era._posterior_bound_multimodel_members(
         conn,
         family=family,
+        decision_time=decision_time,
         source_cycle_time="2026-07-13T06:00:00+00:00",
         provenance=provenance,
     )
@@ -4781,12 +4783,14 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
     assert era._posterior_bound_multimodel_members(
         conn,
         family=family,
+        decision_time=decision_time,
         source_cycle_time="2026-07-13T06:00:00+00:00",
         provenance=source_clock,
     ) == (33.0, 34.0)
     assert era._posterior_bound_spine_inputs(
         conn,
         family=family,
+        decision_time=decision_time,
         source_cycle_time="2026-07-13T06:00:00+00:00",
         provenance=source_clock,
     ) == (
@@ -4827,6 +4831,7 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
     assert era._posterior_bound_multimodel_members(
         conn,
         family=family,
+        decision_time=decision_time,
         source_cycle_time="2026-07-13T06:00:00+00:00",
         provenance=legacy_two,
     ) is None
@@ -4838,14 +4843,43 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
     assert era._posterior_bound_multimodel_members(
         conn,
         family=family,
+        decision_time=decision_time,
         source_cycle_time="2026-07-13T06:00:00+00:00",
         provenance=incomplete,
     ) is None
     assert era._posterior_bound_spine_inputs(
         conn,
         family=family,
+        decision_time=decision_time,
         source_cycle_time="2026-07-13T06:00:00+00:00",
         provenance=incomplete,
+    ) is None
+
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            4,
+            "a",
+            "Hong Kong",
+            "2026-07-13",
+            "high",
+            "2026-07-13T14:00:00+00:00",
+            "2026-07-13T14:00:00+00:00",
+            "2026-07-13T14:05:00+00:00",
+            0,
+            "single_runs",
+            36.0,
+        ),
+    )
+    assert era._posterior_bound_multimodel_members(
+        conn,
+        family=family,
+        decision_time=datetime(2026, 7, 13, 15, 0, tzinfo=timezone.utc),
+        source_cycle_time="2026-07-13T06:00:00+00:00",
+        provenance=source_clock,
     ) is None
 
     provenance["bayes_precision_fusion"]["current_value_serving"]["c"][
@@ -4855,6 +4889,7 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
         era._posterior_bound_multimodel_members(
             conn,
             family=family,
+            decision_time=decision_time,
             source_cycle_time="2026-07-13T06:00:00+00:00",
             provenance=provenance,
         )
