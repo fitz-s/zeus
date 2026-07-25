@@ -2075,28 +2075,36 @@ def test_deterministic_day0_witness_rejects_certificate_probability_drift():
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_current_entry_feasibility_is_native_side_symmetric_without_price_floor(side):
-    def candidate(*, action="BUY", price="0.10"):
+def test_global_current_entry_feasibility_enforces_live_band_symmetrically(side):
+    def candidate(*, action="BUY", price="0.10", bid="0.09"):
         return SimpleNamespace(
             action=action,
             side=side,
             executable_cost_curve=SimpleNamespace(
                 levels=(SimpleNamespace(price=Decimal(price)),)
             ),
+            native_bid_levels=(SimpleNamespace(price=Decimal(bid)),),
         )
 
-    assert era._global_current_entry_feasibility_rejection_reason(
-        candidate(price="0.004")
-    ) is None
     assert (
         era._global_current_entry_feasibility_rejection_reason(
-            candidate(price="0.996")
+            candidate(price="0.004", bid="0.003")
         )
-        is None
+        == "GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:"
+        "live order unit price outside absolute inclusive [0.05, 0.95] submit band: "
+        "price=0.004"
     )
     assert (
         era._global_current_entry_feasibility_rejection_reason(
-            candidate(action="SELL", price="0.004")
+            candidate(price="0.996", bid="0.995")
+        )
+        == "GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:"
+        "live order unit price outside absolute inclusive [0.05, 0.95] submit band: "
+        "price=0.996"
+    )
+    assert (
+        era._global_current_entry_feasibility_rejection_reason(
+            candidate(action="SELL", price="0.004", bid="0.003")
         )
         is None
     )
@@ -2111,6 +2119,14 @@ def test_global_current_entry_feasibility_enforces_owner_strategy_floor(side):
             executable_cost_curve=SimpleNamespace(
                 levels=(SimpleNamespace(price=Decimal(price)),)
             ),
+            native_bid_levels=(
+                SimpleNamespace(
+                    price=max(
+                        Decimal(price) - Decimal("0.01"),
+                        Decimal("0.001"),
+                    )
+                ),
+            ),
         )
 
     # One-law update (ultimate_alpha 2026-07-24): the per-strategy 0.10 floor
@@ -2120,8 +2136,9 @@ def test_global_current_entry_feasibility_enforces_owner_strategy_floor(side):
         candidate("0.049"),
         strategy_key="forecast_qkernel_entry",
     ) == (
-        "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
-        "strategy=forecast_qkernel_entry:ask=0.049:floor=0.05"
+        "GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:"
+        "live order unit price outside absolute inclusive [0.05, 0.95] submit band: "
+        "price=0.049"
     )
     assert era._global_current_entry_feasibility_rejection_reason(
         candidate("0.05"),
@@ -2131,6 +2148,37 @@ def test_global_current_entry_feasibility_enforces_owner_strategy_floor(side):
         candidate("0.099"),
         strategy_key="forecast_qkernel_entry",
     ) is None
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_taker_candidate_requires_measurable_tight_spread(side):
+    def candidate(bids):
+        return SimpleNamespace(
+            action="BUY",
+            side=side,
+            executable_cost_curve=SimpleNamespace(
+                levels=(SimpleNamespace(price=Decimal("0.05")),)
+            ),
+            native_bid_levels=tuple(
+                SimpleNamespace(price=Decimal(price)) for price in bids
+            ),
+        )
+
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate(("0.04",))
+    ) is None
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate(("0.02",))
+    ) == (
+        "GLOBAL_ENTRY_TAKER_INADMISSIBLE:"
+        "TAKER_FORBIDDEN_RELATIVE_SPREAD:spread=0.8571:max=0.25"
+    )
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate(())
+    ) == "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate(("NaN",))
+    ) == "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
 
 
 @pytest.mark.parametrize(
@@ -3781,7 +3829,7 @@ def test_live_entry_day0_gate_accepts_degenerate_lcb_with_oof_qkernel_guard():
     )
 
 
-def test_day0_fresh_submit_mode_remains_maker_even_when_policy_would_cross():
+def test_day0_fresh_submit_mode_rejects_out_of_band_maker():
     mode = era._fresh_rest_then_cross_mode(
         actionable_payload=_day0_payload(
             direction="buy_yes",
@@ -3798,7 +3846,7 @@ def test_day0_fresh_submit_mode_remains_maker_even_when_policy_would_cross():
         decision_time=datetime(2026, 7, 2, 10, 0, tzinfo=timezone.utc),
     )
 
-    assert mode == "MAKER"
+    assert mode == "NO_TRADE"
 
 
 def test_day0_order_mode_remains_maker_even_with_taker_policy():

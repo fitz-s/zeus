@@ -5076,13 +5076,17 @@ def _global_current_entry_feasibility_rejection_reason(
     *,
     strategy_key: str | None = None,
 ) -> str | None:
-    """Reject malformed or strategy-unlicensed BUY quotes before scoring.
+    """Reject BUY actions the global taker-limit solver cannot execute.
 
     The auction still owns economic selection through current q bounds, fees,
     depth, robust utility, Kelly, wealth, and caps.  The strategy registry owns
     the narrower domain license: a BUY below its declared native entry-price
-    floor is not part of that strategy's feasible set.  SELL compares against
-    HOLD and does not consume BUY authority.
+    floor is not part of that strategy's feasible set. The global candidate
+    contract is explicitly immediate ``TAKER_LIMIT``; therefore an out-of-band,
+    one-sided, or spread-forbidden book is not a maker opportunity here. A
+    future maker proposal must compete as its own fill-contingent action rather
+    than being invented after this taker action wins. SELL compares against HOLD
+    and does not consume BUY authority.
     """
 
     action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
@@ -5101,6 +5105,28 @@ def _global_current_entry_feasibility_rejection_reason(
         return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
     if not best_ask.is_finite() or not Decimal("0") < best_ask < Decimal("1"):
         return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
+    try:
+        assert_live_order_unit_price(best_ask)
+    except (TypeError, ValueError) as exc:
+        return f"GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:{exc}"
+    bid_levels = tuple(getattr(candidate, "native_bid_levels", ()) or ())
+    try:
+        best_bid = max(Decimal(level.price) for level in bid_levels)
+    except (ArithmeticError, AttributeError, TypeError, ValueError):
+        return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+    if not best_bid.is_finite() or not Decimal("0") < best_bid < Decimal("1"):
+        return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+    from src.strategy.live_inference.mode_consistent_ev import (
+        taker_spread_guard_reason,
+    )
+
+    taker_rejection = taker_spread_guard_reason(
+        float(best_bid),
+        float(best_ask),
+        max_relative_spread=_taker_max_relative_spread(),
+    )
+    if taker_rejection is not None:
+        return f"GLOBAL_ENTRY_TAKER_INADMISSIBLE:{taker_rejection}"
     normalized_strategy = str(strategy_key or "").strip()
     if normalized_strategy:
         floors = _event_bound_strategy_live_quality_floors(normalized_strategy)
