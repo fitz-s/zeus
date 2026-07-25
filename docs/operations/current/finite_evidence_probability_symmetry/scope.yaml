@@ -18,6 +18,7 @@ in_scope:
 - docs/reference/AGENTS.md
 - src/data/replacement_forecast_materializer.py
 - src/data/replacement_forecast_cycle_policy.py
+- src/data/replacement_forecast_bundle_reader.py
 - src/data/replacement_input_hwm.py
 - src/data/day0_observation_reader.py
 - src/data/wu_hourly_client.py
@@ -81,6 +82,8 @@ in_scope:
 - tests/test_replacement_forecast_current_target_plan.py
 - tests/test_day0_remaining_day_pricing.py
 - tests/test_replacement_forecast_materializer_cycle_policy.py
+- tests/test_replacement_forecast_bundle_reader_tradeable_latest.py
+- tests/test_replacement_forecast_bundle_reader_staleness.py
 - tests/test_replacement_seed_coverage_gate.py
 - tests/engine/test_event_reactor_no_bypass.py
 - tests/engine/test_position_belief_authority.py

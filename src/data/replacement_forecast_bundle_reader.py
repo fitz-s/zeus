@@ -14,7 +14,8 @@ from typing import Any, Mapping
 from src.config import cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.replacement_forecast_cycle_policy import (
-    REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT,
+    TRADEABLE_GRADE_QLCB_BASIS,
+    current_evidence_shape_semantics_mismatch,
     cycle_age_exceeds_bound,
     replacement_source_cycle_max_age_hours,
 )
@@ -246,7 +247,21 @@ def _live_grade_provenance(
     mode = provenance.get("replacement_q_mode")
     if not isinstance(mode, str) or not mode:
         return None
-    return provenance if mode in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE else None
+    if mode not in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE:
+        return None
+    if provenance.get("q_lcb_basis") != TRADEABLE_GRADE_QLCB_BASIS:
+        return None
+    fusion = provenance.get("bayes_precision_fusion")
+    shape = (
+        fusion.get("current_evidence_shape")
+        if isinstance(fusion, Mapping)
+        else None
+    )
+    if not isinstance(shape, Mapping):
+        return None
+    if current_evidence_shape_semantics_mismatch(provenance):
+        return None
+    return provenance
 
 
 def _readiness_posterior_id(

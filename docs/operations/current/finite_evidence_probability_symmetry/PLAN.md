@@ -24,6 +24,16 @@ loop to replace v3 rows before entry or held-position belief can consume them.
 The behavioral antibody reproduces the live 2.132928°C disagreement and
 requires raw member semantics, full sigma, and full center uncertainty.
 
+Post-restart evidence exposed a second reader-side bypass. `position_belief`
+correctly rejected an Ankara Jul-27 posterior carrying
+`ensemble_anomaly_transport_v3`, but the global-auction bundle reader called
+that same row live-grade because it checked only non-null bounds and
+`FUSED_NORMAL_*`. The held auction therefore kept evaluating Ankara with the
+frozen `q_no=0.985060` even after `last_monitor_prob_is_fresh=0`. Live-grade
+bundle selection now also requires the shared tradeable q-bound basis and the
+current-evidence semantics revision. A focused antibody rejects the old
+transport row and accepts the replacement stale-absolute-disagreement row.
+
 ## 2026-07-24 BUY-only preflight fallthrough
 
 The current global auction compares new BUYs and held-position SELLs under one

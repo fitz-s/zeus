@@ -1,6 +1,6 @@
-# Lifecycle: created=2026-06-07; last_reviewed=2026-07-11; last_reused=2026-07-11
-# Purpose: Prove expired readiness and over-age forecast cycles fail closed for new entries.
-# Reuse: Re-audit both point-in-time gates whenever live replacement selection changes.
+# Created: 2026-06-07
+# Last reused/audited: 2026-07-25
+# Authority basis: docs/authority/replacement_final_form_2026_06_09.md
 """H3 antibody — readiness expiry / source-cycle age must be a HARD gate.
 
 Relationship test across the readiness->bundle boundary: a READY posterior whose
@@ -22,6 +22,10 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    TRADEABLE_GRADE_QLCB_BASIS,
+)
 from src.data.replacement_forecast_bundle_reader import (
     HIGH_DATA_VERSION,
     PRODUCT_ID,
@@ -63,7 +67,15 @@ def _dt(day: int, hour: int, minute: int = 0) -> datetime:
 def _provenance() -> dict[str, object]:
     return {
         "replacement_q_mode": "FUSED_NORMAL_FULL",
+        "q_lcb_basis": TRADEABLE_GRADE_QLCB_BASIS,
         "bin_topology_hash": _TOPO_HASH,
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {
+                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                "shape_lag_hours": 0.0,
+                "translation_applied": False,
+            }
+        },
         "bin_topology": [
             {
                 "bin_id": "warm",
