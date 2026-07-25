@@ -206,6 +206,134 @@ def test_same_provider_family_new_raw_revision_signals_upgrade() -> None:
     assert verdict["changed_input_sources"] == [_DWD]
 
 
+def test_post_carrier_provider_run_is_current_at_decision_time() -> None:
+    """Source-clock center uses each provider's newest possessed run, not the ENS carrier ceiling."""
+    conn = _conn()
+    carrier = "2026-06-12T06:00:00+00:00"
+    newer = "2026-06-12T12:00:00+00:00"
+    _insert_single_runs(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        cycle_iso=carrier,
+        models=[_DWD],
+    )
+    old_id = int(
+        conn.execute(
+            "SELECT MAX(raw_model_forecast_id) FROM raw_model_forecasts"
+        ).fetchone()[0]
+    )
+    _insert_posterior(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        cycle_iso=carrier,
+        used_models=[_DWD],
+        computed_at="2026-06-12T10:00:00+00:00",
+        current_value_ids={_DWD: old_id},
+        configured_sources=[_DWD],
+    )
+    _insert_single_runs(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        cycle_iso=newer,
+        models=[_DWD],
+    )
+
+    carrier_bound = scope_capture_offers_larger_provider_set(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        changed_sources=[_DWD],
+    )
+    source_clock = scope_capture_offers_larger_provider_set(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        changed_sources=[_DWD],
+        decision_time=datetime(2026, 6, 12, 13, 0, tzinfo=UTC),
+    )
+
+    assert carrier_bound["is_upgrade"] is False
+    assert source_clock["is_upgrade"] is True
+    assert source_clock["family_upgrade"] is False
+    assert source_clock["input_revision_changed"] is True
+    assert source_clock["changed_input_sources"] == [_DWD]
+    assert source_clock["changed_input_revisions"][_DWD] > old_id
+
+
+def test_post_carrier_provider_run_enqueues_same_carrier_refresh(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The periodic repair lane must enqueue the stale family before the carrier advances."""
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    carrier = "2026-06-12T06:00:00+00:00"
+    newer = "2026-06-12T12:00:00+00:00"
+    _insert_single_runs(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        cycle_iso=carrier,
+        models=[_DWD],
+    )
+    old_id = int(
+        conn.execute(
+            "SELECT MAX(raw_model_forecast_id) FROM raw_model_forecasts"
+        ).fetchone()[0]
+    )
+    _insert_posterior(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        cycle_iso=carrier,
+        used_models=[_DWD],
+        computed_at="2026-06-12T10:00:00+00:00",
+        current_value_ids={_DWD: old_id},
+        configured_sources=[_DWD],
+    )
+    _insert_single_runs(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        cycle_iso=newer,
+        models=[_DWD],
+    )
+    conn.close()
+
+    seed = tmp_path / "same-carrier.seed.json"
+    monkeypatch.setattr(
+        trigger,
+        "_build_and_write_upgrade_seed",
+        lambda *_args, **_kwargs: seed,
+    )
+    report = trigger.enqueue_fusion_upgrade_reseeds(
+        forecast_db=db,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        computed_at=datetime(2026, 6, 12, 13, 0, tzinfo=UTC),
+        scopes=[("Testville", "2026-06-13", "high")],
+        changed_sources=[_DWD],
+        manifests=(),
+    )
+
+    assert report["input_revisions_detected"] == 1
+    assert report["seeds_enqueued"] == 1
+    assert report["enqueued"][0]["source_cycle_time"] == carrier
+
+
 def test_unchanged_or_unrelated_raw_revision_is_noop() -> None:
     conn = _conn()
     cyc = "2026-06-12T06:00:00+00:00"
@@ -444,7 +572,12 @@ def test_station_input_revision_enqueue_is_idempotent_until_raw_id_changes(
     )
     conn.commit()
     conn.close()
-    revised = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+    revised = trigger.enqueue_fusion_upgrade_reseeds(
+        **{
+            **kwargs,
+            "computed_at": datetime(2026, 7, 24, 7, 0, tzinfo=UTC),
+        }
+    )
 
     assert first["seeds_enqueued"] == 1
     assert duplicate["seeds_enqueued"] == 0

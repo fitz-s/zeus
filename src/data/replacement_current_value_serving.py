@@ -12,7 +12,8 @@
 ``read_current_instrument_values`` is the ONE function that decides, per provider, whether its
 CURRENT value for a (city, metric, target_date, selected source_cycle_time) scope is served from
 its ``single_runs`` row (the forward live capture — always preferred) or from the newest
-persisted ``previous_runs`` row that was actually available no later than the selected cycle.
+persisted ``previous_runs`` row. Carrier-bound callers use rows no later than the selected cycle;
+the source-clock live route instead uses each provider's newest row possessed by decision time.
 Both the materializer's q path
 (``_read_persisted_current_capture`` is a thin shape-adapter over this function) and the
 fusion-upgrade trigger's capturable-set computation call it, so "what can be fused" can never
@@ -20,7 +21,7 @@ drift between the two sites (single-builder; registry member #10).
 
 THE GENERALIZED RULE (supersedes the gem-only exception, which becomes one instance of it):
 
-  1. A model's single_runs row at the selected cycle ALWAYS wins (forward capture priority).
+  1. On carrier-bound calls, a model's single_runs row at the selected cycle ALWAYS wins.
   2. A model with NO single_runs row at the selected cycle may be served from the newest
      persisted row for the same model/city/metric/target_date whose ``source_cycle_time`` is not
      after the selected cycle, BRANDED by its real ``served_via`` and ``served_cycle`` — never
@@ -31,6 +32,9 @@ THE GENERALIZED RULE (supersedes the gem-only exception, which becomes one insta
      substituted instrument's precision weight derives from its own lead-bucket history exactly
      like a forward-captured one.
   3. A model absent from BOTH endpoints at or before the selected cycle stays dropped.
+  4. On the source-clock live route, the decision instant replaces the carrier as the
+     deterministic-provider ceiling: each provider serves its newest possessed run, while the
+     carrier continues to govern ENS shape.
 
 K-DECISION on the eligibility guard (task constraint 3, judged + documented): the substitution
 does NOT try to distinguish "structurally unpublished at this cycle" (JMA at 06Z) from
@@ -81,7 +85,7 @@ class ServedInstrumentValue:
     value_c: float
     raw_model_forecast_id: int
     served_via: str            # SERVED_VIA_SINGLE_RUNS | SERVED_VIA_PREVIOUS_RUNS
-    served_cycle: str          # the served row's source_cycle_time (<= the selected cycle)
+    served_cycle: str          # provider cycle; may exceed the ENS/anchor carrier on source-clock
     captured_at: str | None    # the served row's capture timestamp (None on stripped schemas)
     age_hours: float           # captured_at − source_cycle_time, hours (0.0 when unknowable)
     lead_days: int | None      # the served row's lead bucket — the SAME bucket its history uses
@@ -127,6 +131,7 @@ def read_current_instrument_values(
     source_cycle_time_iso: str,
     max_substitution_age_hours: float = PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
     include_station_sources: bool = False,
+    decision_time_iso: str | None = None,
 ) -> dict[str, ServedInstrumentValue]:
     """THE single authority: per-model served CURRENT value for one (scope, cycle).
 
@@ -134,10 +139,13 @@ def read_current_instrument_values(
     substituted from their previous_runs row at the SAME natural key when the freshness horizon
     admits it; models absent from both stay absent (dropped by the fusion exactly as today).
 
-    LEAD_DAYS IS NOT A FILTER (preserved from the 2026-06-09 fix): the selected cycle is the
-    freshness ceiling, while the served row reports its own real lead bucket (which names the
-    history residual variance that prices that older/current value). Fail-soft: any DB error ->
-    empty dict (treated as missing capture; never raises into the q path).
+    When ``decision_time_iso`` is supplied, every provider independently serves its newest row
+    provably possessed by that instant. This is the source-clock law: the carrier still bounds
+    ENS shape, but a faster deterministic provider must not be hidden until the carrier advances.
+    Without it, the historical carrier-bound behavior is unchanged.
+
+    LEAD_DAYS IS NOT A FILTER: the served row reports its real lead bucket, which names the
+    history residual variance for that value. Fail-soft: any DB error -> empty dict.
     """
     try:
         columns = {
@@ -146,7 +154,9 @@ def read_current_instrument_values(
     except Exception:
         return {}
     has_captured_at = "captured_at" in columns
+    has_source_available_at = "source_available_at" in columns
     captured_select = ", captured_at" if has_captured_at else ""
+    available_select = ", source_available_at" if has_source_available_at else ""
 
     # ORDER suffix depends on whether captured_at is present in the schema:
     #   With captured_at: ORDER BY captured_at DESC NULLS LAST, raw_model_forecast_id DESC
@@ -184,6 +194,115 @@ def read_current_instrument_values(
             return []
 
     out: dict[str, ServedInstrumentValue] = {}
+
+    if decision_time_iso is not None:
+        try:
+            decision_time = datetime.fromisoformat(
+                str(decision_time_iso).replace("Z", "+00:00")
+            )
+            if decision_time.tzinfo is None:
+                raise ValueError("decision_time_iso must be timezone-aware")
+            decision_iso = decision_time.isoformat()
+        except Exception:
+            return {}
+        possession_predicate = None
+        if has_captured_at:
+            possession_predicate = (
+                "captured_at IS NOT NULL AND datetime(captured_at) <= datetime(?)"
+            )
+        elif has_source_available_at:
+            possession_predicate = (
+                "source_available_at IS NOT NULL "
+                "AND datetime(source_available_at) <= datetime(?)"
+            )
+        if possession_predicate is None:
+            return {}
+        source_available_guard = (
+            "AND (source_available_at IS NULL "
+            "OR datetime(source_available_at) <= datetime(?))"
+            if has_source_available_at and has_captured_at
+            else ""
+        )
+        params: list[object] = [
+            city,
+            metric,
+            target_date,
+            decision_iso,
+            decision_iso,
+        ]
+        if source_available_guard:
+            params.append(decision_iso)
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT raw_model_forecast_id, model, forecast_value_c, lead_days,
+                       source_cycle_time, endpoint{captured_select}{available_select}
+                FROM raw_model_forecasts
+                WHERE city = ? AND metric = ? AND target_date = ?
+                  AND datetime(source_cycle_time) <= datetime(?)
+                  AND {possession_predicate}
+                  {source_available_guard}
+                  AND endpoint IN (?, ?)
+                ORDER BY model,
+                         datetime(source_cycle_time) DESC,
+                         CASE endpoint WHEN 'single_runs' THEN 0 ELSE 1 END,
+                         lead_days,
+                         {order_clause}
+                """,
+                tuple(
+                    [
+                        *params,
+                        SERVED_VIA_SINGLE_RUNS,
+                        SERVED_VIA_PREVIOUS_RUNS,
+                    ]
+                ),
+            ).fetchall()
+        except Exception:
+            return {}
+        for row in rows:
+            try:
+                rid = int(row[0])
+                model = str(row[1])
+                value = float(row[2])
+                lead = None if row[3] is None else int(row[3])
+                served_cycle = str(row[4])
+                endpoint = str(row[5])
+                captured = (
+                    str(row[6])
+                    if has_captured_at and row[6] is not None
+                    else None
+                )
+            except Exception:
+                continue
+            if model in out:
+                continue
+            if (
+                model.startswith(("cwa_", "hko_"))
+                and not include_station_sources
+            ):
+                continue
+            age = _age_hours_or_none(captured, served_cycle)
+            if (
+                endpoint == SERVED_VIA_PREVIOUS_RUNS
+                and age is not None
+                and age > float(max_substitution_age_hours)
+            ):
+                continue
+            if (
+                endpoint == SERVED_VIA_PREVIOUS_RUNS
+                and model in _PRODUCT_MISMATCHED_PREVIOUS_RUNS
+            ):
+                continue
+            out[model] = ServedInstrumentValue(
+                value_c=value,
+                raw_model_forecast_id=rid,
+                served_via=endpoint,
+                served_cycle=served_cycle,
+                captured_at=captured,
+                age_hours=0.0 if age is None else age,
+                lead_days=lead,
+            )
+        return out
 
     def _serve(endpoint: str, *, exact_cycle: bool) -> None:
         for row in _rows(endpoint, exact_cycle=exact_cycle):

@@ -155,7 +155,13 @@ def _input_revision_marker_key(
 
 
 def _capturable_inputs_for_scope(
-    conn: sqlite3.Connection, *, city: str, target_date: str, metric: str, source_cycle_iso: str
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    source_cycle_iso: str,
+    decision_time: datetime | None = None,
 ) -> dict[str, int]:
     """CURRENT model -> raw row id available to the materializer for this scope and cycle.
 
@@ -179,6 +185,11 @@ def _capturable_inputs_for_scope(
             target_date=target_date,
             source_cycle_time_iso=source_cycle_iso,
             include_station_sources=True,
+            decision_time_iso=(
+                decision_time.astimezone(UTC).isoformat()
+                if decision_time is not None
+                else None
+            ),
         )
         return {model: int(value.raw_model_forecast_id) for model, value in served.items()}
     except Exception:
@@ -298,6 +309,7 @@ def scope_capture_offers_larger_provider_set(
     target_date: str,
     metric: str,
     changed_sources: Sequence[str] | None = None,
+    decision_time: datetime | None = None,
 ) -> dict[str, object]:
     """Return whether a larger family set or changed consumed input requires materialization.
 
@@ -326,7 +338,12 @@ def scope_capture_offers_larger_provider_set(
             "changed_input_revisions": {},
         }
     capturable_inputs = _capturable_inputs_for_scope(
-        conn, city=city, target_date=target_date, metric=metric, source_cycle_iso=source_cycle_iso
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        source_cycle_iso=source_cycle_iso,
+        decision_time=decision_time,
     )
     capturable = decorrelated_provider_families_of(set(capturable_inputs))
     # DOMAIN-AWARE gate (2026-06-17 coarse-global removal): a family that is STRUCTURALLY ABSENT
@@ -589,6 +606,7 @@ def enqueue_fusion_upgrade_reseeds(
                     target_date=target_date,
                     metric=metric,
                     changed_sources=changed_sources,
+                    decision_time=now,
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 _LOG.debug("fusion-upgrade comparison failed for %s/%s/%s: %s", city, target_date, metric, exc)

@@ -1913,9 +1913,9 @@ def _replacement_bayes_precision_fusion_override(
             history_provider = BayesPrecisionFusionHistoryProvider(conn)
 
         # BLOCKER 5: the CURRENT values feeding the traded q come from the PERSISTED single_runs
-        # rows the download job wrote — NEVER a network fetch inside the q path. Read them by
-        # (city, metric, target_date, lead, source_cycle_time) on the SAME connection so the q is
-        # reconstructable to the exact persisted inputs. If the current capture is MISSING (the
+        # rows the download job wrote — NEVER a network fetch inside the q path. Read each
+        # provider's newest row possessed by computed_at on the SAME connection; exact raw row
+        # ids make the q reconstructable even when provider clocks differ. If capture is MISSING (the
         # download did not run / failed), block materialization with a logged reason — never
         # silently network-fetch or substitute a single-anchor posterior.
         source_cycle_iso = _to_utc(
@@ -1935,6 +1935,7 @@ def _replacement_bayes_precision_fusion_override(
             served_current = read_current_instrument_values(
                 conn, city=request.city, metric=metric, target_date=target_date,
                 source_cycle_time_iso=source_cycle_iso,
+                decision_time_iso=computed_at.isoformat(),
                 # ADD-DATA (operator "加数据"): include station-calibrated sources (cwa_*/hko_*) at
                 # their OWN provider cycle so they enter persisted_current -> the precision fusion
                 # weights them at initial precision (raw_second_moment_weights) and the frozen-scheme
