@@ -1,5 +1,5 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-25
 # Purpose: Lock EDLI fill-audit bridge from authenticated WS trade facts.
 from __future__ import annotations
 
@@ -7,10 +7,15 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from src.events.edli_trade_fact_bridge import append_confirmed_trade_facts_to_edli
+import pytest
+
+from src.events.edli_trade_fact_bridge import (
+    append_confirmed_trade_facts_to_edli,
+    append_rest_filled_orphan_trade_facts_to_edli,
+)
 from src.events.live_order_aggregate import LiveOrderAggregateLedger
 from src.state.db import init_schema
-from src.state.venue_command_repo import append_trade_fact
+from src.state.venue_command_repo import append_order_fact, append_trade_fact
 
 
 NOW = datetime(2026, 6, 6, 21, 40, tzinfo=timezone.utc)
@@ -92,6 +97,106 @@ def test_confirmed_ws_trade_fact_uses_command_order_after_matched_submit_unknown
     assert append_confirmed_trade_facts_to_edli(conn, now=NOW) == 1
     projection = ledger.get_projection("event-1:intent-1")
     assert projection.current_state == "USER_TRADE_OBSERVED"
+
+
+@pytest.mark.parametrize(
+    ("position_condition", "chain_shares", "entry_price", "resolved"),
+    [
+        ("condition-1", 7.0, 0.72, True),
+        ("wrong-condition", 7.0, 0.72, False),
+        ("condition-1", 0.0, 0.72, False),
+        ("condition-1", 7.0, 0.60, False),
+    ],
+)
+def test_confirmed_absorbed_fill_consumes_stuck_cap_only_on_exact_chain_proof(
+    position_condition,
+    chain_shares,
+    entry_price,
+    resolved,
+):
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger, include_ack=False)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitUnknown",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "venue_call_started": True,
+            "side_effect_known": False,
+        },
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+    _insert_command(conn)
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, decision_time, cap_scope,
+            max_notional_usd, max_orders_per_day, reserved_notional_usd,
+            order_count, reservation_status, final_intent_id,
+            execution_command_id, created_at, schema_version
+        ) VALUES (
+            'usage-1', 'event-1', ?, 'live_execution_reservation',
+            5.04, 1, 5.04, 1, 'RESERVED', 'intent-1',
+            'command-1', ?, 1
+        )
+        """,
+        (NOW.isoformat(), NOW.isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, condition_id, direction, token_id, no_token_id,
+            shares, entry_price, fill_authority, chain_state, chain_shares,
+            updated_at, temperature_metric
+        ) VALUES (
+            'pos-1', 'active', ?, 'buy_no', 'yes-token-1', 'token-1',
+            7, ?, 'venue_confirmed_full', 'synced', ?, ?, 'high'
+        )
+        """,
+        (position_condition, entry_price, chain_shares, NOW.isoformat()),
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="7",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash="f" * 64,
+        raw_payload_json={"test": "terminal confirmed order"},
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-absorbed",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="1" * 64,
+        raw_payload_json="{}",
+    )
+
+    assert append_confirmed_trade_facts_to_edli(conn, now=NOW) == 1
+    projection = ledger.get_projection("event-1:intent-1")
+    cap_status = conn.execute(
+        "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id='usage-1'"
+    ).fetchone()[0]
+    assert projection.pending_reconcile is (not resolved)
+    assert projection.current_state == ("RECONCILED" if resolved else "USER_TRADE_OBSERVED")
+    assert cap_status == ("CONSUMED" if resolved else "RESERVED")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
+    ).fetchone()[0] == 1
 
 
 def test_confirmed_ws_trade_bridge_skips_terminal_reconciled_aggregate():
@@ -328,7 +433,7 @@ def _seed_edli_chain(
     ledger.append_event(
         aggregate_id="event-1:intent-1",
         event_type="SubmitPlanBuilt",
-        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        payload=_pre_submit_payload(),
         occurred_at=NOW,
         source_authority="engine_adapter",
     )
@@ -445,9 +550,6 @@ def _pre_submit_payload() -> dict:
 # RECONCILE_SOURCE provenance — and must NEVER fire inside the grace window
 # or when the WS truth already exists.
 # ---------------------------------------------------------------------------
-from src.events.edli_trade_fact_bridge import append_rest_filled_orphan_trade_facts_to_edli
-
-
 def _insert_rest_only_fill(
     conn, *, observed_at, trade_id="trade-orphan", state="MATCHED"
 ):

@@ -10,8 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.events.live_cap import LiveCapLedger
 from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
 from src.events.live_order_reconcile import (
+    RECONCILE_SOURCE,
+    append_reconciled,
     append_reconcile_recovered_fill,
     append_user_trade_observed,
 )
@@ -188,7 +191,186 @@ def append_confirmed_trade_facts_to_edli(
             )
             continue
         appended += 1
+    reconciled = _consume_absorbed_confirmed_fills(
+        conn,
+        trade_schema=trade_schema,
+        limit=limit,
+        now=default_now,
+    )
+    if reconciled:
+        logger.warning(
+            "confirmed trade bridge: consumed %d stuck EDLI fill reservation(s)",
+            reconciled,
+        )
     return appended
+
+
+def _consume_absorbed_confirmed_fills(
+    conn: sqlite3.Connection,
+    *,
+    trade_schema: str,
+    limit: int,
+    now: datetime,
+) -> int:
+    """Close pending EDLI state once the exact fill is already canonical."""
+
+    required = (
+        "venue_commands",
+        "venue_trade_facts",
+        "venue_order_facts",
+        "position_current",
+    )
+    if any(
+        _schema_with_table(conn, table, preferred=trade_schema) != trade_schema
+        for table in required
+    ):
+        return 0
+    commands = _q(trade_schema, "venue_commands")
+    trades = _q(trade_schema, "venue_trade_facts")
+    orders = _q(trade_schema, "venue_order_facts")
+    positions = _q(trade_schema, "position_current")
+    rows = conn.execute(
+        f"""
+        WITH latest_plan AS (
+            SELECT aggregate_id, payload_json
+              FROM (
+                    SELECT aggregate_id, payload_json,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY aggregate_id ORDER BY event_sequence DESC
+                           ) AS rank
+                      FROM edli_live_order_events
+                     WHERE event_type = 'SubmitPlanBuilt'
+                   )
+             WHERE rank = 1
+        ),
+        latest_trade AS (
+            SELECT aggregate_id, payload_json
+              FROM (
+                    SELECT aggregate_id, payload_json,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY aggregate_id ORDER BY event_sequence DESC
+                           ) AS rank
+                      FROM edli_live_order_events
+                     WHERE event_type = 'UserTradeObserved'
+                   )
+             WHERE rank = 1
+        ),
+        latest_order AS (
+            SELECT *
+              FROM (
+                    SELECT fact.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY command_id ORDER BY local_sequence DESC
+                           ) AS rank
+                      FROM {orders} fact
+                   )
+             WHERE rank = 1
+        )
+        SELECT projection.aggregate_id, projection.event_id,
+               projection.final_intent_id, usage.usage_id,
+               usage.execution_command_id, command.command_id,
+               command.position_id, command.token_id, command.venue_order_id,
+               trade.trade_fact_id, trade.trade_id,
+               trade.filled_size, trade.fill_price,
+               position.condition_id, position.direction,
+               position.chain_shares, position.phase
+          FROM edli_live_order_projection projection
+          JOIN latest_plan plan USING (aggregate_id)
+          JOIN latest_trade observed USING (aggregate_id)
+          JOIN edli_live_cap_usage usage
+            ON usage.event_id = projection.event_id
+           AND usage.final_intent_id = projection.final_intent_id
+           AND usage.reservation_status = 'RESERVED'
+          JOIN {commands} command
+            ON command.decision_id = usage.execution_command_id
+          JOIN {trades} trade
+            ON trade.trade_fact_id = CAST(
+                json_extract(observed.payload_json, '$.source_trade_fact_id') AS INTEGER
+            )
+           AND trade.command_id = command.command_id
+           AND trade.venue_order_id = command.venue_order_id
+          JOIN latest_order order_fact
+            ON order_fact.command_id = command.command_id
+           AND order_fact.venue_order_id = command.venue_order_id
+          JOIN {positions} position
+            ON position.position_id = command.position_id
+         WHERE projection.pending_reconcile = 1
+           AND projection.current_state = 'USER_TRADE_OBSERVED'
+           AND command.intent_kind = 'ENTRY'
+           AND command.side = 'BUY'
+           AND command.state = 'FILLED'
+           AND trade.state = 'CONFIRMED'
+           AND trade.source = 'WS_USER'
+           AND order_fact.state = 'MATCHED'
+           AND order_fact.source IN ('REST', 'WS_USER', 'DATA_API', 'CHAIN')
+           AND CAST(COALESCE(order_fact.remaining_size, '0') AS REAL) <= 0.01
+           AND json_extract(observed.payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+           AND json_extract(observed.payload_json, '$.venue_order_id') = command.venue_order_id
+           AND json_extract(plan.payload_json, '$.token_id') = command.token_id
+           AND json_extract(plan.payload_json, '$.condition_id') = position.condition_id
+           AND json_extract(plan.payload_json, '$.direction') = position.direction
+           AND command.token_id = CASE position.direction
+                 WHEN 'buy_no' THEN position.no_token_id
+                 WHEN 'buy_yes' THEN position.token_id
+               END
+           AND ABS(CAST(trade.filled_size AS REAL) - command.size) <= 0.01
+           AND ABS(CAST(order_fact.matched_size AS REAL) - command.size) <= 0.01
+           AND ABS(CAST(trade.fill_price AS REAL) - command.price) <= 0.011
+           AND ABS(CAST(position.entry_price AS REAL) - command.price) <= 0.011
+           AND position.fill_authority IN ('venue_confirmed_full', 'venue_confirmed_partial')
+           AND position.chain_state = 'synced'
+           AND CAST(position.shares AS REAL) + 0.01 >= command.size
+           AND CAST(position.chain_shares AS REAL) + 0.01 >= command.size
+         ORDER BY projection.updated_at, projection.aggregate_id
+         LIMIT ?
+        """,
+        (max(0, limit),),
+    ).fetchall()
+    ledger = LiveOrderAggregateLedger(conn)
+    cap_ledger = LiveCapLedger(conn, schema_initialized=True)
+    for row in rows:
+        proof = {
+            "schema_version": 1,
+            "proof_class": "canonical_confirmed_fill_already_absorbed",
+            "command_id": str(_row_get(row, "command_id")),
+            "position_id": str(_row_get(row, "position_id")),
+            "venue_order_id": str(_row_get(row, "venue_order_id")),
+            "trade_fact_id": int(_row_get(row, "trade_fact_id")),
+            "trade_id": str(_row_get(row, "trade_id")),
+            "token_id": str(_row_get(row, "token_id")),
+            "condition_id": str(_row_get(row, "condition_id")),
+            "direction": str(_row_get(row, "direction")),
+            "filled_size": str(_row_get(row, "filled_size")),
+            "fill_price": str(_row_get(row, "fill_price")),
+            "chain_shares": str(_row_get(row, "chain_shares")),
+            "position_phase": str(_row_get(row, "phase")),
+        }
+        proof["proof_hash"] = hashlib.sha256(
+            json.dumps(proof, sort_keys=True).encode()
+        ).hexdigest()
+        append_reconciled(
+            ledger,
+            aggregate_id=str(_row_get(row, "aggregate_id")),
+            event_id=str(_row_get(row, "event_id")),
+            final_intent_id=str(_row_get(row, "final_intent_id")),
+            source=RECONCILE_SOURCE,
+            pending_reconcile=False,
+            occurred_at=now,
+            payload={
+                "execution_command_id": str(_row_get(row, "execution_command_id")),
+                "venue_order_exists": False,
+                "venue_trade_exists": True,
+                "cap_transition_recommendation": "CONSUMED",
+                "reconcile_reason": "CANONICAL_CONFIRMED_FILL_ALREADY_ABSORBED",
+                "canonical_confirmed_fill_proof": proof,
+            },
+        )
+        cap_ledger.consume(
+            str(_row_get(row, "usage_id")),
+            final_intent_id=str(_row_get(row, "final_intent_id")),
+            execution_command_id=str(_row_get(row, "execution_command_id")),
+        )
+    return len(rows)
 
 
 def append_rest_filled_orphan_trade_facts_to_edli(
