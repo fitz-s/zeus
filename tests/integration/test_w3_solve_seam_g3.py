@@ -9988,7 +9988,7 @@ def test_global_preflight_falls_through_non_actionable_winner_before_mode_redeci
     assert era._global_preflight_block_status(rejected.reason) == "CANDIDATE_BLOCKED"
 
 
-def test_global_preflight_falls_through_sub_band_maker_winner(monkeypatch):
+def test_global_preflight_falls_through_sub_band_maker_winner():
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
     curve = ExecutableCostCurve(
@@ -10038,8 +10038,6 @@ def test_global_preflight_falls_through_sub_band_maker_winner(monkeypatch):
             shares=Decimal("340"),
         ),
     )
-    monkeypatch.setattr(era, "_fresh_rest_then_cross_mode", lambda **_kwargs: "MAKER")
-
     rejected = era._global_preflight_entry_jit_receipt(
         event,
         receipt,
@@ -10056,8 +10054,37 @@ def test_global_preflight_falls_through_sub_band_maker_winner(monkeypatch):
 
     assert rejected.proof_accepted is False
     assert rejected.side_effect_status == "NO_SUBMIT"
-    assert rejected.reason.endswith("submit band: price=0.036")
+    assert rejected.reason == (
+        "GLOBAL_PREFLIGHT_CANDIDATE_NOT_ACTIONABLE:"
+        "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:"
+        "fresh_mode=NO_TRADE:fresh_bid=0.035:fresh_ask=0.04"
+    )
     assert era._global_preflight_block_status(rejected.reason) == "CANDIDATE_BLOCKED"
+
+
+def test_fresh_mode_preserves_no_trade_for_sub_band_maker_and_taker():
+    at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
+    base_payload = {
+        "q_lcb_5pct": 0.31,
+        "c_fee_adjusted": 0.058,
+        "direction": "buy_yes",
+        "rest_then_cross_policy": "REST_DEFAULT",
+    }
+
+    for actionable_payload in (
+        base_payload,
+        {**base_payload, "event_type": "DAY0_EXTREME_UPDATED"},
+    ):
+        mode = era._fresh_rest_then_cross_mode(
+            actionable_payload=actionable_payload,
+            executable_snapshot=SimpleNamespace(payload={}),
+            fresh_best_bid=0.035,
+            fresh_best_ask=0.04,
+            tick_size=0.001,
+            decision_time=at,
+        )
+
+        assert mode == "NO_TRADE"
 
 
 def test_global_preflight_reuses_provider_observation_without_second_fetch():

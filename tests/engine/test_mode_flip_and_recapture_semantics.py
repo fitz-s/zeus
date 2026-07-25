@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-07-25
 # Authority basis: P0-A/P0-B Milan first-fill safety plus B55 symmetric fresh-mode
 #   redecision through downstream mode-specific certificate walls.
 """Antibodies: P0-A mode-flip abort; P0-B recapture under proof-mode semantics.
@@ -475,9 +475,8 @@ class TestSingleModeAuthorityFreshSide:
 
     def test_escalated_proof_lane_still_respects_fresh_spread_guard(self):
         """The escalated lane subordinates to the FRESH book: a blown spread
-        makes the taker lane inadmissible and the policy rests — the validator
-        then aborts the cross, the correct outcome (never cross a broken book
-        just because the deadline passed)."""
+        makes the taker lane inadmissible and the expired rest cannot be posted
+        identically again. The validator preserves that no-trade result."""
         from types import SimpleNamespace
         from datetime import datetime, timezone
         from src.engine.event_reactor_adapter import _fresh_rest_then_cross_mode
@@ -499,7 +498,7 @@ class TestSingleModeAuthorityFreshSide:
             tick_size=0.01,
             decision_time=datetime(2026, 6, 11, 10, 0, tzinfo=timezone.utc),
         )
-        assert mode == "MAKER"
+        assert mode == "NO_TRADE"
 
     def test_global_current_escalation_crosses_ask_only_book(self, monkeypatch):
         """The terminal global objective outranks an absent resale bid."""

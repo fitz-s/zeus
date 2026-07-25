@@ -11058,6 +11058,19 @@ def _global_preflight_candidate_mode_receipt(
             tick_size=float(curve.min_tick),
             decision_time=checked_at_utc,
         )
+        if fresh_mode == "NO_TRADE":
+            return dataclass_replace(
+                receipt,
+                submitted=False,
+                side_effect_status="NO_SUBMIT",
+                reason=(
+                    "GLOBAL_PREFLIGHT_CANDIDATE_NOT_ACTIONABLE:"
+                    "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:"
+                    "fresh_mode=NO_TRADE:"
+                    f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
+                ),
+                proof_accepted=False,
+            )
         order_mode = _validate_final_order_mode_or_abort(
             proof_mode=proof_mode,
             fresh_mode=fresh_mode,
@@ -15583,17 +15596,19 @@ def _fresh_rest_then_cross_mode(
     the fresh taker lane is inadmissible (spread guard), the policy rests and
     the validator aborts the cross — the correct outcome.
     ``unexpired_family_rest`` stays False: the HOLD lane yields chosen_ev=-inf
-    at proof time and never reaches submit. Missing fresh inputs degrade to
-    MAKER (the conservative resting default), matching the policy's own
-    unknown-horizon behavior.
+    at proof time and never reaches submit. A fresh policy result with no
+    executable maker or taker preserves that action-space truth as
+    ``NO_TRADE``; it must not be compressed into ``MAKER`` and deferred to a
+    downstream price failsafe. Missing fresh inputs still degrade to MAKER (the
+    conservative resting default), matching the policy's unknown-horizon
+    behavior.
     """
     from src.strategy.live_inference.mode_consistent_ev import (
         POLICY_TAKER_ESCALATED_AFTER_REST,
         select_rest_then_cross_mode,
     )
 
-    if _day0_maker_only_required(actionable_payload):
-        return "MAKER"
+    day0_maker_only = _day0_maker_only_required(actionable_payload)
 
     proof_policy = str(actionable_payload.get("rest_then_cross_policy") or "").strip()
     escalated_after_rest = proof_policy == POLICY_TAKER_ESCALATED_AFTER_REST
@@ -15627,7 +15642,12 @@ def _fresh_rest_then_cross_mode(
         # its real maker window, absence of a resale bid cannot invalidate that
         # settlement-held objective.  A present-but-wide two-sided book still
         # flows through the ordinary spread guard below.
-        return "TAKER"
+        try:
+            assert_live_order_unit_price(fresh_best_ask)
+        except (TypeError, ValueError):
+            pass
+        else:
+            return "TAKER"
     mode_ev = select_rest_then_cross_mode(
         q_lcb=float(q_lcb),
         taker_all_in_cost=taker_all_in,
@@ -15640,7 +15660,21 @@ def _fresh_rest_then_cross_mode(
         unexpired_family_rest=False,
         escalated_after_rest=escalated_after_rest,
     )
+    policy = str(getattr(mode_ev, "policy", "") or "").strip().upper()
+    chosen_ev = _optional_float(getattr(mode_ev, "chosen_ev", None))
+    if (
+        policy == "MAKER_TAKER_FORBIDDEN"
+        or chosen_ev is None
+        or not math.isfinite(chosen_ev)
+    ):
+        return "NO_TRADE"
     chosen = str(getattr(mode_ev, "chosen_mode", "") or "").strip().upper()
+    if day0_maker_only:
+        try:
+            assert_live_order_unit_price(getattr(mode_ev, "maker_limit_price", None))
+        except (TypeError, ValueError):
+            return "NO_TRADE"
+        return "MAKER"
     return chosen if chosen in {"MAKER", "TAKER"} else "MAKER"
 
 
@@ -15663,7 +15697,7 @@ def _validate_final_order_mode_or_abort(
     * proof_mode present and EQUAL to fresh_mode  -> return proof_mode.
     * either valid mode changes to the other      -> return fresh_mode; downstream
       mode-specific quality, pre-submit, and executor certificates must still pass.
-    * either mode is MISSING / unknown            -> FAIL CLOSED: raise.
+    * fresh mode is NO_TRADE / missing / unknown  -> FAIL CLOSED: raise.
     """
     _proof = str(proof_mode or "").strip().upper() or None
     _fresh = str(fresh_mode or "").strip().upper() or None
