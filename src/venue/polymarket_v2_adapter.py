@@ -1232,23 +1232,57 @@ class PolymarketV2Adapter:
     def _get_positions_from_data_api(self) -> list[PositionFact]:
         if not self.funder_address:
             raise V2ReadUnavailable("funder_address is required for data-api position enumeration")
-        query = urllib.parse.urlencode(
-            {"user": self.funder_address, "sizeThreshold": "0.01"}
-        )
-        request = urllib.request.Request(
-            f"{POLYMARKET_DATA_API_BASE}/positions?{query}",
-            headers={"user-agent": "zeus-readonly/1.0"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self._network_timeout(15.0)) as response:
-                decoded = json.loads(response.read())
-        except Exception as exc:
-            raise V2ReadUnavailable(f"data-api position enumeration failed: {exc}") from exc
-        if isinstance(decoded, dict):
-            decoded = decoded.get("data", []) or []
-        if not isinstance(decoded, list):
-            raise V2ReadUnavailable("data-api position enumeration returned non-list payload")
-        return [PositionFact(raw=dict(item)) for item in decoded if isinstance(item, dict)]
+        page_size = 500
+        max_offset = 10_000
+        offset = 0
+        positions: list[PositionFact] = []
+        seen_assets: set[str] = set()
+        while True:
+            query = urllib.parse.urlencode(
+                {
+                    "user": self.funder_address,
+                    "sizeThreshold": "0.01",
+                    "limit": page_size,
+                    "offset": offset,
+                    "sortBy": "TOKENS",
+                    "sortDirection": "DESC",
+                }
+            )
+            request = urllib.request.Request(
+                f"{POLYMARKET_DATA_API_BASE}/positions?{query}",
+                headers={"user-agent": "zeus-readonly/1.0"},
+            )
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=self._network_timeout(15.0),
+                ) as response:
+                    decoded = json.loads(response.read())
+            except Exception as exc:
+                raise V2ReadUnavailable(
+                    f"data-api position enumeration failed: {exc}"
+                ) from exc
+            if isinstance(decoded, dict):
+                decoded = decoded.get("data", []) or []
+            if not isinstance(decoded, list):
+                raise V2ReadUnavailable(
+                    "data-api position enumeration returned non-list payload"
+                )
+            for item in decoded:
+                if not isinstance(item, dict):
+                    continue
+                asset = str(item.get("asset") or item.get("token_id") or "")
+                if not asset or asset in seen_assets:
+                    continue
+                seen_assets.add(asset)
+                positions.append(PositionFact(raw=dict(item)))
+            if len(decoded) < page_size:
+                return positions
+            offset += page_size
+            if offset > max_offset:
+                raise V2ReadUnavailable(
+                    "data-api position pagination exceeded documented offset"
+                )
 
     def get_pusd_balance_micro(self) -> int:
         """Return pUSD wallet balance without touching local trade-state DBs."""

@@ -1,4 +1,6 @@
-# Lifecycle: created=2026-07-18; last_reviewed=2026-07-22; last_reused=2026-07-22
+# Lifecycle: created=2026-07-18; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Created: 2026-07-18
+# Last reused/audited: 2026-07-24
 # Authority basis: live Polymarket HTTP attempt governance and first-principles capital-preservation task
 
 from __future__ import annotations
@@ -687,3 +689,54 @@ def test_public_client_and_gamma_scan_use_shared_governor(
         "https://data-api.polymarket.com/positions",
         "https://gamma-api.polymarket.com/events",
     ]
+
+
+def test_position_enumeration_reads_beyond_data_api_default_page(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from src.data import polymarket_client as client_module
+
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json")
+    offsets: list[str] = []
+
+    def get(url: str, **kwargs: Any) -> httpx.Response:
+        params = kwargs["params"]
+        offsets.append(params["offset"])
+        offset = int(params["offset"])
+        page = [
+            {
+                "asset": f"token-{index}",
+                "size": 5,
+                "avgPrice": 0.5,
+            }
+            for index in range(offset, offset + 500)
+        ]
+        if offset:
+            page = [
+                {
+                    "asset": "held-token-after-default-page",
+                    "size": 5,
+                    "avgPrice": 0.79,
+                }
+            ]
+        return httpx.Response(
+            200,
+            json=page,
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(client_module, "polymarket_request_governor", governor)
+    monkeypatch.setattr(client_module.httpx, "get", get)
+    monkeypatch.setattr(
+        client_module,
+        "_resolve_credentials",
+        lambda: {"funder_address": "wallet"},
+    )
+
+    client = object.__new__(client_module.PolymarketClient)
+    positions = client.get_positions_from_api()
+
+    assert positions is not None
+    assert len(positions) == 501
+    assert positions[-1]["token_id"] == "held-token-after-default-page"
+    assert offsets == ["0", "500"]

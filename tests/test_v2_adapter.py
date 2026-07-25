@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-24; last_reused=2026-07-24
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-07-24
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
@@ -733,6 +733,57 @@ def test_v2_adapter_passes_configured_network_timeout_to_sdk_factory(tmp_path):
 
     assert adapter._sdk_client() is not None
     assert captured["network_timeout_seconds"] == 0.75
+
+
+def test_v2_data_api_position_fallback_reads_all_pages(tmp_path, monkeypatch):
+    import json
+    import urllib.parse
+
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    offsets = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    def urlopen(request, **_kwargs):
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)
+        offset = int(query["offset"][0])
+        offsets.append(offset)
+        page = [
+            {"asset": f"token-{index}", "size": 5}
+            for index in range(offset, offset + 500)
+        ]
+        if offset:
+            page = [{"asset": "held-token-after-default-page", "size": 5}]
+        return Response(page)
+
+    monkeypatch.setattr(adapter_module.urllib.request, "urlopen", urlopen)
+    adapter = adapter_module.PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: object(),
+    )
+
+    positions = adapter._get_positions_from_data_api()
+
+    assert len(positions) == 501
+    assert positions[-1].raw["asset"] == "held-token-after-default-page"
+    assert offsets == [0, 500]
 
 
 def test_pusd_collateral_payload_does_not_enumerate_ctf_positions(tmp_path):

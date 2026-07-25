@@ -4,6 +4,24 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-24 Complete venue-position enumeration
+
+The live loss audit found a confirmed 5-share Seoul fill whose exact Polygon
+CTF `balanceOf` remained positive while both chain reconciliation and the
+global held-position SELL auction treated it as absent. Polymarket's Data API
+documents `/positions` with a default `limit=100`; both Zeus enumeration
+callers set `sizeThreshold` but omitted `limit` and `offset`. The funded wallet
+currently has 117 returned positions, so the default page silently omitted the
+held token and prevented an otherwise executable statistical exit.
+
+Both Data API enumeration paths now request the maximum documented page size
+and continue by offset until a short page proves completion. Repeated assets
+are deduplicated, and reaching the documented offset ceiling without a short
+page fails closed instead of treating a prefix as chain absence. This repairs
+`Chain/CLOB truth -> reconciliation -> current wealth -> global SELL auction`;
+it changes neither probability authority nor exit economics and adds no
+per-token RPC fan-out.
+
 ## 2026-07-24 Venue-outcome probability feedback
 
 The July 22–24 loss reconstruction found a control-loop split: Gamma had

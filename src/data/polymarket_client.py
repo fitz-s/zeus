@@ -1071,18 +1071,46 @@ class PolymarketClient:
             raise RuntimeError("Missing funder_address for position fetch")
 
         url = f"{DATA_API_BASE}/positions"
-        params = {"user": address, "sizeThreshold": "0.01"}
-        resp = polymarket_request_governor.request(
-            lambda: httpx.get(url, params=params, timeout=15.0),
-            "GET",
-            url,
-            params=params,
-            priority=RequestPriority.ACCOUNT_RECOVERY,
-        )
-        resp.raise_for_status()
-        raw = resp.json()
-        if isinstance(raw, dict):
-            raw = raw.get("data", []) or []
+        page_size = 500
+        max_offset = 10_000
+        offset = 0
+        raw: list[dict] = []
+        seen_assets: set[str] = set()
+        while True:
+            params = {
+                "user": address,
+                "sizeThreshold": "0.01",
+                "limit": str(page_size),
+                "offset": str(offset),
+                "sortBy": "TOKENS",
+                "sortDirection": "DESC",
+            }
+            resp = polymarket_request_governor.request(
+                lambda params=params: httpx.get(url, params=params, timeout=15.0),
+                "GET",
+                url,
+                params=params,
+                priority=RequestPriority.ACCOUNT_RECOVERY,
+            )
+            resp.raise_for_status()
+            page = resp.json()
+            if isinstance(page, dict):
+                page = page.get("data", []) or []
+            if not isinstance(page, list):
+                raise RuntimeError("Position API returned a non-list page")
+            for item in page:
+                if not isinstance(item, dict):
+                    continue
+                asset = str(item.get("asset") or item.get("token_id") or "")
+                if not asset or asset in seen_assets:
+                    continue
+                seen_assets.add(asset)
+                raw.append(item)
+            if len(page) < page_size:
+                break
+            offset += page_size
+            if offset > max_offset:
+                raise RuntimeError("Position API pagination exceeded documented offset")
 
         positions: list[dict] = []
         for item in raw:
