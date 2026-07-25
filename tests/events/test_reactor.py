@@ -685,6 +685,92 @@ def test_targeted_forecast_wake_ignores_disjoint_family_revision(monkeypatch):
     assert reads == [frozenset({current.wake_id})]
 
 
+def test_reactor_wake_oldest_joint_input_prevents_forecast_starvation(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="forecast-old",
+        published_at=datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc),
+        forecast_families=(("Paris", "2026-07-26", "high"),),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="forecast-current",
+        published_at=datetime(2026, 7, 25, 12, 0, 1, tzinfo=timezone.utc),
+        forecast_families=(("London", "2026-07-26", "high"),),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="price-newer",
+        published_at=datetime(2026, 7, 25, 12, 0, 2, tzinfo=timezone.utc),
+    )
+
+    selected = reactor_wake.read_reactor_wake(path=path)
+
+    assert selected is not None
+    assert selected.wake_id == "forecast-current"
+
+
+def test_reactor_wake_preserves_price_fast_path_when_price_is_older(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="price-old",
+        published_at=datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="forecast-newer",
+        published_at=datetime(2026, 7, 25, 12, 0, 1, tzinfo=timezone.utc),
+        forecast_families=(("Paris", "2026-07-26", "high"),),
+    )
+
+    selected = reactor_wake.read_reactor_wake(path=path)
+
+    assert selected is not None
+    assert selected.wake_id == "price-old"
+
+
+def test_reactor_wake_day0_still_preempts_older_joint_inputs(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="forecast-old",
+        published_at=datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc),
+        forecast_families=(("Paris", "2026-07-26", "high"),),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=path,
+        wake_id="day0-new",
+        published_at=datetime(2026, 7, 25, 12, 0, 1, tzinfo=timezone.utc),
+    )
+
+    selected = reactor_wake.read_reactor_wake(path=path)
+
+    assert selected is not None
+    assert selected.wake_id == "day0-new"
+
+
 def test_targeted_forecast_wake_ignores_only_older_remaining_backlog(monkeypatch):
     from src.events.reactor import _reactor_wake_cancellation_probe
     from src.runtime import reactor_wake

@@ -321,30 +321,31 @@ def read_reactor_wake(
 ) -> ReactorWake | None:
     """Read the queued fact with the shortest alpha clock first.
 
-    Day0 observations and executable-book changes can reverse value in
-    milliseconds, while a fresh forecast usually has a longer but still finite
-    reaction window. Maintenance and other ordinary hints cannot stand ahead
-    of those facts. Forecast hints carry incremental family scopes; selecting
-    the newest hint first does not lose older scopes because same-reason wakes
-    are coalesced and acknowledgement remains exact.
+    Day0 observations can reverse value in milliseconds and always preempt.
+    Price and probability are joint decision inputs, so after Day0 the oldest
+    unconsumed material input gets one turn. This preserves the price fast path
+    without letting a continuous book stream starve probability indefinitely.
+    Forecast hints carry incremental family scopes; selecting the newest hint
+    does not lose older scopes because same-reason wakes are coalesced and
+    acknowledgement remains exact.
     """
 
     excluded = {str(wake_id) for wake_id in exclude_wake_ids}
     queued = [
         item for item in _queued_wakes(path) if item[1].wake_id not in excluded
     ]
-    priority_reasons = (
-        "day0_extreme_event_committed",
-        "market_price_advanced",
-    )
-    for reason in priority_reasons:
-        reason_wakes = reversed(queued) if reason == "day0_extreme_event_committed" else queued
-        for _queue_file, wake in reason_wakes:
-            if wake.reason == reason:
-                return wake
     for _queue_file, wake in reversed(queued):
-        if wake.reason == "forecast_posterior_advanced":
+        if wake.reason == "day0_extreme_event_committed":
             return wake
+    for _queue_file, wake in queued:
+        if wake.reason == "market_price_advanced":
+            return wake
+        if wake.reason == "forecast_posterior_advanced":
+            return next(
+                candidate
+                for _candidate_file, candidate in reversed(queued)
+                if candidate.reason == "forecast_posterior_advanced"
+            )
     for _queue_file, wake in queued:
         return wake
     legacy = _read_reactor_wake_path(_wake_path(path))
