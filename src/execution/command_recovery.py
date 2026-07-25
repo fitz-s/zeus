@@ -259,6 +259,11 @@ _TERMINAL_ENTRY_NO_FILL_EVENT_TYPES = frozenset({
     "REVIEW_CLEARED_NO_VENUE_EXPOSURE",
     "SUBMIT_REJECTED",
 })
+_SETTLEMENT_ABSORBED_ENTRY_COMMAND_STATES = frozenset({
+    CommandState.FILLED.value,
+    CommandState.CANCELLED.value,
+    CommandState.EXPIRED.value,
+})
 
 
 def _order_fact_proof_rank_sql(alias: str) -> str:
@@ -7918,6 +7923,7 @@ def reconcile_terminal_entry_exposure_obligations(
     if not all(_table_exists(conn, table) for table in required):
         return summary
     projection_gate_sql = "0"
+    settlement_absorption_sql = "0"
     if _table_exists(conn, "position_current") and _table_exists(conn, "position_events"):
         projection_gate_sql = """
                EXISTS (
@@ -7953,6 +7959,23 @@ def reconcile_terminal_entry_exposure_obligations(
                                          LOWER(command.venue_order_id)
                                  )
                              )
+                      )
+               )
+        """
+        settlement_absorption_sql = """
+               EXISTS (
+                   SELECT 1
+                     FROM position_current position
+                    WHERE position.position_id = command.position_id
+                      AND position.phase = 'settled'
+                      AND position.settlement_price IN (0.0, 1.0)
+                      AND TRIM(COALESCE(position.settled_at, '')) <> ''
+                      AND EXISTS (
+                          SELECT 1
+                            FROM position_events event
+                           WHERE event.position_id = position.position_id
+                             AND event.event_type = 'SETTLED'
+                             AND event.phase_after = 'settled'
                       )
                )
         """
@@ -8016,7 +8039,8 @@ def reconcile_terminal_entry_exposure_obligations(
                       AND COALESCE(fact.shares, 0) > 0
                       AND COALESCE(fact.fill_price, 0) > 0
                ) AS positive_execution_economics,
-               {projection_gate_sql} AS positive_command_bound_position_projection
+               {projection_gate_sql} AS positive_command_bound_position_projection,
+               {settlement_absorption_sql} AS settled_position_absorbed
           FROM entry_exposure_obligations obligation
           JOIN venue_commands command
             ON command.command_id = obligation.command_id
@@ -8104,7 +8128,17 @@ def reconcile_terminal_entry_exposure_obligations(
                 row.get("positive_command_bound_position_projection")
             ),
         )
-        if not (terminal_fill or terminal_no_fill or terminal_partial):
+        terminal_settlement = (
+            state in _SETTLEMENT_ABSORBED_ENTRY_COMMAND_STATES
+            and positive_economics
+            and bool(row.get("settled_position_absorbed"))
+        )
+        if not (
+            terminal_fill
+            or terminal_no_fill
+            or terminal_partial
+            or terminal_settlement
+        ):
             summary["stayed"] += 1
             continue
         try:

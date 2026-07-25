@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-22; last_reused=2026-07-24
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-25; last_reused=2026-07-25
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-25
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -1837,6 +1837,66 @@ def test_terminal_entry_obligation_releases_only_on_authoritative_fill(conn):
     }
 
 
+def test_terminal_entry_obligation_releases_settlement_absorbed_fill_only(conn):
+    from src.execution.command_recovery import (
+        reconcile_terminal_entry_exposure_obligations,
+    )
+
+    cases = (
+        ("settled-proven", 1.0, True),
+        ("settled-missing-event", 1.0, False),
+        ("settled-nonbinary", 0.5, True),
+    )
+    for suffix, settlement_price, with_event in cases:
+        command_id = f"cmd-obligation-{suffix}"
+        position_id = f"pos-obligation-{suffix}"
+        token_id = f"tok-obligation-{suffix}"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            token_id=token_id,
+        )
+        _open_test_entry_obligation(conn, command_id)
+        _append_test_entry_fill(conn, command_id, with_trade=True)
+        order_id = f"order-{command_id}"
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=token_id,
+        )
+        _append_test_filled_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+        )
+        _settle_test_position(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            settlement_price=settlement_price,
+            with_event=with_event,
+        )
+
+    assert reconcile_terminal_entry_exposure_obligations(conn) == {
+        "scanned": 3,
+        "advanced": 1,
+        "stayed": 2,
+        "errors": 0,
+    }
+    statuses = dict(
+        conn.execute(
+            "SELECT command_id, status FROM entry_exposure_obligations"
+        ).fetchall()
+    )
+    assert statuses["cmd-obligation-settled-proven"] == "RESOLVED"
+    assert statuses["cmd-obligation-settled-missing-event"] == "OPEN"
+    assert statuses["cmd-obligation-settled-nonbinary"] == "OPEN"
+
+
 def test_terminal_entry_obligation_releases_proven_no_fill_but_not_conflict(conn):
     from src.execution.command_recovery import (
         reconcile_terminal_entry_exposure_obligations,
@@ -2917,6 +2977,53 @@ def _append_test_filled_entry_projection(
             }
         ],
         projection,
+    )
+
+
+def _settle_test_position(
+    conn,
+    *,
+    position_id: str,
+    command_id: str,
+    settlement_price: float = 1.0,
+    with_event: bool = True,
+) -> None:
+    if with_event:
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                decision_id, snapshot_id, order_id, command_id, caused_by,
+                idempotency_key, venue_status, source_module, env, payload_json
+            )
+            SELECT
+                ?, ?, 1, COALESCE(MAX(sequence_no), 0) + 1, 'SETTLED',
+                '2026-07-15T00:00:00+00:00', 'active', 'settled',
+                'opening_inertia', 'dec-001', 'snap-pos-001', NULL, ?, NULL,
+                ?, 'SETTLED', 'tests.test_command_recovery', 'live', ?
+              FROM position_events
+             WHERE position_id = ?
+            """,
+            (
+                f"{position_id}:settled",
+                position_id,
+                command_id,
+                f"{position_id}:settled",
+                json.dumps({"settlement_price": settlement_price}),
+                position_id,
+            ),
+        )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled',
+               settlement_price = ?,
+               settled_at = '2026-07-15T00:00:00+00:00',
+               updated_at = '2026-07-15T00:00:00+00:00'
+         WHERE position_id = ?
+        """,
+        (settlement_price, position_id),
     )
 
 
