@@ -3048,7 +3048,12 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
     }
     if not all(_table_exists(conn, table) for table in required):
         return []
-    sql = "WITH " + _canonical_trade_fact_cte() + """,
+    sql = (
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ",\n"
+        + _economic_trade_fact_cte()
+        + """,
         entry_fill AS (
             SELECT fact.command_id,
                    COUNT(*) AS fill_fact_count,
@@ -3060,7 +3065,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                    MAX(fact.source) AS fill_source,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.trade_fact_id) AS trade_fact_id
-              FROM canonical_trade_fact fact
+              FROM economic_trade_fact fact
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
@@ -3121,7 +3126,29 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                     AND COALESCE(pc.fill_authority, '') IN ('', 'none')
                 )
                 OR (
-                    cmd.state = 'PARTIAL'
+                    (
+                        cmd.state = 'PARTIAL'
+                        OR (
+                            cmd.state = 'FILLED'
+                            AND pc.fill_authority = 'venue_position_observed'
+                            AND pc.chain_state = 'synced'
+                            AND ABS(
+                                COALESCE(pc.shares, 0)
+                                - entry_fill.filled_size
+                            ) <= 0.001
+                            AND ABS(
+                                COALESCE(pc.chain_shares, 0)
+                                - entry_fill.filled_size
+                            ) <= 0.001
+                            AND ABS(
+                                COALESCE(pc.chain_cost_basis_usd, 0)
+                                - (
+                                    entry_fill.filled_size
+                                    * entry_fill.fill_price
+                                )
+                            ) <= 0.02
+                        )
+                    )
                     AND pc.phase IN ('active', 'day0_window')
                     AND COALESCE(pc.order_id, '') != ''
                     AND lower(pc.order_id) != lower(cmd.venue_order_id)
@@ -3154,6 +3181,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
            )
          ORDER BY entry_fill.observed_at, cmd.command_id
         """
+    )
     rows = conn.execute(
         sql
     ).fetchall()
@@ -3165,20 +3193,32 @@ def _filled_entry_position_link_repair_candidates(conn: sqlite3.Connection) -> l
         "venue_commands",
         "venue_trade_facts",
         "position_current",
+        "position_events",
+        "execution_fact",
         "venue_submission_envelopes",
         "executable_market_snapshots",
     }
     if not all(_table_exists(conn, table) for table in required):
         return []
-    sql = "WITH " + _canonical_trade_fact_cte() + """,
+    sql = (
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ",\n"
+        + _economic_trade_fact_cte()
+        + """,
         entry_fill AS (
             SELECT fact.command_id,
                    COUNT(*) AS fill_fact_count,
                    SUM(CAST(fact.filled_size AS REAL)) AS filled_size,
+                   SUM(
+                       CAST(fact.filled_size AS REAL)
+                       * CAST(fact.fill_price AS REAL)
+                   ) AS filled_cost,
                    MAX(fact.observed_at) AS observed_at
-              FROM canonical_trade_fact fact
+              FROM economic_trade_fact fact
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
              GROUP BY fact.command_id
         )
         SELECT cmd.command_id,
@@ -3186,11 +3226,41 @@ def _filled_entry_position_link_repair_candidates(conn: sqlite3.Connection) -> l
                cmd.venue_order_id,
                cmd.token_id,
                cmd.state,
+               cmd.size,
                entry_fill.fill_fact_count,
                entry_fill.filled_size,
+               entry_fill.filled_cost,
                entry_fill.observed_at AS fill_observed_at,
                existing_pc.position_id AS canonical_position_id,
-               existing_pc.phase AS canonical_phase
+               existing_pc.phase AS canonical_phase,
+               existing_pc.order_id AS canonical_order_id,
+               existing_pc.fill_authority AS canonical_fill_authority,
+               existing_pc.chain_state AS canonical_chain_state,
+               existing_pc.shares AS canonical_shares,
+               existing_pc.chain_shares AS canonical_chain_shares,
+               existing_pc.chain_cost_basis_usd AS canonical_chain_cost,
+               existing_pc.condition_id AS canonical_condition_id,
+               EXISTS (
+                   SELECT 1
+                     FROM position_events event
+                    WHERE event.position_id = existing_pc.position_id
+                      AND event.event_type = 'ENTRY_ORDER_FILLED'
+               ) AS canonical_has_fill_event,
+               EXISTS (
+                   SELECT 1
+                     FROM execution_fact execution
+                    WHERE execution.position_id = existing_pc.position_id
+                      AND execution.order_role = 'entry'
+                      AND execution.voided_at IS NULL
+                      AND COALESCE(execution.shares, 0) > 0
+                      AND COALESCE(execution.fill_price, 0) > 0
+               ) AS canonical_has_execution_fill,
+               COALESCE(
+                   env.condition_id,
+                   snap.condition_id,
+                   cmd.market_id,
+                   ''
+               ) AS command_condition_id
           FROM venue_commands cmd
           JOIN entry_fill
             ON entry_fill.command_id = cmd.command_id
@@ -3202,16 +3272,13 @@ def _filled_entry_position_link_repair_candidates(conn: sqlite3.Connection) -> l
             ON snap.snapshot_id = cmd.snapshot_id
           JOIN position_current existing_pc
             ON existing_pc.position_id != cmd.position_id
-           AND COALESCE(existing_pc.order_id, '') != ''
-           AND lower(existing_pc.order_id) = lower(cmd.venue_order_id)
            AND (
                COALESCE(existing_pc.token_id, '') = cmd.token_id
                OR COALESCE(existing_pc.no_token_id, '') = cmd.token_id
-               OR (
-                   COALESCE(existing_pc.condition_id, '') != ''
-                   AND COALESCE(existing_pc.condition_id, '') = COALESCE(env.condition_id, snap.condition_id, cmd.market_id, '')
-               )
            )
+           AND COALESCE(existing_pc.condition_id, '') != ''
+           AND COALESCE(existing_pc.condition_id, '') =
+               COALESCE(env.condition_id, snap.condition_id, cmd.market_id, '')
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
            AND cmd.state IN ('FILLED', 'PARTIAL')
@@ -3220,9 +3287,22 @@ def _filled_entry_position_link_repair_candidates(conn: sqlite3.Connection) -> l
            AND pc.position_id IS NULL
          ORDER BY entry_fill.observed_at, cmd.command_id, existing_pc.updated_at DESC
         """
+    )
     rows = [_dict_row(row) for row in conn.execute(sql).fetchall()]
     by_command: dict[str, list[dict]] = {}
     for row in rows:
+        same_order = (
+            str(row.get("canonical_order_id") or "").lower()
+            == str(row.get("venue_order_id") or "").lower()
+        )
+        chain_absorbed = _chain_observed_fill_absorption_matches(row)
+        if not same_order and not chain_absorbed:
+            continue
+        row["position_link_reason"] = (
+            "filled_entry_existing_order_token_projection"
+            if same_order
+            else "filled_entry_chain_observed_economics_absorbed"
+        )
         by_command.setdefault(str(row.get("command_id") or ""), []).append(row)
     candidates: list[dict] = []
     for command_id, matches in by_command.items():
@@ -3237,6 +3317,49 @@ def _filled_entry_position_link_repair_candidates(conn: sqlite3.Connection) -> l
             first["canonical_position_id"] = next(iter(unique_positions))
         candidates.append(first)
     return candidates
+
+
+def _chain_observed_fill_absorption_matches(candidate: Mapping[str, object]) -> bool:
+    """Prove one filled command is already the complete chain-observed exposure."""
+
+    if (
+        str(candidate.get("state") or "").upper() != CommandState.FILLED.value
+        or str(candidate.get("canonical_phase") or "")
+        not in {"active", "day0_window", "pending_exit"}
+        or str(candidate.get("canonical_fill_authority") or "")
+        != "venue_position_observed"
+        or str(candidate.get("canonical_chain_state") or "") != "synced"
+        or bool(candidate.get("canonical_has_fill_event"))
+        or bool(candidate.get("canonical_has_execution_fill"))
+        or str(candidate.get("canonical_condition_id") or "")
+        != str(candidate.get("command_condition_id") or "")
+    ):
+        return False
+    filled = _positive_decimal_or_none(candidate.get("filled_size"))
+    filled_cost = _positive_decimal_or_none(candidate.get("filled_cost"))
+    command_size = _positive_decimal_or_none(candidate.get("size"))
+    shares = _positive_decimal_or_none(candidate.get("canonical_shares"))
+    chain_shares = _positive_decimal_or_none(
+        candidate.get("canonical_chain_shares")
+    )
+    chain_cost = _positive_decimal_or_none(candidate.get("canonical_chain_cost"))
+    if None in (
+        filled,
+        filled_cost,
+        command_size,
+        shares,
+        chain_shares,
+        chain_cost,
+    ):
+        return False
+    quantity_tolerance = Decimal("0.001")
+    cost_tolerance = Decimal("0.02")
+    return (
+        abs(filled - command_size) <= quantity_tolerance
+        and abs(shares - filled) <= quantity_tolerance
+        and abs(chain_shares - filled) <= quantity_tolerance
+        and abs(chain_cost - filled_cost) <= cost_tolerance
+    )
 
 
 def _latest_unprojected_live_entry_candidates(conn: sqlite3.Connection) -> list[dict]:
@@ -4550,6 +4673,20 @@ def _append_filled_entry_projection_repair(
             """,
             (position_id, command_id, venue_order_id),
         ).fetchone()
+        if existing_fill is None:
+            _log_filled_entry_trade_candidate_execution_fact(
+                conn,
+                candidate={
+                    **candidate,
+                    "cmd_state": candidate.get("state"),
+                    "cmd_size": candidate.get("size"),
+                    "cmd_price": candidate.get("price"),
+                    "cmd_created_at": candidate.get("created_at"),
+                    "filled_size": candidate.get("fill_filled_size"),
+                    "trade_fact_id": candidate.get("source_trade_fact_id"),
+                    "execution_filled_at": candidate.get("fill_observed_at"),
+                },
+            )
         _append_matched_order_fill_projection(
             conn,
             command=candidate,
@@ -6876,7 +7013,10 @@ def reconcile_filled_entry_position_link_repairs(conn: sqlite3.Connection) -> di
                 command_id=command_id,
                 canonical_position_id=canonical_position_id,
                 occurred_at=str(candidate.get("fill_observed_at") or _now_iso()),
-                reason="filled_entry_existing_order_token_projection",
+                reason=str(
+                    candidate.get("position_link_reason")
+                    or "filled_entry_existing_order_token_projection"
+                ),
             )
             conn.execute("RELEASE SAVEPOINT " + sp_name)
             if advanced:
@@ -21277,6 +21417,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "live_entry_projection_repair",
             reconcile_live_entry_projection_repairs,
             "live_entry_projection_repair",
+        )
+        _db_pass(
+            "filled_entry_position_link_repair",
+            reconcile_filled_entry_position_link_repairs,
+            "filled_entry_position_link_repair",
         )
         _client_pass(
             "filled_entry_projection_repair",

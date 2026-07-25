@@ -3554,6 +3554,100 @@ def repair_command_position_link_if_orphaned(
                 "that already points at an existing position_current row"
             )
 
+        execution_rows = conn.execute(
+            """
+            SELECT intent_id, position_id, order_role
+              FROM execution_fact
+             WHERE command_id = ?
+             ORDER BY intent_id
+            """,
+            (command_id,),
+        ).fetchall()
+        foreign_execution_rows = [
+            row
+            for row in execution_rows
+            if str(row["position_id"] or "")
+            not in {current_position_id, canonical_position_id}
+        ]
+        if foreign_execution_rows:
+            raise ValueError(
+                "command position-link repair found execution facts owned by "
+                "an unrelated position"
+            )
+        orphan_execution_rows = [
+            row
+            for row in execution_rows
+            if str(row["position_id"] or "") == current_position_id
+        ]
+        canonical_execution_rows = [
+            row
+            for row in execution_rows
+            if str(row["position_id"] or "") == canonical_position_id
+        ]
+        if len(orphan_execution_rows) > 1 or (
+            orphan_execution_rows and canonical_execution_rows
+        ):
+            raise ValueError(
+                "command position-link repair requires one command-deduped "
+                "execution fact"
+            )
+        rehomed_execution_intent: str | None = None
+        if orphan_execution_rows:
+            execution = orphan_execution_rows[0]
+            if str(execution["order_role"] or "") != "entry":
+                raise ValueError(
+                    "filled entry position-link repair found non-entry execution fact"
+                )
+            baseline_intent = f"{canonical_position_id}:entry"
+            if reason == "filled_entry_chain_observed_economics_absorbed":
+                rehomed_execution_intent = f"{baseline_intent}:{command_id}"
+            else:
+                baseline = conn.execute(
+                    "SELECT command_id FROM execution_fact WHERE intent_id = ? LIMIT 1",
+                    (baseline_intent,),
+                ).fetchone()
+                rehomed_execution_intent = (
+                    baseline_intent
+                    if baseline is None
+                    or str(baseline["command_id"] or "") == command_id
+                    else f"{baseline_intent}:{command_id}"
+                )
+            collision = conn.execute(
+                """
+                SELECT command_id
+                  FROM execution_fact
+                 WHERE intent_id = ?
+                   AND command_id != ?
+                 LIMIT 1
+                """,
+                (rehomed_execution_intent, command_id),
+            ).fetchone()
+            if collision is not None:
+                raise ValueError(
+                    "command position-link repair execution intent collision"
+                )
+            moved = conn.execute(
+                """
+                UPDATE execution_fact
+                   SET position_id = ?,
+                       intent_id = ?
+                 WHERE command_id = ?
+                   AND position_id = ?
+                   AND intent_id = ?
+                """,
+                (
+                    canonical_position_id,
+                    rehomed_execution_intent,
+                    command_id,
+                    current_position_id,
+                    str(execution["intent_id"] or ""),
+                ),
+            ).rowcount
+            if moved != 1:
+                raise RuntimeError(
+                    "command position-link repair execution-fact CAS failed"
+                )
+
         updated = conn.execute(
             """
             UPDATE venue_commands
@@ -3583,12 +3677,14 @@ def repair_command_position_link_if_orphaned(
                 "canonical_position_id": canonical_position_id,
                 "previous_position_id": current_position_id,
                 "reason": reason,
+                "rehomed_execution_intent": rehomed_execution_intent,
             }
         ),
         payload_json={
             "canonical_position_id": canonical_position_id,
             "previous_position_id": current_position_id,
             "reason": reason,
+            "rehomed_execution_intent": rehomed_execution_intent,
         },
         source="WS_USER",
         observed_at=occurred_at,

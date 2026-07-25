@@ -4,6 +4,39 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-24 Restart fill-identity convergence
+
+The official live restart stopped the complete mesh when restart-preflight
+found a confirmed six-share entry command whose original short position id had
+no projection. Chain reconciliation had already restored the same six shares
+onto an earlier zero-fill position row for the exact token, so naïvely opening
+the command's row would create parallel exposure. The command's append-only
+trade journal also contained two derived EDLI aliases of one venue trade;
+projection recovery aggregated canonical trade ids instead of economic trade
+ids and inflated six shares to eighteen.
+
+Recovery now applies the existing economic-fill identity reducer before any
+entry aggregation. A command may relink to a different-order chain-observed
+row only when one unambiguous same-token, same-condition row has synchronized
+quantity and chain cost equal to the complete command-deduped fill, has no
+prior command-bound fill event or execution fact, and the command is terminal
+FILLED. Any command-bound execution fact still owned by the orphan id is
+rehomed in the same repair transaction and keeps one canonical intent identity.
+The active-row projection then persists or reuses that command-level execution
+provenance before rebuilding the aggregate; the aggregate and synchronized
+chain quantity must converge to the same shares, so the fill is attributed
+without adding exposure a second time. Restart-preflight runs this narrow link
+repair before fill projection. The behavioral antibody reproduces the exact
+zero-fill-row -> chain rescue -> later confirmed-fill shape, including an
+orphan execution fact and recursive EDLI aliases, and requires one six-share
+position, one execution fact, and idempotent replay.
+
+Money path: venue fill truth -> command provenance -> canonical position
+identity -> current exposure -> restart admission. No probability, sizing,
+entry, or exit threshold changes. Rollback is a single hot-fix revert; because
+the preflight remains fail-closed, rollback returns to a safe restart block
+rather than fabricating or duplicating exposure.
+
 ## 2026-07-24 Atomic chain-reappearance economics
 
 The complete-position pagination repair made a previously omitted Seoul

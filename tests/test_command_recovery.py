@@ -11933,6 +11933,196 @@ class TestRecoveryResolutionTable:
         assert "stale-pos-001" in provenance["payload_json"]
         assert "canonical-pos-001" in provenance["payload_json"]
 
+    def test_chain_observed_fill_relinks_without_double_counting_alias_facts(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A chain-rescued fill gains command provenance without a second exposure."""
+        _seed_pending_entry_projection(
+            conn,
+            position_id="canonical-pos-001",
+            command_id="expired-command",
+            order_id="ord-expired",
+            token_id="tok-001",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   direction = 'buy_no',
+                   shares = 6.0,
+                   size_usd = 5.19,
+                   cost_basis_usd = 5.19,
+                   entry_price = 0.865,
+                   chain_state = 'synced',
+                   fill_authority = 'venue_position_observed',
+                   chain_shares = 6.0,
+                   chain_avg_price = 0.87,
+                   chain_cost_basis_usd = 5.22,
+                   order_status = 'filled'
+             WHERE position_id = 'canonical-pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-chain-fill",
+            position_id="orphan-pos-001",
+            market_id="condition-test",
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+            outcome_label="NO",
+            size=6.0,
+            price=0.87,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-chain-fill",
+            venue_order_id="ord-chain-fill",
+        )
+        from src.state.venue_command_repo import append_event, append_trade_fact
+
+        append_event(
+            conn,
+            command_id="cmd-chain-fill",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-chain-fill", "venue_status": "MATCHED"},
+        )
+        source_fact_id = _append_trade_fact(
+            conn,
+            command_id="cmd-chain-fill",
+            order_id="ord-chain-fill",
+            trade_id="trade-chain-fill",
+            state="CONFIRMED",
+            filled_size="6",
+            fill_price="0.87",
+            source="WS_USER",
+        )
+        prior_fact_id = source_fact_id
+        for trade_id in ("edli:trade-chain-fill", "edli:edli:trade-chain-fill"):
+            prior_fact_id = append_trade_fact(
+                conn,
+                trade_id=trade_id,
+                venue_order_id="ord-chain-fill",
+                command_id="cmd-chain-fill",
+                state="CONFIRMED",
+                filled_size="6",
+                fill_price="0.87",
+                source="WS_USER",
+                observed_at="2026-04-26T00:07:00Z",
+                venue_timestamp=None,
+                tx_hash=None,
+                raw_payload_hash=hashlib.sha256(trade_id.encode()).hexdigest(),
+                raw_payload_json={
+                    "raw_fill_payload": {
+                        "source_trade_fact_id": prior_fact_id,
+                    }
+                },
+            )
+
+        from src.state.db import log_execution_fact
+
+        log_execution_fact(
+            conn,
+            intent_id="orphan-pos-001:entry",
+            position_id="orphan-pos-001",
+            decision_id="dec-001",
+            command_id="cmd-chain-fill",
+            order_role="entry",
+            strategy_key="opening_inertia",
+            posted_at="2026-04-26T00:00:00Z",
+            filled_at="2026-04-26T00:06:00Z",
+            submitted_price=0.87,
+            fill_price=0.87,
+            shares=6.0,
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+        )
+
+        from src.execution import command_recovery as recovery
+
+        unprojected = recovery._latest_unprojected_filled_entry_candidates(conn)
+        assert len(unprojected) == 1
+        assert unprojected[0]["fill_fact_count"] == 1
+        assert unprojected[0]["fill_filled_size"] == pytest.approx(6.0)
+
+        link = recovery.reconcile_filled_entry_position_link_repairs(conn)
+        projection = recovery.reconcile_filled_entry_projection_repairs(
+            conn,
+            mock_client,
+        )
+
+        assert link == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert projection == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price,
+                   chain_shares, chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'canonical-pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 6.0,
+            "cost_basis_usd": pytest.approx(5.22),
+            "entry_price": pytest.approx(0.87),
+            "chain_shares": 6.0,
+            "chain_cost_basis_usd": 5.22,
+        }
+        assert conn.execute(
+            "SELECT position_id FROM venue_commands WHERE command_id = 'cmd-chain-fill'"
+        ).fetchone()["position_id"] == "canonical-pos-001"
+        execution = conn.execute(
+            """
+            SELECT intent_id, position_id, command_id, shares, fill_price
+              FROM execution_fact
+             WHERE command_id = 'cmd-chain-fill'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "intent_id": "canonical-pos-001:entry:cmd-chain-fill",
+            "position_id": "canonical-pos-001",
+            "command_id": "cmd-chain-fill",
+            "shares": 6.0,
+            "fill_price": 0.87,
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM execution_fact WHERE command_id = 'cmd-chain-fill'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'canonical-pos-001'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+               AND command_id = 'cmd-chain-fill'
+            """
+        ).fetchone()[0] == 1
+        assert recovery.reconcile_filled_entry_position_link_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert recovery.reconcile_filled_entry_projection_repairs(
+            conn,
+            mock_client,
+        ) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 1
+
     def test_filled_entry_repair_does_not_duplicate_existing_order_token_projection(
         self,
         conn,
