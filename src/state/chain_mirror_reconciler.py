@@ -123,6 +123,8 @@ class ChainPositionFact:
     redeemable: bool
     current_value: float
     side: str
+    avg_price: float = 0.0
+    cost_basis_usd: float = 0.0
     title: str = ""
 
     @classmethod
@@ -134,6 +136,8 @@ class ChainPositionFact:
             redeemable=bool(item.get("redeemable", False)),
             current_value=float(item.get("current_value") or 0.0),
             side=str(item.get("side") or ""),
+            avg_price=float(item.get("avg_price") or 0.0),
+            cost_basis_usd=float(item.get("cost") or 0.0),
             title=str(item.get("title") or ""),
         )
 
@@ -157,6 +161,8 @@ class LocalPositionRow:
     shares: Optional[float]
     fill_authority: str
     strategy_key: str
+    chain_avg_price: Optional[float] = None
+    chain_cost_basis_usd: Optional[float] = None
 
     def held_token_id(self) -> str:
         if self.direction == "buy_no":
@@ -427,6 +433,8 @@ def classify_local_position(
             writes=True,
             details={
                 "chain_size": chain_fact.size,
+                "chain_avg_price": chain_fact.avg_price,
+                "chain_cost_basis_usd": chain_fact.cost_basis_usd,
                 "local_shares": local_shares,
                 "delta": delta,
             },
@@ -491,9 +499,40 @@ def classify_local_position(
             details={
                 "reason": "chain_reappeared_after_review_absence",
                 "chain_size": chain_fact.size,
+                "chain_avg_price": chain_fact.avg_price,
+                "chain_cost_basis_usd": chain_fact.cost_basis_usd,
                 "local_shares": local_shares,
                 "delta": delta,
                 "shares_unchanged": True,
+            },
+        )
+
+    chain_economics_incomplete = (
+        chain_fact.avg_price > 0.0
+        and (
+            row.chain_avg_price is None
+            or row.chain_avg_price <= 0.0
+            or row.chain_cost_basis_usd is None
+            or row.chain_cost_basis_usd <= 0.0
+        )
+    )
+    if row.chain_state != "synced" or chain_economics_incomplete:
+        return MirrorFinding(
+            classification=SIZE_CORRECTED,
+            position_id=row.position_id,
+            asset=held_token,
+            writes=True,
+            details={
+                "reason": "chain_positive_observation_incomplete",
+                "chain_size": chain_fact.size,
+                "chain_avg_price": chain_fact.avg_price,
+                "chain_cost_basis_usd": chain_fact.cost_basis_usd,
+                "local_shares": local_shares,
+                "delta": delta,
+                "shares_unchanged": True,
+                "chain_state_before": row.chain_state,
+                "chain_avg_price_before": row.chain_avg_price,
+                "chain_cost_basis_before": row.chain_cost_basis_usd,
             },
         )
 
@@ -563,6 +602,7 @@ _LOCAL_ROW_COLUMNS = (
     "position_id", "phase", "chain_state", "city", "target_date",
     "temperature_metric", "bin_label", "direction", "token_id", "no_token_id",
     "condition_id", "chain_shares", "shares", "fill_authority", "strategy_key",
+    "chain_avg_price", "chain_cost_basis_usd",
 )
 
 
@@ -589,6 +629,16 @@ def load_local_position_rows(conn: sqlite3.Connection) -> list[LocalPositionRow]
                 shares=(float(row["shares"]) if row["shares"] is not None else None),
                 fill_authority=str(row["fill_authority"] or ""),
                 strategy_key=str(row["strategy_key"] or ""),
+                chain_avg_price=(
+                    float(row["chain_avg_price"])
+                    if row["chain_avg_price"] is not None
+                    else None
+                ),
+                chain_cost_basis_usd=(
+                    float(row["chain_cost_basis_usd"])
+                    if row["chain_cost_basis_usd"] is not None
+                    else None
+                ),
             )
         )
     return out
@@ -1091,6 +1141,7 @@ def apply_size_correction_finding(
         else min(chain_size, owned_shares_before)
     )
     projection["chain_shares"] = attributed_chain_shares
+    projection["chain_state"] = "synced"
     if owned_reduction:
         unit_cost = float(current["cost_basis_usd"] or 0.0) / owned_shares_before
         remaining_cost = unit_cost * chain_size
@@ -1102,6 +1153,18 @@ def apply_size_correction_finding(
             prior_remaining = current["shares_remaining"]
             if prior_remaining is not None:
                 projection["shares_remaining"] = min(float(prior_remaining), chain_size)
+    else:
+        observed_avg_price = float(finding.details.get("chain_avg_price") or 0.0)
+        observed_cost_basis = float(
+            finding.details.get("chain_cost_basis_usd") or 0.0
+        )
+        if observed_avg_price > 0.0:
+            projection["chain_avg_price"] = observed_avg_price
+            projection["chain_cost_basis_usd"] = (
+                observed_cost_basis
+                if observed_cost_basis > 0.0
+                else observed_avg_price * attributed_chain_shares
+            )
     projection["updated_at"] = occurred_at
     projection["chain_seen_at"] = occurred_at
 
@@ -1114,6 +1177,9 @@ def apply_size_correction_finding(
             "owned_shares_before": owned_shares_before,
             "owned_shares_after": projection["shares"],
             "owned_cost_basis_after": projection["cost_basis_usd"],
+            "chain_state_after": projection["chain_state"],
+            "chain_avg_price_after": projection["chain_avg_price"],
+            "chain_cost_basis_after": projection["chain_cost_basis_usd"],
             "unattributed_residual": max(0.0, chain_size - owned_shares_before),
         },
         default=str,

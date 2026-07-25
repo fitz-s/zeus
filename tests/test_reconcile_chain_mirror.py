@@ -290,13 +290,16 @@ def test_chain_only_asset_already_matched_returns_none():
 def test_load_chain_positions_by_asset_keys_on_token_id():
     raw = [
         {"token_id": "a1", "condition_id": "c1", "size": 10.0, "redeemable": True,
-         "current_value": 0.0, "side": "Yes", "title": "t1"},
+         "current_value": 0.0, "side": "Yes", "avg_price": 0.42,
+         "cost": 4.2, "title": "t1"},
         {"token_id": "", "condition_id": "c2", "size": 1.0, "redeemable": True,
          "current_value": 0.0, "side": "No", "title": "skip-me-no-token"},
     ]
     out = load_chain_positions_by_asset(raw)
     assert set(out.keys()) == {"a1"}
     assert out["a1"].size == 10.0
+    assert out["a1"].avg_price == pytest.approx(0.42)
+    assert out["a1"].cost_basis_usd == pytest.approx(4.2)
 
 
 # -----------------------------------------------------------------------------
@@ -864,13 +867,12 @@ def test_exact_size_reappearance_resets_chain_evidence_before_next_absence(
 
 
 def test_open_phase_absent_token_reappears_between_runs_no_close(trades_conn, forecasts_conn):
-    """Token reappears on the second read (present + matching size) — must
-    record a no-delta chain observation and never force-close."""
+    """A complete positive observation restores all chain economics atomically."""
     _insert_position_current(
         trades_conn, position_id="pos-manila-3", phase="day0_window",
         city="manila", target_date="2026-07-04", bin_label="33°C",
-        direction="buy_no", no_token_id="tok-manila-no-3", chain_state="synced",
-        chain_shares=11.1, shares=11.1,
+        direction="buy_no", no_token_id="tok-manila-no-3", chain_state="unknown",
+        chain_shares=0.0, shares=11.1, cost_basis_usd=8.769,
     )
 
     first = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
@@ -879,6 +881,7 @@ def test_open_phase_absent_token_reappears_between_runs_no_close(trades_conn, fo
     chain = {"tok-manila-no-3": ChainPositionFact(
         token_id="tok-manila-no-3", condition_id="cond-1", size=11.1,
         redeemable=False, current_value=0.0, side="No",
+        avg_price=0.79, cost_basis_usd=8.769,
     )}
     second = reconcile(trades_conn, forecasts_conn, chain_by_asset=chain, apply=True)
 
@@ -887,12 +890,87 @@ def test_open_phase_absent_token_reappears_between_runs_no_close(trades_conn, fo
     assert len(reappeared) == 1
     assert reappeared[0].classification == SIZE_CORRECTED
     row = trades_conn.execute(
-        "SELECT phase, chain_state, chain_seen_at FROM position_current "
+        "SELECT phase, chain_state, chain_shares, chain_avg_price, "
+        "chain_cost_basis_usd, shares, cost_basis_usd, chain_seen_at "
+        "FROM position_current "
         "WHERE position_id='pos-manila-3'"
     ).fetchone()
     assert row["phase"] == "day0_window"
     assert row["chain_state"] == "synced"
+    assert row["chain_shares"] == pytest.approx(11.1)
+    assert row["chain_avg_price"] == pytest.approx(0.79)
+    assert row["chain_cost_basis_usd"] == pytest.approx(8.769)
+    assert row["shares"] == pytest.approx(11.1)
+    assert row["cost_basis_usd"] == pytest.approx(8.769)
     assert row["chain_seen_at"]
+
+
+def test_positive_chain_observation_repairs_already_consumed_torn_economics(
+    trades_conn, forecasts_conn
+):
+    """Recovery must not depend on the absence marker still being latest."""
+    position_id = "pos-seoul-torn-chain-economics"
+    token_id = "tok-seoul-torn-chain-economics"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="day0_window",
+        city="seoul",
+        target_date="2026-07-25",
+        bin_label="31°C",
+        direction="buy_no",
+        no_token_id=token_id,
+        chain_state="unknown",
+        chain_shares=5.0,
+        shares=5.0,
+        cost_basis_usd=3.95,
+    )
+    trades_conn.execute(
+        """
+        UPDATE position_current
+           SET chain_avg_price = 0.0, chain_cost_basis_usd = 0.0
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    )
+    trades_conn.commit()
+
+    report = reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset={
+            token_id: ChainPositionFact(
+                token_id=token_id,
+                condition_id="cond-seoul",
+                size=5.0,
+                redeemable=False,
+                current_value=0.4,
+                side="No",
+                avg_price=0.79,
+                cost_basis_usd=3.95,
+            )
+        },
+        apply=True,
+    )
+
+    finding = next(f for f in report.findings if f.position_id == position_id)
+    assert finding.classification == SIZE_CORRECTED
+    assert finding.details["reason"] == "chain_positive_observation_incomplete"
+    row = trades_conn.execute(
+        """
+        SELECT phase, chain_state, chain_shares, chain_avg_price,
+               chain_cost_basis_usd, shares, cost_basis_usd
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert (row["phase"], row["chain_state"]) == ("day0_window", "synced")
+    assert row["chain_shares"] == pytest.approx(5.0)
+    assert row["chain_avg_price"] == pytest.approx(0.79)
+    assert row["chain_cost_basis_usd"] == pytest.approx(3.95)
+    assert row["shares"] == pytest.approx(5.0)
+    assert row["cost_basis_usd"] == pytest.approx(3.95)
 
 
 def test_open_phase_absent_token_second_run_with_open_order_does_not_close(

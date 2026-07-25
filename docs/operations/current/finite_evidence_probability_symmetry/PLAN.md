@@ -4,6 +4,30 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-24 Atomic chain-reappearance economics
+
+The complete-position pagination repair made a previously omitted Seoul
+holding visible again and exposed a second canonical-truth defect. The mirror
+reappearance fold restored `chain_shares` and `chain_seen_at`, but discarded
+the Data API's `avg_price` / `cost` and left `chain_state` at its stale
+pre-observation value. Runtime exposure authority then correctly rejected the
+torn state (`chain_shares > 0` with zero chain cost basis), which blocked the
+global capital auction including held-position SELLs.
+
+The repair keeps acquisition/fill provenance fields owned by their existing
+authority and atomically projects only the complete positive chain
+observation: attributed chain shares, chain average price, chain cost basis,
+`chain_state=synced`, and observation time in the same append-plus-projection
+transaction. A behavioral antibody reproduces the exact
+absence-marker -> positive reappearance transition and requires phase and
+owned fill economics to remain unchanged. Because an older correction may
+already have consumed the absence marker while leaving a torn row, the same
+fold is also re-emitted whenever a complete positive observation finds stale
+visibility or missing chain economics; recovery does not depend on historical
+event ordering. No schema or lifecycle grammar changes. Rollback is a single
+hot-fix revert; the next complete reconciliation re-emits the prior event
+shape.
+
 ## 2026-07-24 Complete venue-position enumeration
 
 The live loss audit found a confirmed 5-share Seoul fill whose exact Polygon
