@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-25
 # Authority basis: current global auction, fractional-Kelly repair,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -9638,7 +9638,7 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SELECTION_SCOPE_EMPTY:locked:input=22:"
             "classes=EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED=22",
-            "BLOCKED",
+            "CANDIDATE_BLOCKED",
         ),
         (
             "GLOBAL_PREFLIGHT_CANDIDATE_NOT_ACTIONABLE:"
@@ -18401,6 +18401,11 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "LIVE_ENTRY_BLOCKED:entry_readiness:"
             "EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:1,"
             "EDLI_STAGE_LIVE_CAP_RESERVED:1"
+        ),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:locked:input=1:"
+            "classes=EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED=1"
         ),
     ),
 )

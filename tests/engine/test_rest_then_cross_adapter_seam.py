@@ -1,15 +1,12 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-21 (GAP-4 rest-then-cross re-rest race fix:
-#   added TestRestThenCrossRerestRace — a post-escalation serial re-rest must
-#   not shadow the armed cross; double-submit safety preserved via the executor
-#   dedup backstop)
+# Last reused or audited: 2026-07-25 (native-token rest/duplicate scope)
 # Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K4.0
 #   + live_order_pathology GAP-4 rest-then-cross re-rest evidence
 """K4.0 adapter-seam relationship tests for REST-THEN-CROSS.
 
 Pins the two seams the policy crosses:
 1. _family_rest_state: the venue-truth derivation of the antibody input
-   (unexpired rest blocks ANY new order) and the escalation license
+   (unexpired rest blocks the same native token) and the escalation license
    (cancelled-unfilled >= deadline -> TAKER_ESCALATED_AFTER_REST lawful).
 2. _select_edli_order_mode leg 3: the legacy helper witnesses the proof's
    policy mode. The current final-submit path validates through
@@ -17,9 +14,12 @@ Pins the two seams the policy crosses:
    inline-flipping a proven command when fresh policy math changes.
 """
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+
+import pytest
 
 import src.engine.event_reactor_adapter as adapter
 from src.events.continuous_redecision import REST_VALUE_REFRESH_MIN_AGE_SECONDS
@@ -227,15 +227,148 @@ class TestFamilyRestState:
             False,
         )
 
-    def test_sibling_no_token_rest_blocks_the_whole_family(self):
-        """The antibody is FAMILY-scoped: a rest on the NO token blocks new
-        orders for the YES token too (same family)."""
+    def test_sibling_rest_does_not_block_selected_native_token(self):
+        """Sibling commitments belong in correlated Kelly, not a rest-policy veto."""
         conn = _db()
         _add(conn, token_id="tok_no", facts=[("RESTING", "0", NOW)])
-        assert adapter._family_rest_state(conn, family=_family(), decision_time=NOW) == (
+        assert adapter._family_rest_state(
+            conn,
+            family=_family(),
+            decision_time=NOW,
+            token_id="tok_yes",
+        ) == (
+            False,
+            False,
+        )
+        assert adapter._family_rest_state(
+            conn,
+            family=_family(),
+            decision_time=NOW,
+            token_id="tok_no",
+        ) == (
             True,
             False,
         )
+
+
+def test_live_order_mutex_is_exact_native_token_not_family():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE edli_live_order_events (
+            aggregate_event_id TEXT PRIMARY KEY,
+            aggregate_id TEXT NOT NULL,
+            event_sequence INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO edli_live_order_events VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "event-1",
+            "aggregate-1",
+            1,
+            "SubmitPlanBuilt",
+            json.dumps(
+                {
+                    "family_id": "family-1",
+                    "city": "Ankara",
+                    "target_date": "2026-07-27",
+                    "metric": "high",
+                    "condition_id": "condition-26",
+                    "token_id": "yes-26",
+                    "direction": "buy_yes",
+                }
+            ),
+            "2026-07-25T12:00:00+00:00",
+        ),
+    )
+
+    sibling = adapter._locked_live_opportunity_active_order_reason(
+        conn,
+        condition_id="condition-28",
+        token_id="no-28",
+        direction="buy_no",
+        family_id="family-1",
+        city="Ankara",
+        target_date="2026-07-27",
+        metric="high",
+    )
+    exact = adapter._locked_live_opportunity_active_order_reason(
+        conn,
+        condition_id="condition-26",
+        token_id="yes-26",
+        direction="buy_yes",
+        family_id="family-1",
+        city="Ankara",
+        target_date="2026-07-27",
+        metric="high",
+    )
+
+    assert sibling is None
+    assert exact is not None
+    assert exact.startswith("EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:")
+
+
+@pytest.mark.parametrize(
+    ("trade_payload", "locked"),
+    [
+        ({"venue_command_state": "PARTIAL", "filled_size": 1.149423}, True),
+        ({"remaining_size": "unknown", "filled_size": 1.149423}, True),
+        ({"venue_command_state": "FILLED", "filled_size": 8.25}, False),
+        ({"remaining_size": 0, "filled_size": 8.25}, False),
+    ],
+)
+def test_live_order_mutex_keeps_partial_fill_active(trade_payload, locked):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE edli_live_order_events (
+            aggregate_event_id TEXT PRIMARY KEY,
+            aggregate_id TEXT NOT NULL,
+            event_sequence INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )"""
+    )
+    plan = {
+        "condition_id": "condition-26",
+        "token_id": "yes-26",
+        "direction": "buy_yes",
+    }
+    conn.executemany(
+        "INSERT INTO edli_live_order_events VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "event-plan",
+                "aggregate-1",
+                1,
+                "SubmitPlanBuilt",
+                json.dumps(plan),
+                "2026-07-25T12:00:00+00:00",
+            ),
+            (
+                "event-trade",
+                "aggregate-1",
+                2,
+                "UserTradeObserved",
+                json.dumps(trade_payload),
+                "2026-07-25T12:01:00+00:00",
+            ),
+        ],
+    )
+
+    reason = adapter._locked_live_opportunity_active_order_reason(
+        conn,
+        condition_id="condition-26",
+        token_id="yes-26",
+        direction="buy_yes",
+    )
+
+    assert (reason is not None) is locked
 
 
 class TestRestThenCrossRerestRace:

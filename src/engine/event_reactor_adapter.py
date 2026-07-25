@@ -10730,9 +10730,10 @@ def _global_preflight_block_status(reason: str) -> str:
         )
         and "classes=EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED=" in reason
     ):
-        # The live-order mutex is family-scoped: an active order makes this
-        # family's complete sibling set unavailable, not the rest of the epoch.
-        return "BLOCKED"
+        # The live-order mutex is native-token scoped. Same-family unresolved
+        # commitments are already present in the correlated auction endowment,
+        # so only the exact duplicate candidate is unavailable.
+        return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (
             "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:",
@@ -17822,7 +17823,9 @@ def _execution_command_id_from_final_intent(
 # TERMINAL lifecycle state, correctly handling payload variants:
 #
 #   - SubmitRejected                            : venue rejected; never rested.
-#   - UserTradeObserved                         : fill confirmed; order done.
+#   - UserTradeObserved with a terminal command state or zero remaining size:
+#       full fill confirmed; order done. A PARTIAL trade is still live and must
+#       suppress an exact-token duplicate while its remainder rests.
 #   - CapTransitioned  to_status=CONSUMED       : cap COMMITTED to a SUBMITTED
 #       order that is RESTING LIVE on the venue — emitted on submit SUCCESS
 #       (status=SUBMITTED), BEFORE any fill (the fill is a later
@@ -17848,7 +17851,20 @@ _TERMINAL_EVENT_SQL = """
     WHERE aggregate_id = ?
       AND (
         event_type = 'SubmitRejected'
-        OR event_type = 'UserTradeObserved'
+        OR (event_type = 'UserTradeObserved'
+            AND (
+                UPPER(COALESCE(
+                    json_extract(payload_json, '$.venue_command_state'),
+                    ''
+                )) IN ('FILLED', 'MATCHED')
+                OR (
+                    json_type(payload_json, '$.remaining_size')
+                        IN ('integer', 'real')
+                    AND CAST(
+                        json_extract(payload_json, '$.remaining_size') AS REAL
+                    ) = 0.0
+                )
+            ))
         OR (event_type = 'CapTransitioned'
             AND json_extract(payload_json, '$.to_status') = 'RELEASED')
         OR (event_type = 'Reconciled'
@@ -18039,27 +18055,26 @@ def _locked_live_opportunity_active_order_reason(
     side: str | None = None,
     limit_price: float | None = None,
 ) -> str | None:
-    """Suppress a NEW submit ONLY while a LIVE order for the family is active.
+    """Suppress a NEW submit ONLY while the same native order is active.
 
     FIX A (#125). Duplicate-prevention lock derived from the
     ``edli_live_order_events`` aggregate lifecycle (the live-order-state
     projection), NOT from "any historical command that is not a SubmitRejected".
 
-    For the given weather family we find every order aggregate keyed off its
-    ``SubmitPlanBuilt`` event. New SubmitPlanBuilt payloads carry
-    ``family_id`` and ``(city,target_date,metric)`` so sibling bins share one
-    mutex. Older payloads fall back to the exact ``condition_id/token_id/direction``
-    key.
+    The lock is exact on ``condition_id/token_id/direction``. Same-family sibling
+    commitments are already projected into the global auction's correlated
+    payoff endowment and Fractional Kelly target; turning them into a family
+    mutex would replace the capital objective with a categorical veto.
 
-      * TERMINAL (cancel/expiry/reject/reconcile/cap-release, or a fill) -> the
-        order is closed, NOT an active duplicate -> keep scanning older
+      * TERMINAL (cancel/expiry/reject/reconcile/cap-release, or a full fill) ->
+        the order is closed, NOT an active duplicate -> keep scanning older
         aggregates. A newer terminal row must not hide an older active row.
       * ACTIVE (any state up to and including an acknowledged resting order, an
         in-flight submit, or a pending-reconcile) -> a real live order exists ->
         SUPPRESS (return a reason) so we never double-submit.
 
     FAIL-CLOSED: on any query error, or an aggregate present but indeterminate,
-    treat as ACTIVE and suppress — never risk a second live order on a family
+    treat as ACTIVE and suppress — never risk a second live order on the token
     whose true venue state we cannot read. ``side`` / ``limit_price`` are
     accepted for call-site compatibility and observability only; they no longer
     gate (the retired 0.02 price-improvement requirement is gone).
@@ -18071,65 +18086,20 @@ def _locked_live_opportunity_active_order_reason(
     city = str(city or "").strip()
     target_date = str(target_date or "").strip()
     metric = str(metric or "").strip()
-    family_key_available = bool(family_id or (city and target_date and metric))
     try:
-        if family_key_available:
-            plan_rows = live_cap_conn.execute(
-                """
-                SELECT plan.aggregate_id, plan.occurred_at, plan.payload_json
-                FROM edli_live_order_events AS plan
-                WHERE plan.event_type = 'SubmitPlanBuilt'
-                  AND (
-                    (? != '' AND json_extract(plan.payload_json, '$.family_id') = ?)
-                    OR (
-                      ? != '' AND ? != '' AND ? != ''
-                      AND json_extract(plan.payload_json, '$.city') = ?
-                      AND json_extract(plan.payload_json, '$.target_date') = ?
-                      AND COALESCE(
-                        json_extract(plan.payload_json, '$.metric'),
-                        json_extract(plan.payload_json, '$.temperature_metric')
-                      ) = ?
-                    )
-                    OR (
-                      json_extract(plan.payload_json, '$.family_id') IS NULL
-                      AND json_extract(plan.payload_json, '$.city') IS NULL
-                      AND json_extract(plan.payload_json, '$.target_date') IS NULL
-                      AND json_extract(plan.payload_json, '$.condition_id') = ?
-                      AND json_extract(plan.payload_json, '$.token_id') = ?
-                      AND json_extract(plan.payload_json, '$.direction') = ?
-                    )
-                  )
-                ORDER BY plan.occurred_at DESC, plan.event_sequence DESC
-                LIMIT 128
-                """,
-                (
-                    family_id,
-                    family_id,
-                    city,
-                    target_date,
-                    metric,
-                    city,
-                    target_date,
-                    metric,
-                    condition_id,
-                    token_id,
-                    direction,
-                ),
-            ).fetchall()
-        else:
-            plan_rows = live_cap_conn.execute(
-                """
-                SELECT plan.aggregate_id, plan.occurred_at, plan.payload_json
-                FROM edli_live_order_events AS plan
-                WHERE plan.event_type = 'SubmitPlanBuilt'
-                  AND json_extract(plan.payload_json, '$.condition_id') = ?
-                  AND json_extract(plan.payload_json, '$.token_id') = ?
-                  AND json_extract(plan.payload_json, '$.direction') = ?
-                ORDER BY plan.occurred_at DESC, plan.event_sequence DESC
-                LIMIT 64
-                """,
-                (condition_id, token_id, direction),
-            ).fetchall()
+        plan_rows = live_cap_conn.execute(
+            """
+            SELECT plan.aggregate_id, plan.occurred_at, plan.payload_json
+            FROM edli_live_order_events AS plan
+            WHERE plan.event_type = 'SubmitPlanBuilt'
+              AND json_extract(plan.payload_json, '$.condition_id') = ?
+              AND json_extract(plan.payload_json, '$.token_id') = ?
+              AND json_extract(plan.payload_json, '$.direction') = ?
+            ORDER BY plan.occurred_at DESC, plan.event_sequence DESC
+            LIMIT 64
+            """,
+            (condition_id, token_id, direction),
+        ).fetchall()
     except Exception as exc:  # noqa: BLE001 - dedup must fail CLOSED (suppress).
         return (
             "EDLI_LIVE_ORDER_STATE_UNREADABLE_FAIL_CLOSED:"
@@ -18137,8 +18107,8 @@ def _locked_live_opportunity_active_order_reason(
             f"error={type(exc).__name__}"
         )
     if not plan_rows:
-        # No order has ever been planned for this family -> nothing can be a
-        # duplicate -> the family is free to submit.
+        # No order has ever been planned for this native token -> nothing can be
+        # a duplicate -> the token is free to submit.
         return None
 
     for row in plan_rows:
@@ -18157,9 +18127,10 @@ def _locked_live_opportunity_active_order_reason(
 
         if terminal_row is not None:
             # A qualifying terminal event (RELEASED cap, SubmitRejected,
-            # UserTradeObserved, or a fully-settled Reconcile) was found. Keep
-            # scanning older aggregates; a newer terminal order must not hide an
-            # older active/ambiguous order for the same weather family.
+            # full-fill UserTradeObserved, or fully-settled Reconcile) was
+            # found. Keep scanning older aggregates; a newer terminal order
+            # must not hide an older active/ambiguous order for the same native
+            # token.
             continue
 
         if _aggregate_terminal_venue_command_releases_lock(
@@ -18171,8 +18142,8 @@ def _locked_live_opportunity_active_order_reason(
         # No qualifying terminal event found. This covers ACTIVE states
         # (command-created, submit-attempted, acknowledged-resting,
         # cap-CONSUMED-resting-live, submit-unknown, user-order-observed with no
-        # fill, PENDING_RECONCILE) and indeterminate states. All are treated as
-        # ACTIVE: suppress the potential duplicate.
+        # partial fill, PENDING_RECONCILE) and indeterminate states. All are
+        # treated as ACTIVE: suppress the potential duplicate.
         return (
             "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
             f"condition_id={condition_id}:token_id={token_id}:direction={direction}:"
@@ -24433,20 +24404,14 @@ def _generate_candidate_proofs(
     # Fail-soft None -> pure-module WMO half-up default applies (correct for all
     # non-truncation cities).
     direction_law_settle_value = _direction_law_settle_value_for_family(family=family)
-    # K4.0 REST-THEN-CROSS family-level inputs, computed ONCE per family:
-    # event-end distance (None -> rest, conservative), and the family rest state
-    # from venue truth (open rest -> HOLD antibody; expired-unfilled rest ->
-    # escalation license for the deadline cross).
+    # K4.0 REST-THEN-CROSS family-level time input. Rest state is native-token
+    # scoped below so one sibling commitment cannot veto another candidate whose
+    # correlated endowment has already passed the global capital objective.
     _rtc_minutes_to_event_end = _minutes_to_family_event_end(family, decision_time)
-    _rtc_unexpired_rest, _rtc_escalated = _family_rest_state(
-        trade_conn, family=family, decision_time=decision_time
-    )
     payload_rest_policy = str(payload.get("rest_then_cross_policy") or "").strip().upper()
     payload_escalated_after_rest = payload_rest_policy == "TAKER_ESCALATED_AFTER_REST" or str(
         payload.get("rest_then_cross_escalated_after_rest") or ""
     ).strip().lower() in {"1", "true", "yes"}
-    if payload_escalated_after_rest and not _rtc_unexpired_rest:
-        _rtc_escalated = True
     _day0_proof_maker_only = _is_day0_lane_event_type(getattr(event, "event_type", None))
     # Twin-authority reconciliation #7 (2026-06-11, selected-leg repair 2026-06-30):
     # replacement coverage verdicts are keyed by (condition_id, direction). The
@@ -24616,6 +24581,14 @@ def _generate_candidate_proofs(
             # byte-identical to the legacy kernel (same q_lcb leg, same penalty);
             # MAKER-chosen scores price the resting reality: bid-improving limit,
             # conservative fill prior, adverse-selection half-spread haircut.
+            _rtc_unexpired_rest, _rtc_escalated = _family_rest_state(
+                trade_conn,
+                family=family,
+                decision_time=decision_time,
+                token_id=token_id,
+            )
+            if payload_escalated_after_rest and not _rtc_unexpired_rest:
+                _rtc_escalated = True
             mode_ev = _mode_consistent_ev_for_proof(
                 row=row,
                 direction=direction,
@@ -24844,18 +24817,20 @@ def _family_rest_state(
     *,
     family,
     decision_time: datetime,
+    token_id: str | None = None,
 ) -> tuple[bool, bool]:
-    """K4.0: (unexpired_family_rest, escalated_after_rest) from venue truth.
+    """K4.0: (unexpired_rest, escalated_after_rest) from venue truth.
 
     Derived from venue_commands + latest venue_order_facts (no new state table —
     provenance lives where the orders live):
 
-    - unexpired_family_rest: ANY open ENTRY order on a family token (latest fact
+    - unexpired_rest: an open ENTRY order on the selected native token (latest fact
       LIVE/RESTING/PARTIALLY_MATCHED, or no facts yet with a non-terminal command
-      state). While one exists, NO new order may be constructed for the family
-      (the operator antibody). Age does not matter here: an over-deadline rest
-      still blocks until the escalation job cancels it.
-    - escalated_after_rest: a family ENTRY order was cancelled/expired UNFILLED
+      state). It blocks another order for that token only. Same-family sibling
+      commitments remain visible to the correlated global auction endowment.
+      Age does not matter here: an over-deadline rest still blocks until the
+      escalation job cancels it.
+    - escalated_after_rest: a selected-token ENTRY order was cancelled/expired UNFILLED
       after resting >= the escalation deadline, within the last 24h. This is the
       license for the deadline cross (the FULL standard pipeline re-certifies the
       edge; this flag only switches the policy lane).
@@ -24865,12 +24840,20 @@ def _family_rest_state(
     """
     if trade_conn is None:
         return (False, False)
-    token_ids = {
-        str(tid)
-        for candidate in getattr(family, "candidates", ())
-        for tid in (getattr(candidate, "yes_token_id", None), getattr(candidate, "no_token_id", None))
-        if tid
-    }
+    selected_token = str(token_id or "").strip()
+    token_ids = (
+        {selected_token}
+        if selected_token
+        else {
+            str(tid)
+            for candidate in getattr(family, "candidates", ())
+            for tid in (
+                getattr(candidate, "yes_token_id", None),
+                getattr(candidate, "no_token_id", None),
+            )
+            if tid
+        }
+    )
     if not token_ids:
         return (False, False)
     from src.strategy.live_inference.mode_consistent_ev import (
