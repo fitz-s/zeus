@@ -11498,12 +11498,11 @@ def _global_current_taker_escalation(
     band together.  Applying the historical scalar correction after that solve
     changes the argmax without re-solving the portfolio.  Once a real maker window
     has expired, cross only when that sealed all-in unit cost still clears its own
-    current-evidence payoff bound; final JIT and taker-quality walls re-check the
-    fresh touch before submit.
+    current-evidence payoff bound.  Relative spread is not a second cost after the
+    exact ask curve is priced; final JIT and taker-quality walls re-check the fresh
+    touch before submit.
     """
 
-    reason = str(getattr(proof, "taker_forbidden_reason", "") or "").strip()
-    spread_compatible = not reason or "spread=unmeasurable" in reason
     ev_taker = _optional_float(getattr(proof, "ev_taker", None))
     cost = _optional_float(cert.get("cost"))
     payoff_q_lcb = _optional_float(cert.get("payoff_q_lcb"))
@@ -11512,7 +11511,6 @@ def _global_current_taker_escalation(
         == "MAKER_TAKER_FORBIDDEN"
         and ev_taker is not None
         and ev_taker > 0.0
-        and spread_compatible
         and cost is not None
         and payoff_q_lcb is not None
         and cost <= payoff_q_lcb + 1e-12

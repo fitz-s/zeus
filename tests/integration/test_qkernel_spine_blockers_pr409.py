@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-15; last_reviewed=2026-07-13; last_reused=2026-07-13
+# Lifecycle: created=2026-06-15; last_reviewed=2026-07-25; last_reused=2026-07-25
 # Purpose: Prove the live q-kernel bridge preserves probability and execution invariants.
 # Reuse: Re-audit overlay probability authority and live blockers before q-kernel changes.
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
@@ -2248,8 +2248,9 @@ def test_global_current_winner_crosses_ask_only_after_real_maker_window(monkeypa
         ),
         cert,
     )
-    assert wide_two_sided.execution_mode_intent == "MAKER"
-    assert wide_two_sided.rest_then_cross_policy == "MAKER_TAKER_FORBIDDEN"
+    assert wide_two_sided.execution_mode_intent == "TAKER"
+    assert wide_two_sided.rest_then_cross_policy == "TAKER_ESCALATED_AFTER_REST"
+    assert wide_two_sided.taker_forbidden_reason is None
 
 
 def test_global_maker_preflight_does_not_require_taker_fragmentation_proof(
