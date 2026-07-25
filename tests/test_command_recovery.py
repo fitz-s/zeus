@@ -19136,10 +19136,12 @@ class TestRecoveryResolutionTable:
             for item in open_items
         )
 
-    def test_exit_matched_trade_fact_repairs_retry_pending_projection(
+    @pytest.mark.parametrize("trade_state", ["MATCHED", "MINED", "CONFIRMED"])
+    def test_exit_trade_fact_repairs_retry_pending_projection(
         self,
         conn,
         mock_client,
+        trade_state,
     ):
         _insert(conn, command_id="cmd-entry", position_id="pos-001")
         _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
@@ -19191,7 +19193,7 @@ class TestRecoveryResolutionTable:
             command_id="cmd-exit",
             order_id="ord-exit",
             trade_id="trade-exit-001",
-            state="MATCHED",
+            state=trade_state,
             filled_size="6",
             fill_price="0.29",
         )
