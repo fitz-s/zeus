@@ -65,6 +65,7 @@ from typing import Mapping
 
 __all__ = [
     "ContractViolation",
+    "DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS",
     "MATERIALIZATION_SEED_SCHEMA_VERSION",
     "MATERIALIZATION_REQUEST_SCHEMA_VERSION",
     "MaterializationSeed",
@@ -72,6 +73,10 @@ __all__ = [
     "validate_materialization_seed",
     "validate_materialization_request",
 ]
+
+DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS = (
+    "zero_target_date_observations"
+)
 
 
 class ContractViolation(ValueError):
@@ -196,6 +201,7 @@ _SEED_OPTIONAL_TEXT_KEYS: tuple[str, ...] = (
     "day0_observed_extreme_source",
     "day0_observed_extreme_observation_time",
     "day0_observed_extreme_unit",
+    "day0_observation_state",
 )
 _SEED_OPTIONAL_NUMBER_KEYS: tuple[str, ...] = (
     "anchor_weight",
@@ -233,6 +239,7 @@ class MaterializationSeed:
     day0_observed_extreme_source: str = ""
     day0_observed_extreme_observation_time: str = ""
     day0_observed_extreme_unit: str = ""
+    day0_observation_state: str = ""
     anchor_weight: float | None = None
     anchor_sigma_c: float | None = None
     settlement_step_c: float | None = None
@@ -277,10 +284,26 @@ def validate_materialization_seed(payload: Mapping[str, object]) -> Materializat
         key: _optional_typed_str(payload, key, bad_type=bad_type)
         for key in _SEED_OPTIONAL_TEXT_KEYS
     }
+    day0_observation_state = optional_text["day0_observation_state"]
+    if (
+        day0_observation_state
+        and day0_observation_state
+        != DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+    ):
+        bad_type.append(
+            "day0_observation_state(must be zero_target_date_observations)"
+        )
     number_values = {
         key: _optional_typed_number(payload, key, bad_type=bad_type)
         for key in _SEED_OPTIONAL_NUMBER_KEYS
     }
+    if (
+        day0_observation_state
+        and number_values["day0_observed_extreme_c"] is not None
+    ):
+        bad_type.append(
+            "day0_observation_state(conflicts with day0_observed_extreme_c)"
+        )
     if missing or bad_type:
         detail_parts = []
         if missing:
@@ -308,6 +331,7 @@ def validate_materialization_seed(payload: Mapping[str, object]) -> Materializat
         day0_observed_extreme_source=optional_text["day0_observed_extreme_source"],
         day0_observed_extreme_observation_time=optional_text["day0_observed_extreme_observation_time"],
         day0_observed_extreme_unit=optional_text["day0_observed_extreme_unit"],
+        day0_observation_state=day0_observation_state,
         anchor_weight=number_values["anchor_weight"],
         anchor_sigma_c=number_values["anchor_sigma_c"],
         settlement_step_c=number_values["settlement_step_c"],
@@ -369,6 +393,7 @@ _REQUEST_OPTIONAL_TEXT_KEYS: tuple[str, ...] = (
     "day0_observed_extreme_source",
     "day0_observed_extreme_observation_time",
     "day0_observed_extreme_unit",
+    "day0_observation_state",
 )
 _REQUEST_OPTIONAL_NUMBER_KEYS: tuple[str, ...] = (
     "anchor_weight",
@@ -407,6 +432,7 @@ class MaterializationRequest:
     day0_observed_extreme_source: str = ""
     day0_observed_extreme_observation_time: str = ""
     day0_observed_extreme_unit: str = ""
+    day0_observation_state: str = ""
     anchor_weight: float | None = None
     anchor_sigma_c: float | None = None
     settlement_step_c: float | None = None
@@ -444,10 +470,26 @@ def validate_materialization_request(payload: Mapping[str, object]) -> Materiali
         key: _optional_typed_str(payload, key, bad_type=bad_type)
         for key in _REQUEST_OPTIONAL_TEXT_KEYS
     }
+    day0_observation_state = optional_text["day0_observation_state"]
+    if (
+        day0_observation_state
+        and day0_observation_state
+        != DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+    ):
+        bad_type.append(
+            "day0_observation_state(must be zero_target_date_observations)"
+        )
     number_values = {
         key: _optional_typed_number(payload, key, bad_type=bad_type)
         for key in _REQUEST_OPTIONAL_NUMBER_KEYS
     }
+    if (
+        day0_observation_state
+        and number_values["day0_observed_extreme_c"] is not None
+    ):
+        bad_type.append(
+            "day0_observation_state(conflicts with day0_observed_extreme_c)"
+        )
     if missing or bad_type:
         detail_parts = []
         if missing:
@@ -479,6 +521,7 @@ def validate_materialization_request(payload: Mapping[str, object]) -> Materiali
         day0_observed_extreme_source=optional_text["day0_observed_extreme_source"],
         day0_observed_extreme_observation_time=optional_text["day0_observed_extreme_observation_time"],
         day0_observed_extreme_unit=optional_text["day0_observed_extreme_unit"],
+        day0_observation_state=day0_observation_state,
         anchor_weight=number_values["anchor_weight"],
         anchor_sigma_c=number_values["anchor_sigma_c"],
         settlement_step_c=number_values["settlement_step_c"],

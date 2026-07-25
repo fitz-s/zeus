@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from src.data.replacement_forecast_materialization_request_builder import (
+    build_materialize_request_dataclass,
     build_replacement_forecast_materialization_request,
 )
 
@@ -161,6 +162,30 @@ def test_request_builder_allows_post_localday_day0_observation_to_cover_elapsed_
     assert result.ok is True
     assert result.request is not None
     assert result.request["day0_observed_extreme_c"] == 32.0
+
+
+def test_request_builder_threads_typed_day0_zero_observation_state(
+    tmp_path,
+) -> None:
+    seed = _write_inputs(tmp_path)
+    seed["day0_observation_state"] = "zero_target_date_observations"
+
+    result = build_replacement_forecast_materialization_request(
+        seed,
+        base_dir=tmp_path,
+    )
+
+    assert result.ok is True
+    assert result.request is not None
+    assert (
+        result.request["day0_observation_state"]
+        == "zero_target_date_observations"
+    )
+    request = build_materialize_request_dataclass(
+        result.request,
+        base_dir=tmp_path,
+    )
+    assert request.day0_observation_state == "zero_target_date_observations"
 
 
 def test_request_builder_preserves_display_settlement_units_and_rounding_rule(tmp_path) -> None:

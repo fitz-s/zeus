@@ -61,6 +61,9 @@ from src.data.replacement_forecast_readiness import (
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.contracts.availability_time import proof_of_possession_available_at
+from src.contracts.replacement_pipeline_files import (
+    DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
+)
 from src.state.readiness_repo import get_readiness_state_for_scope, write_readiness_state
 from src.state.source_run_repo import get_source_run
 
@@ -122,6 +125,7 @@ class ReplacementForecastMaterializeRequest:
     day0_observed_extreme_observation_time: datetime | str | None = None
     day0_observed_extreme_sample_count: int | None = None
     day0_observed_extreme_unit: str | None = None
+    day0_observation_state: str | None = None
     # Task #32 honest provenance: set to "instrument_set_expansion" when this materialization was
     # enqueued by the fusion-upgrade trigger (a re-materialization because a strictly-larger
     # decorrelated-provider set became capturable at the same cycle). None for a normal first
@@ -735,6 +739,14 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
     computed_at = _to_utc(request.computed_at, field_name="computed_at")
     request_source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time")
     reasons: list[str] = []
+    target_local_day_started = _target_local_day_has_started(
+        request,
+        computed_at=computed_at,
+    )
+    zero_observation_state = (
+        request.day0_observation_state
+        == DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+    )
     dependency_times = [
         ("baseline_b0", _to_utc(request.baseline_source_available_at, field_name="baseline_source_available_at")),
         ("openmeteo_ifs9_anchor", _to_utc(request.openmeteo_source_available_at, field_name="openmeteo_source_available_at")),
@@ -762,8 +774,20 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         computed_at=computed_at,
     ):
         reasons.append("REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE")
-    if _target_local_day_has_started(request, computed_at=computed_at) and _day0_observed_extreme_c(request) is None:
+    if (
+        target_local_day_started
+        and _day0_observed_extreme_c(request) is None
+        and not zero_observation_state
+    ):
         reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_OBSERVED_EXTREME_REQUIRED")
+    if zero_observation_state and not target_local_day_started:
+        reasons.append(
+            "REPLACEMENT_MATERIALIZATION_DAY0_ZERO_OBSERVATION_STATE_OUTSIDE_DAY0"
+        )
+    if zero_observation_state and _day0_observed_extreme_c(request) is not None:
+        reasons.append(
+            "REPLACEMENT_MATERIALIZATION_DAY0_ZERO_OBSERVATION_STATE_CONFLICT"
+        )
     if any(source_available_at > computed_at for _, source_available_at in dependency_times):
         reasons.append("REPLACEMENT_MATERIALIZATION_DEPENDENCY_AFTER_COMPUTED_AT")
     if request.expires_at is not None and _to_utc(request.expires_at, field_name="expires_at") <= computed_at:
@@ -4225,6 +4249,11 @@ def _compute_posterior_payload(
         "anchor_sigma_c": float(request.anchor_sigma_c),
         "settlement_step_c": float(request.settlement_step_c),
     }
+    if (
+        request.day0_observation_state
+        == DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+    ):
+        posterior_config["day0_observation_state"] = request.day0_observation_state
     _posterior_day0_observed_extreme_c = (
         _day0_absorbing_observed_extreme_c(request)
         if _target_local_day_has_started(request)
@@ -4496,6 +4525,13 @@ def _compute_posterior_payload(
         "runtime_policy_status": runtime_layer,
         "training_allowed": False,
     }
+    if (
+        request.day0_observation_state
+        == DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+    ):
+        provenance_payload["day0_observation_state"] = (
+            request.day0_observation_state
+        )
     if _posterior_day0_observed_extreme_c is not None:
         provenance_payload["day0_conditioning"] = {
             "active": True,
@@ -5022,6 +5058,19 @@ def prepare_replacement_forecast_live(
         metric=metric,
         posterior=posterior,
     )
+
+
+def compute_replacement_posterior_readonly(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+) -> _PosteriorComputeResult | None:
+    """Compute the live replacement posterior without persisting any state."""
+
+    validated = _validated_replacement_forecast_request(conn, request)
+    if isinstance(validated, ReplacementForecastMaterializeResult):
+        return None
+    request, metric = validated
+    return _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
 
 
 def write_prepared_replacement_forecast_live(

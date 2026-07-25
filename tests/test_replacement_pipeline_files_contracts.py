@@ -250,6 +250,34 @@ def test_day0_observed_extreme_fields_round_trip_seed_to_request(tmp_path) -> No
     assert validated_request.day0_observed_extreme_sample_count == 12
 
 
+def test_day0_zero_observation_state_round_trips_and_rejects_aliases(
+    tmp_path,
+) -> None:
+    seed = _write_seed_artifacts(tmp_path)
+    seed["day0_observation_state"] = "zero_target_date_observations"
+
+    validated_seed = validate_materialization_seed(seed)
+    result = build_replacement_forecast_materialization_request(
+        seed,
+        base_dir=tmp_path,
+    )
+    assert result.ok, result.reason_codes
+    validated_request = validate_materialization_request(dict(result.request))
+
+    assert (
+        validated_seed.day0_observation_state
+        == "zero_target_date_observations"
+    )
+    assert (
+        validated_request.day0_observation_state
+        == "zero_target_date_observations"
+    )
+    invalid = dict(seed)
+    invalid["day0_observation_state"] = "no_data"
+    with pytest.raises(ContractViolation):
+        validate_materialization_seed(invalid)
+
+
 def test_request_wrong_typed_number_is_rejected(tmp_path) -> None:
     seed = _write_seed_artifacts(tmp_path)
     result = build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)

@@ -171,6 +171,47 @@ def test_hko_seed_preserves_provisional_provider_source(monkeypatch) -> None:
     assert payload["day0_observed_extreme_source"] == "hko_hourly_accumulator"
 
 
+def test_day0_zero_observation_state_rejects_existing_unauthorized_rows(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT,
+            target_date TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES ('Tel Aviv', '2026-07-26')"
+    )
+    monkeypatch.setitem(
+        seed_discovery.cities_by_name,
+        "Tel Aviv",
+        SimpleNamespace(settlement_unit="C"),
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "get_world_connection_read_only",
+        lambda: conn,
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **_kwargs: None,
+    )
+
+    payload = _day0_observed_extreme_seed_payload(
+        city="Tel Aviv",
+        target_date="2026-07-26",
+        metric="high",
+        computed_at=datetime(2026, 7, 26, 0, 30, tzinfo=timezone.utc),
+    )
+
+    assert payload is None
+
+
 def _write_file(path: Path, payload: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -553,7 +594,7 @@ def _write_raw_inputs(raw_dir: Path) -> None:
     )
 
 
-def _write_world_day0_observation(path: Path) -> None:
+def _write_empty_world_observations(path: Path) -> None:
     conn = sqlite3.connect(path)
     try:
         conn.execute(
@@ -575,6 +616,15 @@ def _write_world_day0_observation(path: Path) -> None:
             )
             """
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _write_world_day0_observation(path: Path) -> None:
+    _write_empty_world_observations(path)
+    conn = sqlite3.connect(path)
+    try:
         conn.execute(
             """
             INSERT INTO observation_instants VALUES (
@@ -1192,14 +1242,21 @@ def test_seed_discovery_prioritizes_held_family_and_skips_unchanged_blocked_budg
     assert seed["city"] == "Tokyo"
 
 
-def test_seed_discovery_does_not_seed_after_local_target_day_starts_without_observed_extreme(
+def test_seed_discovery_seeds_typed_zero_observation_after_local_target_day_starts(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     db_path = tmp_path / "forecast.db"
     raw_dir = tmp_path / "raw"
     seed_dir = tmp_path / "seeds"
+    world_path = tmp_path / "world.db"
     _init_db(db_path)
     _write_raw_inputs(raw_dir)
+    _write_empty_world_observations(world_path)
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.get_world_connection_read_only",
+        lambda: sqlite3.connect(world_path),
+    )
 
     report = discover_replacement_forecast_materialization_seeds(
         forecast_db=db_path,
@@ -1208,9 +1265,9 @@ def test_seed_discovery_does_not_seed_after_local_target_day_starts_without_obse
         computed_at="2026-06-08T05:00:00+00:00",
     )
 
-    assert report.status == "NO_ELIGIBLE_TARGETS"
-    assert report.reason_codes == ("REPLACEMENT_SEED_DISCOVERY_DAY0_OBSERVED_EXTREME_MISSING",)
-    assert not list(seed_dir.glob("*.json"))
+    assert report.status == "DISCOVERED"
+    seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
+    assert seed["day0_observation_state"] == "zero_target_date_observations"
 
 
 def test_seed_discovery_seeds_day0_when_canonical_observed_extreme_exists(

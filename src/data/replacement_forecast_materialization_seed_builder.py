@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from src.config import cities_by_name
-from src.contracts.replacement_pipeline_files import validate_materialization_seed
+from src.contracts.replacement_pipeline_files import (
+    DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
+    validate_materialization_seed,
+)
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
 from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
@@ -186,6 +189,7 @@ def build_replacement_forecast_materialization_seed(
     day0_observed_extreme_observation_time: str | None = None,
     day0_observed_extreme_sample_count: int | None = None,
     day0_observed_extreme_unit: str | None = None,
+    day0_observation_state: str | None = None,
 ) -> ReplacementForecastMaterializationSeedResult:
     city_name = _reject_alias(city, field_name="city")
     metric = _reject_alias(temperature_metric, field_name="temperature_metric")
@@ -282,6 +286,17 @@ def build_replacement_forecast_materialization_seed(
                 "day0_observed_extreme_unit": str(day0_observed_extreme_unit or "C"),
             }
         )
+    if day0_observation_state is not None:
+        if (
+            day0_observation_state
+            != DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+        ):
+            raise ValueError("unsupported day0_observation_state")
+        if day0_observed_extreme_c is not None:
+            raise ValueError(
+                "day0_observation_state conflicts with day0_observed_extreme_c"
+            )
+        seed["day0_observation_state"] = day0_observation_state
     final_seed = {key: value for key, value in seed.items() if value is not None}
     # BOUNDARY CONTRACT (2026-06-10): validate the assembled seed against the
     # shared producer⇄consumer schema BEFORE returning it READY. A seed that

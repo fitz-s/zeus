@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from src.config import cities_by_name
+from src.contracts.replacement_pipeline_files import (
+    DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
+)
 from src.data.raw_forecast_artifact_manifest import (
     RawForecastArtifactManifest,
     UnregisteredRawForecastArtifactIdentityError,
@@ -184,7 +187,22 @@ def _day0_observed_extreme_seed_payload(
             require_settlement_channel=True,
         )
         if fact is None:
-            return None
+            row = world_conn.execute(
+                """
+                SELECT 1
+                FROM observation_instants
+                WHERE city = ? AND target_date = ?
+                LIMIT 1
+                """,
+                (city, target_date),
+            ).fetchone()
+            if row is not None:
+                return None
+            return {
+                "day0_observation_state": (
+                    DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+                )
+            }
         try:
             observed_c = _temperature_native_to_c(
                 float(fact["observed_extreme_native"]),
@@ -205,6 +223,8 @@ def _day0_observed_extreme_seed_payload(
             "day0_observed_extreme_sample_count": sample_count,
             "day0_observed_extreme_unit": unit,
         }
+    except Exception:  # noqa: BLE001 - unreadable authority remains fail-closed
+        return None
     finally:
         try:
             world_conn.close()

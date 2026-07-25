@@ -236,6 +236,7 @@ def _request(
     day0_observed_extreme_source: str | None = None,
     day0_observed_extreme_observation_time: str | None = None,
     day0_observed_extreme_sample_count: int | None = None,
+    day0_observation_state: str | None = None,
 ) -> ReplacementForecastMaterializeRequest:
     guard = _precision_guard() if openmeteo_precision_guard is _DEFAULT_PRECISION_GUARD else openmeteo_precision_guard
     return ReplacementForecastMaterializeRequest(
@@ -261,6 +262,7 @@ def _request(
         day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
         day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
         day0_observed_extreme_unit="C" if day0_observed_extreme_c is not None else None,
+        day0_observation_state=day0_observation_state,
     )
 
 
@@ -718,6 +720,70 @@ def test_materializer_blocks_day0_without_observed_extreme() -> None:
     assert result.ok is False
     assert result.reason_codes == ("REPLACEMENT_MATERIALIZATION_DAY0_OBSERVED_EXTREME_REQUIRED",)
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+
+
+def test_materializer_allows_typed_day0_zero_observation_full_day_posterior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.contracts.replacement_pipeline_files import (
+        DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
+    )
+
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+
+    result = materialize_replacement_forecast_live(
+        conn,
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observation_state=(
+                DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+            ),
+        ),
+    )
+
+    assert result.ok is True
+    row = conn.execute(
+        """
+        SELECT posterior_config_hash, provenance_json
+        FROM forecast_posteriors
+        WHERE posterior_id = ?
+        """,
+        (result.posterior_id,),
+    ).fetchone()
+    provenance = json.loads(row["provenance_json"])
+    assert provenance["day0_observation_state"] == (
+        DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+    )
+    assert "day0_conditioning" not in provenance
+    assert "day0_provisional_observation" not in provenance
+    assert row["posterior_config_hash"]
+
+
+def test_materializer_rejects_conflicting_day0_zero_and_observed_extreme() -> None:
+    from src.contracts.replacement_pipeline_files import (
+        DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
+    )
+
+    conn = _conn()
+    result = materialize_replacement_forecast_live(
+        conn,
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=26.0,
+            day0_observation_state=(
+                DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+            ),
+        ),
+    )
+
+    assert result.ok is False
+    assert (
+        "REPLACEMENT_MATERIALIZATION_DAY0_ZERO_OBSERVATION_STATE_CONFLICT"
+        in result.reason_codes
+    )
 
 
 def test_materializer_day0_observed_extreme_conditions_q_and_bounds(monkeypatch: pytest.MonkeyPatch) -> None:

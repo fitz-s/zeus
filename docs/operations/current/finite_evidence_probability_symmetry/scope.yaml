@@ -17,6 +17,10 @@ in_scope:
 - docs/reference/zeus_execution_lifecycle_reference.md
 - docs/reference/AGENTS.md
 - src/data/replacement_forecast_materializer.py
+- src/data/replacement_forecast_seed_discovery.py
+- src/data/replacement_forecast_materialization_seed_builder.py
+- src/data/replacement_forecast_materialization_request_builder.py
+- src/contracts/replacement_pipeline_files.py
 - src/data/replacement_forecast_cycle_policy.py
 - src/data/replacement_forecast_bundle_reader.py
 - src/data/replacement_input_hwm.py
@@ -82,6 +86,11 @@ in_scope:
 - tests/test_replacement_forecast_current_target_plan.py
 - tests/test_day0_remaining_day_pricing.py
 - tests/test_replacement_forecast_materializer_cycle_policy.py
+- tests/test_replacement_forecast_materializer.py
+- tests/test_replacement_forecast_seed_discovery.py
+- tests/test_replacement_forecast_materialization_request_builder.py
+- tests/test_replacement_pipeline_files_contracts.py
+- tests/engine/test_monitor_held_belief_readthrough.py
 - tests/test_replacement_forecast_bundle_reader_tradeable_latest.py
 - tests/test_replacement_forecast_bundle_reader_staleness.py
 - tests/test_replacement_seed_coverage_gate.py
