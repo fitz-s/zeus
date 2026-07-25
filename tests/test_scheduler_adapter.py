@@ -270,6 +270,7 @@ def test_replacement_discovery_is_not_limited_by_poll_claim_size(
 
     class _Report:
         status = "NO_ELIGIBLE_TARGETS"
+        discovered_count = 80
 
         @staticmethod
         def as_dict() -> dict[str, object]:
@@ -302,6 +303,12 @@ def test_replacement_discovery_is_not_limited_by_poll_claim_size(
             "limit": 80,
         }
     ]
+    assert daemon._replacement_forecast_last_discovery_revision is None
+
+    _Report.discovered_count = 7
+    daemon._replacement_forecast_discovery_job.__wrapped__()
+
+    assert daemon._replacement_forecast_last_discovery_revision == ("revision",)
 
 
 def test_replacement_availability_fast_poll_passes_changed_source_clock_report(monkeypatch) -> None:

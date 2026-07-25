@@ -1226,13 +1226,14 @@ def _replacement_forecast_discovery_job() -> None:
         for key in ("request_dir", "seed_dir")
     ):
         return
+    discovery_limit = int(cfg["seed_discovery_limit"])
     report = discover_replacement_forecast_materialization_seeds(
         forecast_db=cfg["forecast_db"],
         raw_manifest_dir=cfg["raw_manifest_dir"],
         seed_dir=cfg["seed_dir"],
-        limit=int(cfg["seed_discovery_limit"]),
+        limit=discovery_limit,
     )
-    if revision is not None:
+    if revision is not None and report.discovered_count < discovery_limit:
         _replacement_forecast_last_discovery_revision = revision
     if report.status != "NO_ELIGIBLE_TARGETS":
         logger.info("replacement forecast recovery discovery: %s", report.as_dict())
