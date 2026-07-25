@@ -1750,11 +1750,11 @@ def test_sell_point_counterfactual_is_identity_bound_and_cannot_change_live_acti
         ),
     ),
 )
-def test_day0_sell_uses_point_expectation_across_temporal_maturity(
+def test_day0_sell_uses_posterior_draw_mean_across_temporal_maturity(
     exit_authority_status,
     exit_authority_reason,
 ):
-    """Parameter-tail caution cannot replace fixed-action expected utility."""
+    """Fixed-action utility integrates the witness draws, not its point field."""
 
     sell = _global_sell_candidate(
         candidate_id=f"{exit_authority_status}-day0-point-functional",
@@ -1769,12 +1769,12 @@ def test_day0_sell_uses_point_expectation_across_temporal_maturity(
     )
     held_q_samples = np.concatenate((np.full(380, 0.10), np.full(20, 0.90)))
     sell = _replace_global_q_samples(sell, held_q_samples)
-    sell = _replace_global_point_q(sell, 0.10)
+    sell = _replace_global_point_q(sell, 0.90)
     alternate_tail = _replace_global_q_samples(
         sell,
-        np.concatenate((np.full(300, 0.01), np.full(100, 0.99))),
+        np.concatenate((np.full(200, 0.01), np.full(200, 0.27))),
     )
-    alternate_tail = _replace_global_point_q(alternate_tail, 0.10)
+    alternate_tail = _replace_global_point_q(alternate_tail, 0.90)
 
     decision = _global_select((sell,))
     alternate_decision = _global_select((alternate_tail,))
@@ -1784,6 +1784,9 @@ def test_day0_sell_uses_point_expectation_across_temporal_maturity(
     assert decision.robust_ev_usd == 0.0
     assert decision.terminal_wealth is None
     assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.held_probability_mean == pytest.approx(
+        0.14
+    )
     assert decision.expected_terminal_wealth.expected_delta_log_wealth > 0.0
     assert decision.expected_terminal_wealth.expected_ev_usd > 0.0
     assert decision.expected_growth is not None
@@ -1833,6 +1836,38 @@ def test_cape_town_immature_day0_reversal_enters_capital_auction():
     assert decision.expected_terminal_wealth is not None
     assert decision.expected_terminal_wealth.expected_ev_usd > 0.0
     assert decision.candidate_evaluations[0].sell_exit_authority_status == "immature"
+
+
+def test_hong_kong_day0_sell_uses_draw_mean_when_point_probability_is_stale():
+    """Regression: held point 0.9977 cannot override current draw mean 0.7127."""
+
+    sell = _global_sell_candidate(
+        candidate_id="hong-kong-2026-07-25-low-28c",
+        family="Hong Kong|2026-07-25|low",
+        side="NO",
+        held_q=0.9977,
+        bids=(("0.73", "69.9"),),
+        shares="69.9",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="immature",
+        exit_authority_reason="day0_low_extreme_not_terminal:hours_remaining=15.2",
+    )
+    sell = _replace_global_q_samples(
+        sell,
+        np.full(500, 0.7126666666666668),
+    )
+    sell = _replace_global_point_q(sell, 0.9977)
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is sell
+    assert decision.shares > 0
+    assert decision.limit_price == Decimal("0.73")
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.held_probability_mean == pytest.approx(
+        0.7126666666666668
+    )
+    assert decision.expected_terminal_wealth.expected_ev_usd > 0.0
 
 
 def test_mature_mean_sell_cannot_masquerade_as_robust_certificate():

@@ -5,6 +5,11 @@
 
 ## 现状(forward)
 
+### 2026-07-24 19:55 CDT tick — Day0 SELL 的 posterior mean 不再被 point estimate 冒充
+- **live 反例:** Hong Kong Jul-25 LOW28 NO 的同一 current witness 在 `00:50Z` 同时携带 `held point_q=0.9977` 与 500-draw posterior mean `0.7127`；held monitor 正确报告 `0.7127`，global auction 却把 `point_q` 传给标记为 `POSTERIOR_PREDICTIVE_MEAN` 的 SELL action law，因而在可执行 bid `0.73` 错误拒绝退出。该 split-brain 来自 solver 概率 functional 的语义实现，不是 cache、quote 或香港定制数据问题。
+- **第一性修复:** Day0 statistical SELL 的固定动作期望效用/EV 使用 current probability witness 对 exact held payoff 的 draw mean；frozen point estimate 仅保留为 identity-bound counterfactual telemetry，不再支配 live action。BUY robust admission、non-Day0 lower-CVaR SELL、same-family endowment、JIT book/fee/depth、price band、RiskGuard、lifecycle 与 settlement authority 均不改变。
+- **验收:** relationship antibody 必须覆盖 `point_q=0.9977`、draw mean `0.7127`、bid `0.73` 并选出正 EV SELL；相同 draw mean、不同 tail shape/point estimate必须产生相同 expected SELL economics；旧 Cape Town reversal、global BUY/SELL/CASH ranking、fill-prefix 与 execution tests 保持通过。部署后要求新 full global auction 对 HKO exact position 使用与 monitor 一致的 held probability mean，若经济性仍为正则出现真实 SELL command/fill；不能用手工强卖代替证明。
+
 ### 2026-07-18 19:42Z tick — quote refresh 不再占用 WORLD writer
 - **新地图对应关系:** held/candidate REST quote refresh 只生成 TRADE-owned executable evidence；derived `EDLI_REDECISION_PENDING` 已在 quote commit 后通过 independently coordinated WORLD sink 写入。把两者继续绑在同一 attached connection / `world_trade` gate 没有 settlement 或 atomicity 需求，只会让一个慢 quote chunk 阻塞无关 market event、reactor claim 和 ingest commit。
 - **运行态归因:** `price_channel_market_event deferred: WORLD writer busy for 25ms` 发生在进程内 WORLD mutex acquisition，证明同进程某条 WORLD gate 正占用 mutex。held/candidate refresh 仍周期性获取该 mutex，尽管它们的 quote rows 从不写 `opportunity_events`；这是可直接删除的全局耦合。live daemon loaded SHA 仍为 `8f7d7d962`，所以此归因来自当前旧路径，修复尚未 live。

@@ -4789,15 +4789,15 @@ def _score_global_single_order_sell(
 def _score_global_single_order_sell_expected(
     candidate: GlobalSingleOrderSellCandidate,
     *,
-    point_held_payoff_q: float,
+    held_probability_mean: float,
     sample_count: int,
     band_alpha: float,
     endowment: CandidatePortfolioEndowment,
 ) -> GlobalSingleOrderDecision:
-    """Score a mature fixed SELL without relabeling mean economics as robust."""
+    """Score a fixed SELL on the witness mean without relabeling it as robust."""
 
-    point_q = float(point_held_payoff_q)
-    if not math.isfinite(point_q) or not 0.0 <= point_q <= 1.0:
+    mean_q = float(held_probability_mean)
+    if not math.isfinite(mean_q) or not 0.0 <= mean_q <= 1.0:
         raise ValueError("SELL expected probability must lie in [0, 1]")
     internal_candidate = replace(
         candidate,
@@ -4809,7 +4809,7 @@ def _score_global_single_order_sell_expected(
         internal_candidate,
         held_payoff_q_samples=np.full(
             sample_count,
-            point_q,
+            mean_q,
             dtype=np.float64,
         ),
         band_alpha=band_alpha,
@@ -4821,8 +4821,8 @@ def _score_global_single_order_sell_expected(
     assert terminal is not None
     expected_terminal = ExpectedTerminalWealthCertificate(
         probability_basis="POSTERIOR_PREDICTIVE_MEAN",
-        held_probability_mean=point_q,
-        favorable_sell_probability_mean=1.0 - point_q,
+        held_probability_mean=mean_q,
+        favorable_sell_probability_mean=1.0 - mean_q,
         loss_payoff_usd=terminal.loss_payoff_usd,
         win_payoff_usd=terminal.win_payoff_usd,
         wealth_after_loss_usd=terminal.wealth_after_loss_usd,
@@ -5525,14 +5525,10 @@ def select_global_single_order(
                 point_counterfactual
             )
             if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
-                if point_q is None:
-                    rejections[candidate.candidate_id] = (
-                        "POINT_PROBABILITY_UNAVAILABLE"
-                    )
-                    continue
+                held_probability_mean = float(np.mean(q_samples))
                 score = _score_global_single_order_sell_expected(
                     candidate,
-                    point_held_payoff_q=point_q,
+                    held_probability_mean=held_probability_mean,
                     sample_count=q_samples.size,
                     band_alpha=band_alpha,
                     endowment=sell_endowment,
