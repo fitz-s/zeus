@@ -138,7 +138,10 @@ REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_cat
 REPLACEMENT_AVAILABILITY_POLL_JOB_ID = "replacement_cycle_availability_poll"
 ANCHOR_META_CROSS_CHECK_JOB_ID = "anchor_meta_stamp_cross_check"
 REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
-REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES = 4
+# forecast_posteriors has one SQLite writer. Parallel commit subprocesses do not
+# add write throughput; they can exhaust the subprocess timeout waiting on each
+# other and permanently strand the freshest family request in failed/.
+REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES = 1
 # SEPARATE lane for the heavy download (publish-time cron + boot catch-up). The download
 # runs for tens of minutes (8 Open-Meteo models x all cities; slowed further by fail-soft
 # 400-retries on short-range models). On a SHARED max_workers=1 lane it serialized AHEAD of

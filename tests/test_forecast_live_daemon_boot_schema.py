@@ -1,5 +1,5 @@
 # Created: 2026-07-20
-# Last reused/audited: 2026-07-20
+# Last reused/audited: 2026-07-24
 # Authority basis: operator-directed DB hot-path and fault-isolation improvement loop.
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ import sqlite3
 
 import pytest
 
+import src.ingest.forecast_live_daemon as daemon
 from src.ingest.forecast_live_daemon import (
     _FORECAST_BOOT_REQUIRED_INDEXES,
     _FORECAST_BOOT_REQUIRED_INDEX_TABLES,
@@ -40,12 +41,42 @@ def test_forecast_live_boot_schema_fast_check_accepts_present_core_schema() -> N
     finally:
         conn.close()
 
+
 def test_forecast_live_boot_schema_fast_check_rejects_missing_required_column() -> None:
     conn = _conn_with_required_schema(omit=("forecast_posteriors", "runtime_layer"))
     try:
         assert _forecast_boot_schema_ready(conn) is False
     finally:
         conn.close()
+
+
+def test_replacement_materializer_serializes_forecast_db_writer(monkeypatch) -> None:
+    jobs: list[tuple[object, str, dict[str, object]]] = []
+
+    class Scheduler:
+        def add_job(self, fn, trigger, **kwargs) -> None:
+            jobs.append((fn, trigger, kwargs))
+
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_materialize_interval_minutes",
+        lambda: 5,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_materialize_poll_seconds",
+        lambda: 1,
+    )
+
+    daemon._register_replacement_forecast_production_jobs(Scheduler())
+
+    materialize = next(
+        job
+        for job in jobs
+        if job[2]["id"] == daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID
+    )
+    assert daemon.REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES == 1
+    assert materialize[2]["max_instances"] == 1
 
 
 def test_forecast_live_boot_schema_fast_check_rejects_missing_live_index() -> None:
