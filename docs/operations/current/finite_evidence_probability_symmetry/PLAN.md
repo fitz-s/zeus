@@ -4,6 +4,30 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-24 Post-trade boot identity ordering
+
+The official live restart correctly refused to start the order daemon until
+every prerequisite sidecar proved the expected loaded SHA from a fresh
+process-owned heartbeat. The post-trade sidecar registered heartbeat,
+harvester, and collateral jobs with the same immediate `next_run_time`, then
+entered `BlockingScheduler`. Cold network/capital work occupied the scheduler
+workers first, so the first new heartbeat arrived several minutes after the
+90-second deploy identity window. Recovery had succeeded, but the fail-closed
+deployment left live trading stopped.
+
+The sidecar now writes one synchronous boot heartbeat only after sanctioned DB
+preflight and the complete cascade-liveness poller contract pass, but before
+the scheduler can run any immediate job. The existing periodic heartbeat
+remains the ongoing liveness signal. This preserves the proof boundary: the
+running sidecar itself publishes its immutable boot SHA; deploy does not
+fabricate identity, extend a timeout around unbounded work, or start the order
+daemon without prerequisite proof.
+
+Money path: runtime code identity -> restart admission -> continuous
+re-decision/exit availability. No probability, entry, sizing, lifecycle, or
+capital-job semantics change. Rollback restores the prior safe deployment
+block.
+
 ## 2026-07-24 Restart fill-identity convergence
 
 The official live restart stopped the complete mesh when restart-preflight

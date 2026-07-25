@@ -47,6 +47,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import subprocess
 import sys
 import time
@@ -213,6 +214,50 @@ def test_harvester_runs_on_daemon_start_then_keeps_hourly_cadence():
     assert isinstance(next_run, ast.Call)
     assert isinstance(next_run.func, ast.Attribute)
     assert next_run.func.attr == "now"
+
+
+def test_boot_identity_precedes_immediate_scheduler_work():
+    """Deploy identity must not wait behind boot-triggered network/capital jobs."""
+    main_node = _find_func(_P4_DAEMON, "main")
+    assert main_node is not None
+
+    calls: dict[str, list[int]] = {}
+    for node in ast.walk(main_node):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            name = node.func.attr
+        else:
+            continue
+        calls.setdefault(name, []).append(node.lineno)
+
+    add_jobs = calls.get("add_job", [])
+    contract = calls.get("_assert_cascade_liveness_contract", [])
+    heartbeat = calls.get("_write_post_trade_capital_heartbeat", [])
+    start = calls.get("start", [])
+    assert add_jobs and len(contract) == len(heartbeat) == len(start) == 1
+    assert max(add_jobs) < contract[0] < heartbeat[0] < start[0]
+
+
+def test_boot_heartbeat_carries_process_code_identity(tmp_path, monkeypatch):
+    """The synchronous readiness witness binds liveness to the loaded code."""
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / name)
+    monkeypatch.setattr(daemon, "_PROCESS_GIT_HEAD", "abc1234")
+    monkeypatch.setattr(daemon.os, "getpid", lambda: 31415)
+
+    daemon._write_post_trade_capital_heartbeat()
+
+    payload = json.loads(
+        (tmp_path / "daemon-heartbeat-post-trade-capital.json").read_text()
+    )
+    assert payload["daemon"] == "post-trade-capital"
+    assert payload["pid"] == 31415
+    assert payload["git_head"] == "abc1234"
+    assert payload["alive_at"]
 
 
 def test_no_regression_settlement_commands_enqueue_is_idempotent():

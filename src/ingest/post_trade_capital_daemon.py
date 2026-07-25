@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-10
+# Last reused or audited: 2026-07-24
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 commit-before-HTTP no-back-coupling; I4 ingest->P4),
@@ -504,6 +504,11 @@ def main() -> None:
     # jobs. MUST run AFTER all add_job calls (so it sees the complete job set) and BEFORE
     # scheduler.start() (so a contract violation prevents booting).
     _assert_cascade_liveness_contract(_scheduler)
+
+    # Publish this process's immutable code identity before any immediate network/capital
+    # job can occupy the scheduler workers.  The periodic job remains the liveness signal;
+    # this synchronous write is the boot-readiness witness used by the fail-closed deploy.
+    _write_post_trade_capital_heartbeat()
 
     jobs = [j.id for j in _scheduler.get_jobs()]
     logger.info("post-trade-capital scheduler ready. %d jobs: %s", len(jobs), jobs)
