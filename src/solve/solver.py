@@ -1293,7 +1293,7 @@ class PortfolioWealthWitness:
 
 @dataclass(frozen=True)
 class CandidatePortfolioEndowment:
-    """Ledger-aligned branch wealth before one additional native BUY.
+    """Ledger-aligned branch wealth before one native BUY or SELL.
 
     Both branches are lower bounds on the same cash baseline plus exact
     same-family payoffs.  Cross-family holdings stay outside this binary
@@ -4546,12 +4546,16 @@ def _score_global_single_order_sell(
     *,
     held_payoff_q_samples: np.ndarray,
     band_alpha: float,
-    wealth_floor_usd: Decimal,
-    wealth_ceiling_usd: Decimal,
+    endowment: CandidatePortfolioEndowment,
 ) -> GlobalSingleOrderDecision:
     """Select the venue-legal SELL size maximizing hold-relative log wealth."""
 
     held_shares = Decimal(candidate.held_shares)
+    if (
+        endowment.current_token_shares < held_shares
+        or endowment.ledger_snapshot_id != candidate.ledger_snapshot_id
+    ):
+        raise ValueError("SELL portfolio endowment is not ledger aligned")
     curve = candidate.executable_sell_curve
     quantum = Decimal("0.01")
     min_shares = (
@@ -4583,10 +4587,13 @@ def _score_global_single_order_sell(
         band_alpha,
     )
 
-    floor = Decimal(wealth_floor_usd)
-    ceiling = Decimal(wealth_ceiling_usd)
-    loss_baseline = floor + held_shares
-    win_baseline = ceiling
+    # SELL loses relative to HOLD when the held token pays, and wins when it
+    # does not.  Both branch baselines must therefore come from the exact same
+    # cash + same-family endowment.  Coupling the held-win branch to the global
+    # wealth floor and the held-loss branch to an unrelated cross-family
+    # maximum invents correlation and can turn a positive-EV exit negative.
+    loss_baseline = Decimal(endowment.win_wealth_floor_usd)
+    win_baseline = Decimal(endowment.loss_wealth_floor_usd)
 
     # Net proceeds are piecewise linear.  On each bid level the log objective
     # is concave, so its only possible maximum is a level boundary or the one
@@ -4785,8 +4792,7 @@ def _score_global_single_order_sell_expected(
     point_held_payoff_q: float,
     sample_count: int,
     band_alpha: float,
-    wealth_floor_usd: Decimal,
-    wealth_ceiling_usd: Decimal,
+    endowment: CandidatePortfolioEndowment,
 ) -> GlobalSingleOrderDecision:
     """Score a mature fixed SELL without relabeling mean economics as robust."""
 
@@ -4807,8 +4813,7 @@ def _score_global_single_order_sell_expected(
             dtype=np.float64,
         ),
         band_alpha=band_alpha,
-        wealth_floor_usd=wealth_floor_usd,
-        wealth_ceiling_usd=wealth_ceiling_usd,
+        endowment=endowment,
     )
     if internal.candidate is None:
         return internal
@@ -4903,6 +4908,7 @@ def _score_global_sell_point_counterfactual(
     point_held_payoff_q: float,
     probability_witness_identity: str,
     wealth_witness: PortfolioWealthWitness,
+    endowment: CandidatePortfolioEndowment,
     sample_count: int,
     band_alpha: float,
 ) -> GlobalSellPointCounterfactual:
@@ -4911,19 +4917,30 @@ def _score_global_sell_point_counterfactual(
     point_q = float(point_held_payoff_q)
     if not math.isfinite(point_q) or not 0.0 <= point_q <= 1.0:
         raise ValueError("SELL point probability must lie in [0, 1]")
-    score = _score_global_single_order_sell(
+    internal_candidate = replace(
         candidate,
+        probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
+        exit_authority_status="not_applicable",
+        exit_authority_reason="point_counterfactual_internal_fixed_probability",
+    )
+    score = _score_global_single_order_sell(
+        internal_candidate,
         held_payoff_q_samples=np.full(sample_count, point_q, dtype=np.float64),
         band_alpha=band_alpha,
-        wealth_floor_usd=wealth_witness.wealth_floor_usd,
-        wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+        endowment=endowment,
     )
     common = {
         "point_held_payoff_q": point_q,
         "probability_witness_identity": probability_witness_identity,
         "wealth_economic_identity": wealth_witness.economic_identity,
-        "wealth_floor_usd": wealth_witness.wealth_floor_usd,
-        "wealth_ceiling_usd": wealth_witness.wealth_ceiling_usd,
+        # These legacy receipt fields encode the two exact branch baselines:
+        # the held-token-payoff branch stores its floor before the held claim,
+        # while the held-token-loss branch stores its complete floor.  Neither
+        # may import unrelated cross-family maximum payoffs.
+        "wealth_floor_usd": (
+            endowment.win_wealth_floor_usd - candidate.held_shares
+        ),
+        "wealth_ceiling_usd": endowment.loss_wealth_floor_usd,
         "held_shares": candidate.held_shares,
     }
     if score.candidate is None:
@@ -5229,6 +5246,20 @@ def select_global_single_order(
             candidate_input_count=len(candidates),
         )
 
+    def resolve_candidate_endowment(
+        candidate: GlobalSingleOrderAnyCandidate,
+        default: CandidatePortfolioEndowment,
+    ) -> CandidatePortfolioEndowment:
+        if candidate_portfolio_endowment_resolver is None:
+            return default
+        resolved = candidate_portfolio_endowment_resolver(candidate)
+        if (
+            not isinstance(resolved, CandidatePortfolioEndowment)
+            or resolved.ledger_snapshot_id != wealth_witness.ledger_snapshot_id
+        ):
+            raise ValueError("candidate endowment ledger mismatch")
+        return resolved
+
     def bind_capital_horizon(
         score: GlobalSingleOrderDecision,
         *,
@@ -5431,6 +5462,26 @@ def select_global_single_order(
                 bin_id=candidate.bin_id,
                 side=candidate.side,
             )
+            try:
+                sell_endowment = resolve_candidate_endowment(
+                    candidate,
+                    CandidatePortfolioEndowment(
+                        loss_wealth_floor_usd=wealth_witness.wealth_floor_usd,
+                        win_wealth_floor_usd=(
+                            wealth_witness.wealth_floor_usd
+                            + candidate.held_shares
+                        ),
+                        current_token_shares=candidate.held_shares,
+                        ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
+                    ),
+                )
+                if sell_endowment.current_token_shares < candidate.held_shares:
+                    raise ValueError("SELL endowment omits held shares")
+            except Exception:
+                return superseded_decision(
+                    candidate.candidate_id,
+                    "PORTFOLIO_ENDOWMENT_UNAVAILABLE",
+                )
             if point_q is None:
                 point_counterfactual = GlobalSellPointCounterfactual(
                     status="UNAVAILABLE",
@@ -5453,6 +5504,7 @@ def select_global_single_order(
                             probability_witness.witness_identity
                         ),
                         wealth_witness=wealth_witness,
+                        endowment=sell_endowment,
                         sample_count=q_samples.size,
                         band_alpha=band_alpha,
                     )
@@ -5483,16 +5535,14 @@ def select_global_single_order(
                     point_held_payoff_q=point_q,
                     sample_count=q_samples.size,
                     band_alpha=band_alpha,
-                    wealth_floor_usd=wealth_witness.wealth_floor_usd,
-                    wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+                    endowment=sell_endowment,
                 )
             else:
                 score = _score_global_single_order_sell(
                     candidate,
                     held_payoff_q_samples=q_samples,
                     band_alpha=band_alpha,
-                    wealth_floor_usd=wealth_witness.wealth_floor_usd,
-                    wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+                    endowment=sell_endowment,
                 )
             if score.candidate is None:
                 rejections.update(score.rejection_reasons)
@@ -5539,44 +5589,16 @@ def select_global_single_order(
             current_token_shares=Decimal("0"),
             ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
         )
-        if candidate_portfolio_endowment_resolver is not None:
-            try:
-                candidate_endowment = candidate_portfolio_endowment_resolver(
-                    candidate
-                )
-                if (
-                    not isinstance(candidate_endowment, CandidatePortfolioEndowment)
-                    or candidate_endowment.ledger_snapshot_id
-                    != wealth_witness.ledger_snapshot_id
-                ):
-                    raise ValueError("candidate endowment ledger mismatch")
-            except Exception:  # noqa: BLE001 - lost portfolio authority invalidates the epoch
-                reason = "PORTFOLIO_ENDOWMENT_UNAVAILABLE"
-                failure_rejections = {
-                    **rejections,
-                    candidate.candidate_id: reason,
-                }
-                return GlobalSingleOrderDecision(
-                    candidate=None,
-                    shares=Decimal("0"),
-                    cost_usd=Decimal("0"),
-                    robust_delta_log_wealth=0.0,
-                    robust_ev_usd=0.0,
-                    capital_efficiency=0.0,
-                    no_trade_reason="GLOBAL_EPOCH_SUPERSEDED",
-                    rejection_reasons=failure_rejections,
-                    candidate_evaluations=_global_candidate_evaluations(
-                        candidates,
-                        rejections=failure_rejections,
-                        scores=scored,
-                        buy_rejection_economics=rejected_buy_economics_by_id,
-                        sell_point_counterfactuals=(
-                            sell_point_counterfactuals_by_id
-                        ),
-                        default_rejection="GLOBAL_EPOCH_SUPERSEDED",
-                    ),
-                    candidate_input_count=len(candidates),
-                )
+        try:
+            candidate_endowment = resolve_candidate_endowment(
+                candidate,
+                candidate_endowment,
+            )
+        except Exception:  # noqa: BLE001 - lost portfolio authority invalidates the epoch
+            return superseded_decision(
+                candidate.candidate_id,
+                "PORTFOLIO_ENDOWMENT_UNAVAILABLE",
+            )
         buy_endowments[candidate.candidate_id] = candidate_endowment
         candidate_payoff_q_lcb = None
         if candidate_payoff_q_lcb_resolver is not None:

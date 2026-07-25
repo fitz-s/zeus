@@ -477,10 +477,7 @@ def _candidate_portfolio_endowment(
     holdings_snapshot: Any,
     wealth_witness: PortfolioWealthWitness,
 ) -> CandidatePortfolioEndowment:
-    """Project exact same-family holdings onto one BUY's payoff branches."""
-
-    if isinstance(candidate, GlobalSingleOrderSellCandidate):
-        raise ValueError("SELL does not use a BUY portfolio endowment")
+    """Project exact same-family holdings onto one native action's branches."""
     outcomes = tuple(str(bin_id) for bin_id in probability_witness.bin_ids)
     if (
         len(outcomes) < 2

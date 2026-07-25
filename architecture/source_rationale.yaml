@@ -1613,8 +1613,8 @@ files:
       coordinate ascent, seeded at the best single item so it provably dominates the top-1 picker.
       The current global one-order path scores held-token SELL as a venue-cent partial-reduction
       optimization against HOLD, including every FAK fill prefix, rather than requiring full-position depth.
-      BUY branch wealth uses one shared spendable-cash floor plus exact same-family lower payoffs;
-      unrelated held-token upside cannot be coupled only to the candidate's win branch. A global
+      BUY and SELL branch wealth use one shared spendable-cash floor plus exact same-family lower
+      payoffs; unrelated held-token upside cannot be coupled only to one candidate branch. A global
       BUY candidate also carries the same captured native bid levels as its executable ask curve;
       bids are execution-policy provenance, never a second probability or objective authority.
     downstream:

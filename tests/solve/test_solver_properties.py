@@ -2141,7 +2141,19 @@ def test_global_single_order_sell_selects_interior_capital_optimal_reduction():
         shares="10",
     )
 
-    decision = _global_select((sell,), floor="100", ceiling="109.40")
+    decision = _global_select(
+        (sell,),
+        floor="100",
+        ceiling="500",
+        candidate_portfolio_endowment_resolver=lambda _candidate: (
+            S.CandidatePortfolioEndowment(
+                loss_wealth_floor_usd=Decimal("109.40"),
+                win_wealth_floor_usd=Decimal("110"),
+                current_token_shares=Decimal("10"),
+                ledger_snapshot_id=sell.ledger_snapshot_id,
+            )
+        ),
+    )
 
     assert decision.candidate is sell
     assert Decimal("4.98") <= decision.shares <= Decimal("5.00")
@@ -2175,8 +2187,12 @@ def test_global_single_order_sell_matches_every_cent_grid_oracle(
         sell,
         held_payoff_q_samples=held_samples,
         band_alpha=0.10,
-        wealth_floor_usd=Decimal(floor),
-        wealth_ceiling_usd=Decimal(ceiling),
+        endowment=S.CandidatePortfolioEndowment(
+            loss_wealth_floor_usd=Decimal(ceiling),
+            win_wealth_floor_usd=Decimal(floor) + sell.held_shares,
+            current_token_shares=sell.held_shares,
+            ledger_snapshot_id=sell.ledger_snapshot_id,
+        ),
     )
 
     curve = sell.executable_sell_curve
@@ -2217,6 +2233,66 @@ def test_global_single_order_sell_matches_every_cent_grid_oracle(
     assert score.expected_fill_price_before_fee == oracle[5]
     assert score.limit_price == oracle[6]
     assert score.robust_delta_log_wealth == pytest.approx(oracle[0], abs=1e-12)
+
+
+def test_day0_sell_ignores_unrelated_cross_family_maximum():
+    sell = _global_sell_candidate(
+        candidate_id="sell-same-family-endowment",
+        family="sell-same-family-endowment-family",
+        side="NO",
+        held_q=0.9177,
+        bids=(("0.94", "6"),),
+        shares="6",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="immature",
+        exit_authority_reason="day0_high_extreme_not_mature",
+    )
+    endowment = S.CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=Decimal("739.373756"),
+        win_wealth_floor_usd=Decimal("745.373756"),
+        current_token_shares=Decimal("6"),
+        ledger_snapshot_id=sell.ledger_snapshot_id,
+    )
+    resolve_endowment = lambda _candidate: endowment
+
+    local = _global_select(
+        (sell,),
+        floor="739.373756",
+        ceiling="745.373756",
+        cash="739.373756",
+        candidate_portfolio_endowment_resolver=resolve_endowment,
+    )
+    unrelated_upside = _global_select(
+        (sell,),
+        floor="739.373756",
+        ceiling="2077.545518",
+        cash="739.373756",
+        candidate_portfolio_endowment_resolver=resolve_endowment,
+    )
+
+    assert local.candidate is sell
+    assert unrelated_upside.candidate is sell
+    assert local.shares == unrelated_upside.shares == Decimal("6.00")
+    assert local.robust_delta_log_wealth == pytest.approx(
+        unrelated_upside.robust_delta_log_wealth,
+        abs=1e-15,
+    )
+    assert local.robust_ev_usd == pytest.approx(
+        unrelated_upside.robust_ev_usd,
+        abs=1e-15,
+    )
+    assert local.expected_growth is not None
+    assert unrelated_upside.expected_growth is not None
+    assert local.expected_growth.expected_ev_usd > 0.0
+    assert local.expected_growth.expected_ev_usd == pytest.approx(
+        unrelated_upside.expected_growth.expected_ev_usd,
+        abs=1e-15,
+    )
+    counterfactual = unrelated_upside.candidate_evaluations[
+        0
+    ].sell_point_counterfactual
+    assert counterfactual is not None
+    assert counterfactual.status == "POSITIVE"
 
 
 def test_global_sell_materializer_floors_chain_fill_dust_to_venue_grid():

@@ -13803,6 +13803,41 @@ def test_global_candidate_endowment_projects_correlated_family_holdings_exactly(
     assert endowment.current_token_shares == Decimal("5")
     assert endowment.ledger_snapshot_id == "ledger-current"
 
+    sell_curve = ExecutableSellCurve(
+        token_id="no-c",
+        side="NO",
+        snapshot_id="sell-no-c-book",
+        book_hash="sell-no-c-hash",
+        levels=(BookLevel(price=Decimal("0.80"), size=Decimal("5")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    sell_endowment = _candidate_portfolio_endowment(
+        GlobalSingleOrderSellCandidate(
+            candidate_id="sell-no-c",
+            family_key="family",
+            bin_id="c",
+            condition_id="condition-c",
+            side="NO",
+            token_id="no-c",
+            position_id="position-no-c",
+            held_shares=Decimal("5"),
+            probability_witness_identity="probability-family",
+            book_snapshot_id=sell_curve.snapshot_id,
+            book_captured_at_utc=at,
+            execution_curve_identity=executable_curve_identity(sell_curve),
+            ledger_snapshot_id="ledger-current",
+            executable_sell_curve=sell_curve,
+            resolution_identity="resolution-family",
+        ),
+        probability_witness=SimpleNamespace(bin_ids=("a", "b", "c")),
+        holdings_snapshot=holdings,
+        wealth_witness=wealth,
+    )
+    assert sell_endowment == endowment
+
     yes_endowment = _candidate_portfolio_endowment(
         SimpleNamespace(
             family_key="family",
