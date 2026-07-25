@@ -11760,6 +11760,7 @@ class TestRecoveryResolutionTable:
         init_schema_trade_only(seed)
         init_collateral_schema(seed)
         _insert(seed, size=14.0, price=0.36)
+        _open_test_entry_obligation(seed, "cmd-001")
         _advance_to_acked(seed, venue_order_id="ord-priority-unfilled")
         _seed_pending_entry_projection(seed, order_id="ord-priority-unfilled")
         append_event(
@@ -11845,11 +11846,21 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+        assert summary["terminal_entry_exposure_obligations_fast"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
         assert summary["db_budget_deferred"] is True
         assert summary["db_budget_deferred_at"] == "terminal_point_recovery_fast"
         verified = _conn_factory()
         try:
             assert _get_state(verified, "cmd-001") == "EXPIRED"
+            assert verified.execute(
+                "SELECT status FROM entry_exposure_obligations "
+                "WHERE command_id = 'cmd-001'"
+            ).fetchone()[0] == "RESOLVED"
         finally:
             verified.close()
 

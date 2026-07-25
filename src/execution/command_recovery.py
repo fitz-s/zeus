@@ -20898,7 +20898,36 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         ) as conn:
             cancel_candidates = _capital_blocking_cancel_commands(conn)
             terminal_candidates = _terminal_point_order_candidates(conn)
-        if not cancel_candidates and not terminal_candidates:
+            obligation_states = tuple(
+                sorted(
+                    _TERMINAL_ENTRY_NO_FILL_COMMAND_STATES
+                    | _SETTLEMENT_ABSORBED_ENTRY_COMMAND_STATES
+                    | {CommandState.PARTIAL.value}
+                )
+            )
+            terminal_obligation_open = bool(
+                _table_exists(conn, "entry_exposure_obligations")
+                and conn.execute(
+                    f"""
+                    SELECT 1
+                      FROM entry_exposure_obligations obligation
+                      JOIN venue_commands command
+                        ON command.command_id = obligation.command_id
+                     WHERE obligation.status = 'OPEN'
+                       AND command.intent_kind = 'ENTRY'
+                       AND command.state IN (
+                           {','.join('?' for _ in obligation_states)}
+                       )
+                     LIMIT 1
+                    """,
+                    obligation_states,
+                ).fetchone()
+            )
+        if (
+            not cancel_candidates
+            and not terminal_candidates
+            and not terminal_obligation_open
+        ):
             return None
         cancel_command_ids = {
             str(row.get("command_id") or "") for row in cancel_candidates
@@ -20974,6 +21003,24 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             if cancel_result is not None:
                 _accumulate(summary, "cancel_recovery_fast", cancel_result)
 
+        obligation_result = _run_recovery_pass_with_lock_policy(
+            "terminal_entry_exposure_obligations_fast",
+            lambda: run_db_only_pass(
+                reconcile_terminal_entry_exposure_obligations,
+                conn_factory=fast_conn_factory,
+                label="recovery.terminal_entry_exposure_obligations_fast",
+            ),
+            scope="live_tick",
+            summary=summary,
+            deadline_monotonic=fast_deadline,
+        )
+        if obligation_result is not None:
+            _accumulate(
+                summary,
+                "terminal_entry_exposure_obligations_fast",
+                obligation_result,
+            )
+
         terminal_result = None
         if terminal_candidates:
             terminal_result = _run_recovery_pass_with_lock_policy(
@@ -20996,7 +21043,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                     "terminal_point_recovery_fast",
                     terminal_result,
                 )
-        return cancel_result or terminal_result
+        return cancel_result or obligation_result or terminal_result
 
     if scope == "boot_fast":
         # Boot recovery must not perform account-wide or per-order venue reads.
