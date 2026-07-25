@@ -1230,7 +1230,7 @@ def _replacement_forecast_discovery_job() -> None:
         forecast_db=cfg["forecast_db"],
         raw_manifest_dir=cfg["raw_manifest_dir"],
         seed_dir=cfg["seed_dir"],
-        limit=min(int(cfg["seed_discovery_limit"]), int(cfg["poll_batch_limit"])),
+        limit=int(cfg["seed_discovery_limit"]),
     )
     if revision is not None:
         _replacement_forecast_last_discovery_revision = revision

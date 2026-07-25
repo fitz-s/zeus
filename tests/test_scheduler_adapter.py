@@ -250,6 +250,60 @@ def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) 
     assert cfg["limit"] >= cfg["seed_limit"]
 
 
+def test_replacement_discovery_is_not_limited_by_poll_claim_size(
+    monkeypatch, tmp_path
+) -> None:
+    """Discovery may queue the configured burst; the poller still claims it incrementally."""
+    import src.data.replacement_forecast_production as prod
+    import src.data.replacement_forecast_seed_discovery as discovery
+    import src.ingest.forecast_live_daemon as daemon
+
+    cfg = {
+        "forecast_db": tmp_path / "forecast.db",
+        "raw_manifest_dir": tmp_path / "raw",
+        "seed_dir": tmp_path / "seeds",
+        "request_dir": tmp_path / "requests",
+        "seed_discovery_limit": 80,
+        "poll_batch_limit": 8,
+    }
+    calls: list[dict[str, object]] = []
+
+    class _Report:
+        status = "NO_ELIGIBLE_TARGETS"
+
+        @staticmethod
+        def as_dict() -> dict[str, object]:
+            return {}
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_discovery_revision",
+        lambda _cfg: ("revision",),
+    )
+    monkeypatch.setattr(
+        discovery,
+        "discover_replacement_forecast_materialization_seeds",
+        lambda **kwargs: calls.append(kwargs) or _Report(),
+    )
+    monkeypatch.setattr(daemon, "_replacement_forecast_last_discovery_revision", None)
+
+    daemon._replacement_forecast_discovery_job.__wrapped__()
+
+    assert calls == [
+        {
+            "forecast_db": cfg["forecast_db"],
+            "raw_manifest_dir": cfg["raw_manifest_dir"],
+            "seed_dir": cfg["seed_dir"],
+            "limit": 80,
+        }
+    ]
+
+
 def test_replacement_availability_fast_poll_passes_changed_source_clock_report(monkeypatch) -> None:
     """A detected public run change must drive the heavy path with the same probe report."""
     import src.ingest_main as ingest_main
