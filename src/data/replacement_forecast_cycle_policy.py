@@ -97,20 +97,13 @@ TRADEABLE_GRADE_QLCB_BASIS = "fused_center_bootstrap_p05"
 # reseed paths rematerialize every ambiguous certificate instead of serving a mixed law.
 CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v3"
 
-# P2-B anomaly transport (consult docs/evidence/upstream_physical_2026_07_17/
-# consult_freshness_decoupling_verdict.txt; authority doc
-# docs/authority/replacement_final_form_2026_06_09.md §1d, dated 2026-07-17): when
-# the served ENS shape's cycle is OLDER than the fusion carrier's cycle
-# (shape_lag_hours > 0), its members are translated onto the fresh center before
-# use and the operational ensemble_center_delta is zeroed (kept raw, provenance-only,
-# as ens_center_delta_raw_c). That row's probability law differs from the same-cycle
-# disagreement semantics above, so it is stamped with ITS OWN revision string. Only
-# rows where translation_applied is true carry this value; same-cycle rows keep
-# CURRENT_EVIDENCE_SEMANTICS_REVISION. The current-center scenario band applies
-# to both same-cycle and translated members, so both identities advance together;
-# current_evidence_shape_semantics_mismatch() then rematerializes each stale row
-# through the existing bounded target queue rather than accepting mixed semantics.
-ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION = "ensemble_anomaly_transport_v3"
+# A bounded older ENS shape retains its raw absolute members and the full
+# ENS/provider-center disagreement. This identity supersedes every anomaly-
+# transport revision, which synthesized translated members from the fresh
+# center and then reused those members as finite evidence.
+STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION = (
+    "stale_ensemble_absolute_disagreement_v1"
+)
 
 
 def _current_evidence_shape(provenance: object) -> Mapping[str, object] | None:
@@ -142,9 +135,14 @@ def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
     shape = _current_evidence_shape(provenance)
     if shape is None:
         return False
+    try:
+        stale_shape = float(shape.get("shape_lag_hours") or 0.0) > 0.0
+    except (TypeError, ValueError):
+        stale_shape = False
+    stale_shape = stale_shape or shape.get("stale_shape_reused") is True
     expected = (
-        ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION
-        if shape.get("translation_applied") is True
+        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        if stale_shape
         else CURRENT_EVIDENCE_SEMANTICS_REVISION
     )
     return str(shape.get("semantics_revision") or "") != expected
@@ -176,12 +174,15 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     shape_path = "$.bayes_precision_fusion.current_evidence_shape"
     fragments.append(
         "AND (("
+        f"COALESCE(json_extract({alias}provenance_json, '{shape_path}.stale_shape_reused'), 0) = 0 "
+        "AND "
         f"COALESCE(json_extract({alias}provenance_json, '{shape_path}.translation_applied'), 0) = 0 "
         f"AND json_extract({alias}provenance_json, '{shape_path}.semantics_revision') = "
         f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}') OR ("
-        f"json_extract({alias}provenance_json, '{shape_path}.translation_applied') = 1 "
+        f"json_extract({alias}provenance_json, '{shape_path}.stale_shape_reused') = 1 "
+        f"AND COALESCE(json_extract({alias}provenance_json, '{shape_path}.translation_applied'), 0) = 0 "
         f"AND json_extract({alias}provenance_json, '{shape_path}.semantics_revision') = "
-        f"'{ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION}'))"
+        f"'{STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION}'))"
     )
     return "\n              ".join(fragments)
 

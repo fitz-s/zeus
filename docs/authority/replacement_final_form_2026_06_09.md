@@ -101,36 +101,38 @@ deployment-SHA freshness rule.
 The older walk-forward residual width is offline historical evidence only and
 is absent from runtime probability construction.
 
-**2026-07-17 addendum — anomaly transport for a stale-but-coherent ENS shape.**
+**2026-07-25 correction — bounded reuse of a stale-but-coherent ENS shape.**
 Measured cost of the pre-addendum same-cycle-only rule: new scopes waited a mean
 14.6h (p50 6.8h) for the slow ENS-baseline leg while every other instrument was
 already fresh, costing 0.24–0.41°C of avoidable center error at scope-open
 (docs/evidence/upstream_physical_2026_07_17/consult_freshness_decoupling_verdict.txt
 §P2-B; docs/operations/current/plans/upstream_data_physical_2026-07-17.md). Reusing
-an older but internally coherent ENS cycle is licensed ONLY as a location-shape
-transport model, never as same-instant disagreement evidence:
+an older but internally coherent ENS cycle is licensed as bounded stale shape,
+never as same-instant agreement evidence:
 
 ```
 shape_lag_hours = carrier_cycle_time - ens_cycle_time
-translation_applied = shape_lag_hours > 0
+stale_shape_reused = shape_lag_hours > 0
 
-if translation_applied:
-    X'_j        = μ* + (X_j - mean(X))     # anomalies recentered on the fresh center
-    δ_ens       = 0                         # operational: zeroed, never folded into σ_pred
-    δ_ens_raw   = μ* - mean(X)              # provenance-only (research / regime-discordance)
-    σ_pred      = sqrt(σ_within² + σ_between²)   # no δ_ens² term -- avoids double-counting μ*
+if stale_shape_reused:
+    X'_j        = X_j                        # raw absolute members remain finite evidence
+    δ_ens       = mean(X) - μ*               # observed cross-clock epistemic disagreement
+    δ_ens_raw   = μ* - mean(X)               # signed provenance
+    σ_pred      = sqrt(σ_within² + σ_between² + δ_ens²)
 else:
     # shape_lag_hours <= 0 (same ENS cycle as the carrier): §1d above, unchanged.
 ```
 
-Translation is a pure shift and preserves `σ_within` exactly. The translated
-members `X'_j` — not the raw pre-translation members — are the operative sample
-for settlement-preimage hit counting and its downstream Clopper-Pearson tail.
+The raw members `X'_j` are the operative sample for settlement-preimage hit
+counting and its downstream Clopper-Pearson tail.
 `ens_center_delta_raw_c` is carried in `current_evidence_shape` provenance for
-research only; it must never re-enter `σ_pred`. A translated row is stamped
-`semantics_revision = "ensemble_anomaly_transport_v1"` (module
+the signed cross-clock disagreement. A pure location transform does not prove
+that the newer deterministic center dominates the older ensemble center; the
+absolute disagreement remains in both predictive and center uncertainty.
+A bounded stale-shape row is stamped
+`semantics_revision = "stale_ensemble_absolute_disagreement_v1"` (module
 `src.data.replacement_forecast_cycle_policy`, constant
-`ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION`), distinct from the same-cycle
+`STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION`), distinct from the same-cycle
 `"ensemble_center_disagreement_v1"` above — so the existing revision-mismatch
 convergence machinery (`current_evidence_shape_semantics_mismatch`) applies only
 to stale-shape rows, never a universe-wide replay. The 30h source-cycle

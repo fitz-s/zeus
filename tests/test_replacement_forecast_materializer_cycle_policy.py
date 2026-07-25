@@ -33,8 +33,8 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
 )
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
-    ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION,
     REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT,
+    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     classify_cycle_phase,
     current_evidence_shape_semantics_mismatch,
     tradeable_grade_coverage_sql,
@@ -65,11 +65,13 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
             "current_evidence_shape": {"semantics_revision": "older-law"}
         }
     }
-    transported = {
+    stale_reused = {
         "bayes_precision_fusion": {
             "current_evidence_shape": {
-                "semantics_revision": ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION,
-                "translation_applied": True,
+                "semantics_revision": STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+                "shape_lag_hours": 6.0,
+                "stale_shape_reused": True,
+                "translation_applied": False,
             }
         }
     }
@@ -78,6 +80,7 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
             "current_evidence_shape": {
                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                 "translation_applied": True,
+                "shape_lag_hours": 6.0,
             }
         }
     }
@@ -93,12 +96,13 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
             "current_evidence_shape": {
                 "semantics_revision": "ensemble_anomaly_transport_v2",
                 "translation_applied": True,
+                "shape_lag_hours": 6.0,
             }
         }
     }
 
     assert current_evidence_shape_semantics_mismatch(current) is False
-    assert current_evidence_shape_semantics_mismatch(transported) is False
+    assert current_evidence_shape_semantics_mismatch(stale_reused) is False
     assert current_evidence_shape_semantics_mismatch(inconsistent_transport) is True
     assert current_evidence_shape_semantics_mismatch(ambiguous_v2_same_cycle) is True
     assert current_evidence_shape_semantics_mismatch(ambiguous_v2_transport) is True
@@ -110,9 +114,10 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
         alias="p.",
     )
     assert "current_evidence_shape.semantics_revision" in clause
+    assert "current_evidence_shape.stale_shape_reused" in clause
     assert "current_evidence_shape.translation_applied" in clause
     assert CURRENT_EVIDENCE_SEMANTICS_REVISION in clause
-    assert ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION in clause
+    assert STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION in clause
     assert "ensemble_center_scenarios_v2" not in clause
     assert "ensemble_anomaly_transport_v2" not in clause
 

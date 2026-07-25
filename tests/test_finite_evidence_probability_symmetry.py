@@ -151,6 +151,65 @@ def test_current_band_preserves_provider_and_ensemble_center_scenarios() -> None
     assert all(math.isclose(sum(row), 1.0, abs_tol=1e-12) for row in rows)
 
 
+def test_dallas_stale_ensemble_disagreement_rejects_apparent_no_edge() -> None:
+    """The July 25 Dallas witness is point-positive but not robust at 82 cents."""
+
+    def f_to_c(value: float) -> float:
+        return (value - 32.0) * 5.0 / 9.0
+
+    bins = [_Bin("<=95", None, f_to_c(95.0))]
+    bins.extend(
+        _Bin(f"{lower}-{lower + 1}", f_to_c(lower), f_to_c(lower + 1))
+        for lower in range(96, 114, 2)
+    )
+    bins.append(_Bin("114+", f_to_c(114.0), None))
+
+    mu = 36.934337
+    predictive_sigma = 2.25125138989591
+    center_sigma = 2.1450716768808302
+    half_step = 5.0 / 18.0
+    member_mean = 39.067264811197944
+    raw = tuple(range(-25, 26))
+    scale = 0.6684296539618892 / math.sqrt(
+        sum(value**2 for value in raw) / len(raw)
+    )
+    members = [member_mean + value * scale for value in raw]
+    q_point = {
+        bin_.bin_id: bin_probability_settlement(
+            mu,
+            predictive_sigma,
+            bin_.lower_c,
+            bin_.upper_c,
+            half_step=half_step,
+            rounding_rule="wmo_half_up",
+        )
+        for bin_ in bins
+    }
+
+    _, q_ucb = _build_fused_q_bounds(
+        mu_star=mu,
+        center_sigma_c=center_sigma,
+        predictive_sigma_c=predictive_sigma,
+        bins=bins,
+        half_step=half_step,
+        q_point=q_point,
+        n_draws=400,
+        rounding_rule="wmo_half_up",
+        evidence_members_c=members,
+    )
+
+    target = "102-103"
+    no_price = 0.82
+    assert math.isclose(
+        q_point[target],
+        0.12040146787088957,
+        rel_tol=0.0,
+        abs_tol=1e-15,
+    )
+    assert 1.0 - q_point[target] - no_price > 0.0
+    assert 1.0 - q_ucb[target] - no_price < 0.0
+
+
 def test_source_clock_band_is_symmetric_coherent_and_has_no_historical_floor() -> None:
     bins = _bins()
     q_point = {"low": 0.04, "far": 0.18, "center": 0.55, "high": 0.23}

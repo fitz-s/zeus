@@ -4,6 +4,26 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-25 Stale ENS disagreement remains probability uncertainty
+
+The live Dallas Jul-26 102-103°F certificate paired a fresh 06Z carrier center
+of 36.934337°C with a 00Z ENS mean of 39.067265°C. Anomaly transport shifted
+the 6h-old member sample onto the fresh center and set the operational
+2.132928°C disagreement to zero. Predictive sigma collapsed from the
+same-evidence absolute-disagreement value 2.251251°C to 0.720244°C:
+`q_yes(102-103°F)` moved from 0.120401 to 0.009900 and its upper bound from
+0.717837 to 0.155766. The resulting `q_no=0.990100` admitted a live BUY NO
+6.5 @ 0.82 that the complete current-evidence ambiguity would reject robustly.
+
+The correction retires synthetic anomaly translation from finite evidence.
+Raw absolute members and their ENS/provider-center displacement remain the
+independent `delta_ens²` term in predictive and center uncertainty. Bounded
+stale-shape certificates advance to
+`stale_ensemble_absolute_disagreement_v1`, forcing the existing materialization
+loop to replace v3 rows before entry or held-position belief can consume them.
+The behavioral antibody reproduces the live 2.132928°C disagreement and
+requires raw member semantics, full sigma, and full center uncertainty.
+
 ## 2026-07-24 BUY-only preflight fallthrough
 
 The current global auction compares new BUYs and held-position SELLs under one

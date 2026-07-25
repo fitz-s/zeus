@@ -3,7 +3,7 @@
 # Last reused/audited: 2026-07-17
 # Authority basis: docs/operations/current/plans/upstream_data_physical_2026-07-17.md
 #   §Consult P2-B: gamma_g fitted walk-forward on "fresh center + then-available shape"
-#   pairs (actual availability timestamps); serving adds gamma*lag/6 to the transported
+#   pairs (actual availability timestamps); serving adds gamma*lag/6 to the stale
 #   predictive VARIANCE only, fail-open dormant.
 """Shape-age sigma term: fitter + serving antibodies.
 
@@ -19,7 +19,7 @@ SERVING (src/forecast/shape_age_sigma + materializer composition):
   (5) gamma_for fail-open zeros (dir absent, sha mismatch, unknown metric, negative);
   (6) gamma=0 / artifact-absent => byte-identical shape (hash + payload) on BOTH
       branches;
-  (7) transported branch: sigma² increases by exactly gamma*lag/6; term stamped in the
+  (7) stale branch: sigma² increases by exactly gamma*lag/6; term stamped in the
       payload; shape_hash identity dict untouched by the term field itself;
   (8) same-cycle branch: byte-identical even with gamma > 0.
 """
@@ -288,7 +288,7 @@ def test_gamma_for_fails_open(tmp_path, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 _CYCLE = "2026-07-10T00:00:00+00:00"
-_CARRIER = "2026-07-10T12:00:00+00:00"  # 12h newer -> transported branch
+_CARRIER = "2026-07-10T12:00:00+00:00"  # 12h newer -> stale-shape branch
 
 
 def _shape(*, carrier=None, gamma=0.0):
@@ -317,7 +317,7 @@ def test_gamma_zero_is_byte_identical_both_branches() -> None:
         assert "shape_age_sigma_term_c2" not in base.as_payload()
 
 
-def test_transported_branch_sigma_increases_by_exact_term() -> None:
+def test_stale_shape_branch_sigma_increases_by_exact_term() -> None:
     gamma = 0.3
     base = _shape(carrier=_CARRIER, gamma=0.0)
     widened = _shape(carrier=_CARRIER, gamma=gamma)
@@ -356,7 +356,7 @@ def test_term_field_is_outside_identity_dict() -> None:
     assert "shape_age_sigma_term_c2" not in dormant.as_payload()
     assert active.as_payload()["shape_age_sigma_term_c2"] > 0.0
     # Identity dict fields are unchanged in NAME SET: hash difference comes only from
-    # predictive_sigma_c (checked via a same-sigma probe: zero-lag transported is
+    # predictive_sigma_c (checked via a same-sigma probe: zero-lag stale reuse is
     # impossible, so equality of every identity input except sigma implies the term
     # never entered identity as its own key).
     assert set(dormant.as_payload()) | {"shape_age_sigma_term_c2"} == set(active.as_payload())

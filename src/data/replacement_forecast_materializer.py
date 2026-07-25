@@ -32,7 +32,7 @@ from src.data.forecast_target_contract import compute_target_local_day_window_ut
 from src.data.latency_metrics import emit_materialization_latency
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
-    ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION,
+    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     TRADEABLE_GRADE_QLCB_BASIS,
     classify_cycle_phase,
     cycle_age_exceeds_bound,
@@ -1300,13 +1300,13 @@ class _CurrentEvidenceShape:
     predictive_sigma_c: float
     center_sigma_c: float
     shape_hash: str
-    # Anomaly transport provenance (P2-B, 2026-07-17): shape_lag_hours is
-    # carrier_cycle_time - source_cycle_time in hours; translation_applied is
-    # true only when shape_lag_hours > 0 (ENS cycle older than the carrier).
-    # ens_center_delta_raw_c is the PRE-translation mu_t - member_mean, kept for
-    # research/regime-discordance only -- it is NEVER folded into sigma.
+    # Stale-shape provenance: shape_lag_hours is carrier_cycle_time -
+    # source_cycle_time in hours. A bounded older shape may be reused, but its
+    # raw members remain finite evidence and are never translated.
+    # ens_center_delta_raw_c is the signed mu_t - member_mean witness.
     shape_lag_hours: float
     translation_applied: bool
+    stale_shape_reused: bool
     ens_center_delta_raw_c: float
     # Between-spread freshest-coherent-cohort provenance (consult v2 (b), 2026-07-17):
     # populated ONLY when the ±3h cohort filter actually excluded a provider from the
@@ -1316,10 +1316,9 @@ class _CurrentEvidenceShape:
     # distinguishes the shape).
     between_cohort_models: tuple[str, ...] | None = None
     between_cohort_excluded: tuple[str, ...] | None = None
-    # Shape-age sigma term (consult P2-B full form, 2026-07-17): the fitted variance
-    # gamma_g * shape_lag_hours/6 ADDED to the transported predictive variance — the
-    # remaining risk of pricing with an aged shape after transport removed the center
-    # error. None (payload-dropped) when the term is zero: transported branch with no
+    # Shape-age sigma term: the fitted variance gamma_g * shape_lag_hours/6 is
+    # added to bounded stale-shape predictive variance. None (payload-dropped)
+    # when the term is zero: stale branch with no
     # fitted artifact and every same-cycle row stay byte-identical. Same shape_hash
     # discipline as the cohort fields: never in the identity dict — the widened
     # predictive_sigma_c inside `identity` already distinguishes the shape.
@@ -1328,6 +1327,8 @@ class _CurrentEvidenceShape:
     def as_payload(self) -> dict[str, object]:
         payload = asdict(self)
         payload.pop("members_c")
+        if payload.get("stale_shape_reused") is False:
+            payload.pop("stale_shape_reused", None)
         if payload.get("between_cohort_models") is None:
             payload.pop("between_cohort_models", None)
             payload.pop("between_cohort_excluded", None)
@@ -1364,16 +1365,11 @@ def _current_evidence_shape_from_values(
     centers measure between-model uncertainty. Independent components add in
     variance.
 
-    ``carrier_cycle_time`` (P2-B anomaly transport, 2026-07-17): when supplied
-    and newer than ``source_cycle_time`` (shape_lag_hours > 0), the ENS cycle
-    is being reused stale and is licensed ONLY as a location-shape transport
-    model (consult docs/evidence/upstream_physical_2026_07_17/
-    consult_freshness_decoupling_verdict.txt P2-B): members are translated onto
-    the fresh center (anomalies from the ONE coherent cycle, recentered), and
-    the operational ensemble_center_delta is zeroed rather than folded into
-    sigma -- carrying the raw center disagreement forward as squared
-    uncertainty would double-count the new center. The pre-translation delta
-    is kept as provenance-only ``ens_center_delta_raw_c``. Omitting
+    ``carrier_cycle_time``: when supplied and newer than ``source_cycle_time``
+    (shape_lag_hours > 0), the bounded ENS cycle is being reused stale. Its raw
+    absolute members remain finite evidence, and their center displacement from
+    the fresh provider center remains an independent current-evidence
+    uncertainty term in ``sigma`` and ``center_sigma``. Omitting
     ``carrier_cycle_time`` (legacy call sites) or passing the same cycle as
     ``source_cycle_time`` leaves today's same-cycle semantics untouched.
 
@@ -1390,11 +1386,11 @@ def _current_evidence_shape_from_values(
 
     ``shape_age_gamma_c2_per_6h`` (consult P2-B full form, 2026-07-17): the fitted
     excess-variance slope from ``src.forecast.shape_age_sigma.gamma_for`` (degC² per 6h
-    of shape lag; ``scripts/fit_shape_age_sigma.py``). On the TRANSPORTED branch only,
+    of shape lag; ``scripts/fit_shape_age_sigma.py``). On the STALE branch only,
     ``gamma * shape_lag_hours/6`` is added to the predictive VARIANCE:
-    sigma = sqrt(within² + between² + gamma*lag/6) — the remaining risk of pricing with
-    an aged shape after transport removed the center error (deterministic staleness
-    slopes measure center drift, not shape staleness, so this term has its own fit).
+    sigma = sqrt(within² + between² + delta² + gamma*lag/6) — the remaining
+    risk of pricing with any age-linked dispersion beyond the explicit center
+    disagreement.
     CENTER_SIGMA deliberately excludes the term: the fit's residual is settle − FRESH
     fused center, so gamma prices excess settlement dispersion around a center whose
     own estimation error is unchanged by shape age — it is predictive width, not
@@ -1425,7 +1421,8 @@ def _current_evidence_shape_from_values(
     )
 
     raw_member_mean = sum(raw_members) / len(raw_members)
-    # Consult D_t = mu_t - Xbar_e: provenance-only, never operational.
+    # Signed provenance uses D_t = mu_t - Xbar_e. Its absolute value remains
+    # operational uncertainty whenever the older raw sample is reused.
     ens_center_delta_raw = center - raw_member_mean
 
     shape_lag_hours = 0.0
@@ -1433,21 +1430,11 @@ def _current_evidence_shape_from_values(
         carrier_dt = _to_utc(carrier_cycle_time, field_name="carrier_cycle_time")
         source_dt = _to_utc(source_cycle_time, field_name="source_cycle_time")
         shape_lag_hours = (carrier_dt - source_dt).total_seconds() / 3600.0
-    translation_applied = shape_lag_hours > 0.0
-
-    if translation_applied:
-        # X'_j = center_c + (member_j - member_mean): anomalies from the one
-        # coherent selected cycle, recentered on the fused center. This
-        # preserves within-spread exactly (a pure shift), and these translated
-        # values -- not the raw members -- are the operative sample for
-        # downstream finite-evidence preimage hit counting.
-        members = tuple(center + (value - raw_member_mean) for value in raw_members)
-        member_mean = center
-        ensemble_center_delta = 0.0
-    else:
-        members = raw_members
-        member_mean = raw_member_mean
-        ensemble_center_delta = raw_member_mean - center
+    stale_shape_reused = shape_lag_hours > 0.0
+    translation_applied = False
+    members = raw_members
+    member_mean = raw_member_mean
+    ensemble_center_delta = raw_member_mean - center
 
     within = math.sqrt(
         sum((value - member_mean) ** 2 for value in members) / len(members)
@@ -1499,17 +1486,15 @@ def _current_evidence_shape_from_values(
     between = math.sqrt(
         sum(weight * (value - center) ** 2 for _, value, weight in cohort)
     )
-    # These members remain absolute settlement-bin evidence downstream.  Their
-    # displacement from the served center is therefore current disagreement,
-    # not a location term that can be silently recentered out of the width --
-    # except when shape_lag>0, where translation already recentered them and
-    # ensemble_center_delta is 0.0 (this hypot() term drops out naturally).
+    # Raw members remain settlement-preimage evidence. Their displacement from
+    # the served center is observed epistemic disagreement, not a location term
+    # that can be recentered away.
     sigma = math.hypot(within, between, ensemble_center_delta)
-    # Shape-age sigma term (consult P2-B): fitted remaining-risk variance of the aged,
-    # transported shape. TRANSPORTED branch only; a zero/absent gamma leaves the sqrt
+    # Shape-age sigma term: fitted remaining-risk variance of the aged shape.
+    # STALE branch only; a zero/absent gamma leaves the sqrt
     # recomposition untaken so serving stays byte-identical (fail-open dormant).
     shape_age_sigma_term: float | None = None
-    if translation_applied:
+    if stale_shape_reused:
         try:
             gamma = float(shape_age_gamma_c2_per_6h)
         except (TypeError, ValueError):
@@ -1529,8 +1514,8 @@ def _current_evidence_shape_from_values(
         raise ValueError("current evidence center sigma must be positive")
 
     semantics_revision = (
-        ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION
-        if translation_applied
+        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        if stale_shape_reused
         else CURRENT_EVIDENCE_SEMANTICS_REVISION
     )
 
@@ -1556,6 +1541,8 @@ def _current_evidence_shape_from_values(
         "translation_applied": translation_applied,
         "ens_center_delta_raw_c": ens_center_delta_raw,
     }
+    if stale_shape_reused:
+        identity["stale_shape_reused"] = True
     member_values_hash = str(identity["member_values_hash"])
     return _CurrentEvidenceShape(
         snapshot_id=int(snapshot_id),
@@ -1576,6 +1563,7 @@ def _current_evidence_shape_from_values(
         shape_hash=_json_hash(identity),
         shape_lag_hours=shape_lag_hours,
         translation_applied=translation_applied,
+        stale_shape_reused=stale_shape_reused,
         ens_center_delta_raw_c=ens_center_delta_raw,
         # Cohort provenance intentionally OUTSIDE the `identity` dict above: when the
         # filter is inactive these are None (payload-dropped, shape_hash byte-identical
@@ -1682,7 +1670,7 @@ def _read_current_evidence_shape(
             values = tuple((value - 32.0) * 5.0 / 9.0 for value in values)
         elif members_unit not in {"degc", "c", "°c"}:
             return None
-        # Fitted shape-age variance slope (consult P2-B): only bites on the transported
+        # Fitted shape-age variance slope: only applies on the bounded stale
         # branch inside _current_evidence_shape_from_values. FAIL-OPEN: artifact absent
         # / import failure -> 0.0 -> byte-identical serving.
         try:
@@ -3804,8 +3792,6 @@ def _compute_posterior_payload(
         and bayes_precision_fusion_override.predictive_sigma_c is not None
     ):
         try:
-            from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
-
             _half_step = float(request.settlement_step_c) / 2.0
             # Per-city settlement preimage: the bins declare the rounding rule (oracle_truncate
             # for Hong Kong, wmo_half_up otherwise). The integrator MUST consume it so HK's

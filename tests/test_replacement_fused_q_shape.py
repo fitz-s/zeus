@@ -12,7 +12,10 @@ import pytest
 import src.data.replacement_forecast_materializer as mod
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
 )
+
+
 def test_current_ensemble_center_disagreement_stays_in_predictive_shape() -> None:
     """Absolute ENS levels cannot be recentered away from the served center."""
 
@@ -87,6 +90,42 @@ def test_aligned_ensemble_center_preserves_within_between_decomposition() -> Non
 
     assert shape.ensemble_center_delta_c == pytest.approx(0.0, abs=1e-12)
     assert shape.predictive_sigma_c == pytest.approx(0.4085217065969294)
+
+
+def test_stale_shape_reuse_preserves_raw_members_and_center_disagreement() -> None:
+    """A location shift cannot turn conflicting live evidence into certainty."""
+
+    raw = tuple(range(-25, 26))
+    scale = 0.6684296539618892 / statistics.pstdev(raw)
+    member_mean = 39.067264811197944
+    center = 36.934337
+    members = tuple(member_mean + value * scale for value in raw)
+    between = 0.26824162695413317
+    shape = mod._current_evidence_shape_from_values(
+        snapshot_id=1224099,
+        source_cycle_time="2026-07-25T00:00:00+00:00",
+        source_available_at="2026-07-25T08:25:03.905457+00:00",
+        members_c=members,
+        provider_values_c={"a": center - between, "b": center + between},
+        provider_weights={"a": 0.5, "b": 0.5},
+        center_c=center,
+        carrier_cycle_time="2026-07-25T06:00:00+00:00",
+    )
+
+    raw_delta = member_mean - center
+    assert statistics.fmean(shape.members_c) == pytest.approx(member_mean)
+    assert shape.translation_applied is False
+    assert shape.stale_shape_reused is True
+    assert shape.ens_center_delta_raw_c == pytest.approx(-raw_delta)
+    assert shape.ensemble_center_delta_c == pytest.approx(raw_delta)
+    assert shape.predictive_sigma_c == pytest.approx(
+        math.hypot(0.6684296539618892, between, raw_delta)
+    )
+    assert shape.center_sigma_c >= abs(raw_delta)
+    assert (
+        shape.semantics_revision
+        == STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+    )
 
 
 def test_current_evidence_probability_is_yes_no_complement_symmetric() -> None:

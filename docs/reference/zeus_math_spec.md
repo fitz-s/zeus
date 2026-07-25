@@ -78,6 +78,11 @@ evidence, so recentering that displacement out of `σ_pred` would make the width
 and tail certificate describe different probability worlds. Historical
 residual widths and fitted floors remain offline/non-runtime only.
 
+When a licensed older ENS cycle supplies shape for a newer carrier, its raw
+absolute members remain the finite settlement-preimage evidence and its center
+disagreement remains the `δ_ens²` term above. Recentered synthetic members are
+not an observation of the newer ensemble and cannot supply a confidence bound.
+
 `semantics_revision` is included in the shape hash. It changes whenever these
 current-evidence equations change, so posterior identity and coverage cannot
 silently treat two different probability laws as the same certificate.
