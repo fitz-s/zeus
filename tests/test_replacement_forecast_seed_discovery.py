@@ -268,6 +268,40 @@ def test_load_manifests_reuses_unchanged_files_but_rechecks_availability(
     assert reads == [manifest_path.resolve(), manifest_path.resolve()]
 
 
+def test_load_manifests_skips_retired_product_without_vetoing_current_inputs(
+    tmp_path: Path,
+) -> None:
+    """Immutable retired manifests may coexist with current inputs in the live inventory."""
+    raw_dir = tmp_path / "raw"
+    current_path = _write_manifest(
+        raw_dir,
+        name="current",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        metadata={},
+    )
+    retired_path = raw_dir / "retired.manifest.json"
+    retired = json.loads(current_path.read_text(encoding="utf-8"))
+    retired.update(
+        {
+            "source_id": "ecmwf_aifs_ens",
+            "product_id": "ecmwf_aifs_ens_sampled_2t_v1",
+            "data_version": "ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_max",
+            "trade_authority_status": "BLOCKED",
+        }
+    )
+    retired_path.write_text(json.dumps(retired), encoding="utf-8")
+
+    loaded = _load_manifests(
+        raw_dir,
+        computed_at=datetime(2026, 6, 7, tzinfo=timezone.utc),
+    )
+
+    assert len(loaded) == 1
+    assert loaded[0].data_version == OPENMETEO_HIGH_DATA_VERSION
+
+
 def test_load_manifests_singleflights_concurrent_inventory_scans(
     tmp_path: Path,
     monkeypatch,

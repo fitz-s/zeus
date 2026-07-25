@@ -16,6 +16,11 @@ from src.data.forecast_source_registry import REPLACEMENT_FORECAST_PRODUCTS
 
 UTC = timezone.utc
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
+_RETIRED_TOP_LEVEL_MANIFEST_FIELDS = frozenset({"trade_authority_status"})
+
+
+class UnregisteredRawForecastArtifactIdentityError(ValueError):
+    """The manifest names a product no longer in the live replacement registry."""
 
 
 def _parse_utc(value: datetime | str, *, field_name: str) -> datetime:
@@ -58,7 +63,9 @@ def _validate_replacement_raw_artifact_identity(
 ) -> None:
     expected = _replacement_raw_artifact_product_by_data_version().get(data_version)
     if expected is None:
-        raise ValueError("raw forecast artifact data_version is not a registered replacement raw product")
+        raise UnregisteredRawForecastArtifactIdentityError(
+            "raw forecast artifact data_version is not a registered replacement raw product"
+        )
     expected_source_id, expected_product_id = expected
     if source_id != expected_source_id or product_id != expected_product_id:
         raise ValueError("raw forecast artifact source/product identity does not match data_version")
@@ -326,8 +333,9 @@ def read_manifest(path: Path | str) -> RawForecastArtifactManifest:
         raise ValueError("raw forecast artifact manifest must decode to an object")
     known = {item.name for item in fields(RawForecastArtifactManifest)}
     unknown = set(raw) - known
-    if unknown:
-        raise ValueError(f"raw forecast artifact manifest has unsupported fields: {sorted(unknown)}")
+    unsupported = unknown - _RETIRED_TOP_LEVEL_MANIFEST_FIELDS
+    if unsupported:
+        raise ValueError(f"raw forecast artifact manifest has unsupported fields: {sorted(unsupported)}")
     raw = {key: value for key, value in raw.items() if key in known}
     return RawForecastArtifactManifest(**raw)
 

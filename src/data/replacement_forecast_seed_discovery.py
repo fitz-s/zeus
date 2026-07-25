@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from src.config import cities_by_name
-from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
+from src.data.raw_forecast_artifact_manifest import (
+    RawForecastArtifactManifest,
+    UnregisteredRawForecastArtifactIdentityError,
+    read_manifest,
+)
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_forecast_current_target_plan import (
     _latest_authorized_day0_fact,
@@ -266,7 +270,13 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
             if entry is not None and entry[0] == signature:
                 manifest = entry[1]
             else:
-                manifest = _read_manifest_with_path(path)
+                try:
+                    manifest = _read_manifest_with_path(path)
+                except UnregisteredRawForecastArtifactIdentityError:
+                    # The inventory intentionally retains immutable manifests from retired
+                    # products (for example AIFS). They are not current live inputs, but one
+                    # historical file must not veto every current-family repair scan.
+                    continue
             current[path] = (signature, manifest)
         succeeded = True
     finally:
