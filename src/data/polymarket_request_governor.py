@@ -15,12 +15,13 @@ import os
 import random
 import secrets
 import threading
+import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from enum import IntEnum
+from enum import Enum, IntEnum
 from pathlib import Path
-from typing import Any, Callable, TypeVar, cast
+from typing import Any, Callable, Iterator, TypeVar, cast
 
 import httpx
 
@@ -28,13 +29,113 @@ from src.config import state_path
 
 
 class RequestPriority(IntEnum):
-    """Economic priority; higher lanes may probe after a lower-lane outage."""
+    """Economic priority; higher lanes may probe after a lower-lane outage.
 
+    Tiered as: P0 cancel > P1 FC-03 book/fee/submit > P2 held+resting risk
+    refresh > P3 discovery/analytics/reconciliation. Only P3 (SCAN,
+    HEARTBEAT, ACCOUNT_RECOVERY) is throttled below the official route
+    budget (see ``_is_low_tier``); P0-P2 are all work-conserving and share
+    the full budget when P3 is not contending for it.
+    """
+
+    # P3 -- discovery / analytics / reconciliation sweeps.
     SCAN = 10
-    HEARTBEAT = 20
-    ACCOUNT_RECOVERY = 30
-    SUBMIT_JIT = 40
-    HELD_REDUCE_ONLY = 50
+    HEARTBEAT = 11
+    ACCOUNT_RECOVERY = 12
+    # P2 -- held-position / resting-risk continuous refresh.
+    HELD_REDUCE_ONLY = 20
+    # P1 -- FC-03 executable truth: book, fee schedule, submit-time fetch.
+    SUBMIT_JIT = 30
+    # P0 -- cancel. No current caller routes cancel through this read
+    # governor (order cancellation goes through the authenticated CLOB
+    # gateway); reserved so a future cancel-path caller has an explicit,
+    # highest-urgency tier rather than inheriting a lower one by omission.
+    CANCEL = 40
+
+
+_LOW_TIER_CEILING = int(RequestPriority.ACCOUNT_RECOVERY)
+
+
+def _is_low_tier(priority: "RequestPriority | int") -> bool:
+    """P3 only: discovery/analytics/reconciliation. P0-P2 are never throttled."""
+
+    return int(priority) <= _LOW_TIER_CEILING
+
+
+class EndpointClass(str, Enum):
+    """Economic role of a request, independent of host.
+
+    The failure circuit and telemetry are keyed by ``(host, class)`` so
+    high-volume, low-value traffic (discovery scans, analytics/reconciliation
+    sweeps) cannot inflate the exponential backoff shared by a money-critical
+    class on the SAME host (e.g. the scanner's CLOB liveness probe must not
+    contaminate the CLOB order-book circuit used by FC-03).
+    """
+
+    MARKET_DATA = "clob-market-data"
+    TRADING = "clob-trading"
+    FEE_SCHEDULE = "clob-fee-schedule"
+    DISCOVERY = "discovery"
+    ANALYTICS = "analytics"
+    UNKNOWN = "unknown"
+
+
+_CLOB_MARKET_DATA_PATHS = (
+    "/book",
+    "/books",
+    "/price",
+    "/prices",
+    "/midpoint",
+    "/midpoints",
+    "/spread",
+    "/spreads",
+    "/time",
+)
+_CLOB_TRADING_PATH_PREFIXES = ("/order",)
+_CLOB_FEE_SCHEDULE_MARKERS = ("fee",)
+_CLOB_DISCOVERY_PATH_PREFIXES = ("/markets",)
+
+
+def _endpoint_class(url: str) -> EndpointClass:
+    """Classify a request's economic role from its (host, path).
+
+    Unknown callers/paths default to ``UNKNOWN`` -- the safe direction --
+    never silently inherit a money-critical class.
+    """
+
+    parsed = httpx.URL(url)
+    host = str(parsed.host)
+    path = parsed.path.rstrip("/") or "/"
+    if host == "gamma-api.polymarket.com":
+        return EndpointClass.DISCOVERY
+    if host == "data-api.polymarket.com":
+        return EndpointClass.ANALYTICS
+    if host == "clob.polymarket.com":
+        if any(path == candidate or path.startswith(candidate + "/") for candidate in _CLOB_MARKET_DATA_PATHS):
+            return EndpointClass.MARKET_DATA
+        if any(path.startswith(prefix) for prefix in _CLOB_TRADING_PATH_PREFIXES):
+            return EndpointClass.TRADING
+        if any(marker in path for marker in _CLOB_FEE_SCHEDULE_MARKERS):
+            return EndpointClass.FEE_SCHEDULE
+        if any(path.startswith(prefix) for prefix in _CLOB_DISCOVERY_PATH_PREFIXES):
+            return EndpointClass.DISCOVERY
+    return EndpointClass.UNKNOWN
+
+
+def _legacy_global_governor_mode() -> bool:
+    """One-release rollback: former host-only (not (host, class)) circuit keying."""
+
+    return os.environ.get("ZEUS_GOVERNOR_LEGACY_GLOBAL") == "1"
+
+
+def _endpoint_key(url: str) -> tuple[str, EndpointClass]:
+    """Return the circuit key (host[:class]) and the classified role."""
+
+    host = _endpoint(url)
+    endpoint_class = _endpoint_class(url)
+    if _legacy_global_governor_mode():
+        return host, endpoint_class
+    return f"{host}:{endpoint_class.value}", endpoint_class
 
 
 class RequestAdmissionDenied(RuntimeError):
@@ -50,6 +151,7 @@ class RequestLease:
     endpoint_generation: int
     rate_limit_route: str | None
     rate_limit_generation: int
+    endpoint_class: str = EndpointClass.UNKNOWN.value
 
 
 _T = TypeVar("_T")
@@ -165,6 +267,31 @@ def retry_after_seconds(value: str | None) -> float:
         if retry_at.tzinfo is None:
             return 0.0
         return max(0.0, (retry_at - datetime.now(retry_at.tzinfo)).total_seconds())
+
+
+_TELEMETRY_FILE = "polymarket-request-governor-telemetry.jsonl"
+
+
+def _emit_governor_telemetry(payload: dict[str, Any]) -> None:
+    """Append-only, best-effort admission telemetry (GATE alpha-clock req).
+
+    Never raises and never blocks admission: a telemetry write failure is
+    logged (by swallowing it) and the caller's admission decision proceeds
+    unaffected. No HTTP call is ever made from this function, and it is
+    invoked outside any governor state-file write lock.
+    """
+
+    if os.environ.get("PYTEST_CURRENT_TEST") and "ZEUS_GOVERNOR_TELEMETRY_IN_TESTS" not in os.environ:
+        return
+    try:
+        path = state_path(_TELEMETRY_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"recorded_at": datetime.now(timezone.utc).isoformat(), **payload}
+        line = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except Exception:  # noqa: BLE001 - telemetry must never block admission.
+        pass
 
 
 class PolymarketRequestGovernor:
@@ -314,11 +441,12 @@ class PolymarketRequestGovernor:
         lease_seconds: float = _LEASE_SECONDS,
     ) -> RequestLease:
         request_id = request_identity(method, url, params=params, json_body=json_body)
-        endpoint = _endpoint(url)
+        endpoint, endpoint_class = _endpoint_key(url)
         route_limits = _routes(url)
         rate_limit_route = _rate_limit_route(url)
         lease_id = secrets.token_hex(16)
         lease_seconds = max(1.0, min(float(lease_seconds), _MAX_BACKOFF_SECONDS))
+        denial: dict[str, object] = {}
 
         def operation(state: dict[str, object], now: datetime) -> tuple[RequestLease, bool]:
             requests = self._entries(state, "requests")
@@ -329,10 +457,14 @@ class PolymarketRequestGovernor:
             if embargo and embargo > now and (
                 bool(entry.get("rate_limited")) or int(priority) <= old_priority
             ):
+                denial["reason"] = "REQUEST_EMBARGOED"
+                denial["wait_seconds"] = max(0.0, (embargo - now).total_seconds())
                 raise RequestAdmissionDenied(
                     f"POLYMARKET_REQUEST_EMBARGOED:{embargo.isoformat()}"
                 )
             if inflight and inflight > now and int(priority) <= old_priority:
+                denial["reason"] = "REQUEST_IN_FLIGHT"
+                denial["wait_seconds"] = max(0.0, (inflight - now).total_seconds())
                 raise RequestAdmissionDenied(
                     f"POLYMARKET_REQUEST_IN_FLIGHT:{inflight.isoformat()}"
                 )
@@ -340,6 +472,8 @@ class PolymarketRequestGovernor:
             circuit_until = _parse_time(circuit.get("next_retry_at"))
             circuit_priority = _int(circuit.get("priority"), int(RequestPriority.SCAN))
             if circuit_until and circuit_until > now and int(priority) <= circuit_priority:
+                denial["reason"] = "ENDPOINT_EMBARGOED"
+                denial["wait_seconds"] = max(0.0, (circuit_until - now).total_seconds())
                 raise RequestAdmissionDenied(f"POLYMARKET_ENDPOINT_EMBARGOED:{endpoint}:{circuit_until.isoformat()}")
             routes = self._entries(state, "routes")
             route_generation = 0
@@ -347,6 +481,8 @@ class PolymarketRequestGovernor:
                 rate_state = routes.get(rate_limit_route, {})
                 rate_until = _parse_time(rate_state.get("next_retry_at"))
                 if rate_until and rate_until > now:
+                    denial["reason"] = "ROUTE_EMBARGOED"
+                    denial["wait_seconds"] = max(0.0, (rate_until - now).total_seconds())
                     raise RequestAdmissionDenied(
                         f"POLYMARKET_ROUTE_EMBARGOED:{rate_limit_route}:{rate_until.isoformat()}"
                     )
@@ -364,12 +500,18 @@ class PolymarketRequestGovernor:
                         for value in attempts
                         if isinstance(value, (int, float)) and float(value) > cutoff
                     ]
+                    # Work-conserving: only P3 (discovery/analytics/reconciliation)
+                    # is throttled below the official budget. P0-P2 always share
+                    # the full route allowance so idle P3 capacity never becomes
+                    # a hard ceiling on money-critical traffic.
                     allowed = (
                         route_limit
-                        if priority >= RequestPriority.SUBMIT_JIT
+                        if not _is_low_tier(priority)
                         else int(route_limit * _LOW_PRIORITY_FRACTION)
                     )
                     if len(live_attempts) >= allowed:
+                        denial["reason"] = "ROUTE_LIMIT"
+                        denial["wait_seconds"] = 0.0
                         raise RequestAdmissionDenied(
                             f"POLYMARKET_ROUTE_LIMIT:{route}:{len(live_attempts)}/{allowed}"
                         )
@@ -402,9 +544,35 @@ class PolymarketRequestGovernor:
                 endpoint_generation,
                 rate_limit_route,
                 route_generation,
+                endpoint_class.value,
             ), True
 
-        return self._mutate(operation)
+        try:
+            lease = self._mutate(operation)
+        except RequestAdmissionDenied as exc:
+            _emit_governor_telemetry(
+                {
+                    "event": "admission_denied",
+                    "reason": denial.get("reason", str(exc)),
+                    "priority": int(priority),
+                    "endpoint": endpoint,
+                    "endpoint_class": endpoint_class.value,
+                    "rate_limit_route": rate_limit_route,
+                    "wait_seconds": denial.get("wait_seconds", 0.0),
+                }
+            )
+            raise
+        _emit_governor_telemetry(
+            {
+                "event": "admission_granted",
+                "priority": int(priority),
+                "endpoint": endpoint,
+                "endpoint_class": endpoint_class.value,
+                "rate_limit_route": rate_limit_route,
+                "wait_seconds": 0.0,
+            }
+        )
+        return lease
 
     @staticmethod
     def _owns(entry: dict[str, object] | None, lease: RequestLease, now: datetime) -> bool:
@@ -637,6 +805,27 @@ class PolymarketRequestGovernor:
         elif not self.record_neutral(lease):
             raise RequestAdmissionDenied("POLYMARKET_REQUEST_LEASE_LOST")
         return response
+
+    @contextlib.contextmanager
+    def fc03_span(self, label: str) -> Iterator[None]:
+        """Timestamp the start/complete of one FC-03 executable-truth fetch.
+
+        Best-effort telemetry only; never raises and never masks the
+        wrapped block's own exception.
+        """
+
+        started = _time.monotonic()
+        _emit_governor_telemetry({"event": "fc03_fetch_start", "label": label})
+        try:
+            yield
+        finally:
+            _emit_governor_telemetry(
+                {
+                    "event": "fc03_fetch_complete",
+                    "label": label,
+                    "elapsed_seconds": _time.monotonic() - started,
+                }
+            )
 
 
 polymarket_request_governor = PolymarketRequestGovernor()

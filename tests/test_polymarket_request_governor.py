@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 from datetime import datetime, timedelta, timezone
@@ -15,9 +16,11 @@ import httpx
 import pytest
 
 from src.data.polymarket_request_governor import (
+    EndpointClass,
     PolymarketRequestGovernor,
     RequestAdmissionDenied,
     RequestPriority,
+    _endpoint_class,
     request_identity,
 )
 
@@ -79,8 +82,8 @@ def test_429_embargo_is_route_specific_and_cross_route_success_cannot_clear_it(t
             "GET", "https://gamma-api.polymarket.com/events", params={"slug": "third-city"}
         )
     payload = json.loads((tmp_path / "governor.json").read_text())
-    assert payload["endpoints"]["gamma-api.polymarket.com"]["generation"] == 0
-    assert "failed_at" not in payload["endpoints"]["gamma-api.polymarket.com"]
+    assert payload["endpoints"]["gamma-api.polymarket.com:discovery"]["generation"] == 0
+    assert "failed_at" not in payload["endpoints"]["gamma-api.polymarket.com:discovery"]
     assert payload["routes"]["gamma-api.polymarket.com:/events"]["next_retry_at"] is not None
 
 
@@ -452,7 +455,7 @@ def test_host_circuit_backoff_accumulates_across_distinct_scan_requests(tmp_path
         priority=RequestPriority.HEARTBEAT,
     )
     payload = json.loads(state.read_text())
-    assert payload["endpoints"]["clob.polymarket.com"]["failure_count"] == 2
+    assert payload["endpoints"]["clob.polymarket.com:clob-market-data"]["failure_count"] == 2
 
 
 def test_late_low_failure_cannot_downgrade_active_held_host_circuit(tmp_path: Path) -> None:
@@ -470,7 +473,7 @@ def test_late_low_failure_cannot_downgrade_active_held_host_circuit(tmp_path: Pa
     assert governor.record_failure(held) is True
     assert governor.record_failure(low) is True
     payload = json.loads(state.read_text())
-    circuit = payload["endpoints"]["clob.polymarket.com"]
+    circuit = payload["endpoints"]["clob.polymarket.com:clob-market-data"]
     assert circuit["priority"] == int(RequestPriority.HELD_REDUCE_ONLY)
     assert circuit["generation"] == 2
     with pytest.raises(RequestAdmissionDenied, match="ENDPOINT_EMBARGOED"):
@@ -740,3 +743,285 @@ def test_position_enumeration_reads_beyond_data_api_default_page(
     assert len(positions) == 501
     assert positions[-1]["token_id"] == "held-token-after-default-page"
     assert offsets == ["0", "500"]
+
+
+# ---------------------------------------------------------------------------
+# Endpoint-class + priority-tier refactor: P0 cancel > P1 FC-03 book/fee/submit
+# > P2 held+resting risk refresh > P3 discovery/analytics/reconciliation.
+# ---------------------------------------------------------------------------
+
+
+def test_endpoint_class_classification_is_explicit_not_default_fallthrough() -> None:
+    assert _endpoint_class("https://clob.polymarket.com/book") is EndpointClass.MARKET_DATA
+    assert _endpoint_class("https://clob.polymarket.com/books") is EndpointClass.MARKET_DATA
+    assert _endpoint_class("https://clob.polymarket.com/time") is EndpointClass.MARKET_DATA
+    assert _endpoint_class("https://clob.polymarket.com/markets/0xabc") is EndpointClass.DISCOVERY
+    assert _endpoint_class("https://clob.polymarket.com/order") is EndpointClass.TRADING
+    assert _endpoint_class("https://clob.polymarket.com/fee-rate-scale") is EndpointClass.FEE_SCHEDULE
+    assert _endpoint_class("https://gamma-api.polymarket.com/events") is EndpointClass.DISCOVERY
+    assert _endpoint_class("https://gamma-api.polymarket.com/markets") is EndpointClass.DISCOVERY
+    assert _endpoint_class("https://data-api.polymarket.com/positions") is EndpointClass.ANALYTICS
+    # Unknown host/path defaults to UNKNOWN -- the safe (P3-treated) direction,
+    # never a silent inherited money-critical class.
+    assert _endpoint_class("https://clob.polymarket.com/unmapped-path") is EndpointClass.UNKNOWN
+    assert _endpoint_class("https://unknown-host.polymarket.com/x") is EndpointClass.UNKNOWN
+
+
+def test_gamma_discovery_exhaustion_does_not_deny_clob_market_data_admission(tmp_path: Path) -> None:
+    """Antibody: low-value gamma discovery traffic must never blind FC-03 book truth."""
+
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json")
+    # Exhaust and outright fail gamma discovery repeatedly (SCAN tier). Once
+    # the circuit trips, further SCAN-tier attempts are correctly denied at
+    # admission (mirroring a real scanner retry loop swallowing denials).
+    for index in range(20):
+        with contextlib.suppress(RequestAdmissionDenied):
+            governor.request(
+                lambda: _response(503),
+                "GET",
+                "https://gamma-api.polymarket.com/events",
+                params={"slug": f"city-{index}"},
+                priority=RequestPriority.SCAN,
+            )
+    # The independent clob-market-data class (different host entirely) must
+    # still admit a fresh FC-03 book fetch at SUBMIT_JIT (P1).
+    lease = governor.acquire(
+        "GET",
+        "https://clob.polymarket.com/book",
+        params={"token_id": "entry-candidate"},
+        priority=RequestPriority.SUBMIT_JIT,
+    )
+    assert governor.record_success(lease) is True
+
+
+def test_clob_discovery_scan_failures_do_not_embargo_clob_market_data_same_host(
+    tmp_path: Path,
+) -> None:
+    """The actual self-inflicted-blindness fix: same HOST, different endpoint class.
+
+    market_scanner's high-frequency CLOB liveness/archived check
+    (/markets/{condition_id}, SCAN tier) must not share a failure circuit
+    with the FC-03 book/price fetch (/book, SUBMIT_JIT tier) even though
+    both hit clob.polymarket.com.
+    """
+
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json")
+    for index in range(10):
+        with contextlib.suppress(RequestAdmissionDenied):
+            governor.request(
+                lambda: _response(503),
+                "GET",
+                f"https://clob.polymarket.com/markets/0xcond{index}",
+                priority=RequestPriority.SCAN,
+            )
+    with pytest.raises(RequestAdmissionDenied, match="ENDPOINT_EMBARGOED"):
+        governor.acquire(
+            "GET",
+            "https://clob.polymarket.com/markets/0xcond-next",
+            priority=RequestPriority.SCAN,
+        )
+    # clob-market-data is a distinct circuit on the same host: unaffected.
+    lease = governor.acquire(
+        "GET",
+        "https://clob.polymarket.com/book",
+        params={"token_id": "unaffected"},
+        priority=RequestPriority.SUBMIT_JIT,
+    )
+    assert governor.record_success(lease) is True
+    payload = json.loads((tmp_path / "governor.json").read_text())
+    assert "clob.polymarket.com:discovery" in payload["endpoints"]
+    assert "clob.polymarket.com:clob-market-data" in payload["endpoints"]
+
+
+def test_cancel_priority_preempts_submit_jit_under_contention(tmp_path: Path) -> None:
+    """P0 (cancel) preempts an in-flight P1 (SUBMIT_JIT) request on the same identity."""
+
+    state = tmp_path / "governor.json"
+    submit = PolymarketRequestGovernor(state_file=state)
+    cancel = PolymarketRequestGovernor(state_file=state)
+    started = threading.Event()
+    release = threading.Event()
+    outcome: list[object] = []
+    url = "https://clob.polymarket.com/book"
+    params = {"token_id": "contended"}
+
+    def submit_send() -> httpx.Response:
+        started.set()
+        assert release.wait(2.0)
+        return _response(200)
+
+    def run_submit() -> None:
+        try:
+            outcome.append(
+                submit.request(
+                    submit_send,
+                    "GET",
+                    url,
+                    params=params,
+                    priority=RequestPriority.SUBMIT_JIT,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - asserting the fenced outcome
+            outcome.append(exc)
+
+    thread = threading.Thread(target=run_submit)
+    thread.start()
+    assert started.wait(2.0)
+    response = cancel.request(
+        lambda: _response(200),
+        "GET",
+        url,
+        params=params,
+        priority=RequestPriority.CANCEL,
+    )
+    release.set()
+    thread.join(2.0)
+
+    assert response.status_code == 200
+    assert not thread.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], RequestAdmissionDenied)
+    assert "LEASE_LOST" in str(outcome[0])
+
+
+def test_priority_inversion_absent_across_full_tier_chain(tmp_path: Path) -> None:
+    """P3 < P2 < P1 < P0: each higher tier always bypasses a lower-tier circuit,
+    and the circuit ratchet never lets a lower tier block a higher one."""
+
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json")
+    url = "https://clob.polymarket.com/book"
+
+    scan = governor.acquire("GET", url, params={"token_id": "p3"}, priority=RequestPriority.SCAN)
+    assert governor.record_failure(scan) is True
+
+    held = governor.acquire("GET", url, params={"token_id": "p2"}, priority=RequestPriority.HELD_REDUCE_ONLY)
+    assert governor.record_failure(held) is True
+
+    submit = governor.acquire("GET", url, params={"token_id": "p1"}, priority=RequestPriority.SUBMIT_JIT)
+    assert governor.record_failure(submit) is True
+
+    cancel = governor.acquire("GET", url, params={"token_id": "p0"}, priority=RequestPriority.CANCEL)
+    assert governor.record_success(cancel) is True
+
+
+def test_multiple_endpoint_429s_are_isolated_across_classes(tmp_path: Path) -> None:
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json")
+    cases = [
+        ("https://clob.polymarket.com/book", {"token_id": "a"}),
+        ("https://clob.polymarket.com/markets/0xcond", None),
+        ("https://gamma-api.polymarket.com/events", {"slug": "b"}),
+        ("https://data-api.polymarket.com/positions", {"user": "c"}),
+    ]
+    for url, params in cases:
+        response = governor.request(
+            lambda: _response(429, {"Retry-After": "30"}),
+            "GET",
+            url,
+            params=params,
+        )
+        assert response.status_code == 429
+    # Each route embargo is independent: a fresh request against every OTHER
+    # route (different params/identity) still succeeds despite all four
+    # having just been rate-limited.
+    other = [
+        ("https://clob.polymarket.com/book", {"token_id": "a-2"}),
+        ("https://clob.polymarket.com/markets/0xcond2", None),
+        ("https://gamma-api.polymarket.com/events", {"slug": "b-2"}),
+        ("https://data-api.polymarket.com/positions", {"user": "c-2"}),
+    ]
+    for index, (url, params) in enumerate(other):
+        with pytest.raises(RequestAdmissionDenied, match="ROUTE_EMBARGOED"):
+            governor.acquire("GET", url, params=params)
+
+
+def test_p3_route_budget_exhaustion_never_denies_p1_admission(tmp_path: Path) -> None:
+    clock = _Clock()
+    state = tmp_path / "governor.json"
+    governor = PolymarketRequestGovernor(state_file=state, clock=clock)
+    url = "https://data-api.polymarket.com/positions"
+    # Exhaust the 80% low-tier (P3) share of the 150 official limit.
+    for index in range(120):
+        lease = governor.acquire("GET", url, params={"user": str(index)}, priority=RequestPriority.SCAN)
+        assert governor.record_success(lease) is True
+    with pytest.raises(RequestAdmissionDenied, match="ROUTE_LIMIT"):
+        governor.acquire("GET", url, params={"user": "p3-over-share"}, priority=RequestPriority.SCAN)
+    # P1 (SUBMIT_JIT) is unaffected by the P3 exhaustion: still admitted, up
+    # to the full official limit.
+    lease = governor.acquire("GET", url, params={"user": "p1-unblocked"}, priority=RequestPriority.SUBMIT_JIT)
+    assert governor.record_success(lease) is True
+
+
+def test_work_conservation_p3_gets_full_reserved_share_when_higher_tiers_idle(
+    tmp_path: Path,
+) -> None:
+    """P3 is never throttled BELOW its guaranteed 80% share merely because no
+    higher-tier traffic is present -- the reservation is a floor for P0-P2,
+    not a punitive cap that shrinks P3 further when capacity is idle."""
+
+    state = tmp_path / "governor.json"
+    governor = PolymarketRequestGovernor(state_file=state)
+    url = "https://data-api.polymarket.com/positions"
+    for index in range(120):
+        lease = governor.acquire("GET", url, params={"user": f"idle-{index}"}, priority=RequestPriority.SCAN)
+        assert governor.record_success(lease) is True
+    # The 120th (80% of 150) succeeded with zero P0-P2 contention; the 121st
+    # still correctly hits its reserved-share ceiling (not starved earlier,
+    # not granted more than its guaranteed share).
+    with pytest.raises(RequestAdmissionDenied, match="ROUTE_LIMIT"):
+        governor.acquire("GET", url, params={"user": "idle-over"}, priority=RequestPriority.SCAN)
+
+
+def test_missing_retry_after_still_backs_off_the_route(tmp_path: Path) -> None:
+    clock = _Clock()
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json", clock=clock)
+    response = governor.request(
+        lambda: _response(429),  # no Retry-After header at all
+        "GET",
+        "https://gamma-api.polymarket.com/events",
+        params={"slug": "no-retry-after"},
+    )
+    assert response.status_code == 429
+    with pytest.raises(RequestAdmissionDenied, match="ROUTE_EMBARGOED"):
+        governor.acquire(
+            "GET", "https://gamma-api.polymarket.com/events", params={"slug": "next"}
+        )
+
+
+def test_clock_jump_tolerance_expires_embargo_without_error(tmp_path: Path) -> None:
+    clock = _Clock()
+    state = tmp_path / "governor.json"
+    governor = PolymarketRequestGovernor(state_file=state, clock=clock)
+    governor.request(
+        lambda: _response(429, {"Retry-After": "30"}),
+        "GET",
+        "https://gamma-api.polymarket.com/events",
+        params={"slug": "jump"},
+    )
+    with pytest.raises(RequestAdmissionDenied, match="ROUTE_EMBARGOED"):
+        governor.acquire("GET", "https://gamma-api.polymarket.com/events", params={"slug": "jump-2"})
+    # A large forward clock jump (e.g. host clock resync / long GC pause)
+    # must not raise and must correctly treat the embargo as expired.
+    clock.advance(36_000)
+    lease = governor.acquire("GET", "https://gamma-api.polymarket.com/events", params={"slug": "jump-3"})
+    assert governor.record_success(lease) is True
+
+
+def test_legacy_global_governor_rollback_flag_restores_host_only_keying(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ZEUS_GOVERNOR_LEGACY_GLOBAL=1 is the one-release rollback to the
+    former host-only (not (host, class)) endpoint circuit keying."""
+
+    monkeypatch.setenv("ZEUS_GOVERNOR_LEGACY_GLOBAL", "1")
+    state = tmp_path / "governor.json"
+    governor = PolymarketRequestGovernor(state_file=state)
+    governor.request(
+        lambda: _response(503),
+        "GET",
+        "https://clob.polymarket.com/book",
+        params={"token_id": "legacy"},
+        priority=RequestPriority.SCAN,
+    )
+    payload = json.loads(state.read_text())
+    assert "clob.polymarket.com" in payload["endpoints"]
+    assert "clob.polymarket.com:clob-market-data" not in payload["endpoints"]

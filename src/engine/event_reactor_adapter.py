@@ -7470,7 +7470,10 @@ def event_bound_live_adapter_from_trade_conn(
                 FRESHNESS_WINDOW_DEFAULT,
             )
             from src.data.polymarket_client import PolymarketClient
-            from src.data.polymarket_request_governor import RequestPriority
+            from src.data.polymarket_request_governor import (
+                RequestPriority,
+                polymarket_request_governor,
+            )
             from src.engine.global_auction_universe import (
                 _global_book_metadata_is_current,
                 bind_current_global_probability_tokens,
@@ -7748,7 +7751,7 @@ def event_bound_live_adapter_from_trade_conn(
                 with PolymarketClient(
                     public_http_timeout=timeout,
                     public_request_priority=RequestPriority.SUBMIT_JIT,
-                ) as clob:
+                ) as clob, polymarket_request_governor.fc03_span("global_book_prefetch"):
                     fetched_books = fetch_current_global_books(
                         missing_tokens,
                         get_books=lambda chunk: (
@@ -7837,7 +7840,7 @@ def event_bound_live_adapter_from_trade_conn(
                     with PolymarketClient(
                         public_http_timeout=timeout,
                         public_request_priority=RequestPriority.SUBMIT_JIT,
-                    ) as clob:
+                    ) as clob, polymarket_request_governor.fc03_span("global_book_capture"):
                         epoch = capture_current_global_book_epoch(
                             trade_conn,
                             probability_witnesses=bound_probabilities,
