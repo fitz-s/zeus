@@ -1570,3 +1570,52 @@ Acceptance requires a wrong-day persistence antibody, an existing-row
 fallback antibody, the full Day0 remaining-day suite, compile/diff checks, and
 no weakening of model completeness, capture-skew, freshness, or causal-window
 gates.
+
+## 2026-07-24 provisional match versus economic ownership
+
+The loss/lifecycle audit found one Tel Aviv July 25 position whose canonical
+projection reported 5.3 shares although the complete authenticated Data API
+snapshot had never observed the token, `chain_seen_at` was NULL, the current
+order lookup returned no order, and the only durable trade fact was
+`MATCHED`. Command recovery had projected `ENTRY_ORDER_FILLED` directly from
+that provisional fact. Chain mirror then treated either the event name or any
+`MATCHED` fact as confirmed economic ownership, so repeated complete wallet
+absence could never retire the phantom exposure. A second continuity defect
+made that permanent: ordinary monitor payloads containing non-finite `NaN`
+were invalid to SQLite JSON functions and therefore falsely reset the
+consecutive-absence proof on every monitor cycle.
+
+The venue state grammar is causal: `MATCHED` is not `MINED` or `CONFIRMED`.
+Confirmed ownership for the chain-absence guard now requires a prior positive
+wallet observation, a positive chain reconciliation event, a legacy fill event
+without an explicit provisional witness, or a positive `MINED`/`CONFIRMED`
+trade fact. An explicitly `MATCHED`-only recovery event remains fill-unproven;
+after the existing two consecutive complete absence reads and zero open orders,
+the existing `CLOSED_EXITED` administrative-void path removes only the local
+projection. A position with any historical positive chain observation remains
+open for economic-close evidence. Plain monitor events remain continuity noise
+even when their numeric payload contains `NaN`; only typed semantic monitor
+events remain reset boundaries.
+
+This is a K1/K2 canonical truth-boundary hot-fix under INV-18. Allowed files are
+`src/state/chain_mirror_reconciler.py`, its focused reconciliation test, and
+this plan. No schema, lifecycle grammar, venue action, probability, strategy,
+source, settlement, or entry/exit threshold changes are allowed.
+
+Acceptance requires:
+
+- a Tel Aviv-shaped antibody proving `MATCHED`-only recovery closes only after
+  two complete absent reads;
+- a `MINED` fill antibody proving confirmed ownership remains open for review;
+- a prior-positive-chain antibody proving current absence cannot erase real
+  historical ownership;
+- a non-finite plain-monitor antibody proving JSON encoding does not mint
+  false Chain/CLOB evidence while typed semantic monitor events still reset;
+- the complete chain-mirror and affected state/runtime safety suites remain
+  green relative to their recorded baseline;
+- planning lock, compile, diff, dry-run canonical reconciliation, standard
+  hot-fix landing, and post-restart natural lifecycle evidence.
+
+Rollback is the exact hot-fix revert. It restores conservative review of the
+phantom row but performs no inverse DB mutation; any already-voided row remains
+an append-only canonical fact for operator review.

@@ -758,29 +758,98 @@ def has_confirmed_exit_fill_for_position(conn: sqlite3.Connection, position_id: 
 
 
 def has_confirmed_entry_fill_for_position(conn: sqlite3.Connection, position_id: str) -> bool:
-    """True iff canonical or venue facts prove this position was actually bought.
+    """True iff durable ownership evidence proves this position was bought.
 
     Data API absence cannot turn a confirmed economic holding into a local
     hallucination. It may mean an external sale, redemption, transfer, or venue
     enumeration lag; those outcomes require their own evidence before lifecycle
-    closure.
+    closure. A provisional MATCHED trade fact is not that evidence: the venue
+    grammar distinguishes MATCHED from MINED/CONFIRMED, and command recovery can
+    project an ENTRY_ORDER_FILLED event directly from the provisional fact.
     """
 
     if not position_id:
         return False
     try:
+        # A prior positive wallet observation is direct economic-ownership
+        # evidence even if the token is absent from the current snapshot.
         row = conn.execute(
             """
             SELECT 1
-              FROM position_events pe
-             WHERE pe.position_id = ?
-               AND pe.event_type = 'ENTRY_ORDER_FILLED'
+              FROM position_current
+             WHERE position_id = ?
+               AND NULLIF(TRIM(COALESCE(chain_seen_at, '')), '') IS NOT NULL
              LIMIT 1
             """,
             (position_id,),
         ).fetchone()
         if row is not None:
             return True
+
+        rows = conn.execute(
+            """
+            SELECT event_type, payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type IN (
+                    'CHAIN_SYNCED',
+                    'CHAIN_SIZE_CORRECTED',
+                    'VENUE_POSITION_OBSERVED'
+               )
+             ORDER BY sequence_no DESC
+             LIMIT 64
+            """,
+            (position_id,),
+        ).fetchall()
+        for evidence in rows:
+            event_type = str(evidence["event_type"] or "")
+            if event_type in ("CHAIN_SYNCED", "VENUE_POSITION_OBSERVED"):
+                return True
+            try:
+                payload = json.loads(evidence["payload_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            for key in (
+                "chain_size",
+                "attributed_chain_shares",
+                "chain_shares_after",
+                "shares_after",
+            ):
+                try:
+                    if float(payload.get(key) or 0.0) > 0.0:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+
+        # Legacy ENTRY_ORDER_FILLED events without an explicit venue-state
+        # witness remain conservative confirmed evidence. Newer recovery events
+        # carry fill_states; MATCHED-only is explicitly provisional.
+        rows = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'ENTRY_ORDER_FILLED'
+             ORDER BY sequence_no DESC
+            """,
+            (position_id,),
+        ).fetchall()
+        for evidence in rows:
+            try:
+                payload = json.loads(evidence["payload_json"] or "{}")
+            except (TypeError, ValueError):
+                return True
+            fill_states = payload.get("fill_states")
+            if fill_states is None:
+                return True
+            states = {
+                state.strip().upper()
+                for state in str(fill_states).replace(",", " ").split()
+                if state.strip()
+            }
+            if states.intersection({"MINED", "CONFIRMED"}):
+                return True
+
         row = conn.execute(
             """
             SELECT 1
@@ -792,7 +861,7 @@ def has_confirmed_entry_fill_for_position(conn: sqlite3.Connection, position_id:
                     SELECT 1
                       FROM venue_trade_facts tf
                      WHERE tf.command_id = cmd.command_id
-                       AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                       AND tf.state IN ('MINED', 'CONFIRMED')
                        AND CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
                      LIMIT 1
                )
@@ -874,23 +943,36 @@ def _has_prior_review_open_absent_marker(conn: sqlite3.Connection, position_id: 
     """
     if not position_id:
         return False
-    row = conn.execute(
-        "SELECT event_type, payload_json, source_module FROM position_events "
-        "WHERE position_id = ? AND ("
-        "event_type <> 'MONITOR_REFRESHED' "
-        "OR source_module <> 'src.engine.cycle_runtime' "
-        "OR CASE WHEN json_valid(payload_json) = 0 THEN 1 "
-        "ELSE COALESCE(TRIM(json_extract(payload_json, '$.semantic_event')), '') <> '' END"
-        ") ORDER BY sequence_no DESC LIMIT 1",
+    rows = conn.execute(
+        """
+        SELECT event_type, payload_json, source_module
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+        """,
         (position_id,),
-    ).fetchone()
-    if row is None or str(row["event_type"] or "") != "REVIEW_REQUIRED":
-        return False
-    try:
-        payload = json.loads(row["payload_json"] or "{}")
-    except (TypeError, ValueError):
-        return False
-    return payload.get("chain_mirror_classification") == REVIEW_OPEN_ABSENT
+    )
+    for row in rows:
+        event_type = str(row["event_type"] or "")
+        source_module = str(row["source_module"] or "")
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            return False
+        if (
+            event_type == "MONITOR_REFRESHED"
+            and source_module == "src.engine.cycle_runtime"
+            and not str(payload.get("semantic_event") or "").strip()
+        ):
+            # Python's decoder accepts the runtime's non-finite NaN values.
+            # SQLite json_valid/json_extract does not. Encoding validity must
+            # not promote a plain monitor sample into Chain/CLOB evidence.
+            continue
+        return (
+            event_type == "REVIEW_REQUIRED"
+            and payload.get("chain_mirror_classification") == REVIEW_OPEN_ABSENT
+        )
+    return False
 
 
 def _next_sequence_no(conn: sqlite3.Connection, position_id: str) -> int:

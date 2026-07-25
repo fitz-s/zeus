@@ -398,6 +398,80 @@ def _insert_settlement(conn: sqlite3.Connection, **overrides) -> None:
     conn.commit()
 
 
+def _insert_entry_fill_evidence(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    trade_state: str,
+) -> None:
+    command_id = f"cmd-{position_id}"
+    order_id = f"order-{position_id}"
+    observed_at = "2026-07-15T06:02:00+00:00"
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ENTRY', 'market-1', 'tok-entry-no',
+                  'BUY', 5.3, 0.5, ?, 'FILLED', ?, ?)
+        """,
+        (
+            command_id,
+            f"snap-{position_id}",
+            f"env-{position_id}",
+            position_id,
+            f"decision-{position_id}",
+            f"idem-{position_id}",
+            order_id,
+            observed_at,
+            observed_at,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+            trade_id, venue_order_id, command_id, state, filled_size,
+            fill_price, source, observed_at, local_sequence,
+            raw_payload_hash, raw_payload_json
+        ) VALUES (?, ?, ?, ?, '5.3', '0.5', 'REST', ?, 1, ?, '{}')
+        """,
+        (
+            f"trade-{position_id}",
+            order_id,
+            command_id,
+            trade_state,
+            observed_at,
+            position_id.ljust(64, "0")[:64],
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, command_id,
+            source_module, env, payload_json
+        ) VALUES (?, ?, 1, 1, 'ENTRY_ORDER_FILLED', ?, 'pending_entry',
+                  'day0_window', 'edli', ?, 'src.execution.command_recovery',
+                  'live', ?)
+        """,
+        (
+            f"{position_id}:entry-filled",
+            position_id,
+            observed_at,
+            command_id,
+            json.dumps(
+                {
+                    "fill_states": trade_state,
+                    "proof_class": "filled_entry_command_trade_fact_without_position_current",
+                    "reason": "terminal_filled_entry_trade_fact_projection_repair",
+                }
+            ),
+        ),
+    )
+    conn.commit()
+
+
 def test_apply_closes_absent_winner_to_settled_closed_redeemed(trades_conn, forecasts_conn):
     _insert_position_current(
         trades_conn, position_id="pos-win", phase="active",
@@ -688,6 +762,110 @@ def test_confirmed_fill_absence_never_force_voids_without_economic_close_proof(
     ]
 
 
+def test_matched_only_entry_projection_closes_after_two_complete_absent_reads(
+    trades_conn, forecasts_conn
+):
+    """MATCHED-only recovery is not proof that the wallet ever owned the token."""
+    position_id = "pos-provisional-match-absent"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="day0_window",
+        city="tel_aviv",
+        target_date="2026-07-25",
+        bin_label="34°C",
+        direction="buy_no",
+        no_token_id="tok-provisional-no",
+        chain_state="unknown",
+        chain_shares=0.0,
+        shares=5.3,
+    )
+    _insert_entry_fill_evidence(
+        trades_conn,
+        position_id=position_id,
+        trade_state="MATCHED",
+    )
+
+    first = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+    second = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert any(f.classification == REVIEW_OPEN_ABSENT for f in first.findings)
+    assert any(f.classification == CLOSED_EXITED for f in second.findings)
+    row = trades_conn.execute(
+        "SELECT phase, chain_state FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    assert (row["phase"], row["chain_state"]) == ("voided", CLOSED_EXITED)
+
+
+def test_mined_entry_fill_absence_stays_open_for_economic_close_proof(
+    trades_conn, forecasts_conn
+):
+    position_id = "pos-mined-fill-absent"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="day0_window",
+        direction="buy_no",
+        no_token_id="tok-mined-no",
+        chain_state="unknown",
+        chain_shares=0.0,
+        shares=5.3,
+    )
+    _insert_entry_fill_evidence(
+        trades_conn,
+        position_id=position_id,
+        trade_state="MINED",
+    )
+
+    reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+    second = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert any(f.classification == REVIEW_OPEN_ABSENT for f in second.findings)
+    assert not any(f.classification == CLOSED_EXITED for f in second.findings)
+    row = trades_conn.execute(
+        "SELECT phase, chain_state FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    assert (row["phase"], row["chain_state"]) == ("day0_window", "unknown")
+
+
+def test_prior_positive_chain_observation_dominates_matched_only_event(
+    trades_conn, forecasts_conn
+):
+    position_id = "pos-chain-seen-match-absent"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="day0_window",
+        direction="buy_no",
+        no_token_id="tok-chain-seen-no",
+        chain_state="unknown",
+        chain_shares=0.0,
+        shares=5.3,
+    )
+    trades_conn.execute(
+        "UPDATE position_current SET chain_seen_at = ? WHERE position_id = ?",
+        ("2026-07-15T06:03:00+00:00", position_id),
+    )
+    _insert_entry_fill_evidence(
+        trades_conn,
+        position_id=position_id,
+        trade_state="MATCHED",
+    )
+
+    reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+    second = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert any(f.classification == REVIEW_OPEN_ABSENT for f in second.findings)
+    assert not any(f.classification == CLOSED_EXITED for f in second.findings)
+    row = trades_conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    assert row["phase"] == "day0_window"
+
+
 def test_monitor_refresh_between_absent_reads_does_not_reset_chain_evidence(
     trades_conn, forecasts_conn
 ):
@@ -743,6 +921,54 @@ def test_monitor_refresh_between_absent_reads_does_not_reset_chain_evidence(
         "REVIEW_REQUIRED",
         "MONITOR_REFRESHED",
         "ADMIN_VOIDED",
+    ]
+
+
+def test_non_finite_plain_monitor_payload_does_not_reset_chain_evidence(
+    trades_conn, forecasts_conn
+):
+    """Runtime NaN encoding is not Chain/CLOB evidence."""
+    position_id = "pos-manila-nan-monitor-noise"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="day0_window",
+        direction="buy_no",
+        no_token_id="tok-manila-nan-monitor-noise",
+        chain_state="synced",
+        chain_shares=11.1,
+        shares=11.1,
+    )
+
+    reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+    trades_conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, caused_by,
+            source_module, env, payload_json
+        ) VALUES (?, ?, 1, 2, 'MONITOR_REFRESHED', ?, 'day0_window',
+                  'day0_window', 'edli', 'monitor_refresh',
+                  'src.engine.cycle_runtime', 'live', ?)
+        """,
+        (
+            f"{position_id}:monitor_refreshed:2",
+            position_id,
+            "2026-07-04T00:05:00+00:00",
+            json.dumps({"last_monitor_edge": float("nan")}),
+        ),
+    )
+    assert trades_conn.execute(
+        "SELECT json_valid(payload_json) FROM position_events "
+        "WHERE position_id = ? AND sequence_no = 2",
+        (position_id,),
+    ).fetchone()[0] == 0
+    trades_conn.commit()
+
+    second = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert [f.classification for f in second.findings if f.position_id == position_id] == [
+        CLOSED_EXITED
     ]
 
 
