@@ -10701,6 +10701,11 @@ def _global_probability_tightening_from_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
+    if reason.startswith("LIVE_ENTRY_BLOCKED:entry_readiness:"):
+        # Entry readiness governs BUY admission only.  The reduce-only SELL path
+        # bypasses it above, so rejecting the complete epoch here would let an
+        # unrelated BUY-side hold starve a current executable exit.
+        return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (
             "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:",

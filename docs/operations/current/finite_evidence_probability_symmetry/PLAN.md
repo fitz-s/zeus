@@ -4,6 +4,28 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-24 BUY-only preflight fallthrough
+
+The current global auction compares new BUYs and held-position SELLs under one
+posterior-mean expected-log-growth objective.  A BUY winner can fail submit-time
+entry readiness while an independently feasible reduce-only SELL remains in the
+same frozen auction epoch.  The live adapter already routes SELL before every
+entry-only gate, but preflight classified
+`LIVE_ENTRY_BLOCKED:entry_readiness:*` as an unknown batch-wide failure.  That
+stopped the complete cut instead of re-auctioning, so unresolved entry outbox
+or cap reservations could starve a profitable exit.
+
+The preflight now excludes that exact BUY candidate and re-runs the immutable
+current auction.  Other unknown, stale, superseded, or internally inconsistent
+authority failures remain fail-closed for the complete cut.  The behavioral
+antibody proves that an entry-readiness-blocked BUY falls through to a sibling
+SELL without rebuilding probability, book, or wealth truth and with exactly
+one venue submission.
+
+Money path: current entry authority + held-position exit authority -> global
+capital auction -> submit-time preflight -> venue action.  Probability,
+lifecycle, sizing, price-band, and settlement semantics are unchanged.
+
 ## 2026-07-24 Post-trade boot identity ordering
 
 The official live restart correctly refused to start the order daemon until

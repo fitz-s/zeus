@@ -9544,6 +9544,12 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     ("reason", "status"),
     (
         ("entries_paused:deployment_freshness_mismatch", "BATCH_BLOCKED"),
+        (
+            "LIVE_ENTRY_BLOCKED:entry_readiness:"
+            "EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:1,"
+            "EDLI_STAGE_LIVE_CAP_RESERVED:1",
+            "CANDIDATE_BLOCKED",
+        ),
         ("live_health_entry_authority:failing_surfaces=runtime_code", "BATCH_BLOCKED"),
         ("EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED", "BATCH_BLOCKED"),
         ("EXECUTOR_BOUNDARY_MISSING", "BATCH_BLOCKED"),
@@ -18236,9 +18242,22 @@ def test_global_batch_falls_through_family_local_preflight_block(
     )
 
 
-def test_global_batch_candidate_block_keeps_sibling_eligible(
-    monkeypatch,
-):
+@pytest.mark.parametrize(
+    "reason",
+    (
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:execution_price:input=1:"
+            "classes=EXECUTION_PRICE_MISSING=1"
+        ),
+        (
+            "LIVE_ENTRY_BLOCKED:entry_readiness:"
+            "EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:1,"
+            "EDLI_STAGE_LIVE_CAP_RESERVED:1"
+        ),
+    ),
+)
+def test_global_batch_candidate_block_keeps_sibling_eligible(monkeypatch, reason):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     scope = current_global_auction_scope_from_events(
@@ -18304,12 +18323,6 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         sell_assets=(asset,),
     )
     calls = {"select": 0, "wealth": 0, "preflight": [], "books": 0, "venue": 0}
-    reason = (
-        "GLOBAL_ACTUATION_PREPARE_FAILED:"
-        "SELECTION_SCOPE_EMPTY:execution_price:input=1:"
-        "classes=EXECUTION_PRICE_MISSING=1"
-    )
-
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
     )
