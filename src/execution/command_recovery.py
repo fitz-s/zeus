@@ -20922,7 +20922,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             deadline_monotonic=fast_deadline,
         )
 
-        def _apply(conn, snap_client):
+        def _apply_cancel(conn, snap_client):
             ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
             current = {
                 str(row.get("command_id") or ""): row
@@ -20953,29 +20953,50 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                     ps["stayed"] += 1
                 else:
                     ps["errors"] += 1
-            _accumulate(summary, "cancel_recovery_fast", ps)
-
-            terminal_ps = reconcile_restart_preflight_terminal_point_orders(
-                conn,
-                snap_client,
-            )
-            _accumulate(summary, "terminal_point_recovery_fast", terminal_ps)
             return ps
 
-        return _run_recovery_pass_with_lock_policy(
-            "capital_recovery_fast",
-            lambda: run_three_phase(
-                lambda conn: None,
-                lambda _snap: snapshot,
-                _apply,
-                conn_factory=fast_conn_factory,
-                snapshot_conn_factory=read_conn_factory,
-                label="recovery.capital_recovery_fast",
-            ),
-            scope="live_tick",
-            summary=summary,
-            deadline_monotonic=fast_deadline,
-        )
+        cancel_result = None
+        if cancel_candidates:
+            cancel_result = _run_recovery_pass_with_lock_policy(
+                "cancel_recovery_fast",
+                lambda: run_three_phase(
+                    lambda conn: None,
+                    lambda _snap: snapshot,
+                    _apply_cancel,
+                    conn_factory=fast_conn_factory,
+                    snapshot_conn_factory=read_conn_factory,
+                    label="recovery.cancel_recovery_fast",
+                ),
+                scope="live_tick",
+                summary=summary,
+                deadline_monotonic=fast_deadline,
+            )
+            if cancel_result is not None:
+                _accumulate(summary, "cancel_recovery_fast", cancel_result)
+
+        terminal_result = None
+        if terminal_candidates:
+            terminal_result = _run_recovery_pass_with_lock_policy(
+                "terminal_point_recovery_fast",
+                lambda: run_three_phase(
+                    lambda conn: None,
+                    lambda _snap: snapshot,
+                    reconcile_restart_preflight_terminal_point_orders,
+                    conn_factory=fast_conn_factory,
+                    snapshot_conn_factory=read_conn_factory,
+                    label="recovery.terminal_point_recovery_fast",
+                ),
+                scope="live_tick",
+                summary=summary,
+                deadline_monotonic=fast_deadline,
+            )
+            if terminal_result is not None:
+                _accumulate(
+                    summary,
+                    "terminal_point_recovery_fast",
+                    terminal_result,
+                )
+        return cancel_result or terminal_result
 
     if scope == "boot_fast":
         # Boot recovery must not perform account-wide or per-order venue reads.

@@ -11741,6 +11741,118 @@ class TestRecoveryResolutionTable:
         finally:
             verified.close()
 
+    def test_live_tick_commits_cancel_release_before_terminal_budget_interrupt(
+        self,
+        tmp_path,
+        monkeypatch,
+        mock_client,
+    ):
+        """A later priority query cannot roll back an authoritative cancel release."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema, init_schema_trade_only
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / "priority-cancel-atomic-commit.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        _insert(seed, size=14.0, price=0.36)
+        _advance_to_acked(seed, venue_order_id="ord-priority-unfilled")
+        _seed_pending_entry_projection(seed, order_id="ord-priority-unfilled")
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-priority-unfilled"},
+        )
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-priority-unfilled",
+                "reason": "order can't be found - already canceled or matched",
+                "cancel_outcome": {
+                    "orderID": "ord-priority-unfilled",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": (
+                        "order can't be found - already canceled or matched"
+                    ),
+                },
+            },
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        now = [0.0]
+
+        def _terminal_candidates(_conn):
+            return [
+                {
+                    "command_id": "terminal-sentinel",
+                    "venue_order_id": "ord-terminal-sentinel",
+                }
+            ]
+
+        def _terminal_interrupt(_conn, _client):
+            now[0] = 1.0
+            raise sqlite3.OperationalError("interrupted")
+
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+        monkeypatch.setattr(
+            command_recovery,
+            "_terminal_point_order_candidates",
+            _terminal_candidates,
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "reconcile_restart_preflight_terminal_point_orders",
+            _terminal_interrupt,
+        )
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+        mock_client.get_order.side_effect = lambda order_id: {
+            "orderID": order_id,
+            "status": "CANCELED",
+            "original_size": "14",
+            "size_matched": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=mock_client,
+            scope="live_tick",
+        )
+
+        assert summary["cancel_recovery_fast"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert summary["db_budget_deferred"] is True
+        assert summary["db_budget_deferred_at"] == "terminal_point_recovery_fast"
+        verified = _conn_factory()
+        try:
+            assert _get_state(verified, "cmd-001") == "EXPIRED"
+        finally:
+            verified.close()
+
     def test_live_tick_prioritizes_terminal_point_order_before_general_budget(
         self,
         tmp_path,
