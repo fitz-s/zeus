@@ -11584,6 +11584,20 @@ def _global_current_taker_escalation(
     )
 
 
+def _global_current_taker_action(
+    proof: "_CandidateProof",
+    cert: Mapping[str, Any],
+) -> bool:
+    """Bind execution to the action that actually won the global auction."""
+
+    execution_mode = str(cert.get("global_execution_mode") or "").strip().upper()
+    if execution_mode:
+        return execution_mode == "TAKER_LIMIT" and _positive_global_current_objective(
+            cert
+        )
+    return _global_current_taker_escalation(proof, cert)
+
+
 def _bind_global_current_state_economics_to_proof(
     proof: "_CandidateProof",
     cert: Mapping[str, Any],
@@ -11633,10 +11647,15 @@ def _bind_global_current_state_economics_to_proof(
         "qkernel_execution_economics": dict(cert),
         "selection_authority_applied": "qkernel_spine",
     }
-    if _global_current_taker_escalation(proof, cert):
+    if _global_current_taker_action(proof, cert):
         replacement.update(
             execution_mode_intent="TAKER",
-            rest_then_cross_policy="TAKER_ESCALATED_AFTER_REST",
+            rest_then_cross_policy=(
+                "GLOBAL_TAKER_LIMIT"
+                if str(cert.get("global_execution_mode") or "").strip().upper()
+                == "TAKER_LIMIT"
+                else "TAKER_ESCALATED_AFTER_REST"
+            ),
             taker_forbidden_reason=None,
             p_fill_lcb=1.0,
         )
@@ -12035,6 +12054,11 @@ def _global_actuation_selected_proof(
     jit_venue_book_hash = str(curve.book_hash or "").strip()
     if not jit_venue_book_hash:
         raise ValueError("GLOBAL_ACTUATION_JIT_VENUE_BOOK_HASH_MISSING")
+    global_execution_mode = str(
+        getattr(candidate, "execution_mode", "") or ""
+    ).strip().upper()
+    if global_execution_mode != "TAKER_LIMIT":
+        raise ValueError("GLOBAL_ACTUATION_EXECUTION_MODE_INVALID")
     cert = _global_current_state_economics_seed(proof)
     cert.update(
         {
@@ -12067,6 +12091,7 @@ def _global_actuation_selected_proof(
                 getattr(global_actuation, "decision_at_utc", "") or ""
             ),
             "global_candidate_id": candidate.candidate_id,
+            "global_execution_mode": global_execution_mode,
             "global_condition_id": candidate.condition_id,
             "global_token_id": candidate.token_id,
             "global_family_key": candidate.family_key,
@@ -15677,9 +15702,27 @@ def _fresh_rest_then_cross_mode(
         minutes_to_event_end = max(
             0.0, (end_dt - decision_time.astimezone(UTC)).total_seconds() / 60.0
         )
+    economics = actionable_payload.get("qkernel_execution_economics")
+    if (
+        isinstance(economics, Mapping)
+        and str(economics.get("global_execution_mode") or "").strip().upper()
+        == "TAKER_LIMIT"
+    ):
+        payoff_q_lcb = _optional_float(economics.get("payoff_q_lcb"))
+        if (
+            payoff_q_lcb is None
+            or taker_all_in is None
+            or taker_all_in > payoff_q_lcb + 1e-12
+            or not _positive_global_current_objective(economics)
+        ):
+            return "NO_TRADE"
+        try:
+            assert_live_order_unit_price(fresh_best_ask)
+        except (TypeError, ValueError):
+            return "NO_TRADE"
+        return "TAKER"
     if q_lcb is None or reservation is None:
         return "MAKER"
-    economics = actionable_payload.get("qkernel_execution_economics")
     if (
         escalated_after_rest
         and fresh_best_bid is None

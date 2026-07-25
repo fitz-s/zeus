@@ -9366,6 +9366,7 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         book_snapshot_id=curve.snapshot_id,
         execution_curve_identity=executable_curve_identity(curve),
         executable_cost_curve=curve,
+        execution_mode="TAKER_LIMIT",
     )
     proof = SimpleNamespace(
         candidate=SimpleNamespace(condition_id="condition-35c"),
@@ -9484,6 +9485,7 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
 
     assert selected is proof
     assert cert["global_actuation_identity"] == "actuation-current"
+    assert captured["global_execution_mode"] == "TAKER_LIMIT"
     assert captured["cost"] == 0.027666
     assert captured["current_candidate_cap"] == pytest.approx(0.42)
 

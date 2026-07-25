@@ -89,6 +89,7 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_actuation_identity",
     "global_optimum_semantics",
     "global_candidate_id",
+    "global_execution_mode",
     "global_condition_id",
     "global_token_id",
     "global_family_key",
@@ -150,6 +151,10 @@ def qkernel_current_state_identity_hash(economics: Mapping[str, Any]) -> str:
     """Recomputable identity for the current-posterior execution certificate."""
 
     fields = _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS
+    if "global_execution_mode" not in economics:
+        fields = tuple(
+            field for field in fields if field != "global_execution_mode"
+        )
     if "global_buy_fak_prefix_semantics" in economics:
         fields += _QKERNEL_BUY_FAK_PREFIX_IDENTITY_FIELDS
     return stable_hash(
@@ -339,6 +344,11 @@ def qkernel_global_current_state_rejection_reason(
             return field
     if economics.get("global_optimum_semantics") != "CUT_TIME_GLOBAL_OPTIMUM":
         return "global_optimum_semantics"
+    if (
+        "global_execution_mode" in economics
+        and economics.get("global_execution_mode") != "TAKER_LIMIT"
+    ):
+        return "global_execution_mode"
     numeric: dict[str, float] = {}
     for field in (
         "payoff_q_point",

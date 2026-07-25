@@ -154,6 +154,7 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         global_economic_identity="global-economic-1",
         global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
         global_candidate_id="global-candidate-1",
+        global_execution_mode="TAKER_LIMIT",
         global_bin_id="bin-1",
         global_universe_witness_identity="global-universe-1",
         global_wealth_witness_identity="global-wealth-1",
@@ -1944,6 +1945,63 @@ def test_global_current_post_rest_escalation_uses_sealed_current_objective():
     more_expensive = dict(cert, cost=0.61, edge_lcb=-0.01)
     _seal_current_qkernel_cert(more_expensive)
     assert era._global_current_taker_escalation(proof, more_expensive) is False
+
+
+def test_global_taker_action_cannot_be_rewritten_as_resting_maker():
+    cert = dict(
+        _global_current_qkernel_cert(side="NO"),
+        global_execution_mode="TAKER_LIMIT",
+    )
+    proof = SimpleNamespace(
+        rest_then_cross_policy="REST_DEFAULT",
+        ev_taker=0.03,
+    )
+
+    assert era._global_current_taker_action(proof, cert) is True
+
+    non_positive = dict(cert, global_robust_delta_log_wealth=0.0)
+    assert era._global_current_taker_action(proof, non_positive) is False
+
+    tampered = dict(cert, global_execution_mode="MAKER")
+    assert era._qkernel_current_state_solve_economics(tampered) is False
+    stripped = dict(cert)
+    stripped.pop("global_execution_mode")
+    assert era._qkernel_current_state_solve_economics(stripped) is False
+
+
+def test_global_taker_action_fresh_revalidation_never_downgrades_to_maker():
+    cert = dict(
+        _global_current_qkernel_cert(side="NO"),
+        global_execution_mode="TAKER_LIMIT",
+    )
+    actionable = {
+        "direction": "buy_no",
+        "q_lcb_5pct": cert["payoff_q_lcb"],
+        "c_fee_adjusted": cert["cost"],
+        "rest_then_cross_policy": "GLOBAL_TAKER_LIMIT",
+        "qkernel_execution_economics": cert,
+    }
+    snapshot = SimpleNamespace(
+        payload={"market_end_at": "2026-07-23T12:00:00+00:00"}
+    )
+
+    assert era._fresh_rest_then_cross_mode(
+        actionable_payload=actionable,
+        executable_snapshot=snapshot,
+        fresh_best_bid=0.01,
+        fresh_best_ask=0.10,
+        tick_size=0.01,
+        decision_time=datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc),
+    ) == "TAKER"
+
+    assert era._fresh_rest_then_cross_mode(
+        actionable_payload=actionable,
+        executable_snapshot=snapshot,
+        fresh_best_bid=0.59,
+        fresh_best_ask=0.60,
+        tick_size=0.01,
+        decision_time=datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc),
+    ) == "NO_TRADE"
 
 
 def test_global_current_fresh_mode_does_not_reapply_selection_curse():
