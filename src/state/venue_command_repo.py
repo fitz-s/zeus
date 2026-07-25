@@ -2659,6 +2659,7 @@ def _validate_review_confirmed_fill_payload(
         "cancel_unknown_confirmed_trade_with_positive_trade_fact",
         "recovery_no_venue_order_id_confirmed_trade",
         "matched_submit_missing_trade_id_confirmed_trade",
+        "post_ack_persistence_failure_confirmed_trade",
         "matched_cancel_with_confirmed_held_projection",
         "authenticated_trade_fact_full_fill",
         "authenticated_trade_fact_full_fill_with_held_projection",
@@ -2689,6 +2690,16 @@ def _validate_review_confirmed_fill_payload(
         required_true = (
             "latest_event_is_review_required",
             "review_reason_matched_submit_missing_trade_id",
+            "positive_trade_fact",
+            "maker_order_token_matches_command",
+            "bound_venue_order_id_matches_trade",
+            "maker_order_not_open",
+            "venue_size_quantization_residual_lt_0_01",
+        )
+    elif proof_class == "post_ack_persistence_failure_confirmed_trade":
+        required_true = (
+            "latest_event_is_review_required",
+            "review_reason_post_ack_persistence_failure",
             "positive_trade_fact",
             "maker_order_token_matches_command",
             "bound_venue_order_id_matches_trade",
@@ -3278,6 +3289,10 @@ def _actual_review_confirmed_fill_predicates(
         "review_reason_matched_submit_missing_trade_id": (
             review_reason == "matched_submit_missing_trade_id"
         ),
+        "review_reason_post_ack_persistence_failure": review_reason in {
+            "entry_ack_persistence_failed_after_side_effect",
+            "exit_ack_persistence_failed_after_side_effect",
+        },
         "prior_fill_confirmed_event": prior_fill_confirmed,
         "positive_trade_fact": positive_trade_fact,
         "matched_order_fact_positive": matched_order_fact_positive,

@@ -5244,6 +5244,82 @@ class TestRecoveryResolutionTable:
         assert unknown_count == 0
         assert unknown_markets == ()
 
+    def test_exit_ack_persistence_review_confirmed_trade_fills(
+        self, conn, mock_client
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(
+            conn,
+            command_id="cmd-exit-ack-persistence",
+            position_id="pos-exit-ack-persistence",
+            decision_id="dec-exit-ack-persistence",
+            token_id="tok-exit-ack-persistence",
+            intent_kind="EXIT",
+            side="SELL",
+            size=44.42,
+            price=0.74,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit-ack-persistence",
+            venue_order_id="ord-exit-ack-persistence",
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit-ack-persistence",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={"reason": "exit_ack_persistence_failed_after_side_effect"},
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-exit-ack-persistence",
+                "status": "CONFIRMED",
+                "trader_side": "TAKER",
+                "match_time": "2026-04-26T00:04:00Z",
+                "transaction_hash": "0xtx-exit-ack-persistence",
+                "asset_id": "tok-exit-ack-persistence",
+                "taker_order_id": "ord-exit-ack-persistence",
+                "side": "SELL",
+                "price": "0.75",
+                "size": "44.42",
+            }
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-exit-ack-persistence") == "FILLED"
+        assert summary["advanced"] >= 1
+        event = _get_events(conn, "cmd-exit-ack-persistence")[-1]
+        assert event["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == (
+            "post_ack_persistence_failure_confirmed_trade"
+        )
+        assert payload["sdk_submit_attempted"] is True
+        assert payload["required_predicates"][
+            "review_reason_post_ack_persistence_failure"
+        ] is True
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-exit-ack-persistence'
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-exit-ack-persistence",
+            "venue_order_id": "ord-exit-ack-persistence",
+            "state": "CONFIRMED",
+            "filled_size": "44.42",
+            "fill_price": "0.75",
+            "tx_hash": "0xtx-exit-ack-persistence",
+        }
+
     def test_matched_submit_missing_trade_id_confirmed_trade_fills(
         self, conn, mock_client
     ):

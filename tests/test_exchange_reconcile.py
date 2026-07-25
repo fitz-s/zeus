@@ -4679,6 +4679,144 @@ def test_partial_exit_fill_cannot_project_economic_close_even_with_fill_event(co
     ).fetchone()[0] == 0
 
 
+def test_filled_reduction_command_cannot_close_already_chain_reduced_position(conn):
+    """Command finality cannot override an explicit partial-position intent."""
+    from src.execution.exchange_reconcile import _ensure_exit_fill_position_event
+
+    position_id = "pos-capital-reduction-terminal-guard"
+    order_id = "ord-capital-reduction-terminal-guard"
+    command_id = "cmd-capital-reduction-terminal-guard"
+    token = "capital-reduction-terminal-guard-token"
+    seed_position_baseline(
+        conn,
+        position_id=position_id,
+        order_id="ord-entry-capital-reduction-terminal-guard",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               order_id = ?,
+               order_status = 'sell_pending_confirmation',
+               shares = 25.48,
+               chain_shares = 25.48,
+               cost_basis_usd = 17.836,
+               entry_price = 0.70,
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, order_id, NOW.isoformat(), position_id),
+    )
+    sequence_no = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, order_id,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'EXIT_INTENT', ?, 'day0_window', 'pending_exit',
+                  'opening_inertia', NULL, 'src.execution.exit_lifecycle', ?, 'live')
+        """,
+        (
+            f"{position_id}:exit_intent:{sequence_no}",
+            position_id,
+            sequence_no,
+            NOW.isoformat(),
+            json.dumps(
+                {
+                    "exit_intent_close_position": False,
+                    "exit_intent_shares": 44.42,
+                    "exit_intent_capital_certificate": {"held_shares": 69.90},
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, order_id,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'EXIT_ORDER_POSTED', ?, 'pending_exit', 'pending_exit',
+                  'opening_inertia', ?, 'src.execution.exit_lifecycle', '{}', 'live')
+        """,
+        (
+            f"{position_id}:exit_posted:{sequence_no + 1}",
+            position_id,
+            sequence_no + 1,
+            NOW.isoformat(),
+            order_id,
+        ),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=token,
+        side="SELL",
+        size=44.42,
+        price=0.74,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        token_id=token,
+        trade_id="trade-capital-reduction-terminal-guard",
+        size="44.42",
+        fill_price="0.75",
+        state="CONFIRMED",
+    )
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+    )
+
+    _ensure_exit_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id=order_id,
+        filled_size="44.42",
+        fill_price="0.75",
+        observed_at=NOW,
+        command_event="FILL_CONFIRMED",
+    )
+
+    current = conn.execute(
+        """
+        SELECT phase, shares, chain_shares, cost_basis_usd, order_status
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "pending_exit",
+        "shares": 25.48,
+        "chain_shares": 25.48,
+        "cost_basis_usd": 17.836,
+        "order_status": "sell_pending_confirmation",
+    }
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_FILLED'
+        """,
+        (position_id,),
+    ).fetchone()[0] == 0
+
+
 def test_trade_lifecycle_update_appends_confirmed_after_matched_without_double_counting(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

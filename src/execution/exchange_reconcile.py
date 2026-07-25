@@ -5209,6 +5209,27 @@ def _ensure_exit_fill_position_event(
             venue_order_id,
         )
         return
+    # A fully-filled SELL command is not necessarily a fully-closed position.
+    # Capital reallocation may intentionally sell only part of the holding.  The
+    # linked EXIT_INTENT is the position-finality authority; command size alone
+    # cannot manufacture an EXIT_ORDER_FILLED/economically_closed projection.
+    from src.execution.exit_lifecycle import _canonical_reduction_intent_shares
+
+    reduction_target = _canonical_reduction_intent_shares(
+        conn,
+        SimpleNamespace(trade_id=position_id),
+        order_id=venue_order_id,
+    )
+    if reduction_target is not None:
+        logger.info(
+            "exchange_reconcile: preserve partial-position reduction "
+            "command_id=%s intended_shares=%s order_id=%s position_id=%s",
+            command.get("command_id"),
+            reduction_target,
+            venue_order_id,
+            position_id,
+        )
+        return
     fill_economics = _exit_fill_economics_for_command(
         conn,
         command_id=str(command.get("command_id") or ""),

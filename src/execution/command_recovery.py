@@ -239,7 +239,7 @@ _POST_ACK_PERSISTENCE_REVIEW_REASONS = frozenset({
 _CONFIRMED_TRADE_REVIEW_REASONS = frozenset({
     "recovery_no_venue_order_id",
     "matched_submit_missing_trade_id",
-})
+}) | _POST_ACK_PERSISTENCE_REVIEW_REASONS
 _NO_VENUE_EXPOSURE_REVIEW_REASONS = frozenset({
     "recovery_no_venue_order_id",
     # Older recovery moved an unresolved submit here when its authenticated
@@ -18705,10 +18705,17 @@ def _review_required_confirmed_trade_recovery(
         "trade_id": trade_id,
         "filled_size": filled_size,
         "fill_price": fill_price,
-        "proof_class": f"{latest_reason}_confirmed_trade",
+        "proof_class": (
+            "post_ack_persistence_failure_confirmed_trade"
+            if latest_reason in _POST_ACK_PERSISTENCE_REVIEW_REASONS
+            else f"{latest_reason}_confirmed_trade"
+        ),
         "side_effect_boundary_crossed": True,
         "sdk_submit_attempted": (
-            True if latest_reason == "matched_submit_missing_trade_id" else "unknown"
+            True
+            if latest_reason == "matched_submit_missing_trade_id"
+            or latest_reason in _POST_ACK_PERSISTENCE_REVIEW_REASONS
+            else "unknown"
         ),
         "required_predicates": {
             "latest_event_is_review_required": True,
@@ -18719,6 +18726,9 @@ def _review_required_confirmed_trade_recovery(
             ),
             "review_reason_matched_submit_missing_trade_id": (
                 latest_reason == "matched_submit_missing_trade_id"
+            ),
+            "review_reason_post_ack_persistence_failure": (
+                latest_reason in _POST_ACK_PERSISTENCE_REVIEW_REASONS
             ),
             "positive_trade_fact": True,
             "maker_order_token_matches_command": True,
