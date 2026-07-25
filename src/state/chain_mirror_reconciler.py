@@ -1038,8 +1038,6 @@ def _apply_settlement_finding(
     projection["chain_state"] = chain_state_after
     projection["updated_at"] = occurred_at
     projection["settled_at"] = projection.get("settled_at") or occurred_at
-    if finding.details.get("settlement_value") is not None:
-        projection["settlement_price"] = finding.details.get("settlement_value")
     if finding.details.get("chain_absent"):
         projection["chain_shares"] = 0.0
 
@@ -1103,10 +1101,19 @@ def _apply_settlement_finding(
     # by copying pre-transition columns forward) never carried it into the
     # durable realized_pnl_usd / exit_price columns -- a chain-mirror-graded
     # settlement left those NULL even though the payload's own "pnl"/
-    # "exit_price" fields were right. settlement_price (below) is a distinct
-    # column holding a raw temperature value; do not touch it.
+    # "exit_price" fields were right.
     projection["realized_pnl_usd"] = round(_pnl, 2)
     projection["exit_price"] = _exit_price
+    # settlement_price is the binary market-settlement payout (1.0 won / 0.0
+    # lost), independent of exit_price: exit_price above preserves a real
+    # booked fill (was_economically_closed branch), but settlement_price
+    # always represents what the MARKET settled at, not what we exited at --
+    # so it is graded from position_won unconditionally, never copied from
+    # a raw settlement_outcomes temperature (2026-07-25 settlement_price
+    # corruption fix: this column was being overwritten with
+    # finding.details["settlement_value"], a raw measured temperature, not a
+    # [0,1] payout).
+    projection["settlement_price"] = 1.0 if position_won else 0.0
     payload = json.dumps(
         {
             "reconciler": "chain_mirror",
@@ -1166,6 +1173,17 @@ def _apply_settlement_finding(
         "env": "live",
         "payload_json": payload,
     }
+    # Price-band guard: settlement_price is a [0.0, 1.0] payout fraction, never
+    # a raw temperature or other out-of-band value. Catches a repeat of the
+    # 2026-07-25 settlement_price corruption at the write boundary instead of
+    # downstream. src.state.settlement_semantics.SettlementSemantics is the
+    # weather-temperature domain gate and does not apply to this column.
+    _settlement_price_check = projection.get("settlement_price")
+    if _settlement_price_check is not None and not (0.0 <= float(_settlement_price_check) <= 1.0):
+        raise ValueError(
+            "chain-mirror settlement_price out of [0.0, 1.0] payout band: "
+            f"position_id={position_id!r} settlement_price={_settlement_price_check!r}"
+        )
     append_many_and_project(conn, [event], projection)
 
 

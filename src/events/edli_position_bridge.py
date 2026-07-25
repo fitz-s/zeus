@@ -1966,6 +1966,7 @@ def materialize_position_current_from_edli_fill(
         venue_status="CONFIRMED",
         terminal_exec_status="filled",
         posterior_id=_entry_posterior_id,
+        decision_law_id="predicted_bin_ev_v1",
     )
 
     return {

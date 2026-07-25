@@ -4457,6 +4457,16 @@ def _entry_recovery_position(
         source_order_fact_id=candidate.get("order_fact_id"),
         order_fact_state=candidate.get("order_fact_state"),
         order_fact_source=candidate.get("order_fact_source"),
+        # ultimate_alpha 2026-07-25: law-identity dual-stamp. Every candidate
+        # reaching this constructor is keyed by command_id + venue_order_id
+        # (raises above otherwise) -- i.e. a venue_commands row, which only
+        # Zeus's own execution gateway writes (INV-28/INV-30). That holds
+        # regardless of which trade_case source hydrated city/bin/direction
+        # (EDLI certificate, legacy decision_log, or snapshot fallback -- see
+        # _decision_log_trade_case_for_command), so the entry is always
+        # Zeus-decision-origin under the single current law.
+        decision_law_id="predicted_bin_ev_v1",
+        position_origin="zeus_decision",
     )
 
 
@@ -4644,6 +4654,7 @@ def _log_filled_entry_execution_fact(
         shares=_float_or_none(position.shares),
         venue_status=venue_status,
         terminal_exec_status=terminal_status,
+        decision_law_id="predicted_bin_ev_v1",
     )
 
 
@@ -7711,6 +7722,7 @@ def _log_filled_entry_trade_candidate_execution_fact(
         shares=_float_or_none(candidate.get("filled_size")),
         venue_status=venue_status,
         terminal_exec_status=terminal_status,
+        decision_law_id="predicted_bin_ev_v1",
     )
     return intent_id
 
@@ -8575,6 +8587,7 @@ def _append_exit_filled_projection(
         shares=_float_or_none(filled_size),
         venue_status="FILLED",
         terminal_exec_status="filled",
+        decision_law_id="predicted_bin_ev_v1",
     )
     conn.execute(
         """

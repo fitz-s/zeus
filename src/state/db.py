@@ -9953,8 +9953,25 @@ def log_opportunity_fact(
 
         day0_context_json = _build_day0_context_json(candidate, decision)
 
+        # ultimate_alpha 2026-07-25: decision_law_id was migrated onto this
+        # table (_LAW_IDENTITY_TABLES) but never stamped by this writer.
+        # Every row here is a Zeus reactor screening decision -- there is no
+        # external/co-trade axis for a candidate that was never a position --
+        # so the single current law applies unconditionally when the column
+        # is present. COALESCE write-once, same direction as
+        # projection.py:753, since a redecision cycle re-upserts the same
+        # decision_id.
+        _has_decision_law_id = "decision_law_id" in _of_columns
+        _law_column_sql = ", decision_law_id" if _has_decision_law_id else ""
+        _law_placeholder_sql = ", ?" if _has_decision_law_id else ""
+        _law_update_sql = (
+            ",\n                decision_law_id=COALESCE("
+            "opportunity_fact.decision_law_id, excluded.decision_law_id)"
+            if _has_decision_law_id
+            else ""
+        )
         _wconn.execute(
-            """
+            f"""
             INSERT INTO opportunity_fact (
                 decision_id,
                 candidate_id,
@@ -9978,9 +9995,9 @@ def log_opportunity_fact(
                 should_trade,
                 observation_authority_id,
                 day0_context_json,
-                recorded_at
+                recorded_at{_law_column_sql}
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{_law_placeholder_sql})
             ON CONFLICT(decision_id) DO UPDATE SET
                 candidate_id=excluded.candidate_id,
                 city=excluded.city,
@@ -10007,7 +10024,7 @@ def log_opportunity_fact(
                 day0_context_json=COALESCE(
                     excluded.day0_context_json, opportunity_fact.day0_context_json
                 ),
-                recorded_at=COALESCE(opportunity_fact.recorded_at, excluded.recorded_at)
+                recorded_at=COALESCE(opportunity_fact.recorded_at, excluded.recorded_at){_law_update_sql}
             """,
             (
                 str(getattr(decision, "decision_id", "") or ""),
@@ -10038,7 +10055,8 @@ def log_opportunity_fact(
                 str(getattr(decision, "observation_authority_id", "") or "") or None,
                 day0_context_json,
                 recorded_at,
-            ),
+            )
+            + (("predicted_bin_ev_v1",) if _has_decision_law_id else ()),
         )
         if _owns_connection:
             _wconn.commit()
@@ -10178,6 +10196,7 @@ def log_execution_fact(
     terminal_exec_status: str | None = None,
     clear_fill_fields: bool = False,
     posterior_id: int | None = None,
+    decision_law_id: str | None = None,
 ) -> dict:
     if conn is None:
         logger.info("Execution fact write skipped: no connection")
@@ -10197,6 +10216,7 @@ def log_execution_fact(
     # column is absent the posterior link simply is not persisted — fail-soft).
     _exec_fact_cols = {row[1] for row in conn.execute("PRAGMA table_info(execution_fact)").fetchall()}
     _has_posterior_id = "posterior_id" in _exec_fact_cols
+    _has_decision_law_id = "decision_law_id" in _exec_fact_cols
 
     current = conn.execute(
         """
@@ -10301,6 +10321,16 @@ def log_execution_fact(
         _base_values.append(posterior_id)
         _update_clauses.append(
             "posterior_id=COALESCE(excluded.posterior_id, execution_fact.posterior_id)"
+        )
+    if _has_decision_law_id:
+        # ultimate_alpha 2026-07-25: which decision LAW produced this fact.
+        # Write-once COALESCE, same direction as projection.py:753 -- a later
+        # reconcile/repair pass over the same intent_id never NULLs an
+        # already-stamped fact.
+        _base_columns.append("decision_law_id")
+        _base_values.append(decision_law_id)
+        _update_clauses.append(
+            "decision_law_id=COALESCE(execution_fact.decision_law_id, excluded.decision_law_id)"
         )
     _placeholders = ", ".join("?" for _ in _base_columns)
     conn.execute(
@@ -10600,6 +10630,7 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         venue_status=str(getattr(result, "venue_status", "") or getattr(pos, "order_status", "") or status or "") or None,
         terminal_exec_status=terminal_exec_status,
         clear_fill_fields=clear_fill_fields,
+        decision_law_id="predicted_bin_ev_v1",
     )
 
 
@@ -13937,6 +13968,7 @@ def log_exit_lifecycle_event(
             venue_status=str(payload.get("status") or status or "") or None,
             terminal_exec_status=terminal_exec_status,
             clear_fill_fields=not exit_has_fill_finality,
+            decision_law_id="predicted_bin_ev_v1",
         )
 
 

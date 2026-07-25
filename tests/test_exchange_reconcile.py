@@ -3210,6 +3210,49 @@ def test_entry_trade_fill_does_not_claim_chain_position_authority(
     assert runtime["positions"][0]["entry_economics_source"] == "execution_fact"
 
 
+def test_entry_fill_position_event_backfills_law_identity_when_unstamped(conn):
+    """ultimate_alpha 2026-07-25: _ensure_entry_fill_position_event's SimpleNamespace
+    inherits decision_law_id/position_origin from the existing row via `**current`.
+    A row projected before the law-identity stamp existed (seed_position_baseline
+    builds one with neither attribute set, matching every pre-fix recovery/rescue
+    projection) must backfill to the single current law/origin here rather than
+    carry NULL forward -- this is the in-memory-hop half of the fix; the DB-side
+    half is projection.py's write-once COALESCE.
+    """
+    from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
+
+    seed_command(conn, size=10, price=0.50)
+    seed_position_baseline(conn)
+    append_trade_fact(conn, size="10", fill_price="0.50")
+    baseline = conn.execute(
+        "SELECT decision_law_id, position_origin FROM position_current WHERE position_id = 'pos-m5'"
+    ).fetchone()
+    assert baseline["decision_law_id"] is None
+    assert baseline["position_origin"] is None
+
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = 'cmd-m5'"
+        ).fetchone()
+    )
+    _ensure_entry_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id="ord-m5",
+        filled_size="10",
+        fill_price="0.50",
+        observed_at=NOW,
+        command_event="FILL_CONFIRMED",
+        order_fact_source="REST",
+    )
+
+    row = conn.execute(
+        "SELECT decision_law_id, position_origin FROM position_current WHERE position_id = 'pos-m5'"
+    ).fetchone()
+    assert row["decision_law_id"] == "predicted_bin_ev_v1"
+    assert row["position_origin"] == "zeus_decision"
+
+
 def test_entry_reobservation_repairs_edli_alias_double_projection(conn):
     from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
     from src.state.venue_command_repo import append_trade_fact as append

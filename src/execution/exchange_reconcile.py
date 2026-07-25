@@ -5047,6 +5047,18 @@ def _ensure_entry_fill_position_event(
             "size_usd": projection_size_usd,
             "strategy_key": current.get("strategy_key") or current.get("strategy") or "unknown_strategy",
             "unit": current.get("unit") or "F",
+            # ultimate_alpha 2026-07-25: law-identity dual-stamp, fallback-only.
+            # `current` already carries any real stamp (existing row, or the
+            # missing-projection dict built above); COALESCE at
+            # projection.py:753 write-once-protects the DB side, but this
+            # in-memory hop must not let a NULL inherited from `current`
+            # (e.g. a pre-fix row, or the missing-projection recovery dict
+            # which never set these keys) fall through as NULL -- entry fills
+            # reconciled here are always Zeus's own venue_commands, so a
+            # missing stamp backfills to the single current law/origin
+            # without overwriting a real (possibly future non-default) value.
+            "decision_law_id": current.get("decision_law_id") or "predicted_bin_ev_v1",
+            "position_origin": current.get("position_origin") or "zeus_decision",
         }
     )
     if existing is not None:
@@ -5569,6 +5581,7 @@ def _apply_entry_fill_projection_and_execution_fact(
             shares=filled_shares,
             venue_status=venue_status,
             terminal_exec_status=terminal_status,
+            decision_law_id="predicted_bin_ev_v1",
         )
         _append_entry_position_lots_for_command(conn, command=command, observed_at=observed_at)
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
@@ -5616,6 +5629,7 @@ def _apply_exit_fill_projection_and_execution_fact(
             shares=_float_or_none(shares),
             venue_status="FILLED",
             terminal_exec_status="filled",
+            decision_law_id="predicted_bin_ev_v1",
         )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
     except Exception:
