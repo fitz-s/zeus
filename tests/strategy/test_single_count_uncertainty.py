@@ -102,32 +102,3 @@ def test_single_count_context_preserves_lead_and_portfolio_pressure():
         dynamic_kelly_mult(base=0.25, ci_width=0.0, lead_days=5.0)
     )
     assert 0.0 < hot_proof.effective_multiplier < cool_proof.effective_multiplier
-
-
-def test_selection_conditioned_debit_does_not_stack_with_ci_width_haircut():
-    """The selection-conditioned overconfidence debit (src/calibration/
-    selection_conditioned_debit.py) owns ONLY the margin slot (`penalty` in
-    select_mode_consistent_ev / robust_trade_score) — it must never ALSO widen
-    q_lcb or ci_width for the same decision. This mirrors the existing
-    single-count contract above: one uncertainty effect, counted once, in
-    exactly one mechanism.
-    """
-    from src.calibration.selection_conditioned_debit import compute_selection_debit
-
-    raw = SizingContext.from_candidate_proof(
-        q_posterior=0.70,
-        q_lcb_5pct=0.50,
-        lead_days=1.0,
-    )
-    debit = compute_selection_debit([0.05] * 100, state="high")
-    assert debit.d_t > 0.0
-
-    # The debit computation touches nothing on the sizing context: ci_width is
-    # exactly as constructed, byte-identical. SizingContext has no field the
-    # debit could write into — the debit's ONLY legal destination is the entry
-    # law's `penalty` kwarg, evaluated entirely outside the Kelly/ci_width
-    # sizing path this module owns.
-    assert raw.ci_width == pytest.approx(0.40)
-    assert not hasattr(raw, "selection_debit")
-    assert not hasattr(raw, "d_t")
-    assert not hasattr(raw, "penalty")

@@ -3039,17 +3039,6 @@ class _CandidateProof:
     # stake from proof q_lcb.
     qkernel_execution_economics: dict[str, Any] | None = None
     selection_authority_applied: str | None = None
-    # Selection-conditioned overconfidence debit (src/calibration/
-    # selection_conditioned_debit.py) — the walk-forward margin-slot fix for the
-    # measured mid-price-band winner's-curse regression. None on proofs where
-    # the debit was not evaluated (e.g. the deterministic global-actuation
-    # lock path, which has no real posterior/price disagreement to condition
-    # on). Observability only — never re-derived from these fields; the debit
-    # is applied ONCE, at proof-generation time, into c_cost_95pct-adjacent
-    # `penalty` kwargs upstream of this dataclass.
-    selection_debit_state: str | None = None
-    selection_debit_d_t: float | None = None
-    selection_debit_effective_n: int | None = None
 
 
 @dataclass(frozen=True)
@@ -20043,19 +20032,6 @@ def _build_pre_submit_proof_bundle_from_adapter_evidence(
                 "bootstrap_n": edge_n_bootstrap(),
                 "unit": forecast_payload.get("unit"),
                 "unit_authority_source": forecast_payload.get("unit_authority_source"),
-                # Selection-conditioned overconfidence debit telemetry (src/calibration/
-                # selection_conditioned_debit.py): state, walk-forward d_t, effective n,
-                # and the executable entry-quote price the state was classified against
-                # — the alpha-clock evidence a fresh session needs to re-derive/verify
-                # d_t(s) from settled history without re-deriving the state itself.
-                "selection_debit_state": proof.selection_debit_state,
-                "selection_debit_d_t": proof.selection_debit_d_t,
-                "selection_debit_effective_n": proof.selection_debit_effective_n,
-                "selection_debit_executable_price": (
-                    float(proof.execution_price.value)
-                    if proof.execution_price is not None
-                    else None
-                ),
                 **_qkernel_current_state_belief_identity_fields(
                     proof.qkernel_execution_economics
                 ),
@@ -24137,48 +24113,6 @@ def _selection_exposure_receipt_summary(
     )
 
 
-def _selection_conditioned_debit_by_state_fail_soft(
-    *, decision_time: datetime
-) -> dict[str, "SelectionDebit"]:
-    """Walk-forward selection-conditioned debit for both states (src/calibration/
-    selection_conditioned_debit.py), fail-soft to d_t=0.0 on any read error.
-
-    Opens its own short-lived read-only world connection (settlement_attribution
-    is world_class; this function's callers do not otherwise hold a world
-    connection). An unavailable/degraded read must never block live entry
-    scoring — this is additive evidence, not a new fail-closed gate; absence
-    degrades to "no debit", identical to pre-feature behavior.
-    """
-    from src.calibration.selection_conditioned_debit import (
-        SelectionDebit,
-        load_walk_forward_selection_debit,
-    )
-
-    try:
-        from src.state.db import get_world_connection_read_only
-
-        conn = get_world_connection_read_only()
-    except Exception:
-        return {
-            "ordinary": SelectionDebit(state="ordinary", d_t=0.0, effective_n=0, mean_residual=0.0),
-            "high": SelectionDebit(state="high", d_t=0.0, effective_n=0, mean_residual=0.0),
-        }
-    try:
-        return load_walk_forward_selection_debit(
-            conn, decision_time_iso=decision_time.isoformat()
-        )
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "selection-conditioned debit unavailable; scoring with d_t=0.0", exc_info=True
-        )
-        return {
-            "ordinary": SelectionDebit(state="ordinary", d_t=0.0, effective_n=0, mean_residual=0.0),
-            "high": SelectionDebit(state="high", d_t=0.0, effective_n=0, mean_residual=0.0),
-        }
-    finally:
-        conn.close()
-
-
 def _generate_candidate_proofs(
     *,
     event: OpportunityEvent,
@@ -24207,13 +24141,6 @@ def _generate_candidate_proofs(
         native_costs=native_costs,
         decision_time=decision_time,
         provenance_capture=provenance_capture,
-    )
-    from src.calibration.selection_conditioned_debit import (
-        decision_state as _selection_decision_state,
-    )
-
-    _selection_debit_by_state = _selection_conditioned_debit_by_state_fail_soft(
-        decision_time=decision_time
     )
     if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED":
         _day0_metric = str(payload.get("metric") or payload.get("temperature_metric") or getattr(family, "metric", "") or "")
@@ -24748,20 +24675,6 @@ def _generate_candidate_proofs(
             )
             if payload_escalated_after_rest and not _rtc_unexpired_rest:
                 _rtc_escalated = True
-            # Selection-conditioned overconfidence debit (src/calibration/
-            # selection_conditioned_debit.py): classify THIS candidate's own
-            # model-market disagreement state from the frozen decision q
-            # (q_value, the posterior for this direction) and the executable
-            # entry-quote price, then apply the matching walk-forward debit as
-            # the entry law's existing `penalty` margin slot — never touching
-            # q_lcb/q_value construction (INV-40).
-            _selection_state = (
-                _selection_decision_state(q_value, float(execution_price.value))
-                if execution_price is not None
-                else "ordinary"
-            )
-            _selection_debit = _selection_debit_by_state.get(_selection_state)
-            _selection_penalty = float(_selection_debit.d_t) if _selection_debit is not None else 0.0
             mode_ev = _mode_consistent_ev_for_proof(
                 row=row,
                 direction=direction,
@@ -24772,7 +24685,6 @@ def _generate_candidate_proofs(
                 minutes_to_event_end=_rtc_minutes_to_event_end,
                 unexpired_family_rest=_rtc_unexpired_rest,
                 escalated_after_rest=_rtc_escalated,
-                penalty=_selection_penalty,
             )
             if mode_ev is not None:
                 if _day0_proof_maker_only:
@@ -24790,7 +24702,6 @@ def _generate_candidate_proofs(
                     execution_price=execution_price,
                     c_cost_95pct=c_cost_95pct,
                     p_fill_lcb=p_fill_lcb,
-                    penalty=_selection_penalty,
                 )
             # REMOVED 2026-06-08 (S4; "bin selection.md" §6/§9 Hidden #3/#10/§13 +
             # operator directive): the scalar market-disagreement buy_no demotion
@@ -24913,18 +24824,6 @@ def _generate_candidate_proofs(
                     p_cal_vector_hash=str(probability_evidence["p_cal_vector_hash"]),
                     p_live_vector_hash=str(probability_evidence["p_live_vector_hash"]),
                     missing_reason=missing_reason,
-                    # Selection-conditioned overconfidence debit telemetry
-                    # (src/calibration/selection_conditioned_debit.py) —
-                    # state, walk-forward d_t, and effective n as of THIS
-                    # decision. Observability only; the debit was already
-                    # applied above via the `penalty` kwarg.
-                    selection_debit_state=_selection_state,
-                    selection_debit_d_t=(
-                        float(_selection_debit.d_t) if _selection_debit is not None else None
-                    ),
-                    selection_debit_effective_n=(
-                        int(_selection_debit.effective_n) if _selection_debit is not None else None
-                    ),
                     # #120: calibrator provenance — per-family, set by the
                     # ONE-CALIBRATOR SEAM (era.py:3772 emos / 3774 maze). Same
                     # payload instance (#149 fix), so this is the actual q_source.
@@ -35863,7 +35762,6 @@ def _robust_trade_score_from_generated_inputs(
     execution_price: ExecutionPrice | None,
     c_cost_95pct: float | None,
     p_fill_lcb: float,
-    penalty: float = 0.0,
 ) -> float:
     if execution_price is None or c_cost_95pct is None:
         return 0.0
@@ -35877,13 +35775,9 @@ def _robust_trade_score_from_generated_inputs(
         c_stress=ExecutionPrice(c_cost_95pct, "ask", fee_deducted=True, currency="probability_units"),
         p_fill_lcb=p_fill_lcb,
         # phantom 0.01 penalty removed 2026-06-14 (RULE 1) — see trade_score_suppression.md.
-        # Honest cost (real fee in c_95pct fee_deducted + real tick) is preserved. `penalty`
-        # defaults to 0.0 here (unchanged for the deterministic-lock caller,
-        # _global_deterministic_actuation_proofs); _generate_candidate_proofs passes the
-        # walk-forward selection-conditioned debit (src/calibration/
-        # selection_conditioned_debit.py) explicitly — NOT a fixed constant reborn.
-        penalty=penalty,
-        stress_penalty=penalty,
+        # Honest cost (real fee in c_95pct fee_deducted + real tick) is preserved.
+        penalty=0.0,
+        stress_penalty=0.0,
     )
     return float(receipt.score)
 
