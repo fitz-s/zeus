@@ -1,3 +1,6 @@
+# Created: 2026-04-17
+# Last reused/audited: 2026-07-24
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 """B070 tests: control_overrides event-sourced refactor.
 
 Covers:
@@ -264,7 +267,7 @@ class TestExpire:
         assert gate["gated_by"] == "auto:riskguard"
         assert gate["reason_snapshot"]["action_id"] == "riskguard:gate:opening_inertia"
 
-    def test_manual_strategy_override_takes_precedence_over_risk_action(self):
+    def test_active_risk_gate_dominates_manual_enable_override(self):
         conn = _memory_conn()
         upsert_control_override(
             conn,
@@ -294,9 +297,10 @@ class TestExpire:
         state = query_control_override_state(conn, now="2026-04-17T14:00:00+00:00")
 
         gate = state["strategy_gates"]["opening_inertia"]
-        assert gate["enabled"] is True
-        assert gate["reason_code"] == "operator_override"
-        assert gate["gated_by"] == "control_plane"
+        assert gate["enabled"] is False
+        assert gate["reason_code"] == "riskguard_action"
+        assert gate["gated_by"] == "auto:riskguard"
+        assert gate["reason_snapshot"]["action_id"] == "riskguard:gate:opening_inertia"
 
 
 class TestAppendOnlyEnforcement:

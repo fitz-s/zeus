@@ -12775,7 +12775,10 @@ def query_control_override_state(
     # (set_strategy_gate puts dict) but missed the DB reader; the boot
     # guard introduced by G6 forced this latent debt onto every live launch.
     strategy_gates: dict[str, dict] = {}
-    seen_strategy_gate: set[str] = set()
+    strategy_gate_candidates: dict[
+        str,
+        list[tuple[int, float, str, dict]],
+    ] = {}
     global_gate_seen = False
     global_threshold_seen = False
     for row in rows:
@@ -12812,19 +12815,26 @@ def query_control_override_state(
                 edge_threshold_multiplier = 1.0
             global_threshold_seen = True
             continue
-        if target_type == "strategy" and action_type == "gate" and target_key and target_key not in seen_strategy_gate:
+        if target_type == "strategy" and action_type == "gate" and target_key:
             # value="true" means gate IS active (strategy DISABLED), so enabled = NOT value.
             # Synthesize GateDecision-shape from the row columns the DB already carries.
             # reason_code defaults to OPERATOR_OVERRIDE since the DB doesn't store the original
             # ReasonCode enum; reason_snapshot empty (DB doesn't store snapshot either).
-            strategy_gates[target_key] = {
+            issued_at = str(row["issued_at"] or "")
+            parsed_issued_at = _parse_iso_timestamp(issued_at)
+            decision = {
                 "enabled": not _parse_boolish_text(value),
                 "reason_code": "operator_override",
                 "reason_snapshot": {},
-                "gated_at": str(row["issued_at"] or ""),
+                "gated_at": issued_at,
                 "gated_by": str(row["issued_by"] or "unknown"),
             }
-            seen_strategy_gate.add(target_key)
+            strategy_gate_candidates.setdefault(target_key, []).append((
+                int(row["precedence"] or 0),
+                parsed_issued_at.timestamp() if parsed_issued_at is not None else float("-inf"),
+                str(row["override_id"] or ""),
+                decision,
+            ))
     if risk_actions_ref is not None:
         action_rows = conn.execute(
             f"""
@@ -12841,9 +12851,11 @@ def query_control_override_state(
         ).fetchall()
         for row in action_rows:
             target_key = str(row["strategy_key"] or "")
-            if not target_key or target_key in seen_strategy_gate:
+            if not target_key:
                 continue
-            strategy_gates[target_key] = {
+            issued_at = str(row["issued_at"] or "")
+            parsed_issued_at = _parse_iso_timestamp(issued_at)
+            decision = {
                 "enabled": not _parse_boolish_text(str(row["value"] or "")),
                 "reason_code": "riskguard_action",
                 "reason_snapshot": {
@@ -12852,10 +12864,21 @@ def query_control_override_state(
                     "source": str(row["source"] or ""),
                     "precedence": int(row["precedence"] or 0),
                 },
-                "gated_at": str(row["issued_at"] or ""),
+                "gated_at": issued_at,
                 "gated_by": f"auto:{str(row['source'] or 'risk_action')}",
             }
-            seen_strategy_gate.add(target_key)
+            strategy_gate_candidates.setdefault(target_key, []).append((
+                int(row["precedence"] or 0),
+                parsed_issued_at.timestamp() if parsed_issued_at is not None else float("-inf"),
+                str(row["action_id"] or ""),
+                decision,
+            ))
+    for target_key, candidates in strategy_gate_candidates.items():
+        active_gates = [
+            candidate for candidate in candidates if not candidate[3]["enabled"]
+        ]
+        selected = max(active_gates or candidates, key=lambda candidate: candidate[:3])
+        strategy_gates[target_key] = selected[3]
     return {
         "status": "ok",
         "entries_paused": entries_paused,

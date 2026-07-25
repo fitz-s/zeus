@@ -24,6 +24,13 @@ forecast qkernel; durable gates therefore stop only the mechanism's actual
 strategy consumers while leaving healthy current-evidence forecast alpha and
 settlement semantics unchanged.
 
+Strategy gates compose monotonically across independent control and RiskGuard
+authorities: if any active row gates a strategy, a separate active enable row
+cannot erase that protection by winning lookup order. Operators can still
+re-enable a strategy by expiring the gate whose evidence has been reviewed;
+an unrelated enable override is not a substitute for retiring current risk
+evidence.
+
 ## 2026-07-24 Day0 continuous-state residual conditioning
 
 The July 22–24 loss reconstruction falsified the diagnostic-only treatment
