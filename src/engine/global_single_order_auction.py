@@ -1103,6 +1103,14 @@ def select_prepared_global_auction(
         candidate_policy_rejection_resolver=_candidate_policy_rejection,
         cancelled=cancelled,
     )
+    if (
+        decision.candidate is None
+        and decision.no_trade_reason == "GLOBAL_SELECTION_CANCELLED"
+    ):
+        return PreparedGlobalAuctionResult(
+            decision=decision,
+            winner_event_id=None,
+        )
     evaluated = {
         row.candidate_id: row.position_id
         for row in holding_coverage

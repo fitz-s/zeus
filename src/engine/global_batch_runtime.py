@@ -3678,6 +3678,12 @@ def process_current_global_batch(
                 payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                 cancelled=selection_cancelled,
             )
+            if (
+                selected.decision.candidate is None
+                and selected.decision.no_trade_reason
+                == "GLOBAL_SELECTION_CANCELLED"
+            ):
+                return selected
             if holding_obligations:
                 selected = replace(
                     selected,
@@ -3705,12 +3711,6 @@ def process_current_global_batch(
                 time.monotonic() - selection_compute_started,
                 len(prepared_for_selection),
             )
-            if (
-                selected.decision.candidate is None
-                and selected.decision.no_trade_reason
-                == "GLOBAL_SELECTION_CANCELLED"
-            ):
-                return selected
             receipt_store_started = time.monotonic()
             receipt_row_id = _store_global_auction_receipt(
                 trade_conn,
