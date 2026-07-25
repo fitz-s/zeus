@@ -4534,16 +4534,17 @@ def _edli_command_recovery_cycle() -> None:
 def _chain_mirror_reconcile_cycle() -> None:
     """Scheduler hook — body owned by src.state.chain_mirror_reconciler (R4-b
     extraction, 2026-07-08). See that module's ``run_cycle`` docstring for the
-    chain-mirror invariant (operator directive 2026-07-04)."""
-    if _defer_for_active_entry_reactor("chain_mirror_reconcile"):
-        return
-    if _edli_redecision_screen_lock.locked():
-        logger.info("chain_mirror_reconcile deferred: redecision screen active")
-        return
-    if _held_position_monitor_active.is_set():
-        logger.info("chain_mirror_reconcile deferred: held-position monitor active")
-        return
+    chain-mirror invariant (operator directive 2026-07-04).
 
+    Chain holdings are upstream authority for every entry, redecision, and
+    held-position auction.  This periodic backstop therefore must not defer
+    behind those consumers: a skipped 10-minute trigger is not retried, so
+    repeated overlap can age ``chain_seen_at`` past its 30-minute fail-closed
+    bound and erase every native holding from the global auction.  ``run_cycle``
+    performs its venue GET before opening the trade DB and commits one short
+    SQLite transaction; normal SQLite serialization preserves order writes
+    without sacrificing this liveness guarantee.
+    """
     from src.state.chain_mirror_reconciler import run_cycle
 
     run_cycle()
@@ -6720,10 +6721,10 @@ def main():
         # invariant that keeps position_current mirroring on-chain state so
         # quarantined/stale rows do not accumulate forever. Read-only venue
         # call (data-api GET /positions) + local DB read/repair; no order
-        # construction, no signing, no redeem submission. 10-minute cadence:
-        # frequent enough that a settlement/redeem sweep is absorbed within
-        # one cycle, sparse enough to never compete with the entry/exit
-        # money-path jobs for the trade-DB write lock.
+        # construction, no signing, no redeem submission. It is upstream chain
+        # authority for entry/exit decisions, so its 10-minute trigger is
+        # non-deferrable; venue I/O precedes a short serialized trade-DB
+        # transaction and cannot hold a DB lock across HTTP.
         scheduler.add_job(
             _chain_mirror_reconcile_cycle,
             "interval",

@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-23
+# Last reused or audited: 2026-07-24
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-24; last_reused=2026-07-24
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -6133,7 +6133,7 @@ def test_redecision_screen_defers_while_entry_reactor_is_active(monkeypatch) -> 
         (False, False, True),
     ],
 )
-def test_chain_mirror_defers_behind_active_money_path_db_work(
+def test_chain_mirror_remains_live_during_active_money_path_work(
     monkeypatch,
     reactor_active: bool,
     redecision_active: bool,
@@ -6160,7 +6160,7 @@ def test_chain_mirror_defers_behind_active_money_path_db_work(
     finally:
         main_module._held_position_monitor_active.clear()
 
-    assert calls == []
+    assert calls == ["mirror"]
 
 
 def test_chain_mirror_runs_when_money_path_db_work_is_idle(monkeypatch) -> None:

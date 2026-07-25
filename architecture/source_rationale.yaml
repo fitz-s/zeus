@@ -311,7 +311,7 @@ files:
   src/main.py:
     zone: K2_runtime
     authority_role: live_daemon_entry
-    why: Live-only daemon entry point. Its targeted executable snapshot refresh now passes per-row trade write coordinator leases into market_scanner instead of holding the legacy trade writer lock around CLOB refresh; runtime snapshot freshness checks use executable_market_snapshot_latest before falling back to the append log.
+    why: Live-only daemon entry point. Its targeted executable snapshot refresh now passes per-row trade write coordinator leases into market_scanner instead of holding the legacy trade writer lock around CLOB refresh; runtime snapshot freshness checks use executable_market_snapshot_latest before falling back to the append log. The 10-minute chain-mirror backstop is non-deferrable because it refreshes upstream holdings authority before a short serialized trade-DB transaction; active entry, redecision, or monitor consumers cannot starve chain_seen_at past its fail-closed bound.
   src/ingest_main.py:
     zone: K2_runtime
     authority_role: ingest_daemon_entry
