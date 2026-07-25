@@ -90,6 +90,7 @@ _held_position_monitor_handoff_pending = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
 _day0_urgent_wake_pending = threading.Event()
 _day0_held_monitor_preempt_requested = threading.Event()
+_periodic_exit_monitor_day0_yielded = threading.Event()
 _day0_exit_monitor_attempts_lock = threading.Lock()
 _day0_exit_monitor_attempts: dict[str, bool | None] = {}
 _forecast_exit_monitor_attempts_lock = threading.Lock()
@@ -3888,6 +3889,15 @@ def _day0_exit_monitor_priority_pending() -> bool:
         return any(result is None for result in _day0_exit_monitor_attempts.values())
 
 
+def _periodic_exit_monitor_should_yield(day0_pending: bool) -> bool:
+    """Give Day0 one periodic turn without starving the full-book monitor."""
+
+    if not day0_pending or _periodic_exit_monitor_day0_yielded.is_set():
+        return False
+    _periodic_exit_monitor_day0_yielded.set()
+    return True
+
+
 def _complete_day0_exit_monitor_attempt(wake_id: str, *, succeeded: bool) -> None:
     with _day0_exit_monitor_attempts_lock:
         if wake_id in _day0_exit_monitor_attempts:
@@ -6186,7 +6196,9 @@ def _exit_monitor_cycle(
     if urgent_forecast and _day0_exit_monitor_priority_pending():
         logger.info("forecast exit monitor yielded to pending Day0 urgent wake")
         return False
-    if not urgent_fact and _day0_exit_monitor_priority_pending():
+    if not urgent_fact and _periodic_exit_monitor_should_yield(
+        _day0_exit_monitor_priority_pending()
+    ):
         logger.info("periodic exit_monitor yielded to urgent Day0 held-family monitor")
         return True
     if not _held_position_monitor_claim.acquire(blocking=False):
@@ -6223,14 +6235,19 @@ def _exit_monitor_cycle(
             return False
         _edli_reactor_active_lock.release()
         _held_position_monitor_handoff_pending.clear()
-        if (
-            not urgent_day0
-            and _day0_exit_monitor_priority_pending()
-        ):
+        if urgent_forecast and _day0_exit_monitor_priority_pending():
             logger.info(
                 "exit_monitor yielded after reactor handoff to urgent Day0 held-family monitor"
             )
-            return False if urgent_forecast else True
+            return False
+        if not urgent_fact and _periodic_exit_monitor_should_yield(
+            _day0_exit_monitor_priority_pending()
+        ):
+            logger.info(
+                "periodic exit_monitor yielded after reactor handoff to urgent "
+                "Day0 held-family monitor"
+            )
+            return True
         should_preempt_for_urgent_day0 = None
         if urgent_forecast:
             from src.runtime.reactor_wake import read_reactor_wake
@@ -6252,15 +6269,14 @@ def _exit_monitor_cycle(
             # the tail positions never receive a MONITOR_REFRESHED decision.
             should_preempt_for_urgent_day0 = lambda: False
         else:
-            # A Day0 producer wake is not itself held-position work. Entry-only
-            # facts intentionally bypass the targeted monitor, so letting their
-            # raw wake flag preempt this full-book cycle can starve every held
-            # position indefinitely under a steady observation stream. Only a
-            # wake that actually owns a held-family monitor attempt outranks the
-            # periodic monitor after handoff.
+            # One urgent held-family attempt may preempt a periodic pass. The
+            # next pass ignores the same continuous pressure and completes the
+            # full book, whose own ordering still evaluates urgent Day0 first.
             should_preempt_for_urgent_day0 = lambda: (
-                _day0_exit_monitor_priority_pending()
-                or _day0_held_monitor_preempt_requested.is_set()
+                _periodic_exit_monitor_should_yield(
+                    _day0_exit_monitor_priority_pending()
+                    or _day0_held_monitor_preempt_requested.is_set()
+                )
             )
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
@@ -6273,6 +6289,7 @@ def _exit_monitor_cycle(
             raise RuntimeError("EXIT_MONITOR_CYCLE_INCOMPLETE")
         if target_families is None:
             _held_position_monitor_bootstrap_complete.set()
+            _periodic_exit_monitor_day0_yielded.clear()
         return True
     finally:
         if not urgent_fact:

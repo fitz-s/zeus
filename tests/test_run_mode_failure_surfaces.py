@@ -6242,6 +6242,7 @@ def test_periodic_exit_monitor_yields_before_claim_to_urgent_day0_held_monitor(
     main_module._held_position_monitor_active.clear()
     main_module._held_position_monitor_bootstrap_complete.clear()
     main_module._day0_urgent_wake_pending.set()
+    main_module._periodic_exit_monitor_day0_yielded.clear()
     main_module._day0_exit_monitor_attempts["wake-held"] = None
     monkeypatch.setattr(main_module, "_held_position_monitor_claim", UnexpectedClaim())
     try:
@@ -6249,10 +6250,57 @@ def test_periodic_exit_monitor_yields_before_claim_to_urgent_day0_held_monitor(
     finally:
         main_module._day0_urgent_wake_pending.clear()
         main_module._day0_exit_monitor_attempts.clear()
+        main_module._periodic_exit_monitor_day0_yielded.clear()
 
     assert main_module._held_position_monitor_active.is_set() is False
     assert main_module._held_position_monitor_handoff_pending.is_set() is False
     assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
+
+
+def test_periodic_exit_monitor_forces_full_book_after_one_continuous_day0_yield(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    calls: list[str] = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    def _run(**kwargs) -> bool:
+        calls.append("run")
+        assert kwargs["target_families"] is None
+        assert kwargs["should_preempt_for_urgent_day0"]() is False
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._day0_exit_monitor_attempts["continuous-day0"] = None
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
+    try:
+        assert main_module._exit_monitor_cycle() is True
+        assert calls == []
+        assert main_module._periodic_exit_monitor_day0_yielded.is_set()
+
+        assert main_module._exit_monitor_cycle() is True
+        assert calls == ["run"]
+        assert main_module._held_position_monitor_bootstrap_complete.is_set()
+        assert not main_module._periodic_exit_monitor_day0_yielded.is_set()
+
+        assert main_module._exit_monitor_cycle() is True
+        assert calls == ["run"]
+        assert main_module._periodic_exit_monitor_day0_yielded.is_set()
+    finally:
+        main_module._day0_exit_monitor_attempts.clear()
+        main_module._periodic_exit_monitor_day0_yielded.clear()
 
 
 def test_day0_entry_wake_does_not_pause_unrelated_periodic_monitor(monkeypatch) -> None:
@@ -6478,6 +6526,7 @@ def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
 
     main_module._held_position_monitor_active.clear()
     main_module._day0_urgent_wake_pending.clear()
+    main_module._periodic_exit_monitor_day0_yielded.clear()
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(
         exit_module,
@@ -6489,6 +6538,7 @@ def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
     finally:
         main_module._day0_urgent_wake_pending.clear()
         main_module._day0_exit_monitor_attempts.clear()
+        main_module._periodic_exit_monitor_day0_yielded.clear()
 
     assert calls == ["release"]
     assert main_module._held_position_monitor_active.is_set() is False
