@@ -1361,6 +1361,13 @@ SETTLEMENT_METRIC_READY_TRUTH_SOURCES = frozenset({
     "world.settlements",
     "harvester_live_verified_settlement",
 })
+SETTLEMENT_PROBABILITY_OUTCOME_TRUTH_SOURCES = (
+    SETTLEMENT_METRIC_READY_TRUTH_SOURCES
+    | frozenset({
+        "gamma_exact_held_event",
+        "gamma_exact_held_condition",
+    })
+)
 AUTHORITATIVE_SETTLEMENT_ROW_REQUIRED_FIELDS = (
     "trade_id",
     "city",
@@ -10908,6 +10915,18 @@ def _settlement_truth_ready(normalized: dict) -> bool:
     )
 
 
+def _settlement_probability_outcome_ready(normalized: dict) -> bool:
+    """Whether the held-token payoff is final enough to grade decision q."""
+
+    authority = str(normalized.get("settlement_authority") or "").strip().upper()
+    source = str(normalized.get("settlement_truth_source") or "").strip()
+    return (
+        authority in {"VERIFIED", "VENUE_RESOLVED"}
+        and source in SETTLEMENT_PROBABILITY_OUTCOME_TRUTH_SOURCES
+        and normalized.get("outcome") in {0, 1}
+    )
+
+
 
 
 def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
@@ -10994,6 +11013,7 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
             "contract_missing_fields": contract_missing_fields,
             "canonical_payload_complete": not contract_missing_fields,
             "learning_snapshot_ready": False,
+            "probability_outcome_ready": False,
             "metric_ready": False,
             "authority_level": "durable_event_malformed",
             "required_missing_fields": missing_required,
@@ -11016,6 +11036,10 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
     if not truth_ready:
         degraded_reasons.append("missing_verified_settlement_truth")
     side_semantics_ready = not side_semantics_conflicts
+    probability_outcome_ready = (
+        _settlement_probability_outcome_ready(normalized)
+        and side_semantics_ready
+    )
     normalized.update({
         "is_degraded": bool(degraded_reasons),
         "degraded_reason": "; ".join(degraded_reasons),
@@ -11023,9 +11047,9 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         "canonical_payload_complete": not contract_missing_fields,
         "learning_snapshot_ready": (
             bool(normalized["decision_snapshot_id"])
-            and truth_ready
-            and side_semantics_ready
+            and probability_outcome_ready
         ),
+        "probability_outcome_ready": probability_outcome_ready,
         "metric_ready": truth_ready and side_semantics_ready,
         "required_missing_fields": [],
     })

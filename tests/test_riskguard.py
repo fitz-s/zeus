@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-24
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Lifecycle: created=2026-03-30; last_reviewed=2026-07-24; last_reused=2026-07-24
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
@@ -716,6 +716,50 @@ class TestMetrics:
         ]
 
         assert riskguard_module._riskguard_brier_metric_rows(rows) == []
+
+    def test_venue_resolved_outcome_grades_q_before_physical_value(self):
+        from src.state.db import _normalize_position_settlement_event
+
+        normalized = _normalize_position_settlement_event(
+            {
+                "runtime_trade_id": "venue-resolved-loss",
+                "city": "Guangzhou",
+                "target_date": "2026-07-24",
+                "bin_label": "36°C",
+                "direction": "buy_no",
+                "decision_snapshot_id": "metar-fast-zggg",
+                "edge_source": "settlement_capture",
+                "strategy": "settlement_capture",
+                "timestamp": "2026-07-24T22:19:15Z",
+                "env": "live",
+                "details": {
+                    "contract_version": "position_settled.v1",
+                    "winning_bin": "",
+                    "position_bin": "36°C",
+                    "won": False,
+                    "outcome": 0,
+                    "p_posterior": 0.999999999,
+                    "exit_price": 0.0,
+                    "pnl": -1.768,
+                    "exit_reason": "SETTLEMENT",
+                    "settlement_authority": "VENUE_RESOLVED",
+                    "settlement_truth_source": "gamma_exact_held_event",
+                    "settlement_market_slug": "guangzhou-high-2026-07-24",
+                    "settlement_temperature_metric": "high",
+                    "settlement_source": "gamma",
+                    "settlement_value": None,
+                },
+            }
+        )
+
+        assert normalized is not None
+        assert normalized["probability_outcome_ready"] is True
+        assert normalized["learning_snapshot_ready"] is True
+        assert normalized["metric_ready"] is False
+        normalized["probability_identity_ready"] = True
+        assert riskguard_module._riskguard_brier_metric_rows([normalized]) == [
+            normalized
+        ]
 
     def test_probability_identity_binding_requires_one_complete_entry_q_version(self):
         conn = sqlite3.connect(":memory:")
@@ -3037,6 +3081,49 @@ class TestStrategyBrierMinSample:
         )
         assert "opening_inertia" not in out["degraded_strategies"]
         assert out["by_strategy"]["opening_inertia"]["thin_sample_no_verdict"] is True
+
+    def test_shared_recorded_mechanism_localizes_two_thin_consumers(self):
+        rows = [
+            {
+                "strategy": "day0_nowcast_entry",
+                "decision_snapshot_id": f"metar_fast:ZGGG:day0:{i}",
+                "p_posterior": 0.99,
+                "outcome": 0,
+            }
+            for i in range(7)
+        ] + [
+            {
+                "strategy": "settlement_capture",
+                "decision_snapshot_id": f"metar_fast:LIMC:capture:{i}",
+                "p_posterior": 0.90,
+                "outcome": 0,
+            }
+            for i in range(7)
+        ] + [
+            {
+                "strategy": "forecast_qkernel_entry",
+                "decision_snapshot_id": f"forecast-certificate-{i}",
+                "p_posterior": 0.80,
+                "outcome": 1,
+            }
+            for i in range(34)
+        ]
+        out = riskguard_module._strategy_brier_breakdown(
+            rows, {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
+        )
+
+        metar = out["by_mechanism"]["decision_snapshot:metar_fast"]
+        assert metar["sample_size"] == 14
+        assert metar["level"] == "RED"
+        assert set(out["degraded_strategies"]) == {
+            "day0_nowcast_entry",
+            "settlement_capture",
+        }
+        assert out["degraded_strategies"]["day0_nowcast_entry"]["cohort"] == (
+            "decision_snapshot:metar_fast"
+        )
+        assert out["degraded_strategies"]["settlement_capture"]["member_sample_size"] == 7
+        assert out["by_strategy"]["forecast_qkernel_entry"]["level"] == "GREEN"
 
     @pytest.mark.parametrize(
         ("sample_size", "expected_level", "expected_thin", "expected_reason"),

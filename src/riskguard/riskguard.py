@@ -1454,12 +1454,12 @@ def _execution_decay_verdict_is_current(
 def _riskguard_brier_metric_rows(rows: list[dict], *, limit: int = RISKGUARD_SETTLEMENT_LIMIT) -> list[dict]:
     """Return learning-ready settlement rows for probability quality metrics.
 
-    Settlement truth quality and probability learning lineage are different
-    surfaces. A SETTLED event with complete canonical settlement payload is
-    valid settlement truth, but if it lacks the decision snapshot it must not
-    displace a learning-ready row in the Brier sample. Settlement backfills can
-    be newest by occurred_at while carrying no decision snapshot; using them as
-    the latest Brier rows turns a data repair into a false reduce-only halt.
+    Held-token payout truth and physical settlement truth are different
+    surfaces. An exact venue resolution can grade the frozen held-side q
+    immediately even before the source publishes the final temperature; it
+    remains ineligible for physical calibration through ``metric_ready=False``.
+    A settlement row without its decision snapshot must not displace a
+    learning-ready row in the Brier sample.
 
     A frozen probability value without its ``venue_commands.q_version`` is also
     not learning lineage. It cannot prove which q authorized the order, so it is
@@ -1472,7 +1472,10 @@ def _riskguard_brier_metric_rows(rows: list[dict], *, limit: int = RISKGUARD_SET
     for row in rows:
         if not row.get("learning_snapshot_ready", False):
             continue
-        if not row.get("metric_ready", True):
+        probability_outcome_ready = row.get("probability_outcome_ready")
+        if probability_outcome_ready is None:
+            probability_outcome_ready = row.get("metric_ready", True)
+        if not probability_outcome_ready:
             continue
         if not row.get("probability_identity_ready", False):
             continue
@@ -1574,18 +1577,36 @@ def _bind_brier_probability_identities(
 # strategies are still counted in the portfolio pool and the loss gates.
 _STRATEGY_BRIER_MIN_SAMPLE = 10
 
+_PROBABILITY_MECHANISM_SNAPSHOT_PREFIXES = frozenset({
+    "metar_fast",
+    "observation_instants",
+})
+
+
+def _probability_mechanism_key(row: dict) -> str | None:
+    """Return a recorded probability mechanism, never infer one from outcome."""
+
+    snapshot_id = str(row.get("decision_snapshot_id") or "").strip()
+    namespace, separator, _ = snapshot_id.partition(":")
+    if not separator or namespace not in _PROBABILITY_MECHANISM_SNAPSHOT_PREFIXES:
+        return None
+    return f"decision_snapshot:{namespace}"
+
 
 def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, object]:
     """Per-strategy probability-quality attribution for localized protection.
 
     Portfolio-level Brier still protects the system. When the breach is only
     YELLOW and every learning-ready row carries a canonical strategy key, the
-    bad strategy can be halted through durable ``risk_actions`` instead of
-    freezing every other strategy. Unknown/unclassified rows keep the global
-    YELLOW because there is no safe strategy-local enforcement target.
+    bad strategy or recorded probability mechanism can be halted through
+    durable ``risk_actions`` instead of freezing every other strategy. A
+    mechanism cohort may supply the minimum evidence when its consumer
+    strategies are individually thin. Unknown/unclassified rows keep the
+    global YELLOW because there is no safe strategy-local enforcement target.
     """
 
     buckets: dict[str, dict[str, object]] = {}
+    mechanism_buckets: dict[str, dict[str, object]] = {}
     unclassified_count = 0
     for row in rows:
         strategy = str(row.get("strategy") or "unclassified")
@@ -1604,6 +1625,16 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
         bucket = buckets.setdefault(bucket_key, {"p": [], "o": []})
         bucket["p"].append(float(row["p_posterior"]))  # type: ignore[index, union-attr]
         bucket["o"].append(int(row["outcome"]))  # type: ignore[index, union-attr]
+        mechanism_key = _probability_mechanism_key(row)
+        if mechanism_key is not None and strategy in CANONICAL_STRATEGY_KEYS:
+            mechanism_bucket = mechanism_buckets.setdefault(
+                mechanism_key,
+                {"p": [], "o": [], "strategy_counts": {}},
+            )
+            mechanism_bucket["p"].append(float(row["p_posterior"]))  # type: ignore[index, union-attr]
+            mechanism_bucket["o"].append(int(row["outcome"]))  # type: ignore[index, union-attr]
+            strategy_counts = mechanism_bucket["strategy_counts"]  # type: ignore[index]
+            strategy_counts[strategy] = int(strategy_counts.get(strategy, 0)) + 1
 
     by_strategy: dict[str, dict[str, object]] = {}
     degraded: dict[str, dict[str, object]] = {}
@@ -1638,8 +1669,43 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
         if level != RiskLevel.GREEN:
             degraded[strategy] = payload
 
+    by_mechanism: dict[str, dict[str, object]] = {}
+    for mechanism, bucket in sorted(mechanism_buckets.items()):
+        p_values = list(bucket["p"])  # type: ignore[index]
+        outcomes = list(bucket["o"])  # type: ignore[index]
+        strategy_counts = dict(bucket["strategy_counts"])  # type: ignore[index]
+        score = brier_score(p_values, outcomes)
+        level = evaluate_brier(score, thresholds)
+        sample_size = len(p_values)
+        payload = {
+            "sample_size": sample_size,
+            "brier": round(float(score), 6),
+            "level": level.value,
+            "strategy_counts": strategy_counts,
+        }
+        if sample_size < _STRATEGY_BRIER_MIN_SAMPLE:
+            payload["level"] = RiskLevel.GREEN.value
+            payload["thin_sample_no_verdict"] = True
+            by_mechanism[mechanism] = payload
+            continue
+        by_mechanism[mechanism] = payload
+        if level == RiskLevel.GREEN:
+            continue
+        for strategy, member_sample_size in sorted(strategy_counts.items()):
+            if strategy in degraded:
+                degraded[strategy]["corroborating_mechanism"] = mechanism
+                continue
+            degraded[strategy] = {
+                "sample_size": sample_size,
+                "brier": round(float(score), 6),
+                "level": level.value,
+                "cohort": mechanism,
+                "member_sample_size": member_sample_size,
+            }
+
     return {
         "by_strategy": by_strategy,
+        "by_mechanism": by_mechanism,
         "degraded_strategies": degraded,
         "unclassified_count": unclassified_count,
         "classified_count": sum(int(row["sample_size"]) for row in by_strategy.values()),
@@ -2381,6 +2447,7 @@ def _tick_once() -> RiskLevel:
         brier_level = portfolio_brier_level
         brier_strategy_breakdown = _strategy_brier_breakdown(brier_metric_rows, thresholds) if p_forecasts else {
             "by_strategy": {},
+            "by_mechanism": {},
             "degraded_strategies": {},
             "unclassified_count": 0,
             "classified_count": 0,
@@ -2414,6 +2481,8 @@ def _tick_once() -> RiskLevel:
             for strategy, payload in sorted(degraded_brier_strategies.items()):
                 if not isinstance(payload, dict):
                     continue
+                cohort = payload.get("cohort")
+                cohort_suffix = f",cohort={cohort}" if cohort else ""
                 _append_reason(
                     recommended_strategy_gate_reasons,
                     str(strategy),
@@ -2422,6 +2491,7 @@ def _tick_once() -> RiskLevel:
                         f"level={payload.get('level')},"
                         f"brier={payload.get('brier')},"
                         f"sample={payload.get('sample_size')}"
+                        f"{cohort_suffix}"
                         ")"
                     ),
                 )

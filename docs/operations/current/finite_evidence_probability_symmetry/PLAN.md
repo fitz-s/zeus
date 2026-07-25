@@ -4,6 +4,26 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-24 Venue-outcome probability feedback
+
+The July 22–24 loss reconstruction found a control-loop split: Gamma had
+already resolved the held token and the canonical SETTLED event carried the
+frozen entry q, binary payoff, and exact entry q-version, but RiskGuard required
+the later physical temperature publication before scoring Brier. The latest
+fifty economically resolved positions therefore remained invisible while the
+probability system continued to report GREEN.
+
+Venue resolution now makes only the held-token probability outcome
+learning-ready. It does not become physical temperature or calibration truth:
+`probability_outcome_ready` and `metric_ready` are separate facts. RiskGuard can
+localize a degraded recorded probability mechanism from immediate zero-sum
+payoff evidence even when each consumer strategy is individually below the
+minimum sample floor. The live July 24 sample identifies
+`decision_snapshot:metar_fast` rather than pooling it with the independent
+forecast qkernel; durable gates therefore stop only the mechanism's actual
+strategy consumers while leaving healthy current-evidence forecast alpha and
+settlement semantics unchanged.
+
 ## 2026-07-24 Day0 continuous-state residual conditioning
 
 The July 22–24 loss reconstruction falsified the diagnostic-only treatment
