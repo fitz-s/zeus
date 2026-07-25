@@ -260,7 +260,14 @@ def install_dedicated_heartbeat_http_timeout(*, cadence_seconds: int) -> bool:
     heartbeat_http_helpers._http_client = httpx.Client(
         http2=False,
         timeout=httpx.Timeout(timeout_seconds),
-        limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+        # One persistent HTTP/1.1 connection avoids paying the TLS handshake
+        # inside every short heartbeat timeout. Any RequestError replaces this
+        # entire dedicated pool through _reset_dedicated_heartbeat_http_transport.
+        limits=httpx.Limits(
+            max_connections=1,
+            max_keepalive_connections=1,
+            keepalive_expiry=30.0,
+        ),
     )
     close = getattr(old_client, "close", None)
     if callable(close):
@@ -275,7 +282,6 @@ def install_dedicated_heartbeat_http_timeout(*, cadence_seconds: int) -> bool:
 
     def _request_with_cause(endpoint: str, method: str, headers=None, data=None, params=None):
         overloaded_headers = heartbeat_http_helpers._overload_headers(method, headers)
-        overloaded_headers["Connection"] = "close"
         try:
             if isinstance(data, str):
                 resp = heartbeat_http_helpers._http_client.request(

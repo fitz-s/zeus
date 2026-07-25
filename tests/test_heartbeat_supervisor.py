@@ -748,7 +748,7 @@ def test_install_dedicated_heartbeat_timeout_replaces_sdk_http_client(monkeypatc
         assert installed.timeout.connect == pytest.approx(1.0)
         assert installed._transport._pool._http2 is False
         assert installed._transport._pool._max_connections == 1
-        assert installed._transport._pool._max_keepalive_connections == 0
+        assert installed._transport._pool._max_keepalive_connections == 1
     finally:
         installed = heartbeat_http_helpers._http_client
         if installed is not old_client:
@@ -811,6 +811,58 @@ def test_install_dedicated_heartbeat_timeout_preserves_request_error_cause(monke
         heartbeat_supervisor_module._HEARTBEAT_REQUEST_CAUSE_PRESERVED = old_diagnostic
         heartbeat_supervisor_module._HEARTBEAT_TRANSPORT_RESET_COUNT = old_reset_count
         heartbeat_supervisor_module._HEARTBEAT_LAST_TRANSPORT_RESET_REASON = old_reset_reason
+
+
+def test_dedicated_heartbeat_request_does_not_force_cold_tls(monkeypatch):
+    """Healthy ticks reuse one connection; transport errors still reset the pool."""
+
+    from py_clob_client_v2.http_helpers import helpers as heartbeat_http_helpers
+
+    old_client = heartbeat_http_helpers._http_client
+    old_request = heartbeat_http_helpers.request
+    old_installed = getattr(heartbeat_http_helpers, "_zeus_request_cause_preserved", None)
+    calls: list[dict] = []
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"heartbeat_id": "next"}
+
+    class RecordingClient:
+        def request(self, **kwargs):
+            calls.append(kwargs)
+            return Response()
+
+        def close(self):
+            pass
+
+    try:
+        if hasattr(heartbeat_http_helpers, "_zeus_request_cause_preserved"):
+            delattr(heartbeat_http_helpers, "_zeus_request_cause_preserved")
+        install_dedicated_heartbeat_http_timeout(cadence_seconds=2)
+        installed = heartbeat_http_helpers._http_client
+        installed.close()
+        heartbeat_http_helpers._http_client = RecordingClient()
+
+        heartbeat_http_helpers.request(
+            "https://clob.polymarket.com/v1/heartbeats",
+            "POST",
+            headers={},
+            data={"heartbeat_id": "current"},
+        )
+
+        assert str(calls[0]["headers"].get("Connection", "")).lower() != "close"
+    finally:
+        heartbeat_http_helpers.request = old_request
+        heartbeat_http_helpers._http_client = old_client
+        if old_installed is None:
+            with contextlib.suppress(AttributeError):
+                delattr(heartbeat_http_helpers, "_zeus_request_cause_preserved")
+        else:
+            heartbeat_http_helpers._zeus_request_cause_preserved = old_installed
 
 
 def test_transport_failure_resets_dedicated_pool_without_abandoning_chain():
