@@ -162,6 +162,7 @@ in_scope:
 - src/events/live_order_aggregate.py
 - scripts/migrate_b071_token_suppression_to_history.py
 - scripts/deploy_live.py
+- scripts/materialize_replacement_forecast_live.py
 - scripts/obs_live_tick.py
 out_of_scope:
 - state/zeus-world.db

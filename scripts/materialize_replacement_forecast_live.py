@@ -429,6 +429,11 @@ def _materialize(
             if payload.get("day0_observed_extreme_unit") in (None, "")
             else str(payload["day0_observed_extreme_unit"])
         ),
+        day0_observation_state=(
+            None
+            if payload.get("day0_observation_state") in (None, "")
+            else str(payload["day0_observation_state"])
+        ),
         upgrade_trigger=(
             str(payload["upgrade_trigger"]) if payload.get("upgrade_trigger") else None
         ),

@@ -1513,6 +1513,85 @@ def test_materialize_script_reports_durable_manifest_when_posterior_fails(
     }
 
 
+def test_materialize_script_threads_day0_zero_observation_state(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    payload = {
+        "city": "Shanghai",
+        "city_id": "Shanghai",
+        "city_timezone": "Asia/Shanghai",
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-06-06T00:00:00+00:00",
+        "computed_at": "2026-06-06T18:00:00+00:00",
+        "expires_at": "2026-06-08T00:00:00+00:00",
+        "baseline_source_run_id": "b0-run",
+        "baseline_data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
+        "openmeteo_source_run_id": "om9-run",
+        "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
+        "openmeteo_payload_json": "anchor.json",
+        "precision_metadata_json": "precision.json",
+        "day0_observation_state": "zero_target_date_observations",
+        "bins": [{"bin_id": "warm", "lower_c": 20.0, "upper_c": 30.0}],
+    }
+    input_json = tmp_path / "request.json"
+    input_json.write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / "anchor.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "precision.json").write_text("{}", encoding="utf-8")
+    captured = []
+
+    monkeypatch.setattr(
+        cli,
+        "extract_openmeteo_ecmwf_ifs9_localday_anchor",
+        lambda *args, **kwargs: _anchor(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "OpenMeteoIfs9PrecisionMetadata",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "evaluate_openmeteo_ecmwf_ifs9_precision_guard",
+        lambda _metadata: _precision_guard(),
+    )
+    monkeypatch.setattr(cli, "_bins", lambda _payload: _bins())
+    monkeypatch.setattr(
+        cli,
+        "_dry_run_from_read_snapshot",
+        lambda _conn, request: (
+            captured.append(request)
+            or cli.ReplacementForecastMaterializeResult(
+                status="READY",
+                reason_codes=(),
+                posterior_id=1,
+                anchor_id=1,
+                readiness_id="ready-1",
+            )
+        ),
+    )
+    conn = sqlite3.connect(":memory:")
+
+    returncode, response = cli._materialize(
+        input_json,
+        commit=False,
+        init_schema=False,
+        conn=conn,
+    )
+    conn.close()
+
+    assert returncode == 0
+    assert response["status"] == "READY"
+    assert (
+        captured[0].day0_observation_state
+        == "zero_target_date_observations"
+    )
+
+
 def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) -> None:
     (tmp_path / "openmeteo_payload.json").write_text(
         json.dumps(
