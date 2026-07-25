@@ -36,6 +36,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
+from src.calibration.selection_conditioned_debit import (
+    decision_state,
+    load_walk_forward_selection_debit,
+)
 from src.contracts.probability_arithmetic import one_minus
 from src.data.replacement_forecast_readiness import (
     SOURCE_ID as LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
@@ -43,6 +47,30 @@ from src.data.replacement_forecast_readiness import (
 from src.events.opportunity_event import OpportunityEvent
 
 logger = logging.getLogger(__name__)
+
+
+def _selection_debit_by_state_fail_soft(
+    conn: sqlite3.Connection, *, decision_time: datetime
+) -> dict[str, float]:
+    """Walk-forward selection-conditioned debit for both states, fail-soft to 0.0.
+
+    An unavailable/degraded settlement_attribution read must never block this
+    screen (additive evidence, not a new fail-closed gate — see
+    src/calibration/selection_conditioned_debit.py for the law this debit
+    implements). Absence degrades to "no debit", identical to pre-feature
+    behavior.
+    """
+    try:
+        by_state = load_walk_forward_selection_debit(
+            conn, decision_time_iso=decision_time.isoformat()
+        )
+        return {state: debit.d_t for state, debit in by_state.items()}
+    except Exception:
+        logger.warning(
+            "selection-conditioned debit unavailable; screening with d_t=0.0",
+            exc_info=True,
+        )
+        return {"ordinary": 0.0, "high": 0.0}
 
 
 def _fee_at(price: float) -> float:
@@ -906,6 +934,7 @@ def enqueue_live_redecisions(
     improvement; only a NEW belief (new forecast snapshot) re-opens the pair.
     """
     dt = _parse(decision_time)
+    debit_by_state = _selection_debit_by_state_fail_soft(conn, decision_time=dt)
     out: list[EnqueuedRedecision] = []
     for belief in beliefs if beliefs is not None else _all_latest_beliefs(
         conn,
@@ -949,6 +978,9 @@ def enqueue_live_redecisions(
                     q_lcb_5pct=float(conservative_q),
                     price=float(quote.price),
                     tick_size=quote.tick_size,
+                    debit=debit_by_state.get(
+                        decision_state(posterior_q, float(quote.price)), 0.0
+                    ),
                 )
                 if score < min_edge - _EPS:
                     continue
@@ -1188,6 +1220,7 @@ def _entry_screen_robust_trade_score(
     q_lcb_5pct: float,
     price: float,
     tick_size: object = None,
+    debit: float = 0.0,
 ) -> float:
     """Screen with the same robust-cost sign contract as final submission.
 
@@ -1195,10 +1228,18 @@ def _entry_screen_robust_trade_score(
     the fill-policy authority. Multiplying by any positive fill probability does
     not change the sign; the final gate still computes the executable
     side-specific fill LCB from the full snapshot before any order can submit.
+
+    ``debit`` is the walk-forward selection-conditioned overconfidence debit
+    d_t(s) (src/calibration/selection_conditioned_debit.py), mirroring the
+    same margin-slot subtraction the final gate applies via
+    `select_mode_consistent_ev`'s `penalty` parameter — see that module and
+    `src/engine/event_reactor_adapter.py::_generate_candidate_proofs` for the
+    canonical wiring this screen approximates. Defaults to 0.0 (no debit).
     """
 
     c95 = _entry_screen_c95_cost(float(price), tick_size=tick_size)
-    return min(float(q_lcb_5pct) - c95, float(q_posterior) - c95)
+    debit_f = float(debit)
+    return min(float(q_lcb_5pct) - c95 - debit_f, float(q_posterior) - c95 - debit_f)
 
 
 def _optional_float(value: object) -> float | None:
@@ -2450,13 +2491,17 @@ def _family_rest_candidate_score(
     side: str,
     price: float,
     tick_size: object = None,
+    debit_by_state: dict[str, float] | None = None,
 ) -> float | None:
     probs = _belief_side_probability(belief, idx=idx, side=side)
     if probs is None:
         return None
     posterior, q_lcb = probs
     cost = _entry_screen_c95_cost(float(price), tick_size=tick_size)
-    edge = min(float(q_lcb) - cost, float(posterior) - cost)
+    debit = 0.0
+    if debit_by_state:
+        debit = debit_by_state.get(decision_state(float(posterior), float(price)), 0.0)
+    edge = min(float(q_lcb) - cost - debit, float(posterior) - cost - debit)
     if not math.isfinite(edge):
         return None
     if edge <= 0.0:
@@ -2480,16 +2525,21 @@ def _family_rest_candidate_edge(
     side: str,
     price: float,
     tick_size: object = None,
+    debit_by_state: dict[str, float] | None = None,
 ) -> float | None:
     probs = _belief_side_probability(belief, idx=idx, side=side)
     if probs is None:
         return None
     posterior, q_lcb = probs
+    debit = 0.0
+    if debit_by_state:
+        debit = debit_by_state.get(decision_state(float(posterior), float(price)), 0.0)
     edge = _entry_screen_robust_trade_score(
         q_posterior=posterior,
         q_lcb_5pct=q_lcb,
         price=float(price),
         tick_size=tick_size,
+        debit=debit,
     )
     if not math.isfinite(edge):
         return None
@@ -2503,6 +2553,7 @@ def _family_optimum_shift_pull(
     price_by_cid: dict[tuple[str, str], PriceQuote],
     screen_time: datetime,
     value_refresh_min_age_seconds: float,
+    debit_by_state: dict[str, float] | None = None,
 ) -> RepriceDecision | None:
     """Pull a live maker rest only when a different family sibling is now superior.
 
@@ -2538,6 +2589,7 @@ def _family_optimum_shift_pull(
         side=rest.side,
         price=float(rest.limit_price),
         tick_size=rest_tick,
+        debit_by_state=debit_by_state,
     )
     if current_score is None:
         return None
@@ -2560,6 +2612,7 @@ def _family_optimum_shift_pull(
                 side=side,
                 price=float(quote.price),
                 tick_size=quote.tick_size,
+                debit_by_state=debit_by_state,
             )
             if score is None:
                 continue
@@ -2569,6 +2622,7 @@ def _family_optimum_shift_pull(
                 side=side,
                 price=float(quote.price),
                 tick_size=quote.tick_size,
+                debit_by_state=debit_by_state,
             )
             if edge is None:
                 continue
@@ -2630,6 +2684,7 @@ def screen_resting_orders(
     order-management evidence produced for that rest.
     """
     screen_time = _parse(decision_time) if decision_time is not None else datetime.now().astimezone()
+    debit_by_state = _selection_debit_by_state_fail_soft(world_conn, decision_time=screen_time)
     beliefs_by_family: dict[str, CachedBelief] = {}
     condition_ids = {r.condition_id for r in open_rests if r.condition_id}
     for rest in open_rests:
@@ -2744,6 +2799,9 @@ def screen_resting_orders(
                             q_lcb_5pct=float(held_q_lcb),
                             price=float(ask.price),
                             tick_size=ask.tick_size,
+                            debit=debit_by_state.get(
+                                decision_state(posterior_q, float(ask.price)), 0.0
+                            ),
                         )
                         material_price_change = abs(float(ask.price) - float(rest.limit_price))
                         material_refresh_floor = _improve_delta_for_tick(ask.tick_size)
@@ -2773,6 +2831,7 @@ def screen_resting_orders(
                 price_by_cid=ask_by_cid,
                 screen_time=screen_time,
                 value_refresh_min_age_seconds=value_refresh_min_age_seconds,
+                debit_by_state=debit_by_state,
             )
         if decision is not None:
             out.append((rest, decision))
