@@ -278,6 +278,14 @@ scripts:
       sanctioned `git -C <main> merge --ff-only` call. No canonical DB writes.
   antibody_scan.py: {class: read_only_evidence}
   apply_recommended_controls.py: {class: repair, apply_flag: explicit_import_only, target_db: state/control_plane.json}
+  allocator_bankroll_sensitivity.py:
+    class: read_only_evidence
+    read_targets: [state/zeus_trades.db]
+    write_targets: [stdout]
+    reuse_when: "Non-authoritative offline sensitivity probe: does N-x bankroll convert to N-x deployed capital, or do per-market CapPolicy caps / candidate opportunity supply bind first? Recomputes via the real src.strategy.kelly.kelly_size() on frozen inputs recovered from recent global_single_order_auction decision_log cycles; never sizes or places a live order."
+    do_not_use_when: "Never used to size a live order; true per-price order-book depth is not reconstructable offline (only top-of-book price is stored), so its per-market cap check is a fixed-dollar CapPolicy proxy, not a live liquidity curve."
+    canonical_command: "python3 scripts/allocator_bankroll_sensitivity.py [--db PATH] [--cycles N] [--multiplier X] [--json]"
+    required_tests: [tests/test_allocator_bankroll_sensitivity.py]
   audit_architecture_alignment.py: {class: read_only_evidence}
   audit_artifact_json_natural_key_coverage_2026_05_19.py:
     class: evidence_report_writer
@@ -789,6 +797,14 @@ scripts:
   data_completeness_audit.py: {class: evidence_report_writer, write_targets: [docs/reports/data_completeness_report.md, stdout]}
   deep_heartbeat.py: {class: runtime_support}
   reconcile_realized_fees.py: {class: evidence_report_writer, write_targets: [stdout, state/fee_reconciliation.json], read_targets: [state], required_tests: [tests/test_fee_authority.py], reuse_when: "Refit the realized taker-fee evidence artifact after new fills; READ-ONLY over zeus_trades.db via mode=ro.", canonical_command: "python3 scripts/reconcile_realized_fees.py [--dry-run]"}
+  report_redemption_backlog.py:
+    class: read_only_evidence
+    read_targets: [state/zeus_trades.db]
+    write_targets: [stdout]
+    reuse_when: "Read-only enumeration of settlement_commands stuck in redemption limbo (REDEEM_INTENT_CREATED actionable + REDEEM_REVIEW_REQUIRED bookkeeping-stale, per operator redeem directive 2026-06-10) for the third-party redeemer handoff; Zeus never submits a redeem tx (operator law). --verify-fee additionally checks the taker-fee cash effect against collateral-ledger balance deltas."
+    do_not_use_when: "Never constructs or submits any redeem transaction; the OPERATOR ACTION section is a list for a third party, not an executable instruction."
+    canonical_command: "python3 scripts/report_redemption_backlog.py [--db PATH] [--json] [--verify-fee] [--fee-sample-size N]"
+    required_tests: [tests/test_report_redemption_backlog.py]
   audit_yes_no_selection_skew.py:
     class: read_only_evidence
     dangerous_if_run: false

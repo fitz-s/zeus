@@ -978,6 +978,9 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/migrations/2026_07_quarantine_phase_retirement.py",  # operator_invoked, deliberately OUTSIDE db_writer_lock/_connect(): BLOCKER-2 (docs/rebuild/quarantine_excision_2026-07-11.md) requires a DEDICATED non-WAL (journal_mode=DELETE) connection ATTACHing all three DBs in ONE transaction, crash-tested by tests/test_t5_quarantine_phase_retirement_migration.py's kill-point matrix — src.state.db._connect() would re-enable WAL, defeating the crash-atomicity guarantee this migration exists to provide; refuses to run unless the writer plane is fenced (--operator-confirms-fenced + a live-daemon process scan)
         # --- F2 position_events.event_type CHECK live-DB migration (2026-07-13, wave-1.5 C2 rework) ---
         "scripts/migrations/2026_07_position_identity_supersession_check.py",  # operator_invoked, deliberately OUTSIDE db_writer_lock/_connect(): follows the T5 pattern (writer-plane fence + single-transaction table rebuild), crash-tested by tests/test_position_events_identity_supersession_check_migration.py's kill-point matrix; single-file trade-DB table rebuild taking an exclusive table lock for its duration — refuses to run unless the writer plane is fenced (--operator-confirms-fenced + a live-daemon process scan)
+        # --- redemption backlog + bankroll sensitivity operator tooling (2026-07-25) ---
+        "scripts/report_redemption_backlog.py",  # read_only_ro_uri: opens zeus_trades.db via file:...?mode=ro uri; SELECT-only over settlement_commands/position_current/wallet_balance_head; Zeus never submits a redeem tx (operator law); writes stdout only
+        "scripts/allocator_bankroll_sensitivity.py",  # read_only_ro_uri: opens zeus_trades.db via file:...?mode=ro uri; SELECT-only over decision_log/executable_market_snapshot_latest; non-authoritative offline Kelly-formula sensitivity probe; writes stdout only
     }
 )
 
