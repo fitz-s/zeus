@@ -21,7 +21,6 @@ from src.strategy.live_inference.mode_consistent_ev import (
     PLACEMENT_MAKER,
     PLACEMENT_TAKER,
     TAKER_MAX_ABSOLUTE_SPREAD_FOR_ONE_TICK_CROSS,
-    TAKER_MAX_RELATIVE_SPREAD,
     maker_adverse_selection_haircut,
     maker_limit_price,
     relative_spread,
@@ -130,18 +129,16 @@ class TestMakerPlacement:
 
 
 class TestModeSelection:
-    def test_milan_shape_maker_ev_is_tiny_vs_hybrid(self):
+    def test_milan_shape_has_no_live_band_execution_mode(self):
         """Incident shape under mode-consistent semantics: taker forbidden (56%
-        spread); maker EV with fill prior + adverse haircut is ~10x smaller than
-        the 0.0649 hybrid score that sized the wrong order."""
+        spread) and the raw 0.010 maker quote is below the absolute live band."""
         ev = select_mode_consistent_ev(**INCIDENT)
         assert ev.taker_forbidden_reason is not None
         assert ev.chosen_mode == "MAKER"
         assert ev.placement == PLACEMENT_MAKER
         assert ev.maker_limit_price == pytest.approx(0.010)
         assert ev.ev_maker is not None and ev.ev_maker < 0.01
-        # The hybrid would have said 0.0649; mode-consistent says < 1c of EV.
-        assert ev.chosen_ev < 0.01
+        assert ev.chosen_ev == float("-inf")
 
     def test_tight_spread_favorite_chooses_taker(self):
         ev = select_mode_consistent_ev(
@@ -165,7 +162,7 @@ class TestModeSelection:
         assert ev.chosen_mode == "MAKER"
         assert ev.maker_limit_price == pytest.approx(0.31)  # bid + tick
 
-    def test_one_tick_penny_edge_can_choose_taker(self):
+    def test_one_tick_penny_edge_has_no_live_band_execution_mode(self):
         ev = select_mode_consistent_ev(
             q_lcb=0.03,
             taker_all_in_cost=0.0021,
@@ -178,7 +175,8 @@ class TestModeSelection:
         )
         assert ev.taker_forbidden_reason is None
         assert ev.ev_taker is not None and ev.ev_taker > 0.0
-        assert ev.chosen_mode == "TAKER"
+        assert ev.chosen_mode == "MAKER"
+        assert ev.chosen_ev == float("-inf")
 
     def test_adverse_selection_haircut_is_half_spread(self):
         haircut = maker_adverse_selection_haircut(

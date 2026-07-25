@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-20 (lifecycle conversion fix: no-identical-re-rest
-#   on escalated-but-inadmissible — src/strategy/live_inference/mode_consistent_ev.py:608)
+# Last reused or audited: 2026-07-25 (absolute live-price feasibility is part
+#   of maker/taker mode selection, not only the final submission failsafe)
 # Authority basis: FIX C for incident 0b5c305e26524042 (Milan 24C first fill;
 #   docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md §3) + operator
 #   directive 2026-06-10: mode-consistent evaluation. The system is structurally
@@ -50,6 +50,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from decimal import Decimal
+
+from src.contracts.venue_submission_envelope import (
+    LIVE_ORDER_MAX_UNIT_PRICE,
+    LIVE_ORDER_MIN_UNIT_PRICE,
+)
 
 # Crossing a book whose relative spread (ask-bid)/mid exceeds this is forbidden
 # regardless of edge: a wide spread IS the illiquidity signal, and the measured
@@ -255,7 +261,8 @@ def maker_limit_price(
     tick_down(min(bid + tick, ask - tick, reservation)). Missing bid -> rest at
     min(ask - tick, reservation); missing ask -> min(bid + tick, reservation);
     both missing -> reservation. Returns None when the result is not a positive
-    price (no maker placement exists).
+    price. Live-band feasibility is evaluated separately so the raw quote remains
+    available on receipts even when it cannot become a venue order.
     """
     bid = _finite(best_bid)
     ask = _finite(best_ask)
@@ -269,6 +276,21 @@ def maker_limit_price(
     if not math.isfinite(limit) or limit <= 0.0:
         return None
     return limit
+
+
+def _is_live_order_unit_price(price: float | None) -> bool:
+    """Whether a unit price belongs to the live order action space."""
+
+    if price is None:
+        return False
+    try:
+        value = Decimal(str(price))
+    except (ArithmeticError, ValueError):
+        return False
+    return (
+        value.is_finite()
+        and LIVE_ORDER_MIN_UNIT_PRICE <= value <= LIVE_ORDER_MAX_UNIT_PRICE
+    )
 
 
 TAKER_FORBIDDEN_NO_ASK_EMPTY = "NO_ASK_EMPTY"
@@ -377,10 +399,11 @@ def select_mode_consistent_ev(
 ) -> ModeConsistentEv:
     """Compute EV_taker and EV_maker; choose the better ADMISSIBLE one.
 
-    Taker is admissible only when the relative-spread guard passes AND a taker
-    cost exists. Maker is admissible whenever a positive non-crossing limit
-    exists. When neither is admissible the result is a MAKER decision with
-    chosen_ev = -inf: the candidate cannot be priced in either mode, and the
+    Taker is admissible only when the relative-spread guard passes, the fresh ask
+    is inside the absolute live-order price band, AND a taker cost exists. Maker
+    is admissible only when a non-crossing limit exists inside that same band.
+    When neither is admissible the result is a MAKER decision with chosen_ev =
+    -inf: the candidate cannot be priced in either executable mode, and the
     non-positive EV blocks it at the trade-score gate.
 
     HYSTERESIS (Verification B): TAKER is chosen over an admissible MAKER only when
@@ -416,8 +439,12 @@ def select_mode_consistent_ev(
             q_fill_adj - limit - float(penalty)
         )
 
-    taker_allowed = ev_taker is not None and taker_forbidden is None
-    maker_allowed = ev_maker is not None
+    taker_allowed = (
+        ev_taker is not None
+        and taker_forbidden is None
+        and _is_live_order_unit_price(_finite(best_ask))
+    )
+    maker_allowed = ev_maker is not None and _is_live_order_unit_price(limit)
     # HYSTERESIS: taker must CLEAR the maker EV by the margin (not merely tie). A knife-edge
     # ties to MAKER -> mode is stable under a sub-margin (1-tick) book wobble. The margin scales
     # the maker leg so a negative/zero EV_maker still lets a positive EV_taker win (1+margin on a
@@ -485,8 +512,8 @@ def select_rest_then_cross_mode(
        relationship: "no taker cross may exist while an unexpired same-family
        maker rest exists" — pinned by
        tests/strategy/live_inference/test_rest_then_cross_policy.py.
-    2. TAKER_MAKER_INADMISSIBLE — no bid to rest behind (one-sided book): the
-       taker lane stays lawful exactly as before.
+    2. TAKER_MAKER_INADMISSIBLE — no live-band maker quote can be constructed:
+       the taker lane stays lawful exactly as before.
     3. TAKER_ESCALATED_AFTER_REST — the deadline cross: a prior rest for this
        family was cancelled UNFILLED after >= the escalation deadline, and the
        edge re-certified through the FULL standard pipeline (this call IS the
@@ -542,10 +569,12 @@ def select_rest_then_cross_mode(
     taker_admissible = (
         mode_ev.ev_taker is not None
         and mode_ev.taker_forbidden_reason is None
+        and _is_live_order_unit_price(_finite(best_ask))
         and taker_clears_conservative_bound
     )
     maker_admissible = (
-        mode_ev.ev_maker is not None and mode_ev.maker_limit_price is not None
+        mode_ev.ev_maker is not None
+        and _is_live_order_unit_price(mode_ev.maker_limit_price)
     )
 
     def _as_maker(policy: str, *, chosen_ev: float | None = None, deadline: float | None = None) -> ModeConsistentEv:

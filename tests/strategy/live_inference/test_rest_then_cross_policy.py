@@ -1,6 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-20 (lifecycle conversion fix: no-identical-re-rest,
-#   shadow-gate collapse, double-submit-safety + first-rest-default acceptance tests)
+# Last reused or audited: 2026-07-25 (maker live-price feasibility)
 # Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K4.0
 # (operator escalation: taker-only execution root cause) +
 # docs/evidence/maker_taker/2026-06-10_taker_only_root_cause.md (KM measurement).
@@ -15,8 +14,6 @@ escalation deadline and re-certify before any later cross.
 ANTIBODY (the operator-named relationship): no taker cross may be chosen while
 an unexpired same-family maker rest exists.
 """
-
-import math
 
 import pytest
 
@@ -181,6 +178,37 @@ class TestEscalationLane:
 
 
 class TestExceptionLanes:
+    def test_sub_band_maker_uses_lawful_taker(self):
+        decision = _decide(
+            q_lcb=0.30,
+            taker_all_in_cost=0.05,
+            best_bid=0.04,
+            best_ask=0.05,
+            tick_size=0.01,
+            reservation=0.30,
+            minutes_to_event_end=20 * 60.0,
+        )
+
+        assert decision.maker_limit_price == pytest.approx(0.04)
+        assert decision.chosen_mode == "TAKER"
+        assert decision.policy == POLICY_TAKER_MAKER_INADMISSIBLE
+
+    def test_sub_band_maker_and_forbidden_taker_no_trade(self):
+        decision = _decide(
+            q_lcb=0.30,
+            taker_all_in_cost=0.06,
+            best_bid=0.02,
+            best_ask=0.06,
+            tick_size=0.01,
+            reservation=0.30,
+            minutes_to_event_end=20 * 60.0,
+        )
+
+        assert decision.maker_limit_price == pytest.approx(0.03)
+        assert decision.chosen_mode == "MAKER"
+        assert decision.policy == POLICY_MAKER_TAKER_FORBIDDEN
+        assert decision.chosen_ev == float("-inf")
+
     def test_event_end_near_crosses(self):
         decision = _decide(
             minutes_to_event_end=TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES - 1.0
@@ -338,10 +366,8 @@ class TestFixBConservativeQlcbCapOnCross:
         assert decision.ev_taker is not None
         assert 0.70 <= 0.72  # cross all-in <= q_lcb (the HARD LAW)
 
-    def test_escalated_one_tick_penny_book_crosses_when_allin_clears_qlcb(self):
-        """A one-tick 0.001/0.002 book has a huge relative spread but only one
-        tick of absolute spread. Once the maker rest expires, a q_lcb-certified
-        edge must be able to cross instead of re-posting a permanent 0.001 bid."""
+    def test_escalated_one_tick_penny_book_cannot_bypass_live_price_band(self):
+        """Spread and q admissibility cannot legalize a sub-band venue order."""
         decision = select_rest_then_cross_mode(
             q_lcb=0.03,
             taker_all_in_cost=0.0021,
@@ -353,8 +379,9 @@ class TestFixBConservativeQlcbCapOnCross:
             escalated_after_rest=True,
             minutes_to_event_end=20 * 60.0,
         )
-        assert decision.chosen_mode == "TAKER"
-        assert decision.policy == POLICY_TAKER_ESCALATED_AFTER_REST
+        assert decision.chosen_mode == "MAKER"
+        assert decision.policy == POLICY_MAKER_TAKER_FORBIDDEN
+        assert decision.chosen_ev == float("-inf")
         assert decision.taker_forbidden_reason is None
 
     def test_escalated_multi_tick_penny_book_still_rejects_taker(self):
