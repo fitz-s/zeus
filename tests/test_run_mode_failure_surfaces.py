@@ -6745,7 +6745,7 @@ def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
     assert pending.is_set() is True
 
 
-def test_active_monitor_owns_day0_priority_without_starving_reactor(
+def test_claimed_monitor_owns_day0_priority_without_starving_reactor(
     monkeypatch,
 ) -> None:
     import threading
@@ -6789,7 +6789,8 @@ def test_active_monitor_owns_day0_priority_without_starving_reactor(
         lambda wake_id, _families: monitor_dispatches.append(wake_id) or True,
     )
     main_module._day0_exit_monitor_attempts.clear()
-    main_module._held_position_monitor_active.set()
+    main_module._held_position_monitor_active.clear()
+    assert main_module._held_position_monitor_claim.acquire(blocking=False)
     try:
         assert main_module._unowned_day0_urgent_wake_pending() is False
         assert main_module._edli_reactor_wake_poll_once() is False
@@ -6798,6 +6799,7 @@ def test_active_monitor_owns_day0_priority_without_starving_reactor(
         assert pending.is_set() is True
     finally:
         main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_claim.release()
         main_module._day0_exit_monitor_attempts.clear()
 
 

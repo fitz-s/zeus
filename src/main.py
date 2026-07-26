@@ -4243,10 +4243,10 @@ def _unowned_day0_urgent_wake_pending() -> bool:
 
     if not _day0_urgent_wake_pending.is_set():
         return False
-    # An active monitor is the only consumer that can service a held-family
-    # wake.  Keep the durable wake queued, but do not let work that cannot start
-    # cancel an independent reactor cycle until the monitor lane is available.
-    if _held_position_monitor_active.is_set():
+    # The claim is the single-writer authority.  The active Event clears before
+    # the monitor's trailing status/health work releases that claim, so checking
+    # the Event alone admits a doomed dispatch window.
+    if _held_position_monitor_active.is_set() or _held_position_monitor_claim.locked():
         return False
     with _day0_exit_monitor_attempts_lock:
         owned = frozenset(_day0_exit_monitor_attempts)
@@ -4609,10 +4609,12 @@ def _edli_reactor_wake_poll_once() -> bool:
             if wake_families
             else _day0_wake_target_families(wake_event_ids)
         )
-        # The wake remains durable and unacknowledged.  Waiting here avoids a
-        # one-second loop of doomed monitor dispatches while another monitor
-        # owns the lane; the listener retries as soon as that owner completes.
-        if _held_position_monitor_active.is_set():
+        # The wake remains durable and unacknowledged.  The claim, not the
+        # shorter-lived active Event, is the authoritative monitor ownership.
+        if (
+            _held_position_monitor_active.is_set()
+            or _held_position_monitor_claim.locked()
+        ):
             return False
         day0_requires_exit_monitor = _day0_wake_requires_exit_monitor(
             day0_target_families
