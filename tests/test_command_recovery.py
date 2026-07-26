@@ -11741,6 +11741,92 @@ class TestRecoveryResolutionTable:
         finally:
             verified.close()
 
+    def test_live_tick_prioritizes_partial_remainder_before_general_budget(
+        self,
+        tmp_path,
+        monkeypatch,
+        mock_client,
+    ):
+        """A zero broad budget cannot strand a confirmed partial fill remainder."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema, init_schema_trade_only
+
+        db_path = tmp_path / "priority-partial-remainder.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        _insert(seed, size=8.25, price=0.13)
+        _advance_to_partial(seed, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(
+            seed,
+            order_id="ord-partial",
+            trade_id="trade-partial",
+            filled_size="1.149423",
+            fill_price="0.13",
+        )
+        _seed_pending_entry_projection(seed, order_id="ord-partial")
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 1.149423,
+                   chain_shares = 1.149423,
+                   cost_basis_usd = 0.149425,
+                   order_status = 'partial'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=mock_client,
+            scope="live_tick",
+        )
+
+        assert summary["partial_remainder_recovery_fast"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        verified = _conn_factory()
+        try:
+            assert _get_state(verified, "cmd-001") == "EXPIRED"
+            current = verified.execute(
+                """
+                SELECT phase, shares, chain_shares, cost_basis_usd
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+            assert dict(current) == {
+                "phase": "active",
+                "shares": 1.149423,
+                "chain_shares": 1.149423,
+                "cost_basis_usd": 0.149425,
+            }
+        finally:
+            verified.close()
+
     def test_live_tick_commits_cancel_release_before_terminal_budget_interrupt(
         self,
         tmp_path,

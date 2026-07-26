@@ -20899,6 +20899,21 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         ) as conn:
             cancel_candidates = _capital_blocking_cancel_commands(conn)
             terminal_candidates = _terminal_point_order_candidates(conn)
+            partial_candidates = (
+                _partial_remainder_candidates(
+                    conn,
+                    live_tick_scope=True,
+                )
+                if all(
+                    _table_exists(conn, table)
+                    for table in (
+                        "venue_commands",
+                        "venue_order_facts",
+                        "position_current",
+                    )
+                )
+                else []
+            )
             obligation_states = tuple(
                 sorted(
                     _TERMINAL_ENTRY_NO_FILL_COMMAND_STATES
@@ -20927,6 +20942,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         if (
             not cancel_candidates
             and not terminal_candidates
+            and not partial_candidates
             and not terminal_obligation_open
         ):
             return None
@@ -20935,7 +20951,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         }
         order_ids = {
             str(row.get("venue_order_id") or "")
-            for row in cancel_candidates + terminal_candidates
+            for row in cancel_candidates + terminal_candidates + partial_candidates
             if str(row.get("venue_order_id") or "")
         }
         assert_no_open_connection("recovery.capital_recovery_fast")
@@ -21004,6 +21020,34 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             if cancel_result is not None:
                 _accumulate(summary, "cancel_recovery_fast", cancel_result)
 
+        partial_result = None
+        if partial_candidates:
+            partial_result = _run_recovery_pass_with_lock_policy(
+                "partial_remainder_recovery_fast",
+                lambda: run_three_phase(
+                    lambda conn: None,
+                    lambda _snap: snapshot,
+                    lambda conn, snap_client: reconcile_partial_remainders(
+                        conn,
+                        snap_client,
+                        updated_before=started_at,
+                        live_tick_scope=True,
+                    ),
+                    conn_factory=fast_conn_factory,
+                    snapshot_conn_factory=read_conn_factory,
+                    label="recovery.partial_remainder_recovery_fast",
+                ),
+                scope="live_tick",
+                summary=summary,
+                deadline_monotonic=fast_deadline,
+            )
+            if partial_result is not None:
+                _accumulate(
+                    summary,
+                    "partial_remainder_recovery_fast",
+                    partial_result,
+                )
+
         obligation_result = _run_recovery_pass_with_lock_policy(
             "terminal_entry_exposure_obligations_fast",
             lambda: run_db_only_pass(
@@ -21044,7 +21088,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                     "terminal_point_recovery_fast",
                     terminal_result,
                 )
-        return cancel_result or obligation_result or terminal_result
+        return cancel_result or partial_result or obligation_result or terminal_result
 
     if scope == "boot_fast":
         # Boot recovery must not perform account-wide or per-order venue reads.
