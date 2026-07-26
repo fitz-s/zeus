@@ -13,6 +13,7 @@ from src.decision_kernel.canonicalization import (
     qkernel_current_state_identity_hash,
     qkernel_global_current_state_rejection_reason,
 )
+from src.decision_kernel.verifier import _verify_actionable_qkernel_economics
 from src.engine.event_bound_final_intent import conservative_submit_expected_edge
 from src.execution.executor import (
     _actionable_certificate_intent_mismatch_reason,
@@ -1249,6 +1250,15 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
         },
         limit_price=0.40,
     ) == pytest.approx(0.29)
+    _verify_actionable_qkernel_economics(
+        {
+            "direction": "buy_yes",
+            "selection_authority_applied": "qkernel_spine",
+            "qkernel_execution_economics": economics,
+        },
+        q_live=0.70,
+        q_lcb=0.35,
+    )
 
 
 @pytest.mark.parametrize(
