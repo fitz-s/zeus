@@ -523,6 +523,8 @@ def test_insert_rows_widens_running_max_when_incoming_is_higher(mem_db):
     provenance = json.loads(provenance_json)
     assert provenance["payload_hash"] == "sha256:" + "b" * 64
     assert provenance["widened_from"] == {
+        "temp_current": 32.0,
+        "latest_raw_ts": None,
         "running_max": 34.0,
         "running_min": 34.0,
         "observation_count": 1,
@@ -538,6 +540,119 @@ def test_insert_rows_widens_running_max_when_incoming_is_higher(mem_db):
     assert revision is not None
     assert revision[0] == "payload_hash_mismatch_monotone_widening_applied"
     assert revision[1:] == ("sha256:" + "a" * 64, "sha256:" + "b" * 64)
+
+
+def test_insert_rows_advances_latest_report_temperature_without_extremum_change(mem_db):
+    """A later report in the same hour updates the current-state anchor even
+    when neither daily extremum changes."""
+    first_seen = _make_row(
+        temp_current=None,
+        running_max=34.0,
+        running_min=32.0,
+        observation_count=1,
+        provenance_json=_valid_provenance(
+            payload_hash="sha256:" + "a" * 64,
+            latest_raw_ts="2024-01-15T14:05:00+00:00",
+        ),
+        imported_at="2024-01-15T14:10:00+00:00",
+    )
+    later_report = _make_row(
+        temp_current=33.0,
+        running_max=34.0,
+        running_min=32.0,
+        observation_count=2,
+        provenance_json=_valid_provenance(
+            payload_hash="sha256:" + "b" * 64,
+            latest_raw_ts="2024-01-15T14:35:00+00:00",
+            latest_temp=33.0,
+        ),
+        imported_at="2024-01-15T14:40:00+00:00",
+    )
+
+    assert insert_rows(mem_db, [first_seen]) == 1
+    assert insert_rows(mem_db, [later_report]) == 0
+
+    row = mem_db.execute(
+        "SELECT temp_current, running_max, running_min, observation_count, "
+        "provenance_json FROM observation_instants"
+    ).fetchone()
+    assert row[:4] == (33.0, 34.0, 32.0, 2)
+    provenance = json.loads(row[4])
+    assert provenance["latest_raw_ts"] == "2024-01-15T14:35:00+00:00"
+    assert provenance["widened_from"]["temp_current"] is None
+    assert provenance["widened_from"]["latest_raw_ts"] == (
+        "2024-01-15T14:05:00+00:00"
+    )
+
+
+def test_insert_rows_does_not_regress_latest_report_temperature(mem_db):
+    """An older same-hour fetch cannot replace a newer current-state anchor."""
+    newer = _make_row(
+        temp_current=33.0,
+        running_max=34.0,
+        running_min=32.0,
+        observation_count=2,
+        provenance_json=_valid_provenance(
+            payload_hash="sha256:" + "c" * 64,
+            latest_raw_ts="2024-01-15T14:35:00+00:00",
+            latest_temp=33.0,
+        ),
+        imported_at="2024-01-15T14:40:00+00:00",
+    )
+    older = _make_row(
+        temp_current=32.0,
+        running_max=34.0,
+        running_min=32.0,
+        observation_count=1,
+        provenance_json=_valid_provenance(
+            payload_hash="sha256:" + "d" * 64,
+            latest_raw_ts="2024-01-15T14:05:00+00:00",
+            latest_temp=32.0,
+        ),
+        imported_at="2024-01-15T14:45:00+00:00",
+    )
+
+    assert insert_rows(mem_db, [newer]) == 1
+    assert insert_rows(mem_db, [older]) == 0
+
+    row = mem_db.execute(
+        "SELECT temp_current, observation_count FROM observation_instants"
+    ).fetchone()
+    assert row == (33.0, 2)
+    (reason,) = mem_db.execute(
+        "SELECT reason FROM observation_revisions"
+    ).fetchone()
+    assert reason == "payload_hash_mismatch"
+
+
+def test_insert_rows_quarantines_changed_temperature_at_same_report_time(mem_db):
+    """A corrected value at one report timestamp is a revision, not a causal
+    current-state advance."""
+    original = _make_row(
+        temp_current=33.0,
+        provenance_json=_valid_provenance(
+            payload_hash="sha256:" + "e" * 64,
+            latest_raw_ts="2024-01-15T14:35:00+00:00",
+            latest_temp=33.0,
+        ),
+        imported_at="2024-01-15T14:40:00+00:00",
+    )
+    corrected = _make_row(
+        temp_current=32.0,
+        provenance_json=_valid_provenance(
+            payload_hash="sha256:" + "f" * 64,
+            latest_raw_ts="2024-01-15T14:35:00+00:00",
+            latest_temp=32.0,
+        ),
+        imported_at="2024-01-15T14:45:00+00:00",
+    )
+
+    assert insert_rows(mem_db, [original]) == 1
+    assert insert_rows(mem_db, [corrected]) == 0
+    (temp_current,) = mem_db.execute(
+        "SELECT temp_current FROM observation_instants"
+    ).fetchone()
+    assert temp_current == 33.0
 
 
 def test_insert_rows_widens_running_min_when_incoming_is_lower(mem_db):

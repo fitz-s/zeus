@@ -4,6 +4,24 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-26 Same-hour latest-temperature advance
+
+The latest-temperature repair exposed a second writer-side discontinuity.
+`observation_instants` keys native reports by UTC hour bucket. A 15-minute
+live tick can therefore see a newer report in an existing bucket without a
+new key or a wider max/min. The typed writer allowed only extrema/count/
+provenance widening, so it quarantined the changed `temp_current`; Tel Aviv's
+canonical current-state anchor remained NULL even after a successful same-
+source fetch.
+
+The existing audited monotone bucket-advance contract now also updates
+`temp_current`, but only when provenance proves `latest_raw_ts` does not move
+backward and extrema do not narrow. The revision record preserves the prior
+temperature and report time. SCOPE remains the exact city/source/hour key;
+DRAIN is the next successful native-source tick; RESET is the atomic canonical
+row update followed by the normal held-position monitor cycle. No source,
+market-price proxy, trade threshold, lifecycle, or action law changes.
+
 ## 2026-07-26 NOAA-mirror Day0 source continuity
 
 The Tel Aviv Jul-26 31C BUY NO loss reconstruction found a real 21.147057-share

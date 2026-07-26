@@ -474,7 +474,7 @@ _REVISION_INSERT_SQL = """
 """
 _UPDATE_WIDENED_SQL = """
     UPDATE observation_instants
-    SET running_max = ?, running_min = ?, observation_count = ?,
+    SET temp_current = ?, running_max = ?, running_min = ?, observation_count = ?,
         provenance_json = ?, imported_at = ?
     WHERE id = ?
 """
@@ -487,7 +487,13 @@ _MATERIAL_COMPARISON_EXEMPT_COLUMNS: frozenset[str] = frozenset({"imported_at"})
 # incoming row is a DIFFERENT identity/context, not a backfill completion of
 # the same bucket, and must fall back to revision-quarantine.
 _WIDENING_VARIABLE_COLUMNS: frozenset[str] = frozenset(
-    {"running_max", "running_min", "observation_count", "provenance_json"}
+    {
+        "temp_current",
+        "running_max",
+        "running_min",
+        "observation_count",
+        "provenance_json",
+    }
 ) | _MATERIAL_COMPARISON_EXEMPT_COLUMNS
 
 
@@ -616,7 +622,7 @@ def _json_dumps(payload: dict[str, Any]) -> str:
 
 def _monotone_widening(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
     """True when ``incoming`` is the SAME hour bucket with MORE raw obs folded
-    in — a legitimate WU/Ogimet backfill completion, not a different reading.
+    in — a legitimate WU/Ogimet bucket advance, not a different reading.
 
     The 2026-07-14 Paris regression: the live tick polls an hour bucket once,
     shortly after the hour opens, and freezes whatever WU's history endpoint
@@ -625,9 +631,14 @@ def _monotone_widening(existing: dict[str, Any], incoming: dict[str, Any]) -> bo
     true max/min can only be REVEALED to be more extreme as more raw obs
     accumulate, never less (it is a max/min over an accumulating set). A later
     fetch of the identical bucket that only ADVANCES running_max upward and/or
-    running_min downward (never regresses either) is that reveal, not a
-    disagreement — everything else about the bucket's identity must still
-    match exactly, or this is a different reading and must NOT be trusted here.
+    running_min downward (never regresses either) is that reveal.
+
+    The latest causal report inside the still-open bucket may also advance while
+    its extrema stay unchanged. ``temp_current`` follows that newest report,
+    guarded by monotone ``latest_raw_ts`` so an older fetch cannot overwrite a
+    newer current-state anchor. Everything else about the bucket's identity
+    must still match exactly, or this is a different reading and must NOT be
+    trusted here.
     """
     for column in set(_INSERT_COLUMNS) - _WIDENING_VARIABLE_COLUMNS:
         if _normalize_material_value(column, existing.get(column)) != _normalize_material_value(
@@ -639,6 +650,40 @@ def _monotone_widening(existing: dict[str, Any], incoming: dict[str, Any]) -> bo
     if existing_max is not None and (incoming_max is None or incoming_max < existing_max):
         return False
     if existing_min is not None and (incoming_min is None or incoming_min > existing_min):
+        return False
+    try:
+        existing_provenance = json.loads(existing.get("provenance_json") or "{}")
+        incoming_provenance = json.loads(incoming.get("provenance_json") or "{}")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(existing_provenance, dict) or not isinstance(incoming_provenance, dict):
+        return False
+
+    existing_latest = existing_provenance.get("latest_raw_ts")
+    incoming_latest = incoming_provenance.get("latest_raw_ts")
+    if incoming_latest is None:
+        return existing.get("temp_current") == incoming.get("temp_current")
+    try:
+        incoming_latest_dt = datetime.fromisoformat(
+            str(incoming_latest).replace("Z", "+00:00")
+        )
+        existing_latest_dt = (
+            datetime.fromisoformat(str(existing_latest).replace("Z", "+00:00"))
+            if existing_latest is not None
+            else None
+        )
+    except ValueError:
+        return False
+    if existing_latest_dt is not None and incoming_latest_dt < existing_latest_dt:
+        return False
+    if (
+        existing.get("temp_current") is not None
+        and incoming.get("temp_current") != existing.get("temp_current")
+        and existing_latest_dt is not None
+        and incoming_latest_dt <= existing_latest_dt
+    ):
+        return False
+    if incoming.get("temp_current") is None and existing.get("temp_current") is not None:
         return False
     return True
 
@@ -659,6 +704,12 @@ def _widened_provenance_json(existing: dict[str, Any], incoming: dict[str, Any])
         merged = {}
     merged = dict(merged)
     merged["widened_from"] = {
+        "temp_current": existing.get("temp_current"),
+        "latest_raw_ts": (
+            json.loads(existing.get("provenance_json") or "{}").get("latest_raw_ts")
+            if existing.get("provenance_json")
+            else None
+        ),
         "running_max": existing.get("running_max"),
         "running_min": existing.get("running_min"),
         "observation_count": existing.get("observation_count"),
@@ -732,9 +783,10 @@ def insert_rows(conn: sqlite3.Connection, rows: Iterable[ObsV2Row]) -> int:
 
     - MONOTONE WIDENING (2026-07-14 Paris regression fix): identical identity
       (station/unit/timezone/etc, everything except running_max/running_min/
-      observation_count/provenance_json) and the incoming running_max/
-      running_min are equal-or-more-extreme than what is stored — this is WU
-      backfilling MORE raw obs into the SAME hour bucket, not a disagreement
+      observation_count/provenance_json/temp_current) and the incoming
+      running_max/running_min are equal-or-more-extreme than what is stored,
+      while latest_raw_ts never regresses — this is WU backfilling MORE raw
+      obs into the SAME hour bucket, not a disagreement
       (the bucket's true max/min over an accumulating set can only be revealed
       to be more extreme, never less). The current row IS updated in place
       (running_max/running_min/observation_count/provenance_json/imported_at),
@@ -805,6 +857,7 @@ def insert_rows(conn: sqlite3.Connection, rows: Iterable[ObsV2Row]) -> int:
                 conn.execute(
                     _UPDATE_WIDENED_SQL,
                     (
+                        row_dict["temp_current"],
                         row_dict["running_max"],
                         row_dict["running_min"],
                         row_dict["observation_count"],
