@@ -1,15 +1,20 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-18
+# Last reused or audited: 2026-07-25
 # Authority basis: PR-I.5.a / autonomous redeem prep (PR_I5_WEB3_WIRE.md)
+# 2026-07-25 update: Zeus no longer submits on-chain redemption transactions;
+#   Polymarket settles win/loss on our behalf. harvester.enqueue_redeem_command
+#   (the thin wrapper this file drove through) was deleted. winning_index_set
+#   population is request_redeem's own behavior (settlement_commands.py) —
+#   these tests now call request_redeem directly instead of the deleted wrapper.
 """Antibody tests: winning_index_set populated at REDEEM_INTENT_CREATED time.
 
 PR-I.5.a adds winning_index_set to settlement_commands so that the future
 PR-I.5.c web3 redeemPositions wire can construct correct indexSets calldata.
 
 Invariants:
-  - After enqueue_redeem_command with direction=buy_yes (YES won):
+  - After request_redeem with a buy_yes-derived winning_index_set (YES won):
       winning_index_set = '["2"]'  (binary YES = CTF index 1, indexSet = 1<<1)
-  - After enqueue_redeem_command with direction=buy_no (NO won):
+  - After request_redeem with a buy_no-derived winning_index_set (NO won):
       winning_index_set = '["1"]'  (binary NO  = CTF index 0, indexSet = 1<<0)
   - None is valid (for non-binary markets; V1 limitation documented in
     settlement_commands.py::request_redeem docstring).
@@ -28,8 +33,7 @@ import pytest
 import importlib.util
 import pathlib
 
-from src.execution.harvester import enqueue_redeem_command
-from src.execution.settlement_commands import init_settlement_command_schema
+from src.execution.settlement_commands import init_settlement_command_schema, request_redeem
 
 # Migration filename starts with a digit; use importlib to load it directly.
 _migration_path = pathlib.Path(__file__).parents[2] / "scripts" / "migrations" / "202605_add_settlement_commands_winning_index_set.py"
@@ -68,33 +72,29 @@ def _fetch_winning_index_set(conn: sqlite3.Connection, command_id: str) -> str |
     ("buy_no",  '["1"]', "no_resolved"),
 ])
 def test_winning_index_set_populated_at_enqueue(direction, expected_json, case_label):
-    """After enqueue, winning_index_set matches CTF binary convention.
+    """After request_redeem, winning_index_set matches CTF binary convention.
 
     Uses USDC_E payout to bypass Q-FX-1 gate (no ZEUS_PUSD_FX_CLASSIFIED env
     in test environment). State is REDEEM_REVIEW_REQUIRED, which is fine —
     the column value is what we are testing, not the payout asset path.
 
     Relationship tested:
-      harvester._settle_positions (direction + won) →
-      enqueue_redeem_command (winning_index_set param) →
+      caller (direction + won) → winning_index_set param →
       request_redeem INSERT → settlement_commands.winning_index_set column
     """
     conn = _make_conn()
 
-    result = enqueue_redeem_command(
-        conn,
-        condition_id=f"0xdeadbeef{case_label}",
-        payout_asset="USDC_E",  # bypasses Q-FX-1 gate; column value still tested
+    command_id = request_redeem(
+        f"0xdeadbeef{case_label}",
+        "USDC_E",  # bypasses Q-FX-1 gate; column value still tested
         market_id=f"market-{case_label}",
         pusd_amount_micro=500_000,
         token_amounts={"tok1": 0.5},
-        trade_id=f"trade-{case_label}",
+        conn=conn,
         winning_index_set=expected_json,
     )
     conn.commit()
 
-    assert result["status"] == "queued", f"Expected queued, got {result}"
-    command_id = result["command_id"]
     assert command_id is not None
 
     stored = _fetch_winning_index_set(conn, command_id)
@@ -115,20 +115,18 @@ def test_winning_index_set_none_for_multi_bin_unsupported():
     Multi-bin encoding is out of scope for PR-I.5.a (LIMITATION documented).
     """
     conn = _make_conn()
-    result = enqueue_redeem_command(
-        conn,
-        condition_id="0xmultibinunsupported",
-        payout_asset="USDC_E",  # bypasses Q-FX-1 gate
+    command_id = request_redeem(
+        "0xmultibinunsupported",
+        "USDC_E",  # bypasses Q-FX-1 gate
         market_id="market-multibin",
         pusd_amount_micro=1_000_000,
         token_amounts={},
-        trade_id="trade-multibin",
+        conn=conn,
         winning_index_set=None,  # V1: not supported for ranged markets
     )
     conn.commit()
 
-    assert result["status"] == "queued"
-    stored = _fetch_winning_index_set(conn, result["command_id"])
+    stored = _fetch_winning_index_set(conn, command_id)
     assert stored is None, f"Expected NULL for multi-bin unsupported case, got {stored!r}"
 
 
@@ -179,24 +177,24 @@ def test_winning_index_set_idempotent_on_duplicate_enqueue():
     """Duplicate enqueue (same condition_id/market_id/payout_asset) returns the
     existing command_id without overwriting winning_index_set."""
     conn = _make_conn()
-    first = enqueue_redeem_command(
-        conn,
-        condition_id="0xidempotent",
-        payout_asset="USDC_E",  # bypasses Q-FX-1 gate
+    first_id = request_redeem(
+        "0xidempotent",
+        "USDC_E",  # bypasses Q-FX-1 gate
         market_id="market-idem",
+        conn=conn,
         winning_index_set='["2"]',
     )
     conn.commit()
-    second = enqueue_redeem_command(
-        conn,
-        condition_id="0xidempotent",
-        payout_asset="USDC_E",
+    second_id = request_redeem(
+        "0xidempotent",
+        "USDC_E",
         market_id="market-idem",
+        conn=conn,
         winning_index_set='["2"]',
     )
     conn.commit()
 
     # Both calls return the same command_id (idempotency)
-    assert first["command_id"] == second["command_id"]
-    stored = _fetch_winning_index_set(conn, first["command_id"])
+    assert first_id == second_id
+    stored = _fetch_winning_index_set(conn, first_id)
     assert stored == '["2"]'

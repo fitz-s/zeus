@@ -1,24 +1,27 @@
 # Created: 2026-06-03
-# Last reused or audited: 2026-07-24
+# Last reused or audited: 2026-07-25
 # Authority basis: 守護 blocker — settlement_outcomes (VERIFIED truth) -> resolver ->
-#   position settled + REDEEM_INTENT enqueued. Relationship test across the
-#   settlement_outcomes -> position_current -> settlement_commands boundary that the
+#   position settled. Relationship test across the
+#   settlement_outcomes -> position_current boundary that the
 #   "harvester unscheduled in EDLI" bug left dead (memory #56 Shanghai cca68b44).
-# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
+# Lifecycle: created=2026-06-03; last_reviewed=2026-07-25; last_reused=2026-07-25
 # Purpose: Cross-module relationship invariant — when a position's target_date has a
-#   VERIFIED settlement_outcomes row, running the resolver marks the position settled
-#   AND enqueues a REDEEM_INTENT_CREATED row (a winning position is claimable).
+#   VERIFIED settlement_outcomes row, running the resolver marks the position settled.
 # Reuse: inspect src/engine/harvest_cycle.py:_resolve_settlements and
-#   src/state/db.py settlement_outcomes/position_current/settlement_commands tables
+#   src/state/db.py settlement_outcomes/position_current tables
 #   before re-running; verify zeus-forecasts.db and zeus_trades.db schemas match.
-"""Relationship test: resolver consumes VERIFIED settlement truth -> settle + redeem.
+# 2026-07-25 update: on-chain redemption decoupled entirely (Zeus no longer
+#   submits redeem transactions; Polymarket settles win/loss on our behalf).
+#   test_resolver_settles_position_and_enqueues_redeem_intent asserted a
+#   REDEEM_INTENT_CREATED row was enqueued — removed, since enqueue_redeem_command
+#   was deleted from src/execution/harvester.py. The remaining tests in this file
+#   are independent of redeem/settlement_commands and are unchanged.
+"""Relationship test: resolver consumes VERIFIED settlement truth -> settle.
 
 This crosses the exact boundary the scheduling bug broke:
   forecasts.settlement_outcomes (VERIFIED)  ->  trade.position_current (settled)
-                                            ->  trade.settlement_commands (REDEEM_INTENT_CREATED)
 
-Without the harvester scheduled, this whole chain never fires in EDLI modes: the
-redeem pollers (consumers) sit idle because their producer never enqueues.
+Without the harvester scheduled, this whole chain never fires in EDLI modes.
 """
 from __future__ import annotations
 
@@ -28,10 +31,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.state.db import init_schema
-from src.execution.settlement_commands import (
-    SettlementState,
-    init_settlement_command_schema,
-)
 
 
 @pytest.fixture()
@@ -39,7 +38,6 @@ def trade_conn():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     init_schema(db)
-    init_settlement_command_schema(db)
     yield db
     db.close()
 
@@ -140,16 +138,15 @@ def test_missing_optional_named_column_does_not_fall_through_to_position():
     assert _row_value(row, "settlement_scope", 8, "family") == "family"
 
 
-def test_resolver_settles_position_and_enqueues_redeem_intent(
+def test_resolver_settles_position_when_verified_settlement_present(
     trade_conn, forecasts_conn_with_verified_settlement, monkeypatch
 ):
     """VERIFIED settlement_outcomes row + matching winning position
-    → resolver marks settled AND enqueues REDEEM_INTENT_CREATED.
+    → resolver marks settled.
 
     RED proof: if the harvester never runs (the scheduling bug), no
-    REDEEM_INTENT_CREATED row ever exists for the position — the redeem
-    pollers have nothing to consume. This test fires the resolver directly
-    and asserts the producer side emits the intent.
+    position ever gets settled for a VERIFIED settlement_outcomes row.
+    This test fires the resolver directly and asserts the settle side fires.
     """
     monkeypatch.setenv("ZEUS_HARVESTER_LIVE_ENABLED", "1")
 
@@ -159,7 +156,7 @@ def test_resolver_settles_position_and_enqueues_redeem_intent(
     portfolio, pos = _winning_position()
 
     # Resolver loads/saves portfolio + tracker via state helpers — stub them so
-    # the test isolates the settlement_outcomes -> settle -> redeem boundary.
+    # the test isolates the settlement_outcomes -> settle boundary.
     monkeypatch.setattr("src.state.portfolio.load_portfolio", lambda *a, **kw: portfolio)
     monkeypatch.setattr("src.state.portfolio.save_portfolio", lambda *a, **kw: None)
     monkeypatch.setattr("src.state.strategy_tracker.get_tracker", lambda *a, **kw: MagicMock())
@@ -169,14 +166,6 @@ def test_resolver_settles_position_and_enqueues_redeem_intent(
         lambda conn, *, db_op, json_exports: db_op(),
     )
     monkeypatch.setattr("src.state.decision_chain.store_settlement_records", lambda *a, **kw: None)
-
-    # enqueue_redeem_command looks up an anchor from world.decision_events; in this
-    # isolated test there is no world DB → make that lookup a clean no-op so the
-    # redeem command is enqueued via the real request_redeem path on trade_conn.
-    monkeypatch.setattr(
-        hv, "get_world_connection",
-        lambda *a, **kw: (_ for _ in ()).throw(sqlite3.OperationalError("no world db in test")),
-    )
 
     # Canonical exit path uses mark_settled; stub to a deterministic closed record.
     closed = MagicMock()
@@ -197,7 +186,7 @@ def test_resolver_settles_position_and_enqueues_redeem_intent(
     # Downstream settlement-event writers persist many position attributes into real
     # tables; with a MagicMock position those bind MagicMock objects into SQL. They
     # are exercised by their own tests — stub them so this relationship test isolates
-    # the settlement_outcomes -> settle -> REDEEM_INTENT boundary only.
+    # the settlement_outcomes -> settle boundary only.
     monkeypatch.setattr(hv, "log_settlement_event", lambda *a, **kw: None)
     monkeypatch.setattr(hv, "_dual_write_canonical_settlement_if_available", lambda *a, **kw: None)
 
@@ -208,18 +197,6 @@ def test_resolver_settles_position_and_enqueues_redeem_intent(
     assert result["status"] == "ok", f"resolver did not run cleanly: {result!r}"
     assert result["positions_settled"] >= 1, (
         f"VERIFIED settlement present but no position settled: {result!r}"
-    )
-
-    # The producer-side invariant the bug killed: a REDEEM_INTENT_CREATED row
-    # now exists in settlement_commands for the winning position.
-    rows = trade_conn.execute(
-        "SELECT state, condition_id FROM settlement_commands WHERE condition_id = ?",
-        (pos.condition_id,),
-    ).fetchall()
-    assert rows, "no settlement_commands row enqueued for the winning settled position"
-    assert any(r["state"] == SettlementState.REDEEM_INTENT_CREATED.value for r in rows), (
-        f"expected a REDEEM_INTENT_CREATED row; got states "
-        f"{[r['state'] for r in rows]!r}"
     )
 
 

@@ -1,21 +1,27 @@
 # Created: 2026-05-05
-# Last reused or audited: 2026-05-18
-# Lifecycle: created=2026-05-05; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Last reused or audited: 2026-07-25
 # Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json
-# Purpose: Guard independence between settlement persistence and redeem command enqueueing.
-# Reuse: Run when harvester settlement side effects or settlement_commands idempotency changes.
-"""Relationship tests: harvester settlement and redeem are independent side effects.
+# Purpose: Guard that settlement persistence (record_settlement_result) behaves
+#   correctly on its own, now that on-chain redemption is decoupled entirely.
+# Reuse: Run when harvester settlement side effects change.
+# 2026-07-25 update: Zeus no longer submits on-chain redemption transactions
+#   (Polymarket settles win/loss on our behalf). `enqueue_redeem_command` was
+#   deleted from src/execution/harvester.py; the T2/T2b/T4/T5 tests that
+#   asserted redeem-enqueue behavior and settlement/redeem independence were
+#   removed (there is no redeem enqueue left to be independent from). T1/T1b/T3
+#   survive unchanged — they test record_settlement_result in isolation.
+#   test_settle_positions_closes_losing_retry_pending_position was re-homed
+#   here from the deleted tests/test_settle_positions_uses_enqueue_redeem.py
+#   (whose whole T2G premise — routing redeem through enqueue_redeem_command —
+#   no longer exists), stripped of its enqueue_redeem_command references; the
+#   underlying Hong Kong 2026-06-12 regression (stale retry_pending exit_state
+#   must not block a venue-verified settlement) is unrelated to redeem and
+#   still needs coverage.
+"""record_settlement_result writes settlement facts to decision_log.
 
-T1C-SETTLEMENT-NOT-REDEEM: calling record_settlement_result() does NOT invoke any
-redeem-state transition. Calling enqueue_redeem_command() does NOT write a settlement
-record. The two effects are structurally independent.
-
-Tests:
-  T1: record_settlement_result writes rows to decision_log, emits no redeem state.
-  T2: enqueue_redeem_command writes a settlement_command row, does NOT write to decision_log.
-  T3: record_settlement_result with missing decision_log table returns 0 (legacy skip).
-  T4: enqueue_redeem_command returns queued/error dict with expected keys.
-  T5: calling both in sequence leaves each table in consistent independent state.
+T1: record_settlement_result writes rows to decision_log.
+T1b: record_settlement_result with an empty record list is a no-op.
+T3: record_settlement_result with missing decision_log table returns 0 (legacy skip).
 """
 from __future__ import annotations
 
@@ -24,11 +30,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.execution.harvester import enqueue_redeem_command, record_settlement_result
-from src.execution.settlement_commands import (
-    SettlementState,
-    init_settlement_command_schema,
-)
+from src.execution.harvester import record_settlement_result
 from src.state.decision_chain import SettlementRecord
 
 
@@ -94,22 +96,12 @@ def _make_stage2_missing_decision_log() -> dict:
     }
 
 
-def _make_settlement_conn_with_schema() -> sqlite3.Connection:
-    """In-memory DB with settlement_commands schema initialised."""
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_settlement_command_schema(conn)
-    conn.commit()
-    return conn
-
-
 # ---------------------------------------------------------------------------
-# T1: record_settlement_result writes decision_log rows; no redeem state emitted
+# T1: record_settlement_result writes decision_log rows
 # ---------------------------------------------------------------------------
 
-def test_T1_record_settlement_result_writes_decision_log_no_redeem_transition():
-    """record_settlement_result() writes the settlement fact and does not touch
-    settlement_commands / redeem state (T1C-SETTLEMENT-NOT-REDEEM)."""
+def test_T1_record_settlement_result_writes_decision_log():
+    """record_settlement_result() writes the settlement fact."""
     conn = _make_trade_conn()
     records = [_make_settlement_record("trade-001"), _make_settlement_record("trade-002")]
 
@@ -126,9 +118,6 @@ def test_T1_record_settlement_result_writes_decision_log_no_redeem_transition():
     # source tag is "harvester"
     assert call_args[1].get("source") == "harvester"
 
-    # No settlement_command was created — the function has no knowledge of redeem state
-    # (settlement_commands table does not exist in this conn; if it did, row count would be 0)
-
 
 def test_T1b_record_settlement_result_empty_list_returns_zero():
     conn = _make_trade_conn()
@@ -136,59 +125,6 @@ def test_T1b_record_settlement_result_empty_list_returns_zero():
         n = record_settlement_result(conn, [], _make_stage2_ready())
     assert n == 0
     mock_store.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# T2: enqueue_redeem_command writes settlement_commands, NOT decision_log
-# ---------------------------------------------------------------------------
-
-def test_T2_enqueue_redeem_writes_settlement_command_not_decision_log():
-    """enqueue_redeem_command() creates a command row in settlement_commands but
-    does NOT write to decision_log (T1C-SETTLEMENT-NOT-REDEEM).
-
-    Uses USDC_E payout to avoid Q-FX-1 gate (goes to REDEEM_REVIEW_REQUIRED).
-    The test verifies structural independence, not payout-asset semantics.
-    """
-    conn = _make_settlement_conn_with_schema()
-
-    result = enqueue_redeem_command(
-        conn,
-        condition_id="cond-abc123",
-        payout_asset="USDC_E",
-        market_id="mkt-abc123",
-        trade_id="trade-001",
-    )
-
-    assert result["status"] == "queued"
-    assert result["command_id"] is not None
-    assert result["reason"] is None
-
-    # Verify row exists in settlement_commands (USDC_E goes to REDEEM_REVIEW_REQUIRED)
-    row = conn.execute(
-        "SELECT state FROM settlement_commands WHERE command_id = ?",
-        (result["command_id"],),
-    ).fetchone()
-    assert row is not None
-    assert row["state"] in {
-        SettlementState.REDEEM_INTENT_CREATED.value,
-        SettlementState.REDEEM_REVIEW_REQUIRED.value,
-    }
-
-    # decision_log table does not exist in this conn, confirming enqueue_redeem_command
-    # made no attempt to write it (it would raise if it tried).
-
-
-def test_T2b_enqueue_redeem_idempotent_returns_same_command_id():
-    """Calling enqueue_redeem_command twice for the same condition/asset returns
-    the same command_id (request_redeem is idempotent). Uses USDC_E to avoid Q-FX-1."""
-    conn = _make_settlement_conn_with_schema()
-
-    r1 = enqueue_redeem_command(conn, condition_id="cond-dup", payout_asset="USDC_E")
-    r2 = enqueue_redeem_command(conn, condition_id="cond-dup", payout_asset="USDC_E")
-
-    assert r1["status"] == "queued"
-    assert r2["status"] == "already_exists"
-    assert r1["command_id"] == r2["command_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -212,63 +148,158 @@ def test_T3_record_settlement_result_skips_when_decision_log_missing(caplog):
 
 
 # ---------------------------------------------------------------------------
-# T4: enqueue_redeem_command returns correct dict schema on error
+# Re-homed regression: stale retry_pending exit_state must not block a
+# venue-verified settlement close (redeem-independent; see header note).
 # ---------------------------------------------------------------------------
 
-def test_T4_enqueue_redeem_returns_error_dict_on_exception():
-    """If request_redeem raises, enqueue_redeem_command returns status='error'
-    with a reason string and no command_id."""
-    conn = _make_settlement_conn_with_schema()
-
-    # Patch request_redeem at the import site used inside enqueue_redeem_command
-    # (the function does a local 'from src.execution.settlement_commands import request_redeem')
-    with patch("src.execution.settlement_commands.request_redeem",
-               side_effect=RuntimeError("fx gate closed")):
-        result = enqueue_redeem_command(
-            conn,
-            condition_id="cond-fail",
-            payout_asset="USDC_E",
+def _make_settlement_close_conn() -> sqlite3.Connection:
+    """In-memory SQLite with the tables _settle_positions reads."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS position_current (
+            trade_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            phase TEXT
         )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS decision_log (
+            trade_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            entry_price REAL,
+            exit_price REAL,
+            pnl REAL,
+            strategy TEXT,
+            source TEXT,
+            settled_at TEXT,
+            decision_snapshot_id INTEGER,
+            edge_source TEXT
+        )
+    """)
+    conn.commit()
+    return conn
 
-    assert result["status"] == "error"
-    assert result["command_id"] is None
-    assert "fx gate closed" in result["reason"]
+
+def _make_mock_portfolio_with_position(
+    trade_id="trade-t2g-001",
+    city="London",
+    target_date="2026-05-01",
+    direction="buy_yes",
+    condition_id="cond-abc123",
+    token_id="tok-yes-001",
+    shares=100.0,
+    entry_price=0.6,
+):
+    """Return a minimal mock PortfolioState with one position.
+
+    Attributes are set so the position passes all the skip-guards in
+    _settle_positions (state not in skip-set, direction valid, etc.).
+    """
+    pos = MagicMock()
+    pos.trade_id = trade_id
+    pos.city = city
+    pos.target_date = target_date
+    pos.direction = direction
+    pos.condition_id = condition_id
+    pos.token_id = token_id
+    pos.no_token_id = None
+    pos.entry_price = entry_price
+    pos.shares = shares
+    pos.p_posterior = 0.7
+    pos.bin_label = "16-17°C"
+    pos.exit_price = None
+    pos.entry_method = "model"
+    pos.selected_method = "model"
+    pos.decision_snapshot_id = ""
+    pos.edge_source = "model"
+    pos.strategy = "default"
+    pos.last_exit_at = "2026-05-01T18:00:00Z"
+    pos.market_id = condition_id
+    pos.state = "active"
+    pos.exit_state = ""
+    pos.chain_state = ""
+    pos.temperature_metric = "high"
+
+    portfolio = MagicMock()
+    portfolio.positions = [pos]
+    portfolio.ignored_tokens = []
+
+    return portfolio, pos
 
 
-# ---------------------------------------------------------------------------
-# T5: record_settlement_result and enqueue_redeem_command are independent
-#     — calling both leaves each table consistent with no cross-contamination
-# ---------------------------------------------------------------------------
+def test_settle_positions_closes_losing_retry_pending_position(monkeypatch):
+    """A venue-verified settlement outranks stale exit retry state.
 
-def test_T5_settlement_and_redeem_independent_when_called_in_sequence():
-    """Calling record_settlement_result then enqueue_redeem_command leaves
-    decision_log and settlement_commands in independent consistent state.
-    Neither operation contaminates the other's table."""
-    trade_conn = _make_trade_conn()
-    redeem_conn = _make_settlement_conn_with_schema()
+    Regression coverage for the live Hong Kong 2026-06-12 failure mode: the
+    position was buy_no, the YES bin won, and a stale retry_pending exit_state
+    kept the harvester from writing SETTLED even though position_current.phase
+    was still an open canonical phase.
+    """
+    import src.execution.harvester as hv
+    import src.execution.exit_lifecycle as el
 
-    records = [_make_settlement_record("trade-seq-01")]
+    conn = _make_settlement_close_conn()
+    portfolio, pos = _make_mock_portfolio_with_position(
+        trade_id="trade-hk-retry-loser",
+        city="Hong Kong",
+        target_date="2026-06-12",
+        direction="buy_no",
+        condition_id="0xhk",
+        token_id="",
+        shares=5.0,
+        entry_price=0.72,
+    )
+    pos.no_token_id = "no-token"
+    pos.bin_label = "Will the highest temperature in Hong Kong be 30°C on June 12?"
+    pos.exit_state = "retry_pending"
+    pos.chain_state = "synced"
 
-    with patch("src.execution.harvester.store_settlement_records") as mock_store:
-        n_written = record_settlement_result(trade_conn, records, _make_stage2_ready())
+    conn.execute(
+        "INSERT INTO position_current (trade_id, city, target_date, phase) VALUES (?, ?, ?, ?)",
+        (pos.trade_id, pos.city, pos.target_date, "active"),
+    )
+    conn.commit()
 
-    # record_settlement_result returns len(records) when stage2 is ready
-    assert n_written == len(records)
+    monkeypatch.setattr(hv, "log_event", lambda *a, **kw: None)
+    monkeypatch.setattr(hv, "log_settlement_event", lambda *a, **kw: None)
+    monkeypatch.setattr(hv, "_dual_write_canonical_settlement_if_available", lambda *a, **kw: False)
+    monkeypatch.setattr(hv, "record_token_suppression", lambda *a, **kw: {"status": "written"})
+    monkeypatch.setattr(hv, "_settlement_economics_for_position", lambda p: (p.shares, p.entry_price * p.shares))
 
-    redeem_result = enqueue_redeem_command(
-        redeem_conn,
-        condition_id="cond-seq-01",
-        payout_asset="USDC_E",
-        trade_id="trade-seq-01",
+    closed = MagicMock()
+    closed.trade_id = pos.trade_id
+    closed.pnl = -3.6
+    closed.bin_label = pos.bin_label
+    closed.direction = pos.direction
+    closed.p_posterior = pos.p_posterior
+    closed.decision_snapshot_id = ""
+    closed.edge_source = "model"
+    closed.strategy = "default"
+    closed.last_exit_at = "2026-06-17T10:46:18+00:00"
+    closed.exit_price = 0.0
+    mark_settled = MagicMock(return_value=closed)
+    monkeypatch.setattr(el, "mark_settled", mark_settled)
+
+    records = []
+    settled = hv._settle_positions(
+        conn,
+        portfolio,
+        city="Hong Kong",
+        target_date="2026-06-12",
+        winning_label="30°C",
+        settlement_records=records,
+        settlement_authority="VERIFIED",
+        settlement_truth_source="forecasts.settlement_outcomes",
+        settlement_temperature_metric="high",
     )
 
-    assert redeem_result["status"] == "queued"
-
-    # settlement_commands table has exactly 1 row (the redeem intent)
-    cmd_count = redeem_conn.execute(
-        "SELECT COUNT(*) FROM settlement_commands"
-    ).fetchone()[0]
-    assert cmd_count == 1
-
-    # store_settlement_records was called exactly once with our records
-    mock_store.assert_called_once()
+    assert settled == 1
+    mark_settled.assert_called_once_with(portfolio, pos.trade_id, 0.0, "SETTLEMENT")
+    assert len(records) == 1
+    assert records[0].outcome == 0
+    assert records[0].pnl == -3.6

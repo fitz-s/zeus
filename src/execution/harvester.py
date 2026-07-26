@@ -39,7 +39,6 @@ from src.state.db import (
     forecasts_connection_with_trades_flocked,
     get_forecasts_connection,
     get_trade_connection,
-    get_world_connection,
     log_market_event_outcomes,
     log_settlement_event,
     log_settlement,
@@ -571,8 +570,8 @@ def record_settlement_result(
     """Write settlement records to the decision_log table and return count written.
 
     T1C-SETTLEMENT-NOT-REDEEM: this function ONLY writes settlement facts.
-    It does NOT invoke any redeem-state transition. Redeem transitions are
-    the sole responsibility of enqueue_redeem_command().
+    On-chain redemption is decoupled entirely — Zeus no longer submits redeem
+    transactions; Polymarket settles win/loss on our behalf.
     """
     if not settlement_records:
         return 0
@@ -585,104 +584,6 @@ def record_settlement_result(
         return 0
     store_settlement_records(trade_conn, settlement_records, source="harvester")
     return len(settlement_records)
-
-
-def enqueue_redeem_command(
-    conn,
-    *,
-    condition_id: str,
-    payout_asset: str,
-    market_id: Optional[str] = None,
-    pusd_amount_micro: Optional[int] = None,
-    token_amounts: Optional[dict] = None,
-    trade_id: str = "",
-    winning_index_set: Optional[str] = None,
-) -> dict:
-    """Enqueue a durable redeem-intent command in the settlement_commands ledger.
-
-    T1C-SETTLEMENT-NOT-REDEEM: this function is the ONLY entry point for
-    redeem-state transitions. It uses SettlementState.REDEEM_INTENT_CREATED
-    from src/execution/settlement_commands.py (read-only import; that module
-    is NOT modified by T1C).
-
-    T4 wire: polymarket_end_anchor_source is looked up from decision_events
-    (accessible via world ATTACH on conn) by condition_id. Falls back to ""
-    so request_redeem defaults to 'unknown_legacy' when no decision_event exists.
-
-    Returns dict with keys: status ("queued" | "already_exists" | "error"),
-    command_id (str | None), reason (str | None).
-    """
-    from src.execution.settlement_commands import (  # noqa: F401 — verify import only
-        assert_settlement_schema_ready,
-        request_redeem,
-        SettlementState,
-    )
-    try:
-        resolved_market_id = market_id or condition_id
-        assert_settlement_schema_ready(conn)
-
-        # T4: look up anchor source from decision_events (world-class table).
-        # decision_events lives on zeus-world.db, NOT on trade_conn. Must open
-        # world connection directly — querying via trade_conn raises
-        # "no such table: decision_events" (swallowed by broad except, silently dead).
-        # decision_events.condition_id is nullable; IS NOT NULL guard required.
-        _anchor_source = ""
-        if condition_id:
-            try:
-                _world_conn = get_world_connection(write_class=None)
-                try:
-                    _anchor_row = _world_conn.execute(
-                        """
-                        SELECT polymarket_end_anchor_source
-                        FROM decision_events
-                        WHERE condition_id = ?
-                          AND polymarket_end_anchor_source IS NOT NULL
-                        ORDER BY decision_time DESC
-                        LIMIT 1
-                        """,
-                        (condition_id,),
-                    ).fetchone()
-                    if _anchor_row is not None:
-                        _anchor_source = str(_anchor_row[0] or "")
-                finally:
-                    _world_conn.close()
-            except sqlite3.OperationalError:
-                pass  # world DB absent or decision_events missing in test envs; fall back to ""
-
-        existing = conn.execute(
-            """
-            SELECT command_id FROM settlement_commands
-             WHERE condition_id = ?
-               AND market_id = ?
-               AND payout_asset = ?
-               AND state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED')
-             ORDER BY requested_at, command_id
-             LIMIT 1
-            """,
-            (condition_id, resolved_market_id, payout_asset),
-        ).fetchone()
-        existing_command_id = str(existing[0]) if existing is not None else None
-        command_id = request_redeem(
-            condition_id,
-            payout_asset,
-            market_id=resolved_market_id,
-            pusd_amount_micro=pusd_amount_micro,
-            token_amounts=token_amounts or {},
-            conn=conn,
-            winning_index_set=winning_index_set,
-            polymarket_end_anchor_source=_anchor_source,
-        )
-        logger.info(
-            "pUSD redemption for %s (condition=%s) recorded in R1 settlement command ledger: %s",
-            trade_id,
-            condition_id,
-            command_id,
-        )
-        status = "already_exists" if existing_command_id == command_id else "queued"
-        return {"status": status, "command_id": command_id, "reason": None}
-    except Exception as exc:
-        logger.warning("Redeem deferred for %s: %s (pUSD still claimable later)", trade_id, exc)
-        return {"status": "error", "command_id": None, "reason": str(exc)}
 
 
 def _snapshot_position_training_eligible(conn, snapshot_id: str) -> bool:
@@ -1089,8 +990,9 @@ def run_harvester() -> dict:
                                  event.get("slug", "?"), e)
 
             # T1C: settlement record write is now isolated in record_settlement_result().
-            # No redeem transitions here; those occur inside _settle_positions() via
-            # enqueue_redeem_command() which wraps the settlement_commands.request_redeem call.
+            # On-chain redemption is decoupled from settlement close entirely
+            # (Zeus no longer submits redeem transactions; Polymarket settles
+            # win/loss on our behalf).
             n_written = record_settlement_result(conn, settlement_records, stage2_preflight)
 
             # INV-37 / DT#1: release the SAVEPOINT (makes all writes permanent on commit)
@@ -2677,8 +2579,12 @@ def _settle_positions(
         if getattr(pos, "state", "") == "economically_closed":
             settlement_price = getattr(pos, "exit_price", exit_price)
 
-        # Winning positions are claimable inventory. Do not mark them settled
-        # unless the durable redeem command is present or successfully queued.
+        # Zeus no longer submits on-chain redemption (Polymarket settles win/loss
+        # on our behalf) — settlement close never depends on a redeem command.
+        # A winning position still needs condition_id resolved for identity
+        # metadata (token_suppression evidence, dual-write canonical settlement);
+        # the backfill + fail-closed skip below is a data-integrity guard, not a
+        # redeem gate.
         if exit_price > 0 and state_name != "economically_closed":
             redeem_condition_id = str(getattr(pos, "condition_id", "") or "")
             if not redeem_condition_id:
@@ -2701,45 +2607,6 @@ def _settle_positions(
                     pos.trade_id,
                 )
                 continue
-            redeem_token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
-            # PR-I.5.a: encode the chain-winning outcome bin as a CTF indexSet.
-            # Binary market convention: YES outcome = index 1 -> indexSet 1<<1 = 2,
-            #   NO outcome = index 0 -> indexSet 1<<0 = 1.
-            # exit_price > 0 guarantees this position is on the winning side:
-            #   buy_yes + won=True  -> YES won -> indexSet ["2"]
-            #   buy_no  + won=False -> NO won  -> indexSet ["1"]
-            # V1 limitation: multi-bin (ranged market) encoding not supported.
-            # The `else` branch (direction not buy_yes/buy_no) explicitly sets
-            # winning_index_set=None, which suppresses the field for non-binary
-            # markets. This is WAD per PR-I.5.a scope; PR-I.5.b will extend
-            # to ranged markets. The buy_yes/buy_no branches are binary-only
-            # by design — they do NOT need an explicit is_binary_market guard
-            # because: (a) Zeus only enters binary CTF markets, and (b) the
-            # else=None fallback is the safe default for any unexpected direction.
-            if pos.direction == "buy_yes":
-                _winning_index_set: Optional[str] = '["2"]'
-            elif pos.direction == "buy_no":
-                _winning_index_set = '["1"]'
-            else:
-                _winning_index_set = None
-            redeem_result = enqueue_redeem_command(
-                conn,
-                condition_id=pos.condition_id,
-                payout_asset="pUSD",
-                market_id=getattr(pos, "market_id", "") or pos.condition_id,
-                pusd_amount_micro=int(round(shares * 1_000_000)),
-                token_amounts={redeem_token_id: shares} if redeem_token_id else {},
-                trade_id=pos.trade_id,
-                winning_index_set=_winning_index_set,
-            )
-            if redeem_result.get("status") == "error":
-                logger.error(
-                    "Skipping settlement close for %s: redeem command enqueue failed: %s",
-                    pos.trade_id,
-                    redeem_result.get("reason"),
-                )
-                continue
-
         phase_before = _canonical_phase_before_for_settlement(pos)
 
         from src.execution.exit_lifecycle import mark_settled

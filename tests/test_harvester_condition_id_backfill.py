@@ -1,18 +1,25 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-07-25
 # Authority basis: operator redeem directive 2026-06-10 ($19 stuck — harvester
 #   logged "Skipping settlement close for 3a6f0728-c50: winning position has no
 #   condition_id for redeem command" because the position carried token_ids but a
-#   NULL condition_id; settlement close + redeem never proceeded). Confirmed
+#   NULL condition_id; settlement close never proceeded). Confirmed
 #   read-only: position_current trade_id=3a6f0728-c50 had token_id/no_token_id set
 #   and condition_id IS NULL; executable_market_snapshots maps that yes_token_id
 #   -> 0xddb5c82d…4df4d.
-# Lifecycle: created=2026-06-10; last_reviewed=2026-06-10; last_reused=never
+# 2026-07-25 update: on-chain redemption decoupled entirely (Zeus no longer
+#   submits redeem transactions; Polymarket settles win/loss on our behalf).
+#   `enqueue_redeem_command` was deleted from src/execution/harvester.py. The
+#   condition_id backfill + fail-closed skip below survives as a pure
+#   data-integrity guard (condition_id is still needed for token_suppression
+#   evidence and dual-write canonical settlement identity) — it is no longer a
+#   redeem gate. Tests rewritten to drop all enqueue/redeem tracking.
+# Lifecycle: created=2026-06-10; last_reviewed=2026-07-25; last_reused=2026-07-25
 # Purpose: Relationship antibody — when a winning position lacks condition_id, the
 #   harvester backfills it from the token->market mapping
 #   (executable_market_snapshots.yes_token_id/no_token_id -> condition_id) so
-#   settlement close + redeem enqueue proceed; when no mapping exists the loud
-#   skip is preserved (fail-closed, never guesses a condition_id).
+#   settlement close proceeds; when no mapping exists the loud skip is preserved
+#   (fail-closed, never guesses a condition_id).
 # Reuse: Run when modifying _resolve_condition_id_from_token_map or the
 #   condition_id skip block in _settle_positions.
 """Relationship antibodies for harvester condition_id backfill (Defect 2)."""
@@ -89,19 +96,11 @@ def _make_portfolio(*, condition_id):
 
 def _run_settle(monkeypatch, conn, portfolio, pos):
     """Drive _settle_positions with the winning bin == position bin (so the
-    position is the winner: exit_price > 0 triggers the redeem path)."""
+    position is the winner)."""
     import src.execution.harvester as hv
     import src.execution.exit_lifecycle as el
     from unittest.mock import MagicMock
 
-    enqueue_calls = []
-
-    def fake_enqueue(c, *, condition_id, payout_asset, market_id, pusd_amount_micro,
-                     token_amounts, trade_id, winning_index_set=None):
-        enqueue_calls.append({"condition_id": condition_id, "trade_id": trade_id})
-        return {"status": "queued", "command_id": "cmd-bf", "reason": None}
-
-    monkeypatch.setattr(hv, "enqueue_redeem_command", fake_enqueue)
     monkeypatch.setattr(hv, "log_event", lambda *a, **kw: None)
     monkeypatch.setattr(hv, "log_settlement_event", lambda *a, **kw: None)
     monkeypatch.setattr(hv, "_dual_write_canonical_settlement_if_available",
@@ -129,39 +128,35 @@ def _run_settle(monkeypatch, conn, portfolio, pos):
         city="London", target_date="2026-05-19",
         winning_label=pos.bin_label, settlement_records=[],
     )
-    return settled, enqueue_calls
+    return settled
 
 
 def test_missing_condition_id_backfilled_then_close_proceeds(monkeypatch, caplog):
     """B1: condition_id NULL + token->market mapping present -> condition_id
-    resolved, redeem enqueued, settlement counted.
+    resolved, settlement counted.
 
-    Sed-flip: delete the backfill call -> the redeem is skipped, enqueue_calls
-    empty, settled==0 -> RED."""
+    Sed-flip: delete the backfill call -> settled==0 -> RED."""
     import logging
 
     conn = _conn_with_snapshot(seed_mapping=True)
     portfolio, pos = _make_portfolio(condition_id=None)
     with caplog.at_level(logging.INFO, logger="src.execution.harvester"):
-        settled, enqueue_calls = _run_settle(monkeypatch, conn, portfolio, pos)
+        settled = _run_settle(monkeypatch, conn, portfolio, pos)
     assert settled == 1, "B1 FAIL: backfilled winner was not settled."
-    assert len(enqueue_calls) == 1, "B1 FAIL: redeem was not enqueued after backfill."
-    assert enqueue_calls[0]["condition_id"] == _MAPPED_CONDITION
     assert pos.condition_id == _MAPPED_CONDITION, "B1 FAIL: condition_id not backfilled onto pos."
     conn.close()
 
 
 def test_unresolvable_condition_id_keeps_loud_skip(monkeypatch, caplog):
-    """B2: condition_id NULL + NO token->market mapping -> redeem NOT enqueued,
-    settlement NOT counted, and the loud error log is preserved (fail-closed)."""
+    """B2: condition_id NULL + NO token->market mapping -> settlement NOT
+    counted, and the loud error log is preserved (fail-closed)."""
     import logging
 
     conn = _conn_with_snapshot(seed_mapping=False)
     portfolio, pos = _make_portfolio(condition_id=None)
     with caplog.at_level(logging.ERROR, logger="src.execution.harvester"):
-        settled, enqueue_calls = _run_settle(monkeypatch, conn, portfolio, pos)
+        settled = _run_settle(monkeypatch, conn, portfolio, pos)
     assert settled == 0, "B2 FAIL: unresolvable winner was wrongly settled."
-    assert enqueue_calls == [], "B2 FAIL: redeem enqueued without a condition_id."
     assert any(
         "no condition_id for redeem command" in r.message for r in caplog.records
     ), "B2 FAIL: the loud skip log was lost."
@@ -184,10 +179,9 @@ def test_present_condition_id_does_not_query_token_map(monkeypatch):
         return real(c, p)
 
     monkeypatch.setattr(hv, "_resolve_condition_id_from_token_map", spy)
-    settled, enqueue_calls = _run_settle(monkeypatch, conn, portfolio, pos)
+    settled = _run_settle(monkeypatch, conn, portfolio, pos)
     assert settled == 1
     assert called["n"] == 0, "B3 FAIL: backfill ran even though condition_id was present."
-    assert enqueue_calls[0]["condition_id"] == "0x" + "ee" * 32
     conn.close()
 
 
@@ -205,10 +199,9 @@ def test_economically_closed_settles_despite_stale_exit_pending_missing(monkeypa
     )
     conn.commit()
 
-    settled, enqueue_calls = _run_settle(monkeypatch, conn, portfolio, pos)
+    settled = _run_settle(monkeypatch, conn, portfolio, pos)
 
     assert settled == 1
-    assert enqueue_calls == []
     conn.close()
 
 
@@ -225,8 +218,7 @@ def test_active_position_still_blocks_on_exit_pending_missing(monkeypatch):
     )
     conn.commit()
 
-    settled, enqueue_calls = _run_settle(monkeypatch, conn, portfolio, pos)
+    settled = _run_settle(monkeypatch, conn, portfolio, pos)
 
     assert settled == 0
-    assert enqueue_calls == []
     conn.close()
