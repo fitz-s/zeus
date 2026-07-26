@@ -806,7 +806,7 @@ def test_forecast_supersession_preserves_and_safely_recovers_targeted_global_win
     )
     if venue_attempted:
         payload_json = json.dumps(
-            {"event_id": target.event_id},
+            {"event_id": "payload-must-not-own-event-identity"},
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -817,7 +817,7 @@ def test_forecast_supersession_preserves_and_safely_recovers_targeted_global_win
             "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
             (
                 "attempted-targeted-maintenance-expiry",
-                "aggregate-targeted-maintenance-expiry",
+                f"{target.event_id}:final-intent",
                 1,
                 "VenueSubmitAttempted",
                 "event-hash",

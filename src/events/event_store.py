@@ -2912,8 +2912,8 @@ class EventStore:
             return False
         order_event = self.conn.execute(
             "SELECT 1 FROM edli_live_order_events "
-            "WHERE json_extract(payload_json, '$.event_id') = ? LIMIT 1",
-            (event_id,),
+            "WHERE aggregate_id GLOB ? LIMIT 1",
+            (f"{event_id}:*",),
         ).fetchone()
         return order_event is None
 
@@ -2960,8 +2960,8 @@ class EventStore:
         attempted = self.conn.execute(
             "SELECT 1 FROM edli_live_order_events "
             "WHERE event_type = 'VenueSubmitAttempted' "
-            "AND json_extract(payload_json, '$.event_id') = ? LIMIT 1",
-            (event_id,),
+            "AND aggregate_id GLOB ? LIMIT 1",
+            (f"{event_id}:*",),
         ).fetchone()
         return attempted is None
 

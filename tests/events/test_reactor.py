@@ -2030,6 +2030,56 @@ def test_superseded_global_target_gets_new_claim_carrier_identity():
     ).fetchone() == ("pending", "GLOBAL_WINNER_TARGETED_CLAIM")
 
 
+@pytest.mark.parametrize("order_event_exists", (False, True))
+def test_maintenance_expired_global_target_uses_aggregate_identity(
+    order_event_exists,
+):
+    conn, store = _store()
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    source = _forecast_event("maintenance-expired", target_date="2026-05-24")
+    target = _next_claim_carrier(
+        source,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="maintenance-expired-economics",
+        payload=json.loads(source.payload_json),
+    )
+    store.insert_or_ignore(target)
+    conn.execute(
+        "UPDATE opportunity_event_processing "
+        "SET processing_status='expired', last_error='GLOBAL_WINNER_TARGETED_CLAIM' "
+        "WHERE consumer_name=? AND event_id=?",
+        (store.consumer_name, target.event_id),
+    )
+    if order_event_exists:
+        conn.execute(
+            "INSERT INTO edli_live_order_events ("
+            "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+            "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+            "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+            (
+                "maintenance-expired-order-event",
+                f"{target.event_id}:final-intent",
+                1,
+                "DecisionProofAccepted",
+                "maintenance-expired-event-hash",
+                '{"event_id":"payload-must-not-own-event-identity"}',
+                "maintenance-expired-payload-hash",
+                "decision_kernel",
+                _DT_VENUE_OPEN.isoformat(),
+                _DT_VENUE_OPEN.isoformat(),
+            ),
+        )
+
+    recovered = store.prioritized_global_winner_event(target)
+
+    if order_event_exists:
+        assert recovered is None
+    else:
+        assert recovered is not None
+        assert recovered.event_id != target.event_id
+
+
 @pytest.mark.parametrize("venue_attempted", (False, True))
 @pytest.mark.parametrize(
     "reason",
@@ -2081,7 +2131,7 @@ def test_global_target_recovers_processed_refreshable_no_submit_carrier(
     )
     if venue_attempted:
         payload_json = json.dumps(
-            {"event_id": target.event_id},
+            {"event_id": "payload-must-not-own-event-identity"},
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -2092,7 +2142,7 @@ def test_global_target_recovers_processed_refreshable_no_submit_carrier(
             "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
             (
                 "attempted-processed-mode-race",
-                "aggregate-processed-mode-race",
+                f"{target.event_id}:final-intent",
                 1,
                 "VenueSubmitAttempted",
                 "event-hash",
@@ -2124,6 +2174,67 @@ def test_global_target_recovers_processed_refreshable_no_submit_carrier(
             None,
         )
     )
+
+
+def test_global_target_ignores_foreign_aggregate_payload_event_id():
+    """Payload text cannot make another aggregate own this event."""
+
+    conn, store = _store()
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    source = _forecast_event("foreign-payload-event", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        source,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="foreign-payload-economics",
+        payload=json.loads(source.payload_json),
+    )
+    store.insert_or_ignore(target)
+    assert store.claim(target.event_id, claimed_at=_DT_VENUE_OPEN.isoformat())
+    store.mark_processed(target.event_id, processed_at=_DT_VENUE_OPEN.isoformat())
+    conn.execute(
+        "INSERT INTO no_trade_regret_events ("
+        "regret_event_id,event_id,rejection_stage,rejection_reason,regret_bucket,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,1)",
+        (
+            "regret-foreign-payload-event",
+            target.event_id,
+            "EXECUTOR_EXPRESSIBILITY",
+            (
+                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                "EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_REJECTED:"
+                "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:"
+                "policy=MAKER_TAKER_FORBIDDEN"
+            ),
+            "NO_SUBMIT",
+            _DT_VENUE_OPEN.isoformat(),
+        ),
+    )
+    payload_json = json.dumps(
+        {"event_id": target.event_id},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "foreign-aggregate-event",
+            "different-event:final-intent",
+            1,
+            "VenueSubmitAttempted",
+            "foreign-event-hash",
+            payload_json,
+            "foreign-payload-hash",
+            "engine_adapter",
+            _DT_VENUE_OPEN.isoformat(),
+            _DT_VENUE_OPEN.isoformat(),
+        ),
+    )
+
+    assert store.prioritize_global_winner(target)
 
 
 def test_current_global_winner_recovers_old_causal_target_from_cross_family_starvation():
