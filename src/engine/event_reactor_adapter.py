@@ -10844,12 +10844,16 @@ def _global_preflight_block_status(reason: str) -> str:
         return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (
+            "FDR_REJECTED:",
             "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:",
             "GLOBAL_PREFLIGHT_CANDIDATE_NOT_ACTIONABLE:",
             "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:",
             "GLOBAL_PREFLIGHT_CANDIDATE_UNIT_PRICE_INVALID:",
         )
     ):
+        # FDR rejects the selected hypothesis, not the current q/book/wealth
+        # epoch. Exclude that exact action and let the complete auction compare
+        # its remaining candidates with CASH.
         return "CANDIDATE_BLOCKED"
     if reason == (
         "GLOBAL_ACTUATION_PREPARE_FAILED:"

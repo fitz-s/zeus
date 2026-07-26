@@ -18850,6 +18850,10 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "EDLI_STAGE_LIVE_CAP_RESERVED:1"
         ),
         (
+            "FDR_REJECTED:event_type=DAY0_EXTREME_UPDATED:"
+            "attempted=22:selected_post_fdr=0:alpha=0.100000"
+        ),
+        (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SELECTION_SCOPE_EMPTY:locked:input=1:"
             "classes=EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED=1"
