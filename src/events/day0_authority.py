@@ -259,10 +259,20 @@ def _remaining_day_lcb_has_current_band_tightening(
     economics = payload.get("qkernel_execution_economics")
     if not isinstance(economics, Mapping):
         return False
+    selection_basis = str(economics.get("selection_guard_basis") or "")
+    mean_selection = selection_basis == "CURRENT_POSTERIOR_PREDICTIVE_MEAN"
     if (
         str(economics.get("q_lcb_guard_basis") or "") != "CURRENT_POSTERIOR_BAND"
-        or str(economics.get("selection_guard_basis") or "")
-        != "CURRENT_POSTERIOR_BAND"
+        or selection_basis
+        not in {
+            "CURRENT_POSTERIOR_BAND",
+            "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+        }
+        or (
+            mean_selection
+            and str(economics.get("global_probability_functional") or "")
+            != "POSTERIOR_PREDICTIVE_MEAN"
+        )
         or not str(economics.get("current_state_identity_hash") or "").strip()
         or not _truthy_false(economics.get("q_lcb_guard_abstained"))
         or not _truthy_false(economics.get("selection_guard_abstained"))
@@ -278,6 +288,12 @@ def _remaining_day_lcb_has_current_band_tightening(
     return (
         selection_guard_n >= 2
         and selection_guard_q_safe > 0.0
+        and math.isclose(
+            selection_guard_q_safe,
+            q_live if mean_selection else q_lcb,
+            rel_tol=1e-9,
+            abs_tol=1e-6,
+        )
         and q_lcb < q_live - DAY0_REMAINING_DAY_LCB_TOLERANCE
         and math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6)
         and math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6)

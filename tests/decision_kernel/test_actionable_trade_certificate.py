@@ -351,6 +351,84 @@ def test_day0_authority_accepts_non_degenerate_current_band_tightening():
     )
 
 
+def test_day0_authority_accepts_mean_selection_with_current_band_tightening():
+    from src.events.day0_authority import assert_live_day0_probability_authority
+
+    payload = {
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_remaining_models": 15,
+        "rounded_value": 25,
+        "observation_time": "2026-07-26T06:50:00+00:00",
+        "_edli_day0_lcb_transform": {
+            "yes_lcb_by_condition": {"condition-1": 0.10},
+            "no_lcb_by_condition": {"condition-1": 2.0 / 3.0},
+        },
+        "qkernel_execution_economics": {
+            "payoff_q_point": 0.8682666666666666,
+            "payoff_q_lcb": 0.31522844025,
+            "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+            "q_lcb_guard_abstained": False,
+            "selection_guard_basis": "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.8682666666666666,
+            "selection_guard_n": 15000,
+            "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+            "current_state_identity_hash": "current-band-mean-identity",
+        },
+    }
+
+    assert_live_day0_probability_authority(
+        payload,
+        direction="buy_no",
+        condition_id="condition-1",
+        q_live=0.8682666666666666,
+        q_lcb=0.31522844025,
+    )
+
+
+def test_day0_authority_rejects_untyped_mean_selection_band_tightening():
+    from src.events.day0_authority import (
+        Day0AuthorityError,
+        assert_live_day0_probability_authority,
+    )
+
+    payload = {
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_remaining_models": 15,
+        "rounded_value": 25,
+        "observation_time": "2026-07-26T06:50:00+00:00",
+        "_edli_day0_lcb_transform": {
+            "yes_lcb_by_condition": {"condition-1": 0.10},
+            "no_lcb_by_condition": {"condition-1": 2.0 / 3.0},
+        },
+        "qkernel_execution_economics": {
+            "payoff_q_point": 0.8682666666666666,
+            "payoff_q_lcb": 0.31522844025,
+            "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+            "q_lcb_guard_abstained": False,
+            "selection_guard_basis": "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.8682666666666666,
+            "selection_guard_n": 15000,
+            "current_state_identity_hash": "current-band-mean-identity",
+        },
+    }
+
+    with pytest.raises(
+        Day0AuthorityError,
+        match="selected q_lcb does not match remaining-day transform",
+    ):
+        assert_live_day0_probability_authority(
+            payload,
+            direction="buy_no",
+            condition_id="condition-1",
+            q_live=0.8682666666666666,
+            q_lcb=0.31522844025,
+        )
+
+
 def test_day0_authority_rejects_degenerate_current_band_claim():
     from src.events.day0_authority import (
         Day0AuthorityError,
