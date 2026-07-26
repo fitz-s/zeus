@@ -1294,9 +1294,9 @@ def _settlement_skill_attribution_tick() -> None:
 # harvester_pnl_resolver would sit forever (the F14 SEV-0 defect documented
 # in docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/).
 #
-# _redeem_reconciler_cycle: polls REDEEM_TX_HASHED, calls reconcile_pending_redeems
-#   (no-op until web3 is wired — operator-recorded tx_hash sits in TX_HASHED
-#   until PR-I.5 follow-up).
+# _redeem_reconciler_cycle: DELETED 2026-07-25 -- on-chain redemption is
+#   decoupled entirely (Polymarket settles win/loss on Zeus's behalf); zero
+#   REDEEM_TX_HASHED rows ever reached it in production.
 # Wrap cycle functions (2026-05-19 auto-wrap-post-redeem):
 # _wrap_intent_creator_cycle: reads Safe USDC.e balance; inserts WRAP_REQUESTED
 #   if balance > threshold and no non-terminal WRAP row exists.
