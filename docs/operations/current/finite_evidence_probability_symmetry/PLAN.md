@@ -22,6 +22,30 @@ DRAIN is the next successful native-source tick; RESET is the atomic canonical
 row update followed by the normal held-position monitor cycle. No source,
 market-price proxy, trade threshold, lifecycle, or action law changes.
 
+## 2026-07-26 Held q is independent of entry phase
+
+The current global auction correctly closed forecast-carried families to new
+BUYs once local settlement day began, but reused that entry phase gate as a
+probability gate.  Held positions in those families therefore lost their
+current q before the auction could compare reduce-only SELL with HOLD/CASH.
+This was a composition defect: venue phase can remove an action from the
+feasible set, but it cannot erase the state needed to re-optimize existing
+capital.
+
+The hot-fix preserves the phase rejection for new entry while allowing the same
+current forecast carrier to prepare a held-only probability witness with
+`entry_authority=False`.  Day0 fallback permissions remain disabled on this
+forecast lane, the resulting positive family witness uses the existing bounded
+probability cache, and the global batch's existing held-only rule keeps BUY
+disabled.  Day0 provisional/physical-frontier entry protections are unchanged.
+
+Acceptance requires the phase-rejected entry and held-only q behaviors in one
+antibody, the complete global-auction integration file, syntax and diff checks,
+and a base-versus-patch comparison of the wider required test slice.  Live
+completion additionally requires loaded-SHA proof and a natural same-epoch
+receipt showing held families reach SELL/HOLD/CASH evaluation rather than being
+excluded solely because forecast entry phase is closed.
+
 ## 2026-07-26 NOAA-mirror Day0 source continuity
 
 The Tel Aviv Jul-26 31C BUY NO loss reconstruction found a real 21.147057-share

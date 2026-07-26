@@ -96,6 +96,7 @@ from src.solve.solver import (
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.contracts.executable_market_snapshot import (
     ExecutableMarketSnapshot,
+    FRESHNESS_WINDOW_DEFAULT,
     canonicalize_fee_details,
 )
 from src.contracts.execution_price import ExecutionPrice
@@ -5796,6 +5797,90 @@ def test_live_adapter_excludes_closed_forecast_family_before_probability_prepare
         "FamilyAuthorityUnavailable:"
         "EVENT_BOUND_MARKET_PHASE_CLOSED:settlement_day:"
     )
+
+
+def test_live_adapter_keeps_held_forecast_q_outside_entry_phase_gate(
+    monkeypatch,
+):
+    from src.events.candidate_binding import weather_family_id
+
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    callbacks = {}
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(family_key="held-family")
+    )
+    prepare_calls = []
+    cache_stores = []
+
+    def process(events, **kwargs):
+        callbacks.update(kwargs)
+        return SimpleNamespace(events=tuple(events))
+
+    def prepare(*_args, **kwargs):
+        kwargs["cache_metadata_out"]["family_binding_hash"] = "held-binding"
+        prepare_calls.append(kwargs)
+        return prepared
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        process,
+    )
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        prepare,
+    )
+    monkeypatch.setattr(
+        era,
+        "_store_global_probability_family_cache",
+        lambda *args, **kwargs: cache_stores.append((args, kwargs)),
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    settlement_day = _dt.datetime(
+        2026, 7, 11, 8, 0, tzinfo=_dt.timezone.utc
+    )
+
+    adapter.process_global_batch((event,), settlement_day)
+    entry_receipt = callbacks["prepare_event"](event, settlement_day)
+    held_receipt = callbacks["prepare_held_event"](event, settlement_day)
+
+    assert entry_receipt.prepared_global_family is None
+    assert entry_receipt.reason is not None
+    assert "EVENT_BOUND_MARKET_PHASE_CLOSED:settlement_day:" in entry_receipt.reason
+    assert held_receipt.prepared_global_family is prepared
+    assert held_receipt.reason == "GLOBAL_CURRENT_PROBABILITY_PREPARED"
+    assert prepare_calls == [
+        {
+            "forecast_conn": forecast,
+            "topology_conn": topology,
+            "observation_conn": world,
+            "decision_time": settlement_day,
+            "max_age": FRESHNESS_WINDOW_DEFAULT,
+            "allow_unobserved_day0_replacement": False,
+            "allow_provisional_day0_replacement": False,
+            "entry_authority": False,
+            "cache_metadata_out": {"family_binding_hash": "held-binding"},
+        }
+    ]
+    assert len(cache_stores) == 1
+    assert cache_stores[0][1]["family_key"] == weather_family_id(
+        city="Dallas",
+        target_date="2026-07-11",
+        metric="high",
+    )
+    assert cache_stores[0][1]["family_binding_hash"] == "held-binding"
+    assert cache_stores[0][1]["prepared"] is prepared
 
 
 def test_live_adapter_reuses_ineligible_probability_until_authority_db_changes(

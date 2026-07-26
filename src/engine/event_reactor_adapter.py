@@ -7313,13 +7313,14 @@ def event_bound_live_adapter_from_trade_conn(
             return receipt
 
         def _prepare_held_current_scope_event(event, at):
-            """Prepare a held-only pre-observation witness; never entry authority."""
+            """Prepare current held q without granting entry authority."""
 
             from src.contracts.executable_market_snapshot import (
                 FRESHNESS_WINDOW_DEFAULT,
             )
 
-            if event.event_type != "DAY0_EXTREME_UPDATED":
+            is_forecast_lane = event.event_type in _FORECAST_DECISION_EVENT_TYPES
+            if not is_forecast_lane and event.event_type != "DAY0_EXTREME_UPDATED":
                 return EventSubmissionReceipt(
                     False,
                     event.event_id,
@@ -7327,10 +7328,43 @@ def event_bound_live_adapter_from_trade_conn(
                     reason=(
                         "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
                         f"{_FAMILY_AUTHORITY_UNAVAILABLE}:"
-                        "GLOBAL_HELD_UNOBSERVED_DAY0_CARRIER_REQUIRED"
+                        "GLOBAL_HELD_CURRENT_PROBABILITY_CARRIER_REQUIRED"
                     ),
                     proof_accepted=False,
                 )
+            family_key = ""
+            cache_metadata: dict[str, str] = {}
+            if is_forecast_lane:
+                payload = _payload(event)
+                try:
+                    family_key = weather_family_id(
+                        city=str(payload.get("city") or ""),
+                        target_date=str(payload.get("target_date") or ""),
+                        metric=str(payload.get("metric") or "").lower(),
+                    )
+                except (TypeError, ValueError):
+                    pass
+                force_refresh = (
+                    probability_refresh_family_keys is None
+                    or family_key in probability_refresh_family_keys
+                )
+                if force_refresh:
+                    _evict_global_probability_family_cache(
+                        probability_cache_namespace,
+                        family_key=family_key,
+                    )
+                else:
+                    cached = _probe_global_probability_family_cache(
+                        probability_cache_namespace,
+                        family_key=family_key,
+                        event_id=event.event_id,
+                        causal_snapshot_id=event.causal_snapshot_id,
+                        captured_at_utc=at,
+                    )
+                    if cached is not None:
+                        probability_cache_stats["hit"] += 1
+                        return _prepared_global_event_receipt(event, cached)
+                    probability_cache_stats["miss"] += 1
             try:
                 prepared = _prepare_current_global_probability_family(
                     event,
@@ -7339,9 +7373,10 @@ def event_bound_live_adapter_from_trade_conn(
                     observation_conn=calibration_conn,
                     decision_time=at,
                     max_age=FRESHNESS_WINDOW_DEFAULT,
-                    allow_unobserved_day0_replacement=True,
-                    allow_provisional_day0_replacement=True,
+                    allow_unobserved_day0_replacement=not is_forecast_lane,
+                    allow_provisional_day0_replacement=not is_forecast_lane,
                     entry_authority=False,
+                    cache_metadata_out=cache_metadata,
                 )
             except Exception as exc:  # noqa: BLE001 - held authority remains fail closed
                 failure_type = type(exc).__name__
@@ -7361,6 +7396,16 @@ def event_bound_live_adapter_from_trade_conn(
                         f"{failure_type}:{exc}"
                     ),
                     proof_accepted=False,
+                )
+            if is_forecast_lane:
+                _store_global_probability_family_cache(
+                    probability_cache_namespace,
+                    family_key=family_key,
+                    event_id=event.event_id,
+                    family_binding_hash=str(
+                        cache_metadata.get("family_binding_hash") or ""
+                    ),
+                    prepared=prepared,
                 )
             return _prepared_global_event_receipt(event, prepared)
 
