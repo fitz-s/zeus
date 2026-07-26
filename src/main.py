@@ -822,7 +822,25 @@ def _edli_live_entry_readiness_block(
         universe (see ``_edli_stage_pending_reconcile_families`` and
         ``_edli_stage_open_cap_reservation_families``).
     """
-
+    # SCOPE: per-family when a pending_reconcile/RESERVED-cap row resolves to a
+    # family_id (see the two `_edli_stage_*_families` helpers below); GLOBAL
+    # (blocks BUY for every family this cycle) only for an unresolvable row,
+    # source-health/status-summary staleness, or any read error -- unreadable
+    # admission truth stays fail-closed at global scope. INV-47: an earlier
+    # version ran a bare COUNT(*) here that scoped every RESERVED/pending row
+    # globally, once blocking all 57 families for 20.97h; this per-family
+    # split is the fix.
+    # DRAIN: family rows clear when pending_reconcile flips to 0 (one of
+    # edli_absence_resolver / edli_presence_resolver / edli_resting_absorbed_resolver
+    # / edli_trade_fact_bridge resolving the stuck order) or the cap
+    # reservation transitions RESERVED->CONSUMED/RELEASED (LiveCapLedger in
+    # src/events/live_cap.py). None of those run on a fixed clock inside this
+    # function -- drain latency depends entirely on the next reconcile/
+    # discovery pass for that specific order, not on this gate.
+    # RESET: this function holds no state of its own; it recomputes both
+    # return values fresh from current DB rows on every call, so once DRAIN
+    # clears the underlying row the gate reads false on its very next
+    # invocation -- no separate reset action exists or is needed.
     try:
         _require_stage_file_paths(edli_cfg)
         state_section = _settings_section("state", {})

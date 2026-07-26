@@ -20862,6 +20862,28 @@ def _posterior_bound_multimodel_members(
             # this posterior was computed. This posterior_id can never re-verify
             # again (read_current_instrument_values always serves latest-as-of-now);
             # the caller must retire it, not retry it.
+            # SCOPE: per bound-posterior candidate for one (family_key, event_id)
+            # -- a drift here fails only THIS witness's re-verification attempt; it
+            # never blocks the family's other candidates or any other family.
+            # DRAIN: this reason_out["reason"] value propagates up through
+            # _forecast_authority_payload_from_posterior to the caller, which
+            # passes it to _evict_superseded_global_probability_family_cache
+            # (this module, ~line 768); its `"model_identity_drift" in reason`
+            # branch evicts the cached family entry from
+            # _GLOBAL_PROBABILITY_FAMILY_CACHE /
+            # _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE. No periodic sweep
+            # exists independent of that event flow -- drain fires on the next
+            # actuation cycle that surfaces this reason for the family.
+            # RESET: once evicted, the next attempt for that family_key has no
+            # cached witness to compare against, so it binds a fresh posterior
+            # from current DB state. INV-47: before the 2026-07-26 eviction fix
+            # (commit 268ca30b8) this check had NO reset path -- the frozen
+            # snapshot could never re-equal read_current_instrument_values once
+            # any bound model advanced, so the SAME posterior_id was rejected
+            # bit-identically forever (Austin/SF high, 92% of a day's events,
+            # 24h+). Safety today depends entirely on the eviction wiring above;
+            # if it is ever removed or this reason string renamed without
+            # updating the eviction match, the check reverts to a ratchet.
             _fail(f"model_identity_drift:{model}")
             return None
         members.append(value_c if unit == "C" else value_c * 9.0 / 5.0 + 32.0)

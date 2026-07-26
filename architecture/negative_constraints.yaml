@@ -197,3 +197,13 @@ constraints:
     enforced_by:
       tests:
         - tests/test_no_bare_float_seams.py::TestNoBareFloatInExitTriggerThresholds::test_monitor_bootstrap_refresh_keeps_held_quote_out_of_corrected_posterior
+  - id: NC-24
+    statement: No fail-closed gate site named in the INV-47 gate registry may omit an adjacent SCOPE, DRAIN, or RESET declaration comment; a renamed or removed anchor must fail the check loudly, never silently pass.
+    invariants: [INV-47]
+    enforced_by:
+      tests:
+        - tests/test_gate_scope_drain_reset.py::test_entry_readiness_gate_declares_scope_drain_reset
+        - tests/test_gate_scope_drain_reset.py::test_day0_oracle_guard_declares_scope_drain_reset
+        - tests/test_gate_scope_drain_reset.py::test_posterior_identity_check_declares_scope_drain_reset
+        - tests/test_gate_scope_drain_reset.py::test_request_governor_circuit_declares_scope_drain_reset
+        - tests/test_gate_scope_drain_reset.py::test_unknown_gate_site_fails_loudly_not_silently

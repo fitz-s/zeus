@@ -409,6 +409,23 @@ def is_day0_family_paused(
     ttl_hours: float = DEFAULT_PAUSE_TTL_HOURS,
     conn=None,
 ) -> bool:
+    # SCOPE: per (city, target_date) key only -- flag_day0_oracle_anomaly and
+    # this reader never propagate a pause across cities or dates. This is the
+    # narrow shape INV-47 requires (contrast the historic unscoped src/main.py
+    # COUNT(*) antibody documented alongside INV-47 in AGENTS.md).
+    # DRAIN: two independent paths clear a pause: (1) TTL expiry -- this
+    # function itself deletes the record below once
+    # `moment - record.flagged_at > timedelta(hours=effective_ttl)`, a
+    # wall-clock-only dependency, no other job required; (2)
+    # clear_day0_oracle_anomaly (operator/cleanup hook) deletes both surfaces
+    # explicitly before TTL.
+    # RESET: whichever DRAIN path fires first deletes BOTH the in-process
+    # _REGISTRY entry and the durable day0_oracle_anomaly_flags row together,
+    # and invalidates _DB_MISS_CACHE in the same critical section so a
+    # read-through cannot resurrect the expired flag. The durable row is the
+    # source of truth on process restart (PR#404 P1): a crash mid-pause does
+    # not silently clear (stays fail-closed) and does not silently outlive its
+    # own TTL either.
     import time as _time
 
     moment = (now or datetime.now(UTC)).astimezone(UTC)

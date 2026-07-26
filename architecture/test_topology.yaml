@@ -28,6 +28,7 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_gate_scope_drain_reset.py: {created: "2026-07-26", last_used: "2026-07-26", note: "INV-47/NC-24 antibody: site-anchors 4 named fail-closed gates (src/main.py entry readiness, src/data/day0_oracle_anomaly.py Day0 guard, src/engine/event_reactor_adapter.py posterior identity check, src/data/polymarket_request_governor.py circuit) and asserts each carries adjacent SCOPE/DRAIN/RESET declarations; a renamed/removed anchor fails loudly."}
     tests/test_repair_book_hash_transitions_corruption.py: {created: "2026-07-24", last_used: "2026-07-24", note: "Candidate-only book-hash transition tail repair: read-only fingerprint, surviving-snapshot blocker, readable-history preservation, and full index rebuild."}
     # DB first-principles audit (2026-07-20, PR #436) — authored + reviewed 2026-07-22.
     tests/test_trade_decisions_fk_rebuild.py: {created: "2026-07-20", last_used: "2026-07-22", note: "W0-a trade_decisions dangling-FK rebuild green-gate: crash-atomic single-DB WAL rebuild, 6-kill-point matrix, sequence preservation, rollback capsule."}
@@ -808,6 +809,7 @@ test_trust_policy:
 
 categories:
   core_law_antibody:
+    - tests/test_gate_scope_drain_reset.py
     - tests/test_bayes_precision_fusion_download.py
     - tests/test_finite_evidence_probability_symmetry.py
     - tests/test_replacement_forecast_extras_coverage_gate.py
@@ -1362,6 +1364,14 @@ categories:
     - tests/test_platt.py
 
 law_gate:
+  GATE_SCOPE_DRAIN_RESET:
+    tests:
+      - tests/test_gate_scope_drain_reset.py
+    protects:
+      - src/main.py
+      - src/data/day0_oracle_anomaly.py
+      - src/engine/event_reactor_adapter.py
+      - src/data/polymarket_request_governor.py
   WMO_ROUNDING:
     tests:
       - tests/test_instrument_invariants.py

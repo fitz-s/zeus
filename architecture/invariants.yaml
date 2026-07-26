@@ -1101,3 +1101,41 @@ invariants:
       - tests/test_live_safety_invariants.py
     basis: operator first-principles capital objective correction 2026-07-23 and exit authority E2/E6
     added: 2026-07-23
+
+  - id: INV-47
+    zones: [K1_governance, K2_runtime, live_venue_submit]
+    statement: >
+      Every fail-closed gate declares three properties in code adjacent to its
+      condition, or it is presumed defective: SCOPE (the narrowest identity
+      the gate may block -- token/family/city/global -- never wider than the
+      fact that triggered it), DRAIN (what clears the gate, on what cadence,
+      and what that cadence itself depends on), and RESET (the concrete path
+      back to false; a comparison with no path back to false is a ratchet,
+      not a gate). A false-positive fix on one side of a symmetric pair
+      (low/high, bid/ask, entry/exit, maker/taker) is incomplete until the
+      twin is checked in the same change.
+    why: >
+      Six live incidents in one night turned gates that were correct when
+      written into defective ones purely because the world moved under them:
+      a new endpoint class sharing another class's failure circuit, a second
+      weather family inheriting a single-family veto, a faster money path
+      outrunning its own drain job, a model cadence advancing past a frozen
+      provenance snapshot with no path back to false, a symmetric twin case
+      left unpatched, and an abandoned pipeline still holding a live block.
+      The logic was right at each gate's birth; only its declared scope was
+      stale. SCOPE/DRAIN/RESET turns "is this gate still correct" from an
+      archaeology exercise into an adjacent-comment read, and gives review a
+      concrete rejection ground when a new or widened gate omits them.
+    enforced_by:
+      tests:
+        - tests/test_gate_scope_drain_reset.py::test_entry_readiness_gate_declares_scope_drain_reset
+        - tests/test_gate_scope_drain_reset.py::test_day0_oracle_guard_declares_scope_drain_reset
+        - tests/test_gate_scope_drain_reset.py::test_posterior_identity_check_declares_scope_drain_reset
+        - tests/test_gate_scope_drain_reset.py::test_request_governor_circuit_declares_scope_drain_reset
+        - tests/test_gate_scope_drain_reset.py::test_unknown_gate_site_fails_loudly_not_silently
+      negative_constraints: [NC-24]
+    capability_tags: [K2_runtime, live_venue_submit, probability_authority]
+    relationship_tests:
+      - tests/test_gate_scope_drain_reset.py
+    basis: AGENTS.md root INV-47 (commit 7125dc633); six same-night live incidents 2026-07-25/26
+    added: 2026-07-26

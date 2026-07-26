@@ -468,6 +468,30 @@ class PolymarketRequestGovernor:
                 raise RequestAdmissionDenied(
                     f"POLYMARKET_REQUEST_IN_FLIGHT:{inflight.isoformat()}"
                 )
+            # SCOPE: per (host, EndpointClass) circuit key -- `endpoint` already
+            # encodes both via _endpoint_key(url). Before commit d84c41a93 the
+            # circuit was keyed by host alone, so a low-value P3 (discovery/
+            # analytics/reconciliation) scanner's CLOB liveness probe inflated
+            # the SAME exponential-backoff counter as money-critical
+            # clob.polymarket.com book/price reads (FC-03), producing 127
+            # self-inflicted POLYMARKET_ENDPOINT_EMBARGOED denials in ~2 days on
+            # the entry lane. ZEUS_GOVERNOR_LEGACY_GLOBAL=1 (_legacy_global_governor_mode)
+            # is a documented one-release rollback to that unscoped keying and
+            # must not become permanent.
+            # DRAIN: next_retry_at is set by record_failure() to
+            # now + exponential_backoff(failure_count), capped at
+            # _MAX_BACKOFF_SECONDS, and only grows via further failures on the
+            # SAME (host, class) key; a higher-priority caller may still probe
+            # past a lower-priority embargo (the `int(priority) <= circuit_priority`
+            # test below). No background sweep clears it -- the embargo drains
+            # purely by wall-clock elapse of circuit_until.
+            # RESET: record_success() sets next_retry_at=None, failure_count=0
+            # for the endpoint on a successful response, clearing the embargo
+            # immediately. record_success() deliberately keeps the prior
+            # `generation` unchanged so an earlier, now-stale in-flight probe
+            # cannot use its own success to clear a LATER failure circuit that
+            # has since incremented generation -- the reset is generation-fenced,
+            # not last-write-wins.
             circuit = self._entries(state, "endpoints").get(endpoint, {})
             circuit_until = _parse_time(circuit.get("next_retry_at"))
             circuit_priority = _int(circuit.get("priority"), int(RequestPriority.SCAN))
