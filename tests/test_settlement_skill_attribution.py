@@ -571,13 +571,16 @@ def test_BLOCKER2_decision_time_uses_immutable_entry_not_updated_at(tmp_path) ->
     """BLOCKER 2 (RED on revert): the decision-time posterior bound must be the
     IMMUTABLE entry time (position_events), NOT position_current.updated_at.
 
-    Scenario: entry T0=06-09, a FRESHER posterior at T1=06-10 (after entry), and a
-    mutated updated_at T2=06-12 (a settlement/monitor bump). The decision-time
-    posterior MUST be the T0 one, and a fresher cycle (T1) MUST be detected as having
-    existed at decision (stale signal). Under the old updated_at(T2) bound, the T1
-    posterior would itself be selected as 'decision-time' → no fresher cycle → the
-    stale classification is corrupted. Asserts the grade's decision posterior is the
-    T0 one and fresher_cycle_existed_at_decision is True.
+    Scenario: entry T0=06-09, a posterior at T1=06-10 (AFTER entry), and a mutated
+    updated_at T2=06-12 (a settlement/monitor bump). The decision-time posterior
+    provenance MUST be the T0 one; under the old updated_at(T2) bound the T1
+    posterior would be selected as 'decision-time' and corrupt the provenance.
+
+    The fresher-cycle assertion was CORRECTED 2026-07-26: a posterior published
+    AFTER entry is not evidence of an unconsumed cycle — nothing available at
+    decision time was skipped. The original assertion here (True) encoded the
+    tautological predicate itself; see
+    test_STALE_post_entry_posterior_is_not_a_fresher_cycle.
     """
     world_path = str(tmp_path / "world.db")
     fcst_path = str(tmp_path / "fcst.db")
@@ -631,10 +634,12 @@ def test_BLOCKER2_decision_time_uses_immutable_entry_not_updated_at(tmp_path) ->
     grades = load_settled_positions(wconn)
     assert len(grades) == 1
     g = grades[0]
-    # The decision-time posterior is T0 (06-09), NOT the fresher T1 (06-10).
+    # The decision-time posterior is T0 (06-09), NOT the post-entry T1 (06-10).
     assert g.decision_posterior_computed_at == "2026-06-09T06:00:00Z"
-    # A strictly-fresher cycle (T1) existed at decision → stale signal present.
-    assert g.fresher_cycle_existed_at_decision is True
+    # The T1 posterior did not exist at decision time, so no cycle was left
+    # unconsumed. With no resolvable consumed-posterior identity here the predicate
+    # is unknown — and unknown must never brand STALE.
+    assert g.fresher_cycle_existed_at_decision is not True
     wconn.close()
 
 
@@ -1169,3 +1174,278 @@ def test_LXE_no_attribution_row_falls_back_to_legacy_bridge(tmp_path) -> None:
     assert len(grades) == 1
     assert grades[0].q_live == pytest.approx(0.80, abs=1e-9)
     assert grades[0].category == "SKILL_WIN", grades[0].rationale
+
+
+# ---------------------------------------------------------------------------
+# STALE predicate: decision-time truth, not settlement-eve truth (2026-07-26)
+# ---------------------------------------------------------------------------
+#
+# The predicate previously compared the family's SETTLEMENT-EVE latest posterior
+# against a time-reconstructed decision-time posterior, which reduces to "did
+# anyone publish a posterior after we traded" — true of every trade in a family
+# that kept forecasting. Live evidence (zeus-world.db, read-only, 2026-07-26):
+# 266/266 flagged rows joined to their own immutable POSITION_OPEN_INTENT entry
+# time had the "fresher" posterior computed AFTER entry (median +26.8h, min
+# +0.10h, max +59.9h) — ZERO had it available at decision. 232 of the 243
+# STALE_DECISION brands came from that flag, and 211 of the 243 STALE rows had
+# decision_posterior_age_hours BELOW the 6h budget: not old, just followed by
+# later forecasts. The corrected predicate compares the CONSUMED posterior (the
+# certificate's posterior_id) against cycles available at/<= decision time.
+
+def _seed_posterior(fconn, *, posterior_id, city, target_date, computed_at, q_json):
+    fconn.execute(
+        """INSERT INTO forecast_posteriors
+           (posterior_id, source_id, product_id, data_version, city, target_date,
+            temperature_metric, source_cycle_time, source_available_at, computed_at,
+            q_json, posterior_method, training_allowed, recorded_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (posterior_id, "src", "prod", "v1", city, target_date, "high",
+         computed_at, computed_at, computed_at, q_json, "test", 0, computed_at),
+    )
+
+
+def _seed_cert_with_posterior(wconn, *, certificate_hash, condition_id, token_id,
+                              q_live, q_lcb_5pct, posterior_id) -> None:
+    """An ActionableTradeCertificate carrying BOTH the immutable q and the
+    posterior_id the decision actually consumed (the real live payload shape —
+    verified against zeus-world.db 2026-07-26: 378/433 VERIFIED ATCs carry a
+    posterior_id and every one of them joins forecast_posteriors)."""
+    payload = json.dumps({
+        "condition_id": condition_id,
+        "token_id": token_id,
+        "q_live": q_live,
+        "q_lcb_5pct": q_lcb_5pct,
+        "posterior_id": posterior_id,
+    })
+    wconn.execute(
+        """INSERT INTO decision_certificates
+           (certificate_id, certificate_type, schema_version,
+            canonicalization_version, semantic_key, claim_type, mode,
+            decision_time, authority_id, authority_version, algorithm_id,
+            algorithm_version, payload_json, payload_hash, certificate_hash,
+            verifier_status, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (f"cert-{certificate_hash[:8]}", "ActionableTradeCertificate", 1,
+         "v1", f"sk-{certificate_hash[:8]}", "actionable_trade", "LIVE",
+         "2026-06-21T00:00:00Z", "auth", "1", "algo", "1", payload,
+         f"ph-{certificate_hash[:8]}", certificate_hash, "VERIFIED",
+         "2026-06-21T00:00:00Z"),
+    )
+
+
+def _build_stale_fixture(tmp_path, *, name, posteriors, consumed_posterior_id,
+                         entry_at, cert_posterior_id="__consumed__"):
+    """World+forecasts+trades fixture for the staleness predicate.
+
+    posteriors: list of (posterior_id, computed_at, q_json). The position is a
+    buy_no on 90-91F that WON (settle 87, OUT of bin), entered at ``entry_at``.
+    """
+    world_path = str(tmp_path / "world.db")
+    fcst_path = str(tmp_path / "fcst.db")
+    trades_path = str(tmp_path / "trades.db")
+    wconn = sqlite3.connect(world_path); init_schema(wconn)
+    fconn = sqlite3.connect(fcst_path); init_schema_forecasts(fconn)
+    tconn = sqlite3.connect(trades_path); init_schema(tconn)
+
+    cid = f"cond{name}"
+    _seed_q_market_and_settlement(
+        fconn, condition_id=cid, city="Tucson", target_date="2026-06-20",
+        range_low=90.0, range_high=91.0, settlement_value=87.0,
+    )
+    for pid, computed_at, q_json in posteriors:
+        _seed_posterior(fconn, posterior_id=pid, city="Tucson",
+                        target_date="2026-06-20", computed_at=computed_at,
+                        q_json=q_json)
+    fconn.commit(); fconn.close()
+
+    cert_hash = (name[0].lower() * 64)[:64]
+    pid_on_cert = (consumed_posterior_id if cert_posterior_id == "__consumed__"
+                   else cert_posterior_id)
+    _seed_cert_with_posterior(
+        wconn, certificate_hash=cert_hash, condition_id=cid, token_id=f"tok{name}",
+        q_live=0.80, q_lcb_5pct=0.70, posterior_id=pid_on_cert,
+    )
+    _seed_audit_bridge_row(
+        wconn, audit_id=f"aud{name}", condition_id=cid, direction="buy_no",
+        token_id=f"tok{name}", expected_edge_source_certificate_hash=cert_hash,
+    )
+    wconn.commit()
+
+    tconn.execute(
+        """INSERT INTO position_current
+           (position_id, phase, strategy_key, condition_id, direction, entry_price,
+            shares, cost_basis_usd, city, target_date, temperature_metric, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (f"pos{name}", "settled", "center_buy", cid, "buy_no", 0.30, 10.0, 3.0,
+         "Tucson", "2026-06-20", "high", "2026-06-25T00:00:00Z"),
+    )
+    tconn.execute(
+        """INSERT INTO position_events
+           (event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, strategy_key, source_module, env, payload_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (f"ev{name}", f"pos{name}", 1, 1, "POSITION_OPEN_INTENT", entry_at,
+         "center_buy", "test", "test", "{}"),
+    )
+    tconn.commit(); tconn.close()
+
+    wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
+    wconn.execute("ATTACH DATABASE ? AS trades", (trades_path,))
+    return wconn
+
+
+def test_STALE_post_entry_posterior_is_not_a_fresher_cycle(tmp_path) -> None:
+    """THE TAUTOLOGY ANTIBODY (RED on revert): a posterior published AFTER the
+    decision must NOT brand it STALE_DECISION.
+
+    Fixture: the decision consumed posterior 1 (the freshest cycle available at
+    entry); posterior 2 is computed 20h AFTER entry — settlement-eve data. Under
+    the reverted predicate (settlement-eve latest > reconstructed decision-time
+    latest) this grades STALE_DECISION and is excluded from the skill denominator.
+    Nothing available at decision time was left unconsumed, so it must grade on its
+    own merits (SKILL_WIN: cert q_live 0.80 for the held NO > 0.5, and it won).
+    """
+    wconn = _build_stale_fixture(
+        tmp_path, name="TAUT",
+        posteriors=[
+            (1, "2026-06-19T06:00:00+00:00", '{"90-91F": 0.20}'),
+            (2, "2026-06-20T08:00:00+00:00", '{"90-91F": 0.05}'),  # 20h AFTER entry
+        ],
+        consumed_posterior_id=1,
+        entry_at="2026-06-19T12:00:00+00:00",
+    )
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    g = grades[0]
+    assert g.fresher_cycle_existed_at_decision is False, (
+        "a posterior computed after the decision is not an unconsumed cycle"
+    )
+    assert g.category != "STALE_DECISION", g.rationale
+    assert g.category == "SKILL_WIN", g.rationale
+    assert g.counts_as_skill_win is True
+    wconn.close()
+
+
+def test_STALE_genuinely_unconsumed_cycle_still_brands_stale(tmp_path) -> None:
+    """The predicate must still FIRE when a strictly-fresher cycle really was
+    available at decision time and the decision consumed an older one.
+
+    Fixture: posterior 1 at T-30h is what the certificate says we consumed, but
+    posterior 2 at T-2h existed BEFORE entry. That is a genuinely unconsumed
+    cycle -> STALE_DECISION even though the position won.
+    """
+    wconn = _build_stale_fixture(
+        tmp_path, name="REAL",
+        posteriors=[
+            (1, "2026-06-18T06:00:00+00:00", '{"90-91F": 0.20}'),
+            (2, "2026-06-19T10:00:00+00:00", '{"90-91F": 0.05}'),  # BEFORE entry
+        ],
+        consumed_posterior_id=1,
+        entry_at="2026-06-19T12:00:00+00:00",
+    )
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    g = grades[0]
+    assert g.fresher_cycle_existed_at_decision is True, (
+        "a strictly-fresher cycle available before entry IS unconsumed"
+    )
+    assert g.category == "STALE_DECISION", g.rationale
+    assert g.counts_as_skill_win is False
+    wconn.close()
+
+
+def test_STALE_unresolvable_consumed_identity_is_unknown_never_stale(tmp_path) -> None:
+    """INV-47 DRAIN: when the consumed-posterior identity is unresolvable the
+    predicate returns None (unknown) and must NOT brand STALE_DECISION.
+
+    An unknown consumed identity costs the position its unconsumed-cycle check,
+    never its skill signal — the age-vs-budget test (decision-time facts only)
+    still applies. Fixture: the cert carries NO posterior_id (55/433 live VERIFIED
+    ATCs are in exactly this shape), while a later posterior exists.
+    """
+    wconn = _build_stale_fixture(
+        tmp_path, name="UNKN",
+        posteriors=[
+            (1, "2026-06-19T06:00:00+00:00", '{"90-91F": 0.20}'),
+            (2, "2026-06-20T08:00:00+00:00", '{"90-91F": 0.05}'),
+        ],
+        consumed_posterior_id=1,
+        entry_at="2026-06-19T12:00:00+00:00",
+        cert_posterior_id=None,  # cert carries no posterior_id
+    )
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    g = grades[0]
+    assert g.fresher_cycle_existed_at_decision is None, (
+        "an unresolvable consumed identity must be unknown, never a verdict"
+    )
+    assert g.category != "STALE_DECISION", g.rationale
+    wconn.close()
+
+
+def test_STALE_age_over_budget_still_brands_stale_independently(tmp_path) -> None:
+    """The age-vs-budget half of the born-stale test is untouched: a decision that
+    consumed the only available cycle, but one already older than the freshness
+    budget at decision time, still grades STALE_DECISION."""
+    wconn = _build_stale_fixture(
+        tmp_path, name="AGED",
+        posteriors=[(1, "2026-06-18T00:00:00+00:00", '{"90-91F": 0.20}')],
+        consumed_posterior_id=1,
+        entry_at="2026-06-19T12:00:00+00:00",  # 36h after the only cycle
+    )
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    g = grades[0]
+    assert g.fresher_cycle_existed_at_decision is False
+    assert g.decision_posterior_age_hours == pytest.approx(36.0, abs=1e-6)
+    assert g.category == "STALE_DECISION", g.rationale
+    wconn.close()
+
+
+def test_regrade_refreshes_every_recomputed_column(tmp_path) -> None:
+    """persist_grade's ON CONFLICT DO UPDATE must refresh EVERY field the grader
+    recomputes — not bump graded_at while leaving q_live at its first-insert value.
+
+    A row whose category was derived from one q while its q column reports another
+    is a receipt that lies about its own inputs, and the corrected staleness
+    predicate makes exactly that re-grade likely. The prior values are preserved in
+    settlement_attribution_supersessions (asserted here too).
+    """
+    world_path = str(tmp_path / "world.db")
+    wconn = sqlite3.connect(world_path); init_schema(wconn)
+
+    def _grade(q_live, price, category_direction="buy_no"):
+        return grade_position(
+            position_id="posRG", direction=category_direction,
+            traded_bin_label="90-91F", won=True, settled_in_bin=False,
+            settled_value=87.0, settlement_unit="F",
+            settled_at="2026-06-21T00:00:00Z", condition_id="condRG",
+            city="Tucson", target_date="2026-06-20", metric="high",
+            avg_fill_price=price, q_live=q_live,
+            q_lcb_5pct=q_live - 0.1, decision_time="2026-06-20T00:00:00Z",
+            decision_posterior_computed_at="2026-06-19T22:00:00Z",
+            fresher_cycle_existed_at_decision=False, filled_size=10.0,
+        )
+
+    persist_grade(wconn, _grade(0.80, 0.30))
+    persist_grade(wconn, _grade(0.55, 0.42))
+
+    row = wconn.execute(
+        "SELECT q_live, q_lcb_5pct, avg_fill_price, condition_id, city, direction, "
+        "traded_bin_label FROM settlement_attribution WHERE position_id='posRG'"
+    ).fetchone()
+    assert row[0] == pytest.approx(0.55, abs=1e-9), (
+        "a re-grade must refresh q_live, not keep the first-insert value forever"
+    )
+    assert row[1] == pytest.approx(0.45, abs=1e-9)
+    assert row[2] == pytest.approx(0.42, abs=1e-9)
+    assert row[3] == "condRG" and row[4] == "Tucson"
+    assert row[5] == "buy_no" and row[6] == "90-91F"
+    # The superseded pre-image keeps the ORIGINAL q (append-only history intact).
+    prior = wconn.execute(
+        "SELECT prior_row_json FROM settlement_attribution_supersessions "
+        "WHERE position_id='posRG'"
+    ).fetchone()
+    assert prior is not None
+    assert json.loads(prior[0])["q_live"] == pytest.approx(0.80, abs=1e-9)
+    wconn.close()

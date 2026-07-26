@@ -53,8 +53,11 @@ THE SIX CATEGORIES
                      above our q AND the market was right (the 3-loss shape).
   STALE_DECISION     the decision-time posterior was older than the family
                      freshness budget / a strictly-fresher cycle existed
-                     unconsumed (born-stale gets its own brand regardless of
-                     outcome).
+                     unconsumed AT DECISION TIME (born-stale gets its own brand
+                     regardless of outcome). "Unconsumed" is measured against the
+                     posterior the decision ACTUALLY consumed (the certificate's
+                     posterior_id), never against settlement-eve data — see
+                     _fresher_cycle_existed_at_decision.
   UNATTRIBUTABLE_Q_MISSING
                      the immutable decision-q certificate is unresolvable, so the
                      system's ACTUAL decision-time q is unknown. Without it the
@@ -137,8 +140,9 @@ LARGE_FACTOR_DERIVATION = (
 SUPPORT_BOUNDARY: float = 0.5
 
 # Default family freshness budget (hours). A decision posterior older than this,
-# OR a strictly-fresher posterior cycle existing before the decision, brands the
-# position STALE_DECISION. 6.0h = one full forecast cycle interval (00/06/12/18Z);
+# OR a strictly-fresher posterior cycle already available at decision time than the
+# one consumed, brands the position STALE_DECISION. Both are decision-time facts.
+# 6.0h = one full forecast cycle interval (00/06/12/18Z);
 # a decision consuming a cycle already superseded by the next 6-hourly cycle is
 # born stale. Recorded on each row as freshness_budget_hours.
 DEFAULT_FRESHNESS_BUDGET_HOURS: float = 6.0
@@ -355,8 +359,13 @@ def grade_position(
         fresh_supports = float(fresh_q_held) > SUPPORT_BOUNDARY
 
     # --- STALENESS gate (born-stale brand, evaluated FIRST) ---
-    # A decision is born stale if a strictly-fresher cycle existed before it, OR
-    # the consumed posterior was older than the freshness budget at decision time.
+    # A decision is born stale if a strictly-fresher cycle was AVAILABLE at decision
+    # time than the one it consumed, OR the consumed posterior was already older
+    # than the freshness budget at decision time. Both tests read only decision-time
+    # facts; nothing that happened after entry can brand a decision stale.
+    # fresher_cycle_existed_at_decision is None when the consumed-posterior identity
+    # is unresolvable — the unconsumed-cycle test is then simply absent (never
+    # assumed True), and the age-vs-budget test still applies.
     born_stale = False
     if fresher_cycle_existed_at_decision is True:
         born_stale = True
@@ -847,11 +856,78 @@ def _resolve_decision_q_from_certificate(
         q_lcb_f = float(q_lcb) if q_lcb is not None else None
     except (TypeError, ValueError):
         q_lcb_f = None
+    consumed = payload.get("posterior_id")
     return {
         "q_live": q_live_f,
         "q_lcb_5pct": q_lcb_f,
         "certificate_hash": h,
+        # The posterior the decision ACTUALLY consumed. The staleness predicate is
+        # measured against THIS, never against a settlement-eve reconstruction.
+        # None on a cert whose payload carries no posterior_id.
+        "consumed_posterior_id": (str(consumed).strip() or None) if consumed is not None else None,
     }
+
+
+def _fresher_cycle_existed_at_decision(
+    world_conn: sqlite3.Connection,
+    *,
+    city: Optional[str],
+    target_date: Optional[str],
+    metric: Optional[str],
+    consumed_posterior_id: Optional[str],
+    decision_time: Optional[str],
+) -> Optional[bool]:
+    """Was a strictly-fresher family cycle AVAILABLE at decision time than the one
+    the decision consumed?
+
+    Both halves of the comparison must be decision-time quantities or the answer is
+    meaningless. The prior shape compared the family's settlement-eve latest against
+    a time-reconstructed decision posterior, which reduces to "did anyone publish a
+    posterior after we traded" — true of every trade in a family that kept
+    forecasting (live: 266/266 flagged rows had the 'fresher' posterior computed
+    AFTER entry, median 26.8h later; 211/243 STALE rows were inside their freshness
+    budget). This asks the question the brand claims to answer instead: strictly
+    newer than the CONSUMED posterior AND already computed at/<= the decision.
+
+    Fail-closed shape (INV-47) — this is a grading predicate, not a runtime gate, so
+    its "gate" is the STALE_DECISION brand on ONE position:
+      SCOPE  one position_id. Unresolvable inputs never widen to a family, city, or
+             the whole corpus; each position resolves independently.
+      DRAIN  returns None (unknown) rather than True when the consumed-posterior
+             identity or the decision time is unresolvable. None does NOT brand
+             STALE — grade_position falls through to the age-vs-budget test, which
+             uses only decision-time facts. An unknown consumed identity therefore
+             costs the position its unconsumed-cycle check, never its skill signal.
+      RESET  a re-grade recomputes it from scratch; the certificate corpus growing
+             a previously-absent row flips a None to a real True/False on the next
+             run. There is no latched state and no ratchet.
+
+    Returns True (a strictly-fresher cycle was available and unconsumed), False (the
+    decision consumed the freshest cycle available to it), or None (unresolvable —
+    never fabricated as either verdict).
+    """
+    pid = str(consumed_posterior_id or "").strip()
+    if not pid or not decision_time:
+        return None
+    row = world_conn.execute(
+        "SELECT computed_at FROM forecasts.forecast_posteriors WHERE posterior_id = ?",
+        (pid,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    consumed_at = row[0]
+    fresher = world_conn.execute(
+        """
+        SELECT 1
+        FROM forecasts.forecast_posteriors
+        WHERE city = ? AND target_date = ? AND temperature_metric = ?
+          AND computed_at > ?
+          AND computed_at <= ?
+        LIMIT 1
+        """,
+        (city, target_date, (metric or "high"), consumed_at, decision_time),
+    ).fetchone()
+    return fresher is not None
 
 
 def _fresh_posterior_for_family(
@@ -1166,6 +1242,7 @@ def load_settled_positions(
             q_live = cert_q["q_live"]
             q_lcb_5pct = cert_q["q_lcb_5pct"]
             decision_q_certificate_hash = cert_q["certificate_hash"]
+            consumed_posterior_id = cert_q["consumed_posterior_id"]
         else:
             # No resolvable immutable decision-q. Do NOT fall back to the
             # column value when the cert is unresolvable — without the cert the
@@ -1173,6 +1250,7 @@ def load_settled_positions(
             q_live = None
             q_lcb_5pct = None
             decision_q_certificate_hash = None
+            consumed_posterior_id = None
 
         # Quantity 2b — freshest posterior at settlement-eve (latest cycle).
         fresh = _fresh_posterior_for_family(
@@ -1189,14 +1267,22 @@ def load_settled_positions(
 
         fresh_q_held = _held_q_from_in_bin(direction, fresh.get("in_bin_yes") if fresh else None)
 
-        # A strictly-fresher cycle existed at decision iff the family's latest
-        # posterior is newer than the one the decision consumed.
-        fresher_existed = None
-        if fresh is not None and decision_post is not None:
-            d_fresh = _parse_ts(fresh.get("computed_at"))
-            d_dec = _parse_ts(decision_post.get("computed_at"))
-            if d_fresh is not None and d_dec is not None:
-                fresher_existed = d_fresh > d_dec
+        # Was a strictly-fresher cycle AVAILABLE at decision time than the one the
+        # decision consumed? Both halves are decision-time quantities: the CONSUMED
+        # posterior identity (the certificate's posterior_id — the same immutable
+        # cert that supplies q_live, so no new bridge) versus cycles computed at or
+        # before entry. ``fresh`` above is settlement-eve data and is deliberately
+        # NOT part of this comparison — feeding it here made the flag mean "did
+        # anyone publish a posterior after we traded", true by construction.
+        # Unresolvable -> None (never True): see _fresher_cycle_existed_at_decision.
+        fresher_existed = _fresher_cycle_existed_at_decision(
+            world_conn,
+            city=meta["city"],
+            target_date=meta["target_date"],
+            metric=meta["metric"],
+            consumed_posterior_id=consumed_posterior_id,
+            decision_time=created_at,
+        )
 
         grade = grade_position(
             position_id=str(audit_id),
@@ -1331,9 +1417,25 @@ def persist_grade(
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         ON CONFLICT(position_id) DO UPDATE SET
+            -- Every field the grader recomputes is refreshed. A re-grade that
+            -- bumped graded_at while leaving q_live/avg_fill_price/identity at
+            -- their first-insert values produced a row whose category was derived
+            -- from one q and whose q column reported another — a receipt that
+            -- lies about its own inputs. The prior values are not lost: the full
+            -- pre-image is archived into settlement_attribution_supersessions
+            -- immediately above, which is exactly what that archive is for.
+            condition_id = excluded.condition_id,
+            city = excluded.city,
+            target_date = excluded.target_date,
+            temperature_metric = excluded.temperature_metric,
+            direction = excluded.direction,
+            traded_bin_label = excluded.traded_bin_label,
             category = excluded.category,
             won = excluded.won,
             counts_as_skill_win = excluded.counts_as_skill_win,
+            avg_fill_price = excluded.avg_fill_price,
+            q_live = excluded.q_live,
+            q_lcb_5pct = excluded.q_lcb_5pct,
             q_in_bin = excluded.q_in_bin,
             market_in_bin_prob = excluded.market_in_bin_prob,
             market_q_ratio = excluded.market_q_ratio,
@@ -1347,10 +1449,14 @@ def persist_grade(
             fresh_input_identity = excluded.fresh_input_identity,
             fresh_input_age_hours = excluded.fresh_input_age_hours,
             settled_value = excluded.settled_value,
+            settlement_unit = excluded.settlement_unit,
             settled_in_bin = excluded.settled_in_bin,
             settled_at = excluded.settled_at,
             world_grade_pnl_usd = excluded.world_grade_pnl_usd,
+            freshness_budget_hours = excluded.freshness_budget_hours,
             fresher_cycle_existed_at_decision = excluded.fresher_cycle_existed_at_decision,
+            large_factor_threshold = excluded.large_factor_threshold,
+            derivation_note = excluded.derivation_note,
             rationale = excluded.rationale,
             graded_at = excluded.graded_at
         """,
