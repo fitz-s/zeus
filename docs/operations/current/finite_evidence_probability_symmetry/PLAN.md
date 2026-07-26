@@ -4,6 +4,33 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-26 NOAA-mirror Day0 source continuity
+
+The Tel Aviv Jul-26 31C BUY NO loss reconstruction found a real 21.147057-share
+holding with 754 monitor refreshes and no `EXIT_INTENT`.  The last fresh belief
+arrived at 00:25 UTC; from 00:26 onward the held family accumulated 568
+`EVIDENCE_UNAVAILABLE` decisions while the executable NO bid fell through
+28c, 15c, 6c, and 4c.  Canonical `observation_instants` contained zero Tel Aviv
+rows for the target day.  The ingest log showed every NOAA-settled city failing
+with macOS `EADDRNOTAVAIL`: the Ogimet client bound each request to the IPv4
+wildcard to avoid an older IPv6 SYN stall, but that local bind could not obtain
+an address while an unbound IPv4 request to the same endpoint succeeded.
+
+The hot-fix keeps the exact provider, station, local-day window, parser, source
+tag, and extremum-preserving writer contract.  Forced IPv4 remains the preferred
+route; only a proved local-address exhaustion error retries the same Ogimet URL
+through the default network route.  Other transport failures remain
+`NETWORK_ERROR` and fail closed.  No market-price belief substitution, forced
+exit, source-role fallback, or entry/exit threshold is added.
+
+The existing evidence gate remains family-scoped.  Its DRAIN is a successful
+same-source ingest followed by the normal held-family redecision wake; RESET is
+a fresh canonical target-date observation and current probability certificate.
+Acceptance requires focused fallback/fail-closed antibodies, the complete
+hourly-client and observation-writer suites, a live LLBG fetch, a canonical
+Jul-26 row, and a natural held-position refresh that no longer reports
+`zero target-date canonical observations`.
+
 ## 2026-07-25 Stale ENS disagreement remains probability uncertainty
 
 The live Dallas Jul-26 102-103°F certificate paired a fresh 06Z carrier center

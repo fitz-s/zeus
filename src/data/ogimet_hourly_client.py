@@ -33,6 +33,7 @@ Public API
 """
 from __future__ import annotations
 
+import errno
 import logging
 import re
 from dataclasses import dataclass, field
@@ -288,6 +289,50 @@ class _ChunkResult:
         return self.failure_reason is not None
 
 
+def _local_ipv4_bind_unavailable(exc: BaseException) -> bool:
+    """Return whether the forced-IPv4 socket could not obtain a local address."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and current.errno == errno.EADDRNOTAVAIL:
+            return True
+        current = current.__cause__ or current.__context__
+    return "Can't assign requested address" in str(exc)
+
+
+def _request_ogimet(
+    *, params: dict[str, str], timeout_seconds: float
+) -> httpx.Response:
+    """Prefer forced IPv4, but preserve the same provider when that bind fails."""
+
+    try:
+        with httpx.Client(
+            transport=_OGIMET_TRANSPORT,
+            timeout=timeout_seconds,
+        ) as client:
+            return client.get(
+                OGIMET_METAR_URL,
+                params=params,
+                headers=OGIMET_HEADERS,
+            )
+    except (httpx.HTTPError, httpx.RequestError) as exc:
+        if not _local_ipv4_bind_unavailable(exc):
+            raise
+        logger.warning(
+            "Ogimet forced-IPv4 bind unavailable; retrying the same provider "
+            "through the default network route: %s",
+            exc,
+        )
+        with httpx.Client(timeout=timeout_seconds) as client:
+            return client.get(
+                OGIMET_METAR_URL,
+                params=params,
+                headers=OGIMET_HEADERS,
+            )
+
+
 def _fetch_one_chunk(
     station: str, begin: datetime, end: datetime, timeout_seconds: float
 ) -> _ChunkResult:
@@ -304,14 +349,10 @@ def _fetch_one_chunk(
         "end": end.strftime("%Y%m%d%H%M"),
     }
     try:
-        # Use a short-lived Client bound to IPv4 so flaky home-ISP IPv6
-        # routes can't stall us in SYN_SENT.
-        with httpx.Client(transport=_OGIMET_TRANSPORT, timeout=timeout_seconds) as client:
-            resp = client.get(
-                OGIMET_METAR_URL,
-                params=params,
-                headers=OGIMET_HEADERS,
-            )
+        resp = _request_ogimet(
+            params=params,
+            timeout_seconds=timeout_seconds,
+        )
         _last_ogimet_request_at = _time.monotonic()
     except (httpx.HTTPError, httpx.RequestError) as exc:
         logger.warning(

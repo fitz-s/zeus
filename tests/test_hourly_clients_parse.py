@@ -17,8 +17,10 @@ settlement and for Day-0 stop-loss monitoring).
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 
 import src.data.ogimet_hourly_client as ogimet_client
@@ -340,6 +342,83 @@ def test_fetch_ogimet_requests_local_date_utc_bounds(monkeypatch):
             datetime(2024, 1, 15, 20, 59, 59, tzinfo=timezone.utc),
         )
     ]
+
+
+def test_ogimet_local_ipv4_bind_failure_retries_same_provider(monkeypatch):
+    calls: list[object] = []
+    response = SimpleNamespace(
+        status_code=200,
+        text=(
+            "LLBG,2026,07,26,12,20,"
+            "METAR LLBG 261220Z 27012KT CAVOK 31/20 Q1008=\n"
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, *, transport=None, timeout):
+            self.transport = transport
+            calls.append(transport)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            if self.transport is ogimet_client._OGIMET_TRANSPORT:
+                raise httpx.ConnectError("[Errno 49] Can't assign requested address")
+            return response
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    monkeypatch.setattr(ogimet_client, "_last_ogimet_request_at", 0.0)
+
+    result = ogimet_client._fetch_one_chunk(
+        "LLBG",
+        datetime(2026, 7, 26, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 26, 20, 59, tzinfo=timezone.utc),
+        5.0,
+    )
+
+    assert result.failed is False
+    assert result.raw_metar_count == 1
+    assert result.observations == [
+        (datetime(2026, 7, 26, 12, 20, tzinfo=timezone.utc), 31.0)
+    ]
+    assert calls == [ogimet_client._OGIMET_TRANSPORT, None]
+
+
+def test_ogimet_other_network_failure_remains_fail_closed(monkeypatch):
+    calls = 0
+
+    class FakeClient:
+        def __init__(self, *, transport=None, timeout):
+            del transport, timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise httpx.ConnectError("remote route unavailable")
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    monkeypatch.setattr(ogimet_client, "_last_ogimet_request_at", 0.0)
+
+    result = ogimet_client._fetch_one_chunk(
+        "LLBG",
+        datetime(2026, 7, 26, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 26, 20, 59, tzinfo=timezone.utc),
+        5.0,
+    )
+
+    assert result.failed is True
+    assert result.failure_reason == "NETWORK_ERROR"
+    assert calls == 1
 
 
 # ----------------------------------------------------------------------
