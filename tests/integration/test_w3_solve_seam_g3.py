@@ -9249,6 +9249,97 @@ def test_global_book_cache_rebinds_fresh_q_without_refreshing_untouched_tokens()
     assert rebound.bindings == cached.bindings
 
 
+def test_global_book_token_reuse_for_batch_slices_broader_cache():
+    def probability(family, token_suffix):
+        return SimpleNamespace(
+            family_key=family,
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{family}",
+                    condition_id=f"condition-{family}",
+                    yes_token_id=f"yes-{token_suffix}",
+                    no_token_id=f"no-{token_suffix}",
+                ),
+            ),
+        )
+
+    cached_universe = {
+        "family-a": probability("family-a", "a"),
+        "family-b": probability("family-b", "b"),
+        "family-c": probability("family-c", "c"),
+    }
+    batch = {
+        "family-a": probability("family-a", "a"),
+        "family-b": probability("family-b", "b"),
+    }
+
+    # Comparing the raw broader cache against a narrower batch is the
+    # documented defect: it always fails the family-set check.
+    with pytest.raises(ValueError, match="GLOBAL_BOOK_CACHED_FAMILY_SET_CHANGED"):
+        era._reuse_global_book_token_bindings(batch, cached_universe)
+
+    # Slicing the cache to the batch's own families before reuse succeeds.
+    rebound = era._reuse_global_book_token_bindings_for_batch(
+        batch,
+        cached_universe,
+    )
+    assert set(rebound) == {"family-a", "family-b"}
+
+
+def test_global_book_token_reuse_for_batch_rejects_real_topology_change():
+    def probability(family, *, bin_suffix):
+        return SimpleNamespace(
+            family_key=family,
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{bin_suffix}",
+                    condition_id=f"condition-{bin_suffix}",
+                    yes_token_id=f"yes-{family}",
+                    no_token_id=f"no-{family}",
+                ),
+            ),
+        )
+
+    cached_universe = {
+        "family-a": probability("family-a", bin_suffix="a"),
+        "family-b": probability("family-b", bin_suffix="b"),
+    }
+    batch = {
+        # Same family key, but the bin/condition shape changed underneath it.
+        "family-a": probability("family-a", bin_suffix="a-rolled"),
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_BOOK_CACHED_PROBABILITY_TOPOLOGY_CHANGED",
+    ):
+        era._reuse_global_book_token_bindings_for_batch(batch, cached_universe)
+
+
+def test_global_book_token_reuse_for_batch_missing_family_raises_keyerror():
+    def probability(family):
+        return SimpleNamespace(
+            family_key=family,
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{family}",
+                    condition_id=f"condition-{family}",
+                    yes_token_id=f"yes-{family}",
+                    no_token_id=f"no-{family}",
+                ),
+            ),
+        )
+
+    cached_universe = {"family-a": probability("family-a")}
+    batch = {
+        "family-a": probability("family-a"),
+        "family-b": probability("family-b"),
+    }
+
+    with pytest.raises(KeyError):
+        era._reuse_global_book_token_bindings_for_batch(batch, cached_universe)
+
+
 def test_global_probability_authority_is_materialized_once_per_family(monkeypatch):
     calls = []
     authority_a = object()

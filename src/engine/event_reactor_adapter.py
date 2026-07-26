@@ -874,6 +874,28 @@ def _reuse_global_book_token_bindings(
     return rebound
 
 
+def _reuse_global_book_token_bindings_for_batch(
+    probabilities: Mapping[str, object],
+    cached_probabilities: Mapping[str, object],
+) -> dict[str, object]:
+    """Scope a broader cached universe to the current batch before reuse.
+
+    The epoch cache commonly holds more families than the round-robin batch
+    being processed this cycle; comparing the raw cache against the batch
+    would always fail `_reuse_global_book_token_bindings`'s family-set check
+    (KeyError on the missing keys propagates to the caller's exception
+    handling, same as any other rejected reuse). Slicing first keeps that
+    check meaningful for the batch's own families while raising a plain
+    KeyError, never a silent stale-token graft, when a batch family is absent
+    from the cache.
+    """
+
+    cached_slice = {
+        family_key: cached_probabilities[family_key] for family_key in probabilities
+    }
+    return _reuse_global_book_token_bindings(probabilities, cached_slice)
+
+
 def _reuse_global_book_superset_token_bindings(
     trade_conn: sqlite3.Connection,
     probabilities: Mapping[str, object],
@@ -8304,7 +8326,7 @@ def event_bound_live_adapter_from_trade_conn(
                 if cached_probabilities is not None:
                     try:
                         retained_bound_probabilities = (
-                            _reuse_global_book_token_bindings(
+                            _reuse_global_book_token_bindings_for_batch(
                                 probabilities,
                                 cached_probabilities,
                             )
