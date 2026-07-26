@@ -16389,6 +16389,45 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         "GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"
     )
 
+    held_failure_reason = (
+        "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
+        "FamilyAuthorityUnavailable:POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"
+    )
+    stored_kwargs.clear()
+    global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=lambda item, _at: EventSubmissionReceipt(
+            False,
+            item.event_id,
+            item.causal_snapshot_id,
+            reason=(
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:ENTRY_ONLY_REASON"
+            ),
+        ),
+        prepare_held_event=lambda item, _at: EventSubmissionReceipt(
+            False,
+            item.event_id,
+            item.causal_snapshot_id,
+            reason=held_failure_reason,
+        ),
+        actuate_winner=lambda *_: pytest.fail("cash-dominant auction must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        portfolio_state_provider=lambda: object(),
+    )
+
+    assert stored_kwargs["probability_ineligible_by_family"] == {
+        family_key: held_failure_reason
+    }
+
 
 def test_global_batch_isolates_missing_held_q_and_keeps_other_families(
     monkeypatch,

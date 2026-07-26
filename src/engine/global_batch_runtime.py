@@ -3477,6 +3477,7 @@ def process_current_global_batch(
             prepared = prepared_receipt.prepared_global_family
             if prepared is None:
                 if _current_probability_ineligible(prepared_receipt):
+                    failure_receipt = prepared_receipt
                     if (
                         prepare_held_event is not None
                         and family_key in held_obligation_family_keys
@@ -3489,8 +3490,10 @@ def process_current_global_batch(
                                 prepared_receipt.reason
                                 or "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED"
                             )
+                        else:
+                            failure_receipt = held_receipt
                     if prepared is None:
-                        reason = str(prepared_receipt.reason)
+                        reason = str(failure_receipt.reason)
                         ineligible_by_family[family_key] = reason
                         if family_key in claimed_by_family:
                             ineligible_by_event[owner.event_id] = reason
