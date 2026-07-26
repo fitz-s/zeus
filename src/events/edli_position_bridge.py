@@ -1738,7 +1738,23 @@ def _append_edli_confirmed_trade_facts(
         fees = _float_or_none(payload.get("fees")) or 0.0
         source_event_hash = _edli_source_event_hash(aggregate_id, payload, index)
         native_trade_id = str(payload.get("trade_id") or "").strip()
-        trade_id = f"edli:{native_trade_id}" if native_trade_id else f"edli:{source_event_hash}"
+        # Idempotent prefixing (2026-07-25): on a stall longer than one bridge
+        # cycle, this function can re-observe its OWN prior canonical fact as
+        # if it were a fresh native trade -- payload["trade_id"] then already
+        # carries the "edli:" prefix this function itself wrote. Unconditional
+        # prepending compounded it ("edli:X" -> "edli:edli:X" -> ...), which
+        # breaks canonical_trade_fact_cte's (command_id, trade_id) stability
+        # invariant (src/state/fill_dedup.py). Never re-prefix an already
+        # prefixed id; a genuinely native id still gets exactly one prefix.
+        # Historical double-prefixed rows are left as-is -- not rewritten here.
+        if native_trade_id:
+            trade_id = (
+                native_trade_id
+                if native_trade_id.startswith("edli:")
+                else f"edli:{native_trade_id}"
+            )
+        else:
+            trade_id = f"edli:{source_event_hash}"
         filled_size_s = str(size)
         fill_price_s = str(price)
         if _edli_canonical_trade_fact_already_recorded(

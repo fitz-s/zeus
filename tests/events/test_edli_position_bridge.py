@@ -1002,6 +1002,115 @@ def test_two_distinct_partial_fills_each_get_their_own_canonical_trade_fact(conn
     assert float(rows[1]["fill_price"]) == pytest.approx(0.45)
 
 
+# --------------------------------------------------------------------------- #
+# Idempotent trade_id prefixing (2026-07-25): the bridge can re-observe its
+# OWN prior canonical fact as if it were a fresh native trade on any stall
+# longer than one bridge cycle (~10min), and payload["trade_id"] then already
+# carries the "edli:" prefix this function itself wrote. Unconditional
+# prepending compounded it ("edli:X" -> "edli:edli:X" -> ...), breaking
+# canonical_trade_fact_cte's (command_id, trade_id) stability invariant
+# (src/state/fill_dedup.py) and defeating _edli_canonical_trade_fact_already_
+# recorded's dedup match.
+# --------------------------------------------------------------------------- #
+
+def test_native_trade_id_gets_exactly_one_prefix(conn):
+    aggregate_id = _seed_confirmed_buy_no_aggregate(
+        conn,
+        aggregate_id="agg-edli-fact-native-trade-id-1",
+        fill_payload_extras=[{"trade_id": "native-venue-trade-abc"}],
+    )
+    _seed_venue_command_for_execution_command_id(
+        conn, command_id="cmd-fact-native", execution_command_id=EXECUTION_COMMAND_ID,
+    )
+
+    materialize_position_current_from_edli_fill(
+        conn, aggregate_id, now=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+    fact = conn.execute("SELECT trade_id FROM venue_trade_facts").fetchone()
+    assert fact["trade_id"] == "edli:native-venue-trade-abc"
+
+
+def test_already_prefixed_trade_id_is_not_double_prefixed(conn):
+    """A re-observed fill payload can already carry the "edli:" prefix (the
+    bridge's own prior canonical write fed back as if native) -- the prefix
+    must not compound."""
+    aggregate_id = _seed_confirmed_buy_no_aggregate(
+        conn,
+        aggregate_id="agg-edli-fact-reobserved-1",
+        fill_payload_extras=[{"trade_id": "edli:already-canonical-hash"}],
+    )
+    _seed_venue_command_for_execution_command_id(
+        conn, command_id="cmd-fact-reobserved", execution_command_id=EXECUTION_COMMAND_ID,
+    )
+
+    materialize_position_current_from_edli_fill(
+        conn, aggregate_id, now=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+    fact = conn.execute("SELECT trade_id FROM venue_trade_facts").fetchone()
+    assert fact["trade_id"] == "edli:already-canonical-hash"
+    assert not fact["trade_id"].startswith("edli:edli:")
+
+
+def test_self_reobserved_fill_after_stall_counts_once_not_double(conn):
+    """Regression: on a stall longer than one bridge cycle, a second
+    UserTradeObserved event can re-observe the SAME fill carrying its own
+    already-canonical trade_id in payload["trade_id"]. Idempotent prefixing
+    keeps that trade_id STABLE across observations, so the dedup check
+    collapses the re-observation into the SAME row instead of double-
+    counting the fill (the historical defect: 18 shares recorded vs 6 real,
+    via three trade_id variants for one fill)."""
+    aggregate_id = _seed_confirmed_buy_no_aggregate(
+        conn,
+        aggregate_id="agg-edli-fact-stall-reobserve-1",
+        fills=[(16.75, 0.42, 0.03)],
+    )
+    _seed_venue_command_for_execution_command_id(
+        conn, command_id="cmd-fact-stall", execution_command_id=EXECUTION_COMMAND_ID,
+    )
+
+    materialize_position_current_from_edli_fill(
+        conn, aggregate_id, now=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    first_rows = conn.execute("SELECT trade_id FROM venue_trade_facts").fetchall()
+    assert len(first_rows) == 1
+    canonical_trade_id = first_rows[0]["trade_id"]
+    assert canonical_trade_id.startswith("edli:")
+
+    # Simulate the stall: a second UserTradeObserved event re-observes the
+    # SAME fill, carrying the already-canonical trade_id as if it were the
+    # native venue trade_id.
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=4,
+        event_type="UserTradeObserved",
+        payload={
+            "event_id": EVENT_ID,
+            "final_intent_id": FINAL_INTENT_ID,
+            "trade_status": "CONFIRMED",
+            "fill_authority_state": "FILL_CONFIRMED",
+            "venue_order_id": VENUE_ORDER_ID,
+            "filled_size": 16.75,
+            "avg_fill_price": 0.42,
+            "fees": 0.03,
+            "trade_id": canonical_trade_id,
+        },
+        source_authority="user_channel",
+        occurred_at="2026-06-01T12:15:00+00:00",
+    )
+
+    materialize_position_current_from_edli_fill(
+        conn, aggregate_id, now=datetime(2026, 6, 1, 12, 20, tzinfo=timezone.utc),
+    )
+
+    rows = conn.execute("SELECT trade_id FROM venue_trade_facts").fetchall()
+    assert len(rows) == 1, "re-observation of the same fill must not double-count"
+    assert rows[0]["trade_id"] == canonical_trade_id
+    assert not rows[0]["trade_id"].startswith("edli:edli:")
+
+
 def test_bridge_relinks_venue_command_decision_id_to_canonical_position(conn):
     aggregate_id = _seed_confirmed_buy_no_aggregate(conn)
     conn.execute(
