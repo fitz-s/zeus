@@ -1317,8 +1317,12 @@ def test_scan_observation_instants_change_gate_suppresses_unchanged_extreme():
     assert len(first) == 2  # first-ever high+low
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 2
 
-    # Later import, SAME running extreme → available_at advances but the extreme did not.
-    _insert_observation_instant(conn, running_max=14.0, running_min=11.0, imported_at="2026-06-06T05:15:00+00:00")
+    # Later import of the SAME source report advances available_at only. The
+    # source-issued observation clock does not move, so this is a free no-op.
+    conn.execute(
+        "UPDATE observation_instants "
+        "SET imported_at='2026-06-06T05:15:00+00:00'"
+    )
     second = trigger.scan_observation_instants_rows(
         observation_conn=conn, settlement_semantics=FakeSettlementSemantics(14),
         decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc), received_at="2026-06-06T05:20:00+00:00",
@@ -1327,9 +1331,55 @@ def test_scan_observation_instants_change_gate_suppresses_unchanged_extreme():
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 2
 
 
+def test_scan_observation_instants_change_gate_emits_on_source_clock_advance():
+    """A genuinely newer station report changes remaining-window probability
+    even when both running extrema plateau."""
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    trigger = Day0ExtremeUpdatedTrigger(EventWriter(conn))
+
+    _insert_observation_instant(
+        conn,
+        running_max=14.0,
+        running_min=11.0,
+        imported_at="2026-06-06T04:15:00+00:00",
+    )
+    first = trigger.scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(14),
+        decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc),
+        received_at="2026-06-06T05:20:00+00:00",
+    )
+    assert len(first) == 2
+
+    _insert_observation_instant(
+        conn,
+        running_max=14.0,
+        running_min=11.0,
+        imported_at="2026-06-06T05:15:00+00:00",
+    )
+    second = trigger.scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(14),
+        decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc),
+        received_at="2026-06-06T05:20:00+00:00",
+    )
+
+    assert len(second) == 2
+    assert {
+        json.loads(
+            conn.execute(
+                "SELECT payload_json FROM opportunity_events WHERE event_id=?",
+                (result.event_id,),
+            ).fetchone()[0]
+        )["metric"]
+        for result in second
+    } == {"high", "low"}
+
+
 def test_scan_observation_instants_change_gate_emits_on_extreme_advance():
-    """The gate still emits when the running extreme ADVANCES: a higher running_max emits a
-    new 'high' event; the unchanged low is suppressed."""
+    """A newer report with a higher max refreshes both metric families: HIGH
+    carries the advanced bound and LOW carries the new trajectory clock."""
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     trigger = Day0ExtremeUpdatedTrigger(EventWriter(conn))
@@ -1345,9 +1395,18 @@ def test_scan_observation_instants_change_gate_emits_on_extreme_advance():
         observation_conn=conn, settlement_semantics=FakeSettlementSemantics(16),
         decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc), received_at="2026-06-06T05:20:00+00:00",
     )
-    assert len(second) == 1, "only the advanced high re-emits; the unchanged low is suppressed"
-    payloads = [r[0] for r in conn.execute("SELECT payload_json FROM opportunity_events").fetchall()]
-    assert sum('"high_so_far":16.0' in p for p in payloads) == 1
+    assert len(second) == 2
+    payloads = [
+        json.loads(row[0])
+        for row in conn.execute(
+            "SELECT payload_json FROM opportunity_events"
+        ).fetchall()
+    ]
+    assert sum(
+        payload["metric"] == "high"
+        and payload["high_so_far"] == pytest.approx(16.0)
+        for payload in payloads
+    ) == 1
 
 
 def test_day0_write_suppresses_recent_same_payload_no_value_refutation():

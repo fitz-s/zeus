@@ -21,6 +21,24 @@ DRAIN is the next canonical retry scan/global auction; RESET is a fresh submit
 or a newly justified HOLD. Runtime submit gates, venue-side unknown outcomes,
 price bands, liquidity waits, and active-order locks are unchanged.
 
+## 2026-07-26 Current-state redecision wake
+
+Publishing the current report restored fresh local monitor q, but the global
+capital auction still held the prior probability content. Statistical SELL is
+intentionally non-authoritative in the local monitor, so the exact new q could
+not act until a family event refreshed global holding coverage. The Day0
+trigger emitted only when a WU/Ogimet running extreme moved; a newer station
+report inside the old extrema changed trajectory probability without waking
+the auction.
+
+The existing Day0 source-clock gate now emits once when the source-issued
+observation time advances, matching its existing HKO plateau semantics. A
+mere later fetch/import of the same report remains suppressed, preserving the
+anti-firehose invariant. SCOPE is the exact city/date/station/metric family;
+DRAIN is the next admitted source report; RESET is committed event processing
+and a new exact global holding-coverage epoch. Local SELL does not bypass the
+global expected-log-capital comparison.
+
 ## 2026-07-26 Native hourly publication-ledger continuity
 
 After canonical `temp_current` became available, held-position redecision still
