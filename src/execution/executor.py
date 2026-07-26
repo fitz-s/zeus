@@ -897,7 +897,7 @@ def _current_band_taker_quality_proof_valid(
     selection_authority_applied: Any,
     qkernel_execution_economics: Any,
 ) -> bool:
-    """Bind the fixed-threshold exception to the sealed current-band economics."""
+    """Bind taker quality to the sealed current-state action probability."""
 
     from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
 
@@ -905,6 +905,12 @@ def _current_band_taker_quality_proof_valid(
         return False
     economics = qkernel_execution_economics
     basis = "CURRENT_POSTERIOR_BAND"
+    mean_basis = "CURRENT_POSTERIOR_PREDICTIVE_MEAN"
+    mean_action = bool(
+        economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+        and qkernel_global_current_state_rejection_reason(economics) is None
+    )
     sample_hash = str(economics.get("sample_hash") or "").strip()
     try:
         n_draws = int(economics.get("selection_guard_n") or 0)
@@ -912,7 +918,7 @@ def _current_band_taker_quality_proof_valid(
         economics_q_lcb = Decimal(str(economics.get("payoff_q_lcb")))
     except (ArithmeticError, TypeError, ValueError):
         return False
-    return (
+    common = (
         str(selection_authority_applied or "").strip() == "qkernel_spine"
         and str(economics.get("source") or "").strip() == "qkernel_spine"
         and bool(str(economics.get("decision_id") or "").strip())
@@ -921,21 +927,42 @@ def _current_band_taker_quality_proof_valid(
         and str(economics.get("current_state_identity_hash") or "").strip()
         == qkernel_current_state_identity_hash(economics)
         and str(economics.get("q_lcb_guard_basis") or "").strip() == basis
-        and str(economics.get("selection_guard_basis") or "").strip() == basis
         and economics.get("q_lcb_guard_abstained") is False
         and economics.get("selection_guard_abstained") is False
         and bool(sample_hash)
         and str(economics.get("q_lcb_guard_cell_key") or "").strip() == sample_hash
         and str(economics.get("selection_guard_cell_key") or "").strip() == sample_hash
         and n_draws >= 2
-        and str(taker_quality_proof.get("passed_basis") or "").strip()
-        == "current_posterior_band_after_cost"
         and str(taker_quality_proof.get("q_exec_lcb_basis") or "").strip() == basis
         and str(taker_quality_proof.get("q_lcb_source") or "").strip()
         == "qkernel_execution_economics.payoff_q_lcb"
         and proof_q_lcb.is_finite()
         and economics_q_lcb.is_finite()
         and proof_q_lcb == economics_q_lcb
+    )
+    if not common:
+        return False
+    if mean_action:
+        try:
+            proof_q_mean = Decimal(str(taker_quality_proof.get("q_exec_mean")))
+            economics_q_point = Decimal(str(economics.get("payoff_q_point")))
+        except (ArithmeticError, TypeError, ValueError):
+            return False
+        return bool(
+            str(economics.get("selection_guard_basis") or "").strip()
+            == mean_basis
+            and str(taker_quality_proof.get("passed_basis") or "").strip()
+            == "current_posterior_predictive_mean_after_cost"
+            and str(taker_quality_proof.get("q_exec_mean_basis") or "").strip()
+            == "POSTERIOR_PREDICTIVE_MEAN"
+            and proof_q_mean.is_finite()
+            and economics_q_point.is_finite()
+            and proof_q_mean == economics_q_point
+        )
+    return bool(
+        str(economics.get("selection_guard_basis") or "").strip() == basis
+        and str(taker_quality_proof.get("passed_basis") or "").strip()
+        == "current_posterior_band_after_cost"
     )
 
 

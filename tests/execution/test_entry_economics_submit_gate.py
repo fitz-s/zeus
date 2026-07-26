@@ -18,6 +18,7 @@ from src.engine.event_bound_final_intent import conservative_submit_expected_edg
 from src.execution.executor import (
     _actionable_certificate_intent_mismatch_reason,
     _entry_economics_component,
+    _entry_taker_quality_component,
     _global_limit_edge_bound_authorized,
 )
 
@@ -1259,6 +1260,27 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
         q_live=0.70,
         q_lcb=0.35,
     )
+    taker_quality = _entry_taker_quality_component(
+        effective_order_type="FAK",
+        post_only=False,
+        taker_quality_proof={
+            "passed": True,
+            "passed_basis": "current_posterior_predictive_mean_after_cost",
+            "q_exec_lcb": "0.35",
+            "q_exec_lcb_basis": "CURRENT_POSTERIOR_BAND",
+            "q_exec_mean": "0.70",
+            "q_exec_mean_basis": "POSTERIOR_PREDICTIVE_MEAN",
+            "q_lcb_source": "qkernel_execution_economics.payoff_q_lcb",
+            "taker_fee_adjusted_edge": "0.28",
+            "taker_expected_profit_usd": "1.40",
+            "maker_expected_profit_usd": "0",
+            "incremental_expected_profit_usd": "1.40",
+            "model_confidence": "0.65",
+        },
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics=economics,
+    )
+    assert taker_quality["allowed"] is True
 
 
 @pytest.mark.parametrize(
