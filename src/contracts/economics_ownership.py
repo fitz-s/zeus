@@ -18,13 +18,23 @@ clobber twin):
     exit_price, settlement_price — all CHAIN-DERIVABLE per the excision plan's
     disease test (a copy of, or a deterministic function over, chain-knowable fills/
     balances/payouts + Zeus order attribution).
-  - ``edli_live_profit_audit``: pnl_usd, realized_edge, edge_value_usd,
-    settlement_outcome, promotion_eligible — the "new disease surface" (census
-    精化 #2): a second local P&L clobber twin of position_current's, written by
-    settlement grading (src/analysis/settlement_skill_attribution.py) and
-    src/events/live_profit_audit.py. Round-2 delta verdict: logical excision here
-    (LX-T3, stop writing/treating as authority), physical table retirement stays R7
-    (rehome the certificate/evidence links first).
+  - ``edli_live_profit_audit``: pnl_usd, settlement_outcome — the "new disease
+    surface" (census 精化 #2): a second local P&L clobber twin of
+    position_current's. Round-2 delta verdict: logical excision here (LX-T3, stop
+    writing/treating as authority), physical table retirement stays R7 (rehome
+    the certificate/evidence links first). LOGICAL EXCISION IS COMPLETE as of
+    2026-07-26: settlement grading stopped writing them at fe5afb2d2, and
+    live_profit_audit.py no longer names them in its INSERT at all, so no writer
+    can reach them. They remain listed because the physical columns still hold
+    the 99-row pre-excision corpus and must stay unwritable until R7 rehomes it.
+
+    Three former members of this set are gone rather than frozen (2026-07-26):
+    ``realized_edge``/``edge_value_usd`` were never P&L — they carry no
+    settlement term — so they were renamed to ``fill_alpha_gap``/
+    ``fill_alpha_gap_usd`` (execution quality: our q vs the price we paid) and
+    left OUT of this set; ``promotion_eligible`` was renamed to
+    ``learning_eligible`` at fe5afb2d2 and the column is now dropped with the
+    belief-confirming learning gate that computed it.
 
 The inventory is descriptive input for static analysis; live write authority remains
 with the canonical executable paths and their current invariants.
@@ -104,22 +114,9 @@ FORBIDDEN_ECONOMICS_COLUMNS: tuple[ForbiddenEconomicsColumn, ...] = (
         "not chain-realized wallet P&L; misnamed authority per round-2 delta.",
     ),
     ForbiddenEconomicsColumn(
-        "edli_live_profit_audit", "realized_edge",
-        "Execution-quality metric (decision q vs fill price) computed at "
-        "settlement time; legitimate analytical value, wrong mutable home.",
-    ),
-    ForbiddenEconomicsColumn(
-        "edli_live_profit_audit", "edge_value_usd",
-        "realized_edge * filled_size — same mutable-home defect as realized_edge.",
-    ),
-    ForbiddenEconomicsColumn(
         "edli_live_profit_audit", "settlement_outcome",
         "WU/world grade outcome written into a mutable audit row — belongs in "
         "a versioned, append-only settlement_learning_receipt (round-2 delta).",
-    ),
-    ForbiddenEconomicsColumn(
-        "edli_live_profit_audit", "promotion_eligible",
-        "Derived from the mutable columns above; inherits their clobber risk.",
     ),
 )
 

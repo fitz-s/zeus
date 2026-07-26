@@ -1463,16 +1463,26 @@ tables:
       - {name: avg_fill_price, type: REAL, nullable: true}
       - {name: filled_size, type: REAL, nullable: true}
       - {name: fees, type: REAL, nullable: true}
-      - {name: post_fill_mark, type: REAL, nullable: true}
+      - {name: fill_alpha_gap, type: REAL, nullable: true}
+      - {name: fill_alpha_gap_usd, type: REAL, nullable: true}
       - {name: settlement_outcome, type: TEXT, nullable: true}
-      - {name: realized_edge, type: REAL, nullable: true}
       - {name: pnl_usd, type: REAL, nullable: true}
       - {name: reject_reason, type: TEXT, nullable: true}
       - {name: created_at, type: TEXT, nullable: false}
       - {name: schema_version, type: INTEGER, nullable: false}
     notes: >
-      Event-bound EDLI live realized-edge audit projection. Used by promotion
-      gates to block scaleout when probe lifecycle or economics are not proven.
+      Event-bound EDLI live order audit projection: ex-ante decision economics
+      (q_live, q_lcb_5pct, expected_edge, kelly_size_usd — all stamped from the
+      frozen ActionableTradeCertificate) against the execution facts of the same
+      order (fill price, size, fees). fill_alpha_gap = q_live - fill price - fee
+      per share is EXECUTION QUALITY, not P&L and not proof the belief was right;
+      it carries no settlement term. Settlement grading lives in
+      settlement_attribution. settlement_outcome/pnl_usd are frozen legacy: no
+      writer names them since fe5afb2d2; they hold the 99-row pre-excision corpus
+      until R7 rehomes it. Retired 2026-07-26: learning_eligible (a learning gate
+      that graded a fill against our own belief and had no consumer),
+      live_cap_notional and post_fill_mark (0/5368 non-null — no writer ever
+      passed them, no event or certificate carries them).
 
   - name: edli_live_profit_audit_supersessions
     db: world
