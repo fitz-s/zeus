@@ -9590,6 +9590,7 @@ def test_global_current_state_mean_buy_uses_current_point_and_keeps_lcb_as_evide
         current,
         probability_payload={
             "_edli_q_source": "day0_remaining_day",
+            "_edli_day0_remaining_models": 15,
             "direction": "buy_yes",
             "q_live": current["payoff_q_point"],
             "q_lcb_5pct": current["payoff_q_lcb"],
