@@ -104,7 +104,8 @@ def _tokyo():
 
 
 def _wellington():
-    # UNMEASURED city -> default_guess threshold (C: 1.0)... use an F default city
+    # UNMEASURED city (no wu_metar_divergence.json entry) -> excluded from
+    # the METAR hard-fact lane entirely (2026-07-26 default-direction fix).
     return SimpleNamespace(
         name="Wellington", timezone="Pacific/Auckland", settlement_unit="C",
         wu_station="NZWN", settlement_source_type="wu_icao",
@@ -1096,25 +1097,25 @@ class TestSourceDiscipline:
         assert effective == pytest.approx(26.0)
         assert source == "same_station_fast_tail"
 
-    def test_metar_kill_at_unmeasured_city_carries_default_margin(self, monkeypatch):
-        """default_guess city: the METAR extreme is shifted by the conservative
-        threshold before it can kill — 26 at a C-default (1.0) city is
-        effectively 25 (cannot kill the 25 bin); 27 effectively 26 (kills)."""
+    def test_metar_kill_at_unmeasured_city_is_excluded_not_default_margin(self, monkeypatch):
+        """2026-07-26 (Shenzhen class, day0 defect-6): an UNMEASURED city (no
+        wu_metar_divergence.json entry -- Wellington here) is no longer given
+        the conservative default margin and allowed to kill; it is excluded
+        from the METAR hard-fact lane entirely (R15: "METAR kills only at
+        settlement-faithful cities with the empirical-divergence margin" --
+        Wellington has neither). With no WU-side signal (autouse fixture)
+        and no METAR-driven source, effective_extreme stays None regardless
+        of the METAR memo value, so no verdict can fire off it."""
         _set_metar_memo(monkeypatch, 26)
-        effective, _ = settlement_grade_effective_extreme(
+        effective, source = settlement_grade_effective_extreme(
             city=_wellington(), target_date="2026-06-10", metric="high", now=NOW,
         )
-        assert effective == pytest.approx(25.0)
-        v = hard_fact_bin_verdict(
-            metric="high", direction="buy_yes", bin_low=25.0, bin_high=25.0,
-            effective_extreme=effective,
-        )
-        assert v is None  # not beyond the edge after the margin
+        assert effective is None and source == ""
         _set_metar_memo(monkeypatch, 27)
-        effective, _ = settlement_grade_effective_extreme(
+        effective, source = settlement_grade_effective_extreme(
             city=_wellington(), target_date="2026-06-10", metric="high", now=NOW,
         )
-        assert effective == pytest.approx(26.0)
+        assert effective is None and source == ""
 
     def test_non_wu_city_cannot_consume_fast_lane_kill_memo(self, monkeypatch):
         _set_metar_memo(monkeypatch, 34)

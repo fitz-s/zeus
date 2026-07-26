@@ -1173,6 +1173,10 @@ class TestEmpiricalThresholds:
         assert threshold_f == pytest.approx(DIVERGENCE_THRESHOLD["F"])
 
     def test_missing_model_file_degrades_to_defaults(self, tmp_path):
+        """2026-07-26 (Shenzhen class): a missing/unreadable model file means
+        EVERY city is unmeasured for this call — the conservative direction,
+        not a blanket faithful assumption. See test_settlement_faithfulness_
+        verdicts for the measured-city cases."""
         from src.data.day0_oracle_anomaly import (
             DIVERGENCE_THRESHOLD,
             city_metar_settlement_faithful,
@@ -1183,7 +1187,7 @@ class TestEmpiricalThresholds:
         threshold, provenance = divergence_threshold_for_city("Tokyo", "C", path=bogus)
         assert provenance == "default_guess"
         assert threshold == pytest.approx(DIVERGENCE_THRESHOLD["C"])
-        assert city_metar_settlement_faithful("Seoul", path=bogus) is True
+        assert city_metar_settlement_faithful("Seoul", path=bogus) is False
 
     def test_settlement_faithfulness_verdicts(self):
         from src.data.day0_oracle_anomaly import city_metar_settlement_faithful
@@ -1191,7 +1195,10 @@ class TestEmpiricalThresholds:
         assert city_metar_settlement_faithful("Seoul") is False   # measured divergence
         assert city_metar_settlement_faithful("Tokyo") is True
         assert city_metar_settlement_faithful("NYC") is True
-        assert city_metar_settlement_faithful("UnmeasuredCity") is True
+        # 2026-07-26 (Shenzhen class): a city with NO entry at all is no
+        # longer assumed faithful — an unmeasured city carries LESS evidence
+        # than a measured-thin sample, not more trust than one.
+        assert city_metar_settlement_faithful("UnmeasuredCity") is False
 
     def test_unfaithful_but_well_measured_city_gets_margin_absorbed_not_excluded(self):
         """2026-07-16 (day0 defect-5): Seoul's METAR integer is not reliably
@@ -1334,20 +1341,59 @@ class TestMetarMarginAbsorption:
         }))
         assert metar_margin_units_for_city("ThinCity", "C", path=path) is None
 
-    def test_never_measured_city_keeps_current_default_guess_margin(self):
-        """A city with NO entry at all in wu_metar_divergence.json defaults
-        to settlement_faithful=True (the guard threshold still covers it),
-        so it is INCLUDED — not excluded — exactly as it is today. Its
-        margin is the conservative DEFAULT_GUESS threshold (1.0C / 1.5F,
-        provenance='default_guess'), not 0.0 — this is the pre-existing
-        behavior this fix preserves unchanged (the OLD
-        _metar_kill_margin_units gave unmeasured faithful cities this same
-        non-zero margin; only an EMPIRICALLY byte-identical measured city
-        gets margin 0.0)."""
+    def test_never_measured_city_is_now_excluded_not_default_margin(self):
+        """2026-07-26 (Shenzhen class, day0 defect-6): a city with NO entry at
+        all in wu_metar_divergence.json used to default to
+        settlement_faithful=True and get the generic 1.0C/1.5F margin —
+        Shenzhen ran on that default against a live measured p99=4.0C/
+        max=11.0C divergence (83% of hours disagreeing >=1C). Absence of a
+        measurement is now excluded (None), the SAME bucket as a
+        measured-but-thin-sample city — not defaulted to the faithful
+        bucket. Only a MEASURED city (empirical or default-guess threshold on
+        record) keeps a non-None margin."""
         from src.data.day0_oracle_anomaly import metar_margin_units_for_city
 
-        assert metar_margin_units_for_city("CityNeverMeasured", "C") == pytest.approx(1.0)
-        assert metar_margin_units_for_city("CityNeverMeasured", "F") == pytest.approx(1.5)
+        assert metar_margin_units_for_city("CityNeverMeasured", "C") is None
+        assert metar_margin_units_for_city("CityNeverMeasured", "F") is None
+
+    def test_shenzhen_class_large_real_divergence_not_treated_faithful(self, tmp_path):
+        """Antibody: a city with a large REAL divergence (Shenzhen decisive
+        test: median|delta|=1.0C, p99=4.0C, max=11.0C, disagree>=1C=83%) must
+        not be treated as settlement-faithful merely because it lacks a
+        wu_metar_divergence.json entry. Absence of measurement is not
+        evidence of faithfulness."""
+        from src.data.day0_oracle_anomaly import (
+            city_metar_settlement_faithful,
+            metar_margin_units_for_city,
+        )
+
+        path = tmp_path / "divergence.json"
+        path.write_text(json.dumps({"cities": {}}))
+        assert city_metar_settlement_faithful("Shenzhen", path=path) is False
+        assert metar_margin_units_for_city("Shenzhen", "C", path=path) is None
+
+    def test_all_22_measured_cities_margin_unchanged(self):
+        """Regression: the (b) default-direction fix changes behavior for
+        UNMEASURED cities only. Every already-measured city in the real
+        config/wu_metar_divergence.json (no path override) must keep its
+        pre-fix margin byte-identical, including Seoul (measured-unfaithful,
+        adequate sample -> absorbed at its measured 2.0C, not excluded)."""
+        from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+
+        f_cities = {
+            "NYC", "Chicago", "Miami", "Dallas", "Denver", "Atlanta",
+            "Los Angeles", "Houston", "Austin", "San Francisco", "Seattle",
+        }
+        expected_margin = {name: 0.0 for name in (
+            f_cities | {
+                "London", "Paris", "Amsterdam", "Milan", "Munich", "Madrid",
+                "Tokyo", "Singapore", "Taipei", "Toronto",
+            }
+        )}
+        expected_margin["Seoul"] = 2.0
+        for city_name, margin in expected_margin.items():
+            unit = "F" if city_name in f_cities else "C"
+            assert metar_margin_units_for_city(city_name, unit) == pytest.approx(margin), city_name
 
 
 # ===========================================================================
@@ -2970,9 +3016,17 @@ class TestAnomalyFreshnessGates:
         assert prefetch.freshness_status == "fresh_fetch"
         assert calls == ["Tokyo"]
 
-    def test_cached_anomaly_checks_rotate_without_another_metar_fetch(self):
+    def test_cached_anomaly_checks_rotate_without_another_metar_fetch(self, monkeypatch):
         from src.data.day0_fast_obs import Day0FastObsEmitter
 
+        # Fixture cities share Tokyo's real station under fictitious names
+        # (Tokyo-B, ...) to test rotation/caching, not per-city faithfulness
+        # -- stub the (b) fail-closed unmeasured-city lookup so these
+        # synthetic names still resolve a fast-lane source (2026-07-26).
+        monkeypatch.setattr(
+            "src.data.day0_oracle_anomaly.metar_margin_units_for_city",
+            lambda *_a, **_k: 0.0,
+        )
         t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
         tokyo = _tokyo()
         tokyo_b = SimpleNamespace(
@@ -3004,9 +3058,15 @@ class TestAnomalyFreshnessGates:
         assert fetches["n"] == 1
         assert checked == ["Tokyo", "Tokyo-B"]
 
-    def test_cached_anomaly_check_prioritizes_flag_without_starving_rotation(self):
+    def test_cached_anomaly_check_prioritizes_flag_without_starving_rotation(self, monkeypatch):
         from src.data.day0_fast_obs import Day0FastObsEmitter
 
+        # See test_cached_anomaly_checks_rotate_without_another_metar_fetch:
+        # fictitious per-station city names must still resolve a source.
+        monkeypatch.setattr(
+            "src.data.day0_oracle_anomaly.metar_margin_units_for_city",
+            lambda *_a, **_k: 0.0,
+        )
         t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
         tokyo = _tokyo()
         tokyo_b = SimpleNamespace(
@@ -3042,9 +3102,15 @@ class TestAnomalyFreshnessGates:
 
         assert checked == ["Tokyo-C", "Tokyo", "Tokyo-C", "Tokyo-B"]
 
-    def test_cached_anomaly_priority_rotates_with_bounded_api_budget(self):
+    def test_cached_anomaly_priority_rotates_with_bounded_api_budget(self, monkeypatch):
         from src.data.day0_fast_obs import Day0FastObsEmitter
 
+        # See test_cached_anomaly_checks_rotate_without_another_metar_fetch:
+        # fictitious per-station city names must still resolve a source.
+        monkeypatch.setattr(
+            "src.data.day0_oracle_anomaly.metar_margin_units_for_city",
+            lambda *_a, **_k: 0.0,
+        )
         t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
         tokyo = _tokyo()
         cities = [

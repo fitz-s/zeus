@@ -87,7 +87,11 @@ def _insert_settlement(path: Path, rows: list[tuple]) -> None:
 
 
 def _fixture_city() -> City:
-    # Unmeasured city name -> faithfulness gate defaults True -> fast-eligible.
+    # Synthetic test-only city name -- never in wu_metar_divergence.json, so
+    # (2026-07-26 default-direction fix) it is excluded from the fast lane by
+    # default. This suite tests undercapture RECONSTRUCTION, not the
+    # faithfulness gate, so the autouse fixture below stubs the margin lookup
+    # to keep Testville fast-eligible.
     return City(
         name="Testville",
         lat=41.0,
@@ -97,6 +101,14 @@ def _fixture_city() -> City:
         cluster="test",
         wu_station="KTST",
         settlement_source_type="wu_icao",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _fast_eligible_testville(monkeypatch):
+    monkeypatch.setattr(
+        "src.data.day0_oracle_anomaly.metar_margin_units_for_city",
+        lambda *_a, **_k: 0.0,
     )
 
 

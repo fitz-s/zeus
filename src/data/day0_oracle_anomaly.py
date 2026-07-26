@@ -146,11 +146,22 @@ def city_metar_settlement_faithful(city_name: str, *, path: "Optional[Path]" = N
     layer up). This function still reports the raw faithfulness verdict —
     callers that need the emission/kill decision should use
     ``metar_margin_units_for_city`` instead of this boolean directly.
-    Unmeasured cities default to True (the guard threshold still covers them)."""
+
+    2026-07-26 (Shenzhen class): an UNMEASURED city now defaults to False, not
+    True. Pre-fix, absence of a measurement read as "faithful" and got the
+    generic 1.0C/1.5F default margin via metar_margin_units_for_city — Shenzhen
+    ran on that default against a live same-hour-matched divergence of
+    median|delta|=1.0C, p99=4.0C, max=11.0C, 83% of hours disagreeing >=1C
+    (22 of 49 live wu_icao cities had ever been measured; zero mainland
+    Chinese cities among them). "Unmeasured" carries STRICTLY LESS evidence
+    than a measured-but-thin sample (which already excludes below); treating
+    it as more trustworthy than thin data was the fail-open bug. No entry is
+    now the SAME evidentiary state as a thin/absent divergence measurement,
+    not the same as a confirmed-faithful one."""
     entry = _load_divergence_model(path).get("cities", {}).get(str(city_name)) or {}
     verdict = entry.get("settlement_faithful")
     if verdict is None:
-        return True
+        return False
     return bool(verdict)
 
 
@@ -165,23 +176,28 @@ def metar_margin_units_for_city(
     the exit lane's hard-fact kill margin (day0_hard_fact_exit.py
     ``_metar_kill_margin_units``) — one margin mechanism, not two.
 
-    - Settlement-faithful (True, or unmeasured — the guard threshold still
-      covers unmeasured cities): 0.0 for an empirically-measured
-      byte-identical station (threshold already at the 1.0 floor — the
-      quantum is already consumed by strict boundary crossing), else the
-      measured/default threshold itself (unmeasured or measured-but-wider
-      faithful stations still carry their own conservative margin).
-    - NOT faithful, but the divergence was measured with an adequate sample
-      (threshold_provenance == 'empirical', >=100 matched pairs — Seoul/RKSI
-      class): the measured empirical_threshold. A reading still enters the
-      running belief, shifted toward the absorbing direction (HIGH: reading
-      - margin; LOW: reading + margin) so a METAR-only value must clear the
-      measured divergence allowance before it counts — absorb, don't exclude.
-    - NOT faithful and the divergence measurement itself is thin or absent
-      (threshold_provenance in {'thin_sample', 'no_data'}, or no comparable
-      pairs at all): None. There is not enough evidence to trust even a
-      margin-adjusted inclusion — stays excluded, same as an unfaithful city
-      does today.
+    - Measured settlement-faithful (settlement_faithful == True on record):
+      0.0 for an empirically-measured byte-identical station (threshold
+      already at the 1.0 floor — the quantum is already consumed by strict
+      boundary crossing), else the measured threshold itself (a
+      measured-but-wider faithful station still carries its own conservative
+      margin).
+    - Measured NOT faithful, but the divergence was measured with an adequate
+      sample (threshold_provenance == 'empirical', >=100 matched pairs —
+      Seoul/RKSI class): the measured empirical_threshold. A reading still
+      enters the running belief, shifted toward the absorbing direction
+      (HIGH: reading - margin; LOW: reading + margin) so a METAR-only value
+      must clear the measured divergence allowance before it counts — absorb,
+      don't exclude.
+    - NOT faithful — because the divergence measurement itself is thin or
+      absent (threshold_provenance in {'thin_sample', 'no_data'}), OR because
+      the city has NEVER been measured at all: None. Absence of a measurement
+      is not weaker evidence than a thin sample, it is less evidence still —
+      city_metar_settlement_faithful now returns False by default for an
+      unmeasured city (2026-07-26, Shenzhen class), landing it in this same
+      excluded bucket rather than the faithful/default-margin bucket it used
+      to fall into. There is not enough evidence to trust even a
+      margin-adjusted inclusion — stays excluded.
     """
     threshold, provenance = divergence_threshold_for_city(city_name, unit, path=path)
     if city_metar_settlement_faithful(city_name, path=path):
