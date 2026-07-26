@@ -15980,11 +15980,17 @@ def _fresh_rest_then_cross_mode(
         and str(economics.get("global_execution_mode") or "").strip().upper()
         == "TAKER_LIMIT"
     ):
-        payoff_q_lcb = _optional_float(economics.get("payoff_q_lcb"))
+        mean_action = (
+            economics.get("global_probability_functional")
+            == "POSTERIOR_PREDICTIVE_MEAN"
+        )
+        admissible_cost = _optional_float(
+            economics.get("cost" if mean_action else "payoff_q_lcb")
+        )
         if (
-            payoff_q_lcb is None
+            admissible_cost is None
             or taker_all_in is None
-            or taker_all_in > payoff_q_lcb + 1e-12
+            or taker_all_in > admissible_cost + 1e-12
             or not _positive_global_current_objective(economics)
         ):
             return "NO_TRADE"

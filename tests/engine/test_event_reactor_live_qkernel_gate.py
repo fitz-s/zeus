@@ -2034,6 +2034,50 @@ def test_global_taker_action_fresh_revalidation_never_downgrades_to_maker():
     ) == "NO_TRADE"
 
 
+def test_global_mean_taker_accepts_only_price_improvement_over_certified_cost():
+    cert = dict(
+        _global_current_qkernel_cert(side="NO"),
+        payoff_q_point=0.8693666666666666,
+        payoff_q_lcb=0.113835,
+        cost=0.306513671875,
+        edge_lcb=-0.192678671875,
+        false_edge_rate=0.05,
+        selection_guard_basis="CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+        selection_guard_q_safe=0.8693666666666666,
+        global_probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        global_expected_delta_log_wealth=0.005737777292424163,
+        global_expected_ev_usd=7.204518333333333,
+    )
+    _seal_current_qkernel_cert(cert)
+    actionable = {
+        "direction": "buy_no",
+        "q_lcb_5pct": cert["payoff_q_lcb"],
+        "c_fee_adjusted": cert["cost"],
+        "rest_then_cross_policy": "GLOBAL_TAKER_LIMIT",
+        "qkernel_execution_economics": cert,
+    }
+    snapshot = SimpleNamespace(payload={})
+    at = datetime(2026, 7, 26, 7, 18, tzinfo=timezone.utc)
+
+    assert era._fresh_rest_then_cross_mode(
+        actionable_payload=actionable,
+        executable_snapshot=snapshot,
+        fresh_best_bid=0.26,
+        fresh_best_ask=0.29,
+        tick_size=0.01,
+        decision_time=at,
+    ) == "TAKER"
+
+    assert era._fresh_rest_then_cross_mode(
+        actionable_payload=actionable,
+        executable_snapshot=snapshot,
+        fresh_best_bid=0.26,
+        fresh_best_ask=0.30,
+        tick_size=0.01,
+        decision_time=at,
+    ) == "NO_TRADE"
+
+
 def test_global_current_fresh_mode_does_not_reapply_selection_curse():
     cert = _global_current_qkernel_cert(side="NO")
 
