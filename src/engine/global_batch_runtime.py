@@ -2612,7 +2612,10 @@ def _selection_epoch_identity(
     digest = hashlib.sha256()
     rows = (
         ("cut_at", full_scope.captured_at_utc.isoformat()),
-        ("full_scope", full_scope.scope_identity),
+        (
+            "full_scope",
+            _accounted_scope_identity(full_scope, ineligible_by_family),
+        ),
         (
             "eligible_scope",
             eligible_scope.scope_identity if eligible_scope is not None else "NONE",
@@ -2621,7 +2624,7 @@ def _selection_epoch_identity(
     for row in rows:
         digest.update(repr(row).encode("utf-8"))
         digest.update(b"\x1f")
-    for family_key in full_scope.family_keys:
+    for family_key in sorted(set(full_scope.family_keys).union(ineligible_by_family)):
         witness = probability_witnesses.get(family_key)
         row = (
             family_key,
@@ -2633,6 +2636,29 @@ def _selection_epoch_identity(
         if witness is None and not row[-1]:
             raise ValueError("GLOBAL_SELECTION_EPOCH_FAMILY_UNACCOUNTED")
         digest.update(repr(row).encode("utf-8"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
+def _accounted_scope_identity(
+    scope: CurrentGlobalAuctionScope,
+    ineligible_by_family: Mapping[str, str],
+) -> str:
+    """Bind held-family q outages without pretending they had a q carrier."""
+
+    missing = tuple(sorted(set(ineligible_by_family).difference(scope.family_keys)))
+    if not missing:
+        return scope.scope_identity
+    digest = hashlib.sha256()
+    digest.update(
+        repr(("probability_ready_scope", scope.scope_identity)).encode("utf-8")
+    )
+    digest.update(b"\x1f")
+    for family_key in missing:
+        reason = str(ineligible_by_family.get(family_key) or "").strip()
+        if not reason:
+            raise ValueError("GLOBAL_ACCOUNTED_SCOPE_EXCLUSION_REASON_MISSING")
+        digest.update(repr((family_key, reason)).encode("utf-8"))
         digest.update(b"\x1f")
     return digest.hexdigest()
 
@@ -3240,12 +3266,14 @@ def process_current_global_batch(
                 for event in event_tuple
             )
         )
+        missing_held_families: list[tuple[str, str, str]] = []
         try:
             full_scope = scan_current_global_auction_scope(
                 world_conn=world_conn,
                 forecasts_conn=forecast_conn,
                 decision_at_utc=scope_at,
                 held_families=held_families,
+                missing_held_families=missing_held_families,
                 restrict_to_families=(restricted_families or None),
                 day0_only=day0_only_scope,
                 cancelled=selection_cancelled,
@@ -3427,7 +3455,17 @@ def process_current_global_batch(
             obligation.family_key for obligation in holding_obligations
         }
         full_scope_event_by_family = dict(decision_scope.events_by_family)
-        ineligible_by_family: dict[str, str] = {}
+        ineligible_by_family: dict[str, str] = {
+            weather_family_id(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+            ): (
+                "GLOBAL_HELD_FAMILY_PROBABILITY_CARRIER_MISSING:"
+                f"{city}|{target_date}|{metric}"
+            )
+            for city, target_date, metric in missing_held_families
+        }
         ineligible_by_event: dict[str, str] = {}
         for family_key, scope_event in decision_scope.events_by_family:
             if cancelled(f"prepare_family:{family_key}"):
@@ -3749,8 +3787,17 @@ def process_current_global_batch(
                 probability_manifest=_probability_manifest(
                     attempt_probabilities
                 ),
-                full_scope_identity=decision_scope.scope_identity,
-                full_scope_family_keys=decision_scope.family_keys,
+                full_scope_identity=_accounted_scope_identity(
+                    decision_scope,
+                    ineligible_by_family,
+                ),
+                full_scope_family_keys=tuple(
+                    sorted(
+                        set(decision_scope.family_keys).union(
+                            ineligible_by_family
+                        )
+                    )
+                ),
                 probability_ineligible_by_family=ineligible_by_family,
                 buy_disabled_reason_by_family=held_only_buy_disabled_reasons,
                 book_epoch_identity=venue_identity,

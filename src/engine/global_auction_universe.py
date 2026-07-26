@@ -2147,6 +2147,7 @@ def scan_current_global_auction_scope(
     forecasts_conn: sqlite3.Connection,
     decision_at_utc: datetime,
     held_families: Sequence[tuple[str, str, str]] = (),
+    missing_held_families: list[tuple[str, str, str]] | None = None,
     restrict_to_families: Sequence[tuple[str, str, str]] | None = None,
     day0_only: bool = False,
     cancelled: Callable[[], bool] | None = None,
@@ -2299,10 +2300,12 @@ def scan_current_global_auction_scope(
     covered = {_event_family(event) for event in events}
     missing = sorted(set(scope_held) - covered)
     if missing:
-        detail = ",".join("|".join(family) for family in missing)
-        raise ValueError(
-            f"GLOBAL_HELD_FAMILY_PROBABILITY_CARRIER_MISSING:{detail}"
-        )
+        if missing_held_families is None:
+            detail = ",".join("|".join(family) for family in missing)
+            raise ValueError(
+                f"GLOBAL_HELD_FAMILY_PROBABILITY_CARRIER_MISSING:{detail}"
+            )
+        missing_held_families.extend(missing)
     return current_global_auction_scope_from_events(
         events,
         captured_at_utc=decision_at_utc,
