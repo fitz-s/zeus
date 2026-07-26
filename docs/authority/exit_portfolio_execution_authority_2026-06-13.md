@@ -2,6 +2,17 @@
 
 Status: ACTIVE
 
+## ERRATUM (2026-07-25, operator first-principles correction)
+
+The 2026-07-24 Day0 fixed-action rule applies to every non-deterministic
+statistical SELL. With an exact current probability witness, Day0 and non-Day0
+SELL use posterior-predictive-mean expected log wealth and EV, with the same
+witness, holding, wealth, and executable book reproduced at submit. Posterior
+parameter tails cannot alter a fixed action's expectation because E2 is linear
+in q. Until an explicit transition-aware continuation model exists, the live
+rule is myopic; lower-CVaR parameter tails must not masquerade as future-
+information option value.
+
 ## ERRATUM (2026-07-24, operator first-principles correction)
 
 Temporal maturity qualifies an absorbing Day0 observation; it is not permission

@@ -59,11 +59,14 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   native entry-price floor removes unlicensed longshots from the feasible set. Inside that set,
   admission is `q_lcb > fee-inclusive executable cost` plus positive robust delta-log wealth and
   EV, never a price-independent `q > 0.5` wall; the terminal median follows the probability branch.
-  A reduce-only SELL is scored against HOLD instead. Non-Day0 SELL retains the
-  lower-CVaR action gate until future-information option value has an explicit
-  model. Day0 statistical SELL first requires a current maturity authority bound
-  to its probability witness; once mature, fixed-action size and every FAK prefix
-  use posterior-mean expected log-growth and EV. Mean economics live only in
+  A reduce-only SELL is scored against HOLD instead. Every statistical SELL uses
+  posterior-mean expected log-growth and EV for its fixed-action size and every
+  FAK prefix. Day0 statistical SELL additionally carries current temporal
+  authority bound to its probability witness; maturity may upgrade that evidence
+  to an absorbing fact but does not choose the statistical functional. Future-
+  information option value requires an explicit transition model and must not be
+  approximated by lower-CVaR parameter tails; until then the live rule is
+  explicitly myopic. Mean economics live only in
   `expected_*` certificates and may never be written into `robust_*` or LCB/UCB
   fields. After BUY robust admission/sizing and SELL action-law admission, rank
   every fixed proposal by one posterior-mean expected Δlog-wealth rate. The horizon is

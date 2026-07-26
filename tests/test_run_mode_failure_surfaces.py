@@ -4345,8 +4345,21 @@ def test_high_yes_edge_accepts_current_global_auction_candidate(
     assert evidence["yes_condition_count"] == 1
 
 
+@pytest.mark.parametrize(
+    ("authority_identity", "expected_issue"),
+    (
+        ("typed-non-day0-authority", None),
+        (
+            "",
+            "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:"
+            "HOLDING_AUTHORITY_PAYLOAD",
+        ),
+    ),
+)
 def test_high_yes_edge_rejects_mean_sell_without_typed_day0_authority(
     tmp_path: Path,
+    authority_identity: str,
+    expected_issue: str | None,
 ) -> None:
     sd = tmp_path / "state"
     sd.mkdir()
@@ -4378,7 +4391,7 @@ def test_high_yes_edge_rejects_mean_sell_without_typed_day0_authority(
                 "sell_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
                 "sell_exit_authority_status": "not_applicable",
                 "sell_exit_authority_reason": "non_day0_family",
-                "sell_action_authority_identity": "forged-authority",
+                "sell_action_authority_identity": authority_identity,
             }
         ]
         encoded = json.dumps(
@@ -4397,7 +4410,7 @@ def test_high_yes_edge_rejects_mean_sell_without_typed_day0_authority(
                 "status": "EVALUATED",
                 "sell_exit_authority_status": "not_applicable",
                 "sell_exit_authority_reason": "non_day0_family",
-                "sell_action_authority_identity": "forged-authority",
+                "sell_action_authority_identity": authority_identity,
             }
         ]
         holding_encoded = json.dumps(
@@ -4428,10 +4441,7 @@ def test_high_yes_edge_rejects_mean_sell_without_typed_day0_authority(
         main_daemon_surface={"attested": True},
     )
 
-    assert surface["ok"] is False
-    assert surface["global_auction_candidate_evidence"]["issue"] == (
-        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:SELL_EXPECTED_AUTHORITY"
-    )
+    assert surface["global_auction_candidate_evidence"]["issue"] == expected_issue
 
 
 @pytest.mark.parametrize(

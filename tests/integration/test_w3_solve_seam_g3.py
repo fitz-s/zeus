@@ -14548,7 +14548,7 @@ def test_two_prepared_families_choose_one_globally_unique_order():
         and evaluation.position_id == "position-evaluated"
     )
     assert non_day0_sell.sell_probability_functional == (
-        "LOWER_CVAR_PARAMETER_DRAWS"
+        "POSTERIOR_PREDICTIVE_MEAN"
     )
     assert non_day0_sell.sell_exit_authority_status == "not_applicable"
 
@@ -19979,13 +19979,22 @@ def test_global_sell_jit_rejects_changed_day0_statistical_authority(monkeypatch)
     )
 
 
+@pytest.mark.parametrize(
+    "probability_functional",
+    ("LOWER_CVAR_PARAMETER_DRAWS", "POSTERIOR_PREDICTIVE_MEAN"),
+)
 def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     monkeypatch,
+    probability_functional,
 ):
     from src.data.polymarket_request_governor import RequestPriority
 
     event = _global_scope_event(city="Alpha", source_run_id="run-sell")
-    actuation = _adapter_sell_actuation(event, selected_shares="6")
+    actuation = _adapter_sell_actuation(
+        event,
+        selected_shares="6",
+        probability_functional=probability_functional,
+    )
     position = SimpleNamespace(
         trade_id="position-1",
         direction="buy_yes",
@@ -20007,7 +20016,12 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         era,
         "_current_global_actuation_prepared_family",
         lambda *_, **__: (
-            SimpleNamespace(day0_exit_authority_status="not_applicable"),
+            SimpleNamespace(
+                day0_exit_authority_status="not_applicable",
+                sell_action_authority_identity=(
+                    actuation.decision.candidate.sell_action_authority_identity
+                ),
+            ),
             {},
         ),
     )
@@ -20079,6 +20093,16 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         assert intent.submit_order_type == "FAK"
         assert intent.capital_certificate["held_shares"] == "10.006602"
         assert intent.capital_certificate["sellable_shares"] == "10"
+        if probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
+            assert intent.capital_certificate["expected_sell_delta_log_wealth"] > 0
+            assert intent.capital_certificate["expected_sell_ev_usd"] > 0
+            assert "robust_delta_log_wealth" not in intent.capital_certificate
+            assert "robust_ev_usd" not in intent.capital_certificate
+        else:
+            assert intent.capital_certificate["robust_delta_log_wealth"] > 0
+            assert intent.capital_certificate["robust_ev_usd"] > 0
+            assert "expected_sell_delta_log_wealth" not in intent.capital_certificate
+            assert "expected_sell_ev_usd" not in intent.capital_certificate
         evidence = kwargs["execution_evidence"]
         evidence.venue_call_started = True
         evidence.venue_ack_received = True

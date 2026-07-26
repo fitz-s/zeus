@@ -884,11 +884,8 @@ def select_prepared_global_auction(
                         )
                         or ""
                     ).strip()
-                    if prepared_status == "not_applicable":
-                        sell_functional = "LOWER_CVAR_PARAMETER_DRAWS"
-                        exit_status = "not_applicable"
-                        exit_reason = prepared_reason or "non_day0_family"
-                    elif prepared_status in {
+                    if prepared_status in {
+                        "not_applicable",
                         "mature",
                         "immature",
                         "unavailable",
@@ -897,7 +894,11 @@ def select_prepared_global_auction(
                         exit_status = prepared_status
                         exit_reason = (
                             prepared_reason
-                            or "day0_temporal_status_reason_missing"
+                            or (
+                                "non_day0_family"
+                                if prepared_status == "not_applicable"
+                                else "day0_temporal_status_reason_missing"
+                            )
                         )
                     else:
                         return _no_trade(

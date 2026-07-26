@@ -1737,6 +1737,10 @@ def test_sell_point_counterfactual_is_identity_bound_and_cannot_change_live_acti
     ("exit_authority_status", "exit_authority_reason"),
     (
         (
+            "not_applicable",
+            "non_day0_family",
+        ),
+        (
             "immature",
             "day0_high_extreme_not_mature:post_peak_confidence=0.12",
         ),
@@ -1750,7 +1754,7 @@ def test_sell_point_counterfactual_is_identity_bound_and_cannot_change_live_acti
         ),
     ),
 )
-def test_day0_sell_uses_posterior_draw_mean_across_temporal_maturity(
+def test_statistical_sell_uses_posterior_draw_mean_across_temporal_status(
     exit_authority_status,
     exit_authority_reason,
 ):

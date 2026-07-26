@@ -1609,7 +1609,8 @@ class GlobalSingleOrderSellCandidate:
             }
             or (
                 functional == "POSTERIOR_PREDICTIVE_MEAN"
-                and status not in {"mature", "immature", "unavailable"}
+                and status
+                not in {"not_applicable", "mature", "immature", "unavailable"}
             )
             or (functional == "DETERMINISTIC_PAYOFF" and status != "deterministic")
             or (
@@ -2331,7 +2332,7 @@ class GlobalSingleOrderCandidateEvaluation:
                 self.sell_probability_functional
                 == "POSTERIOR_PREDICTIVE_MEAN"
                 and self.sell_exit_authority_status
-                not in {"mature", "immature", "unavailable"}
+                not in {"not_applicable", "mature", "immature", "unavailable"}
             )
             or (
                 self.sell_probability_functional == "DETERMINISTIC_PAYOFF"
