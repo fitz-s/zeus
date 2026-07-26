@@ -91,6 +91,8 @@ _held_position_monitor_active = threading.Event()
 _held_position_monitor_claim = threading.Lock()
 _held_position_monitor_handoff_pending = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
+_held_position_monitor_bootstrap_check_lock = threading.Lock()
+_held_position_monitor_bootstrap_last_check = 0.0
 _day0_urgent_wake_pending = threading.Event()
 _day0_held_monitor_preempt_requested = threading.Event()
 _periodic_exit_monitor_day0_yielded = threading.Event()
@@ -126,6 +128,7 @@ _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 _EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS = 60.0
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
+HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
 # Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
 # APScheduler interval. The refresh wall-clock budget
 # (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS in src.data.substrate_observer) MUST be
@@ -217,10 +220,76 @@ def _utc_run_time_after(seconds: float) -> datetime:
     return datetime.now(timezone.utc) + timedelta(seconds=seconds)
 
 
+def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
+    """Release bootstrap after one post-boot full-book coverage tranche."""
+
+    global _held_position_monitor_bootstrap_last_check
+    if _held_position_monitor_bootstrap_complete.is_set():
+        return True
+    if not _held_position_monitor_active.is_set():
+        return False
+    now_monotonic = time.monotonic()
+    if (
+        now_monotonic - _held_position_monitor_bootstrap_last_check
+        < HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS
+    ):
+        return False
+    if not _held_position_monitor_bootstrap_check_lock.acquire(blocking=False):
+        return False
+    try:
+        now_monotonic = time.monotonic()
+        if (
+            now_monotonic - _held_position_monitor_bootstrap_last_check
+            < HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS
+        ):
+            return False
+        _held_position_monitor_bootstrap_last_check = now_monotonic
+        boot_at = _BOOT_STATE.get("ts")
+        if not isinstance(boot_at, datetime):
+            return False
+        from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+        from src.state.db import get_trade_connection_read_only
+
+        conn = get_trade_connection_read_only()
+        try:
+            evidence = collect_monitor_cadence_evidence(
+                conn,
+                now=datetime.now(timezone.utc),
+                min_occurred_at=boot_at - timedelta(seconds=5),
+                sample_limit=0,
+            )
+        finally:
+            conn.close()
+        if int(evidence.get("future_monitor_event_count") or 0) > 0:
+            return False
+        open_count = int(evidence.get("open_position_count") or 0)
+        required = min(open_count, max(2, (open_count + 2) // 3))
+        fresh = int(evidence.get("fresh_position_count") or 0)
+        if fresh < required:
+            return False
+        _held_position_monitor_bootstrap_complete.set()
+        logger.info(
+            "held-position monitor bootstrap coverage verified: "
+            "progress_positions=%d required_progress=%d open_positions=%d",
+            fresh,
+            required,
+            open_count,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - bootstrap remains fail-closed.
+        logger.warning(
+            "held-position monitor bootstrap coverage read failed closed: %s",
+            exc,
+        )
+        return False
+    finally:
+        _held_position_monitor_bootstrap_check_lock.release()
+
+
 def _defer_for_held_position_monitor(job_name: str) -> bool:
     """Give initial held monitoring first access to DB I/O and reactor work.
 
-    Database-heavy background jobs wait only for the first full monitor pass.
+    Database-heavy background jobs wait for the first bounded coverage tranche.
     Reactor competitors also yield during later handoffs; after the handoff both
     live lanes may make progress concurrently.
     """
@@ -234,9 +303,12 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     ):
         logger.info("%s deferred: held-position monitor reactor handoff pending", job_name)
         return True
-    if not _held_position_monitor_bootstrap_complete.is_set():
+    if (
+        not _held_position_monitor_bootstrap_complete.is_set()
+        and not _promote_held_position_monitor_bootstrap_from_canonical_progress()
+    ):
         logger.info(
-            "%s deferred: first held-position monitor cycle has not completed",
+            "%s deferred: first held-position monitor coverage tranche has not completed",
             job_name,
         )
         return True

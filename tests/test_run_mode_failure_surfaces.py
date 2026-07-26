@@ -6240,6 +6240,75 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
     assert not main_module._held_position_monitor_active.is_set()
 
 
+def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
+    monkeypatch,
+) -> None:
+    from datetime import datetime, timezone
+
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = ReadOnlyConnection()
+
+    main_module._held_position_monitor_active.set()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._held_position_monitor_bootstrap_last_check = 0.0
+    monkeypatch.setitem(
+        main_module._BOOT_STATE,
+        "ts",
+        datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(
+        db_module,
+        "get_trade_connection_read_only",
+        lambda: conn,
+    )
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: {
+            "open_position_count": 20,
+            "fresh_position_count": 7,
+            "future_monitor_event_count": 0,
+        },
+    )
+    try:
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+        assert main_module._held_position_monitor_bootstrap_complete.is_set()
+        assert conn.closed is True
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_reactor_bootstrap_stays_deferred_without_canonical_monitor_coverage(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    main_module._held_position_monitor_active.set()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    monkeypatch.setattr(
+        main_module,
+        "_promote_held_position_monitor_bootstrap_from_canonical_progress",
+        lambda: False,
+    )
+    try:
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+        assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+
 def test_periodic_exit_monitor_yields_before_claim_to_urgent_day0_held_monitor(
     monkeypatch,
 ) -> None:
