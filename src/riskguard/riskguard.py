@@ -43,6 +43,7 @@ from src.runtime import bankroll_provider
 from src.runtime.bankroll_provider import BankrollOfRecord
 from src.state.db import (
     CANONICAL_STRATEGY_KEYS,
+    DECISION_LAW_IDS,
     RISK_DB_PATH,
     get_connection,
     get_trade_connection_with_world_required,
@@ -1495,8 +1496,11 @@ def _bind_brier_probability_identities(
 
     ``p_posterior`` is only a number. A Brier verdict becomes evidence about a
     probability system only when the actual ENTRY command carries exactly one
-    non-empty, non-conflicting ``q_version``. Missing and ambiguous identities
-    remain visible on the settlement rows but are excluded from the risk verdict.
+    non-empty, non-conflicting ``q_version``. Actuation additionally requires
+    the persisted ``position_current.decision_law_id``; q content identity must
+    not be misread as proof of which decision law produced an old position.
+    Missing and ambiguous identities remain visible on the settlement rows but
+    are excluded from the current-law risk verdict.
     """
 
     output = [dict(row) for row in rows]
@@ -1569,7 +1573,88 @@ def _bind_brier_probability_identities(
         row["entry_q_version"] = next(iter(nonempty)) if len(nonempty) == 1 else ""
         row["probability_identity_source"] = "venue_commands.q_version"
         row["probability_identity_blocked_reason"] = reason
+
+    unresolved_law = {
+        str(row.get("trade_id") or "")
+        for row in output
+        if str(row.get("trade_id") or "").strip()
+    }
+    law_bindings: dict[str, str | None] = {
+        trade_id: None for trade_id in unresolved_law
+    }
+    law_schema_ready = False
+    if unresolved_law and _table_exists(conn, "position_current"):
+        try:
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+            }
+            law_schema_ready = {"position_id", "decision_law_id"}.issubset(columns)
+        except sqlite3.Error:
+            law_schema_ready = False
+    if law_schema_ready:
+        trade_ids = sorted(unresolved_law)
+        for start in range(0, len(trade_ids), 500):
+            chunk = trade_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            try:
+                law_rows = conn.execute(
+                    "SELECT position_id,decision_law_id FROM position_current "
+                    f"WHERE position_id IN ({placeholders})",
+                    tuple(chunk),
+                ).fetchall()
+            except sqlite3.Error:
+                law_schema_ready = False
+                break
+            for law_row in law_rows:
+                position_id = str(law_row[0] or "")
+                if position_id in law_bindings:
+                    law_bindings[position_id] = (
+                        str(law_row[1] or "").strip() or None
+                    )
+
+    for row in output:
+        trade_id = str(row.get("trade_id") or "").strip()
+        bound_law = law_bindings.get(trade_id)
+        row["decision_law_id"] = bound_law or ""
+        row["decision_law_identity_ready"] = bound_law in DECISION_LAW_IDS
+        row["decision_law_identity_source"] = "position_current.decision_law_id"
+        if not law_schema_ready:
+            reason = "decision_law_schema_unavailable"
+        elif bound_law is None:
+            reason = "decision_law_id_missing"
+        else:
+            reason = "decision_law_id_unknown"
+        row["decision_law_identity_blocked_reason"] = (
+            "" if row["decision_law_identity_ready"] else reason
+        )
     return output
+
+
+def _riskguard_brier_actuating_rows(
+    rows: list[dict],
+    *,
+    limit: int = RISKGUARD_SETTLEMENT_LIMIT,
+) -> list[dict]:
+    """Return Brier rows proven to belong to a current executable law.
+
+    Legacy rows without a persisted law identity remain useful telemetry. They
+    cannot convict a newer law merely because both laws emitted a q_version or
+    reused the same decision-snapshot namespace.
+    """
+
+    actuating: list[dict] = []
+    for row in rows:
+        if not row.get("probability_identity_ready", False):
+            continue
+        if not row.get("decision_law_identity_ready", False):
+            continue
+        if str(row.get("decision_law_id") or "").strip() not in DECISION_LAW_IDS:
+            continue
+        actuating.append(row)
+        if len(actuating) >= limit:
+            break
+    return actuating
 
 
 # Below this many settled observations a per-strategy Brier score is noise,
@@ -1586,11 +1671,17 @@ _PROBABILITY_MECHANISM_SNAPSHOT_PREFIXES = frozenset({
 def _probability_mechanism_key(row: dict) -> str | None:
     """Return a recorded probability mechanism, never infer one from outcome."""
 
+    decision_law_id = str(row.get("decision_law_id") or "").strip()
+    if (
+        not row.get("decision_law_identity_ready", False)
+        or decision_law_id not in DECISION_LAW_IDS
+    ):
+        return None
     snapshot_id = str(row.get("decision_snapshot_id") or "").strip()
     namespace, separator, _ = snapshot_id.partition(":")
     if not separator or namespace not in _PROBABILITY_MECHANISM_SNAPSHOT_PREFIXES:
         return None
-    return f"decision_snapshot:{namespace}"
+    return f"law:{decision_law_id}:decision_snapshot:{namespace}"
 
 
 def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, object]:
@@ -2390,6 +2481,7 @@ def _tick_once() -> RiskLevel:
         portfolio = replace(portfolio, recent_exits=realized_exits)
 
         brier_metric_rows = _riskguard_brier_metric_rows(brier_candidate_rows)
+        brier_actuating_rows = _riskguard_brier_actuating_rows(brier_metric_rows)
         probability_identity_ready_count = sum(
             bool(row.get("probability_identity_ready", False))
             for row in brier_candidate_rows
@@ -2404,8 +2496,26 @@ def _tick_once() -> RiskLevel:
             probability_identity_block_reasons[reason] = (
                 probability_identity_block_reasons.get(reason, 0) + 1
             )
-        p_forecasts = [float(r["p_posterior"]) for r in brier_metric_rows]
-        outcomes = [int(r["outcome"]) for r in brier_metric_rows]
+        decision_law_identity_ready_count = sum(
+            bool(row.get("decision_law_identity_ready", False))
+            for row in brier_metric_rows
+        )
+        decision_law_identity_block_reasons: dict[str, int] = {}
+        for row in brier_metric_rows:
+            if row.get("decision_law_identity_ready", False):
+                continue
+            reason = str(
+                row.get("decision_law_identity_blocked_reason") or "unbound"
+            )
+            decision_law_identity_block_reasons[reason] = (
+                decision_law_identity_block_reasons.get(reason, 0) + 1
+            )
+        observed_p_forecasts = [
+            float(r["p_posterior"]) for r in brier_metric_rows
+        ]
+        observed_outcomes = [int(r["outcome"]) for r in brier_metric_rows]
+        p_forecasts = [float(r["p_posterior"]) for r in brier_actuating_rows]
+        outcomes = [int(r["outcome"]) for r in brier_actuating_rows]
         strategy_settlement_summary = _strategy_settlement_summary(settlement_metric_ready_rows)
         entry_execution_summary = _entry_execution_summary(zeus_conn)
         try:
@@ -2421,6 +2531,11 @@ def _tick_once() -> RiskLevel:
             strategy_tracker_error = str(exc)
 
         # Compute metrics from authoritative settlement rows only.
+        observed_b_score = (
+            brier_score(observed_p_forecasts, observed_outcomes)
+            if observed_p_forecasts
+            else 0.0
+        )
         b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
         d_accuracy = directional_accuracy(p_forecasts, outcomes) if p_forecasts else 0.5
 
@@ -2445,7 +2560,7 @@ def _tick_once() -> RiskLevel:
             else portfolio_brier_raw_level
         )
         brier_level = portfolio_brier_level
-        brier_strategy_breakdown = _strategy_brier_breakdown(brier_metric_rows, thresholds) if p_forecasts else {
+        brier_strategy_breakdown = _strategy_brier_breakdown(brier_actuating_rows, thresholds) if p_forecasts else {
             "by_strategy": {},
             "by_mechanism": {},
             "degraded_strategies": {},
@@ -2475,6 +2590,10 @@ def _tick_once() -> RiskLevel:
             isinstance(degraded_brier_strategies, dict)
             and bool(degraded_brier_strategies)
             and int(brier_strategy_breakdown.get("unclassified_count", 0) or 0) == 0
+            and all(
+                str(strategy) in CANONICAL_STRATEGY_KEYS
+                for strategy in degraded_brier_strategies
+            )
         )
 
         def _append_brier_degraded_gate_reasons() -> None:
@@ -2632,7 +2751,7 @@ def _tick_once() -> RiskLevel:
                     residual_sample_size,
                     residual_thin_excluded,
                 ) = _residual_active_portfolio_brier_level(
-                    brier_metric_rows, thresholds, set(orange_gated_strategies),
+                    brier_actuating_rows, thresholds, set(orange_gated_strategies),
                 )
                 if residual_level == RiskLevel.GREEN:
                     brier_level = RiskLevel.GREEN
@@ -2804,6 +2923,9 @@ def _tick_once() -> RiskLevel:
                 "portfolio_brier_level": portfolio_brier_level.value,
                 "portfolio_brier_raw_level": portfolio_brier_raw_level.value,
                 "portfolio_brier_thin_sample_no_verdict": portfolio_brier_thin_sample,
+                "brier_observed_all_lineage_score": round(float(observed_b_score), 6),
+                "brier_observed_all_lineage_sample_size": len(brier_metric_rows),
+                "brier_actuating_sample_size": len(brier_actuating_rows),
                 # ORANGE-localization audit surface (2026-07-04): the raw,
                 # unfiltered portfolio view (all strategies pooled) vs. the
                 # view that actually DRIVES admission after any localization
@@ -2879,7 +3001,7 @@ def _tick_once() -> RiskLevel:
                 "portfolio_excluded_duplicate_count": portfolio_truth.get("excluded_duplicate_count", 0),
                 "realized_truth_source": realized_truth_source,
                 "realized_degraded": realized_degraded,
-                "settlement_sample_size": len(p_forecasts),
+                "settlement_sample_size": len(observed_p_forecasts),
                 "settlement_brier_scan_limit": RISKGUARD_BRIER_SCAN_LIMIT,
                 "settlement_brier_candidate_count": len(brier_candidate_rows),
                 "settlement_storage_source": settlement_storage_source,
@@ -2892,11 +3014,21 @@ def _tick_once() -> RiskLevel:
                 "settlement_canonical_payload_complete_count": canonical_payload_complete_count,
                 "settlement_metric_ready_count": len(settlement_metric_ready_rows),
                 "settlement_brier_learning_ready_count": len(brier_metric_rows),
+                "settlement_brier_actuating_count": len(brier_actuating_rows),
                 "settlement_probability_identity_ready_count": probability_identity_ready_count,
                 "settlement_probability_identity_unready_count": (
                     len(brier_candidate_rows) - probability_identity_ready_count
                 ),
                 "settlement_probability_identity_block_reasons": probability_identity_block_reasons,
+                "settlement_decision_law_identity_ready_count": (
+                    decision_law_identity_ready_count
+                ),
+                "settlement_decision_law_identity_unready_count": (
+                    len(brier_metric_rows) - decision_law_identity_ready_count
+                ),
+                "settlement_decision_law_identity_block_reasons": (
+                    decision_law_identity_block_reasons
+                ),
                 # K2 rename (bug #3): this field is the PROBABILITY-SIDE directional
                 # hit rate computed from brier forecasts (did p>0.5 match the
                 # outcome?). It is NOT the same as trade profitability rate, which

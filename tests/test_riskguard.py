@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-25
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-03-30; last_reviewed=2026-07-25; last_reused=2026-07-25
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
@@ -134,6 +134,7 @@ def _insert_position_current(
     token_id: str = "yes-test-token",
     no_token_id: str = "no-test-token",
     condition_id: str = "condition-test",
+    decision_law_id: str | None = None,
 ) -> None:
     conn.execute(
         """
@@ -143,8 +144,8 @@ def _insert_position_current(
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
-            temperature_metric, fill_authority
-        ) VALUES (?, ?, ?, 'm-test', 'NYC', 'NYC', '2026-04-01', '39-40°F', 'buy_yes', 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, '', '', ?, '', '', 'unknown', ?, ?, ?, '', '', ?, ?, 'none')
+            temperature_metric, fill_authority, decision_law_id
+        ) VALUES (?, ?, ?, 'm-test', 'NYC', 'NYC', '2026-04-01', '39-40°F', 'buy_yes', 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, '', '', ?, '', '', 'unknown', ?, ?, ?, '', '', ?, ?, 'none', ?)
         """,
         (
             position_id,
@@ -161,8 +162,26 @@ def _insert_position_current(
             condition_id,
             "2026-04-04T12:00:00+00:00",
             temperature_metric,
+            decision_law_id,
         ),
     )
+
+
+def _persist_decision_law_identities(db_path, rows: list[dict]) -> None:
+    conn = get_connection(db_path)
+    for row in rows:
+        trade_id = str(row.get("trade_id") or "").strip()
+        decision_law_id = str(row.get("decision_law_id") or "").strip()
+        if not trade_id or not decision_law_id:
+            continue
+        _insert_position_current(
+            conn,
+            position_id=trade_id,
+            strategy_key="forecast_qkernel_entry",
+            decision_law_id=decision_law_id,
+        )
+    conn.commit()
+    conn.close()
 
 
 def _insert_outcome_fact(
@@ -767,6 +786,10 @@ class TestMetrics:
             "CREATE TABLE venue_commands ("
             "position_id TEXT,intent_kind TEXT,q_version TEXT)"
         )
+        conn.execute(
+            "CREATE TABLE position_current ("
+            "position_id TEXT PRIMARY KEY,decision_law_id TEXT)"
+        )
         conn.executemany(
             "INSERT INTO venue_commands VALUES (?,?,?)",
             [
@@ -774,6 +797,17 @@ class TestMetrics:
                 ("missing", "ENTRY", None),
                 ("conflict", "ENTRY", "q-v1"),
                 ("conflict", "ENTRY", "q-v2"),
+                ("legacy", "ENTRY", "q-old"),
+                ("claimed", "ENTRY", "q-claimed"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO position_current VALUES (?,?)",
+            [
+                ("bound", "predicted_bin_ev_v1"),
+                ("missing", "predicted_bin_ev_v1"),
+                ("conflict", "predicted_bin_ev_v1"),
+                ("legacy", None),
             ],
         )
 
@@ -784,14 +818,29 @@ class TestMetrics:
                 {"trade_id": "missing"},
                 {"trade_id": "conflict"},
                 {"trade_id": "absent"},
+                {"trade_id": "legacy"},
+                {
+                    "trade_id": "claimed",
+                    "decision_law_id": "predicted_bin_ev_v1",
+                },
             ],
         )
 
         assert bound[0]["probability_identity_ready"] is True
         assert bound[0]["entry_q_version"] == "q-v1"
+        assert bound[0]["decision_law_identity_ready"] is True
+        assert bound[0]["decision_law_id"] == "predicted_bin_ev_v1"
         assert bound[1]["probability_identity_blocked_reason"] == "entry_q_version_missing"
         assert bound[2]["probability_identity_blocked_reason"] == "entry_q_version_conflicting"
         assert bound[3]["probability_identity_blocked_reason"] == "entry_command_missing"
+        assert bound[4]["probability_identity_ready"] is True
+        assert bound[4]["decision_law_identity_ready"] is False
+        assert bound[4]["decision_law_identity_blocked_reason"] == "decision_law_id_missing"
+        assert bound[5]["probability_identity_ready"] is True
+        assert bound[5]["decision_law_identity_ready"] is False
+        assert bound[5]["decision_law_id"] == ""
+        assert bound[5]["decision_law_identity_blocked_reason"] == "decision_law_id_missing"
+        assert riskguard_module._riskguard_brier_actuating_rows(bound) == [bound[0]]
         conn.close()
 
 
@@ -802,6 +851,7 @@ def _settlement_row(
     p_posterior: float,
     outcome: int,
     pnl: float = 0.0,
+    decision_law_id: str | None = "predicted_bin_ev_v1",
 ) -> dict:
     return {
         "trade_id": trade_id,
@@ -814,6 +864,7 @@ def _settlement_row(
         "learning_snapshot_ready": True,
         "probability_identity_ready": True,
         "entry_q_version": "test-q-version",
+        "decision_law_id": decision_law_id,
         "canonical_payload_complete": True,
         "is_degraded": False,
         "pnl": pnl,
@@ -2527,6 +2578,7 @@ class TestRiskGuardOrangeLocalization:
             return get_connection(zeus_db)
 
         _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
         _patch_riskguard_bankroll(monkeypatch)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
@@ -2558,12 +2610,16 @@ class TestRiskGuardOrangeLocalization:
         assert details["brier_strategy_localization"]["gate_confirmation"] == {"opening_inertia": True}
         assert dict(gate_row) == {"strategy_key": "opening_inertia", "status": "active"}
 
-    def test_orange_stays_global_when_unclassified_rows_present(self, monkeypatch, tmp_path):
-        """Live-incident regression pin: unclassified_count>0 must NOT localize,
-        even though the classified portion is cleanly attributable and gated."""
+    def test_unlabeled_legacy_rows_do_not_veto_current_law_localization(
+        self, monkeypatch, tmp_path
+    ):
+        """Rows without law identity remain telemetry, never current-law votes."""
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
         rows = self._orange_rows(unclassified_count=3)
+        for row in rows:
+            if row["strategy"] == "legacy_unattributed":
+                row["decision_law_id"] = None
 
         def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
@@ -2571,6 +2627,7 @@ class TestRiskGuardOrangeLocalization:
             return get_connection(zeus_db)
 
         _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
         _patch_riskguard_bankroll(monkeypatch)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
@@ -2583,14 +2640,16 @@ class TestRiskGuardOrangeLocalization:
         ).fetchone()
         details = json.loads(risk_row["details_json"])
 
-        assert level == RiskLevel.ORANGE
-        assert risk_row["level"] == RiskLevel.ORANGE.value
+        assert level == RiskLevel.GREEN
+        assert risk_row["level"] == RiskLevel.GREEN.value
         assert details["portfolio_brier_level"] == "ORANGE"
-        assert details["brier_level"] == "ORANGE"
-        assert details["brier_active_portfolio_level"] == "ORANGE"
-        assert details["localized_orange_scope"] is False
-        assert details["brier_strategy_localization"]["status"] == "not_localized"
-        assert details["brier_strategy_breakdown"]["unclassified_count"] == 3
+        assert details["brier_level"] == "GREEN"
+        assert details["brier_active_portfolio_level"] == "GREEN"
+        assert details["localized_orange_scope"] is True
+        assert details["brier_strategy_localization"]["status"] == "localized_orange_scope"
+        assert details["brier_strategy_breakdown"]["unclassified_count"] == 0
+        assert details["brier_observed_all_lineage_sample_size"] == 50
+        assert details["brier_actuating_sample_size"] == 47
 
     def test_orange_stays_global_when_durable_gate_write_is_skipped(self, monkeypatch, tmp_path):
         """Condition #2 failure mode A: the write itself reports non-emitted
@@ -2606,6 +2665,7 @@ class TestRiskGuardOrangeLocalization:
             return get_connection(zeus_db)
 
         _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
         _patch_riskguard_bankroll(monkeypatch)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
@@ -2654,6 +2714,7 @@ class TestRiskGuardOrangeLocalization:
             return get_connection(zeus_db)
 
         _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
         _patch_riskguard_bankroll(monkeypatch)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
@@ -2708,6 +2769,7 @@ class TestRiskGuardOrangeLocalization:
             return get_connection(zeus_db)
 
         _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
         conn = get_connection(zeus_db)
         _insert_risk_action(
             conn,
@@ -2760,6 +2822,7 @@ class TestRiskGuardOrangeLocalization:
             return get_connection(zeus_db)
 
         _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
         _patch_riskguard_bankroll(monkeypatch)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
@@ -3082,10 +3145,12 @@ class TestStrategyBrierMinSample:
         assert "opening_inertia" not in out["degraded_strategies"]
         assert out["by_strategy"]["opening_inertia"]["thin_sample_no_verdict"] is True
 
-    def test_shared_recorded_mechanism_localizes_two_thin_consumers(self):
+    def test_shared_recorded_mechanism_requires_one_recorded_decision_law(self):
         rows = [
             {
                 "strategy": "day0_nowcast_entry",
+                "decision_law_id": "predicted_bin_ev_v1",
+                "decision_law_identity_ready": True,
                 "decision_snapshot_id": f"metar_fast:ZGGG:day0:{i}",
                 "p_posterior": 0.99,
                 "outcome": 0,
@@ -3094,6 +3159,8 @@ class TestStrategyBrierMinSample:
         ] + [
             {
                 "strategy": "settlement_capture",
+                "decision_law_id": "predicted_bin_ev_v1",
+                "decision_law_identity_ready": True,
                 "decision_snapshot_id": f"metar_fast:LIMC:capture:{i}",
                 "p_posterior": 0.90,
                 "outcome": 0,
@@ -3112,7 +3179,10 @@ class TestStrategyBrierMinSample:
             rows, {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
         )
 
-        metar = out["by_mechanism"]["decision_snapshot:metar_fast"]
+        mechanism = (
+            "law:predicted_bin_ev_v1:decision_snapshot:metar_fast"
+        )
+        metar = out["by_mechanism"][mechanism]
         assert metar["sample_size"] == 14
         assert metar["level"] == "RED"
         assert set(out["degraded_strategies"]) == {
@@ -3120,10 +3190,102 @@ class TestStrategyBrierMinSample:
             "settlement_capture",
         }
         assert out["degraded_strategies"]["day0_nowcast_entry"]["cohort"] == (
-            "decision_snapshot:metar_fast"
+            mechanism
         )
         assert out["degraded_strategies"]["settlement_capture"]["member_sample_size"] == 7
         assert out["by_strategy"]["forecast_qkernel_entry"]["level"] == "GREEN"
+
+    def test_unlabeled_snapshot_namespace_cannot_pool_thin_legacy_strategies(self):
+        rows = [
+            {
+                "strategy": strategy,
+                "decision_snapshot_id": f"metar_fast:{strategy}:{i}",
+                "p_posterior": 0.99,
+                "outcome": 0,
+            }
+            for strategy in ("day0_nowcast_entry", "settlement_capture")
+            for i in range(7)
+        ]
+
+        out = riskguard_module._strategy_brier_breakdown(
+            rows,
+            {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
+        )
+
+        assert out["by_mechanism"] == {}
+        assert out["degraded_strategies"] == {}
+
+    @pytest.mark.parametrize(
+        ("p_posterior", "expected_level"),
+        [
+            (0.51, RiskLevel.YELLOW),
+            (0.56, RiskLevel.ORANGE),
+        ],
+    )
+    def test_current_law_brier_breach_stays_global_without_law_gate_consumer(
+        self,
+        monkeypatch,
+        tmp_path,
+        p_posterior,
+        expected_level,
+    ):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        rows = [
+            _settlement_row(
+                trade_id=f"law-loss-{i}",
+                strategy="",
+                p_posterior=p_posterior,
+                outcome=0,
+            )
+            for i in range(riskguard_module._STRATEGY_BRIER_MIN_SAMPLE)
+        ]
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(bankroll=211.37),
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_tracker",
+            lambda: strategy_tracker_module.StrategyTracker(),
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda *_, **__: rows,
+        )
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+        law_gate = get_connection(zeus_db).execute(
+            """
+            SELECT 1 FROM risk_actions
+            WHERE status = 'active'
+              AND strategy_key = 'law:predicted_bin_ev_v1'
+            """
+        ).fetchone()
+
+        assert level == expected_level
+        assert details["brier_level"] == expected_level.value
+        assert details["brier_strategy_localization"]["status"] == "not_localized"
+        assert set(details["brier_strategy_breakdown"]["degraded_strategies"]) == {
+            "law:predicted_bin_ev_v1"
+        }
+        assert law_gate is None
 
     @pytest.mark.parametrize(
         ("sample_size", "expected_level", "expected_thin", "expected_reason"),
@@ -3143,6 +3305,15 @@ class TestStrategyBrierMinSample:
     ):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
+        rows = [
+            _settlement_row(
+                trade_id=f"loss-{i}",
+                strategy="forecast_qkernel_entry",
+                p_posterior=0.9033,
+                outcome=0,
+            )
+            for i in range(sample_size)
+        ]
 
         def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
@@ -3150,6 +3321,7 @@ class TestStrategyBrierMinSample:
             return get_connection(zeus_db)
 
         _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
         _patch_riskguard_bankroll(monkeypatch)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(
@@ -3165,15 +3337,7 @@ class TestStrategyBrierMinSample:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda *_, **__: [
-                _settlement_row(
-                    trade_id=f"loss-{i}",
-                    strategy="forecast_qkernel_entry",
-                    p_posterior=0.9033,
-                    outcome=0,
-                )
-                for i in range(sample_size)
-            ],
+            lambda *_, **__: rows,
         )
 
         level = riskguard_module.tick()
@@ -3267,6 +3431,7 @@ class TestRiskGuardExecutionQualityLocalization:
             return get_connection(zeus_db)
 
         _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
         _patch_riskguard_bankroll(monkeypatch)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
@@ -3874,6 +4039,7 @@ class TestStrategyPolicyResolver:
             return get_connection(zeus_db)
 
         _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
         from src.runtime import bankroll_provider as _bp
 
         monkeypatch.setattr(
@@ -3954,6 +4120,7 @@ class TestStrategyPolicyResolver:
             return get_connection(zeus_db)
 
         _init_empty_canonical_portfolio_schema(zeus_db, drop_risk_actions=True)
+        _persist_decision_law_identities(zeus_db, rows)
         from src.runtime import bankroll_provider as _bp
 
         monkeypatch.setattr(
