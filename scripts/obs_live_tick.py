@@ -56,10 +56,10 @@ import os
 import sqlite3
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -143,6 +143,8 @@ class TickResult:
     row_build_errors: int = 0
     skipped_hko: bool = False
     failure_reason: Optional[str] = None
+    day0_event_ids: tuple[str, ...] = ()
+    day0_event_families: tuple[tuple[str, str, str], ...] = ()
 
     def __str__(self) -> str:
         if self.skipped_hko:
@@ -313,7 +315,14 @@ def _append_wu_prints_to_ledger(conn: sqlite3.Connection, prints: list[dict] | N
 
 
 def _write_rows(
-    conn_or_path, rows: list[ObsV2Row], prints: list[dict] | None = None
+    conn_or_path,
+    rows: list[ObsV2Row],
+    prints: list[dict] | None = None,
+    *,
+    day0_event_city: str | None = None,
+    day0_family_admission: Callable[[dict[str, object]], bool] | None = None,
+    inserted_event_ids: list[str] | None = None,
+    inserted_event_families: list[tuple[str, str, str]] | None = None,
 ) -> int:
     """Persist one city's rows with the SQLite writer lock scoped to the write only.
 
@@ -325,6 +334,13 @@ def _write_rows(
     if isinstance(conn_or_path, sqlite3.Connection):
         written = insert_rows(conn_or_path, rows)
         _append_wu_prints_to_ledger(conn_or_path, prints)
+        _emit_admitted_day0_events(
+            conn_or_path,
+            city_name=day0_event_city,
+            family_admission=day0_family_admission,
+            inserted_event_ids=inserted_event_ids,
+            inserted_event_families=inserted_event_families,
+        )
         return written
     if conn_or_path is None:
         return 0
@@ -341,6 +357,13 @@ def _write_rows(
             conn.execute("BEGIN IMMEDIATE")
             written = insert_rows(conn, rows)
             _append_wu_prints_to_ledger(conn, prints)
+            _emit_admitted_day0_events(
+                conn,
+                city_name=day0_event_city,
+                family_admission=day0_family_admission,
+                inserted_event_ids=inserted_event_ids,
+                inserted_event_families=inserted_event_families,
+            )
             conn.commit()
             return written
         except Exception:
@@ -348,6 +371,81 @@ def _write_rows(
             raise
         finally:
             conn.close()
+
+
+def _emit_admitted_day0_events(
+    conn: sqlite3.Connection,
+    *,
+    city_name: str | None,
+    family_admission: Callable[[dict[str, object]], bool] | None,
+    inserted_event_ids: list[str] | None,
+    inserted_event_families: list[tuple[str, str, str]] | None,
+) -> None:
+    """Publish admitted NOAA/Ogimet facts in the observation commit.
+
+    SCOPE: only the exact city written by this source transaction.
+    DRAIN: a missing/failed admission emits no event; the next obs tick and the
+    reactor's durable observation scanner retry the same canonical rows.
+    RESET: a successful admission resolve plus canonical scan commits the
+    missing event, after which trigger watermarks suppress unchanged repeats.
+    """
+
+    if not city_name or family_admission is None:
+        return
+
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
+
+    city = cities_by_name[city_name]
+    decision_time = datetime.now(timezone.utc)
+    savepoint = "obs_tick_day0_event_bridge"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        results = Day0ExtremeUpdatedTrigger(
+            EventWriter(conn),
+            family_admission=family_admission,
+            scan_cities=(city_name,),
+        ).scan_observation_instants_rows(
+            observation_conn=conn,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            decision_time=decision_time,
+            received_at=decision_time.isoformat(),
+            limit=4,
+        )
+        event_ids = tuple(result.event_id for result in results if result.inserted)
+        families: tuple[tuple[str, str, str], ...] = ()
+        if event_ids:
+            placeholders = ",".join("?" for _ in event_ids)
+            families = tuple(
+                (str(event_city), str(target_date), str(metric).lower())
+                for event_city, target_date, metric in conn.execute(
+                    f"""
+                    SELECT json_extract(payload_json, '$.city'),
+                           json_extract(payload_json, '$.target_date'),
+                           json_extract(payload_json, '$.metric')
+                      FROM opportunity_events
+                     WHERE event_id IN ({placeholders})
+                    """,
+                    event_ids,
+                ).fetchall()
+            )
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except Exception as exc:  # noqa: BLE001 - raw source facts remain authoritative
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        logger.warning(
+            "OBS_TICK_DAY0_EVENT_BRIDGE_FAILED city=%s exc=%s: %s; "
+            "canonical facts retained for catch-up",
+            city_name,
+            type(exc).__name__,
+            exc,
+        )
+        return
+    if inserted_event_ids is not None:
+        inserted_event_ids.extend(event_ids)
+    if inserted_event_families is not None:
+        inserted_event_families.extend(families)
 
 
 def _tick_wu_city(
@@ -412,6 +510,7 @@ def _tick_ogimet_city(
     start_date: date,
     end_date: date,
     dry_run: bool,
+    day0_family_admission: Callable[[dict[str, object]], bool] | None = None,
 ) -> TickResult:
     city = cities_by_name[city_name]
     result = TickResult(city=city_name, tier="OGIMET_METAR")
@@ -444,7 +543,18 @@ def _tick_ogimet_city(
 
     result.rows_ready = len(rows)
     if not dry_run and rows:
-        result.rows_written = _write_rows(conn, rows)
+        event_ids: list[str] = []
+        event_families: list[tuple[str, str, str]] = []
+        result.rows_written = _write_rows(
+            conn,
+            rows,
+            day0_event_city=city_name,
+            day0_family_admission=day0_family_admission,
+            inserted_event_ids=event_ids,
+            inserted_event_families=event_families,
+        )
+        result.day0_event_ids = tuple(event_ids)
+        result.day0_event_families = tuple(event_families)
     return result
 
 
@@ -456,6 +566,7 @@ def _run_city_with_sqlite_retry(
     start_date: date,
     end_date: date,
     dry_run: bool,
+    tick_kwargs: dict | None = None,
 ) -> TickResult:
     delays = _obs_tick_lock_retry_delays()
     for attempt in range(len(delays) + 1):
@@ -466,6 +577,7 @@ def _run_city_with_sqlite_retry(
                 start_date=start_date,
                 end_date=end_date,
                 dry_run=dry_run,
+                **(tick_kwargs or {}),
             )
             if conn is not None and hasattr(conn, "commit"):
                 conn.commit()
@@ -501,6 +613,7 @@ def run_live_tick(
     dry_run: bool = False,
     db_path: Path = DEFAULT_DB_PATH,
     log_path: Path = DEFAULT_LOG_PATH,
+    day0_family_admission: Callable[[dict[str, object]], bool] | None = None,
 ) -> list[TickResult]:
     """Run one live-tick pass over all non-HKO cities.
 
@@ -564,6 +677,9 @@ def run_live_tick(
                 start_date=start_date,
                 end_date=end_date,
                 dry_run=dry_run,
+                tick_kwargs={
+                    "day0_family_admission": day0_family_admission,
+                },
             )
         except Exception as exc:
             r = TickResult(city=city_name, tier="OGIMET_METAR", failure_reason=f"unexpected: {exc}")

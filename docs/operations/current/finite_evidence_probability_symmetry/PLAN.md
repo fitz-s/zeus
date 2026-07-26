@@ -1676,3 +1676,47 @@ Acceptance requires:
 Rollback is the exact hot-fix revert. It restores conservative review of the
 phantom row but performs no inverse DB mutation; any already-voided row remains
 an append-only canonical fact for operator review.
+
+## 2026-07-26 NOAA/Ogimet observation commit to Day0 redecision
+
+The Tel Aviv July 26 NO 31C loss reconstruction found two serial breaks.
+Ogimet hourly fetches first failed on a process-local forced-IPv4 bind; after
+that transport was repaired, 24 verified LLBG observations reached canonical
+`observation_instants`, but the held monitor still had no
+`DAY0_EXTREME_UPDATED` carrier. NOAA-settled cities are intentionally excluded
+from the fast WU/METAR emitter because their settlement source class differs.
+Their Ogimet writer persisted the same-station NOAA mirror but never published
+the admitted Day0 event. Reactor catch-up was only a fallback and was preempted
+under the active urgent-wake backlog, leaving canonical physical truth unable
+to reprice owned capital.
+
+The correction publishes only admitted NOAA/Ogimet families from the exact
+city's canonical rows in the same SQLite transaction as the observation
+commit. Admission is resolved before upstream fetch/write and remains
+fail-closed; raw weather facts still commit if the derived event scan fails,
+using a savepoint so the durable scanner can retry. After commit, the existing
+materialization bridge and reactor wake receive the inserted event identities.
+The scanner's persisted monotone watermarks prevent unchanged event firehose.
+
+SCOPE is one NOAA/Ogimet city and only market-backed/current-exposure families.
+DRAIN is the next source tick plus the existing durable reactor scanner.
+RESET is a successfully committed `DAY0_EXTREME_UPDATED`, followed by the
+existing posterior materialization and held-position redecision lanes.
+
+Allowed files are `scripts/obs_live_tick.py`, `src/ingest_main.py`, the focused
+admission/source bridge antibody, and this plan. No settlement-source mapping,
+probability formula, exit threshold, order band, lifecycle, schema, or monitor
+fallback changes are allowed.
+
+Acceptance requires:
+
+- an idempotent replay antibody proving a previously committed canonical
+  Ogimet row can publish its missing admitted event even with zero new rows;
+- admission failure still commits raw observations and emits no broad event;
+- event and observation commit together on success, then the existing
+  post-commit materialization/wake bridge receives exact identities;
+- focused source, trigger, admission, monitor, invariant, compile, lint, and
+  diff checks pass;
+- standard hot-fix deployment plus live proof of canonical event, fresh global
+  Day0 probability, monitor redecision, loaded SHA, heartbeat, and rejection
+  evidence.

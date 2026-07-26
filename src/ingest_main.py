@@ -438,6 +438,54 @@ def _bridge_committed_day0_events(
         )
 
 
+def _obs_tick_day0_family_admission(
+    city_names: list[str] | tuple[str, ...],
+    *,
+    decision_time: datetime,
+):
+    """Resolve only the NOAA/Ogimet local-day scopes this source tick can publish."""
+
+    from src.config import runtime_cities_by_name
+
+    cities = runtime_cities_by_name()
+    scopes: list[tuple[str, str]] = []
+    for city_name in city_names:
+        city = cities.get(str(city_name))
+        if city is None or str(getattr(city, "settlement_source_type", "")) != "noaa":
+            continue
+        try:
+            local_today = decision_time.astimezone(ZoneInfo(str(city.timezone))).date()
+        except Exception:
+            continue
+        scopes.extend(
+            (
+                (city.name, (local_today - timedelta(days=1)).isoformat()),
+                (city.name, local_today.isoformat()),
+            )
+        )
+    return _day0_family_admission_for_scopes(tuple(scopes))
+
+
+def _bridge_obs_tick_day0_results(*, source: str, results: list[object]) -> None:
+    """Wake probability/redecision lanes for events committed with obs rows."""
+
+    event_ids = tuple(
+        event_id
+        for result in results
+        for event_id in tuple(getattr(result, "day0_event_ids", ()) or ())
+    )
+    families = tuple(
+        family
+        for result in results
+        for family in tuple(getattr(result, "day0_event_families", ()) or ())
+    )
+    _bridge_committed_day0_events(
+        source=source,
+        event_ids=event_ids,
+        families=families,
+    )
+
+
 def _persist_day0_metar_ledger_after_wake(prefetch: Any) -> bool:
     """Best-effort additive ledger flush outside the Day0 alpha transaction."""
 
@@ -1358,11 +1406,24 @@ def _k2_obs_tick():
         if str(_REPO_ROOT) not in _sys.path:
             _sys.path.insert(0, str(_REPO_ROOT))
         from scripts.obs_live_tick import run_live_tick
-        from src.config import STATE_DIR
+        from src.config import STATE_DIR, runtime_cities_by_name
         # run_live_tick fetches upstream data lock-free and opens short
         # per-city db_writer_lock connections only for insert_rows + commit.
         # Do NOT create a second get_world_connection here.
-        results = run_live_tick(days_back=7, db_path=STATE_DIR / "zeus-world.db")
+        decision_time = datetime.now(timezone.utc)
+        family_admission = _obs_tick_day0_family_admission(
+            tuple(runtime_cities_by_name()),
+            decision_time=decision_time,
+        )
+        results = run_live_tick(
+            days_back=7,
+            db_path=STATE_DIR / "zeus-world.db",
+            day0_family_admission=family_admission,
+        )
+        _bridge_obs_tick_day0_results(
+            source="k2_obs_tick",
+            results=results,
+        )
         written = sum(r.rows_written for r in results if not r.skipped_hko)
         failed = [r.city for r in results if r.failure_reason]
         logger.info("K2 obs_tick: written=%d failed=%s", written, failed or "none")
@@ -1456,10 +1517,19 @@ def _k2_obs_fast_tick():
         offset = (int(now_utc.timestamp()) // 900) % len(city_filter)
         city_filter = city_filter[offset:] + city_filter[:offset]
 
+        family_admission = _obs_tick_day0_family_admission(
+            tuple(city_filter),
+            decision_time=now_utc,
+        )
         results = run_live_tick(
             days_back=1,
             city_filter=city_filter,
             db_path=STATE_DIR / "zeus-world.db",
+            day0_family_admission=family_admission,
+        )
+        _bridge_obs_tick_day0_results(
+            source="k2_obs_fast_tick",
+            results=results,
         )
         written = sum(r.rows_written for r in results if not r.skipped_hko)
         failed = [r.city for r in results if r.failure_reason]

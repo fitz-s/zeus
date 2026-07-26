@@ -416,3 +416,119 @@ def test_hko_tick_resolves_family_admission_before_opening_the_raw_write_transac
         "write transaction opens, so a fail-closed (or any) resolver "
         "outcome cannot roll back or block the already-separate raw write"
     )
+
+
+def test_ogimet_tick_retries_missing_day0_event_from_committed_canonical_fact(tmp_path):
+    """A later source tick must close the canonical-fact -> event gap.
+
+    This is the Tel Aviv 2026-07-26 antibody: the first write may retain raw
+    weather truth while admission/event publication is unavailable. Replaying
+    the same idempotent observation after admission recovers must publish the
+    missing DAY0_EXTREME_UPDATED event even when no new obs row is inserted.
+    """
+
+    import json
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    from scripts.obs_live_tick import _write_rows
+    from src.data.observation_instants_writer import ObsV2Row
+
+    db_path = tmp_path / "world.db"
+    conn = sqlite3.connect(db_path)
+    init_schema(conn)
+    conn.commit()
+    conn.close()
+
+    now_utc = datetime.now(UTC).replace(microsecond=0)
+    observed_utc = now_utc - timedelta(minutes=2)
+    imported_utc = now_utc - timedelta(minutes=1)
+    observed_local = observed_utc.astimezone(ZoneInfo("Asia/Jerusalem"))
+    row = ObsV2Row(
+        city="Tel Aviv",
+        target_date=observed_local.date().isoformat(),
+        source="ogimet_metar_llbg",
+        timezone_name="Asia/Jerusalem",
+        local_timestamp=observed_local.isoformat(),
+        utc_timestamp=observed_utc.isoformat(),
+        utc_offset_minutes=int(observed_local.utcoffset().total_seconds() // 60),
+        time_basis="utc_hour_bucket_extremum",
+        temp_unit="C",
+        imported_at=imported_utc.isoformat(),
+        authority="VERIFIED",
+        data_version="v1.wu-native",
+        provenance_json=json.dumps(
+            {
+                "tier": "OGIMET_METAR",
+                "station_id": "LLBG",
+                "source_url": "https://www.ogimet.com/cgi-bin/getmetar?icao=LLBG",
+                "payload_hash": "sha256:" + ("1" * 64),
+                "parser_version": "obs_v2_live_tick_v1",
+                "latest_raw_ts": observed_utc.isoformat(),
+                "hour_max_raw_ts": observed_utc.isoformat(),
+                "hour_min_raw_ts": observed_utc.isoformat(),
+            }
+        ),
+        local_hour=float(observed_local.hour),
+        running_max=31.0,
+        running_min=25.0,
+        station_id="LLBG",
+        observation_count=1,
+    )
+
+    first_written = _write_rows(db_path, [row])
+    assert first_written == 1
+    check = sqlite3.connect(db_path)
+    assert check.execute("SELECT COUNT(*) FROM observation_instants").fetchone()[0] == 1
+    assert check.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    check.close()
+
+    event_ids: list[str] = []
+    families: list[tuple[str, str, str]] = []
+    second_written = _write_rows(
+        db_path,
+        [row],
+        day0_event_city="Tel Aviv",
+        day0_family_admission=lambda observation: (
+            observation["city"] == "Tel Aviv"
+            and observation["target_date"] == row.target_date
+            and observation["metric"] == "high"
+        ),
+        inserted_event_ids=event_ids,
+        inserted_event_families=families,
+    )
+
+    check = sqlite3.connect(db_path)
+    payload = json.loads(
+        check.execute(
+            "SELECT payload_json FROM opportunity_events "
+            "WHERE event_type='DAY0_EXTREME_UPDATED'"
+        ).fetchone()[0]
+    )
+    assert second_written == 0
+    assert check.execute("SELECT COUNT(*) FROM observation_instants").fetchone()[0] == 1
+    assert check.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+    assert payload["city"] == "Tel Aviv"
+    assert payload["target_date"] == row.target_date
+    assert payload["metric"] == "high"
+    assert payload["rounded_value"] == 31
+    assert payload["settlement_source"] == "ogimet_metar_llbg"
+    assert event_ids
+    assert families == [("Tel Aviv", row.target_date, "high")]
+    check.close()
+
+
+@pytest.mark.parametrize("job_name", ("_k2_obs_tick", "_k2_obs_fast_tick"))
+def test_noaa_obs_jobs_resolve_admission_then_commit_then_bridge(job_name):
+    """Production schedulers must wire admission and the post-commit wake."""
+
+    import inspect
+
+    import src.ingest_main as ingest_main
+
+    source = inspect.getsource(getattr(ingest_main, job_name))
+    admission_pos = source.index("_obs_tick_day0_family_admission(")
+    run_pos = source.index("run_live_tick(")
+    bridge_pos = source.index("_bridge_obs_tick_day0_results(")
+    assert admission_pos < run_pos < bridge_pos
+    assert "day0_family_admission=family_admission" in source
