@@ -203,8 +203,9 @@ def _hourly_obs_to_v2_row(
 ) -> ObsV2Row:
     """Build ObsV2Row from HourlyObservation. Mirrors backfill_obs semantics.
 
-    M1: temp_current=None — forces consumers to use running_max/running_min
-    for track-aware queries. Do NOT set to hour_max_temp.
+    Daily-extreme consumers use running_max/running_min. ``temp_current`` is
+    the latest source report in the bucket, never the HIGH-biased hour maximum;
+    it supplies the causal current-state anchor for remaining-window Day0 q.
     """
     source_tag = expected_source_for_city(obs.city)
     latest_raw_ts = _latest_raw_ts(obs)
@@ -214,6 +215,7 @@ def _hourly_obs_to_v2_row(
         "hour_max_raw_ts": obs.hour_max_raw_ts,
         "hour_min_raw_ts": obs.hour_min_raw_ts,
         "latest_raw_ts": latest_raw_ts,
+        "latest_temp": obs.latest_temp,
         "raw_obs_count": obs.observation_count,
         "aggregation": "utc_hour_bucket_extremum",
         "source_url": _source_url_for_obs(obs, source_tag=source_tag),
@@ -226,6 +228,7 @@ def _hourly_obs_to_v2_row(
             "hour_max_raw_ts": obs.hour_max_raw_ts,
             "hour_min_raw_ts": obs.hour_min_raw_ts,
             "latest_raw_ts": latest_raw_ts,
+            "latest_temp": obs.latest_temp,
             "hour_max_temp": obs.hour_max_temp,
             "hour_min_temp": obs.hour_min_temp,
             "temp_unit": obs.temp_unit,
@@ -247,7 +250,7 @@ def _hourly_obs_to_v2_row(
         is_ambiguous_local_hour=obs.is_ambiguous_local_hour,
         is_missing_local_hour=obs.is_missing_local_hour,
         time_basis=obs.time_basis,
-        temp_current=None,  # M1: no HIGH-biased default
+        temp_current=obs.latest_temp,
         running_max=obs.hour_max_temp,
         running_min=obs.hour_min_temp,
         temp_unit=obs.temp_unit,

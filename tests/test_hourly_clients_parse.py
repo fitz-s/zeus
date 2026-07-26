@@ -1,5 +1,5 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-05-02 (PR 36 review: local UTC bounds + DST fold)
+# Last reused/audited: 2026-07-26 (latest-report current-state relationship)
 # Authority basis: plan v3 Phase 0 files #4/#5; extremum-preservation
 #                  correction 2026-04-21 (operator).
 """Networkless parse + aggregate tests for WU/Ogimet hourly clients.
@@ -120,6 +120,7 @@ def test_wu_aggregate_emits_hour_max_and_min_from_same_bucket():
     assert bucket_14.hour_max_raw_ts.startswith("2024-01-15T14:35:00")
     assert bucket_14.hour_min_raw_ts.startswith("2024-01-15T14:00:00")
     assert bucket_14.latest_raw_ts.startswith("2024-01-15T14:35:00")
+    assert bucket_14.latest_temp == 82.0
     assert bucket_14.observation_count == 2
     # 15:00 bucket has a single obs; max == min == 80
     assert bucket_15.hour_max_temp == 80.0
@@ -174,6 +175,7 @@ def test_wu_aggregate_multi_obs_bucket_tracks_both_max_and_min():
     assert bucket.hour_min_temp == 70.0
     assert bucket.hour_min_raw_ts.startswith("2024-01-15T14:00:00")
     assert bucket.latest_raw_ts.startswith("2024-01-15T14:45:00")
+    assert bucket.latest_temp == 72.0
     assert bucket.observation_count == 4
 
 
@@ -263,6 +265,8 @@ def test_ogimet_aggregate_preserves_extremum():
     bucket_14 = by_hour["2024-01-15T14:00:00+00:00"]
     assert bucket_14.hour_max_temp == 13.0
     assert bucket_14.hour_min_temp == 10.0
+    assert bucket_14.latest_raw_ts.startswith("2024-01-15T14:35:00")
+    assert bucket_14.latest_temp == 13.0
     assert bucket_14.observation_count == 2
 
 
@@ -465,9 +469,10 @@ def test_no_hourly_observation_field_named_temp_current():
 
     The old HourlyObservation had a single ``temp_current`` field which
     carried the closest-to-HH:00 obs (erasing extrema). The new struct
-    carries hour_max_temp + hour_min_temp instead. If someone re-adds
-    temp_current to the struct, this test fails and forces the PR
-    author to confront the extremum semantics before merging.
+    carries hour_max_temp + hour_min_temp instead. The distinct
+    ``latest_temp`` field is the actual latest causal report, not a snap
+    surrogate. If someone re-adds temp_current to the struct, this test fails
+    and forces the PR author to confront the extremum semantics before merging.
     """
     fields = set(HourlyObservation.__dataclass_fields__.keys())
     assert "temp_current" not in fields, (
@@ -481,3 +486,4 @@ def test_no_hourly_observation_field_named_temp_current():
     assert "hour_max_raw_ts" in fields
     assert "hour_min_raw_ts" in fields
     assert "latest_raw_ts" in fields
+    assert "latest_temp" in fields

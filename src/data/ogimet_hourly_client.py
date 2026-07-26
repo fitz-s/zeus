@@ -455,6 +455,7 @@ def _aggregate(
                 max_temp, max_dt = temp_v, dt_v
             if temp_v < min_temp or (temp_v == min_temp and dt_v < min_dt):
                 min_temp, min_dt = temp_v, dt_v
+        latest_temp, latest_dt = max(obs_list, key=lambda item: item[1])
 
         utc_offset = local_dt.utcoffset()
         dst_offset = local_dt.dst()
@@ -482,7 +483,8 @@ def _aggregate(
             temp_unit=unit_out,
             station_id=station,
             observation_count=len(obs_list),
-            latest_raw_ts=max(dt_v for _, dt_v in obs_list).isoformat(),
+            latest_raw_ts=latest_dt.isoformat(),
+            latest_temp=_convert(latest_temp),
         )
 
 

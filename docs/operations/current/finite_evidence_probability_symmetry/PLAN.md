@@ -1720,3 +1720,43 @@ Acceptance requires:
 - standard hot-fix deployment plus live proof of canonical event, fresh global
   Day0 probability, monitor redecision, loaded SHA, heartbeat, and rejection
   evidence.
+
+## 2026-07-26 Hourly extrema plus current-state observation shape
+
+The Tel Aviv July 26 loss reconstruction exposed a third serial break after
+Ogimet transport and Day0 event publication were restored. Fresh three-model
+hourly forecast vectors existed, but the current-state conditioned
+remaining-window probability still failed closed. The canonical Ogimet rows
+persisted hourly maxima/minima while setting `temp_current=NULL`; the source
+object carried the latest report timestamp but discarded that report's
+temperature. The Day0 trajectory conditioner therefore had no physical
+current-state anchor and returned
+`DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE`.
+
+The observation shape now carries three distinct facts without conflation:
+hour maximum, hour minimum, and the temperature from the latest causal source
+report. Daily HIGH/LOW extrema continue to consume max/min. Remaining-window
+probability consumes only latest-report temperature and timestamp. The latest
+value is included in provenance and payload identity, so widening an existing
+row from unknown current temperature to a known source value is auditable and
+idempotent.
+
+SCOPE is the shared WU/Ogimet hourly aggregate-to-canonical adapter. DRAIN is
+the next admitted observation tick, which widens current-day rows and wakes the
+existing Day0 redecision chain. RESET is a non-null canonical
+`temp_current` paired with `latest_raw_ts`, followed by a fresh
+current-state-conditioned monitor receipt. No source mapping, settlement
+extremum, probability formula, exit threshold, order band, schema, or
+lifecycle rule changes.
+
+Acceptance requires:
+
+- WU and Ogimet aggregation antibodies proving latest-report temperature is
+  independent from the bucket maximum/minimum;
+- writer relationship proof that `temp_current`, provenance, and payload hash
+  carry that exact latest report;
+- existing hourly parser/writer, remaining-window, monitor, compile, lint, and
+  diff checks remain green;
+- standard hot-fix deployment, targeted current-day source replay, and live
+  evidence that Tel Aviv current-state remaining-window probabilities become
+  fresh before evaluating exits.

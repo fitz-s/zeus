@@ -97,6 +97,7 @@ class HourlyObservation:
     station_id: str  # ICAO (e.g. 'KORD')
     observation_count: int  # raw METAR/SPECI reports in the bucket
     latest_raw_ts: Optional[str] = None  # latest source report in the bucket
+    latest_temp: Optional[float] = None  # temperature on latest source report
 
 
 @dataclass(frozen=True)
@@ -312,6 +313,7 @@ def _aggregate_hourly(
                 max_temp, max_dt = temp_v, dt_v
             if temp_v < min_temp or (temp_v == min_temp and dt_v < min_dt):
                 min_temp, min_dt = temp_v, dt_v
+        latest_temp, latest_dt = max(obs_list, key=lambda item: item[1])
 
         utc_offset = local_dt.utcoffset()
         dst_offset = local_dt.dst()
@@ -340,7 +342,8 @@ def _aggregate_hourly(
                 temp_unit=unit,
                 station_id=icao,
                 observation_count=len(obs_list),
-                latest_raw_ts=max(dt_v for _, dt_v in obs_list).isoformat(),
+                latest_raw_ts=latest_dt.isoformat(),
+                latest_temp=latest_temp,
             )
         )
     return out
