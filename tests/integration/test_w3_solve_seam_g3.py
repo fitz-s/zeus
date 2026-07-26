@@ -2436,9 +2436,18 @@ def test_global_deterministic_actuation_builds_only_selected_exact_proof():
         )
 
 
+@pytest.mark.parametrize(
+    ("exit_status", "maturity_reason"),
+    (
+        ("not_applicable", "non_day0_family"),
+        ("mature", "day0_high_extreme_mature:post_peak_confidence=0.97"),
+    ),
+)
 def test_global_actuation_revalidates_content_then_preserves_selected_witness(
     monkeypatch,
     caplog,
+    exit_status,
+    maturity_reason,
 ):
     content = {
         field: f"current-{field}"
@@ -2457,17 +2466,16 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         authority_certificate_hash="fresh-cert",
         witness_identity="fresh-witness",
     )
-    maturity_reason = "day0_high_extreme_mature:post_peak_confidence=0.97"
     current_family = bridge.PreparedGlobalFamily(
         decision_id="fresh-decision",
         probability_witness=refreshed,
         candidate_seeds=(),
-        day0_exit_authority_status="mature",
+        day0_exit_authority_status=exit_status,
         day0_exit_authority_reason=maturity_reason,
         sell_action_authority_identity=bridge.sell_action_authority_identity(
             family_key=refreshed.family_key,
             probability_witness_identity=refreshed.witness_identity,
-            status="mature",
+            status=exit_status,
             reason=maturity_reason,
         ),
     )
@@ -2503,7 +2511,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         bridge.sell_action_authority_identity(
             family_key=selected.family_key,
             probability_witness_identity=selected.witness_identity,
-            status="mature",
+            status=exit_status,
             reason=maturity_reason,
         )
     )

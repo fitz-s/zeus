@@ -12461,7 +12461,7 @@ def _current_global_actuation_prepared_family(
     rebound_status = str(
         getattr(rebound, "day0_exit_authority_status", "") or ""
     ).strip().lower()
-    if rebound_status in {"mature", "immature", "unavailable"}:
+    if rebound_status in {"not_applicable", "mature", "immature", "unavailable"}:
         from src.engine.qkernel_spine_bridge import (
             sell_action_authority_identity,
         )
