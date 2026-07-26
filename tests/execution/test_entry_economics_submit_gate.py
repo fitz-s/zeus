@@ -1203,7 +1203,7 @@ def test_entry_economics_current_state_tail_still_requires_positive_robust_utili
     assert verdict["reason"] == "expected_profit_below_floor"
 
 
-def test_current_state_mean_buy_is_blocked_when_lcb_edge_is_negative():
+def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb_edge():
     economics = _current_state_mean_buy_econ(global_max_spend_usd="2.05")
 
     assert (
@@ -1211,7 +1211,7 @@ def test_current_state_mean_buy_is_blocked_when_lcb_edge_is_negative():
             economics,
             direction="buy_yes",
         )
-        == "buy_requires_robust_probability_functional"
+        is None
     )
     tampered = {
         **economics,
@@ -1225,7 +1225,7 @@ def test_current_state_mean_buy_is_blocked_when_lcb_edge_is_negative():
             tampered,
             direction="buy_yes",
         )
-        == "buy_requires_robust_probability_functional"
+        == "mean_execution_edge"
     )
 
     verdict = _entry_economics_component(
@@ -1242,8 +1242,7 @@ def test_current_state_mean_buy_is_blocked_when_lcb_edge_is_negative():
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"] == "submit_q_lcb_minus_limit_non_positive"
+    assert verdict["allowed"] is True
     assert conservative_submit_expected_edge(
         {
             "direction": "buy_yes",
@@ -1252,20 +1251,16 @@ def test_current_state_mean_buy_is_blocked_when_lcb_edge_is_negative():
             "qkernel_execution_economics": economics,
         },
         limit_price=0.40,
-    ) == pytest.approx(-0.06)
-    with pytest.raises(
-        CertificateVerificationError,
-        match="current-state identity invalid",
-    ):
-        _verify_actionable_qkernel_economics(
-            {
-                "direction": "buy_yes",
-                "selection_authority_applied": "qkernel_spine",
-                "qkernel_execution_economics": economics,
-            },
-            q_live=0.70,
-            q_lcb=0.35,
-        )
+    ) == pytest.approx(0.29)
+    _verify_actionable_qkernel_economics(
+        {
+            "direction": "buy_yes",
+            "selection_authority_applied": "qkernel_spine",
+            "qkernel_execution_economics": economics,
+        },
+        q_live=0.70,
+        q_lcb=0.35,
+    )
     taker_quality = _entry_taker_quality_component(
         effective_order_type="FAK",
         post_only=False,
@@ -1286,8 +1281,7 @@ def test_current_state_mean_buy_is_blocked_when_lcb_edge_is_negative():
         selection_authority_applied="qkernel_spine",
         qkernel_execution_economics=economics,
     )
-    assert taker_quality["allowed"] is False
-    assert taker_quality["reason"] == "current_band_taker_quality_proof_invalid"
+    assert taker_quality["allowed"] is True
 
 
 @pytest.mark.parametrize(

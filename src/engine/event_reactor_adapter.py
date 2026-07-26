@@ -11391,13 +11391,11 @@ def _global_current_state_execution_economics(
 ) -> dict[str, Any]:
     """Bind actuation to the current source-clock band and order certificate."""
 
-    robust_terminal = getattr(decision, "terminal_wealth", None)
-    expected_terminal = getattr(decision, "expected_terminal_wealth", None)
-    if expected_terminal is not None or robust_terminal is None:
-        raise ValueError("GLOBAL_CURRENT_STATE_BUY_REQUIRES_ROBUST_ECONOMICS")
     try:
         shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
         cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
+        robust_terminal = getattr(decision, "terminal_wealth", None)
+        expected_terminal = getattr(decision, "expected_terminal_wealth", None)
         mean_action = expected_terminal is not None
         terminal = expected_terminal if mean_action else robust_terminal
         if mean_action:
@@ -16282,8 +16280,15 @@ def _build_event_bound_taker_quality_proof(
             }
         q_live = _optional_float(qkernel_cert.get("payoff_q_point"))
         q_lcb = _optional_float(qkernel_cert.get("payoff_q_lcb"))
-        mean_action = False
-        q_action = _optional_float(qkernel_cert.get("payoff_q_lcb"))
+        mean_action = (
+            qkernel_cert.get("global_probability_functional")
+            == "POSTERIOR_PREDICTIVE_MEAN"
+        )
+        q_action = _optional_float(
+            qkernel_cert.get("payoff_q_action")
+            if mean_action
+            else qkernel_cert.get("payoff_q_lcb")
+        )
         payload_q_live = _optional_float(actionable_payload.get("q_live"))
         payload_q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
         if (

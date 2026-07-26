@@ -9,7 +9,10 @@ import sqlite3
 from typing import Literal, Mapping
 
 from src.contracts.execution_price import ExecutionPrice
-from src.decision_kernel.canonicalization import stable_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_global_current_state_rejection_reason,
+    stable_hash,
+)
 from src.decision_kernel.certificate import DecisionCertificate
 
 
@@ -121,6 +124,36 @@ def conservative_submit_expected_edge(
     q_lcb = finite_decimal(payload.get("q_lcb_5pct"))
     limit = finite_decimal(limit_price)
     economics = payload.get("qkernel_execution_economics")
+    if (
+        isinstance(economics, Mapping)
+        and economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+        and qkernel_global_current_state_rejection_reason(
+            economics,
+            direction=str(payload.get("direction") or ""),
+        )
+        is None
+    ):
+        point = finite_decimal(economics.get("payoff_q_point"))
+        expected_edge = finite_decimal(economics.get("edge_expected"))
+        max_spend = finite_decimal(economics.get("global_max_spend_usd"))
+        shares = finite_decimal(economics.get("global_target_shares"))
+        if (
+            point is None
+            or expected_edge is None
+            or limit is None
+            or max_spend is None
+            or shares is None
+            or shares <= 0
+        ):
+            return raw_score
+        return float(
+            min(
+                expected_edge,
+                point - limit,
+                point - (max_spend / shares),
+            )
+        )
     if score is None or q_lcb is None or limit is None:
         return raw_score
     bounds = [score, q_lcb - limit]

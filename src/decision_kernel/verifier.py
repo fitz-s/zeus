@@ -767,12 +767,43 @@ def _verify_actionable_qkernel_economics(
         raise CertificateVerificationError("actionable qkernel payoff_q_lcb mismatches q_lcb_5pct")
     cost = _finite_float(economics.get("cost"), "actionable qkernel cost")
     edge_lcb = _finite_float(economics.get("edge_lcb"), "actionable qkernel edge_lcb")
+    mean_action = bool(
+        current_state_solve
+        and economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
     if cost <= 0.0 or cost >= 1.0:
         raise CertificateVerificationError("actionable qkernel cost must be in (0, 1)")
-    if edge_lcb <= 0.0:
+    if not mean_action and edge_lcb <= 0.0:
         raise CertificateVerificationError("actionable qkernel edge_lcb must be positive")
     if abs((payoff_q_lcb - cost) - edge_lcb) > 1e-6:
         raise CertificateVerificationError("actionable qkernel payoff edge inconsistent")
+    if mean_action:
+        payoff_q_action = _probability_float(
+            economics.get("payoff_q_action"),
+            "actionable qkernel payoff_q_action",
+        )
+        edge_expected = _finite_float(
+            economics.get("edge_expected"),
+            "actionable qkernel edge_expected",
+        )
+        if not math.isclose(
+            payoff_q_action,
+            payoff_q_point,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise CertificateVerificationError(
+                "actionable qkernel payoff_q_action must equal payoff_q_point"
+            )
+        if edge_expected <= 0.0:
+            raise CertificateVerificationError(
+                "actionable qkernel edge_expected must be positive"
+            )
+        if abs((payoff_q_action - cost) - edge_expected) > 1e-6:
+            raise CertificateVerificationError(
+                "actionable qkernel expected payoff edge inconsistent"
+            )
     if not current_state_solve:
         optimal_delta_u = _finite_float(
             economics.get("optimal_delta_u"), "actionable qkernel optimal_delta_u"
@@ -1173,7 +1204,13 @@ def _verify_pre_submit_revalidation_for_command(
     if min_entry_price < 0.0:
         raise CertificateVerificationError("pre-submit revalidation min_entry_price must be non-negative")
     current_state_solve = _current_state_solve_payload(pre_submit)
-    submit_probability = q_lcb
+    mean_action = bool(
+        current_state_solve
+        and isinstance(economics, Mapping)
+        and economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    submit_probability = q_live if mean_action else q_lcb
     submit_cost_bound = limit_price
     if current_state_solve and isinstance(economics, Mapping):
         try:
@@ -1189,8 +1226,13 @@ def _verify_pre_submit_revalidation_for_command(
             )
     submit_edge = submit_probability - submit_cost_bound
     if submit_edge <= 0.0:
+        label = (
+            "action-probability-minus-cost-bound"
+            if mean_action
+            else "q_lcb-minus-limit"
+        )
         raise CertificateVerificationError(
-            "pre-submit revalidation submit q_lcb-minus-limit must be positive"
+            f"pre-submit revalidation submit {label} must be positive"
         )
     _verify_live_entry_win_rate_floor(
         pre_submit,

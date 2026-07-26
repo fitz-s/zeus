@@ -1096,6 +1096,12 @@ def _validate_pre_submit_revalidation_payload(
         and isinstance(decision_economics, Mapping)
         and canonical_json(economics) == canonical_json(decision_economics)
     )
+    mean_action = bool(
+        current_state_solve
+        and isinstance(economics, Mapping)
+        and economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
     floor_decision = entry_price_floor_decision(
         strategy_key=payload.get("strategy_key"),
         direction=payload.get("direction"),
@@ -1125,11 +1131,16 @@ def _validate_pre_submit_revalidation_payload(
         limit_price=limit_price,
         size=size,
     )
-    submit_probability = q_lcb
+    submit_probability = q_live if mean_action else q_lcb
     submit_edge = submit_probability - submit_cost_bound
     if submit_edge <= 0.0:
+        label = (
+            "action-probability-minus-cost-bound"
+            if mean_action
+            else "q_lcb-minus-cost-bound"
+        )
         raise LiveOrderAggregateError(
-            "PreSubmitRevalidated requires positive submit q_lcb-minus-cost-bound"
+            f"PreSubmitRevalidated requires positive submit {label}"
         )
     if expected_edge > submit_edge + 1e-6:
         raise LiveOrderAggregateError(

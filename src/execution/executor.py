@@ -1275,6 +1275,12 @@ def _entry_economics_component(
         and isinstance(durable_economics, Mapping)
         and canonical_json(economics) == canonical_json(durable_economics)
     )
+    mean_action = bool(
+        current_state_solve
+        and isinstance(economics, Mapping)
+        and economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
     day0_authority_errors: tuple[str, ...] | None = None
     is_day0_actionable = False
     if isinstance(actionable_payload, Mapping) and str(
@@ -1327,10 +1333,7 @@ def _entry_economics_component(
             detail=str(exc),
             limit_price=limit_price,
         )
-    # ENTRY is always a BUY of a YES or NO token.  Posterior mean may compare
-    # proposals after admission, but the live BUY boundary remains the selected
-    # side's current probability lower bound.
-    submit_probability = q_lcb
+    submit_probability = q_live if mean_action else q_lcb
     submit_edge = submit_probability - limit_price
     expected_profit = submit_edge * submitted_shares
     edge_density = submit_edge / limit_price
@@ -1468,6 +1471,7 @@ def _entry_economics_component(
     ).strip()
     econ_cost = _float_field(economics.get("cost"))
     econ_edge_lcb = _float_field(economics.get("edge_lcb"))
+    econ_edge_expected = _float_field(economics.get("edge_expected"))
     econ_delta_u_at_min = _float_field(economics.get("delta_u_at_min"))
     econ_optimal_stake_usd = _float_field(economics.get("optimal_stake_usd"))
     econ_optimal_delta_u = _float_field(economics.get("optimal_delta_u"))
@@ -1519,7 +1523,7 @@ def _entry_economics_component(
         action_q=submit_probability,
         expected_edge=expected_edge,
     )
-    econ_action_edge = econ_edge_lcb
+    econ_action_edge = econ_edge_expected if mean_action else econ_edge_lcb
     if econ_source != "qkernel_spine":
         reason = "qkernel_source_missing"
     elif selection_authority != "qkernel_spine":
@@ -1541,11 +1545,23 @@ def _entry_economics_component(
     elif limit_price > econ_cost + 1e-6 and not global_limit_bound_authorized:
         reason = "submit_price_worse_than_qkernel_cost"
     elif econ_action_edge is None or econ_action_edge <= 0.0:
-        reason = "qkernel_edge_lcb_non_positive"
+        reason = (
+            "qkernel_edge_expected_non_positive"
+            if mean_action
+            else "qkernel_edge_lcb_non_positive"
+        )
     elif econ_action_edge > submit_edge + 1e-6 and not global_limit_bound_authorized:
-        reason = "qkernel_edge_lcb_exceeds_submit_edge"
+        reason = (
+            "qkernel_edge_expected_exceeds_submit_edge"
+            if mean_action
+            else "qkernel_edge_lcb_exceeds_submit_edge"
+        )
     elif expected_edge > econ_action_edge + 1e-6:
-        reason = "expected_edge_exceeds_qkernel_edge_lcb"
+        reason = (
+            "expected_edge_exceeds_qkernel_edge_expected"
+            if mean_action
+            else "expected_edge_exceeds_qkernel_edge_lcb"
+        )
     elif (
         not current_state_solve
         and (econ_delta_u_at_min is None or econ_delta_u_at_min <= 0.0)
@@ -1573,6 +1589,11 @@ def _entry_economics_component(
         or abs((payoff_q_lcb - econ_cost) - econ_edge_lcb) > 1e-6
     ):
         reason = "qkernel_payoff_edge_inconsistent"
+    elif mean_action and (
+        econ_edge_expected is None
+        or abs((payoff_q_point - econ_cost) - econ_edge_expected) > 1e-6
+    ):
+        reason = "qkernel_payoff_expected_edge_inconsistent"
     elif not math.isclose(payoff_q_point, q_live, rel_tol=0.0, abs_tol=1e-6):
         reason = "qkernel_payoff_q_point_mismatch_q_live"
     elif not math.isclose(payoff_q_lcb, q_lcb, rel_tol=0.0, abs_tol=1e-6):
