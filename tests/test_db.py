@@ -1808,6 +1808,42 @@ def test_init_schema_trade_only_commits_position_events_read_indexes(tmp_path):
     assert "idx_position_events_position_type_sequence" in indexes
     assert "idx_position_events_position_phase_after_sequence" in indexes
     assert "idx_position_events_settled_env_position_sequence" in indexes
+    assert "idx_position_events_entry_execution_occurred_at" in indexes
+
+
+def test_position_events_entry_execution_query_uses_partial_time_index(tmp_path):
+    import sqlite3
+
+    from src.state.db import init_schema_trade_only
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    init_schema_trade_only(conn)
+
+    plan = "\n".join(
+        str(row[3])
+        for row in conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT event_type, strategy_key, occurred_at
+            FROM position_events
+            WHERE event_type IN (
+                'POSITION_OPEN_INTENT',
+                'ENTRY_ORDER_FILLED',
+                'ENTRY_ORDER_REJECTED',
+                'ENTRY_ORDER_VOIDED'
+            )
+              AND occurred_at >= ?
+              AND occurred_at LIKE '____-__-__T%'
+            """,
+            ("2026-07-23",),
+        ).fetchall()
+    )
+    conn.close()
+
+    assert "idx_position_events_entry_execution_occurred_at" in plan
+    assert "SCAN position_events" not in plan
 
 
 def test_init_schema_trade_only_commits_position_current_quote_priority_index(tmp_path):

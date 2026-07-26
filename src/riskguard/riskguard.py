@@ -1346,7 +1346,14 @@ def _entry_execution_summary(
         if now
         else datetime.now(timezone.utc)
     )
-    cutoff = (now_dt - _ENTRY_EXECUTION_LOOKBACK).isoformat()
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    cutoff = now_dt.astimezone(timezone.utc) - _ENTRY_EXECUTION_LOOKBACK
+    # ``datetime(occurred_at)`` on both sides made SQLite convert and temp-sort
+    # every historical position_event on each 60-second RiskGuard tick.  Read a
+    # timezone-safe one-day superset with a cheap textual date floor, then do
+    # exact UTC filtering/order/limit in Python.
+    broad_cutoff = (cutoff - timedelta(days=1)).date().isoformat()
     try:
         rows = conn.execute(
             """
@@ -1358,14 +1365,29 @@ def _entry_execution_summary(
                 'ENTRY_ORDER_REJECTED',
                 'ENTRY_ORDER_VOIDED'
             )
-              AND datetime(occurred_at) >= datetime(?)
-            ORDER BY datetime(occurred_at) DESC
-            LIMIT ?
+              AND occurred_at >= ?
+              AND occurred_at LIKE '____-__-__T%'
             """,
-            (cutoff, limit),
+            (broad_cutoff,),
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
+
+    recent_rows: list[tuple[datetime, sqlite3.Row]] = []
+    for row in rows:
+        try:
+            occurred_at = datetime.fromisoformat(
+                str(row["occurred_at"]).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            continue
+        if occurred_at.tzinfo is None:
+            occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+        occurred_at = occurred_at.astimezone(timezone.utc)
+        if occurred_at >= cutoff:
+            recent_rows.append((occurred_at, row))
+    recent_rows.sort(key=lambda item: item[0], reverse=True)
+    rows = [row for _, row in recent_rows[:limit]]
 
     overall = {
         "attempted": 0,
@@ -1404,9 +1426,8 @@ def _entry_execution_summary(
         overall[counter_key] += 1
         bucket[counter_key] += 1
         if counter_key in _TERMINAL_ENTRY_COUNTERS:
-            # Rows arrive newest-first (ORDER BY datetime(occurred_at) DESC), so
-            # the first terminal event seen is the newest — for the global
-            # overall and for each strategy bucket.
+            # Exact UTC timestamps were sorted newest-first above, so the first
+            # terminal event seen is newest globally and for its strategy.
             occurred_at = str(row["occurred_at"])
             if overall["newest_terminal_at"] is None:
                 overall["newest_terminal_at"] = occurred_at

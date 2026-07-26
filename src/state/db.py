@@ -5696,6 +5696,14 @@ CREATE INDEX IF NOT EXISTS idx_position_events_position_phase_after_sequence
 CREATE INDEX IF NOT EXISTS idx_position_events_settled_env_position_sequence
     ON position_events(env, position_id, sequence_no DESC)
     WHERE event_type = 'SETTLED';
+CREATE INDEX IF NOT EXISTS idx_position_events_entry_execution_occurred_at
+    ON position_events(occurred_at DESC, event_type, strategy_key)
+    WHERE event_type IN (
+        'POSITION_OPEN_INTENT',
+        'ENTRY_ORDER_FILLED',
+        'ENTRY_ORDER_REJECTED',
+        'ENTRY_ORDER_VOIDED'
+    );
 
 -- position_current (from architecture/2026_04_02_architecture_kernel.sql)
 CREATE TABLE IF NOT EXISTS position_current (

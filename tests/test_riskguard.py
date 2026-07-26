@@ -2962,6 +2962,70 @@ class TestEntryExecutionSummaryWindow:
         assert bucket["fill_rate"] == 0.0
         conn.close()
 
+    def test_offset_timestamps_use_exact_utc_window_and_order(self, tmp_path):
+        from src.state.db import get_connection, init_schema
+
+        db = tmp_path / "zeus.db"
+        conn = get_connection(db)
+        init_schema(conn)
+        rows = (
+            (
+                "fresh-offset",
+                "ENTRY_ORDER_FILLED",
+                "2026-07-24T00:30:00-12:00",
+            ),
+            (
+                "stale-offset",
+                "ENTRY_ORDER_VOIDED",
+                "2026-07-24T23:00:00+14:00",
+            ),
+            (
+                "newest",
+                "ENTRY_ORDER_REJECTED",
+                "2026-07-26T10:00:00+00:00",
+            ),
+        )
+        for position_id, event_type, occurred_at in rows:
+            conn.execute(
+                """
+                INSERT INTO position_events
+                (event_id, position_id, event_version, sequence_no, event_type,
+                 occurred_at, strategy_key, source_module, env, payload_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    f"{position_id}:{event_type}:1",
+                    position_id,
+                    1,
+                    1,
+                    event_type,
+                    occurred_at,
+                    "forecast_qkernel_entry",
+                    "test",
+                    "live",
+                    "{}",
+                ),
+            )
+        conn.commit()
+
+        summary = riskguard_module._entry_execution_summary(
+            conn,
+            now="2026-07-26T12:00:00+00:00",
+            limit=1,
+        )
+        assert summary["overall"]["rejected"] == 1
+        assert summary["overall"]["filled"] == 0
+
+        summary = riskguard_module._entry_execution_summary(
+            conn,
+            now="2026-07-26T12:00:00+00:00",
+            limit=10,
+        )
+        assert summary["overall"]["rejected"] == 1
+        assert summary["overall"]["filled"] == 1
+        assert summary["overall"]["voided"] == 0
+        conn.close()
+
 
 class TestExecutionDecayNotASelectionGate:
     """execution_decay must NEVER emit a per-strategy selection gate (2026-07-05,
