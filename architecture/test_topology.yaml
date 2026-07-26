@@ -593,7 +593,6 @@ test_trust_policy:
     tests/test_migration_redeem_operator_required.py: {created: "2026-05-01", last_used: "2026-05-16"}
     tests/test_no_unregistered_block_predicate.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_opendata_mx2t3_not_2t.py: {created: "2026-05-01", last_used: "2026-05-07"}
-    tests/test_operator_record_redeem.py: {created: "2026-05-01", last_used: "2026-05-16"}
     tests/test_oracle_low_failclosed.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_override_health.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_phase2_6_evaluator_wiring.py: {created: "2026-05-04", last_used: "2026-05-04"}
@@ -616,7 +615,6 @@ test_trust_policy:
     tests/test_route_card_token_budget.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_schema_introspection.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_selection_coverage_mode.py: {created: "2026-05-07", last_used: "2026-05-18"}
-    tests/test_settle_positions_uses_enqueue_redeem.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_severity_tier_invariant.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_severity_tier_runtime.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_source_family_collision.py: {created: "2026-05-17", last_used: "2026-05-17"}
@@ -661,8 +659,6 @@ test_trust_policy:
     tests/test_boundary_rule_majority_threshold.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # PR #192 — negRisk-misroute reconcile-guard antibody (Karachi root-cause permanent fix).
     tests/test_settlement_commands_negrisk_misroute_recovery.py: {created: "2026-05-19", last_used: "2026-05-19"}
-    # PR redeem-reconciler-wiring — PR-I.5 completion: reconciler wiring antibody (Karachi auto-recovery).
-    tests/test_main_redeem_reconciler_wiring.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # fix/json-hexbytes-serializer — HexBytes JSON serializer antibody (2026-05-19 alpha-loss postmortem).
     tests/test_settlement_commands_hexbytes_serializer.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # fix/antibody-negrisk-gamma-fallback — authoritative lookup 3-tier fallback + fail-closed None (PR #196).
@@ -1056,8 +1052,6 @@ categories:
     - tests/test_deployment_freshness_resume_on_boot_match.py
     - tests/test_boundary_rule_majority_threshold.py
     - tests/test_settlement_commands_negrisk_misroute_recovery.py
-    # PR redeem-reconciler-wiring — reconciler wiring antibody.
-    - tests/test_main_redeem_reconciler_wiring.py
     # fix/antibody-negrisk-gamma-fallback — authoritative 3-tier lookup + fail-closed None (PR #196).
     - tests/test_antibody_lookup_fallback.py
     # phase1-codehash-drift-antibody — runtime CI antibody: fail-closed on internal_resolver upgrade (2026-05-19).
@@ -1246,7 +1240,6 @@ categories:
     - tests/test_no_unregistered_block_predicate.py
     - tests/test_observability_counters.py
     - tests/test_opendata_mx2t3_not_2t.py
-    - tests/test_operator_record_redeem.py
     - tests/test_oracle_evidence_status.py
     - tests/test_oracle_low_failclosed.py
     - tests/test_override_health.py
@@ -1275,7 +1268,6 @@ categories:
     - tests/test_route_card_token_budget.py
     - tests/test_schema_introspection.py
     - tests/test_selection_coverage_mode.py
-    - tests/test_settle_positions_uses_enqueue_redeem.py
     - tests/test_settlement_commands_schema.py
     - tests/test_settlement_semantics_f_to_c.py
     - tests/test_severity_tier_invariant.py

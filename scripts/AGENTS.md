@@ -103,7 +103,6 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `migrate_phase2_cycle_stratification.py` | Migration: Phase 2 cycle stratification per DESIGN_PHASE2_PLATT_CYCLE_STRATIFICATION (dry-run/apply; created 2026-05-14) |
 | `migrate_world_observations_to_forecasts.py` | Migration: move world observation rows to zeus-forecasts.db post K1 split per task_2026-05-14_k1_followups PLAN §2 P0 (dry-run/apply; created 2026-05-14) |
 | `migrate_world_to_forecasts.py` | Migration: K1 DB split world→forecasts DB transition per task_2026-05-11_forecast_db_split PLAN §5.4 (dry-run/apply; created 2026-05-11) |
-| `operator_record_redeem.py` | Operator CLI: advance REDEEM_OPERATOR_REQUIRED rows; runtime support (created 2026-05-14) |
 | `pre-commit-capability-gate.sh` | Pre-commit enforcement gate for capability declarations; runs on staged changes (created 2026-05-06) |
 | `repair_active_entry_q_versions.py` | Repair active ENTRY q_version stamps from existing FinalIntentCertificate evidence; no venue action or DB backup (dry-run/apply; created 2026-07-09) |
 | `repair_dust_exit_projection.py` | Repair dust pending-exit projections from existing canonical backoff evidence; no venue action (dry-run/apply; created 2026-06-18) |

@@ -552,12 +552,13 @@ def test_money_path_lifecycle_replay_converges_across_crash_boundaries(tmp_path:
         assert replay.conn.execute("SELECT state FROM settlement_commands WHERE command_id=?", (command_id,)).fetchone()[0] == SettlementState.REDEEM_INTENT_CREATED.value
 
         # R6-a (2026-07-08): submit_redeem was DELETED (Zeus never submits redeem
-        # tx, operator law 2026-06-10). REDEEM_TX_HASHED is now reached only via
-        # an operator manually recording an externally-observed redemption
-        # (scripts/operator_record_redeem.py, same _atomic_transition building
-        # block) -- this replays that transition directly so the rest of the
-        # crash-recovery harness (reconcile_pending_redeems onward) still gets
-        # exercised against a real REDEEM_TX_HASHED row.
+        # tx, operator law 2026-06-10). 2026-07-25: on-chain redemption is
+        # decoupled entirely (Polymarket settles win/loss on our behalf);
+        # scripts/operator_record_redeem.py was deleted as unreachable (zero
+        # rows ever reached REDEEM_TX_HASHED in production). This replays the
+        # _atomic_transition directly so the rest of the crash-recovery harness
+        # (reconcile_pending_redeems onward) still gets exercised against a
+        # real REDEEM_TX_HASHED row.
         expected_tx_hash = "0x" + "ab" * 32
         transitioned = _atomic_transition(
             replay.conn,

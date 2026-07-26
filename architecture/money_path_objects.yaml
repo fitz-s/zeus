@@ -125,7 +125,11 @@ state_machines:
       - tests/test_command_recovery.py
       - tests/test_order_truth_reducer.py
   settlement_command:
-    owner: src/execution/harvester.py
+    # 2026-07-25: on-chain redemption decoupled entirely (Zeus never submits
+    # redeem tx; Polymarket settles win/loss on our behalf). harvester.py no
+    # longer enqueues into this state machine (enqueue_redeem_command deleted);
+    # ownership corrected to the module that actually still writes/reads it.
+    owner: src/execution/settlement_commands.py
     states:
       - REDEEM_INTENT_CREATED
       - REDEEM_SUBMITTED
@@ -932,16 +936,6 @@ state_machines:
       - BAYES_PRECISION_FUSION_BACKFILL_DRY_RUN
       - BAYES_PRECISION_FUSION_BACKFILL_SEEDED
 
-  inventory_redeem_sweep_config_keys:
-    owner: src/main.py
-    description: >
-      Environment-variable kill switch for the inventory-truth redeem sweep
-      (src/execution/inventory_redeem_sweep.py wired in src/main.py).
-      ZEUS_INVENTORY_REDEEM_SWEEP_DISABLED=1 disables the sweep cycle entirely.
-      Config key, not a state machine state or economic object.
-    states:
-      - ZEUS_INVENTORY_REDEEM_SWEEP_DISABLED
-
   live_db_backup_config_keys:
     owner: scripts/source_contract_auto_convert.py
     description: >
@@ -1238,13 +1232,15 @@ external_truth_sources:
     required_tests: [tests/venue/test_rate_budget.py]
   polymarket_data_api:
     # Read-only venue position-inventory truth (data-api.polymarket.com/positions)
-    # used by the redeem balance probe and the inventory-truth auto-collect sweep
-    # to discover redeemable CTF holdings. Never an order-submission or
-    # forecast/settlement source; chain truth (polygon_rpc) remains the
-    # redemption authority — this endpoint only seeds the candidate list.
+    # used by the redeem balance probe to discover CTF holdings. Never an
+    # order-submission or forecast/settlement source; chain truth (polygon_rpc)
+    # remains the redemption authority — this endpoint only seeds the candidate list.
+    # (2026-07-25: the inventory-truth auto-collect sweep, src/execution/
+    # inventory_redeem_sweep.py, was deleted -- confirmed zero call sites, never
+    # actually wired into src/main.py despite this comment's prior claim.)
     authority_tier: venue_position_inventory
     endpoint_patterns: [data-api.polymarket.com, /positions]
-    required_tests: [tests/test_inventory_redeem_sweep.py, tests/test_polymarket_v2_adapter_balance_probe.py]
+    required_tests: [tests/test_polymarket_v2_adapter_balance_probe.py]
   metar_fast_obs:
     # Day0 fast-lane intraday observations: the append-only NOAA/NWS global
     # METAR cycle is the publication-first transport; aviationweather.gov is

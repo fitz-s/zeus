@@ -12,8 +12,9 @@ proceeds, and reconcile chain truth, plus the chain-sync READ phase that the ord
 used to bundle with exit monitoring:
 
   - ``chain_sync_read_cycle``      (chain-truth sync READ phase, 2-min)
-  - ``_harvester_cycle``           (settlement P&L resolver, 1h; REDEEM_INTENT_CREATED producer)
-  - ``_redeem_reconciler_cycle``   (10-min)
+  - ``_harvester_cycle``           (settlement P&L resolver, 1h; on-chain redemption
+                                    decoupled entirely 2026-07-25 -- Polymarket settles
+                                    win/loss on Zeus's behalf, no redeem-reconciler poller)
   - ``_wrap_intent_creator_cycle`` (5-min)
   - ``_wrap_submitter_cycle``      (2-min)
   - ``_wrap_reconciler_cycle``     (2-min)
@@ -164,7 +165,6 @@ _heartbeat_fails = 0
 # Asserted present in the scheduler at boot by _assert_cascade_liveness_contract below.
 _OWNED_CASCADE_POLLER_IDS = frozenset({
     "harvester",
-    "redeem_reconciler",
     "wrap_intent_creator",
     "wrap_submitter",
     "wrap_reconciler",
@@ -400,7 +400,6 @@ def main() -> None:
     from src.execution.post_trade_capital import (
         collateral_snapshot_refresh_cycle,
         _harvester_cycle,
-        _redeem_reconciler_cycle,
         _wrap_intent_creator_cycle,
         _wrap_submitter_cycle,
         _wrap_reconciler_cycle,
@@ -438,9 +437,10 @@ def main() -> None:
     _scheduler = BlockingScheduler()
 
     # Cadences are byte-identical to the order daemon's former registrations (src/main.py):
-    #   chain_sync_and_exit_monitor 2-min ; harvester 1h ; redeem_submitter 5-min ;
-    #   redeem_reconciler 10-min ; wrap_intent_creator 5-min ; wrap_submitter 2-min ;
-    #   wrap_reconciler 2-min. Job ids are byte-identical so scheduler_health keying carries
+    #   chain_sync_and_exit_monitor 2-min ; harvester 1h ; wrap_intent_creator 5-min ;
+    #   wrap_submitter 2-min ; wrap_reconciler 2-min. (redeem_submitter and
+    #   redeem_reconciler are gone -- on-chain redemption is decoupled entirely,
+    #   2026-07-25.) Job ids are byte-identical so scheduler_health keying carries
     #   over (the chain-sync READ job uses a NEW id 'chain_sync_read' since the order daemon's
     #   'chain_sync_and_exit_monitor' id now belongs to the exit-SUBMIT phase that STAYS in P1).
     _scheduler.add_job(
@@ -453,11 +453,6 @@ def main() -> None:
         "interval", hours=1, id="harvester",
         max_instances=1, coalesce=True,
         next_run_time=datetime.now(timezone.utc),
-    )
-    _scheduler.add_job(
-        _scheduler_job("redeem_reconciler")(_redeem_reconciler_cycle),
-        "interval", minutes=10, id="redeem_reconciler",
-        max_instances=1, coalesce=True,
     )
     _scheduler.add_job(
         _scheduler_job("wrap_intent_creator")(_wrap_intent_creator_cycle),

@@ -133,7 +133,7 @@ Shell launchers: `resume_backfills_sequential.sh`, `post_sequential_fillback.sh`
 
 ### Operator record / runtime support
 
-`zpkt.py`, `operator_record_redeem.py`, `operator_record_wrap.py`,
+`zpkt.py`, `operator_record_wrap.py`,
 `apply_recommended_controls.py`, `force_lifecycle.py`, `force_cycle_with_healthy_gates.py`,
 `nuke_rebuild_projections.py`, `restamp_readiness_to_cycle_bound.py`,
 `maintenance_worker_install.py`, `install_hooks.sh`, `install_codegraph_hooks.sh`,

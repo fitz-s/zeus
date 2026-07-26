@@ -29,9 +29,11 @@ _ATLAS_ANCHORS: dict[str, list[str]] = {
     "execution/order_truth_reducer.py": ["class VenueOrderTruthReducer", "def reduce"],
     "state/venue_command_repo.py": ["def append_event"],
     "state/chain_state.py": ["def classify_chain_state"],
+    # redemption_accounting_phase (A10) REMOVED 2026-07-25: on-chain redemption
+    # decoupled entirely (Polymarket settles win/loss on Zeus's behalf); the
+    # axis had zero production consumers.
     "contracts/settlement_axes.py": [
         "def settlement_resolution_state_from_row",
-        "def redemption_accounting_phase",
         "def economic_outcome_for_position",
     ],
     "contracts/settlement_outcome.py": ["def classify_settlement_outcome"],

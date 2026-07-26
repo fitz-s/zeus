@@ -181,7 +181,6 @@ segments:
     files:
       - src/execution/harvester.py
       - src/venue/**
-      - scripts/operator_record_redeem.py
       - scripts/run_redeem_reconcile_with_onchain_proof.py
     relationship_tests:
       - tests/money_path/test_003_redeem_receipt_classifier.py

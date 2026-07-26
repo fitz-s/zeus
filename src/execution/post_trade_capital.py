@@ -16,8 +16,9 @@ daemon (src.main) and are now hosted by the dedicated P4 process
                                        holds the trades.db WAL write lock across the
                                        per-position HTTP the order daemon used to run
                                        afterwards (the DATA_DEGRADED-flap root cause, §4.3).
-  - ``_harvester_cycle``             — settlement P&L resolver (REDEEM_INTENT_CREATED producer)
-  - ``_redeem_reconciler_cycle``     — REDEEM_TX_HASHED -> reconcile_pending_redeems
+  - ``_harvester_cycle``             — settlement P&L resolver (on-chain redemption
+                                       decoupled entirely 2026-07-25; Polymarket settles
+                                       win/loss on Zeus's behalf)
   - ``_wrap_intent_creator_cycle``   — enqueue WRAP_REQUESTED on balance threshold
   - ``_wrap_submitter_cycle``        — WRAP_REQUESTED/WRAP_APPROVED -> submit APPROVE/WRAP tx
   - ``_wrap_reconciler_cycle``       — WRAP_*_TX_HASHED -> advance on receipt
@@ -414,68 +415,13 @@ def _harvester_cycle():
 # cascade-liveness boot guard travels with them (post_trade_capital_daemon.py).
 # ---------------------------------------------------------------------------
 
-# Redeem submission is absent by operator law 2026-06-10; this module only
-# reconciles externally recorded transactions. No redeem-submitter scheduler is
-# registered in src/ingest/post_trade_capital_daemon.py.
-
-
-def _redeem_reconciler_cycle() -> None:
-    """Poll REDEEM_TX_HASHED rows + reconcile_pending_redeems against web3.
-
-    PR-I.5 completion (2026-05-19): wires Web3 HTTPProvider + calls
-    reconcile_pending_redeems so the antibody guard merged in PR #192 is
-    reachable in production.  Karachi anchor: tx 0x0c85d94… (negRisk market
-    c8c220f5…) sitting in REDEEM_TX_HASHED since 2026-05-19T08:26 UTC.
-    """
-    from src.data.job_lock import acquire_lock
-    from src.execution.settlement_commands import (
-        SettlementState,
-        list_commands,
-        reconcile_pending_redeems,
-    )
-    from src.state.db import get_trade_connection
-    from src.venue.polymarket_v2_adapter import DEFAULT_POLYGON_RPC_URL
-
-    if get_mode() != "live":
-        logger.info("redeem_reconciler skipped_non_live mode=%s", get_mode())
-        return
-
-    with acquire_lock("redeem_reconciler") as acquired:
-        if not acquired:
-            logger.info("redeem_reconciler skipped_lock_held")
-            return
-        conn = get_trade_connection(write_class="live")
-        try:
-            rows = list_commands(conn, state=SettlementState.REDEEM_TX_HASHED)
-            if not rows:
-                logger.info("redeem_reconciler: results=0")
-                return
-            try:
-                from web3 import Web3
-            except ImportError:
-                logger.info(
-                    "redeem_reconciler: web3 not installed; rows=%d sitting in "
-                    "TX_HASHED (expected pre-PR-I.5)", len(rows),
-                )
-                return
-            polygon_rpc_url = os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL)
-            w3 = Web3(Web3.HTTPProvider(polygon_rpc_url, request_kwargs={"timeout": 15}))
-            try:
-                results = reconcile_pending_redeems(w3, conn)
-                conn.commit()
-                logger.info(
-                    "redeem_reconciler: reconciled=%d states=%s",
-                    len(results), [r.state.value for r in results],
-                )
-            except Exception as exc:
-                try:
-                    conn.rollback()
-                except Exception:  # noqa: BLE001
-                    pass
-                logger.error("redeem_reconciler: error=%s", exc)
-                raise
-        finally:
-            conn.close()
+# Redeem submission is absent by operator law 2026-06-10; on-chain redemption
+# is decoupled entirely from Zeus (Polymarket settles win/loss on our behalf).
+# No redeem-submitter or redeem-reconciler scheduler is registered in
+# src/ingest/post_trade_capital_daemon.py. (2026-07-25: _redeem_reconciler_cycle
+# was deleted here -- zero settlement_commands rows ever reached REDEEM_TX_HASHED
+# in production, and harvester no longer enqueues REDEEM_INTENT_CREATED rows for
+# it to eventually watch, so the poller was permanently a no-op.)
 
 
 def _wrap_intent_creator_cycle() -> None:

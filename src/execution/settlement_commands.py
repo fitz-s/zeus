@@ -88,8 +88,12 @@ class SettlementState(str, Enum):
     REDEEM_REVIEW_REQUIRED = "REDEEM_REVIEW_REQUIRED"
     # 2026-05-16 SCAFFOLD §K.2 v5 Path A-clean: first-class state for
     # operator-completion when PolymarketV2Adapter.redeem returns the
-    # REDEEM_DEFERRED_TO_R1 stub. Exit transitions only via
-    # scripts/operator_record_redeem.py CLI (record-only, no web3 write).
+    # REDEEM_DEFERRED_TO_R1 stub. 2026-07-25: the sole exit transition CLI
+    # (scripts/operator_record_redeem.py) was deleted as unreachable -- on-chain
+    # redemption is decoupled entirely (Polymarket settles win/loss on Zeus's
+    # behalf) and zero rows ever reached this state in production. Retained as
+    # a historical/schema state (settlement_commands table CHECK constraint
+    # still allows it) with no live producer or consumer.
     REDEEM_OPERATOR_REQUIRED = "REDEEM_OPERATOR_REQUIRED"
 
 

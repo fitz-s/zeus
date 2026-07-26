@@ -4,8 +4,14 @@
 #   operator_runbook references are verified to resolve to files on disk.
 #   Authority basis: docs/architecture/system_decomposition_plan.md §8 Step 2.)
 # Authority basis: docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §G.2 + §K.6 v5
-#   + 守護 2026-06-03: harvester (REDEEM_INTENT_CREATED producer) added to required_pollers
-#     so the boot guard enforces its presence in live modes (memory #56 Shanghai cca68b44).
+#   + 守護 2026-06-03: harvester added to required_pollers so the boot guard
+#     enforces its presence in live modes (memory #56 Shanghai cca68b44).
+#   + 2026-07-25: on-chain redemption decoupled entirely (Zeus never submits
+#     redeem tx; Polymarket settles win/loss on our behalf). The settlement_commands
+#     state_machine entry (redeem_reconciler poller, REDEEM_OPERATOR_REQUIRED
+#     operator-action) was removed; harvester's entry survives, reframed under
+#     table: position_current, since its boot-liveness guard protects against an
+#     unrelated historical incident (memory #56) that has nothing to do with redeem.
 #
 # Cascade liveness contract — the registry of state-machine tables in src/
 # that REQUIRE a scheduled APScheduler poller to drive them, plus optional
@@ -24,51 +30,35 @@
 # operator_runbook + cli_invocation fields.
 
 state_machines:
-  - table: settlement_commands
+  - table: position_current
     db: trades
-    intent_states: [REDEEM_INTENT_CREATED, REDEEM_RETRYING]
-    terminal_states:
-      - REDEEM_CONFIRMED
-      - REDEEM_FAILED
-      - REDEEM_REVIEW_REQUIRED
-    terminal_states_with_operator_action:
-      - state: REDEEM_OPERATOR_REQUIRED
-        max_age_hours: 24
-        operator_runbook: docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/KARACHI_2026_05_17_MANUAL_FALLBACK.md
-        escalation_action: "Path C trigger per SCAFFOLD §I.4 if exceeded; arm manual fallback runbook §3"
-        cli_invocation: "python -m scripts.operator_record_redeem <condition_id> <tx_hash>"
+    # 2026-07-25: on-chain redemption is decoupled entirely (Zeus never submits
+    # redeem tx; Polymarket settles win/loss on our behalf). This entry no
+    # longer drives settlement_commands/REDEEM_* state -- harvester stopped
+    # enqueueing REDEEM_INTENT_CREATED rows, redeem_reconciler (dead: zero
+    # REDEEM_TX_HASHED rows ever reached it in production) was deleted, and
+    # REDEEM_OPERATOR_REQUIRED's operator_runbook (scripts/operator_record_redeem.py)
+    # was deleted as unreachable. This entry survives SOLELY to keep the
+    # pre-existing harvester boot-liveness guard alive under an accurate,
+    # non-redemption framing (see required_pollers comment below).
+    intent_states: []
+    terminal_states: [settled, economically_closed]
     required_pollers:
-      # 守護 (2026-06-03): the PRODUCER of REDEEM_INTENT_CREATED. Reads VERIFIED
-      # forecasts.settlement_outcomes, marks settled positions closed, and enqueues
-      # the redeem intent the submitter/reconciler below consume. Without it
-      # scheduled in EDLI modes, the consumers sit idle forever (memory #56,
-      # Shanghai cca68b44 settled-but-active). mode=producer (NOT liveness_only:
-      # it drives _settle_positions state transitions). Registration gate +
-      # boot-recovery share src/main.py:_harvester_should_register.
-      # PROCESS-TOPOLOGY REFACTOR P4 (2026-06-08, system_decomposition_plan §8 Step 2):
-      # harvester + redeem pollers LIFTED out of the order daemon into the P4
-      # post-trade-capital daemon. owner repointed to
-      # src/execution/post_trade_capital.py so the boot guard + orphan-check resolve
-      # against the new host process; the P4 daemon carries _assert_cascade_liveness_contract
-      # for the pollers it owns (owner contains "post_trade_capital").
+      # 守護 (2026-06-03), reframed 2026-07-25: reads VERIFIED
+      # forecasts.settlement_outcomes and marks settled positions closed (P&L
+      # booking, decision_log, token_suppression) -- it no longer enqueues any
+      # redeem command. Without it scheduled in EDLI modes, settled positions
+      # never close (memory #56, Shanghai cca68b44 settled-but-active,
+      # 2026-06-03). mode=liveness_only: registration presence is the guard,
+      # not a state-machine transition (harvester's writes are direct
+      # position_current/decision_log mutations, not _transition/_atomic_transition
+      # calls). PROCESS-TOPOLOGY REFACTOR P4 (2026-06-08, system_decomposition_plan
+      # §8 Step 2): lifted out of the order daemon into the P4 post-trade-capital
+      # daemon; owner repointed to src/execution/post_trade_capital.py.
       - id: harvester
-        produced_states: [REDEEM_INTENT_CREATED]
         owner: src/execution/post_trade_capital.py:_harvester_cycle
         owner_daemon: post_trade_capital
-        mode: producer
-      # redeem_submitter DELETED 2026-07-08 (R6-a): dead redeem-submission
-      # machinery (Zeus never submits redeem tx, operator law 2026-06-10) --
-      # it already unconditionally calm-skipped every cycle
-      # (redeem_submission_allowed() is always False). REDEEM_INTENT_CREATED
-      # rows now intentionally sit unconsumed by any autonomous poller; the
-      # existing REDEEM_OPERATOR_REQUIRED terminal_states_with_operator_action
-      # entry above (operator_runbook + cli_invocation) is the accounting
-      # path for external/manual redemption.
-      - id: redeem_reconciler
-        watched_states: [REDEEM_TX_HASHED]
-        owner: src/execution/post_trade_capital.py:_redeem_reconciler_cycle
-        owner_daemon: post_trade_capital
-        mode: reconciler
+        mode: liveness_only
 
   - table: wrap_unwrap_commands
     db: world

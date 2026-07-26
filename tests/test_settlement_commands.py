@@ -184,13 +184,15 @@ def mark_externally_redeemed(conn, command_id: str, *, tx_hash: str) -> None:
     """Test-only fixture setup: put a command directly into REDEEM_TX_HASHED.
 
     R6-a (2026-07-08): submit_redeem was DELETED (Zeus never submits redeem tx,
-    operator law 2026-06-10) -- REDEEM_TX_HASHED is now reached ONLY via an
-    operator manually recording an externally-observed redemption
-    (scripts/operator_record_redeem.py, which uses this same
-    _atomic_transition building block). reconcile_pending_redeems' chain-receipt
-    classification is still live READ-PATH code and still needs a
+    operator law 2026-06-10). 2026-07-25: on-chain redemption is decoupled
+    entirely (Polymarket settles win/loss on our behalf); scripts/
+    operator_record_redeem.py (the manual REDEEM_OPERATOR_REQUIRED ->
+    REDEEM_TX_HASHED recorder) was deleted as unreachable -- zero rows ever
+    reached REDEEM_TX_HASHED in production via any path. reconcile_pending_redeems'
+    chain-receipt classification remains live READ-PATH code (still used by
+    scripts/run_redeem_reconcile_with_onchain_proof.py) and still needs a
     REDEEM_TX_HASHED row to recover/classify against -- this helper produces
-    that row without going through the deleted submit machinery.
+    that row directly via _atomic_transition for test purposes only.
     """
     from src.execution.settlement_commands import SettlementState, _atomic_transition
 
