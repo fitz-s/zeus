@@ -9907,6 +9907,11 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "EDLI_STAGE_LIVE_CAP_RESERVED:1",
             "CANDIDATE_BLOCKED",
         ),
+        (
+            "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+            "GLOBAL_SELL_POSITION_EXIT_ALREADY_ACTIVE",
+            "CANDIDATE_BLOCKED",
+        ),
         ("live_health_entry_authority:failing_surfaces=runtime_code", "BATCH_BLOCKED"),
         ("EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED", "BATCH_BLOCKED"),
         ("EXECUTOR_BOUNDARY_MISSING", "BATCH_BLOCKED"),
@@ -19134,30 +19139,49 @@ def test_global_batch_falls_through_family_local_preflight_block(
 
 
 @pytest.mark.parametrize(
-    "reason",
+    ("reason", "blocked_action", "sibling_action"),
     (
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SELECTION_SCOPE_EMPTY:execution_price:input=1:"
-            "classes=EXECUTION_PRICE_MISSING=1"
+            "classes=EXECUTION_PRICE_MISSING=1",
+            "BUY",
+            "SELL",
         ),
         (
             "LIVE_ENTRY_BLOCKED:entry_readiness:"
             "EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:1,"
-            "EDLI_STAGE_LIVE_CAP_RESERVED:1"
+            "EDLI_STAGE_LIVE_CAP_RESERVED:1",
+            "BUY",
+            "SELL",
         ),
         (
             "FDR_REJECTED:event_type=DAY0_EXTREME_UPDATED:"
-            "attempted=22:selected_post_fdr=0:alpha=0.100000"
+            "attempted=22:selected_post_fdr=0:alpha=0.100000",
+            "BUY",
+            "SELL",
         ),
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SELECTION_SCOPE_EMPTY:locked:input=1:"
-            "classes=EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED=1"
+            "classes=EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED=1",
+            "BUY",
+            "SELL",
+        ),
+        (
+            "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+            "GLOBAL_SELL_POSITION_EXIT_ALREADY_ACTIVE",
+            "SELL",
+            "BUY",
         ),
     ),
 )
-def test_global_batch_candidate_block_keeps_sibling_eligible(monkeypatch, reason):
+def test_global_batch_candidate_block_keeps_sibling_eligible(
+    monkeypatch,
+    reason,
+    blocked_action,
+    sibling_action,
+):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     scope = current_global_auction_scope_from_events(
@@ -19174,7 +19198,7 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(monkeypatch, reason
     )
     candidate_a = SimpleNamespace(
         candidate_id="candidate-a",
-        action="BUY",
+        action=blocked_action,
         family_key=family_key,
         bin_id="bin-a",
         side="NO",
@@ -19182,7 +19206,7 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(monkeypatch, reason
     )
     candidate_b = SimpleNamespace(
         candidate_id="candidate-b",
-        action="SELL",
+        action=sibling_action,
         family_key=family_key,
         bin_id="bin-a",
         side="NO",

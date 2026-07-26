@@ -10882,6 +10882,14 @@ def _global_probability_tightening_from_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
+    if reason == (
+        "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+        "GLOBAL_SELL_POSITION_EXIT_ALREADY_ACTIVE"
+    ):
+        # An active exit makes only this exact position/side unavailable. The
+        # current probability, book, and wealth epoch remain valid for every
+        # other candidate, so exclude this SELL and re-run the same auction.
+        return "CANDIDATE_BLOCKED"
     if reason.startswith("LIVE_ENTRY_BLOCKED:entry_readiness:"):
         # Entry readiness governs BUY admission only.  The reduce-only SELL path
         # bypasses it above, so rejecting the complete epoch here would let an
