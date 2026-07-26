@@ -1377,24 +1377,24 @@ class FamilyPortfolioEndowment:
 
 @dataclass(frozen=True)
 class FamilyJointBuyTarget:
-    """One native BUY target from the family-wide full-Kelly solution."""
+    """One native BUY target from the family posterior-mean Kelly solution."""
 
     candidate_id: str
     shares: Decimal
     current_token_shares: Decimal
     full_kelly_target_shares: Decimal
     fractional_kelly_target_shares: Decimal
-    standalone_robust_delta_log_wealth: float
+    standalone_expected_delta_log_wealth: float
 
 
 @dataclass(frozen=True)
 class FamilyJointBuyPlan:
-    """Joint full-Kelly vector projected once onto the family Fractional Kelly target."""
+    """Joint posterior-mean Kelly vector projected onto the family fractional target."""
 
     family_key: str
     targets: tuple[FamilyJointBuyTarget, ...]
     primary_candidate_id: str | None
-    robust_delta_log_wealth: float
+    expected_delta_log_wealth: float
     full_kelly_cost_usd: Decimal
     fractional_target_cost_usd: Decimal
     no_trade_reason: str | None = None
@@ -1831,6 +1831,75 @@ class ExpectedTerminalWealthCertificate:
 
 
 @dataclass(frozen=True)
+class ExpectedBuyTerminalWealthCertificate:
+    """Fixed-action BUY economics under the posterior predictive mean."""
+
+    probability_basis: Literal["POSTERIOR_PREDICTIVE_MEAN"]
+    win_probability_mean: float
+    loss_probability_mean: float
+    loss_payoff_usd: Decimal
+    win_payoff_usd: Decimal
+    wealth_after_loss_usd: Decimal
+    wealth_after_win_usd: Decimal
+    expected_delta_log_wealth: float
+    expected_ev_usd: float
+
+    def __post_init__(self) -> None:
+        win_q = float(self.win_probability_mean)
+        loss_q = float(self.loss_probability_mean)
+        loss_base = self.wealth_after_loss_usd - self.loss_payoff_usd
+        win_base = self.wealth_after_win_usd - self.win_payoff_usd
+        if (
+            self.probability_basis != "POSTERIOR_PREDICTIVE_MEAN"
+            or not all(
+                math.isfinite(value)
+                for value in (
+                    win_q,
+                    loss_q,
+                    self.expected_delta_log_wealth,
+                    self.expected_ev_usd,
+                )
+            )
+            or not math.isclose(win_q + loss_q, 1.0, abs_tol=1e-12)
+            or not 0.0 <= win_q <= 1.0
+            or not 0.0 <= loss_q <= 1.0
+            or self.loss_payoff_usd >= 0
+            or self.win_payoff_usd <= 0
+            or min(
+                loss_base,
+                win_base,
+                self.wealth_after_loss_usd,
+                self.wealth_after_win_usd,
+            )
+            <= 0
+        ):
+            raise ValueError("expected BUY terminal-wealth certificate is incoherent")
+        expected_du = loss_q * math.log(
+            float(self.wealth_after_loss_usd / loss_base)
+        ) + win_q * math.log(float(self.wealth_after_win_usd / win_base))
+        expected_ev = loss_q * float(self.loss_payoff_usd) + win_q * float(
+            self.win_payoff_usd
+        )
+        if not math.isclose(
+            expected_du,
+            self.expected_delta_log_wealth,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ) or not math.isclose(
+            expected_ev,
+            self.expected_ev_usd,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("expected BUY terminal-wealth objective disagrees")
+
+
+ExpectedActionTerminalWealthCertificate = (
+    ExpectedTerminalWealthCertificate | ExpectedBuyTerminalWealthCertificate
+)
+
+
+@dataclass(frozen=True)
 class ExpectedGrowthComparison:
     """Common cross-action score after each action passes its own admission law."""
 
@@ -2070,6 +2139,136 @@ class GlobalBuyRejectionEconomics:
 
 
 @dataclass(frozen=True)
+class GlobalExpectedBuyRejectionEconomics:
+    """Best venue-legal BUY probe measured on posterior-mean capital value."""
+
+    candidate_id: str
+    rejection_reason: str
+    probability_basis: Literal["POSTERIOR_PREDICTIVE_MEAN"]
+    payoff_probability_mean: float
+    minimum_all_in_unit_cost: Decimal
+    current_token_shares: Decimal
+    full_kelly_target_shares: Decimal
+    fractional_kelly_target_shares: Decimal
+    remaining_fractional_target_shares: Decimal
+    probe_kind: Literal["BEST_EXECUTABLE", "MINIMUM_MARKETABLE"]
+    probe_shares: Decimal
+    probe_cost_usd: Decimal
+    probe_expected_delta_log_wealth: float
+    probe_expected_ev_usd: float
+    probe_expected_capital_efficiency: float
+    probe_limit_price: Decimal
+    probe_expected_fill_price_before_fee: Decimal
+    resolution_at_utc: datetime | None = None
+    capital_lock_hours: float | None = None
+    probe_expected_log_growth_per_hour: float | None = None
+
+    def __post_init__(self) -> None:
+        current = Decimal(self.current_token_shares)
+        full = Decimal(self.full_kelly_target_shares)
+        fractional = Decimal(self.fractional_kelly_target_shares)
+        remaining = Decimal(self.remaining_fractional_target_shares)
+        shares = Decimal(self.probe_shares)
+        cost = Decimal(self.probe_cost_usd)
+        minimum_cost = Decimal(self.minimum_all_in_unit_cost)
+        limit = Decimal(self.probe_limit_price)
+        expected = Decimal(self.probe_expected_fill_price_before_fee)
+        reason = str(self.rejection_reason or "").strip()
+        horizon_fields = (
+            self.resolution_at_utc,
+            self.capital_lock_hours,
+            self.probe_expected_log_growth_per_hour,
+        )
+        horizon_complete = all(value is None for value in horizon_fields) or all(
+            value is not None for value in horizon_fields
+        )
+        if (
+            not str(self.candidate_id or "").strip()
+            or reason
+            not in {
+                "NON_POSITIVE_EXPECTED_OBJECTIVE",
+                "FRACTIONAL_KELLY_TARGET_REACHED",
+                "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT",
+            }
+            or self.probability_basis != "POSTERIOR_PREDICTIVE_MEAN"
+            or not math.isfinite(self.payoff_probability_mean)
+            or not 0.0 <= self.payoff_probability_mean <= 1.0
+            or self.probe_kind not in {"BEST_EXECUTABLE", "MINIMUM_MARKETABLE"}
+            or not all(
+                value.is_finite()
+                for value in (
+                    current,
+                    full,
+                    fractional,
+                    remaining,
+                    shares,
+                    cost,
+                    minimum_cost,
+                    limit,
+                    expected,
+                )
+            )
+            or not all(
+                math.isfinite(value)
+                for value in (
+                    self.probe_expected_delta_log_wealth,
+                    self.probe_expected_ev_usd,
+                    self.probe_expected_capital_efficiency,
+                )
+            )
+            or current < 0
+            or full < 0
+            or fractional < 0
+            or fractional > full
+            or remaining != fractional - current
+            or shares <= 0
+            or cost <= 0
+            or minimum_cost <= 0
+            or not Decimal("0") < limit < Decimal("1")
+            or expected <= 0
+            or expected > limit
+            or (
+                reason == "NON_POSITIVE_EXPECTED_OBJECTIVE"
+                and self.probe_expected_delta_log_wealth > 0.0
+                and self.probe_expected_ev_usd > _ROBUST_EV_EPS_USD
+            )
+            or (
+                reason == "FRACTIONAL_KELLY_TARGET_REACHED"
+                and remaining > 0
+            )
+            or (
+                reason == "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
+                and not Decimal("0") < remaining < shares
+            )
+            or not horizon_complete
+        ):
+            raise ValueError("global expected BUY rejection economics are incoherent")
+        if self.resolution_at_utc is not None:
+            assert self.capital_lock_hours is not None
+            assert self.probe_expected_log_growth_per_hour is not None
+            if (
+                self.resolution_at_utc.tzinfo is None
+                or not math.isfinite(self.capital_lock_hours)
+                or self.capital_lock_hours <= 0.0
+                or not math.isfinite(self.probe_expected_log_growth_per_hour)
+                or not math.isclose(
+                    self.probe_expected_log_growth_per_hour,
+                    self.probe_expected_delta_log_wealth / self.capital_lock_hours,
+                    rel_tol=0.0,
+                    abs_tol=1e-15,
+                )
+            ):
+                raise ValueError(
+                    "global expected BUY rejection capital horizon is incoherent"
+                )
+
+
+GlobalAnyBuyRejectionEconomics = (
+    GlobalBuyRejectionEconomics | GlobalExpectedBuyRejectionEconomics
+)
+
+
+@dataclass(frozen=True)
 class GlobalSellPointCounterfactual:
     """Receipt-only exact partial-SELL optimum under frozen point probability."""
 
@@ -2240,11 +2439,11 @@ class GlobalSingleOrderCandidateEvaluation:
     full_kelly_target_shares: Decimal = Decimal("0")
     fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
-    expected_terminal_wealth: ExpectedTerminalWealthCertificate | None = None
+    expected_terminal_wealth: ExpectedActionTerminalWealthCertificate | None = None
     expected_growth: ExpectedGrowthComparison | None = None
     sell_point_counterfactual: GlobalSellPointCounterfactual | None = None
     buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
-    buy_rejection_economics: GlobalBuyRejectionEconomics | None = None
+    buy_rejection_economics: GlobalAnyBuyRejectionEconomics | None = None
 
     def __post_init__(self) -> None:
         if self.action == "SELL" and all(
@@ -2461,7 +2660,7 @@ class GlobalSingleOrderCandidateEvaluation:
             if self.action == "BUY"
             else "IMMEDIATE_REDUCE_ONLY_SELL"
         )
-        mean_sell = (
+        mean_action = self.action == "BUY" or (
             self.action == "SELL"
             and self.sell_probability_functional
             == "POSTERIOR_PREDICTIVE_MEAN"
@@ -2479,7 +2678,7 @@ class GlobalSingleOrderCandidateEvaluation:
             or self.expected_growth.expected_ev_usd <= _ROBUST_EV_EPS_USD
             or self.expected_growth.expected_capital_efficiency <= 0.0
             or (
-                not mean_sell
+                not mean_action
                 and (
                     self.robust_log_growth_per_hour is None
                     or not math.isfinite(self.robust_log_growth_per_hour)
@@ -2501,7 +2700,7 @@ class GlobalSingleOrderCandidateEvaluation:
             or self.robust_ev_usd != 0.0
             or self.capital_efficiency != 0.0
             or self.robust_log_growth_per_hour is not None
-        ) if mean_sell else (
+        ) if mean_action else (
             self.expected_terminal_wealth is not None
             or self.terminal_wealth is None
             or self.robust_delta_log_wealth <= 0.0
@@ -2570,7 +2769,8 @@ class GlobalSingleOrderCandidateEvaluation:
             or self.buy_minimum_marketable_repair is not None
             or self.buy_sizing_mode != "NOT_APPLICABLE"
             or (
-                mean_sell
+                self.action == "SELL"
+                and mean_action
                 and (
                     self.expected_terminal_wealth is None
                     or self.expected_terminal_wealth.loss_payoff_usd
@@ -2618,10 +2818,10 @@ class GlobalSingleOrderDecision:
     full_kelly_target_shares: Decimal = Decimal("0")
     fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
-    expected_terminal_wealth: ExpectedTerminalWealthCertificate | None = None
+    expected_terminal_wealth: ExpectedActionTerminalWealthCertificate | None = None
     expected_growth: ExpectedGrowthComparison | None = None
     buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
-    buy_rejection_economics: GlobalBuyRejectionEconomics | None = None
+    buy_rejection_economics: GlobalAnyBuyRejectionEconomics | None = None
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
     candidate_evaluations: tuple[GlobalSingleOrderCandidateEvaluation, ...] = ()
     candidate_input_count: int | None = None
@@ -2808,6 +3008,10 @@ class GlobalSingleOrderDecision:
             ):
                 raise ValueError("global sell decision is not held-position coherent")
             return
+        expected_buy = isinstance(
+            self.expected_terminal_wealth,
+            ExpectedBuyTerminalWealthCertificate,
+        )
         repair = self.buy_minimum_marketable_repair
         if repair is None:
             sizing_invalid = self.shares > (
@@ -2871,10 +3075,33 @@ class GlobalSingleOrderDecision:
             or self.fractional_kelly_target_shares <= self.current_token_shares
             or self.fractional_kelly_target_shares
             > self.full_kelly_target_shares
-            or self.terminal_wealth is None
-            or self.expected_terminal_wealth is not None
-            or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
-            or self.terminal_wealth.win_payoff_usd != self.shares - self.cost_usd
+            or (not internal_score and not expected_buy)
+            or (self.terminal_wealth is None) == (
+                self.expected_terminal_wealth is None
+            )
+            or (
+                expected_buy
+                and (
+                    self.expected_terminal_wealth is None
+                    or self.expected_terminal_wealth.loss_payoff_usd
+                    != -self.cost_usd
+                    or self.expected_terminal_wealth.win_payoff_usd
+                    != self.shares - self.cost_usd
+                    or self.robust_delta_log_wealth != 0.0
+                    or self.robust_ev_usd != 0.0
+                    or self.capital_efficiency != 0.0
+                    or self.robust_log_growth_per_hour is not None
+                )
+            )
+            or (
+                not expected_buy
+                and (
+                    self.terminal_wealth is None
+                    or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
+                    or self.terminal_wealth.win_payoff_usd
+                    != self.shares - self.cost_usd
+                )
+            )
             or (
                 not internal_score
                 and (
@@ -2882,24 +3109,36 @@ class GlobalSingleOrderDecision:
                     or self.resolution_at_utc is None
                     or self.resolution_at_utc.tzinfo is None
                     or self.capital_lock_hours is None
-                    or self.robust_log_growth_per_hour is None
                     or not math.isfinite(self.capital_lock_hours)
-                    or not math.isfinite(self.robust_log_growth_per_hour)
                     or self.capital_lock_hours <= 0.0
-                    or self.robust_log_growth_per_hour <= 0.0
-                    or not math.isclose(
-                        self.robust_log_growth_per_hour,
-                        self.robust_delta_log_wealth / self.capital_lock_hours,
-                        rel_tol=0.0,
-                        abs_tol=1e-15,
+                    or (
+                        not expected_buy
+                        and (
+                            self.robust_log_growth_per_hour is None
+                            or not math.isfinite(self.robust_log_growth_per_hour)
+                            or self.robust_log_growth_per_hour <= 0.0
+                            or not math.isclose(
+                                self.robust_log_growth_per_hour,
+                                self.robust_delta_log_wealth
+                                / self.capital_lock_hours,
+                                rel_tol=0.0,
+                                abs_tol=1e-15,
+                            )
+                        )
                     )
                 )
             )
-            or not math.isclose(
-                self.terminal_wealth.expected_value_usd,
-                self.robust_ev_usd,
-                rel_tol=0.0,
-                abs_tol=1e-12,
+            or (
+                not expected_buy
+                and (
+                    self.terminal_wealth is None
+                    or not math.isclose(
+                        self.terminal_wealth.expected_value_usd,
+                        self.robust_ev_usd,
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                )
             )
         ):
             raise ValueError(
@@ -2913,7 +3152,7 @@ def _global_candidate_evaluations(
     rejections: Mapping[str, str],
     scores: Sequence[GlobalSingleOrderDecision] = (),
     buy_rejection_economics: Mapping[
-        str, GlobalBuyRejectionEconomics
+        str, GlobalAnyBuyRejectionEconomics
     ] | None = None,
     sell_point_counterfactuals: Mapping[
         str, GlobalSellPointCounterfactual
@@ -3494,7 +3733,7 @@ def plan_family_joint_buy_targets(
         family_key=family,
         targets=(),
         primary_candidate_id=None,
-        robust_delta_log_wealth=0.0,
+        expected_delta_log_wealth=0.0,
         full_kelly_cost_usd=Decimal("0"),
         fractional_target_cost_usd=Decimal("0"),
         no_trade_reason="FAMILY_JOINT_NO_POSITIVE_TARGET",
@@ -3616,7 +3855,11 @@ def plan_family_joint_buy_targets(
             empty,
             no_trade_reason="FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED",
         )
-    weights = np.ones(probability_witness.yes_q_samples.shape[0], dtype=np.float64)
+    mean_q = np.asarray(
+        probability_witness.yes_point_q,
+        dtype=np.float64,
+    ).reshape(1, -1)
+    weights = np.ones(1, dtype=np.float64)
     try:
         direct, _u, _iterations = _ru_cvar_optimum(
             seed=np.zeros(len(caps), dtype=np.float64),
@@ -3625,7 +3868,7 @@ def plan_family_joint_buy_targets(
             caps=caps,
             costs=costs,
             cash=float(direct_cash),
-            q_draws=probability_witness.yes_q_samples,
+            q_draws=mean_q,
             weights=weights,
             alpha=probability_witness.band_alpha,
         )
@@ -3717,8 +3960,7 @@ def plan_family_joint_buy_targets(
             w_end += claim * float(shares) - float(cost)
         if np.any(w_end <= 0.0):
             return float("-inf")
-        draw_du = probability_witness.yes_q_samples @ np.log(w_end / w0)
-        return _lower_cvar(draw_du, weights, probability_witness.band_alpha)
+        return float(mean_q[0] @ np.log(w_end / w0))
 
     joint_du = exact_delta(desired)
     if not math.isfinite(joint_du) or joint_du <= 0.0:
@@ -3749,7 +3991,7 @@ def plan_family_joint_buy_targets(
             ),
             full_kelly_target_shares=target_by_index[index][0],
             fractional_kelly_target_shares=target_by_index[index][1],
-            standalone_robust_delta_log_wealth=standalone[index],
+            standalone_expected_delta_log_wealth=standalone[index],
         )
         for index, shares in ranked
     )
@@ -3764,7 +4006,7 @@ def plan_family_joint_buy_targets(
         family_key=family,
         targets=targets,
         primary_candidate_id=targets[0].candidate_id,
-        robust_delta_log_wealth=float(joint_du),
+        expected_delta_log_wealth=float(joint_du),
         full_kelly_cost_usd=full_cost,
         fractional_target_cost_usd=fractional_cost,
         no_trade_reason=None,
@@ -4404,6 +4646,129 @@ def _score_global_single_order(
     )
 
 
+def _score_global_single_order_buy_expected(
+    candidate: GlobalSingleOrderCandidate,
+    *,
+    payoff_probability_mean: float,
+    sample_count: int,
+    band_alpha: float,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+    spendable_cash_usd: Decimal,
+    capital_limit_usd: Decimal,
+    fractional_kelly_multiplier: Decimal,
+    current_token_shares: Decimal,
+) -> GlobalSingleOrderDecision:
+    """Size one BUY on posterior-mean expected log wealth.
+
+    For a fixed binary action, expected log wealth is affine in the uncertain
+    payoff probability. Integrating over the posterior therefore equals
+    evaluating the action at its posterior predictive mean. A lower confidence
+    bound is retained as evidence elsewhere, but is not a second risk preference
+    inside the capital objective.
+    """
+
+    mean_q = float(payoff_probability_mean)
+    if (
+        not math.isfinite(mean_q)
+        or not 0.0 <= mean_q <= 1.0
+        or sample_count < 1
+    ):
+        raise ValueError("BUY expected probability must lie in [0, 1]")
+    internal = _score_global_single_order(
+        candidate,
+        q_samples=np.full(sample_count, mean_q, dtype=np.float64),
+        band_alpha=band_alpha,
+        wealth_floor_usd=wealth_floor_usd,
+        wealth_ceiling_usd=wealth_ceiling_usd,
+        spendable_cash_usd=spendable_cash_usd,
+        capital_limit_usd=capital_limit_usd,
+        fractional_kelly_multiplier=fractional_kelly_multiplier,
+        payoff_q_lcb=mean_q,
+        current_token_shares=current_token_shares,
+    )
+    reason_map = {
+        "NON_POSITIVE_ROBUST_OBJECTIVE": "NON_POSITIVE_EXPECTED_OBJECTIVE",
+        "NON_POSITIVE_ROBUST_FILL_PREFIX": "NON_POSITIVE_EXPECTED_FILL_PREFIX",
+    }
+    if internal.candidate is None:
+        rejection = internal.buy_rejection_economics
+        expected_rejection = (
+            None
+            if rejection is None
+            else GlobalExpectedBuyRejectionEconomics(
+                candidate_id=rejection.candidate_id,
+                rejection_reason=reason_map.get(
+                    rejection.rejection_reason,
+                    rejection.rejection_reason,
+                ),
+                probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+                payoff_probability_mean=mean_q,
+                minimum_all_in_unit_cost=rejection.minimum_all_in_unit_cost,
+                current_token_shares=rejection.current_token_shares,
+                full_kelly_target_shares=rejection.full_kelly_target_shares,
+                fractional_kelly_target_shares=(
+                    rejection.fractional_kelly_target_shares
+                ),
+                remaining_fractional_target_shares=(
+                    rejection.remaining_fractional_target_shares
+                ),
+                probe_kind=rejection.probe_kind,
+                probe_shares=rejection.probe_shares,
+                probe_cost_usd=rejection.probe_cost_usd,
+                probe_expected_delta_log_wealth=(
+                    rejection.probe_robust_delta_log_wealth
+                ),
+                probe_expected_ev_usd=rejection.probe_robust_ev_usd,
+                probe_expected_capital_efficiency=(
+                    rejection.probe_capital_efficiency
+                ),
+                probe_limit_price=rejection.probe_limit_price,
+                probe_expected_fill_price_before_fee=(
+                    rejection.probe_expected_fill_price_before_fee
+                ),
+            )
+        )
+        return replace(
+            internal,
+            buy_rejection_economics=expected_rejection,
+            no_trade_reason=reason_map.get(
+                str(internal.no_trade_reason or ""),
+                internal.no_trade_reason,
+            ),
+            rejection_reasons={
+                candidate_id: reason_map.get(reason, reason)
+                for candidate_id, reason in internal.rejection_reasons.items()
+            },
+        )
+    terminal = internal.terminal_wealth
+    assert terminal is not None
+    expected_terminal = ExpectedBuyTerminalWealthCertificate(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        win_probability_mean=mean_q,
+        loss_probability_mean=1.0 - mean_q,
+        loss_payoff_usd=terminal.loss_payoff_usd,
+        win_payoff_usd=terminal.win_payoff_usd,
+        wealth_after_loss_usd=terminal.wealth_after_loss_usd,
+        wealth_after_win_usd=terminal.wealth_after_win_usd,
+        expected_delta_log_wealth=internal.robust_delta_log_wealth,
+        expected_ev_usd=internal.robust_ev_usd,
+    )
+    return replace(
+        internal,
+        robust_delta_log_wealth=0.0,
+        robust_ev_usd=0.0,
+        capital_efficiency=0.0,
+        terminal_wealth=None,
+        expected_terminal_wealth=expected_terminal,
+        buy_minimum_marketable_repair=None,
+        rejection_reasons={
+            candidate_id: reason_map.get(reason, reason)
+            for candidate_id, reason in internal.rejection_reasons.items()
+        },
+    )
+
+
 def global_sell_fill_prefix_objective(
     decision: GlobalSingleOrderDecision,
     *,
@@ -4460,7 +4825,13 @@ def global_buy_fak_prefix_certificate(
     """
 
     candidate = decision.candidate
-    terminal = getattr(decision, "terminal_wealth", None)
+    robust_terminal = getattr(decision, "terminal_wealth", None)
+    expected_terminal = getattr(decision, "expected_terminal_wealth", None)
+    terminal = robust_terminal or expected_terminal
+    expected_basis = isinstance(
+        expected_terminal,
+        ExpectedBuyTerminalWealthCertificate,
+    )
     if (
         candidate is None
         or getattr(candidate, "action", "BUY") != "BUY"
@@ -4486,8 +4857,20 @@ def global_buy_fak_prefix_certificate(
     worst_fee_per_share = Decimal("2") * fee_rate * max_fee_shape
     unit_cost = limit + worst_fee_per_share
     full_cost = unit_cost * shares
-    win_q = Decimal(str(terminal.win_probability_lcb))
-    loss_q = Decimal(str(terminal.loss_probability_ucb))
+    win_q = Decimal(
+        str(
+            terminal.win_probability_mean
+            if expected_basis
+            else terminal.win_probability_lcb
+        )
+    )
+    loss_q = Decimal(
+        str(
+            terminal.loss_probability_mean
+            if expected_basis
+            else terminal.loss_probability_ucb
+        )
+    )
     loss_baseline = terminal.wealth_after_loss_usd - terminal.loss_payoff_usd
     win_baseline = terminal.wealth_after_win_usd - terminal.win_payoff_usd
     loss_after = loss_baseline - full_cost
@@ -4511,17 +4894,19 @@ def global_buy_fak_prefix_certificate(
         or min(loss_baseline, win_baseline, loss_after, win_after) <= 0
     ):
         raise ValueError("buy FAK prefix wealth bound is invalid")
-    robust_du = float(loss_q) * math.log(float(loss_after / loss_baseline)) + float(
+    delta_log_wealth = float(loss_q) * math.log(
+        float(loss_after / loss_baseline)
+    ) + float(
         win_q
     ) * math.log(float(win_after / win_baseline))
-    robust_ev = float(win_q * shares - full_cost)
+    ev = float(win_q * shares - full_cost)
     if (
-        not math.isfinite(robust_du)
-        or robust_du <= 0
-        or robust_ev <= _ROBUST_EV_EPS_USD
+        not math.isfinite(delta_log_wealth)
+        or delta_log_wealth <= 0
+        or ev <= _ROBUST_EV_EPS_USD
     ):
         raise ValueError("buy FAK full-size worst-limit prefix is non-positive")
-    return {
+    certificate = {
         "global_buy_fak_prefix_semantics": (
             "CONCAVE_WORST_LIMIT_ALL_NONZERO_PREFIXES_POSITIVE"
         ),
@@ -4537,9 +4922,29 @@ def global_buy_fak_prefix_certificate(
         "global_buy_fak_worst_fee_per_share": str(worst_fee_per_share),
         "global_buy_fak_worst_unit_cost": str(unit_cost),
         "global_buy_fak_full_worst_cost_usd": str(full_cost),
-        "global_buy_fak_full_robust_delta_log_wealth": robust_du,
-        "global_buy_fak_full_robust_ev_usd": robust_ev,
     }
+    if expected_basis:
+        certificate.update(
+            {
+                "global_buy_fak_probability_basis": (
+                    "POSTERIOR_PREDICTIVE_MEAN"
+                ),
+                "global_buy_fak_full_expected_delta_log_wealth": (
+                    delta_log_wealth
+                ),
+                "global_buy_fak_full_expected_ev_usd": ev,
+            }
+        )
+    else:
+        certificate.update(
+            {
+                "global_buy_fak_full_robust_delta_log_wealth": (
+                    delta_log_wealth
+                ),
+                "global_buy_fak_full_robust_ev_usd": ev,
+            }
+        )
+    return certificate
 
 
 def _score_global_single_order_sell(
@@ -5178,14 +5583,13 @@ def select_global_single_order(
     rejections: dict[str, str] = {}
     scored: list[GlobalSingleOrderDecision] = []
     rejected_buy_economics_by_id: dict[
-        str, GlobalBuyRejectionEconomics
+        str, GlobalAnyBuyRejectionEconomics
     ] = {}
     sell_point_counterfactuals_by_id: dict[
         str, GlobalSellPointCounterfactual
     ] = {}
     buy_capital_limits: dict[str, Decimal] = {}
     buy_endowments: dict[str, CandidatePortfolioEndowment] = {}
-    buy_payoff_q_lcbs: dict[str, float | None] = {}
     joint_buy_candidates_by_family: dict[
         str, list[GlobalSingleOrderCandidate]
     ] = {}
@@ -5292,11 +5696,7 @@ def select_global_single_order(
             )
         except Exception:
             return None, "EXPECTED_COMPARISON_UNAVAILABLE"
-        mean_sell = (
-            isinstance(candidate, GlobalSingleOrderSellCandidate)
-            and candidate.probability_functional
-            == "POSTERIOR_PREDICTIVE_MEAN"
-        )
+        mean_action = score.expected_terminal_wealth is not None
         return (
             replace(
                 score,
@@ -5305,7 +5705,7 @@ def select_global_single_order(
                 capital_lock_hours=capital_lock_hours,
                 robust_log_growth_per_hour=(
                     None
-                    if mean_sell
+                    if mean_action
                     else score.robust_delta_log_wealth / capital_lock_hours
                 ),
                 expected_growth=expected_growth,
@@ -5610,7 +6010,6 @@ def select_global_single_order(
             ):
                 rejections[candidate.candidate_id] = "PAYOFF_Q_LCB_INVALID"
                 continue
-        buy_payoff_q_lcbs[candidate.candidate_id] = candidate_payoff_q_lcb
         if (
             family_portfolio_endowment_resolver is not None
             and isinstance(
@@ -5621,16 +6020,24 @@ def select_global_single_order(
             joint_buy_candidates_by_family.setdefault(
                 candidate.family_key, []
             ).append(candidate)
-        score = _score_global_single_order(
+        payoff_probability_mean = family_payoff_point_q(
+            probability_witnesses[candidate.family_key],
+            bin_id=candidate.bin_id,
+            side=candidate.side,
+        )
+        if payoff_probability_mean is None:
+            rejections[candidate.candidate_id] = "POINT_PROBABILITY_UNAVAILABLE"
+            continue
+        score = _score_global_single_order_buy_expected(
             candidate,
-            q_samples=q_samples,
+            payoff_probability_mean=payoff_probability_mean,
+            sample_count=q_samples.size,
             band_alpha=band_alpha,
             wealth_floor_usd=candidate_endowment.loss_wealth_floor_usd,
             wealth_ceiling_usd=candidate_endowment.win_wealth_floor_usd,
             spendable_cash_usd=wealth_witness.spendable_cash_usd,
             capital_limit_usd=candidate_capital_limit,
             fractional_kelly_multiplier=multiplier,
-            payoff_q_lcb=candidate_payoff_q_lcb,
             current_token_shares=candidate_endowment.current_token_shares,
         )
         if score.candidate is None:
@@ -5645,15 +6052,29 @@ def select_global_single_order(
                         resolution_at - decision_at_utc.astimezone(timezone.utc)
                     ).total_seconds() / 3600.0
                     if math.isfinite(capital_lock_hours) and capital_lock_hours > 0.0:
-                        rejected_buy = replace(
+                        if isinstance(
                             rejected_buy,
-                            resolution_at_utc=resolution_at,
-                            capital_lock_hours=capital_lock_hours,
-                            probe_robust_log_growth_per_hour=(
-                                rejected_buy.probe_robust_delta_log_wealth
-                                / capital_lock_hours
-                            ),
-                        )
+                            GlobalExpectedBuyRejectionEconomics,
+                        ):
+                            rejected_buy = replace(
+                                rejected_buy,
+                                resolution_at_utc=resolution_at,
+                                capital_lock_hours=capital_lock_hours,
+                                probe_expected_log_growth_per_hour=(
+                                    rejected_buy.probe_expected_delta_log_wealth
+                                    / capital_lock_hours
+                                ),
+                            )
+                        else:
+                            rejected_buy = replace(
+                                rejected_buy,
+                                resolution_at_utc=resolution_at,
+                                capital_lock_hours=capital_lock_hours,
+                                probe_robust_log_growth_per_hour=(
+                                    rejected_buy.probe_robust_delta_log_wealth
+                                    / capital_lock_hours
+                                ),
+                            )
                 rejected_buy_economics_by_id[candidate.candidate_id] = rejected_buy
         else:
             score, horizon_reason = bind_capital_horizon(
@@ -5671,8 +6092,9 @@ def select_global_single_order(
             score.candidate.candidate_id
             for score in scored
             if isinstance(score.candidate, GlobalSingleOrderCandidate)
-            and score.robust_delta_log_wealth > 0.0
-            and score.robust_ev_usd > _ROBUST_EV_EPS_USD
+            and score.expected_growth is not None
+            and score.expected_growth.expected_delta_log_wealth > 0.0
+            and score.expected_growth.expected_ev_usd > _ROBUST_EV_EPS_USD
             and score.candidate.candidate_id not in rejections
         }
         joint_positive_candidate_ids.update(
@@ -5688,8 +6110,21 @@ def select_global_single_order(
                 "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT",
                 "FRACTIONAL_KELLY_TARGET_REACHED",
             }
-            and economics.probe_robust_delta_log_wealth > 0.0
-            and economics.probe_robust_ev_usd > _ROBUST_EV_EPS_USD
+            and (
+                (
+                    isinstance(
+                        economics,
+                        GlobalExpectedBuyRejectionEconomics,
+                    )
+                    and economics.probe_expected_delta_log_wealth > 0.0
+                    and economics.probe_expected_ev_usd > _ROBUST_EV_EPS_USD
+                )
+                or (
+                    isinstance(economics, GlobalBuyRejectionEconomics)
+                    and economics.probe_robust_delta_log_wealth > 0.0
+                    and economics.probe_robust_ev_usd > _ROBUST_EV_EPS_USD
+                )
+            )
         )
         for family_key, family_candidates in joint_buy_candidates_by_family.items():
             # The family budget can concentrate capital into one native leg even when
@@ -5721,7 +6156,7 @@ def select_global_single_order(
                     family_key=family_key,
                     targets=(),
                     primary_candidate_id=None,
-                    robust_delta_log_wealth=0.0,
+                    expected_delta_log_wealth=0.0,
                     full_kelly_cost_usd=Decimal("0"),
                     fractional_target_cost_usd=Decimal("0"),
                     no_trade_reason="FAMILY_JOINT_AUTHORITY_UNAVAILABLE",
@@ -5769,16 +6204,23 @@ def select_global_single_order(
                     primary.executable_cost_curve,
                     target.shares,
                 )
-                fixed = _score_global_single_order(
+                payoff_probability_mean = family_payoff_point_q(
+                    witness,
+                    bin_id=primary.bin_id,
+                    side=primary.side,
+                )
+                if payoff_probability_mean is None:
+                    raise ValueError("POINT_PROBABILITY_UNAVAILABLE")
+                fixed = _score_global_single_order_buy_expected(
                     primary,
-                    q_samples=q_samples,
+                    payoff_probability_mean=payoff_probability_mean,
+                    sample_count=q_samples.size,
                     band_alpha=witness.band_alpha,
                     wealth_floor_usd=primary_endowment.loss_wealth_floor_usd,
                     wealth_ceiling_usd=primary_endowment.win_wealth_floor_usd,
                     spendable_cash_usd=wealth_witness.spendable_cash_usd,
                     capital_limit_usd=target_cost,
                     fractional_kelly_multiplier=Decimal("1"),
-                    payoff_q_lcb=buy_payoff_q_lcbs[primary_id],
                     current_token_shares=Decimal("0"),
                 )
             except Exception:  # noqa: BLE001 - repaired primary must remain executable
@@ -5853,9 +6295,8 @@ def select_global_single_order(
             candidate_input_count=len(candidates),
         )
 
-    # Each action first passes its own admission/sizing law.  Rank the resulting
-    # fixed proposals on one posterior-mean expected-growth axis; robust BUY
-    # admission remains mandatory but cannot become an incommensurate score.
+    # Each action first passes its own admission/sizing law. Rank all fixed
+    # proposals on the same posterior-mean expected-growth axis.
     winner = min(
         positive_scored,
         key=lambda score: (

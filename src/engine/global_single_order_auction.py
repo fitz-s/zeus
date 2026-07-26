@@ -189,18 +189,32 @@ def _global_decision_economics_identity(
         raise ValueError("global decision lacks common expected-growth economics")
     if decision.expected_terminal_wealth is not None:
         terminal = decision.expected_terminal_wealth
-        action_economics = (
-            "EXPECTED_SELL",
-            terminal.probability_basis,
-            repr(terminal.held_probability_mean),
-            repr(terminal.favorable_sell_probability_mean),
-            terminal.loss_payoff_usd,
-            terminal.win_payoff_usd,
-            terminal.wealth_after_loss_usd,
-            terminal.wealth_after_win_usd,
-            repr(terminal.expected_delta_log_wealth),
-            repr(terminal.expected_ev_usd),
-        )
+        if getattr(decision.candidate, "action", "BUY") == "BUY":
+            action_economics = (
+                "EXPECTED_BUY",
+                terminal.probability_basis,
+                repr(terminal.win_probability_mean),
+                repr(terminal.loss_probability_mean),
+                terminal.loss_payoff_usd,
+                terminal.win_payoff_usd,
+                terminal.wealth_after_loss_usd,
+                terminal.wealth_after_win_usd,
+                repr(terminal.expected_delta_log_wealth),
+                repr(terminal.expected_ev_usd),
+            )
+        else:
+            action_economics = (
+                "EXPECTED_SELL",
+                terminal.probability_basis,
+                repr(terminal.held_probability_mean),
+                repr(terminal.favorable_sell_probability_mean),
+                terminal.loss_payoff_usd,
+                terminal.win_payoff_usd,
+                terminal.wealth_after_loss_usd,
+                terminal.wealth_after_win_usd,
+                repr(terminal.expected_delta_log_wealth),
+                repr(terminal.expected_ev_usd),
+            )
     elif decision.terminal_wealth is not None:
         terminal = decision.terminal_wealth
         action_economics = (

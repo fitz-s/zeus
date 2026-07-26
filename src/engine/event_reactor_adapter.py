@@ -5543,7 +5543,11 @@ def _qkernel_current_state_solve_economics_rejection_reason(cert: Any) -> str | 
 
     if not isinstance(cert, Mapping):
         return "payload_not_mapping"
-    basis = "CURRENT_POSTERIOR_BAND"
+    band_basis = "CURRENT_POSTERIOR_BAND"
+    selection_bases = {
+        band_basis,
+        "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+    }
     sample_hash = str(cert.get("sample_hash") or "").strip()
     q_lcb_sample_hash = str(cert.get("q_lcb_guard_cell_key") or "").strip()
     selection_hash = str(cert.get("selection_guard_cell_key") or "").strip()
@@ -5556,9 +5560,13 @@ def _qkernel_current_state_solve_economics_rejection_reason(cert: Any) -> str | 
         (bool(str(cert.get("decision_id") or "").strip()), "decision_id"),
         (bool(str(cert.get("receipt_hash") or "").strip()), "receipt_hash"),
         (bool(str(cert.get("q_version") or "").strip()), "q_version"),
-        (str(cert.get("q_lcb_guard_basis") or "").strip() == basis, "q_lcb_guard_basis"),
         (
-            str(cert.get("selection_guard_basis") or "").strip() == basis,
+            str(cert.get("q_lcb_guard_basis") or "").strip() == band_basis,
+            "q_lcb_guard_basis",
+        ),
+        (
+            str(cert.get("selection_guard_basis") or "").strip()
+            in selection_bases,
             "selection_guard_basis",
         ),
         (cert.get("q_lcb_guard_abstained") is False, "q_lcb_guard_abstained"),
@@ -11319,17 +11327,45 @@ def _global_current_state_execution_economics(
     try:
         shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
         cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
-        robust_ev = Decimal(str(getattr(decision, "robust_ev_usd", "nan")))
-        terminal = getattr(decision, "terminal_wealth")
-        cut_win_probability = Decimal(str(terminal.win_probability_lcb))
-        cut_loss_probability = Decimal(str(terminal.loss_probability_ucb))
+        robust_terminal = getattr(decision, "terminal_wealth", None)
+        expected_terminal = getattr(decision, "expected_terminal_wealth", None)
+        mean_action = expected_terminal is not None
+        terminal = expected_terminal if mean_action else robust_terminal
+        if mean_action:
+            decision_ev = Decimal(str(expected_terminal.expected_ev_usd))
+            cut_win_probability = Decimal(
+                str(expected_terminal.win_probability_mean)
+            )
+            cut_loss_probability = Decimal(
+                str(expected_terminal.loss_probability_mean)
+            )
+        else:
+            decision_ev = Decimal(
+                str(getattr(decision, "robust_ev_usd", "nan"))
+            )
+            cut_win_probability = Decimal(
+                str(robust_terminal.win_probability_lcb)
+            )
+            cut_loss_probability = Decimal(
+                str(robust_terminal.loss_probability_ucb)
+            )
         loss_payoff = Decimal(terminal.loss_payoff_usd)
         win_payoff = Decimal(terminal.win_payoff_usd)
-        median_payoff = Decimal(terminal.median_payoff_usd)
+        median_payoff = (
+            win_payoff
+            if mean_action and cut_win_probability > Decimal("0.5")
+            else loss_payoff
+            if mean_action and cut_win_probability < Decimal("0.5")
+            else (loss_payoff + win_payoff) / Decimal("2")
+            if mean_action
+            else Decimal(robust_terminal.median_payoff_usd)
+        )
         wealth_after_loss = Decimal(terminal.wealth_after_loss_usd)
         wealth_after_win = Decimal(terminal.wealth_after_win_usd)
-        expected_value = Decimal(
-            str(terminal.expected_value_usd)
+        expected_value = (
+            decision_ev
+            if mean_action
+            else Decimal(str(robust_terminal.expected_value_usd))
         )
     except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_CURRENT_STATE_DECISION_ECONOMICS_INVALID") from exc
@@ -11344,34 +11380,61 @@ def _global_current_state_execution_economics(
         raise ValueError("GLOBAL_CURRENT_STATE_SIDE_INVALID")
     from src.solve.solver import (
         DeterministicBinPayoffWitness,
+        _lower_cvar,
+        family_payoff_point_q,
         family_payoff_q_samples,
     )
 
     raw_point_q = cert.get("payoff_q_point")
-    payoff_samples = None
-    if raw_point_q in {None, ""} or isinstance(
-        witness, DeterministicBinPayoffWitness
-    ):
-        payoff_samples = family_payoff_q_samples(
-            witness,
-            bin_id=str(getattr(candidate, "bin_id", "") or ""),
-            side=side,
-        )
-        if payoff_samples is None:
-            raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID")
+    payoff_samples = family_payoff_q_samples(
+        witness,
+        bin_id=str(getattr(candidate, "bin_id", "") or ""),
+        side=side,
+    )
+    current_point_q = family_payoff_point_q(
+        witness,
+        bin_id=str(getattr(candidate, "bin_id", "") or ""),
+        side=side,
+    )
+    if payoff_samples is None or current_point_q is None:
+        raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID")
+    sample_hash = str(getattr(witness, "sample_matrix_identity", "") or "").strip()
     try:
-        if raw_point_q in {None, ""}:
-            assert payoff_samples is not None
-            point_q = Decimal(str(float(payoff_samples.mean())))
-        else:
-            point_q = Decimal(str(raw_point_q))
-    except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
-        if str(exc) == "GLOBAL_CURRENT_STATE_SIDE_INVALID":
-            raise
+        n_draws = int(payoff_samples.shape[0])
+        alpha = float(getattr(witness, "band_alpha"))
+        sample_payoff_q_lcb = Decimal(
+            str(
+                _lower_cvar(
+                    np.asarray(payoff_samples, dtype=np.float64),
+                    np.ones(n_draws, dtype=np.float64),
+                    alpha,
+                )
+            )
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_CURRENT_STATE_BAND_INVALID") from exc
+    if (
+        not sample_hash
+        or n_draws < 2
+        or not (0.0 < alpha < 0.5)
+        or not sample_payoff_q_lcb.is_finite()
+        or not Decimal("0") <= sample_payoff_q_lcb <= Decimal("1")
+    ):
+        raise ValueError("GLOBAL_CURRENT_STATE_BAND_INVALID")
+    try:
+        point_q = Decimal(str(current_point_q))
+        prior_point_q = (
+            Decimal(str(raw_point_q))
+            if raw_point_q not in {None, ""}
+            else point_q
+        )
+    except (ArithmeticError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID") from exc
-    if payoff_samples is not None and not math.isclose(
+    if not prior_point_q.is_finite():
+        raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID")
+    if isinstance(witness, DeterministicBinPayoffWitness) and not math.isclose(
+        float(prior_point_q),
         float(point_q),
-        float(payoff_samples.mean()),
         rel_tol=0.0,
         abs_tol=1e-12,
     ):
@@ -11400,7 +11463,7 @@ def _global_current_state_execution_economics(
         or not all(
             value.is_finite()
             for value in (
-                robust_ev,
+                decision_ev,
                 cut_win_probability,
                 cut_loss_probability,
                 loss_payoff,
@@ -11423,7 +11486,7 @@ def _global_current_state_execution_economics(
         or wealth_after_win <= 0
         or not math.isclose(
             float(expected_value),
-            float(robust_ev),
+            float(decision_ev),
             rel_tol=0.0,
             abs_tol=1e-12,
         )
@@ -11444,18 +11507,17 @@ def _global_current_state_execution_economics(
     if prior_payoff_lcb is not None and not prior_payoff_lcb.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_PRIOR_LCB_INVALID")
     unit_cost = cost / shares
-    current_band_payoff_q_lcb = cut_win_probability
     if not math.isclose(
-        float(robust_ev),
-        float(current_band_payoff_q_lcb * shares - cost),
+        float(decision_ev),
+        float(cut_win_probability * shares - cost),
         rel_tol=0.0,
         abs_tol=1e-12,
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_DECISION_ECONOMICS_INVALID")
     if served_lcb is None:
-        served_lcb = current_band_payoff_q_lcb
+        served_lcb = cut_win_probability
     if prior_payoff_lcb is None:
-        prior_payoff_lcb = current_band_payoff_q_lcb
+        prior_payoff_lcb = served_lcb
     if not served_lcb.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_SERVED_LCB_INVALID")
     # ``served_lcb`` and ``prior_payoff_lcb`` are pre-W3 provenance and may
@@ -11472,43 +11534,53 @@ def _global_current_state_execution_economics(
             or not Decimal("0") <= current_cap <= Decimal("1")
         ):
             raise ValueError("GLOBAL_CURRENT_STATE_CANDIDATE_CAP_INVALID")
-    payoff_q_lcb = min(
+    current_band_payoff_q_lcb = min(
         value
         for value in (
-            current_band_payoff_q_lcb,
+            cut_win_probability,
             point_q,
+            sample_payoff_q_lcb,
             current_cap,
         )
         if value is not None
     )
+    payoff_q_lcb = current_band_payoff_q_lcb
     edge_lcb = payoff_q_lcb - unit_cost
+    edge_expected = point_q - unit_cost
     if not all(
         Decimal("0") <= value <= Decimal("1")
         for value in (
             point_q,
             served_lcb,
             prior_payoff_lcb,
+            sample_payoff_q_lcb,
             current_band_payoff_q_lcb,
         )
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_PROBABILITY_ORDER_INVALID")
-    if payoff_q_lcb < current_band_payoff_q_lcb:
-        raise _GlobalProbabilityTightened(float(payoff_q_lcb))
-    if edge_lcb <= 0:
-        raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
-    sample_hash = str(getattr(witness, "sample_matrix_identity", "") or "").strip()
-    try:
-        n_draws = int(
-            payoff_samples.shape[0]
-            if payoff_samples is not None
-            else getattr(witness, "yes_q_samples").shape[0]
+    if (
+        not mean_action
+        and payoff_q_lcb < cut_win_probability
+        and not (
+            point_q == cut_win_probability
+            and math.isclose(
+                float(payoff_q_lcb),
+                float(cut_win_probability),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
         )
-        alpha = float(getattr(witness, "band_alpha"))
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise ValueError("GLOBAL_CURRENT_STATE_BAND_INVALID") from exc
-    if not sample_hash or n_draws < 2 or not (0.0 < alpha < 0.5):
-        raise ValueError("GLOBAL_CURRENT_STATE_BAND_INVALID")
-
+    ):
+        raise _GlobalProbabilityTightened(float(payoff_q_lcb))
+    if mean_action and not math.isclose(
+        float(point_q),
+        float(cut_win_probability),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_SUPERSEDED")
+    if (edge_expected if mean_action else edge_lcb) <= 0:
+        raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
     current = dict(cert)
     current.update(
         {
@@ -11530,11 +11602,15 @@ def _global_current_state_execution_economics(
             "payoff_q_point": float(point_q),
             "q_dot_payoff": float(point_q),
             "payoff_q_lcb": float(payoff_q_lcb),
+            "payoff_q_action": float(
+                point_q if mean_action else payoff_q_lcb
+            ),
             "cost": float(unit_cost),
             "cost_basis": float(unit_cost),
             "route_cost": float(unit_cost),
             "edge_lcb": float(edge_lcb),
             "route_edge_lcb": float(edge_lcb),
+            "edge_expected": float(edge_expected),
             "false_edge_rate": (
                 0.0
                 if isinstance(witness, DeterministicBinPayoffWitness)
@@ -11544,21 +11620,27 @@ def _global_current_state_execution_economics(
             "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
             "q_lcb_guard_abstained": False,
             "q_lcb_guard_cell_key": sample_hash,
-            "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+            "selection_guard_basis": (
+                "CURRENT_POSTERIOR_PREDICTIVE_MEAN"
+                if mean_action
+                else "CURRENT_POSTERIOR_BAND"
+            ),
             "selection_guard_abstained": False,
             "selection_guard_cell_key": sample_hash,
             "selection_guard_n": n_draws,
-            "selection_guard_q_safe": float(payoff_q_lcb),
+            "selection_guard_q_safe": float(
+                point_q if mean_action else payoff_q_lcb
+            ),
+            "global_probability_functional": (
+                "POSTERIOR_PREDICTIVE_MEAN"
+                if mean_action
+                else "LOWER_CVAR_PARAMETER_DRAWS"
+            ),
             "global_current_band_payoff_q_lcb": float(current_band_payoff_q_lcb),
+            "global_current_sample_payoff_q_lcb": float(sample_payoff_q_lcb),
             "global_current_served_payoff_q_lcb": float(served_lcb),
             "global_current_prior_payoff_q_lcb": float(prior_payoff_lcb),
             "global_current_effective_payoff_q_lcb": float(payoff_q_lcb),
-            "global_cut_time_win_probability_lcb": float(cut_win_probability),
-            "global_cut_time_loss_probability_ucb": float(cut_loss_probability),
-            "global_terminal_win_probability_lcb": float(payoff_q_lcb),
-            "global_terminal_loss_probability_ucb": float(
-                Decimal("1") - payoff_q_lcb
-            ),
             "global_terminal_loss_payoff_usd": str(loss_payoff),
             "global_terminal_win_payoff_usd": str(win_payoff),
             "global_terminal_median_payoff_usd": str(median_payoff),
@@ -11568,7 +11650,7 @@ def _global_current_state_execution_economics(
                 expected_value
             ),
             "global_expected_value_usd": float(
-                payoff_q_lcb * shares - cost
+                (point_q if mean_action else payoff_q_lcb) * shares - cost
             ),
             "global_expected_value_semantics": (
                 "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
@@ -11579,6 +11661,53 @@ def _global_current_state_execution_economics(
             "global_current_band_alpha": alpha,
         }
     )
+    if mean_action:
+        current.update(
+            {
+                "global_expected_delta_log_wealth": (
+                    expected_terminal.expected_delta_log_wealth
+                ),
+                "global_expected_ev_usd": expected_terminal.expected_ev_usd,
+                "global_expected_capital_efficiency": (
+                    expected_terminal.expected_delta_log_wealth / float(cost)
+                ),
+                "global_cut_time_win_probability_mean": float(
+                    cut_win_probability
+                ),
+                "global_cut_time_loss_probability_mean": float(
+                    cut_loss_probability
+                ),
+                "global_terminal_win_probability_mean": float(point_q),
+                "global_terminal_loss_probability_mean": float(
+                    Decimal("1") - point_q
+                ),
+            }
+        )
+        for field in (
+            "global_robust_delta_log_wealth",
+            "global_robust_ev_usd",
+            "global_capital_efficiency",
+            "global_cut_time_win_probability_lcb",
+            "global_cut_time_loss_probability_ucb",
+            "global_terminal_win_probability_lcb",
+            "global_terminal_loss_probability_ucb",
+        ):
+            current.pop(field, None)
+    else:
+        current.update(
+            {
+                "global_cut_time_win_probability_lcb": float(
+                    cut_win_probability
+                ),
+                "global_cut_time_loss_probability_ucb": float(
+                    cut_loss_probability
+                ),
+                "global_terminal_win_probability_lcb": float(payoff_q_lcb),
+                "global_terminal_loss_probability_ucb": float(
+                    Decimal("1") - payoff_q_lcb
+                ),
+            }
+        )
     current["current_state_identity_hash"] = qkernel_current_state_identity_hash(
         current
     )
@@ -11604,17 +11733,33 @@ def _global_current_state_economics_seed(proof: "_CandidateProof") -> dict[str, 
 
 
 def _positive_global_current_objective(cert: Mapping[str, Any]) -> bool:
-    """Whether one sealed current-state winner improves robust terminal wealth."""
+    """Whether one sealed current-state winner improves its declared objective."""
 
     if not _qkernel_current_state_solve_economics(cert):
         return False
-    delta_log_wealth = _optional_float(cert.get("global_robust_delta_log_wealth"))
-    robust_ev = _optional_float(cert.get("global_robust_ev_usd"))
+    mean_action = (
+        cert.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    delta_log_wealth = _optional_float(
+        cert.get(
+            "global_expected_delta_log_wealth"
+            if mean_action
+            else "global_robust_delta_log_wealth"
+        )
+    )
+    ev = _optional_float(
+        cert.get(
+            "global_expected_ev_usd"
+            if mean_action
+            else "global_robust_ev_usd"
+        )
+    )
     return bool(
         delta_log_wealth is not None
-        and robust_ev is not None
+        and ev is not None
         and delta_log_wealth > 0.0
-        and robust_ev > 0.0
+        and ev > 0.0
     )
 
 
@@ -11637,15 +11782,20 @@ def _global_current_taker_escalation(
 
     ev_taker = _optional_float(getattr(proof, "ev_taker", None))
     cost = _optional_float(cert.get("cost"))
-    payoff_q_lcb = _optional_float(cert.get("payoff_q_lcb"))
+    payoff_q_action = _optional_float(
+        cert.get("payoff_q_action")
+        if cert.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+        else cert.get("payoff_q_lcb")
+    )
     return bool(
         str(getattr(proof, "rest_then_cross_policy", "") or "").strip().upper()
         == "MAKER_TAKER_FORBIDDEN"
         and ev_taker is not None
         and ev_taker > 0.0
         and cost is not None
-        and payoff_q_lcb is not None
-        and cost <= payoff_q_lcb + 1e-12
+        and payoff_q_action is not None
+        and cost <= payoff_q_action + 1e-12
         and _positive_global_current_objective(cert)
     )
 
@@ -11681,6 +11831,16 @@ def _bind_global_current_state_economics_to_proof(
         q_point = float(cert["payoff_q_point"])
         q_lcb = float(cert["payoff_q_lcb"])
         edge_lcb = float(cert["edge_lcb"])
+        mean_action = (
+            cert.get("global_probability_functional")
+            == "POSTERIOR_PREDICTIVE_MEAN"
+        )
+        action_q = float(
+            cert["payoff_q_action"] if mean_action else q_lcb
+        )
+        action_edge = float(
+            cert["edge_expected"] if mean_action else edge_lcb
+        )
         false_edge_rate = float(cert["false_edge_rate"])
         served_q_point = float(proof.q_posterior)
     except (KeyError, TypeError, ValueError) as exc:
@@ -11691,6 +11851,8 @@ def _bind_global_current_state_economics_to_proof(
             q_point,
             q_lcb,
             edge_lcb,
+            action_q,
+            action_edge,
             false_edge_rate,
             served_q_point,
         )
@@ -11700,13 +11862,14 @@ def _bind_global_current_state_economics_to_proof(
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_POINT_MISMATCH")
     if (
         not (0.0 <= q_lcb <= q_point <= 1.0)
-        or edge_lcb <= 0.0
+        or not 0.0 <= action_q <= 1.0
+        or action_edge <= 0.0
         or not (0.0 <= false_edge_rate <= 1.0)
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_ECONOMICS_NON_POSITIVE")
     replacement: dict[str, Any] = {
         "q_lcb_5pct": q_lcb,
-        "trade_score": edge_lcb,
+        "trade_score": action_edge,
         "p_value": false_edge_rate,
         "passed_prefilter": True,
         "missing_reason": None,
@@ -12181,12 +12344,39 @@ def _global_actuation_selected_proof(
                 decision.expected_fill_price_before_fee
             ),
             "global_max_spend_usd": str(decision.max_spend_usd),
-            "global_robust_delta_log_wealth": decision.robust_delta_log_wealth,
-            "global_robust_ev_usd": decision.robust_ev_usd,
-            "global_capital_efficiency": decision.capital_efficiency,
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         }
     )
+    if getattr(decision, "expected_terminal_wealth", None) is not None:
+        expected_terminal = decision.expected_terminal_wealth
+        cert.update(
+            {
+                "global_probability_functional": (
+                    "POSTERIOR_PREDICTIVE_MEAN"
+                ),
+                "global_expected_delta_log_wealth": (
+                    expected_terminal.expected_delta_log_wealth
+                ),
+                "global_expected_ev_usd": expected_terminal.expected_ev_usd,
+                "global_expected_capital_efficiency": (
+                    expected_terminal.expected_delta_log_wealth
+                    / float(decision.cost_usd)
+                ),
+            }
+        )
+    else:
+        cert.update(
+            {
+                "global_probability_functional": (
+                    "LOWER_CVAR_PARAMETER_DRAWS"
+                ),
+                "global_robust_delta_log_wealth": (
+                    decision.robust_delta_log_wealth
+                ),
+                "global_robust_ev_usd": decision.robust_ev_usd,
+                "global_capital_efficiency": decision.capital_efficiency,
+            }
+        )
     prefix = _global_buy_prefix_certificate_for_proof(
         decision,
         proof,
@@ -16011,11 +16201,21 @@ def _build_event_bound_taker_quality_proof(
             }
         q_live = _optional_float(qkernel_cert.get("payoff_q_point"))
         q_lcb = _optional_float(qkernel_cert.get("payoff_q_lcb"))
+        mean_action = (
+            qkernel_cert.get("global_probability_functional")
+            == "POSTERIOR_PREDICTIVE_MEAN"
+        )
+        q_action = _optional_float(
+            qkernel_cert.get("payoff_q_action")
+            if mean_action
+            else qkernel_cert.get("payoff_q_lcb")
+        )
         payload_q_live = _optional_float(actionable_payload.get("q_live"))
         payload_q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
         if (
             q_live is None
             or q_lcb is None
+            or q_action is None
             or payload_q_live is None
             or payload_q_lcb is None
         ):
@@ -16047,6 +16247,8 @@ def _build_event_bound_taker_quality_proof(
     else:
         q_live = _optional_float(actionable_payload.get("q_live"))
         q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
+        q_action = q_lcb
+        mean_action = False
     notional = _optional_float(
         actionable_payload.get("live_cap_reserved_notional_usd")
         or actionable_payload.get("kelly_size_usd")
@@ -16064,6 +16266,7 @@ def _build_event_bound_taker_quality_proof(
         }
     touch_dec = Decimal(str(touch))
     q_lcb_dec = Decimal(str(q_lcb))
+    q_action_dec = Decimal(str(q_action))
     notional_dec = Decimal(str(max(float(notional), 0.0)))
     from src.strategy.live_inference.live_admission import (
         live_entry_probability_quality_rejection_reason,
@@ -16094,7 +16297,7 @@ def _build_event_bound_taker_quality_proof(
             "q_lcb_source": q_lcb_source,
         }
     fee_dec = Decimal("0.05") * touch_dec * (Decimal("1") - touch_dec)
-    taker_edge_dec = q_lcb_dec - touch_dec - fee_dec
+    taker_edge_dec = q_action_dec - touch_dec - fee_dec
     taker_expected_profit_usd = (
         max(Decimal("0"), taker_edge_dec)
         * notional_dec
@@ -16144,7 +16347,7 @@ def _build_event_bound_taker_quality_proof(
         maker_expected_profit_usd + min_incremental_profit,
     )
     taker_edge_density = taker_edge_dec / max(touch_dec, Decimal("0.000001"))
-    conservative_surplus_ok = taker_edge_dec >= Decimal("0")
+    action_surplus_ok = taker_edge_dec >= Decimal("0")
     taker_quality_threshold_pass = bool(
         current_state_solve
         or (
@@ -16164,13 +16367,17 @@ def _build_event_bound_taker_quality_proof(
         )
     )
     passed = bool(
-        conservative_surplus_ok
+        action_surplus_ok
         and taker_quality_threshold_pass
         and strategy_quality_floor_pass
     )
     reason = "allowed"
-    if not conservative_surplus_ok:
-        reason = "negative_conservative_after_cost_surplus"
+    if not action_surplus_ok:
+        reason = (
+            "negative_expected_after_cost_surplus"
+            if mean_action
+            else "negative_conservative_after_cost_surplus"
+        )
     elif not taker_quality_threshold_pass:
         reason = "taker_quality_threshold_not_met"
     elif not strategy_quality_floor_pass:
@@ -16180,7 +16387,9 @@ def _build_event_bound_taker_quality_proof(
         "passed": bool(passed),
         "reason": reason,
         "passed_basis": (
-            "current_posterior_band_after_cost"
+            "current_posterior_predictive_mean_after_cost"
+            if mean_action
+            else "current_posterior_band_after_cost"
             if current_state_solve
             else "conservative_after_cost_plus_taker_and_strategy_quality_floors"
         ),
@@ -16216,6 +16425,9 @@ def _build_event_bound_taker_quality_proof(
     if current_state_solve:
         proof["q_exec_lcb"] = str(q_lcb_dec)
         proof["q_exec_lcb_basis"] = "CURRENT_POSTERIOR_BAND"
+        if mean_action:
+            proof["q_exec_mean"] = str(q_action_dec)
+            proof["q_exec_mean_basis"] = "POSTERIOR_PREDICTIVE_MEAN"
     return proof
 
 
@@ -23406,6 +23618,18 @@ def _qkernel_actual_submit_quality_rejection_reason(
             payoff_q_point = float(raw_cert.get("payoff_q_point"))
             payoff_q_lcb = float(raw_cert.get("payoff_q_lcb"))
             edge_lcb = float(raw_cert.get("edge_lcb"))
+            mean_action = (
+                raw_cert.get("global_probability_functional")
+                == "POSTERIOR_PREDICTIVE_MEAN"
+            )
+            payoff_q_action = float(
+                raw_cert.get("payoff_q_action")
+                if mean_action
+                else payoff_q_lcb
+            )
+            action_edge = float(
+                raw_cert.get("edge_expected") if mean_action else edge_lcb
+            )
         except (TypeError, ValueError):
             return (
                 "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
@@ -23418,6 +23642,8 @@ def _qkernel_actual_submit_quality_rejection_reason(
             payoff_q_point,
             payoff_q_lcb,
             edge_lcb,
+            payoff_q_action,
+            action_edge,
         )
         if not all(math.isfinite(value) for value in values):
             return (
@@ -23447,14 +23673,15 @@ def _qkernel_actual_submit_quality_rejection_reason(
             and 0.0 < cost < 1.0
             and 0.0 < certified_cost < 1.0
             and 0.0 <= payoff_q_lcb <= payoff_q_point <= 1.0
-            and edge_lcb > 0.0
+            and 0.0 <= payoff_q_action <= 1.0
+            and action_edge > 0.0
             and math.isclose(
-                payoff_q_lcb,
-                certified_cost + edge_lcb,
+                payoff_q_action,
+                certified_cost + action_edge,
                 rel_tol=1e-9,
                 abs_tol=1e-9,
             )
-            and payoff_q_lcb - cost > 0.0
+            and payoff_q_action - cost > 0.0
         ):
             return (
                 "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
@@ -23648,8 +23875,24 @@ def _qkernel_current_state_actual_submit_rejection_reason(
             global_max_spend = float(cert.get("global_max_spend_usd"))
             global_expected_cost = float(cert.get("global_expected_cost_usd"))
             global_shares = float(cert.get("global_target_shares"))
-            global_robust_du = float(cert.get("global_robust_delta_log_wealth"))
-            global_robust_ev = float(cert.get("global_robust_ev_usd"))
+            mean_action = (
+                cert.get("global_probability_functional")
+                == "POSTERIOR_PREDICTIVE_MEAN"
+            )
+            global_du = float(
+                cert.get(
+                    "global_expected_delta_log_wealth"
+                    if mean_action
+                    else "global_robust_delta_log_wealth"
+                )
+            )
+            global_ev = float(
+                cert.get(
+                    "global_expected_ev_usd"
+                    if mean_action
+                    else "global_robust_ev_usd"
+                )
+            )
         except (TypeError, ValueError):
             return "GLOBAL_ACTUATION_SUBMIT_CERTIFICATE_INVALID"
         expected_unit_cost = global_expected_cost / global_shares
@@ -23661,13 +23904,13 @@ def _qkernel_current_state_actual_submit_rejection_reason(
                 global_max_spend,
                 global_expected_cost,
                 global_shares,
-                global_robust_du,
-                global_robust_ev,
+                global_du,
+                global_ev,
                 expected_unit_cost,
             )
         ):
             return "GLOBAL_ACTUATION_SUBMIT_CERTIFICATE_NON_FINITE"
-        if global_robust_du <= 0.0 or global_robust_ev <= 0.0:
+        if global_du <= 0.0 or global_ev <= 0.0:
             return "GLOBAL_ACTUATION_OBJECTIVE_NON_POSITIVE"
         if stake > global_max_spend + 1e-9:
             return "GLOBAL_ACTUATION_MAX_SPEND_EXCEEDED"
@@ -26108,11 +26351,20 @@ def _robust_marginal_utility_stake_and_price(
         if envelope_reason is not None:
             return 0.0, None
         if stake_floor_out is not None:
+            mean_action = (
+                global_qkernel_cert.get("global_probability_functional")
+                == "POSTERIOR_PREDICTIVE_MEAN"
+            )
+            action_q = float(
+                global_qkernel_cert[
+                    "payoff_q_action" if mean_action else "payoff_q_lcb"
+                ]
+            )
             stake_floor_out["qkernel_execution_economics"] = {
                 "payoff_q_lcb": float(global_qkernel_cert["payoff_q_lcb"]),
                 "payoff_q_point": float(global_qkernel_cert["payoff_q_point"]),
-                "submit_edge": float(global_qkernel_cert["payoff_q_lcb"])
-                - float(price.value),
+                "payoff_q_action": action_q,
+                "submit_edge": action_q - float(price.value),
                 "edge_lcb": float(global_qkernel_cert["edge_lcb"]),
                 "global_expected_cost_usd": float(target_cost),
                 "global_target_shares": float(

@@ -114,9 +114,19 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_limit_price",
     "global_expected_fill_price_before_fee",
     "global_max_spend_usd",
+    "global_probability_functional",
+    "payoff_q_action",
+    "edge_expected",
+    "global_expected_delta_log_wealth",
+    "global_expected_ev_usd",
+    "global_expected_capital_efficiency",
     "global_robust_delta_log_wealth",
     "global_robust_ev_usd",
     "global_capital_efficiency",
+    "global_cut_time_win_probability_mean",
+    "global_cut_time_loss_probability_mean",
+    "global_terminal_win_probability_mean",
+    "global_terminal_loss_probability_mean",
     "global_cut_time_win_probability_lcb",
     "global_cut_time_loss_probability_ucb",
     "global_terminal_win_probability_lcb",
@@ -142,6 +152,9 @@ _QKERNEL_BUY_FAK_PREFIX_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_buy_fak_worst_fee_per_share",
     "global_buy_fak_worst_unit_cost",
     "global_buy_fak_full_worst_cost_usd",
+    "global_buy_fak_probability_basis",
+    "global_buy_fak_full_expected_delta_log_wealth",
+    "global_buy_fak_full_expected_ev_usd",
     "global_buy_fak_full_robust_delta_log_wealth",
     "global_buy_fak_full_robust_ev_usd",
 )
@@ -165,10 +178,15 @@ def qkernel_current_state_identity_hash(economics: Mapping[str, Any]) -> str:
 def qkernel_declares_current_state(economics: Mapping[str, Any]) -> bool:
     """Whether a payload has entered the non-downgradable current-state grammar."""
 
-    basis = "CURRENT_POSTERIOR_BAND"
+    band_basis = "CURRENT_POSTERIOR_BAND"
+    selection_bases = {
+        band_basis,
+        "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+    }
     return (
-        str(economics.get("q_lcb_guard_basis") or "").strip() == basis
-        or str(economics.get("selection_guard_basis") or "").strip() == basis
+        str(economics.get("q_lcb_guard_basis") or "").strip() == band_basis
+        or str(economics.get("selection_guard_basis") or "").strip()
+        in selection_bases
         or bool(str(economics.get("current_state_identity_hash") or "").strip())
     )
 
@@ -178,7 +196,11 @@ def qkernel_current_state_rejection_reason(economics: Any) -> str | None:
 
     if not isinstance(economics, Mapping):
         return "payload_not_mapping"
-    basis = "CURRENT_POSTERIOR_BAND"
+    band_basis = "CURRENT_POSTERIOR_BAND"
+    selection_bases = {
+        band_basis,
+        "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+    }
     sample_hash = str(economics.get("sample_hash") or "").strip()
     try:
         n_draws = int(economics.get("selection_guard_n") or 0)
@@ -189,9 +211,13 @@ def qkernel_current_state_rejection_reason(economics: Any) -> str | None:
         (bool(str(economics.get("decision_id") or "").strip()), "decision_id"),
         (bool(str(economics.get("receipt_hash") or "").strip()), "receipt_hash"),
         (bool(str(economics.get("q_version") or "").strip()), "q_version"),
-        (str(economics.get("q_lcb_guard_basis") or "").strip() == basis, "q_lcb_guard_basis"),
         (
-            str(economics.get("selection_guard_basis") or "").strip() == basis,
+            str(economics.get("q_lcb_guard_basis") or "").strip() == band_basis,
+            "q_lcb_guard_basis",
+        ),
+        (
+            str(economics.get("selection_guard_basis") or "").strip()
+            in selection_bases,
             "selection_guard_basis",
         ),
         (economics.get("q_lcb_guard_abstained") is False, "q_lcb_guard_abstained"),
@@ -349,6 +375,17 @@ def qkernel_global_current_state_rejection_reason(
         and economics.get("global_execution_mode") != "TAKER_LIMIT"
     ):
         return "global_execution_mode"
+    functional = str(
+        economics.get("global_probability_functional")
+        or "LOWER_CVAR_PARAMETER_DRAWS"
+    ).strip()
+    if functional == "POSTERIOR_PREDICTIVE_MEAN":
+        return _qkernel_global_mean_buy_rejection_reason(
+            economics,
+            direction=direction,
+        )
+    if functional != "LOWER_CVAR_PARAMETER_DRAWS":
+        return "global_probability_functional"
     numeric: dict[str, float] = {}
     for field in (
         "payoff_q_point",
@@ -490,6 +527,200 @@ def qkernel_global_current_state_rejection_reason(
     return None
 
 
+def _qkernel_global_mean_buy_rejection_reason(
+    economics: Mapping[str, Any],
+    *,
+    direction: str | None,
+) -> str | None:
+    """Validate one BUY whose action law is posterior-mean expected growth."""
+
+    if any(
+        field in economics
+        for field in (
+            "global_robust_delta_log_wealth",
+            "global_robust_ev_usd",
+            "global_capital_efficiency",
+            "global_cut_time_win_probability_lcb",
+            "global_cut_time_loss_probability_ucb",
+            "global_terminal_win_probability_lcb",
+            "global_terminal_loss_probability_ucb",
+        )
+    ):
+        return "mean_action_carries_robust_economics"
+    fields = (
+        "payoff_q_point",
+        "payoff_q_lcb",
+        "payoff_q_action",
+        "cost",
+        "edge_lcb",
+        "edge_expected",
+        "global_target_shares",
+        "global_expected_cost_usd",
+        "global_max_spend_usd",
+        "global_expected_delta_log_wealth",
+        "global_expected_ev_usd",
+        "global_expected_capital_efficiency",
+        "global_cut_time_win_probability_mean",
+        "global_cut_time_loss_probability_mean",
+        "global_terminal_win_probability_mean",
+        "global_terminal_loss_probability_mean",
+        "global_terminal_loss_payoff_usd",
+        "global_terminal_win_payoff_usd",
+        "global_terminal_median_payoff_usd",
+        "global_terminal_wealth_after_loss_usd",
+        "global_terminal_wealth_after_win_usd",
+        "global_cut_time_expected_value_usd",
+        "global_expected_value_usd",
+    )
+    try:
+        numeric = {field: float(economics.get(field)) for field in fields}
+    except (TypeError, ValueError):
+        return "mean_numeric_field_invalid"
+    if not all(math.isfinite(value) for value in numeric.values()):
+        return "mean_numeric_field_non_finite"
+    point = numeric["payoff_q_point"]
+    lcb = numeric["payoff_q_lcb"]
+    action_q = numeric["payoff_q_action"]
+    cost = numeric["cost"]
+    edge_lcb = numeric["edge_lcb"]
+    edge_expected = numeric["edge_expected"]
+    shares = numeric["global_target_shares"]
+    expected_cost = numeric["global_expected_cost_usd"]
+    max_spend = numeric["global_max_spend_usd"]
+    expected_du = numeric["global_expected_delta_log_wealth"]
+    expected_ev = numeric["global_expected_ev_usd"]
+    expected_efficiency = numeric["global_expected_capital_efficiency"]
+    cut_win = numeric["global_cut_time_win_probability_mean"]
+    cut_loss = numeric["global_cut_time_loss_probability_mean"]
+    terminal_win = numeric["global_terminal_win_probability_mean"]
+    terminal_loss = numeric["global_terminal_loss_probability_mean"]
+    loss_payoff = numeric["global_terminal_loss_payoff_usd"]
+    win_payoff = numeric["global_terminal_win_payoff_usd"]
+    median_payoff = numeric["global_terminal_median_payoff_usd"]
+    wealth_after_loss = numeric["global_terminal_wealth_after_loss_usd"]
+    wealth_after_win = numeric["global_terminal_wealth_after_win_usd"]
+    cut_ev = numeric["global_cut_time_expected_value_usd"]
+    current_ev = numeric["global_expected_value_usd"]
+    if not (0.0 <= lcb <= point <= 1.0):
+        return "probability_order"
+    if not (
+        math.isclose(action_q, point, rel_tol=0.0, abs_tol=1e-12)
+        and 0.0 < cost < 1.0
+        and edge_expected > 0.0
+        and math.isclose(
+            edge_expected,
+            action_q - cost,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+        and math.isclose(
+            edge_lcb,
+            lcb - cost,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+    ):
+        return "mean_execution_edge"
+    if not (
+        shares > 0.0
+        and expected_cost > 0.0
+        and max_spend + 1e-9 >= expected_cost
+        and expected_du > 0.0
+        and expected_ev > 0.0
+        and expected_efficiency > 0.0
+    ):
+        return "mean_global_utility_envelope"
+    if not math.isclose(cost, expected_cost / shares, rel_tol=1e-9, abs_tol=1e-9):
+        return "global_cost_identity"
+    if not (
+        0.0 <= terminal_win <= 1.0
+        and 0.0 <= terminal_loss <= 1.0
+        and math.isclose(cut_win, point, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(cut_loss, 1.0 - point, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(terminal_win, point, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(terminal_loss, 1.0 - point, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            terminal_win + terminal_loss,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        return "mean_terminal_probability_identity"
+    loss_base = wealth_after_loss - loss_payoff
+    win_base = wealth_after_win - win_payoff
+    if not (
+        math.isclose(loss_payoff, -expected_cost, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            win_payoff,
+            shares - expected_cost,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and (
+            (
+                terminal_win > 0.5
+                and math.isclose(
+                    median_payoff,
+                    win_payoff,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            )
+            or (
+                terminal_win < 0.5
+                and math.isclose(
+                    median_payoff,
+                    loss_payoff,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            )
+            or (
+                terminal_win == 0.5
+                and loss_payoff - 1e-12 <= median_payoff <= win_payoff + 1e-12
+            )
+        )
+        and min(loss_base, win_base, wealth_after_loss, wealth_after_win) > 0.0
+    ):
+        return "mean_terminal_payoff_identity"
+    recomputed_du = terminal_loss * math.log(
+        wealth_after_loss / loss_base
+    ) + terminal_win * math.log(wealth_after_win / win_base)
+    recomputed_ev = terminal_win * shares - expected_cost
+    if not (
+        math.isclose(expected_du, recomputed_du, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(expected_ev, recomputed_ev, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(cut_ev, recomputed_ev, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(current_ev, recomputed_ev, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            expected_efficiency,
+            expected_du / expected_cost,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        return "mean_objective_identity"
+    if economics.get("selection_guard_basis") != (
+        "CURRENT_POSTERIOR_PREDICTIVE_MEAN"
+    ):
+        return "selection_guard_basis"
+    if economics.get("global_expected_value_semantics") != (
+        "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
+    ):
+        return "global_expected_value_semantics"
+    if economics.get("global_terminal_payoff_semantics") != "BINARY_0_1":
+        return "global_terminal_payoff_semantics"
+    if "global_buy_fak_prefix_semantics" in economics:
+        prefix_reason = qkernel_global_buy_fak_prefix_rejection_reason(
+            economics,
+            direction=direction,
+        )
+        if prefix_reason is not None:
+            return f"global_buy_fak:{prefix_reason}"
+    return None
+
+
 def qkernel_global_buy_fak_prefix_rejection_reason(
     economics: Any,
     *,
@@ -526,11 +757,36 @@ def qkernel_global_buy_fak_prefix_rejection_reason(
         native_side is not None and native_side != side
     ):
         return "side"
+    mean_basis = (
+        economics.get("global_buy_fak_probability_basis")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    probability_fields = (
+        (
+            "global_terminal_win_probability_mean",
+            "global_terminal_loss_probability_mean",
+        )
+        if mean_basis
+        else (
+            "global_terminal_win_probability_lcb",
+            "global_terminal_loss_probability_ucb",
+        )
+    )
+    objective_fields = (
+        (
+            "global_buy_fak_full_expected_delta_log_wealth",
+            "global_buy_fak_full_expected_ev_usd",
+        )
+        if mean_basis
+        else (
+            "global_buy_fak_full_robust_delta_log_wealth",
+            "global_buy_fak_full_robust_ev_usd",
+        )
+    )
     fields = (
         "global_target_shares",
         "global_limit_price",
-        "global_terminal_win_probability_lcb",
-        "global_terminal_loss_probability_ucb",
+        *probability_fields,
         "global_terminal_loss_payoff_usd",
         "global_terminal_win_payoff_usd",
         "global_terminal_wealth_after_loss_usd",
@@ -540,8 +796,7 @@ def qkernel_global_buy_fak_prefix_rejection_reason(
         "global_buy_fak_worst_fee_per_share",
         "global_buy_fak_worst_unit_cost",
         "global_buy_fak_full_worst_cost_usd",
-        "global_buy_fak_full_robust_delta_log_wealth",
-        "global_buy_fak_full_robust_ev_usd",
+        *objective_fields,
     )
     try:
         values = {field: float(economics.get(field)) for field in fields}
@@ -551,8 +806,8 @@ def qkernel_global_buy_fak_prefix_rejection_reason(
         return "numeric_field_non_finite"
     shares = values["global_target_shares"]
     limit = values["global_limit_price"]
-    win_q = values["global_terminal_win_probability_lcb"]
-    loss_q = values["global_terminal_loss_probability_ucb"]
+    win_q = values[probability_fields[0]]
+    loss_q = values[probability_fields[1]]
     fee_rate = values["global_buy_fak_fee_rate"]
     if not (
         shares > 0
@@ -579,23 +834,25 @@ def qkernel_global_buy_fak_prefix_rejection_reason(
     win_after = win_baseline - full_cost + shares
     if min(loss_baseline, win_baseline, loss_after, win_after) <= 0:
         return "wealth"
-    robust_du = loss_q * math.log(loss_after / loss_baseline) + win_q * math.log(
+    delta_log_wealth = loss_q * math.log(
+        loss_after / loss_baseline
+    ) + win_q * math.log(
         win_after / win_baseline
     )
-    robust_ev = win_q * shares - full_cost
+    ev = win_q * shares - full_cost
     expected = {
         "global_buy_fak_worst_fee_shape": max_fee_shape,
         "global_buy_fak_worst_fee_per_share": worst_fee_per_share,
         "global_buy_fak_worst_unit_cost": unit_cost,
         "global_buy_fak_full_worst_cost_usd": full_cost,
-        "global_buy_fak_full_robust_delta_log_wealth": robust_du,
-        "global_buy_fak_full_robust_ev_usd": robust_ev,
+        objective_fields[0]: delta_log_wealth,
+        objective_fields[1]: ev,
     }
     for field, expected_value in expected.items():
         if not math.isclose(
             values[field], expected_value, rel_tol=1e-12, abs_tol=1e-12
         ):
             return field
-    if robust_du <= 0 or robust_ev <= 0:
+    if delta_log_wealth <= 0 or ev <= 0:
         return "non_positive"
     return None

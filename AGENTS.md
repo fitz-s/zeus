@@ -64,7 +64,7 @@ The replacement chain is the strategy of record. Authority basis: `docs/authorit
 
 Durable chain:
 
-`current provider center mu* -> current target-specific ENS within-spread + absolute ENS-center disagreement + simultaneous provider between-spread -> sigma_pred = sqrt(within^2 + ens_center_delta^2 + between^2) -> settlement-preimage integration of N(mu*, sigma_pred) -> current-evidence q_lcb/q_ucb -> symmetric YES/NO executable edge -> Fractional Kelly -> Position Size`
+`current provider center mu* -> current target-specific ENS within-spread + absolute ENS-center disagreement + simultaneous provider between-spread -> sigma_pred = sqrt(within^2 + ens_center_delta^2 + between^2) -> settlement-preimage integration of N(mu*, sigma_pred) -> current-evidence q point + q_lcb/q_ucb confidence -> symmetric YES/NO expected executable edge -> Fractional Kelly -> Position Size`
 
 This decision-time current-evidence form is mandatory for source-clock live
 posteriors. A missing/invalid current ENS shape blocks the posterior; it must not
@@ -197,21 +197,21 @@ Durable trading rules:
   tick/range, minimum size, identity, tradeability, fees, depth, action-law
   economics, and Kelly remain cumulative requirements; none may waive
   this absolute band. There are no strategy, side, lifecycle, or exit exceptions.
-- Statistical SELL authority is probability-witness typed. A Day0 statistical
-  SELL may enter the feasible set whenever its current probability witness,
+- Statistical BUY/SELL authority is probability-witness typed. A Day0 statistical
+  action may enter the feasible set whenever its current probability witness,
   holding, wealth, and executable book are exact and are reproduced at submit;
   temporal maturity upgrades observation evidence to absorbing hard-fact
   authority but must not suppress continuous statistical redecision. Posterior
   parameter bounds are confidence evidence, not fixed-action expected payoff.
-  Day0 SELL sizes and fill-prefixes therefore use posterior-predictive-mean
-  expected log wealth and EV, never values relabeled as `robust_*`. BUY retains
-  robust admission/sizing. After each action passes its own law, globally ranked
+  BUY and statistical SELL sizes and fill-prefixes therefore use posterior-
+  predictive-mean expected log wealth and EV, never values relabeled as
+  `robust_*`. After each action passes its own law, globally ranked
   fixed proposals share one posterior-mean expected-log-growth comparison;
   direction never licenses incomparable objective scores.
 - Holding or buying multiple outcome tokens in the same weather family is not
   categorically forbidden. Every sibling-bin BUY must be evaluated against the
   exact current same-family portfolio and unresolved entry commitments through
-  the correlated payoff endowment, robust delta-log-wealth/EV, fees, depth, and
+  the correlated payoff endowment, expected delta-log-wealth/EV, fees, depth, and
   cumulative Kelly target. Command persistence may enforce executable truth and
   risk contracts, but it must not replace that capital objective with a blanket
   one-position or one-token family veto.

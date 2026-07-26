@@ -57,18 +57,19 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   on the correlation-cap rail. Stale, mismatched, maker-contingent, or
   non-positive candidates are unrankable. Before sizing a new BUY, the current owner strategy's
   native entry-price floor removes unlicensed longshots from the feasible set. Inside that set,
-  admission is `q_lcb > fee-inclusive executable cost` plus positive robust delta-log wealth and
-  EV, never a price-independent `q > 0.5` wall; the terminal median follows the probability branch.
-  A reduce-only SELL is scored against HOLD instead. Every statistical SELL uses
-  posterior-mean expected log-growth and EV for its fixed-action size and every
-  FAK prefix. Day0 statistical SELL additionally carries current temporal
+  admission is posterior predictive mean `q > fee-inclusive executable cost` plus positive
+  expected delta-log wealth and EV, never a price-independent `q > 0.5` wall; `q_lcb/q_ucb`
+  remain confidence evidence and do not add a second ambiguity preference. The terminal median
+  follows the probability branch. A reduce-only SELL is scored against HOLD instead. Every
+  statistical BUY and SELL uses posterior-mean expected log-growth and EV for its fixed-action
+  size and every FAK prefix. Day0 statistical SELL additionally carries current temporal
   authority bound to its probability witness; maturity may upgrade that evidence
   to an absorbing fact but does not choose the statistical functional. Future-
   information option value requires an explicit transition model and must not be
   approximated by lower-CVaR parameter tails; until then the live rule is
   explicitly myopic. Mean economics live only in
   `expected_*` certificates and may never be written into `robust_*` or LCB/UCB
-  fields. After BUY robust admission/sizing and SELL action-law admission, rank
+  fields. After each action-law admission, rank
   every fixed proposal by one posterior-mean expected Δlog-wealth rate. The horizon is
   derived from the immutable family city and target local date plus the configured settlement
   timezone, and is bound into the current scope/universe witness identity — never authored by a

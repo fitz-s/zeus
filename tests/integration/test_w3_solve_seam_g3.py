@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-25
-# Authority basis: current global auction, fractional-Kelly repair,
+# Last reused/audited: 2026-07-26
+# Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
 
@@ -11,6 +11,7 @@ import datetime as _dt
 import hashlib
 import inspect
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -71,9 +72,9 @@ from src.solve.solver import (
     CurrentFamilyProbabilityAuthority,
     DeterministicBinPayoffWitness,
     ExecutableSellCurve,
+    ExpectedBuyTerminalWealthCertificate,
     ExpectedGrowthComparison,
     ExpectedTerminalWealthCertificate,
-    GlobalBuyMinimumMarketableRepair,
     GlobalSingleOrderCandidate,
     GlobalSingleOrderCandidateEvaluation,
     GlobalSingleOrderDecision,
@@ -145,31 +146,18 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         token_id="token-buy",
         min_order_size="12",
     )
-    repair = GlobalBuyMinimumMarketableRepair(
-        current_token_shares=Decimal("0"),
-        full_kelly_target_shares=Decimal("40"),
-        fractional_kelly_target_shares=Decimal("10"),
-        minimum_marketable_increment_shares=Decimal("12"),
-        minimum_fractional_kelly_multiplier=Decimal("0.3"),
-        continuous_full_kelly_target_shares=Decimal("32"),
-        continuous_fractional_kelly_target_shares=Decimal("8"),
-        continuous_full_robust_delta_log_wealth=0.001,
-        continuous_full_robust_ev_usd=0.1,
-        minimum_marketable_cost_usd=Decimal("5.88"),
-        minimum_marketable_robust_delta_log_wealth=0.0008,
-        minimum_marketable_robust_ev_usd=0.08,
-        minimum_marketable_capital_efficiency=0.00017,
-        minimum_marketable_positive=True,
-    )
-    terminal = BinaryTerminalWealthCertificate(
-        win_probability_lcb=0.49666666666666665,
-        loss_probability_ucb=0.5033333333333334,
+    win_q = 0.55
+    expected_du = (1.0 - win_q) * math.log(0.9412) + win_q * math.log(1.0612)
+    terminal = ExpectedBuyTerminalWealthCertificate(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        win_probability_mean=win_q,
+        loss_probability_mean=1.0 - win_q,
         loss_payoff_usd=Decimal("-5.88"),
         win_payoff_usd=Decimal("6.12"),
-        median_payoff_usd=Decimal("-5.88"),
         wealth_after_loss_usd=Decimal("94.12"),
         wealth_after_win_usd=Decimal("106.12"),
-        expected_value_usd=0.08,
+        expected_delta_log_wealth=expected_du,
+        expected_ev_usd=0.72,
     )
     sell_point_counterfactual = GlobalSellPointCounterfactual(
         status="POSITIVE",
@@ -201,11 +189,11 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     buy_expected_growth = ExpectedGrowthComparison(
         probability_basis="POSTERIOR_PREDICTIVE_MEAN",
         probability_witness_identity="q-buy",
-        expected_delta_log_wealth=0.0008,
-        expected_ev_usd=0.08,
+        expected_delta_log_wealth=expected_du,
+        expected_ev_usd=0.72,
         capital_lock_hours=24.0,
-        expected_log_growth_per_hour=0.0008 / 24.0,
-        expected_capital_efficiency=0.0008 / 5.88,
+        expected_log_growth_per_hour=expected_du / 24.0,
+        expected_capital_efficiency=expected_du / 5.88,
     )
     evaluations = (
         GlobalSingleOrderCandidateEvaluation(
@@ -219,23 +207,21 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             status="SELECTED",
             shares=Decimal("12"),
             cost_usd=Decimal("5.88"),
-            robust_delta_log_wealth=0.0008,
-            robust_ev_usd=0.08,
-            capital_efficiency=0.00017,
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
             capital_action_mode="SETTLEMENT_LOCKED_BUY",
-            buy_sizing_mode="MINIMUM_MARKETABLE_DISCRETE_REPAIR",
+            buy_sizing_mode="FRACTIONAL_TARGET",
             resolution_at_utc=at + _dt.timedelta(days=1),
             capital_lock_hours=24.0,
-            robust_log_growth_per_hour=0.0008 / 24.0,
             limit_price=Decimal("0.49"),
             expected_fill_price_before_fee=Decimal("0.49"),
             max_spend_usd=Decimal("5.88"),
             current_token_shares=Decimal("0"),
             full_kelly_target_shares=Decimal("40"),
-            fractional_kelly_target_shares=Decimal("10"),
-            terminal_wealth=terminal,
+            fractional_kelly_target_shares=Decimal("12"),
+            expected_terminal_wealth=terminal,
             expected_growth=buy_expected_growth,
-            buy_minimum_marketable_repair=repair,
         ),
         GlobalSingleOrderCandidateEvaluation(
             candidate_id="sell-negative",
@@ -278,24 +264,22 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         candidate=buy_candidate,
         shares=Decimal("12"),
         cost_usd=Decimal("5.88"),
-        robust_delta_log_wealth=0.0008,
-        robust_ev_usd=0.08,
-        capital_efficiency=0.00017,
+        robust_delta_log_wealth=0.0,
+        robust_ev_usd=0.0,
+        capital_efficiency=0.0,
         no_trade_reason=None,
         capital_action_mode="SETTLEMENT_LOCKED_BUY",
-        buy_sizing_mode="MINIMUM_MARKETABLE_DISCRETE_REPAIR",
+        buy_sizing_mode="FRACTIONAL_TARGET",
         resolution_at_utc=at + _dt.timedelta(days=1),
         capital_lock_hours=24.0,
-        robust_log_growth_per_hour=0.0008 / 24.0,
         limit_price=Decimal("0.49"),
         expected_fill_price_before_fee=Decimal("0.49"),
         max_spend_usd=Decimal("5.88"),
         current_token_shares=Decimal("0"),
         full_kelly_target_shares=Decimal("40"),
-        fractional_kelly_target_shares=Decimal("10"),
-        terminal_wealth=terminal,
+        fractional_kelly_target_shares=Decimal("12"),
+        expected_terminal_wealth=terminal,
         expected_growth=buy_expected_growth,
-        buy_minimum_marketable_repair=repair,
         rejection_reasons={
             evaluation.candidate_id: str(evaluation.rejection_reason)
             for evaluation in evaluations
@@ -318,14 +302,37 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         candidate_evaluations=(),
         candidate_input_count=None,
     )
-    changed_repair = replace(
-        repair,
-        continuous_full_kelly_target_shares=Decimal("33"),
-        continuous_fractional_kelly_target_shares=Decimal("8.25"),
+    changed_q = 0.51
+    changed_terminal = ExpectedBuyTerminalWealthCertificate(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        win_probability_mean=changed_q,
+        loss_probability_mean=1.0 - changed_q,
+        loss_payoff_usd=terminal.loss_payoff_usd,
+        win_payoff_usd=terminal.win_payoff_usd,
+        wealth_after_loss_usd=terminal.wealth_after_loss_usd,
+        wealth_after_win_usd=terminal.wealth_after_win_usd,
+        expected_delta_log_wealth=(
+            (1.0 - changed_q) * math.log(0.9412)
+            + changed_q * math.log(1.0612)
+        ),
+        expected_ev_usd=(changed_q * 12.0 - 5.88),
     )
     changed_decision = replace(
         identity_decision,
-        buy_minimum_marketable_repair=changed_repair,
+        expected_terminal_wealth=changed_terminal,
+        expected_growth=replace(
+            buy_expected_growth,
+            expected_delta_log_wealth=(
+                changed_terminal.expected_delta_log_wealth
+            ),
+            expected_ev_usd=changed_terminal.expected_ev_usd,
+            expected_log_growth_per_hour=(
+                changed_terminal.expected_delta_log_wealth / 24.0
+            ),
+            expected_capital_efficiency=(
+                changed_terminal.expected_delta_log_wealth / 5.88
+            ),
+        ),
     )
     assert global_single_order_economic_identity(
         decision=identity_decision,
@@ -685,7 +692,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["candidate_input_count"] == 2
     assert summary["candidate_detailed_count"] == 2
     assert summary["candidate_rejection_group_count"] == 0
-    assert summary["buy_minimum_marketable_repair_count"] == 1
+    assert summary["buy_minimum_marketable_repair_count"] == 0
     assert summary["buy_minimum_marketable_repair_complete"] is True
     assert summary["buy_minimum_marketable_repair_encoding"] == (
         "zlib+base64+indexed-canonical-json-v1"
@@ -700,44 +707,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["buy_minimum_marketable_repairs_sha256"]
     )
     minimum_repairs = json.loads(minimum_repair_json)
-    assert minimum_repairs == {
-        "fields": [
-            "buy_candidate_index",
-            "current_token_shares",
-            "full_kelly_target_shares",
-            "fractional_kelly_target_shares",
-            "minimum_marketable_increment_shares",
-            "minimum_fractional_kelly_multiplier",
-            "continuous_full_kelly_target_shares",
-            "continuous_fractional_kelly_target_shares",
-            "continuous_full_robust_delta_log_wealth",
-            "continuous_full_robust_ev_usd",
-            "minimum_marketable_cost_usd",
-            "minimum_marketable_robust_delta_log_wealth",
-            "minimum_marketable_robust_ev_usd",
-            "minimum_marketable_capital_efficiency",
-            "minimum_marketable_positive",
-        ],
-        "rows": [
-            [
-                0,
-                "0",
-                "40",
-                "10",
-                "12",
-                "0.3",
-                "32",
-                "8",
-                0.001,
-                0.1,
-                "5.88",
-                0.0008,
-                0.08,
-                0.00017,
-                True,
-            ]
-        ],
-    }
+    assert minimum_repairs["rows"] == []
 
 
     assert summary["hold_cash"] == {
@@ -758,24 +728,6 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["sell_point_counterfactual_positive_count"] == 1
     assert summary["sell_point_counterfactual_unavailable_count"] == 0
     candidate_evaluations = json.loads(evaluation_json)
-    repair_row = dict(
-        zip(
-            minimum_repairs["fields"],
-            minimum_repairs["rows"][0],
-            strict=True,
-        )
-    )
-    repair_identity = candidate_evaluations["buy_candidate_index"][
-        repair_row["buy_candidate_index"]
-    ]
-    assert repair_identity == [
-        "buy-repaired",
-        "family-buy",
-        "20C",
-        "condition-buy",
-        "YES",
-        "token-buy",
-    ]
     assert candidate_evaluations["rejected_groups"] == []
     assert candidate_evaluations["buy_condition_side_masks"] == [
         ["condition-buy", 1]
@@ -825,8 +777,11 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         )
     ]
     assert candidate_evaluations["detailed"][0]["buy_sizing_mode"] == (
-        "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
+        "FRACTIONAL_TARGET"
     )
+    assert candidate_evaluations["detailed"][0][
+        "expected_terminal_wealth"
+    ]["probability_basis"] == "POSTERIOR_PREDICTIVE_MEAN"
     sell_evaluation = candidate_evaluations["detailed"][1]
     assert sell_evaluation["shares"] == "12.34"
     assert sell_evaluation["cash_proceeds_usd"] == "10"
@@ -926,6 +881,40 @@ def test_compact_buy_rejection_group_requires_complete_economic_frontier():
     assert incomplete["frontier_complete"] is False
     assert incomplete["economics_candidate_count"] == 1
     assert incomplete["frontier"] is None
+
+
+def test_compact_buy_rejection_group_ranks_posterior_mean_frontier():
+    rows = tuple(
+        {
+            "candidate_id": candidate_id,
+            "family_key": f"family-{candidate_id}",
+            "bin_id": "32C",
+            "condition_id": f"condition-{candidate_id}",
+            "token_id": f"token-{candidate_id}",
+            "buy_rejection_economics": {
+                "probability_basis": "POSTERIOR_PREDICTIVE_MEAN",
+                "probe_expected_log_growth_per_hour": growth,
+                "probe_expected_delta_log_wealth": delta,
+                "probe_expected_capital_efficiency": delta / 5,
+                "probe_cost_usd": "5",
+            },
+        }
+        for candidate_id, growth, delta in (
+            ("worse", -0.002, -0.02),
+            ("nearest-cash", -0.001, -0.03),
+        )
+    )
+
+    compact = global_batch_runtime._compact_buy_rejection_group(
+        action="BUY",
+        side="YES",
+        reason="NON_POSITIVE_EXPECTED_OBJECTIVE",
+        rows=rows,
+    )
+
+    assert compact["frontier_complete"] is True
+    assert compact["frontier"]["candidate_id"] == "nearest-cash"
+    assert "_frontier_growth" not in compact["frontier"]["economics"]
 
 
 def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
@@ -9441,12 +9430,47 @@ def test_global_current_state_economics_tightens_on_current_candidate_cap():
         ),
     )
     current_cap = era._prepared_candidate_payoff_q_lcb_cap(prepared, candidate)
+    bindings = (
+        OutcomeTokenBinding(
+            bin_id=candidate.bin_id,
+            condition_id=candidate.condition_id,
+            yes_token_id=candidate.token_id,
+            no_token_id="no-27",
+        ),
+        OutcomeTokenBinding(
+            bin_id="other",
+            condition_id="condition-other",
+            yes_token_id="yes-other",
+            no_token_id="no-other",
+        ),
+    )
+    samples = np.tile(np.asarray(((0.21, 0.79),)), (400, 1))
+    witness_fields = {
+        "family_key": candidate.family_key,
+        "bindings": bindings,
+        "q_version": "q-current",
+        "resolution_identity": candidate.resolution_identity,
+        "topology_identity": "topology-current",
+        "posterior_identity_hash": "posterior-current",
+        "source_truth_identity": "source-current",
+        "authority_certificate_hash": "authority-current",
+        "band_alpha": 0.05,
+        "band_basis": "current-evidence",
+        "yes_point_q": np.asarray((0.21, 0.79)),
+        "yes_q_samples": samples,
+        "captured_at_utc": at,
+    }
+    witness = JointOutcomeProbabilityWitness(
+        **witness_fields,
+        max_age=_dt.timedelta(minutes=3),
+        witness_identity=joint_probability_witness_identity(**witness_fields),
+    )
 
     with pytest.raises(era._GlobalProbabilityTightened) as caught:
         era._global_current_state_execution_economics(
             {"payoff_q_point": 0.21},
             decision=decision,
-            witness=SimpleNamespace(),
+            witness=witness,
             payoff_q_lcb_cap=current_cap,
         )
 
@@ -9458,6 +9482,119 @@ def test_global_current_state_economics_tightens_on_current_candidate_cap():
             prepared,
             replace(candidate, token_id="wrong-token"),
         )
+
+
+def test_global_current_state_mean_buy_uses_current_point_and_keeps_lcb_as_evidence():
+    at = _dt.datetime(2026, 7, 26, 12, 0, tzinfo=_dt.timezone.utc)
+    family = "Seoul|2026-07-27|high"
+    bindings = (
+        OutcomeTokenBinding(
+            bin_id="30C",
+            condition_id="condition-30",
+            yes_token_id="yes-30",
+            no_token_id="no-30",
+        ),
+        OutcomeTokenBinding(
+            bin_id="other",
+            condition_id="condition-other",
+            yes_token_id="yes-other",
+            no_token_id="no-other",
+        ),
+    )
+    samples = np.tile(np.asarray(((0.50, 0.50),)), (400, 1))
+    witness_fields = {
+        "family_key": family,
+        "bindings": bindings,
+        "q_version": "q-current",
+        "resolution_identity": "resolution-current",
+        "topology_identity": "topology-current",
+        "posterior_identity_hash": "posterior-current",
+        "source_truth_identity": "source-current",
+        "authority_certificate_hash": "authority-current",
+        "band_alpha": 0.05,
+        "band_basis": "current-evidence",
+        "yes_point_q": np.asarray((0.70, 0.30)),
+        "yes_q_samples": samples,
+        "captured_at_utc": at,
+    }
+    witness = JointOutcomeProbabilityWitness(
+        **witness_fields,
+        max_age=_dt.timedelta(minutes=3),
+        witness_identity=joint_probability_witness_identity(**witness_fields),
+    )
+    candidate = _global_test_buy_candidate(
+        family_key=family,
+        probability_witness_identity=witness.witness_identity,
+        book_identity="current",
+        price="0.40",
+        captured_at=at,
+        bin_id="30C",
+        condition_id="condition-30",
+        side="YES",
+        token_id="yes-30",
+    )
+    shares = Decimal("5")
+    cost = Decimal("2")
+    loss_payoff = -cost
+    win_payoff = shares - cost
+    loss_wealth = Decimal("98")
+    win_wealth = Decimal("103")
+    expected_du = 0.30 * math.log(0.98) + 0.70 * math.log(1.03)
+    terminal = ExpectedBuyTerminalWealthCertificate(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        win_probability_mean=0.70,
+        loss_probability_mean=0.30,
+        loss_payoff_usd=loss_payoff,
+        win_payoff_usd=win_payoff,
+        wealth_after_loss_usd=loss_wealth,
+        wealth_after_win_usd=win_wealth,
+        expected_delta_log_wealth=expected_du,
+        expected_ev_usd=1.5,
+    )
+    decision = SimpleNamespace(
+        candidate=candidate,
+        shares=shares,
+        cost_usd=cost,
+        terminal_wealth=None,
+        expected_terminal_wealth=terminal,
+    )
+
+    current = era._global_current_state_execution_economics(
+        {
+            "source": "qkernel_spine",
+            "decision_id": "decision-current",
+            "receipt_hash": "receipt-current",
+            "payoff_q_point": 0.70,
+            "payoff_q_lcb": 0.35,
+        },
+        decision=decision,
+        witness=witness,
+        payoff_q_lcb_cap=0.35,
+    )
+
+    assert current["global_probability_functional"] == (
+        "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    assert current["payoff_q_action"] == pytest.approx(0.70)
+    assert current["edge_expected"] == pytest.approx(0.30)
+    assert current["edge_lcb"] == pytest.approx(-0.05)
+    assert current["global_current_sample_payoff_q_lcb"] == pytest.approx(0.50)
+    assert current["global_expected_ev_usd"] == pytest.approx(1.5)
+    assert "global_robust_ev_usd" not in current
+
+    uncapped = era._global_current_state_execution_economics(
+        {
+            "source": "qkernel_spine",
+            "decision_id": "decision-current",
+            "receipt_hash": "receipt-current",
+            "payoff_q_point": 0.70,
+            "payoff_q_lcb": 0.35,
+        },
+        decision=decision,
+        witness=witness,
+    )
+    assert uncapped["payoff_q_lcb"] == pytest.approx(0.50)
+    assert uncapped["edge_lcb"] == pytest.approx(0.10)
 
 
 def test_time_dependent_candidate_caps_are_not_probability_cached(monkeypatch):

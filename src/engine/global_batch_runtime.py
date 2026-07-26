@@ -1284,21 +1284,44 @@ def _compact_buy_rejection_group(
         economics = row.get("buy_rejection_economics")
         if not isinstance(economics, Mapping):
             continue
-        growth = economics.get("probe_robust_log_growth_per_hour")
+        expected = (
+            economics.get("probability_basis")
+            == "POSTERIOR_PREDICTIVE_MEAN"
+        )
+        growth_key = (
+            "probe_expected_log_growth_per_hour"
+            if expected
+            else "probe_robust_log_growth_per_hour"
+        )
+        delta_key = (
+            "probe_expected_delta_log_wealth"
+            if expected
+            else "probe_robust_delta_log_wealth"
+        )
+        efficiency_key = (
+            "probe_expected_capital_efficiency"
+            if expected
+            else "probe_capital_efficiency"
+        )
+        growth = economics.get(growth_key)
         if growth is None:
             continue
         try:
             numeric = (
                 float(growth),
-                float(economics["probe_robust_delta_log_wealth"]),
-                float(economics["probe_capital_efficiency"]),
+                float(economics[delta_key]),
+                float(economics[efficiency_key]),
                 Decimal(str(economics["probe_cost_usd"])),
             )
         except (KeyError, TypeError, ValueError, ArithmeticError):
             continue
         if not all(math.isfinite(value) for value in numeric[:3]):
             continue
-        economic_rows.append((row, economics))
+        normalized = dict(economics)
+        normalized["_frontier_growth"] = numeric[0]
+        normalized["_frontier_delta"] = numeric[1]
+        normalized["_frontier_efficiency"] = numeric[2]
+        economic_rows.append((row, normalized))
 
     frontier_complete = len(economic_rows) == len(rows)
     frontier: dict[str, object] | None = None
@@ -1306,13 +1329,18 @@ def _compact_buy_rejection_group(
         row, economics = min(
             economic_rows,
             key=lambda item: (
-                -round(float(item[1]["probe_robust_log_growth_per_hour"]), 15),
-                -round(float(item[1]["probe_robust_delta_log_wealth"]), 15),
-                -round(float(item[1]["probe_capital_efficiency"]), 15),
+                -round(float(item[1]["_frontier_growth"]), 15),
+                -round(float(item[1]["_frontier_delta"]), 15),
+                -round(float(item[1]["_frontier_efficiency"]), 15),
                 Decimal(str(item[1]["probe_cost_usd"])),
                 str(item[0].get("candidate_id") or ""),
             ),
         )
+        economics = {
+            key: value
+            for key, value in economics.items()
+            if not str(key).startswith("_frontier_")
+        }
         frontier = {
             "candidate_id": str(row.get("candidate_id") or ""),
             "family_key": str(row.get("family_key") or ""),

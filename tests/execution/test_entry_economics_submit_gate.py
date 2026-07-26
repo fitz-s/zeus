@@ -1,7 +1,9 @@
 # Created: 2026-07-01
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-07-26
 # Authority basis: current q-kernel final-entry economics and selected-side probability quality law.
 from __future__ import annotations
+
+import math
 
 import pytest
 
@@ -100,6 +102,65 @@ def _current_state_econ(**overrides) -> dict:
         "coherence_allows",
     ):
         payload.pop(legacy_field, None)
+    payload["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        payload
+    )
+    return payload
+
+
+def _current_state_mean_buy_econ(**overrides) -> dict:
+    point = 0.70
+    lcb = 0.35
+    price = 0.40
+    shares = 5.0
+    expected_cost = price * shares
+    loss_payoff = -expected_cost
+    win_payoff = shares - expected_cost
+    wealth_after_loss = 100.0 + loss_payoff
+    wealth_after_win = 100.0 + win_payoff
+    expected_du = (1.0 - point) * math.log(
+        wealth_after_loss / 100.0
+    ) + point * math.log(wealth_after_win / 100.0)
+    payload = _current_state_econ()
+    for field in (
+        "global_robust_delta_log_wealth",
+        "global_robust_ev_usd",
+        "global_cut_time_win_probability_lcb",
+        "global_cut_time_loss_probability_ucb",
+        "global_terminal_win_probability_lcb",
+        "global_terminal_loss_probability_ucb",
+    ):
+        payload.pop(field)
+    payload.update(
+        global_probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        selection_guard_basis="CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+        payoff_q_point=point,
+        payoff_q_lcb=lcb,
+        payoff_q_action=point,
+        cost=price,
+        edge_lcb=lcb - price,
+        edge_expected=point - price,
+        global_target_shares=str(shares),
+        global_limit_price=str(price),
+        global_expected_fill_price_before_fee=str(price),
+        global_expected_cost_usd=str(expected_cost),
+        global_max_spend_usd=str(expected_cost),
+        global_expected_delta_log_wealth=expected_du,
+        global_expected_ev_usd=point * shares - expected_cost,
+        global_expected_capital_efficiency=expected_du / expected_cost,
+        global_cut_time_win_probability_mean=point,
+        global_cut_time_loss_probability_mean=1.0 - point,
+        global_terminal_win_probability_mean=point,
+        global_terminal_loss_probability_mean=1.0 - point,
+        global_terminal_loss_payoff_usd=str(loss_payoff),
+        global_terminal_win_payoff_usd=str(win_payoff),
+        global_terminal_median_payoff_usd=str(win_payoff),
+        global_terminal_wealth_after_loss_usd=str(wealth_after_loss),
+        global_terminal_wealth_after_win_usd=str(wealth_after_win),
+        global_cut_time_expected_value_usd=point * shares - expected_cost,
+        global_expected_value_usd=point * shares - expected_cost,
+    )
+    payload.update(overrides)
     payload["current_state_identity_hash"] = qkernel_current_state_identity_hash(
         payload
     )
@@ -1136,6 +1197,32 @@ def test_entry_economics_current_state_tail_still_requires_positive_robust_utili
     )
     assert verdict["allowed"] is False
     assert verdict["reason"] == "expected_profit_below_floor"
+
+
+def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb_edge():
+    economics = _current_state_mean_buy_econ()
+
+    assert (
+        qkernel_global_current_state_rejection_reason(
+            economics,
+            direction="buy_yes",
+        )
+        is None
+    )
+    tampered = {
+        **economics,
+        "payoff_q_action": economics["payoff_q_lcb"],
+    }
+    tampered["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        tampered
+    )
+    assert (
+        qkernel_global_current_state_rejection_reason(
+            tampered,
+            direction="buy_yes",
+        )
+        == "mean_execution_edge"
+    )
 
 
 @pytest.mark.parametrize(

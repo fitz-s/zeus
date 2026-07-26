@@ -117,11 +117,13 @@ Scale by κ.
 
 For the live cross-family one-order entry projection, the current owner strategy's native
 entry-price floor first removes unlicensed longshots from the feasible set. Inside that set,
-expected log growth admits a BUY only when conservative payoff-side probability exceeds the
-fee-inclusive executable cost and the exact terminal-wealth certificate has positive robust
-delta-log wealth and EV. There is no price-independent `q > 0.5` wall; the binary median follows
-the loss branch below one half and the win branch above it. Expected value remains a diagnostic
-expectation, never a realized capital-gain claim. YES and NO use the identical native rule.
+expected log growth admits a BUY only when posterior predictive mean payoff probability exceeds
+the fee-inclusive executable cost and the exact terminal-wealth certificate has positive expected
+delta-log wealth and EV. The current `q_lcb/q_ucb` carrier remains confidence evidence; using it
+as the fixed-action payoff would add an ambiguity-aversion preference outside A1's one-q world.
+There is no price-independent `q > 0.5` wall; the binary median follows the loss branch below one
+half and the win branch above it. Expected value remains a decision-time expectation, never a
+realized capital-gain claim. YES and NO use the identical native rule.
 
 **Discrete repair pass:** solve continuous, then repair onto venue quantization (tick rounding,
 minimum order size, ≤15-orders-per-batch); submit only if the rounded plan still improves expected

@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-26
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -875,7 +875,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
     assert plan.primary_candidate_id is not None
     assert Decimal("0") < plan.fractional_target_cost_usd <= Decimal("1449.166") / 32
     assert plan.full_kelly_cost_usd > plan.fractional_target_cost_usd
-    assert plan.robust_delta_log_wealth > 0
+    assert plan.expected_delta_log_wealth > 0
     for target in plan.targets:
         assert target.fractional_kelly_target_shares == (
             target.full_kelly_target_shares * Decimal("0.03125")
@@ -1095,6 +1095,7 @@ def _global_select(
     candidate_capital_limit_resolver=None,
     candidate_portfolio_endowment_resolver=None,
     family_portfolio_endowment_resolver=None,
+    candidate_payoff_q_lcb_resolver=None,
     candidate_policy_rejection_resolver=None,
     fractional_kelly_multiplier="1",
     resolution_hours_by_family=None,
@@ -1155,6 +1156,7 @@ def _global_select(
             candidate_portfolio_endowment_resolver
         ),
         family_portfolio_endowment_resolver=family_portfolio_endowment_resolver,
+        candidate_payoff_q_lcb_resolver=candidate_payoff_q_lcb_resolver,
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
         cancelled=cancelled,
     )
@@ -1178,7 +1180,7 @@ def test_global_rejected_buy_detail_failure_does_not_abort_auction(monkeypatch):
 
     assert decision.candidate is None
     assert decision.rejection_reasons[candidate.candidate_id] == (
-        "NON_POSITIVE_ROBUST_OBJECTIVE"
+        "NON_POSITIVE_EXPECTED_OBJECTIVE"
     )
     assert decision.candidate_evaluations[0].buy_rejection_economics is None
 
@@ -1285,8 +1287,10 @@ def test_deterministic_day0_payoff_selects_exact_bin_and_rejects_unknown_sibling
     )
 
     assert decision.candidate == exact
-    assert decision.terminal_wealth is not None
-    assert decision.terminal_wealth.win_probability_lcb == pytest.approx(1.0)
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.win_probability_mean == pytest.approx(
+        1.0
+    )
     assert unknown.eligibility_reason == "DETERMINISTIC_PAYOFF_NOT_PROVED"
     assert decision.rejection_reasons[unknown.candidate_id] == (
         "DETERMINISTIC_PAYOFF_NOT_PROVED"
@@ -1389,9 +1393,11 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
     assert evaluations[sell.candidate_id].position_id == "position-sell-winner"
     assert evaluations[sell.candidate_id].held_shares == Decimal("10")
     assert evaluations[buy.candidate_id].status == "SCORED"
+    assert evaluations[sell.candidate_id].expected_growth is not None
+    assert evaluations[buy.candidate_id].expected_growth is not None
     assert (
-        evaluations[sell.candidate_id].robust_delta_log_wealth
-        > evaluations[buy.candidate_id].robust_delta_log_wealth
+        evaluations[sell.candidate_id].expected_growth.expected_log_growth_per_hour
+        > evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
         > 0
     )
     assert decision.capital_lock_hours == pytest.approx(24)
@@ -1400,7 +1406,7 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
     )
     assert (
         evaluations[sell.candidate_id].robust_log_growth_per_hour
-        > evaluations[buy.candidate_id].robust_log_growth_per_hour
+        > evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
         > 0
     )
 
@@ -1498,27 +1504,27 @@ def test_global_single_order_ranks_buy_and_sell_by_one_capital_growth_rate():
 
     assert decision.candidate is buy
     assert decision.cash_proceeds_usd == 0
-    assert decision.robust_delta_log_wealth > 0
-    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
-    assert decision.robust_log_growth_per_hour == pytest.approx(
-        decision.robust_delta_log_wealth / 6
+    assert decision.robust_delta_log_wealth == 0
+    assert isinstance(
+        decision.expected_terminal_wealth,
+        S.ExpectedBuyTerminalWealthCertificate,
     )
+    assert decision.expected_terminal_wealth.expected_delta_log_wealth > 0
+    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
+    assert decision.robust_log_growth_per_hour is None
     evaluations = {
         evaluation.candidate_id: evaluation
         for evaluation in decision.candidate_evaluations
     }
-    assert (
-        evaluations[buy.candidate_id].robust_delta_log_wealth
-        > evaluations[sell.candidate_id].robust_delta_log_wealth
-        > 0
-    )
+    assert evaluations[buy.candidate_id].expected_growth is not None
+    assert evaluations[sell.candidate_id].expected_growth is not None
     assert evaluations[sell.candidate_id].capital_lock_hours == pytest.approx(24)
     assert evaluations[sell.candidate_id].robust_log_growth_per_hour == pytest.approx(
         evaluations[sell.candidate_id].robust_delta_log_wealth / 24
     )
     assert (
-        evaluations[buy.candidate_id].robust_log_growth_per_hour
-        > evaluations[sell.candidate_id].robust_log_growth_per_hour
+        evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
+        > evaluations[sell.candidate_id].expected_growth.expected_log_growth_per_hour
         > 0
     )
 
@@ -1666,7 +1672,7 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
         for evaluation in decision.candidate_evaluations
     } == {
         sell.candidate_id: ("REJECTED", "NON_POSITIVE_ROBUST_OBJECTIVE"),
-        buy.candidate_id: ("REJECTED", "NON_POSITIVE_ROBUST_OBJECTIVE"),
+        buy.candidate_id: ("REJECTED", "NON_POSITIVE_EXPECTED_OBJECTIVE"),
     }
     evaluations = {
         evaluation.candidate_id: evaluation
@@ -1689,9 +1695,9 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
     assert buy_rejection is not None
     assert buy_rejection.resolution_at_utc is not None
     assert buy_rejection.capital_lock_hours == pytest.approx(24.0)
-    assert buy_rejection.probe_robust_delta_log_wealth < 0
-    assert buy_rejection.probe_robust_log_growth_per_hour == pytest.approx(
-        buy_rejection.probe_robust_delta_log_wealth / 24.0
+    assert buy_rejection.probe_expected_delta_log_wealth < 0
+    assert buy_rejection.probe_expected_log_growth_per_hour == pytest.approx(
+        buy_rejection.probe_expected_delta_log_wealth / 24.0
     )
 
 
@@ -1911,29 +1917,25 @@ def test_mature_mean_sell_cannot_masquerade_as_robust_certificate():
         )
 
 
-def test_buy_robust_admission_and_size_are_invariant_to_common_mean_score():
+def test_buy_posterior_mean_changes_size_and_expected_growth():
     buy = _global_candidate(
         candidate_id="robust-buy-common-mean-ranking",
         family="robust-buy-common-mean-ranking-family",
         side="YES",
         q=0.80,
-        levels=(("0.20", "20"),),
+        levels=(("0.20", "1000"),),
     )
     low_mean = _replace_global_point_q(buy, 0.70)
     high_mean = _replace_global_point_q(buy, 0.95)
 
-    low_decision = _global_select((low_mean,))
-    high_decision = _global_select((high_mean,))
+    low_decision = _global_select((low_mean,), cap="100")
+    high_decision = _global_select((high_mean,), cap="100")
 
     assert low_decision.candidate is low_mean
     assert high_decision.candidate is high_mean
-    assert low_decision.shares == high_decision.shares
-    assert low_decision.robust_delta_log_wealth == pytest.approx(
-        high_decision.robust_delta_log_wealth
-    )
-    assert low_decision.robust_ev_usd == pytest.approx(
-        high_decision.robust_ev_usd
-    )
+    assert low_decision.shares < high_decision.shares
+    assert low_decision.robust_delta_log_wealth == 0
+    assert high_decision.robust_delta_log_wealth == 0
     assert low_decision.expected_growth is not None
     assert high_decision.expected_growth is not None
     assert (
@@ -2430,7 +2432,11 @@ def test_global_single_order_yes_best_matches_full_depth_exact_oracle():
     assert decision.candidate.candidate_id == "yes-a"
     assert decision.shares == oracle[4]
     assert decision.cost_usd == oracle[3]
-    assert abs(decision.robust_delta_log_wealth - oracle[0]) < 1e-12
+    assert decision.robust_delta_log_wealth == 0
+    assert decision.expected_terminal_wealth is not None
+    assert abs(
+        decision.expected_terminal_wealth.expected_delta_log_wealth - oracle[0]
+    ) < 1e-12
 
 
 def test_global_single_order_sizes_each_native_side_inside_current_capital_envelope():
@@ -2452,7 +2458,8 @@ def test_global_single_order_sizes_each_native_side_inside_current_capital_envel
     assert bounded.candidate is not None
     assert bounded.candidate.candidate_id == yes.candidate_id
     assert bounded.max_spend_usd <= Decimal("1.20")
-    assert bounded.robust_delta_log_wealth > 0.0
+    assert bounded.expected_terminal_wealth is not None
+    assert bounded.expected_terminal_wealth.expected_delta_log_wealth > 0.0
 
 
 def test_global_single_order_excludes_capacity_exhausted_winner_and_ranks_runner_up():
@@ -2502,7 +2509,11 @@ def test_global_single_order_no_best_matches_full_depth_exact_oracle():
     assert decision.candidate.candidate_id == "no-b"
     assert decision.shares == oracle[4]
     assert decision.cost_usd == oracle[3]
-    assert abs(decision.robust_delta_log_wealth - oracle[0]) < 1e-12
+    assert decision.robust_delta_log_wealth == 0
+    assert decision.expected_terminal_wealth is not None
+    assert abs(
+        decision.expected_terminal_wealth.expected_delta_log_wealth - oracle[0]
+    ) < 1e-12
 
 
 def test_global_single_order_binds_exact_shares_to_fundable_deepest_limit():
@@ -2543,17 +2554,17 @@ def test_global_buy_fak_certificate_proves_every_nonzero_fill_prefix():
     assert Decimal(str(cert["global_buy_fak_worst_fee_shape"])) == Decimal("0.09")
     assert Decimal(str(cert["global_buy_fak_worst_fee_per_share"])) == Decimal("0.0090")
     assert "global_buy_fak_min_fill_quantum" not in cert
-    terminal = decision.terminal_wealth
-    assert terminal is not None
+    terminal = decision.expected_terminal_wealth
+    assert isinstance(terminal, S.ExpectedBuyTerminalWealthCertificate)
     floor = terminal.wealth_after_loss_usd - terminal.loss_payoff_usd
     ceiling = terminal.wealth_after_win_usd - terminal.win_payoff_usd
     for shares in (Decimal("0.01"), decision.shares / 2, decision.shares):
         cost = unit_cost * shares
-        du = terminal.loss_probability_ucb * math.log(float((floor - cost) / floor))
-        du += terminal.win_probability_lcb * math.log(
+        du = terminal.loss_probability_mean * math.log(float((floor - cost) / floor))
+        du += terminal.win_probability_mean * math.log(
             float((ceiling - cost + shares) / ceiling)
         )
-        ev = terminal.win_probability_lcb * float(shares) - float(cost)
+        ev = terminal.win_probability_mean * float(shares) - float(cost)
         assert du > 0
         assert ev > 0
 
@@ -2604,7 +2615,7 @@ def test_global_buy_fak_certificate_uses_coherent_joint_price_fee_bound_at_999()
     assert Decimal(str(cert["global_buy_fak_worst_unit_cost"])) == Decimal(
         "0.99909990"
     )
-    assert cert["global_buy_fak_full_robust_ev_usd"] == pytest.approx(
+    assert cert["global_buy_fak_full_expected_ev_usd"] == pytest.approx(
         float((Decimal("1") - Decimal("0.99909990")) * decision.shares)
     )
 
@@ -2623,16 +2634,16 @@ def test_global_buy_fak_certificate_binds_fee_curve_and_recomputes_independently
         fee="0.05",
     )
     decision = _global_select((candidate,), cap="5")
-    terminal = decision.terminal_wealth
-    assert terminal is not None
+    terminal = decision.expected_terminal_wealth
+    assert isinstance(terminal, S.ExpectedBuyTerminalWealthCertificate)
     economics = {
         **S.global_buy_fak_prefix_certificate(decision),
         "side": candidate.side,
         "global_jit_execution_curve_identity": candidate.execution_curve_identity,
         "global_target_shares": str(decision.shares),
         "global_limit_price": str(decision.limit_price),
-        "global_terminal_win_probability_lcb": terminal.win_probability_lcb,
-        "global_terminal_loss_probability_ucb": terminal.loss_probability_ucb,
+        "global_terminal_win_probability_mean": terminal.win_probability_mean,
+        "global_terminal_loss_probability_mean": terminal.loss_probability_mean,
         "global_terminal_loss_payoff_usd": str(terminal.loss_payoff_usd),
         "global_terminal_win_payoff_usd": str(terminal.win_payoff_usd),
         "global_terminal_wealth_after_loss_usd": str(terminal.wealth_after_loss_usd),
@@ -2999,15 +3010,12 @@ def test_current_13pct_at_live_floor_is_accepted_positive_growth():
     decision = _global_select((tail,))
 
     assert decision.candidate is not None
-    assert decision.robust_delta_log_wealth > 0
-    assert decision.robust_ev_usd > 0
-    assert (
-        decision.terminal_wealth.median_payoff_usd
-        == decision.terminal_wealth.loss_payoff_usd
-    )
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.expected_delta_log_wealth > 0
+    assert decision.expected_terminal_wealth.expected_ev_usd > 0
 
 
-def test_global_selection_ranks_by_robust_growth_not_majority():
+def test_global_selection_ranks_by_expected_growth_not_majority():
     tail = _global_candidate(
         candidate_id="current-13pct-live-floor",
         family="tail",
@@ -3032,14 +3040,15 @@ def test_global_selection_ranks_by_robust_growth_not_majority():
 
     winner = (
         tail
-        if tail_solo.robust_delta_log_wealth > majority_solo.robust_delta_log_wealth
+        if tail_solo.expected_growth.expected_log_growth_per_hour
+        > majority_solo.expected_growth.expected_log_growth_per_hour
         else majority_no
     )
     assert decision.candidate is winner
 
 
 def test_global_single_order_positivity_boundary_is_strict():
-    """The economic boundary is positive robust growth, not q=0.5."""
+    """The economic boundary is positive expected growth, not q=0.5."""
 
     def decision_at(q):
         candidate = _global_candidate(
@@ -3065,11 +3074,11 @@ def test_global_single_order_positivity_boundary_is_strict():
     assert below.candidate is None
     assert (
         below.rejection_reasons[below_candidate.candidate_id]
-        == "NON_POSITIVE_ROBUST_OBJECTIVE"
+        == "NON_POSITIVE_EXPECTED_OBJECTIVE"
     )
     assert above.candidate is not None
-    assert above.robust_delta_log_wealth > 0
-    assert above.robust_ev_usd > 0
+    assert above.expected_terminal_wealth.expected_delta_log_wealth > 0
+    assert above.expected_terminal_wealth.expected_ev_usd > 0
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -3085,15 +3094,14 @@ def test_global_single_order_certifies_exact_binary_terminal_payoffs(side):
     decision = _global_select((candidate,))
 
     assert decision.candidate is not None
-    cert = decision.terminal_wealth
-    assert cert is not None
-    assert cert.win_probability_lcb == pytest.approx(0.70)
-    assert cert.loss_probability_ucb == pytest.approx(0.30)
-    assert cert.win_probability_lcb + cert.loss_probability_ucb == pytest.approx(1.0)
+    cert = decision.expected_terminal_wealth
+    assert isinstance(cert, S.ExpectedBuyTerminalWealthCertificate)
+    assert cert.win_probability_mean == pytest.approx(0.70)
+    assert cert.loss_probability_mean == pytest.approx(0.30)
+    assert cert.win_probability_mean + cert.loss_probability_mean == pytest.approx(1.0)
     assert cert.loss_payoff_usd == -decision.cost_usd
     assert cert.win_payoff_usd == decision.shares - decision.cost_usd
-    assert cert.median_payoff_usd == cert.win_payoff_usd > 0
-    assert cert.expected_value_usd == pytest.approx(decision.robust_ev_usd)
+    assert cert.expected_ev_usd > 0
 
 
 def test_global_single_order_self_issued_13pct_without_external_current_is_rejected():
@@ -3429,6 +3437,36 @@ def test_global_single_order_resizes_on_candidate_executable_q_bound():
     assert tightened.robust_delta_log_wealth > 0.0
 
 
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_buy_uses_posterior_mean_when_lcb_is_below_market(side):
+    candidate = _global_candidate(
+        candidate_id=f"mean-positive-lcb-negative-{side}",
+        family=f"mean-positive-lcb-negative-{side}",
+        side=side,
+        q=0.72,
+        levels=(("0.55", "100"),),
+    )
+
+    decision = _global_select(
+        (candidate,),
+        cap="5",
+        candidate_payoff_q_lcb_resolver=lambda _candidate: 0.49,
+    )
+
+    assert decision.candidate is candidate
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.probability_basis == (
+        "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    assert decision.expected_terminal_wealth.win_probability_mean == pytest.approx(
+        0.72
+    )
+    assert decision.expected_terminal_wealth.expected_ev_usd > 0
+    assert decision.expected_terminal_wealth.expected_delta_log_wealth > 0
+    assert decision.robust_delta_log_wealth == 0
+    assert decision.robust_ev_usd == 0
+
+
 def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
     q_old = _global_candidate(candidate_id="q-old", family="q", side="YES", q=0.70)
     book_old = _global_candidate(candidate_id="book-old", family="book", side="YES", q=0.70)
@@ -3733,12 +3771,11 @@ def test_global_single_order_maximizes_authority_bound_log_growth_rate():
         resolution_hours_by_family={"a": 48.0, "b": 12.0},
     )
 
-    assert decision.robust_delta_log_wealth == fast_score.robust_delta_log_wealth
     assert decision.candidate.candidate_id == "lower-growth"
     assert decision.capital_lock_hours == 12.0
-    assert decision.robust_log_growth_per_hour == pytest.approx(
-        fast_score.robust_delta_log_wealth / 12.0
-    )
+    assert decision.robust_log_growth_per_hour is None
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.expected_log_growth_per_hour > 0
     selected = next(
         evaluation
         for evaluation in decision.candidate_evaluations

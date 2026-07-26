@@ -108,7 +108,7 @@ q_lcb = Wilson lower bound (z = 1.645)         — event_reactor_adapter._wilson
                                                — _resolve_replacement_settlement_floor_lcb
 ```
 
-Live entry `event_reactor_adapter._replacement_authority_probability_and_fdr_proof` (gated by `_replacement_authority_enabled`); q-mode gate `_replacement_q_mode_live_eligibility` admits only FUSED_NORMAL_FULL/PARTIAL, else deterministic no-submit; a live-authority missing settlement floor BLOCKS. The former §6/§7 baseline q_lcb min-cap join is deleted. Baseline q may be emitted as comparison/provenance only; it is not a live authority, cap, floor, or fallback. Edge = replacement q_lcb − cost → BH FDR (§9) → Fractional Kelly (§10), unchanged.
+Live entry `event_reactor_adapter._replacement_authority_probability_and_fdr_proof` (gated by `_replacement_authority_enabled`); q-mode gate `_replacement_q_mode_live_eligibility` admits only FUSED_NORMAL_FULL/PARTIAL, else deterministic no-submit; a live-authority missing settlement floor BLOCKS. The former §6/§7 baseline q_lcb min-cap join is deleted. Baseline q may be emitted as comparison/provenance only; it is not a live authority, cap, floor, or fallback. For a fixed BUY/SELL action, expected edge and expected log wealth use the current posterior predictive mean q; `q_lcb/q_ucb` remain required confidence and freshness evidence and are reproduced at submit. Fractional Kelly (§10) sizes only positive expected-log actions.
 
 ---
 

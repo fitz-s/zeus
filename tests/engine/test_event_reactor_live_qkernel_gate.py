@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-25
+# Last reused/audited: 2026-07-26
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -100,6 +100,10 @@ def _global_decision(
     candidate=None,
     wealth: str = "1000",
 ):
+    if candidate is None:
+        candidate = SimpleNamespace(bin_id="bin-1")
+    elif not str(getattr(candidate, "bin_id", "") or "").strip():
+        candidate = SimpleNamespace(**vars(candidate), bin_id="bin-1")
     shares_decimal = Decimal(shares)
     cost_decimal = Decimal(cost)
     q_decimal = Decimal(q)
@@ -125,6 +129,32 @@ def _global_decision(
         cost_usd=cost_decimal,
         robust_ev_usd=robust_ev,
         terminal_wealth=terminal,
+    )
+
+
+def _global_current_witness(
+    *,
+    side: str,
+    payoff_q_point: float,
+    sample_identity: str,
+    n_draws: int = 400,
+    q_version: str = "",
+) -> SimpleNamespace:
+    """Build a complete current-family witness for JIT economics tests."""
+
+    yes_q = (
+        float(payoff_q_point)
+        if side == "YES"
+        else 1.0 - float(payoff_q_point)
+    )
+    yes_point_q = np.asarray((yes_q, 1.0 - yes_q), dtype=np.float64)
+    return SimpleNamespace(
+        bin_ids=("bin-1", "bin-2"),
+        yes_point_q=yes_point_q,
+        sample_matrix_identity=sample_identity,
+        yes_q_samples=np.tile(yes_point_q, (n_draws, 1)),
+        band_alpha=0.05,
+        q_version=q_version,
     )
 
 
@@ -1891,10 +1921,10 @@ def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
         cost="91.3482",
         q="0.7271700502061007",
     )
-    witness = SimpleNamespace(
-        sample_matrix_identity="global-current-sample",
-        yes_q_samples=SimpleNamespace(shape=(400, 11)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=0.7271700502061007,
+        sample_identity="global-current-sample",
     )
 
     current = era._global_current_state_execution_economics(
@@ -2046,10 +2076,10 @@ def test_low_probability_current_band_taker_is_symmetric_positive_growth(
     )
     _seal_current_qkernel_cert(cert)
     decision = _global_decision(shares="100", cost="10", q="0.13")
-    witness = SimpleNamespace(
-        sample_matrix_identity=f"current-sample-{side.lower()}",
-        yes_q_samples=SimpleNamespace(shape=(400, 11)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=0.13,
+        sample_identity=f"current-sample-{side.lower()}",
     )
     current = era._global_current_state_execution_economics(
         cert,
@@ -2346,16 +2376,16 @@ def test_global_current_band_rejects_terminal_certificate_incoherent_with_its_br
         expected_value_usd=float(Decimal("0.13") * shares - cost),
     )
     decision = SimpleNamespace(
-        candidate=None,
+        candidate=SimpleNamespace(bin_id="bin-1"),
         shares=shares,
         cost_usd=cost,
         robust_ev_usd=Decimal("0.13") * shares - cost,
         terminal_wealth=terminal,
     )
-    witness = SimpleNamespace(
-        sample_matrix_identity="current-sample-incoherent",
-        yes_q_samples=SimpleNamespace(shape=(400, 11)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side="YES",
+        payoff_q_point=0.13,
+        sample_identity="current-sample-incoherent",
     )
 
     with pytest.raises(
@@ -2689,10 +2719,10 @@ def test_global_actuation_current_band_refuses_non_positive_bound():
         edge_lcb=0.10,
     )
     decision = _global_decision(shares="10", cost="6", q="0.59")
-    witness = SimpleNamespace(
-        sample_matrix_identity="global-current-sample",
-        yes_q_samples=SimpleNamespace(shape=(400, 2)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side="NO",
+        payoff_q_point=0.59,
+        sample_identity="global-current-sample",
     )
 
     with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE"):
@@ -2720,10 +2750,10 @@ def test_global_actuation_current_band_binds_candidate_side_when_cert_omits_it(s
         q="0.60",
         candidate=SimpleNamespace(side=side),
     )
-    witness = SimpleNamespace(
-        sample_matrix_identity="global-current-sample",
-        yes_q_samples=SimpleNamespace(shape=(400, 2)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=0.60,
+        sample_identity="global-current-sample",
     )
 
     current = era._global_current_state_execution_economics(
@@ -2743,10 +2773,10 @@ def test_global_actuation_current_band_refuses_candidate_cert_side_mismatch():
         q="0.60",
         candidate=SimpleNamespace(side="YES"),
     )
-    witness = SimpleNamespace(
-        sample_matrix_identity="global-current-sample",
-        yes_q_samples=SimpleNamespace(shape=(400, 2)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side="YES",
+        payoff_q_point=0.60,
+        sample_identity="global-current-sample",
     )
 
     with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_SIDE_INVALID"):
@@ -2774,10 +2804,10 @@ def test_global_actuation_current_band_missing_prior_still_accepts_low_probabili
         pre_qkernel_q_lcb_5pct=0.12,
     )
     decision = _global_decision(shares="100", cost="5", q="0.10")
-    witness = SimpleNamespace(
-        sample_matrix_identity="global-current-sample",
-        yes_q_samples=SimpleNamespace(shape=(400, 2)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side="YES",
+        payoff_q_point=0.10,
+        sample_identity="global-current-sample",
         q_version="global-q-version-1",
     )
 
@@ -2795,10 +2825,10 @@ def test_global_actuation_current_band_rejects_malformed_present_prior_lcb():
     cert = _current_qkernel_cert(side="YES")
     cert["payoff_q_lcb"] = "not-a-probability"
     decision = _global_decision(shares="100", cost="1", q="0.60")
-    witness = SimpleNamespace(
-        sample_matrix_identity="global-current-sample",
-        yes_q_samples=SimpleNamespace(shape=(400, 2)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side="YES",
+        payoff_q_point=0.60,
+        sample_identity="global-current-sample",
     )
 
     with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_PRIOR_LCB_INVALID"):
@@ -2824,11 +2854,10 @@ def test_global_actuation_missing_point_still_accepts_low_probability_order():
         q="0.15",
         candidate=SimpleNamespace(bin_id="bin-1", side="NO"),
     )
-    witness = SimpleNamespace(
-        bin_ids=("bin-1", "bin-2"),
-        sample_matrix_identity="global-current-missing-point",
-        yes_q_samples=np.tile(np.array([[0.8, 0.2]]), (400, 1)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side="NO",
+        payoff_q_point=0.20,
+        sample_identity="global-current-missing-point",
     )
 
     current = era._global_current_state_execution_economics(
@@ -2851,10 +2880,10 @@ def test_global_actuation_current_band_can_tighten_served_bound(side):
         edge_lcb=0.30,
     )
     decision = _global_decision(shares="10", cost="4", q="0.60")
-    witness = SimpleNamespace(
-        sample_matrix_identity="global-current-tighter-sample",
-        yes_q_samples=SimpleNamespace(shape=(400, 2)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=0.60,
+        sample_identity="global-current-tighter-sample",
     )
 
     current = era._global_current_state_execution_economics(
@@ -2882,10 +2911,10 @@ def test_global_actuation_legacy_served_bound_is_point_evidence_only(side):
         edge_lcb=0.0,
     )
     decision = _global_decision(shares="10", cost="4", q="0.70")
-    witness = SimpleNamespace(
-        sample_matrix_identity=f"global-current-no-legacy-veto-{side.lower()}",
-        yes_q_samples=SimpleNamespace(shape=(400, 2)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=0.70,
+        sample_identity=f"global-current-no-legacy-veto-{side.lower()}",
     )
 
     current = era._global_current_state_execution_economics(
@@ -2915,10 +2944,10 @@ def test_global_actuation_reauctions_sample_band_above_served_point(side):
         edge_lcb=served - 0.001,
     )
     decision = _global_decision(shares="1000", cost="1", q="0.9375885546392851")
-    witness = SimpleNamespace(
-        sample_matrix_identity=f"global-current-point-cap-{side.lower()}",
-        yes_q_samples=SimpleNamespace(shape=(400, 11)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=served,
+        sample_identity=f"global-current-point-cap-{side.lower()}",
     )
 
     with pytest.raises(era._GlobalProbabilityTightened) as raised:
@@ -2945,10 +2974,11 @@ def test_global_actuation_reauctions_boundary_lcb_above_immutable_point(side):
         edge_lcb=0.60,
     )
     decision = _global_decision(shares="10", cost="4", q="1")
-    witness = SimpleNamespace(
-        sample_matrix_identity=f"global-current-boundary-{side.lower()}",
-        yes_q_samples=SimpleNamespace(shape=(500, 11)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=point,
+        sample_identity=f"global-current-boundary-{side.lower()}",
+        n_draws=500,
     )
 
     with pytest.raises(era._GlobalProbabilityTightened) as raised:
@@ -2976,10 +3006,10 @@ def test_global_actuation_reauctions_prior_band_above_served_point(side):
         edge_lcb=current - 0.001,
     )
     decision = _global_decision(shares="1000", cost="1", q=str(current))
-    witness = SimpleNamespace(
-        sample_matrix_identity=f"global-current-prior-cap-{side.lower()}",
-        yes_q_samples=SimpleNamespace(shape=(400, 11)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=served,
+        sample_identity=f"global-current-prior-cap-{side.lower()}",
     )
 
     with pytest.raises(era._GlobalProbabilityTightened) as raised:
@@ -3003,10 +3033,10 @@ def test_global_actuation_legacy_prior_below_majority_is_point_evidence_only(sid
         edge_lcb=0.39,
     )
     decision = _global_decision(shares="10", cost="1", q="0.60")
-    witness = SimpleNamespace(
-        sample_matrix_identity="global-current-majority-drop",
-        yes_q_samples=SimpleNamespace(shape=(400, 2)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=0.60,
+        sample_identity="global-current-majority-drop",
     )
 
     current = era._global_current_state_execution_economics(
@@ -3030,10 +3060,10 @@ def test_global_actuation_legacy_bound_absence_still_accepts_low_probability_ord
         edge_lcb=0.10,
     )
     decision = _global_decision(shares="10", cost="1", q="0.15")
-    witness = SimpleNamespace(
-        sample_matrix_identity="global-current-no-legacy-bound",
-        yes_q_samples=SimpleNamespace(shape=(400, 2)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=0.15,
+        sample_identity="global-current-no-legacy-bound",
     )
 
     current = era._global_current_state_execution_economics(
@@ -3057,10 +3087,10 @@ def test_global_actuation_legacy_prior_cannot_tighten_frozen_witness(side):
         edge_lcb=0.15,
     )
     decision = _global_decision(shares="10", cost="4", q="0.60")
-    witness = SimpleNamespace(
-        sample_matrix_identity="global-current-prior-bound-sample",
-        yes_q_samples=SimpleNamespace(shape=(400, 2)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=0.60,
+        sample_identity="global-current-prior-bound-sample",
     )
 
     current = era._global_current_state_execution_economics(
@@ -3099,10 +3129,10 @@ def test_global_actuation_legacy_prior_cannot_reprice_current_selected_size(side
         q="0.70",
         wealth=str(wealth),
     )
-    witness = SimpleNamespace(
-        sample_matrix_identity=f"global-negative-log-tightening-{side.lower()}",
-        yes_q_samples=SimpleNamespace(shape=(400, 2)),
-        band_alpha=0.05,
+    witness = _global_current_witness(
+        side=side,
+        payoff_q_point=0.70,
+        sample_identity=f"global-negative-log-tightening-{side.lower()}",
     )
 
     current = era._global_current_state_execution_economics(

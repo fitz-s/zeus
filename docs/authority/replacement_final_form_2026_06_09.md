@@ -157,8 +157,8 @@ q_shape provenance = "fused_normal_direct"
 The Normal is the maximum-entropy distribution determined by the observable
 current center and variance; it does not add a fitted tail or a market anchor.
 YES and NO are exact complements of this one probability world. Side selection
-therefore depends only on executable cost and the same robust objective, never on
-a side-specific probability recipe.
+therefore depends only on executable cost and the same posterior-mean expected
+log-wealth objective, never on a side-specific probability recipe.
 
 ### 1f. Finite current-evidence tail limit
 
@@ -196,12 +196,13 @@ sigma `0.527789°C`, and `39°C` WMO point bin (`[38.5,39.5)`) imply
 the Normal point complement displays near `0.9999`.
 
 `replacement_forecast_materializer._build_fused_q_bounds` writes this ambiguity
-into disjoint stress rows of the same coherent simplex carrier consumed by the
-global lower-CVaR selector, then derives `q_lcb_json` / `q_ucb_json` from that
-carrier. The Normal point `q_json` remains immutable audit provenance. The rule
-is symmetric: YES consumes the column, NO consumes its exact pointwise
-complement, and both ranking and submit-time bounds see the same current-evidence
-world. Current member values stay in memory for settlement-preimage hit counts;
+into disjoint stress rows of one coherent simplex carrier, then derives
+`q_lcb_json` / `q_ucb_json` from that carrier. The Normal point `q_json` is the
+fixed-action posterior predictive mean; the bounds remain confidence evidence,
+not a second payoff distribution or admission objective. The rule is symmetric:
+YES consumes the point column, NO consumes its exact complement, and submit-time
+evidence rebinds both the current point and the same current-evidence bounds.
+Current member values stay in memory for settlement-preimage hit counts;
 their hash, count, and resulting per-bin bounds are persisted as provenance. The
 historical `FAR_TAIL_LCB_FLOOR` is not applied on this source-clock route. Day0
 absorbing observation facts dominate the forecast ambiguity band and are not
@@ -318,6 +319,13 @@ These make error categories **unconstructable**, not merely less likely.
 **Live runtime semantics:** Materialization writes only `runtime_layer='live'` rows that satisfy the complete current-evidence contract. Execution and monitoring consume that row set only. Incomplete rows are refused rather than persisted under a second authority class.
 
 **q_lcb requirement:** The live replacement path requires fused-q certified bootstrap `q_lcb_json` / `q_ucb_json`. On the source-clock route the bootstrap consumes `σ_center`, `σ_pred`, and `member_count` from the same current-evidence shape; the coherent carrier includes the finite-member tail limit in §1f. A missing current ENS carrier or bound blocks live materialization/readiness; it must not fall back through historical residual calibration, baseline, or retired experiment provenance.
+
+**Action probability:** For a fixed binary BUY or statistical SELL, posterior
+expected log terminal wealth is evaluated at the current posterior predictive
+mean `q_json`. `q_lcb_json` / `q_ucb_json` certify uncertainty and freshness but
+do not replace the action probability or impose an additional ambiguity utility.
+Every JIT submit certificate must reproduce the current point and confidence
+carrier; a changed point forces re-decision.
 
 **FSR dependency (commit 8c6e028066):** The replacement forecast is an OVERLAY authority — it writes posteriors and readiness that depend on `baseline_b0 (ecmwf_open_data)` source_run. It emits no source_run or ensemble_snapshots of its own. The opendata baseline producer (mx2t6_high / mn2t6_low) MUST remain enabled; disabling it starves FSR.
 
