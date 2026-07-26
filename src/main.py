@@ -39,7 +39,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 
@@ -804,41 +804,108 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
     return report
 
 
-def _edli_live_entry_readiness_block(edli_cfg: dict) -> str | None:
-    """Return a cycle-local BUY block without stopping monitor/recovery/SELL."""
+def _edli_live_entry_readiness_block(
+    edli_cfg: dict,
+) -> tuple[str | None, dict[str, str]]:
+    """Return this cycle's BUY block without stopping monitor/recovery/SELL.
+
+    Returns ``(global_block_reason, family_block_reasons)``:
+      - ``global_block_reason`` blocks EVERY family this cycle (cap-reservation
+        or pending-reconcile rows whose family_id could not be resolved --
+        fail-closed --, source-health/status-summary staleness, or any read
+        error -- unreadable admission truth blocks BUY exactly as before).
+      - ``family_block_reasons`` blocks ONLY the named family_id: a resolved
+        stuck order narrows admission to its own family instead of the whole
+        universe (see ``_edli_stage_pending_reconcile_families`` and
+        ``_edli_stage_open_cap_reservation_families``).
+    """
 
     try:
         _require_stage_file_paths(edli_cfg)
-        report = evaluate_edli_stage_readiness(
-            stage="edli_live",
-            world_db_path=str(_settings_section("state", {}).get("world_db", ""))
-            if isinstance(_settings_section("state", {}), dict)
-            else None,
-            trade_db_path=str(_settings_section("state", {}).get("trade_db", ""))
-            if isinstance(_settings_section("state", {}), dict)
-            else None,
-            forecasts_db_path=str(_settings_section("state", {}).get("forecasts_db", ""))
-            if isinstance(_settings_section("state", {}), dict)
-            else None,
-            loaded_sha_file=_resolve_edli_stage_runtime_path(
-                edli_cfg.get("edli_stage_loaded_sha_file")
-            ),
-            source_health_json=_resolve_edli_stage_runtime_path(
-                edli_cfg.get("edli_stage_source_health_json")
-            ),
-            status_json=_resolve_edli_stage_runtime_path(
-                edli_cfg.get("edli_stage_status_json")
-            ),
-            max_age_seconds=int(
-                edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)
-            ),
+        state_section = _settings_section("state", {})
+        world_db_path = (
+            str(state_section.get("world_db", ""))
+            if isinstance(state_section, dict)
+            else None
         )
+        loaded_sha_file = _resolve_edli_stage_runtime_path(
+            edli_cfg.get("edli_stage_loaded_sha_file")
+        )
+        if loaded_sha_file:
+            identity_observations = _edli_stage_loaded_sha_observations(loaded_sha_file)
+            if identity_observations:
+                logger.warning(
+                    "EDLI stage code identity observed: %s",
+                    ",".join(identity_observations),
+                )
+        source_health_json = _resolve_edli_stage_runtime_path(
+            edli_cfg.get("edli_stage_source_health_json")
+        )
+        status_json = _resolve_edli_stage_runtime_path(
+            edli_cfg.get("edli_stage_status_json")
+        )
+        max_age_seconds = int(
+            edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)
+        )
+        now = datetime.now(timezone.utc)
+
+        global_reasons: list[str] = []
+        family_reasons: dict[str, str] = {}
+        conn = _edli_stage_world_connection(world_db_path)
+        try:
+            pending_family_reasons, pending_unresolved = (
+                _edli_stage_pending_reconcile_families(conn)
+            )
+            for family_id, reason in pending_family_reasons.items():
+                family_reasons[family_id] = reason
+            if pending_unresolved:
+                global_reasons.append(
+                    f"EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:{pending_unresolved}"
+                )
+
+            cap_family_reasons, cap_unresolved = (
+                _edli_stage_open_cap_reservation_families(conn)
+            )
+            for family_id, reason in cap_family_reasons.items():
+                # A family blocked by either gate stays blocked; concatenate
+                # so the log still shows both causes (per operator directive).
+                family_reasons[family_id] = (
+                    f"{family_reasons[family_id]},{reason}"
+                    if family_id in family_reasons
+                    else reason
+                )
+            if cap_unresolved:
+                global_reasons.append(
+                    f"EDLI_STAGE_LIVE_CAP_RESERVED:{cap_unresolved}"
+                )
+
+            if source_health_json:
+                global_reasons.extend(
+                    _edli_stage_fresh_file_reasons(
+                        name="SOURCE_HEALTH",
+                        path=source_health_json,
+                        max_age_seconds=max_age_seconds,
+                        now=now,
+                    )
+                )
+            if status_json:
+                global_reasons.extend(
+                    _edli_stage_fresh_file_reasons(
+                        name="STATUS_SUMMARY",
+                        path=status_json,
+                        max_age_seconds=max_age_seconds,
+                        now=now,
+                    )
+                )
+        finally:
+            conn.close()
     except Exception as exc:  # noqa: BLE001 - unreadable admission truth blocks BUY
-        return f"entry_readiness_error:{type(exc).__name__}:{exc}"
-    if report.status == EDLI_STAGE_PASS and report.live_entries_allowed:
-        return None
-    reasons = report.reasons or (report.status,)
-    return "entry_readiness:" + ",".join(str(reason) for reason in reasons)
+        return f"entry_readiness_error:{type(exc).__name__}:{exc}", {}
+
+    global_reason = (
+        "entry_readiness:" + ",".join(global_reasons) if global_reasons else None
+    )
+    return global_reason, family_reasons
 
 
 def _require_stage_file_paths(edli_cfg: dict) -> None:
@@ -923,6 +990,149 @@ def _edli_stage_open_cap_reservation_count(conn) -> int:
     except Exception as exc:
         raise RuntimeError(f"EDLI_STAGE_OPEN_CAP_QUERY_FAILED:{type(exc).__name__}") from exc
     return int(row[0] if row else 0)
+
+
+def _edli_stage_latest_submit_plan_family_ids(
+    conn, aggregate_ids: list[str]
+) -> dict[str, str]:
+    """Resolve aggregate_id -> family_id via each aggregate's latest SubmitPlanBuilt.
+
+    Reuses the latest-payload-per-aggregate join shape from
+    ``edli_trade_fact_bridge._consume_absorbed_confirmed_fills`` (a window
+    function over ``edli_live_order_events`` partitioned by aggregate_id,
+    filtered to ``event_type = 'SubmitPlanBuilt'``). An aggregate_id absent
+    from the returned mapping (no persisted plan, invalid JSON, or a missing
+    ``family_id`` field) is UNRESOLVED -- callers must fail closed for it
+    rather than silently dropping it from any block.
+    """
+    if not aggregate_ids:
+        return {}
+    placeholders = ",".join("?" for _ in aggregate_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT aggregate_id, payload_json
+              FROM (
+                    SELECT aggregate_id, payload_json,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY aggregate_id ORDER BY event_sequence DESC
+                           ) AS rank
+                      FROM edli_live_order_events
+                     WHERE event_type = 'SubmitPlanBuilt'
+                       AND aggregate_id IN ({placeholders})
+                   )
+             WHERE rank = 1
+            """,
+            tuple(aggregate_ids),
+        ).fetchall()
+    except Exception as exc:
+        raise RuntimeError(
+            f"EDLI_STAGE_FAMILY_RESOLUTION_QUERY_FAILED:{type(exc).__name__}"
+        ) from exc
+    resolved: dict[str, str] = {}
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            continue
+        family_id = str(payload.get("family_id") or "").strip()
+        if family_id:
+            resolved[str(row["aggregate_id"])] = family_id
+    return resolved
+
+
+def _edli_stage_pending_reconcile_families(conn) -> tuple[dict[str, str], int]:
+    """Per-family breakdown of ``EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN``.
+
+    Returns ``(family_id -> reason, unresolved_row_count)``. A row whose
+    family_id cannot be resolved is counted in ``unresolved_row_count``, NOT
+    silently dropped -- the caller must fold that count into a GLOBAL block
+    (fail-closed), matching pre-narrowing behavior for exactly those rows.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT aggregate_id FROM edli_live_order_projection WHERE pending_reconcile = 1"
+        ).fetchall()
+    except Exception as exc:
+        raise RuntimeError(f"EDLI_STAGE_PENDING_RECONCILE_QUERY_FAILED:{type(exc).__name__}") from exc
+    aggregate_ids = [str(row["aggregate_id"]) for row in rows]
+    resolved = _edli_stage_latest_submit_plan_family_ids(conn, aggregate_ids)
+    family_counts: dict[str, int] = {}
+    unresolved = 0
+    for aggregate_id in aggregate_ids:
+        family_id = resolved.get(aggregate_id)
+        if family_id:
+            family_counts[family_id] = family_counts.get(family_id, 0) + 1
+        else:
+            unresolved += 1
+            logger.warning(
+                "EDLI stage: pending-reconcile aggregate %s has no resolvable "
+                "family_id; falling back to the global entry block for this row",
+                aggregate_id,
+            )
+    family_reasons = {
+        family_id: f"EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:{count}"
+        for family_id, count in family_counts.items()
+    }
+    return family_reasons, unresolved
+
+
+def _edli_stage_open_cap_reservation_families(conn) -> tuple[dict[str, str], int]:
+    """Per-family breakdown of ``EDLI_STAGE_LIVE_CAP_RESERVED``.
+
+    The composite live-block pair (verified against 7 days of production
+    block events, 2026-07-25): every observed blocking instance of
+    ``EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN`` co-occurred with
+    ``EDLI_STAGE_LIVE_CAP_RESERVED`` -- the same stuck order holds both an
+    unresolved projection row and its cap reservation. Narrowing only the
+    unresolved-submit gate leaves this one global, so both gates are
+    narrowed together here using the identical resolution contract.
+
+    Joins RESERVED ``edli_live_cap_usage`` rows to ``edli_live_order_projection``
+    via ``(event_id, final_intent_id)`` -- the same join
+    ``edli_absence_resolver.py``'s pre-submit-orphan query uses (proven
+    production join shape) -- then resolves family_id from the aggregate's
+    latest SubmitPlanBuilt payload. Returns ``(family_id -> reason,
+    unresolved_row_count)`` with the same fail-closed contract as
+    ``_edli_stage_pending_reconcile_families``.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT usage.usage_id AS usage_id, proj.aggregate_id AS aggregate_id
+              FROM edli_live_cap_usage usage
+              LEFT JOIN edli_live_order_projection proj
+                ON proj.event_id = usage.event_id
+               AND proj.final_intent_id = usage.final_intent_id
+             WHERE usage.reservation_status = 'RESERVED'
+            """
+        ).fetchall()
+    except Exception as exc:
+        raise RuntimeError(f"EDLI_STAGE_OPEN_CAP_QUERY_FAILED:{type(exc).__name__}") from exc
+    aggregate_ids = [
+        str(row["aggregate_id"]) for row in rows if row["aggregate_id"] is not None
+    ]
+    resolved = _edli_stage_latest_submit_plan_family_ids(conn, aggregate_ids)
+    family_counts: dict[str, int] = {}
+    unresolved = 0
+    for row in rows:
+        aggregate_id = row["aggregate_id"]
+        family_id = resolved.get(str(aggregate_id)) if aggregate_id is not None else None
+        if family_id:
+            family_counts[family_id] = family_counts.get(family_id, 0) + 1
+        else:
+            unresolved += 1
+            logger.warning(
+                "EDLI stage: RESERVED cap usage %s has no resolvable family_id "
+                "(aggregate_id=%r); falling back to the global entry block for this row",
+                row["usage_id"],
+                aggregate_id,
+            )
+    family_reasons = {
+        family_id: f"EDLI_STAGE_LIVE_CAP_RESERVED:{count}"
+        for family_id, count in family_counts.items()
+    }
+    return family_reasons, unresolved
 
 
 def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int, now: datetime) -> list[str]:
@@ -3545,11 +3755,13 @@ def _edli_event_reactor_cycle(
     from src.events.reactor import run_edli_event_reactor_cycle
 
     _start_edli_reactor_wake_listener()
+    _global_block_reason, _family_block_reasons = _edli_live_entry_readiness_block(
+        _settings_section("edli", {})
+    )
     return run_edli_event_reactor_cycle(
         active_lock=_edli_reactor_active_lock,
-        live_entry_block_reason=_edli_live_entry_readiness_block(
-            _settings_section("edli", {})
-        ),
+        live_entry_block_reason=_global_block_reason,
+        live_entry_family_block_reasons=_family_block_reasons,
         producer_wake_reason=producer_wake_reason,
         producer_wake_ids=producer_wake_ids,
         producer_wake_published_at=producer_wake_published_at,

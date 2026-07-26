@@ -5685,6 +5685,7 @@ def run_edli_event_reactor_cycle(
     urgent_day0_pending: Callable[[], bool] | None = None,
     held_position_monitor_pending: Callable[[], bool] | None = None,
     live_entry_block_reason: str | None = None,
+    live_entry_family_block_reasons: Mapping[str, str] | None = None,
 ) -> bool:
     """EDLI event-reactor cycle body (R4-b3 extraction from src/main.py::
     _edli_event_reactor_cycle, 2026-07-08). main.py's scheduler hook is now a
@@ -6193,6 +6194,14 @@ def run_edli_event_reactor_cycle(
         # entry is unavailable. A live reactor never changes adapters to avoid a
         # submit; an offline/test caller must construct its own no-submit adapter.
         _live_entry_block_reason: str | None = live_entry_block_reason
+        # Per-family narrowing (EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN /
+        # EDLI_STAGE_LIVE_CAP_RESERVED): threaded through unchanged -- these
+        # do not participate in the global-reason override cascade below,
+        # which covers only genuinely bankroll-wide gates (portfolio,
+        # allocator, capital authority).
+        _live_entry_family_block_reasons: Mapping[str, str] = (
+            live_entry_family_block_reasons or {}
+        )
         _auction_capital_authority = None
         # Task #107 (portfolio/multi Kelly): source one canonical exposure
         # snapshot per reactor cycle. Terminal history and operator/recovery
@@ -6286,6 +6295,7 @@ def run_edli_event_reactor_cycle(
             get_current_level=get_current_level,
             portfolio_state_provider=_portfolio_state_provider,
             entry_submit_block_reason=_live_entry_block_reason,
+            entry_submit_family_block_reasons=_live_entry_family_block_reasons,
             pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_book_evidence_conn(
                 trade_conn,
                 edli_cfg,

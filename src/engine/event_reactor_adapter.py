@@ -6178,6 +6178,7 @@ def event_bound_live_adapter_from_trade_conn(
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     pre_submit_book_quote_provider: Callable[[str], Mapping[str, object]] | None = None,
     entry_submit_block_reason: str | None = None,
+    entry_submit_family_block_reasons: Mapping[str, str] | None = None,
     family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
     auction_capital_authority: "AuctionCapitalAuthority | None" = None,
     producer_wake_ids: tuple[str, ...] = (),
@@ -6410,6 +6411,35 @@ def event_bound_live_adapter_from_trade_conn(
                 reason=f"LIVE_ENTRY_BLOCKED:{entry_submit_block_reason}",
                 proof_accepted=False,
             )
+        if entry_submit_family_block_reasons:
+            # Per-family narrowing: block only when THIS event's own weather
+            # family (derivable from its own payload, identical identity space
+            # to the family_id persisted on SubmitPlanBuilt -- see
+            # weather_family_id call sites) is in the blocked set. An event
+            # whose payload lacks city/target_date/metric cannot be matched
+            # here and falls through unblocked by this gate; downstream
+            # candidate binding validates those fields on its own.
+            _block_payload = _payload(event)
+            _block_city = str(_block_payload.get("city") or "").strip()
+            _block_target_date = str(_block_payload.get("target_date") or "").strip()
+            _block_metric = str(_block_payload.get("metric") or "").strip().lower()
+            if _block_city and _block_target_date and _block_metric in {"high", "low"}:
+                _block_family_id = weather_family_id(
+                    city=_block_city,
+                    target_date=_block_target_date,
+                    metric=_block_metric,
+                )
+                _block_family_reason = entry_submit_family_block_reasons.get(
+                    _block_family_id
+                )
+                if _block_family_reason is not None:
+                    return EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=f"LIVE_ENTRY_BLOCKED:entry_readiness_family:{_block_family_reason}",
+                        proof_accepted=False,
+                    )
         if executor_submit is None:
             return EventSubmissionReceipt(
                 False,
