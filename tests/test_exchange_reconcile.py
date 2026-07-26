@@ -6040,92 +6040,6 @@ def test_terminal_local_row_does_not_hide_positive_exchange_exposure(conn):
     assert '"confirmed_journal_size":"0"' in position_findings[0].evidence_json
 
 
-def test_settled_redeem_pending_token_holding_is_expected_wallet_balance(conn):
-    from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
-
-    token = "settled-redeem-pending-token"
-    seed_command(
-        conn,
-        command_id="cmd-settled-redeem-pending",
-        venue_order_id="ord-settled-redeem-pending",
-        position_id="pos-settled-redeem-pending",
-        token_id=token,
-        state="FILLED",
-        size=5.17,
-        price=0.37,
-    )
-    append_trade_fact(
-        conn,
-        command_id="cmd-settled-redeem-pending",
-        venue_order_id="ord-settled-redeem-pending",
-        token_id=token,
-        trade_id="trade-settled-redeem-pending",
-        size="1.5873",
-        state="CONFIRMED",
-    )
-    seed_position_baseline(
-        conn,
-        position_id="pos-settled-redeem-pending",
-        order_id="ord-settled-redeem-pending",
-    )
-    conn.execute(
-        """
-        UPDATE position_current
-           SET phase = 'settled',
-               chain_state = 'synced',
-               token_id = ?,
-               condition_id = 'condition-m5',
-               market_id = 'condition-m5',
-               shares = 1.5873,
-               order_id = 'ord-settled-redeem-pending',
-               updated_at = ?
-         WHERE position_id = 'pos-settled-redeem-pending'
-        """,
-        (token, NOW.isoformat()),
-    )
-    conn.execute(
-        """
-        INSERT INTO settlement_commands (
-            command_id, state, condition_id, market_id, payout_asset,
-            pusd_amount_micro, token_amounts_json, requested_at, winning_index_set
-        ) VALUES (?, 'REDEEM_INTENT_CREATED', 'condition-m5', 'condition-m5', 'pUSD',
-                  1587297, ?, ?, ?)
-        """,
-        (
-            "redeem-settled-redeem-pending",
-            json.dumps({token: 1.5872972972972974}, separators=(",", ":")),
-            NOW.isoformat(),
-            json.dumps(["2"]),
-        ),
-    )
-    observed = NOW + timedelta(minutes=10)
-    stale = record_finding(
-        conn,
-        kind="position_drift",
-        subject_id=token,
-        context="ws_gap",
-        evidence={"reason": "settled_redeem_pending_probe"},
-        recorded_at=observed - timedelta(minutes=1),
-    )
-
-    result = run_reconcile_sweep(
-        FakeM5Adapter(positions=[position(token_id=token, size="1.5873")]),
-        conn,
-        context="ws_gap",
-        observed_at=observed,
-    )
-
-    assert not any(finding.kind == "position_drift" for finding in result)
-    resolved = conn.execute(
-        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
-        (stale.finding_id,),
-    ).fetchone()
-    assert dict(resolved) == {
-        "resolution": "position_drift_settlement_command_token_holding",
-        "resolved_by": "src.execution.exchange_reconcile",
-    }
-
-
 def test_terminal_position_current_token_holding_is_expected_wallet_balance(conn):
     from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
 
@@ -6187,6 +6101,68 @@ def test_terminal_position_current_token_holding_is_expected_wallet_balance(conn
         "resolution": "position_drift_closed_position_token_holding",
         "resolved_by": "src.execution.exchange_reconcile",
     }
+
+
+def test_stuck_redeem_intent_row_does_not_mask_genuine_position_drift(conn):
+    """A stale, permanently-non-progressing REDEEM_INTENT_CREATED settlement_commands
+    row (the production shape: 139 rows stuck since redeem_submitter was deleted,
+    2026-07-08 -- Zeus never submits on-chain redemption; Polymarket settles win/loss)
+    must NOT mask a genuinely unexplained wallet mismatch.
+
+    Before the settlement_commands-keyed branches were removed from
+    _record_position_drift_findings, a pending settlement_commands row zeroed
+    closed_position_size unconditionally (`closed_position_size = 0 if settlement_size
+    > 0 else ...`), which starves _absorb_terminal_chain_closed_phantom's first gate
+    (`if closed_position_size <= 0: return False`) forever for any token tied to a
+    stuck intent row -- exactly the M5 submit-latch-freeze risk this change closes.
+
+    This position has NO closed_position_current holding, NO chain-confirmed active
+    holding, and NO token_suppression row -- it is a real, unexplained drift and must
+    still surface as an open position_drift finding regardless of the stuck redeem row.
+    """
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "stuck-redeem-intent-genuine-drift-token"
+    seed_command(
+        conn,
+        command_id="cmd-stuck-redeem-intent",
+        venue_order_id="ord-stuck-redeem-intent",
+        position_id="pos-stuck-redeem-intent",
+        token_id=token,
+        state="FILLED",
+        size=3.0,
+        price=0.42,
+    )
+    # No trade fact, no closed position_current row, no chain-confirmed holding, no
+    # suppression -- the exchange position is entirely unexplained by any journal.
+    conn.execute(
+        """
+        INSERT INTO settlement_commands (
+            command_id, state, condition_id, market_id, payout_asset,
+            pusd_amount_micro, token_amounts_json, requested_at, winning_index_set
+        ) VALUES (?, 'REDEEM_INTENT_CREATED', 'condition-stuck', 'condition-stuck', 'pUSD',
+                  3000000, ?, ?, ?)
+        """,
+        (
+            "redeem-stuck-forever",
+            json.dumps({token: 3.0}, separators=(",", ":")),
+            NOW.isoformat(),
+            json.dumps(["2"]),
+        ),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="3.0")]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW + timedelta(minutes=10),
+    )
+
+    position_findings = [finding for finding in result if finding.kind == "position_drift"]
+    assert [finding.subject_id for finding in position_findings] == [token], (
+        "a stuck REDEEM_INTENT_CREATED row must not suppress a genuinely unexplained "
+        "position_drift finding"
+    )
 
 
 def test_duplicate_terminal_positions_same_order_count_holding_once(conn):
@@ -6372,7 +6348,6 @@ def test_redeem_confirmed_settled_token_still_at_exchange_is_position_drift(conn
     assert [finding.subject_id for finding in position_findings] == [token]
     evidence = position_findings[0].evidence_json
     assert '"exchange_size":"1.5873"' in evidence
-    assert '"settlement_command_token_size":"0"' in evidence
     assert '"expected_wallet_size":"0"' in evidence
 
 
@@ -6446,7 +6421,6 @@ def test_terminal_non_pending_redeem_state_does_not_mask_position_drift(conn, se
     assert [finding.subject_id for finding in position_findings] == [token]
     evidence = position_findings[0].evidence_json
     assert '"exchange_size":"1.5873"' in evidence
-    assert '"settlement_command_token_size":"0"' in evidence
     assert '"expected_wallet_size":"0"' in evidence
 
 

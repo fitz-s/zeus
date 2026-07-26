@@ -147,7 +147,6 @@ def _wire_terminal_chain_closed_phantom(
     monkeypatch.setattr(
         xr, "_journal_positions_by_token", lambda conn, states: {TOKEN: JOURNAL}
     )
-    monkeypatch.setattr(xr, "_settlement_command_token_holdings_by_token", lambda conn: {})
     monkeypatch.setattr(
         xr,
         "_closed_position_token_holdings_by_token",

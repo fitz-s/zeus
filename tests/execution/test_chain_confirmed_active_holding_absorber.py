@@ -98,7 +98,6 @@ def _wire(monkeypatch, *, chain_confirmed: Decimal = CHAIN, exchange: Decimal = 
         lambda positions: ({TOKEN: exchange} if exchange > 0 else {}),
     )
     monkeypatch.setattr(xr, "_journal_positions_by_token", lambda conn, states: {})
-    monkeypatch.setattr(xr, "_settlement_command_token_holdings_by_token", lambda conn: {})
     monkeypatch.setattr(xr, "_closed_position_token_holdings_by_token", lambda conn: {})
     monkeypatch.setattr(xr, "_live_open_sell_locked_tokens_by_token", lambda conn, open_orders: {})
     monkeypatch.setattr(

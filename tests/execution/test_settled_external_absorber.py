@@ -121,9 +121,6 @@ def _wire_sizes(monkeypatch, *, journal: str = "19", sell_locked: str = "0") -> 
         xr, "_journal_positions_by_token", lambda conn, states: {TOKEN: Decimal(journal)}
     )
     monkeypatch.setattr(
-        xr, "_settlement_command_token_holdings_by_token", lambda conn: {}
-    )
-    monkeypatch.setattr(
         xr, "_closed_position_token_holdings_by_token", lambda conn: {}
     )
     monkeypatch.setattr(
