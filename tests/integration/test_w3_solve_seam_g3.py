@@ -9582,6 +9582,19 @@ def test_global_current_state_mean_buy_uses_current_point_and_keeps_lcb_as_evide
     assert current["global_expected_ev_usd"] == pytest.approx(1.5)
     assert current["false_edge_rate"] == pytest.approx(1.0 / 401.0)
     assert "global_robust_ev_usd" not in current
+    from src.events.day0_authority import (
+        assert_live_day0_qkernel_guard_authority,
+    )
+
+    assert_live_day0_qkernel_guard_authority(
+        current,
+        probability_payload={
+            "_edli_q_source": "day0_remaining_day",
+            "direction": "buy_yes",
+            "q_live": current["payoff_q_point"],
+            "q_lcb_5pct": current["payoff_q_lcb"],
+        },
+    )
 
     uncapped = era._global_current_state_execution_economics(
         {

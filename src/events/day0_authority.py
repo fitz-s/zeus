@@ -1241,12 +1241,30 @@ def assert_live_day0_qkernel_guard_authority(
             raise Day0AuthorityError(
                 f"replacement_day0_current_state invalid:{current_state_reason}"
             )
-    accepted_bases = (
-        frozenset({DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS})
-        if replacement_global or current_band
-        else _DAY0_GUARDED_QLCB_BASES
-    )
+    current_state = replacement_global or current_band
+    accepted_bases_by_field = {
+        "q_lcb_guard_basis": (
+            frozenset({DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS})
+            if current_state
+            else _DAY0_GUARDED_QLCB_BASES
+        ),
+        "selection_guard_basis": (
+            frozenset(
+                {
+                    DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS,
+                    "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+                }
+            )
+            if current_state
+            and str(economics.get("global_probability_functional") or "")
+            == "POSTERIOR_PREDICTIVE_MEAN"
+            else frozenset({DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS})
+            if current_state
+            else _DAY0_GUARDED_QLCB_BASES
+        ),
+    }
     for field_name in ("q_lcb_guard_basis", "selection_guard_basis"):
+        accepted_bases = accepted_bases_by_field[field_name]
         basis = str(economics.get(field_name) or "").strip()
         if not basis:
             raise Day0AuthorityError(f"{field_name} missing")
