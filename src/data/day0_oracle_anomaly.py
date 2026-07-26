@@ -794,9 +794,7 @@ def check_wu_metar_divergence(
     # ONLY when METAR's window also started at local-day onset; otherwise WU's
     # full-coverage low is authoritative and the cross-check simply could not run
     # on the low (module doctrine: absence of the cross-check is visibility loss,
-    # not an anomaly). The HIGH stays compared — it forms within the covered late
-    # window and the METAR-END gate vouches for it — so real high-side tampering is
-    # still caught. Coverage notion reuses the SINGLE authority
+    # not an anomaly). Coverage notion reuses the SINGLE authority
     # observation_client._compute_day0_coverage_status (same grace as WU); only a
     # late START (WINDOW_INCOMPLETE) excludes the low, a thin-but-early window
     # (LOW_COVERAGE) still observed the dawn low and stays comparable.
@@ -817,7 +815,36 @@ def check_wu_metar_divergence(
             metar_low_comparable = metar_low_coverage != "WINDOW_INCOMPLETE"
         except Exception:  # noqa: BLE001 — tz/helper failure -> not comparable (never a pause)
             metar_low_comparable = False
-    high_delta = (
+    # HIGH-SIDE START-COVERAGE GATE (symmetric twin, 2026-07-26 fix; live evidence
+    # world.day0_oracle_anomaly_flags: 32/37 flagged rows carry the coverage
+    # signature — low_delta=None/metar_low_coverage=WINDOW_INCOMPLETE (correctly
+    # excluded above) alongside a NONZERO high_delta with low_delta_raw ~0, i.e.
+    # the SAME window that could not verify the low also could not verify the
+    # high; 0/37 show the real-tamper signature of both extremes moving with
+    # coverage OK). The prior code excused the HIGH from this gate on the theory
+    # that "it forms within the covered late window and the END gate vouches for
+    # it" — that theory is refuted by the live rows above.
+    #
+    # The reason the exemption was wrong: `truncated.high_so_far` /
+    # `truncated.low_so_far` are BOTH running reductions (max / min) over the
+    # IDENTICAL observed window, from local midnight through `wu_last_obs_time`
+    # (running_extremes_for_local_day). The METAR-END gate above only proves that
+    # window reaches wu_last_obs_time; it says nothing about whether the window's
+    # START reaches back to local midnight. A window that starts late can miss an
+    # earlier, more extreme reading for EITHER reduction — a missed cold pre-dawn
+    # low, or an already-warm early reading later confirmed/exceeded WU-side (day0
+    # is an in-progress day; "high so far" queried before the true afternoon peak
+    # is just as exposed to a late window start as "low so far" is). The window's
+    # start-coverage is therefore a property of the OBSERVATION WINDOW, not of
+    # which extreme is being read off it: whatever start-coverage governs the LOW
+    # governs the HIGH identically, and no distinct high-specific window derivation
+    # is available or needed — this IS the conservative "full plausible
+    # high-forming period" reading the diagnosis calls for, since a running-max
+    # from local midnight is only trustworthy when the window covers from local
+    # midnight, exactly like the running-min.
+    metar_high_comparable = metar_low_comparable
+    metar_high_coverage = metar_low_coverage
+    high_delta_raw = (
         abs(float(wu_high_so_far) - float(truncated.high_so_far))
         if wu_high_so_far is not None and truncated.high_so_far is not None
         else None
@@ -827,13 +854,16 @@ def check_wu_metar_divergence(
         if wu_low_so_far is not None and truncated.low_so_far is not None
         else None
     )
-    # Only a low difference observed by BOTH windows can conclude divergence; an
-    # uncovered METAR low window contributes nothing to the divergence test.
+    # Only a delta observed by BOTH windows can conclude divergence; an uncovered
+    # METAR window contributes nothing to the divergence test for that extreme.
+    high_delta = high_delta_raw if metar_high_comparable else None
     low_delta = low_delta_raw if metar_low_comparable else None
     diverged = any(delta is not None and delta > threshold for delta in (high_delta, low_delta))
     detail = (
         f"unit={unit} threshold={threshold} threshold_provenance={threshold_provenance} "
-        f"high_delta={high_delta} low_delta={low_delta} low_delta_raw={low_delta_raw} "
+        f"high_delta={high_delta} high_delta_raw={high_delta_raw} "
+        f"metar_high_coverage={metar_high_coverage} "
+        f"low_delta={low_delta} low_delta_raw={low_delta_raw} "
         f"metar_low_coverage={metar_low_coverage} "
         f"wu_last_obs={wu_last_obs_time.isoformat()} metar_samples={truncated.sample_count}"
     )

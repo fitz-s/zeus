@@ -3211,9 +3211,21 @@ class TestAnomalyFreshnessGates:
                                         conn=sqlite3.connect(":memory:")) is False
 
     def test_detector_still_fires_on_real_mismatch_with_coverage(self):
+        """2026-07-26 (HIGH-side start-coverage fix): the METAR window must
+        genuinely cover from local-day onset for this to be a coverage-OK real
+        mismatch test — Tokyo local midnight on 2026-06-10 is 2026-06-09T15:00Z.
+        A window starting at 15:10Z (within the 2h grace) plus samples spanning
+        through wu_last_obs_time gives real start-coverage, so a real tamper on
+        the HIGH must still fire (this is the genuine-tamper counterpart to
+        test_detector_refuses_conclusion_when_metar_window_lags_wu and the new
+        false-pause regression test below)."""
         from src.data import day0_oracle_anomaly as oa
 
         reports = [
+            _report("RJTT", datetime(2026, 6, 9, 15, 10, tzinfo=UTC), 21.0, t_group=False),
+            _report("RJTT", datetime(2026, 6, 9, 21, 0, tzinfo=UTC), 21.5, t_group=False),
+            _report("RJTT", datetime(2026, 6, 10, 3, 0, tzinfo=UTC), 21.0, t_group=False),
+            _report("RJTT", datetime(2026, 6, 10, 9, 0, tzinfo=UTC), 21.5, t_group=False),
             _report("RJTT", datetime(2026, 6, 10, 11, 30, tzinfo=UTC), 22.0, t_group=False),
             _report("RJTT", datetime(2026, 6, 10, 12, 0, tzinfo=UTC), 22.0, t_group=False),
         ]
@@ -3223,7 +3235,37 @@ class TestAnomalyFreshnessGates:
             wu_low_so_far=21.0,
             wu_last_obs_time=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
         )
+        assert "metar_high_coverage=OK" in verdict.detail
         assert verdict.compared is True and verdict.diverged is True
+
+    def test_high_side_coverage_gap_does_not_false_pause(self):
+        """2026-07-26 fix (frozen-posterior-adjacent Day0 anomaly item): live
+        artifact shape world.day0_oracle_anomaly_flags 2026-07-25 — 32/37 flagged
+        rows carried nonzero high_delta with low_delta=None/metar_low_coverage=
+        WINDOW_INCOMPLETE and low_delta_raw~0 (the covered side agreed). This is
+        the exact reproduction: a METAR window starting late in the local day
+        (missed the full-day history) must NOT conclude a HIGH divergence — the
+        window cannot prove it saw the true running high any more than it can
+        prove it saw the true running low."""
+        from src.data import day0_oracle_anomaly as oa
+
+        reports = [
+            _report("RJTT", datetime(2026, 6, 10, 11, 30, tzinfo=UTC), 22.0, t_group=False),
+            _report("RJTT", datetime(2026, 6, 10, 12, 0, tzinfo=UTC), 22.0, t_group=False),
+        ]
+        verdict = oa.check_wu_metar_divergence(
+            city=_tokyo(), target_date="2026-06-10", metar_reports=reports,
+            wu_high_so_far=26.0,  # would be a 4C mismatch if the window were trusted
+            wu_low_so_far=21.95,  # covered side agrees near-perfectly (low_delta_raw~0.05)
+            wu_last_obs_time=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
+        )
+        assert verdict.compared is True
+        assert verdict.diverged is False
+        assert verdict.high_delta is None
+        assert verdict.low_delta is None
+        assert "metar_high_coverage=WINDOW_INCOMPLETE" in verdict.detail
+        assert "metar_low_coverage=WINDOW_INCOMPLETE" in verdict.detail
+        assert "low_delta_raw=0.05" in verdict.detail
 
     def test_coverage_within_tolerance_still_compares(self):
         from src.data import day0_oracle_anomaly as oa

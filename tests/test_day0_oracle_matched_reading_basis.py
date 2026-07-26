@@ -241,7 +241,9 @@ def test_coverage_none_preserves_legacy_behavior():
 # 5-sample midday window never reached the pre-dawn low. The low is comparable
 # ONLY when METAR's window also started at local-day onset (coverage_status !=
 # WINDOW_INCOMPLETE); otherwise WU's full-coverage low is authoritative and the
-# low cross-check could not run. The HIGH stays compared (per-extreme gate).
+# low cross-check could not run. (2026-07-26: the HIGH is gated identically —
+# see test_metar_start_gap_high_does_not_false_pause below; live evidence
+# refuted the original per-extreme exemption for the HIGH.)
 # ---------------------------------------------------------------------------
 
 
@@ -303,11 +305,31 @@ def test_metar_covered_low_tamper_still_pauses():
     assert "metar_low_coverage=OK" in verdict.detail
 
 
-def test_metar_start_gap_high_tamper_still_caught():
-    """Per-extreme proof: even when METAR's window started midday (low excluded),
-    a genuine HIGH divergence is STILL compared and pauses. Guards against the
-    fix degenerating into a whole-comparison mute (which would blind the detector
-    to high-side tampering on every mid-day-booted family)."""
+def test_metar_start_gap_high_does_not_false_pause():
+    """SUPERSEDES the prior `test_metar_start_gap_high_tamper_still_caught`
+    (2026-07-26 HIGH-side coverage-gate fix; docs/evidence and live
+    world.day0_oracle_anomaly_flags evidence 2026-07-25: 32/37 flagged rows
+    carried this EXACT shape — nonzero high_delta with low_delta=None/
+    metar_low_coverage=WINDOW_INCOMPLETE and low_delta_raw~0, i.e. the covered
+    side agreed and the SAME uncovered window produced a spurious high_delta;
+    0/37 live rows showed the real-tamper shape of both extremes diverging on a
+    covered window). The prior test asserted the opposite on the theory that a
+    late-starting METAR window still safely captures the HIGH ("it forms within
+    the covered late window"); that theory is refuted by the live evidence.
+
+    Root cause this test now pins: `truncated.high_so_far` is a running MAXIMUM
+    over METAR's OBSERVED window from local midnight through wu_last_obs_time,
+    exactly like `truncated.low_so_far` is a running MINIMUM over the same
+    window. A window that starts mid-day (WINDOW_INCOMPLETE) can miss an
+    earlier, more extreme reading for EITHER reduction — coverage is a property
+    of the observation window, not of which extreme is read off it. This is the
+    conservative reading the diagnosis calls for when no principled high-only
+    window can be derived (see src/data/day0_oracle_anomaly.py
+    check_wu_metar_divergence, HIGH-SIDE START-COVERAGE GATE comment).
+
+    RED-on-revert: delete metar_high_comparable / metar_high_coverage and this
+    assertion fails (verdict.diverged becomes True again, the false-pause
+    resurrects)."""
     base = datetime(2026, 6, 10, 3, 0, tzinfo=UTC)  # 12:00 JST -> WINDOW_INCOMPLETE
     metar_reports = [
         _metar("RJTT", base, 30.0, t_group=False),
@@ -316,13 +338,42 @@ def test_metar_start_gap_high_tamper_still_caught():
     ]
     verdict = check_wu_metar_divergence(
         city=_tokyo(), target_date="2026-06-10", metar_reports=metar_reports,
-        wu_high_so_far=36.0,   # WU claims 6C above the same-window METAR high -> tamper
-        wu_low_so_far=18.0,
+        wu_high_so_far=36.0,   # would be a 6C mismatch if the uncovered window were trusted
+        wu_low_so_far=18.03,   # covered-if-it-were-comparable side agrees near-perfectly
         wu_last_obs_time=base + timedelta(hours=2),
         wu_coverage_status="OK",
     )
-    assert verdict.compared is True and verdict.diverged is True, (
-        "high-side tamper must still be caught even when the METAR low window is "
-        f"uncovered; verdict={verdict}"
+    assert verdict.compared is True and verdict.diverged is False, (
+        "a METAR window that started mid-day cannot prove it saw the true "
+        f"running high any more than the true running low; verdict={verdict}"
     )
+    assert verdict.high_delta is None
+    assert verdict.low_delta is None
     assert "metar_low_coverage=WINDOW_INCOMPLETE" in verdict.detail
+    assert "metar_high_coverage=WINDOW_INCOMPLETE" in verdict.detail
+
+
+def test_metar_covered_high_tamper_still_pauses():
+    """Tamper detection PRESERVED on the high (symmetric twin of
+    test_metar_covered_low_tamper_still_pauses). When METAR's window DID start
+    at local-day onset (coverage OK), a real >threshold HIGH divergence is
+    comparable and must still pause. Guards against the HIGH-side start-coverage
+    gate swallowing a genuine high tamper."""
+    metar_reports = [
+        _metar("RJTT", datetime(2026, 6, 9, 15, 30, tzinfo=UTC), 18.0, t_group=False),  # 00:30 JST dawn low
+        _metar("RJTT", datetime(2026, 6, 9, 17, 30, tzinfo=UTC), 19.0, t_group=False),  # 02:30 JST
+        _metar("RJTT", datetime(2026, 6, 9, 19, 30, tzinfo=UTC), 22.0, t_group=False),  # 04:30 JST
+        _metar("RJTT", datetime(2026, 6, 10, 3, 0, tzinfo=UTC), 30.0, t_group=False),   # 12:00 JST high
+    ]
+    verdict = check_wu_metar_divergence(
+        city=_tokyo(), target_date="2026-06-10", metar_reports=metar_reports,
+        wu_high_so_far=36.0,   # WU claims 6C above the same-window, COVERED METAR high -> tamper
+        wu_low_so_far=18.0,    # low agrees
+        wu_last_obs_time=datetime(2026, 6, 10, 3, 0, tzinfo=UTC),
+        wu_coverage_status="OK",
+    )
+    assert verdict.compared is True and verdict.diverged is True, (
+        "a real high divergence on a METAR window that COVERED local-day onset "
+        f"must still pause; verdict={verdict}"
+    )
+    assert "metar_high_coverage=OK" in verdict.detail
