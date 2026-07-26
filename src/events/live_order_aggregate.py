@@ -1096,6 +1096,12 @@ def _validate_pre_submit_revalidation_payload(
         and isinstance(decision_economics, Mapping)
         and canonical_json(economics) == canonical_json(decision_economics)
     )
+    mean_action = bool(
+        current_state_solve
+        and isinstance(economics, Mapping)
+        and economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
     floor_decision = entry_price_floor_decision(
         strategy_key=payload.get("strategy_key"),
         direction=payload.get("direction"),
@@ -1125,10 +1131,16 @@ def _validate_pre_submit_revalidation_payload(
         limit_price=limit_price,
         size=size,
     )
-    submit_edge = q_lcb - submit_cost_bound
+    submit_probability = q_live if mean_action else q_lcb
+    submit_edge = submit_probability - submit_cost_bound
     if submit_edge <= 0.0:
+        label = (
+            "action-probability-minus-cost-bound"
+            if mean_action
+            else "q_lcb-minus-cost-bound"
+        )
         raise LiveOrderAggregateError(
-            "PreSubmitRevalidated requires positive submit q_lcb-minus-cost-bound"
+            f"PreSubmitRevalidated requires positive submit {label}"
         )
     if expected_edge > submit_edge + 1e-6:
         raise LiveOrderAggregateError(
@@ -1293,7 +1305,20 @@ def _validate_qkernel_submit_probability(
     if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_lcb mismatches submit q_lcb_5pct")
     cost = _positive_number(economics.get("cost"), "qkernel_execution_economics.cost")
-    edge_lcb = _positive_number(economics.get("edge_lcb"), "qkernel_execution_economics.edge_lcb")
+    mean_action = bool(
+        current_state_solve
+        and economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    edge_lcb = _finite_number(
+        economics.get("edge_lcb"),
+        "qkernel_execution_economics.edge_lcb",
+    )
+    if not mean_action and edge_lcb <= 0.0:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated requires positive "
+            "qkernel_execution_economics.edge_lcb"
+        )
     if not current_state_solve:
         false_edge_rate = _positive_number(
             economics.get("false_edge_rate"),
@@ -1327,8 +1352,36 @@ def _validate_qkernel_submit_probability(
     if not global_submit and limit_price > cost + 1e-6:
         raise LiveOrderAggregateError("PreSubmitRevalidated submit price worse than qkernel cost")
     expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
-    if expected_edge > edge_lcb + 1e-6:
-        raise LiveOrderAggregateError("PreSubmitRevalidated expected_edge exceeds qkernel edge_lcb")
+    action_edge = edge_lcb
+    if mean_action:
+        action_q = _probability_number(
+            economics.get("payoff_q_action"),
+            "qkernel_execution_economics.payoff_q_action",
+        )
+        edge_expected = _positive_number(
+            economics.get("edge_expected"),
+            "qkernel_execution_economics.edge_expected",
+        )
+        if not math.isclose(
+            action_q,
+            payoff_q_point,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ) or not math.isclose(
+            edge_expected,
+            action_q - cost,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            raise LiveOrderAggregateError(
+                "PreSubmitRevalidated qkernel expected edge inconsistent"
+            )
+        action_edge = edge_expected
+    if expected_edge > action_edge + 1e-6:
+        label = "edge_expected" if mean_action else "edge_lcb"
+        raise LiveOrderAggregateError(
+            f"PreSubmitRevalidated expected_edge exceeds qkernel {label}"
+        )
     if current_state_solve:
         return
     delta_u_at_min = _positive_number(
@@ -1436,9 +1489,21 @@ def _non_negative_number(value: Any, name: str) -> float:
     try:
         number = float(value)
     except (TypeError, ValueError):
-        raise LiveOrderAggregateError(f"PreSubmitRevalidated requires numeric {name}") from None
+        raise LiveOrderAggregateError(
+            f"PreSubmitRevalidated requires numeric {name}"
+        ) from None
     if number < 0:
         raise LiveOrderAggregateError(f"PreSubmitRevalidated requires non-negative {name}")
+    return number
+
+
+def _finite_number(value: Any, name: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise LiveOrderAggregateError(f"PreSubmitRevalidated requires numeric {name}") from None
+    if not math.isfinite(number):
+        raise LiveOrderAggregateError(f"PreSubmitRevalidated requires finite {name}")
     return number
 
 

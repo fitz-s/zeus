@@ -13,6 +13,7 @@ from src.decision_kernel.canonicalization import (
     qkernel_current_state_identity_hash,
     qkernel_global_current_state_rejection_reason,
 )
+from src.engine.event_bound_final_intent import conservative_submit_expected_edge
 from src.execution.executor import (
     _actionable_certificate_intent_mismatch_reason,
     _entry_economics_component,
@@ -945,7 +946,7 @@ def test_entry_economics_allows_global_maker_price_improvement_under_taker_bound
         economics,
         limit_price=0.63,
         submitted_shares=shares,
-        q_lcb=q_lcb,
+        action_q=q_lcb,
         expected_edge=global_edge,
     )
 
@@ -1200,7 +1201,7 @@ def test_entry_economics_current_state_tail_still_requires_positive_robust_utili
 
 
 def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb_edge():
-    economics = _current_state_mean_buy_econ()
+    economics = _current_state_mean_buy_econ(global_max_spend_usd="2.05")
 
     assert (
         qkernel_global_current_state_rejection_reason(
@@ -1223,6 +1224,31 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
         )
         == "mean_execution_edge"
     )
+
+    verdict = _entry_economics_component(
+        _intent(
+            direction=Direction("buy_yes"),
+            limit_price=0.40,
+            q_live=0.70,
+            q_lcb_5pct=0.35,
+            expected_edge=0.29,
+            min_entry_price=0.05,
+            qkernel_execution_economics=economics,
+        ),
+        shares=5.0,
+        actionable_payload={"qkernel_execution_economics": economics},
+    )
+
+    assert verdict["allowed"] is True
+    assert conservative_submit_expected_edge(
+        {
+            "direction": "buy_yes",
+            "trade_score": economics["edge_lcb"],
+            "q_lcb_5pct": economics["payoff_q_lcb"],
+            "qkernel_execution_economics": economics,
+        },
+        limit_price=0.40,
+    ) == pytest.approx(0.29)
 
 
 @pytest.mark.parametrize(

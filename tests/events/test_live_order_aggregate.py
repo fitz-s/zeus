@@ -3,6 +3,7 @@
 # Authority basis: PR332 full-live split verdict; live-order aggregate substrate PR A.
 from __future__ import annotations
 
+import math
 import sqlite3
 import threading
 import time
@@ -11,6 +12,10 @@ from datetime import datetime, timezone
 import pytest
 
 from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+from src.decision_kernel.verifier import (
+    _current_state_solve_payload,
+    _verify_pre_submit_revalidation_for_command,
+)
 from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
 from src.state.db import init_schema
 
@@ -2357,6 +2362,154 @@ def _pre_submit_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def test_pre_submit_mean_winner_uses_point_action_edge_through_all_verifiers():
+    point = 0.70
+    lcb = 0.35
+    cost = 0.40
+    shares = 5.0
+    expected_cost = cost * shares
+    max_spend = 2.05
+    loss_payoff = -expected_cost
+    win_payoff = shares - expected_cost
+    wealth_after_loss = 100.0 + loss_payoff
+    wealth_after_win = 100.0 + win_payoff
+    expected_du = (1.0 - point) * math.log(
+        wealth_after_loss / 100.0
+    ) + point * math.log(wealth_after_win / 100.0)
+    expected_ev = point * shares - expected_cost
+    economics = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-mean",
+        "receipt_hash": "receipt-mean",
+        "q_version": "q-mean",
+        "sample_hash": "sample-mean",
+        "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "sample-mean",
+        "selection_guard_basis": "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": "sample-mean",
+        "selection_guard_n": 500,
+        "selection_guard_q_safe": point,
+        "side": "YES",
+        "payoff_q_point": point,
+        "payoff_q_lcb": lcb,
+        "payoff_q_action": point,
+        "cost": cost,
+        "edge_lcb": lcb - cost,
+        "edge_expected": point - cost,
+        "global_actuation_identity": "actuation-mean",
+        "global_economic_identity": "economic-mean",
+        "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+        "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        "global_candidate_id": "global-candidate-mean",
+        "global_bin_id": "bin-mean",
+        "global_universe_witness_identity": "universe-mean",
+        "global_wealth_witness_identity": "wealth-mean",
+        "global_wealth_economic_identity": "wealth-economic-mean",
+        "global_selection_epoch_identity": "epoch-mean",
+        "global_selection_cut_at": "2026-07-26T08:00:00+00:00",
+        "global_selection_decision_at": "2026-07-26T08:00:01+00:00",
+        "global_jit_book_hash": "book-mean",
+        "global_jit_venue_book_hash": "venue-book-mean",
+        "global_jit_book_snapshot_id": "snapshot-mean",
+        "global_jit_execution_curve_identity": "curve-mean",
+        "global_target_shares": str(shares),
+        "global_limit_price": str(cost),
+        "global_expected_fill_price_before_fee": str(cost),
+        "global_expected_cost_usd": str(expected_cost),
+        "global_max_spend_usd": str(max_spend),
+        "global_expected_delta_log_wealth": expected_du,
+        "global_expected_ev_usd": expected_ev,
+        "global_expected_capital_efficiency": expected_du / expected_cost,
+        "global_cut_time_win_probability_mean": point,
+        "global_cut_time_loss_probability_mean": 1.0 - point,
+        "global_terminal_win_probability_mean": point,
+        "global_terminal_loss_probability_mean": 1.0 - point,
+        "global_terminal_loss_payoff_usd": str(loss_payoff),
+        "global_terminal_win_payoff_usd": str(win_payoff),
+        "global_terminal_median_payoff_usd": str(win_payoff),
+        "global_terminal_wealth_after_loss_usd": str(wealth_after_loss),
+        "global_terminal_wealth_after_win_usd": str(wealth_after_win),
+        "global_cut_time_expected_value_usd": expected_ev,
+        "global_expected_value_usd": expected_ev,
+        "global_expected_value_semantics": (
+            "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
+        ),
+        "global_terminal_payoff_semantics": "BINARY_0_1",
+    }
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+    payload = _pre_submit_payload(
+        size=shares,
+        min_order_size=1.0,
+        q_live=point,
+        q_lcb_5pct=lcb,
+        expected_edge=point - (max_spend / shares),
+        min_entry_price=0.05,
+        qkernel_execution_economics=economics,
+    )
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-mean:intent-mean",
+        event_type="DecisionProofAccepted",
+        payload={
+            "event_id": payload["event_id"],
+            "final_intent_id": payload["final_intent_id"],
+            "decision_audit": {"qkernel_execution_economics": economics},
+        },
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    event = ledger.append_event(
+        aggregate_id="event-mean:intent-mean",
+        event_type="PreSubmitRevalidated",
+        payload=payload,
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+    assert event.event_type == "PreSubmitRevalidated"
+    assert _current_state_solve_payload(payload) is True
+
+    verified = {
+        **payload,
+        "aggregate_event_hash": event.event_hash,
+        "live_cap_usage_id": "cap-mean",
+    }
+    command = {
+        field: verified.get(field)
+        for field in (
+            "event_id",
+            "event_type",
+            "final_intent_id",
+            "strategy_key",
+            "condition_id",
+            "token_id",
+            "side",
+            "direction",
+            "order_type",
+            "time_in_force",
+            "post_only",
+            "limit_price",
+            "min_order_size",
+            "neg_risk",
+        )
+    }
+    command.update(
+        tick_size=str(verified["tick_size"]),
+        aggregate_pre_submit_event_hash=event.event_hash,
+        aggregate_execution_command_event_hash="command-event-mean",
+    )
+    _verify_pre_submit_revalidation_for_command(
+        command,
+        verified,
+        {"replacement_no_bound_certificate": None},
+        {"usage_id": "cap-mean"},
+    )
 
 
 def _day0_lcb_transform(condition_id: str = "condition-1", q_lcb: float = 0.60):

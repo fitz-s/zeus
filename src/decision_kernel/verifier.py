@@ -1172,9 +1172,37 @@ def _verify_pre_submit_revalidation_for_command(
         raise CertificateVerificationError("pre-submit revalidation expected_edge must be positive")
     if min_entry_price < 0.0:
         raise CertificateVerificationError("pre-submit revalidation min_entry_price must be non-negative")
-    submit_edge = q_lcb - limit_price
+    current_state_solve = _current_state_solve_payload(pre_submit)
+    mean_action = bool(
+        current_state_solve
+        and isinstance(economics, Mapping)
+        and economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    submit_probability = q_live if mean_action else q_lcb
+    submit_cost_bound = limit_price
+    if current_state_solve and isinstance(economics, Mapping):
+        try:
+            global_shares = float(economics["global_target_shares"])
+            global_max_spend = float(economics["global_max_spend_usd"])
+        except (KeyError, TypeError, ValueError):
+            global_shares = 0.0
+            global_max_spend = 0.0
+        if global_shares > 0.0 and math.isfinite(global_max_spend):
+            submit_cost_bound = max(
+                submit_cost_bound,
+                global_max_spend / global_shares,
+            )
+    submit_edge = submit_probability - submit_cost_bound
     if submit_edge <= 0.0:
-        raise CertificateVerificationError("pre-submit revalidation submit q_lcb-minus-limit must be positive")
+        label = (
+            "action-probability-minus-cost-bound"
+            if mean_action
+            else "q_lcb-minus-limit"
+        )
+        raise CertificateVerificationError(
+            f"pre-submit revalidation submit {label} must be positive"
+        )
     _verify_live_entry_win_rate_floor(
         pre_submit,
         q_lcb=q_lcb,
@@ -1201,7 +1229,7 @@ def _verify_pre_submit_revalidation_for_command(
         raise CertificateVerificationError("pre-submit revalidation limit_price below strategy entry floor")
     if size <= 0.0:
         raise CertificateVerificationError("pre-submit revalidation size must be positive")
-    if not _current_state_solve_payload(pre_submit):
+    if not current_state_solve:
         if submit_edge * size + 1e-9 < effective_min_expected_profit_usd:
             raise CertificateVerificationError("pre-submit revalidation expected profit below strategy floor")
         if submit_edge / limit_price + 1e-9 < effective_min_submit_edge_density:
@@ -1931,6 +1959,26 @@ def _current_state_solve_payload(payload: dict) -> bool:
     economics = payload.get("qkernel_execution_economics")
     if not isinstance(economics, dict):
         return False
+    global_declared = any(
+        field in economics
+        for field in (
+            "global_actuation_identity",
+            "global_candidate_id",
+            "global_target_shares",
+            "global_expected_cost_usd",
+            "global_max_spend_usd",
+        )
+    )
+    if global_declared:
+        return bool(
+            str(payload.get("selection_authority_applied") or "").strip()
+            == "qkernel_spine"
+            and qkernel_global_current_state_rejection_reason(
+                economics,
+                direction=str(payload.get("direction") or ""),
+            )
+            is None
+        )
     basis = "CURRENT_POSTERIOR_BAND"
     sample_hash = str(economics.get("sample_hash") or "").strip()
     q_lcb_sample_hash = str(economics.get("q_lcb_guard_cell_key") or "").strip()
@@ -1958,23 +2006,7 @@ def _current_state_solve_payload(payload: dict) -> bool:
     )
     if not current_state_valid:
         return False
-    global_declared = any(
-        field in economics
-        for field in (
-            "global_actuation_identity",
-            "global_candidate_id",
-            "global_target_shares",
-            "global_expected_cost_usd",
-            "global_max_spend_usd",
-        )
-    )
-    return not global_declared or (
-        qkernel_global_current_state_rejection_reason(
-            economics,
-            direction=str(payload.get("direction") or ""),
-        )
-        is None
-    )
+    return True
 
 
 def _verify_live_entry_win_rate_floor(
