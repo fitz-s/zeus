@@ -1,26 +1,43 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-07-25; last_reviewed=2026-07-25; last_reused=never
-# Purpose: Read-only enumeration of settlement_commands stuck in redemption
-#   limbo (REDEEM_INTENT_CREATED actionable + REDEEM_REVIEW_REQUIRED
-#   bookkeeping-stale) for the third-party redeemer operator handoff, plus an
-#   optional --verify-fee cash-effect check on recent MATCHED taker fills.
+# Lifecycle: created=2026-07-25; last_reviewed=2026-07-25; last_reused=2026-07-25
+# Purpose: Read-only HISTORICAL TELEMETRY over settlement_commands rows left in
+#   REDEEM_INTENT_CREATED / REDEEM_REVIEW_REQUIRED state, plus an optional
+#   --verify-fee cash-effect check on recent MATCHED taker fills.
 # Reuse: Re-run any time; opens state/zeus_trades.db mode=ro only, never
-#   writes. Confirm operator redeem directive 2026-06-10 (REVIEW_REQUIRED rows
-#   are already externally redeemed at zero payout) still applies before
-#   trusting the bookkeeping-stale exclusion below.
-"""Read-only redemption-backlog report.
+#   writes.
+# 2026-07-25 IMPORTANT CORRECTION: on-chain redemption is decoupled entirely
+#   from Zeus (Polymarket settles win/loss on our behalf; harvester no longer
+#   enqueues these rows -- see src/execution/harvester.py). This script
+#   PREVIOUSLY labeled REDEEM_INTENT_CREATED rows "ACTIONABLE (claimable now)"
+#   and printed an "OPERATOR ACTION" list for a third-party redeemer. That
+#   framing was WRONG and operationally hazardous: verified read-only audit
+#   confirms the underlying condition_ids are already chain-resolved
+#   (payout_observations) and their tokens are already registered in
+#   token_suppression (settled_position) -- the money is already home. Rows in
+#   this state are PERMANENTLY INERT (nothing consumes REDEEM_INTENT_CREATED
+#   any more) historical residue, NOT a to-do list. There is no operator
+#   action to take. Kept as read-only historical telemetry only because the
+#   dollar/age breakdown still has diagnostic value for auditing the residue;
+#   the misleading "actionable"/"operator action" framing is removed below.
+"""Read-only HISTORICAL TELEMETRY over stale settlement_commands rows.
 
-Zeus never submits a redeem transaction (operator law: third party redeems).
-This script only reads `settlement_commands` + `position_current` from
-`state/zeus_trades.db` (mode=ro) and prints a human-readable table plus an
-OPERATOR ACTION list for the third-party redeemer. It performs no writes and
-constructs no transaction of any kind.
+NO ACTION EXISTS FOR THESE ROWS. Zeus never submits a redeem transaction
+(operator law) and, as of 2026-07-25, on-chain redemption is decoupled
+entirely -- Polymarket settles win/loss on Zeus's behalf and the underlying
+capital is already accounted for via token_suppression / chain-resolved
+payout observations by the time a row lands here. This script only reads
+`settlement_commands` + `position_current` from `state/zeus_trades.db`
+(mode=ro) and prints a historical table of stuck rows for audit purposes.
+It performs no writes, constructs no transaction, and implies no pending
+operator task.
 
 `--verify-fee` additionally checks whether Polymarket's per-fill schedule fee
 is a real cash effect or just an unpopulated `venue_trade_facts.fee_paid_micro`
 column: it compares the collateral-ledger balance delta immediately around N
 recent MATCHED taker fills against price*size with and without the documented
 price-dependent fee formula (`src.contracts.execution_price.polymarket_fee`).
+This half of the script is independent of the redemption-residue reporting
+above and is unaffected by the above correction.
 """
 
 from __future__ import annotations
@@ -44,7 +61,12 @@ from src.contracts.execution_price import polymarket_fee  # noqa: E402
 
 DEFAULT_DB = REPO_ROOT / "state" / "zeus_trades.db"
 
-# ACTIONABLE_STATE: redeem intent created, never submitted -- claimable now.
+# ACTIONABLE_STATE name is legacy (kept to avoid an unnecessary rename of the
+# public constant); as of 2026-07-25 these rows are NOT actionable -- redeem
+# intent was created, will NEVER be submitted or consumed (on-chain redemption
+# is decoupled entirely; harvester no longer enqueues, no poller watches this
+# state), and the underlying capital is already accounted for elsewhere. This
+# is permanently-inert historical residue.
 ACTIONABLE_STATE = "REDEEM_INTENT_CREATED"
 # STALE_STATE: per operator redeem directive 2026-06-10, these rows are
 # already externally redeemed at zero payout -- bookkeeping-only, not
@@ -273,8 +295,14 @@ def render_text(
 ) -> str:
     lines: list[str] = []
     lines.append("=" * 100)
-    lines.append("REDEMPTION BACKLOG REPORT (read-only; Zeus never submits redeem tx)")
+    lines.append("SETTLEMENT_COMMANDS HISTORICAL RESIDUE REPORT (read-only; Zeus never submits redeem tx)")
     lines.append("=" * 100)
+    lines.append(
+        "NO ACTION EXISTS FOR ANY ROW BELOW. On-chain redemption is decoupled entirely "
+        "(2026-07-25) -- Polymarket settles win/loss on Zeus's behalf. This capital is "
+        "already accounted for via token_suppression / chain-resolved payout observations. "
+        "These rows are permanently-inert historical residue, kept for audit only."
+    )
     if warnings:
         lines.append("")
         lines.append("WARNINGS:")
@@ -282,7 +310,7 @@ def render_text(
             lines.append(f"  - {w}")
 
     lines.append("")
-    lines.append(f"ACTIONABLE ({ACTIONABLE_STATE}) -- claimable now, sorted by amount desc")
+    lines.append(f"INERT ({ACTIONABLE_STATE}) -- never submitted, never will be; sorted by amount desc")
     lines.append("-" * 100)
     if not actionable:
         lines.append("  (none)")
@@ -295,7 +323,7 @@ def render_text(
 
     lines.append("")
     lines.append(
-        f"BOOKKEEPING-STALE ({STALE_STATE}) -- excluded from actionable totals; already "
+        f"BOOKKEEPING-STALE ({STALE_STATE}) -- excluded from the totals above; already "
         "externally redeemed at zero payout per operator directive 2026-06-10"
     )
     lines.append("-" * 100)
@@ -307,20 +335,11 @@ def render_text(
     lines.append("")
     lines.append("TOTALS")
     lines.append("-" * 100)
-    lines.append(f"  actionable count:        {totals.actionable_count}")
-    lines.append(f"  actionable $ sum:        ${totals.actionable_total_usd:,.2f}")
-    lines.append(f"  actionable dollar-days:  ${totals.actionable_dollar_days:,.2f}")
+    lines.append(f"  inert-residue count:     {totals.actionable_count}")
+    lines.append(f"  inert-residue $ sum:     ${totals.actionable_total_usd:,.2f}")
+    lines.append(f"  inert-residue dollar-days: ${totals.actionable_dollar_days:,.2f}")
     lines.append(f"  bookkeeping-stale count: {totals.stale_count}")
     lines.append(f"  bookkeeping-stale $ sum: ${totals.stale_total_usd:,.2f} (excluded above)")
-
-    lines.append("")
-    lines.append("=" * 100)
-    lines.append("OPERATOR ACTION -- exact list for the third-party redeemer")
-    lines.append("=" * 100)
-    if not actionable:
-        lines.append("  (nothing actionable)")
-    for r in actionable:
-        lines.append(f"  condition_id={r.condition_id}  amount_pusd={r.pusd_amount:.6f}  token_ids={r.token_ids}")
     return "\n".join(lines)
 
 
@@ -328,20 +347,23 @@ def render_json(
     actionable: list[RedemptionRow], stale: list[RedemptionRow], totals: Totals, warnings: list[str]
 ) -> str:
     payload = {
+        "notice": (
+            "NO ACTION EXISTS for any row below. On-chain redemption is decoupled "
+            "entirely (2026-07-25) -- Polymarket settles win/loss on Zeus's behalf; "
+            "this capital is already accounted for via token_suppression / "
+            "chain-resolved payout observations. Permanently-inert historical "
+            "residue, kept for audit only."
+        ),
         "warnings": warnings,
-        "actionable": [_row_to_dict(r) for r in actionable],
+        "inert_residue": [_row_to_dict(r) for r in actionable],
         "bookkeeping_stale": [_row_to_dict(r) for r in stale],
         "totals": {
-            "actionable_count": totals.actionable_count,
-            "actionable_total_usd": round(totals.actionable_total_usd, 6),
-            "actionable_dollar_days": round(totals.actionable_dollar_days, 6),
+            "inert_residue_count": totals.actionable_count,
+            "inert_residue_total_usd": round(totals.actionable_total_usd, 6),
+            "inert_residue_dollar_days": round(totals.actionable_dollar_days, 6),
             "stale_count": totals.stale_count,
             "stale_total_usd": round(totals.stale_total_usd, 6),
         },
-        "operator_action": [
-            {"condition_id": r.condition_id, "amount_pusd": round(r.pusd_amount, 6), "token_ids": r.token_ids}
-            for r in actionable
-        ],
     }
     return json.dumps(payload, indent=2, sort_keys=True)
 

@@ -801,8 +801,8 @@ scripts:
     class: read_only_evidence
     read_targets: [state/zeus_trades.db]
     write_targets: [stdout]
-    reuse_when: "Read-only enumeration of settlement_commands stuck in redemption limbo (REDEEM_INTENT_CREATED actionable + REDEEM_REVIEW_REQUIRED bookkeeping-stale, per operator redeem directive 2026-06-10) for the third-party redeemer handoff; Zeus never submits a redeem tx (operator law). --verify-fee additionally checks the taker-fee cash effect against collateral-ledger balance deltas."
-    do_not_use_when: "Never constructs or submits any redeem transaction; the OPERATOR ACTION section is a list for a third party, not an executable instruction."
+    reuse_when: "Read-only HISTORICAL TELEMETRY over settlement_commands rows stuck in REDEEM_INTENT_CREATED / REDEEM_REVIEW_REQUIRED state. 2026-07-25: on-chain redemption is decoupled entirely (Polymarket settles win/loss on Zeus's behalf); these rows are permanently-inert residue, NOT a to-do list -- the underlying capital is already accounted for via token_suppression / chain-resolved payout observations. No operator action exists; the report is audit-only. --verify-fee additionally checks the taker-fee cash effect against collateral-ledger balance deltas (independent of the redemption-residue reporting)."
+    do_not_use_when: "Never constructs or submits any redeem transaction; never implies a pending operator task -- the report is historical residue only, not an actionable list."
     canonical_command: "python3 scripts/report_redemption_backlog.py [--db PATH] [--json] [--verify-fee] [--fee-sample-size N]"
     required_tests: [tests/test_report_redemption_backlog.py]
   audit_yes_no_selection_skew.py:
