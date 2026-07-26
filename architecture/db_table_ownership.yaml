@@ -1450,7 +1450,6 @@ tables:
       - {name: native_token_side, type: TEXT, nullable: true}
       - {name: expected_edge, type: REAL, nullable: true}
       - {name: kelly_size_usd, type: REAL, nullable: true}
-      - {name: live_cap_notional, type: REAL, nullable: true}
       - {name: quote_seen_at, type: TEXT, nullable: true}
       - {name: quote_age_ms, type: INTEGER, nullable: true}
       - {name: best_bid, type: REAL, nullable: true}

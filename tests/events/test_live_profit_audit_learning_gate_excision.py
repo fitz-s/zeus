@@ -26,7 +26,11 @@ from src.events.live_profit_audit import (
     compute_fill_alpha_gap_from_authorities,
     record_edli_live_profit_audit_from_aggregate,
 )
-from src.state.schema.edli_live_profit_audit_schema import ensure_table
+from src.state.schema.edli_live_profit_audit_schema import (
+    _RETIRED_COLUMNS,
+    ensure_table,
+)
+from src.state.table_registry import required_columns_for
 
 CERT_HASH = "ab" * 32
 COST_HASH = "cd" * 32
@@ -67,6 +71,14 @@ def test_columns_no_writer_can_fill_do_not_exist(conn: sqlite3.Connection) -> No
     cols = _columns(conn)
     assert "live_cap_notional" not in cols
     assert "post_fill_mark" not in cols
+
+
+def test_registry_does_not_require_retired_columns() -> None:
+    """Boot registry must not demand columns that the schema owner retires."""
+    required = required_columns_for("edli_live_profit_audit")
+    assert required is not None
+    declared = {column.name for column in required}
+    assert declared.isdisjoint(_RETIRED_COLUMNS)
 
 
 def test_execution_quality_metric_keeps_its_honest_name(conn: sqlite3.Connection) -> None:
