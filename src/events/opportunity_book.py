@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.decision_kernel.canonicalization import (
-    qkernel_current_state_identity_hash,
+    qkernel_global_current_state_rejection_reason,
     stable_hash,
 )
 from src.events.candidate_evaluation import CandidateEvaluation
@@ -54,75 +54,7 @@ def _declares_global_current_economics(economics: dict[str, Any]) -> bool:
 def _global_current_economics_live_admitted(economics: dict[str, Any]) -> bool:
     """Keep receipt admission coherent with a sealed global current-state winner."""
 
-    if not str(economics.get("global_actuation_identity") or "").strip():
-        return False
-    if str(economics.get("current_state_identity_hash") or "").strip() != (
-        qkernel_current_state_identity_hash(economics)
-    ):
-        return False
-    side = str(economics.get("side") or "").strip().upper()
-    if side not in {"YES", "NO"}:
-        return False
-    for field in (
-        "global_candidate_id",
-        "global_bin_id",
-        "global_universe_witness_identity",
-        "global_wealth_witness_identity",
-        "global_selection_epoch_identity",
-        "global_jit_book_hash",
-        "global_jit_venue_book_hash",
-        "global_jit_book_snapshot_id",
-        "global_jit_execution_curve_identity",
-    ):
-        if not str(economics.get(field) or "").strip():
-            return False
-    point = _finite_float(economics.get("payoff_q_point"))
-    lcb = _finite_float(economics.get("payoff_q_lcb"))
-    cost = _finite_float(economics.get("cost"))
-    edge = _finite_float(economics.get("edge_lcb"))
-    shares = _finite_float(economics.get("global_target_shares"))
-    expected_cost = _finite_float(economics.get("global_expected_cost_usd"))
-    max_spend = _finite_float(economics.get("global_max_spend_usd"))
-    robust_du = _finite_float(economics.get("global_robust_delta_log_wealth"))
-    robust_ev = _finite_float(economics.get("global_robust_ev_usd"))
-    if None in (
-        point,
-        lcb,
-        cost,
-        edge,
-        shares,
-        expected_cost,
-        max_spend,
-        robust_du,
-        robust_ev,
-    ):
-        return False
-    assert point is not None
-    assert lcb is not None
-    assert cost is not None
-    assert edge is not None
-    assert shares is not None
-    assert expected_cost is not None
-    assert max_spend is not None
-    assert robust_du is not None
-    assert robust_ev is not None
-    return bool(
-        0.0 <= lcb <= point <= 1.0
-        and 0.0 < cost < 1.0
-        and edge > 0.0
-        and math.isclose(lcb, cost + edge, rel_tol=1e-9, abs_tol=1e-9)
-        and shares > 0.0
-        and expected_cost > 0.0
-        and max_spend + 1e-9 >= expected_cost
-        and robust_du > 0.0
-        and robust_ev > 0.0
-        and math.isclose(
-            cost,
-            expected_cost / shares,
-            rel_tol=1e-9,
-            abs_tol=1e-9,
-        )
-    )
+    return qkernel_global_current_state_rejection_reason(economics) is None
 
 
 def _qkernel_selected_economics_live_admitted(economics: Any) -> bool:
@@ -201,6 +133,30 @@ def _qkernel_selected_objective(economics: Any) -> dict[str, Any] | None:
     edge_lcb = float(economics["edge_lcb"])
     if _declares_global_current_economics(economics):
         expected_cost = float(economics["global_expected_cost_usd"])
+        if economics.get("global_probability_functional") == (
+            "POSTERIOR_PREDICTIVE_MEAN"
+        ):
+            expected_ev = float(economics["global_expected_ev_usd"])
+            expected_du = float(economics["global_expected_delta_log_wealth"])
+            expected_efficiency = float(
+                economics["global_expected_capital_efficiency"]
+            )
+            edge_expected = float(economics["edge_expected"])
+            return {
+                "authority": "qkernel_global_current_state",
+                "objective_semantics": "POSTERIOR_PREDICTIVE_MEAN",
+                "objective_name": "EXPECTED_DELTA_LOG_WEALTH",
+                "objective_value": expected_du,
+                "expected_ev_per_dollar": expected_ev / expected_cost,
+                "expected_capital_efficiency": expected_efficiency,
+                "q_point": float(economics["payoff_q_point"]),
+                "q_lcb_5pct": float(economics["payoff_q_lcb"]),
+                "expected_edge": edge_expected,
+                "execution_price": cost,
+                "target_spend_usd": expected_cost,
+                "expected_ev_usd": expected_ev,
+                "expected_delta_log_wealth": expected_du,
+            }
         robust_ev = float(economics["global_robust_ev_usd"])
         robust_du = float(economics["global_robust_delta_log_wealth"])
         robust_kelly_fraction = edge_lcb / (1.0 - cost)
