@@ -12,10 +12,6 @@ from datetime import datetime, timezone
 import pytest
 
 from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
-from src.decision_kernel.verifier import (
-    _current_state_solve_payload,
-    _verify_pre_submit_revalidation_for_command,
-)
 from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
 from src.state.db import init_schema
 
@@ -2364,7 +2360,7 @@ def _pre_submit_payload(**overrides):
     return payload
 
 
-def test_pre_submit_mean_winner_uses_point_action_edge_through_all_verifiers():
+def test_pre_submit_mean_winner_is_blocked_before_command():
     point = 0.70
     lcb = 0.35
     cost = 0.40
@@ -2464,52 +2460,17 @@ def test_pre_submit_mean_winner_uses_point_action_edge_through_all_verifiers():
         occurred_at=NOW,
         source_authority="decision_kernel",
     )
-    event = ledger.append_event(
-        aggregate_id="event-mean:intent-mean",
-        event_type="PreSubmitRevalidated",
-        payload=payload,
-        occurred_at=NOW,
-        source_authority="engine_adapter",
-    )
-
-    assert event.event_type == "PreSubmitRevalidated"
-    assert _current_state_solve_payload(payload) is True
-
-    verified = {
-        **payload,
-        "aggregate_event_hash": event.event_hash,
-        "live_cap_usage_id": "cap-mean",
-    }
-    command = {
-        field: verified.get(field)
-        for field in (
-            "event_id",
-            "event_type",
-            "final_intent_id",
-            "strategy_key",
-            "condition_id",
-            "token_id",
-            "side",
-            "direction",
-            "order_type",
-            "time_in_force",
-            "post_only",
-            "limit_price",
-            "min_order_size",
-            "neg_risk",
+    with pytest.raises(
+        LiveOrderAggregateError,
+        match="positive submit q_lcb-minus-cost-bound",
+    ):
+        ledger.append_event(
+            aggregate_id="event-mean:intent-mean",
+            event_type="PreSubmitRevalidated",
+            payload=payload,
+            occurred_at=NOW,
+            source_authority="engine_adapter",
         )
-    }
-    command.update(
-        tick_size=str(verified["tick_size"]),
-        aggregate_pre_submit_event_hash=event.event_hash,
-        aggregate_execution_command_event_hash="command-event-mean",
-    )
-    _verify_pre_submit_revalidation_for_command(
-        command,
-        verified,
-        {"replacement_no_bound_certificate": None},
-        {"usage_id": "cap-mean"},
-    )
 
 
 def _day0_lcb_transform(condition_id: str = "condition-1", q_lcb: float = 0.60):

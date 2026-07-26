@@ -380,10 +380,7 @@ def qkernel_global_current_state_rejection_reason(
         or "LOWER_CVAR_PARAMETER_DRAWS"
     ).strip()
     if functional == "POSTERIOR_PREDICTIVE_MEAN":
-        return _qkernel_global_mean_buy_rejection_reason(
-            economics,
-            direction=direction,
-        )
+        return "buy_requires_robust_probability_functional"
     if functional != "LOWER_CVAR_PARAMETER_DRAWS":
         return "global_probability_functional"
     numeric: dict[str, float] = {}

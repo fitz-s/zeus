@@ -2660,7 +2660,7 @@ class GlobalSingleOrderCandidateEvaluation:
             if self.action == "BUY"
             else "IMMEDIATE_REDUCE_ONLY_SELL"
         )
-        mean_action = self.action == "BUY" or (
+        mean_action = (
             self.action == "SELL"
             and self.sell_probability_functional
             == "POSTERIOR_PREDICTIVE_MEAN"
@@ -3075,7 +3075,7 @@ class GlobalSingleOrderDecision:
             or self.fractional_kelly_target_shares <= self.current_token_shares
             or self.fractional_kelly_target_shares
             > self.full_kelly_target_shares
-            or (not internal_score and not expected_buy)
+            or (not internal_score and expected_buy)
             or (self.terminal_wealth is None) == (
                 self.expected_terminal_wealth is None
             )
@@ -3855,11 +3855,11 @@ def plan_family_joint_buy_targets(
             empty,
             no_trade_reason="FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED",
         )
-    mean_q = np.asarray(
-        probability_witness.yes_point_q,
+    q_draws = np.asarray(
+        probability_witness.yes_q_samples,
         dtype=np.float64,
-    ).reshape(1, -1)
-    weights = np.ones(1, dtype=np.float64)
+    )
+    weights = np.ones(q_draws.shape[0], dtype=np.float64)
     try:
         direct, _u, _iterations = _ru_cvar_optimum(
             seed=np.zeros(len(caps), dtype=np.float64),
@@ -3868,7 +3868,7 @@ def plan_family_joint_buy_targets(
             caps=caps,
             costs=costs,
             cash=float(direct_cash),
-            q_draws=mean_q,
+            q_draws=q_draws,
             weights=weights,
             alpha=probability_witness.band_alpha,
         )
@@ -3960,7 +3960,11 @@ def plan_family_joint_buy_targets(
             w_end += claim * float(shares) - float(cost)
         if np.any(w_end <= 0.0):
             return float("-inf")
-        return float(mean_q[0] @ np.log(w_end / w0))
+        return _lower_cvar(
+            q_draws @ np.log(w_end / w0),
+            weights,
+            probability_witness.band_alpha,
+        )
 
     joint_du = exact_delta(desired)
     if not math.isfinite(joint_du) or joint_du <= 0.0:
@@ -6020,24 +6024,16 @@ def select_global_single_order(
             joint_buy_candidates_by_family.setdefault(
                 candidate.family_key, []
             ).append(candidate)
-        payoff_probability_mean = family_payoff_point_q(
-            probability_witnesses[candidate.family_key],
-            bin_id=candidate.bin_id,
-            side=candidate.side,
-        )
-        if payoff_probability_mean is None:
-            rejections[candidate.candidate_id] = "POINT_PROBABILITY_UNAVAILABLE"
-            continue
-        score = _score_global_single_order_buy_expected(
+        score = _score_global_single_order(
             candidate,
-            payoff_probability_mean=payoff_probability_mean,
-            sample_count=q_samples.size,
+            q_samples=q_samples,
             band_alpha=band_alpha,
             wealth_floor_usd=candidate_endowment.loss_wealth_floor_usd,
             wealth_ceiling_usd=candidate_endowment.win_wealth_floor_usd,
             spendable_cash_usd=wealth_witness.spendable_cash_usd,
             capital_limit_usd=candidate_capital_limit,
             fractional_kelly_multiplier=multiplier,
+            payoff_q_lcb=candidate_payoff_q_lcb,
             current_token_shares=candidate_endowment.current_token_shares,
         )
         if score.candidate is None:
@@ -6204,24 +6200,22 @@ def select_global_single_order(
                     primary.executable_cost_curve,
                     target.shares,
                 )
-                payoff_probability_mean = family_payoff_point_q(
-                    witness,
-                    bin_id=primary.bin_id,
-                    side=primary.side,
+                primary_payoff_q_lcb = (
+                    candidate_payoff_q_lcb_resolver(primary)
+                    if candidate_payoff_q_lcb_resolver is not None
+                    else None
                 )
-                if payoff_probability_mean is None:
-                    raise ValueError("POINT_PROBABILITY_UNAVAILABLE")
-                fixed = _score_global_single_order_buy_expected(
+                fixed = _score_global_single_order(
                     primary,
-                    payoff_probability_mean=payoff_probability_mean,
-                    sample_count=q_samples.size,
+                    q_samples=q_samples,
                     band_alpha=witness.band_alpha,
                     wealth_floor_usd=primary_endowment.loss_wealth_floor_usd,
                     wealth_ceiling_usd=primary_endowment.win_wealth_floor_usd,
                     spendable_cash_usd=wealth_witness.spendable_cash_usd,
                     capital_limit_usd=target_cost,
                     fractional_kelly_multiplier=Decimal("1"),
-                    current_token_shares=Decimal("0"),
+                    payoff_q_lcb=primary_payoff_q_lcb,
+                    current_token_shares=target.current_token_shares,
                 )
             except Exception:  # noqa: BLE001 - repaired primary must remain executable
                 fixed = GlobalSingleOrderDecision(

@@ -13,6 +13,7 @@ from src.decision_kernel.canonicalization import (
     qkernel_current_state_identity_hash,
     qkernel_global_current_state_rejection_reason,
 )
+from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.verifier import _verify_actionable_qkernel_economics
 from src.engine.event_bound_final_intent import conservative_submit_expected_edge
 from src.execution.executor import (
@@ -1202,7 +1203,7 @@ def test_entry_economics_current_state_tail_still_requires_positive_robust_utili
     assert verdict["reason"] == "expected_profit_below_floor"
 
 
-def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb_edge():
+def test_current_state_mean_buy_is_blocked_when_lcb_edge_is_negative():
     economics = _current_state_mean_buy_econ(global_max_spend_usd="2.05")
 
     assert (
@@ -1210,7 +1211,7 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
             economics,
             direction="buy_yes",
         )
-        is None
+        == "buy_requires_robust_probability_functional"
     )
     tampered = {
         **economics,
@@ -1224,7 +1225,7 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
             tampered,
             direction="buy_yes",
         )
-        == "mean_execution_edge"
+        == "buy_requires_robust_probability_functional"
     )
 
     verdict = _entry_economics_component(
@@ -1241,7 +1242,8 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
-    assert verdict["allowed"] is True
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "submit_q_lcb_minus_limit_non_positive"
     assert conservative_submit_expected_edge(
         {
             "direction": "buy_yes",
@@ -1250,16 +1252,20 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
             "qkernel_execution_economics": economics,
         },
         limit_price=0.40,
-    ) == pytest.approx(0.29)
-    _verify_actionable_qkernel_economics(
-        {
-            "direction": "buy_yes",
-            "selection_authority_applied": "qkernel_spine",
-            "qkernel_execution_economics": economics,
-        },
-        q_live=0.70,
-        q_lcb=0.35,
-    )
+    ) == pytest.approx(-0.06)
+    with pytest.raises(
+        CertificateVerificationError,
+        match="current-state identity invalid",
+    ):
+        _verify_actionable_qkernel_economics(
+            {
+                "direction": "buy_yes",
+                "selection_authority_applied": "qkernel_spine",
+                "qkernel_execution_economics": economics,
+            },
+            q_live=0.70,
+            q_lcb=0.35,
+        )
     taker_quality = _entry_taker_quality_component(
         effective_order_type="FAK",
         post_only=False,
@@ -1280,7 +1286,8 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
         selection_authority_applied="qkernel_spine",
         qkernel_execution_economics=economics,
     )
-    assert taker_quality["allowed"] is True
+    assert taker_quality["allowed"] is False
+    assert taker_quality["reason"] == "current_band_taker_quality_proof_invalid"
 
 
 @pytest.mark.parametrize(

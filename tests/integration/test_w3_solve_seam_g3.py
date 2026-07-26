@@ -148,16 +148,15 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     )
     win_q = 0.55
     expected_du = (1.0 - win_q) * math.log(0.9412) + win_q * math.log(1.0612)
-    terminal = ExpectedBuyTerminalWealthCertificate(
-        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
-        win_probability_mean=win_q,
-        loss_probability_mean=1.0 - win_q,
+    terminal = BinaryTerminalWealthCertificate(
+        win_probability_lcb=win_q,
+        loss_probability_ucb=1.0 - win_q,
         loss_payoff_usd=Decimal("-5.88"),
         win_payoff_usd=Decimal("6.12"),
+        median_payoff_usd=Decimal("6.12"),
         wealth_after_loss_usd=Decimal("94.12"),
         wealth_after_win_usd=Decimal("106.12"),
-        expected_delta_log_wealth=expected_du,
-        expected_ev_usd=0.72,
+        expected_value_usd=0.72,
     )
     sell_point_counterfactual = GlobalSellPointCounterfactual(
         status="POSITIVE",
@@ -207,20 +206,21 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             status="SELECTED",
             shares=Decimal("12"),
             cost_usd=Decimal("5.88"),
-            robust_delta_log_wealth=0.0,
-            robust_ev_usd=0.0,
-            capital_efficiency=0.0,
+            robust_delta_log_wealth=expected_du,
+            robust_ev_usd=0.72,
+            capital_efficiency=expected_du / 5.88,
             capital_action_mode="SETTLEMENT_LOCKED_BUY",
             buy_sizing_mode="FRACTIONAL_TARGET",
             resolution_at_utc=at + _dt.timedelta(days=1),
             capital_lock_hours=24.0,
+            robust_log_growth_per_hour=expected_du / 24.0,
             limit_price=Decimal("0.49"),
             expected_fill_price_before_fee=Decimal("0.49"),
             max_spend_usd=Decimal("5.88"),
             current_token_shares=Decimal("0"),
             full_kelly_target_shares=Decimal("40"),
             fractional_kelly_target_shares=Decimal("12"),
-            expected_terminal_wealth=terminal,
+            terminal_wealth=terminal,
             expected_growth=buy_expected_growth,
         ),
         GlobalSingleOrderCandidateEvaluation(
@@ -264,21 +264,22 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         candidate=buy_candidate,
         shares=Decimal("12"),
         cost_usd=Decimal("5.88"),
-        robust_delta_log_wealth=0.0,
-        robust_ev_usd=0.0,
-        capital_efficiency=0.0,
+        robust_delta_log_wealth=expected_du,
+        robust_ev_usd=0.72,
+        capital_efficiency=expected_du / 5.88,
         no_trade_reason=None,
         capital_action_mode="SETTLEMENT_LOCKED_BUY",
         buy_sizing_mode="FRACTIONAL_TARGET",
         resolution_at_utc=at + _dt.timedelta(days=1),
         capital_lock_hours=24.0,
+        robust_log_growth_per_hour=expected_du / 24.0,
         limit_price=Decimal("0.49"),
         expected_fill_price_before_fee=Decimal("0.49"),
         max_spend_usd=Decimal("5.88"),
         current_token_shares=Decimal("0"),
         full_kelly_target_shares=Decimal("40"),
         fractional_kelly_target_shares=Decimal("12"),
-        expected_terminal_wealth=terminal,
+        terminal_wealth=terminal,
         expected_growth=buy_expected_growth,
         rejection_reasons={
             evaluation.candidate_id: str(evaluation.rejection_reason)
@@ -303,35 +304,34 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         candidate_input_count=None,
     )
     changed_q = 0.51
-    changed_terminal = ExpectedBuyTerminalWealthCertificate(
-        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
-        win_probability_mean=changed_q,
-        loss_probability_mean=1.0 - changed_q,
+    changed_du = (
+        (1.0 - changed_q) * math.log(0.9412)
+        + changed_q * math.log(1.0612)
+    )
+    changed_ev = changed_q * 12.0 - 5.88
+    changed_terminal = BinaryTerminalWealthCertificate(
+        win_probability_lcb=changed_q,
+        loss_probability_ucb=1.0 - changed_q,
         loss_payoff_usd=terminal.loss_payoff_usd,
         win_payoff_usd=terminal.win_payoff_usd,
+        median_payoff_usd=terminal.win_payoff_usd,
         wealth_after_loss_usd=terminal.wealth_after_loss_usd,
         wealth_after_win_usd=terminal.wealth_after_win_usd,
-        expected_delta_log_wealth=(
-            (1.0 - changed_q) * math.log(0.9412)
-            + changed_q * math.log(1.0612)
-        ),
-        expected_ev_usd=(changed_q * 12.0 - 5.88),
+        expected_value_usd=changed_ev,
     )
     changed_decision = replace(
         identity_decision,
-        expected_terminal_wealth=changed_terminal,
+        terminal_wealth=changed_terminal,
+        robust_delta_log_wealth=changed_du,
+        robust_ev_usd=changed_ev,
+        capital_efficiency=changed_du / 5.88,
+        robust_log_growth_per_hour=changed_du / 24.0,
         expected_growth=replace(
             buy_expected_growth,
-            expected_delta_log_wealth=(
-                changed_terminal.expected_delta_log_wealth
-            ),
-            expected_ev_usd=changed_terminal.expected_ev_usd,
-            expected_log_growth_per_hour=(
-                changed_terminal.expected_delta_log_wealth / 24.0
-            ),
-            expected_capital_efficiency=(
-                changed_terminal.expected_delta_log_wealth / 5.88
-            ),
+            expected_delta_log_wealth=changed_du,
+            expected_ev_usd=changed_ev,
+            expected_log_growth_per_hour=changed_du / 24.0,
+            expected_capital_efficiency=changed_du / 5.88,
         ),
     )
     assert global_single_order_economic_identity(
@@ -780,8 +780,11 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         "FRACTIONAL_TARGET"
     )
     assert candidate_evaluations["detailed"][0][
+        "terminal_wealth"
+    ]["win_probability_lcb"] == pytest.approx(win_q)
+    assert candidate_evaluations["detailed"][0][
         "expected_terminal_wealth"
-    ]["probability_basis"] == "POSTERIOR_PREDICTIVE_MEAN"
+    ] is None
     sell_evaluation = candidate_evaluations["detailed"][1]
     assert sell_evaluation["shares"] == "12.34"
     assert sell_evaluation["cash_proceeds_usd"] == "10"
@@ -9484,7 +9487,7 @@ def test_global_current_state_economics_tightens_on_current_candidate_cap():
         )
 
 
-def test_global_current_state_mean_buy_uses_current_point_and_keeps_lcb_as_evidence():
+def test_global_current_state_mean_buy_cannot_reenter_live_economics():
     at = _dt.datetime(2026, 7, 26, 12, 0, tzinfo=_dt.timezone.utc)
     family = "Seoul|2026-07-27|high"
     bindings = (
@@ -9559,57 +9562,22 @@ def test_global_current_state_mean_buy_uses_current_point_and_keeps_lcb_as_evide
         expected_terminal_wealth=terminal,
     )
 
-    current = era._global_current_state_execution_economics(
-        {
-            "source": "qkernel_spine",
-            "decision_id": "decision-current",
-            "receipt_hash": "receipt-current",
-            "payoff_q_point": 0.70,
-            "payoff_q_lcb": 0.35,
-        },
-        decision=decision,
-        witness=witness,
-        payoff_q_lcb_cap=0.35,
-    )
-
-    assert current["global_probability_functional"] == (
-        "POSTERIOR_PREDICTIVE_MEAN"
-    )
-    assert current["payoff_q_action"] == pytest.approx(0.70)
-    assert current["edge_expected"] == pytest.approx(0.30)
-    assert current["edge_lcb"] == pytest.approx(-0.05)
-    assert current["global_current_sample_payoff_q_lcb"] == pytest.approx(0.50)
-    assert current["global_expected_ev_usd"] == pytest.approx(1.5)
-    assert current["false_edge_rate"] == pytest.approx(1.0 / 401.0)
-    assert "global_robust_ev_usd" not in current
-    from src.events.day0_authority import (
-        assert_live_day0_qkernel_guard_authority,
-    )
-
-    assert_live_day0_qkernel_guard_authority(
-        current,
-        probability_payload={
-            "_edli_q_source": "day0_remaining_day",
-            "_edli_day0_remaining_models": 15,
-            "direction": "buy_yes",
-            "q_live": current["payoff_q_point"],
-            "q_lcb_5pct": current["payoff_q_lcb"],
-        },
-    )
-
-    uncapped = era._global_current_state_execution_economics(
-        {
-            "source": "qkernel_spine",
-            "decision_id": "decision-current",
-            "receipt_hash": "receipt-current",
-            "payoff_q_point": 0.70,
-            "payoff_q_lcb": 0.35,
-        },
-        decision=decision,
-        witness=witness,
-    )
-    assert uncapped["payoff_q_lcb"] == pytest.approx(0.50)
-    assert uncapped["edge_lcb"] == pytest.approx(0.10)
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_BUY_REQUIRES_ROBUST_ECONOMICS",
+    ):
+        era._global_current_state_execution_economics(
+            {
+                "source": "qkernel_spine",
+                "decision_id": "decision-current",
+                "receipt_hash": "receipt-current",
+                "payoff_q_point": 0.70,
+                "payoff_q_lcb": 0.35,
+            },
+            decision=decision,
+            witness=witness,
+            payoff_q_lcb_cap=0.35,
+        )
 
 
 def test_time_dependent_candidate_caps_are_not_probability_cached(monkeypatch):

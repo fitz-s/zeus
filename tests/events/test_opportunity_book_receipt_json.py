@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import math
 
+import pytest
+
 from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.no_submit_receipts import _receipt_json
@@ -68,7 +70,7 @@ def test_opportunity_book_included_in_receipt_json_when_present():
     assert payload["opportunity_book"]["selected_candidate_id"] == "candidate-1"
 
 
-def test_mean_selected_global_candidate_uses_canonical_live_admission():
+def test_mean_selected_global_candidate_cannot_claim_live_admission():
     point = 0.87
     lcb = 0.11
     cost = 0.33
@@ -173,31 +175,25 @@ def test_mean_selected_global_candidate_uses_canonical_live_admission():
         },
     ).to_receipt_dict()
 
-    assert payload["candidates"][0]["admitted"] is True
-    assert payload["selected_objective"]["objective_semantics"] == (
-        "POSTERIOR_PREDICTIVE_MEAN"
-    )
-    assert payload["selected_objective"]["expected_ev_usd"] == expected_ev
-    assert payload["selected_objective"]["expected_capital_efficiency"] == (
-        expected_du / expected_cost
-    )
-    assert "expected_robust_dollars" not in payload["selected_objective"]
+    assert payload["candidates"][0]["admitted"] is False
+    assert "objective_semantics" not in payload["selected_objective"]
 
     from src.engine.event_reactor_adapter import (
         _assert_event_bound_receipt_live_authority,
     )
 
-    _assert_event_bound_receipt_live_authority(
-        EventSubmissionReceipt(
-            submitted=False,
-            event_id="event-mean",
-            condition_id="condition-no",
-            token_id="token-no",
-            direction="buy_no",
-            q_source="qkernel_spine",
-            q_live=point,
-            q_lcb_5pct=lcb,
-            qkernel_execution_economics=cert,
-            opportunity_book=payload,
+    with pytest.raises(ValueError):
+        _assert_event_bound_receipt_live_authority(
+            EventSubmissionReceipt(
+                submitted=False,
+                event_id="event-mean",
+                condition_id="condition-no",
+                token_id="token-no",
+                direction="buy_no",
+                q_source="qkernel_spine",
+                q_live=point,
+                q_lcb_5pct=lcb,
+                qkernel_execution_economics=cert,
+                opportunity_book=payload,
+            )
         )
-    )
