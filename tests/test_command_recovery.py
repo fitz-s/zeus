@@ -1352,6 +1352,65 @@ def test_live_tick_recovers_fill_provenance_before_maintenance_budget_defer(
     )
 
 
+def test_live_tick_recovers_abandoned_ghost_before_general_budget_defer(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+    now = [0.0]
+
+    def _conn_factory():
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _abandoned(_conn, **_kwargs):
+        calls.append("abandoned_unsubmitted_ghosts")
+        return {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+            "continuations": [{"aggregate_id": "ghost-1"}],
+        }
+
+    def _authenticated(_conn):
+        calls.append("authenticated_entry_trade_fact")
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_abandoned_unsubmitted_ghosts",
+        _abandoned,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_authenticated_entry_trade_facts",
+        _authenticated,
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-07-26T08:55:00+00:00",
+        scope="live_tick",
+    )
+
+    assert calls == [
+        "abandoned_unsubmitted_ghosts",
+        "authenticated_entry_trade_fact",
+    ]
+    assert summary["abandoned_unsubmitted_ghosts"]["advanced"] == 1
+    assert summary["db_budget_deferred"] is True
+    assert summary["db_budget_deferred_at"] == "authenticated_entry_trade_fact"
+
+
 def test_live_tick_recovers_confirmed_review_fill_before_maintenance_budget_defer(
     monkeypatch,
 ):

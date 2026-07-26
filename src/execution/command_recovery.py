@@ -21366,6 +21366,17 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
 
     if scope == "live_tick":
         _capital_recovery_fast_pass()
+        # An aggregate abandoned at ExecutionCommandCreated holds a RESERVED
+        # live-cap row and blocks its whole weather family.  The venue-absence
+        # reconciler already requires the full safe-replay grace and proves no
+        # command/venue/user fact exists; run that bounded local proof before
+        # maintenance can exhaust the live-tick DB budget.
+        _db_pass(
+            "abandoned_unsubmitted_ghosts",
+            reconcile_abandoned_unsubmitted_ghosts,
+            "abandoned_unsubmitted_ghosts",
+            updated_before=started_at,
+        )
 
     _db_pass(
         "authenticated_entry_trade_fact",
