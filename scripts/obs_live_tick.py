@@ -279,12 +279,43 @@ def _city_local_fetch_window(city_name: str, *, now_utc: datetime, days_back: in
     city = cities_by_name[city_name]
     return city_local_fetch_window(city.timezone, reference_time=now_utc, days_back=days_back)
 
-def _append_wu_prints_to_ledger(conn: sqlite3.Connection, prints: list[dict] | None) -> None:
-    """Append WU hourly bucket extrema (hour_max_temp @ hour_max_raw_ts,
-    hour_min_temp @ hour_min_raw_ts) to the observation_prints
-    publication-stream ledger (day0 defect-ledger, 2026-07-16).
+def _hourly_observation_prints(
+    obs: HourlyObservation,
+    *,
+    source_channel: str,
+    fetched_at_utc: str,
+) -> list[dict]:
+    """Return append-only extrema and latest-report facts for one hour bucket."""
 
-    Design amendment: double-writing wu_icao_history (already durably
+    facts = [
+        (obs.hour_max_raw_ts, obs.hour_max_temp),
+        (obs.hour_min_raw_ts, obs.hour_min_temp),
+    ]
+    if obs.latest_temp is not None:
+        facts.append((_latest_raw_ts(obs), obs.latest_temp))
+    return [
+        {
+            "city": obs.city,
+            "station_id": obs.station_id,
+            "source_channel": source_channel,
+            "publish_ts_utc": publish_ts,
+            "value_native": value,
+            "unit": obs.temp_unit,
+            "fetched_at_utc": fetched_at_utc,
+            "raw_report": None,
+        }
+        for publish_ts, value in facts
+    ]
+
+
+def _append_hourly_prints_to_ledger(
+    conn: sqlite3.Connection,
+    prints: list[dict] | None,
+) -> None:
+    """Append native hourly extrema and latest-report temperature to the
+    observation_prints publication-stream ledger.
+
+    Design amendment: double-writing the native hourly source (already durably
     persisted via observation_instants + observation_revisions, see day0
     defect-2's widening fix) is now the POINT, not a mistake to avoid — the
     absorbing-direction reduction in _latest_authorized_day0_fact is
@@ -309,10 +340,10 @@ def _append_wu_prints_to_ledger(conn: sqlite3.Connection, prints: list[dict] | N
             if append_print(conn, **entry):
                 appended += 1
         if appended:
-            logger.debug("OBSERVATION_PRINTS_APPENDED source=wu_icao_history count=%d", appended)
+            logger.debug("OBSERVATION_PRINTS_APPENDED count=%d", appended)
     except Exception as exc:  # noqa: BLE001 — ledger append is best-effort, never blocks the obs_v2 write
         logger.warning(
-            "OBSERVATION_PRINTS_APPEND_FAILED source=wu_icao_history exc=%s: %s",
+            "OBSERVATION_PRINTS_APPEND_FAILED exc=%s: %s",
             type(exc).__name__, exc,
         )
 
@@ -336,7 +367,7 @@ def _write_rows(
         return 0
     if isinstance(conn_or_path, sqlite3.Connection):
         written = insert_rows(conn_or_path, rows)
-        _append_wu_prints_to_ledger(conn_or_path, prints)
+        _append_hourly_prints_to_ledger(conn_or_path, prints)
         _emit_admitted_day0_events(
             conn_or_path,
             city_name=day0_event_city,
@@ -359,7 +390,7 @@ def _write_rows(
             # with SQLITE_BUSY_SNAPSHOT — busy_timeout never applies to it.
             conn.execute("BEGIN IMMEDIATE")
             written = insert_rows(conn, rows)
-            _append_wu_prints_to_ledger(conn, prints)
+            _append_hourly_prints_to_ledger(conn, prints)
             _emit_admitted_day0_events(
                 conn,
                 city_name=day0_event_city,
@@ -489,16 +520,13 @@ def _tick_wu_city(
             logger.warning("Row build error %s %s: %s", city_name, obs.utc_timestamp, exc)
             result.row_build_errors += 1
             continue
-        prints.append(dict(
-            city=city_name, station_id=obs.station_id, source_channel="wu_icao_history",
-            publish_ts_utc=obs.hour_max_raw_ts, value_native=obs.hour_max_temp,
-            unit=obs.temp_unit, fetched_at_utc=imported_at, raw_report=None,
-        ))
-        prints.append(dict(
-            city=city_name, station_id=obs.station_id, source_channel="wu_icao_history",
-            publish_ts_utc=obs.hour_min_raw_ts, value_native=obs.hour_min_temp,
-            unit=obs.temp_unit, fetched_at_utc=imported_at, raw_report=None,
-        ))
+        prints.extend(
+            _hourly_observation_prints(
+                obs,
+                source_channel="wu_icao_history",
+                fetched_at_utc=imported_at,
+            )
+        )
 
     result.rows_ready = len(rows)
     if not dry_run and rows:
@@ -537,12 +565,21 @@ def _tick_ogimet_city(
     imported_at = proof_of_possession_available_at(datetime.now(timezone.utc))
 
     rows: list[ObsV2Row] = []
+    prints: list[dict] = []
     for obs in fetch.observations:
         try:
             rows.append(_hourly_obs_to_v2_row(obs, imported_at=imported_at, tier_name="OGIMET_METAR"))
         except (InvalidObsV2RowError, ValueError) as exc:
             logger.warning("Row build error %s %s: %s", city_name, obs.utc_timestamp, exc)
             result.row_build_errors += 1
+            continue
+        prints.extend(
+            _hourly_observation_prints(
+                obs,
+                source_channel=source_tag,
+                fetched_at_utc=imported_at,
+            )
+        )
 
     result.rows_ready = len(rows)
     if not dry_run and rows:
@@ -551,6 +588,7 @@ def _tick_ogimet_city(
         result.rows_written = _write_rows(
             conn,
             rows,
+            prints,
             day0_event_city=city_name,
             day0_family_admission=day0_family_admission,
             inserted_event_ids=event_ids,

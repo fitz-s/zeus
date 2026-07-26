@@ -867,6 +867,80 @@ class TestRemainingDayMembers:
             "aviationweather_metar",
         )
 
+    def test_ogimet_hourly_latest_report_reaches_current_temperature_authority(
+        self, monkeypatch
+    ):
+        """The native hourly ingest bridge must publish the latest report, not
+        only the bucket extrema, for NOAA-routed current-state conditioning."""
+        import src.engine.event_reactor_adapter as era
+        from scripts.obs_live_tick import (
+            _append_hourly_prints_to_ledger,
+            _hourly_observation_prints,
+        )
+        from src.data.wu_hourly_client import HourlyObservation
+        from src.state.schema.observation_prints_schema import ensure_table
+
+        city = SimpleNamespace(
+            name="Tel Aviv",
+            timezone="Asia/Jerusalem",
+            settlement_unit="C",
+            settlement_source_type="noaa",
+            wu_station="LLBG",
+        )
+        obs = HourlyObservation(
+            city="Tel Aviv",
+            target_date="2026-07-27",
+            local_hour=0.0,
+            local_timestamp="2026-07-27T00:00:00+03:00",
+            utc_timestamp="2026-07-26T21:00:00+00:00",
+            utc_offset_minutes=180,
+            dst_active=1,
+            is_ambiguous_local_hour=0,
+            is_missing_local_hour=0,
+            time_basis="utc_hour_bucket_extremum",
+            hour_max_temp=28.0,
+            hour_min_temp=26.0,
+            hour_max_raw_ts="2026-07-26T21:00:00+00:00",
+            hour_min_raw_ts="2026-07-26T21:10:00+00:00",
+            temp_unit="C",
+            station_id="LLBG",
+            observation_count=3,
+            latest_raw_ts="2026-07-26T21:20:00+00:00",
+            latest_temp=27.0,
+        )
+        conn = _conn()
+        ensure_table(conn)
+        _append_hourly_prints_to_ledger(
+            conn,
+            _hourly_observation_prints(
+                obs,
+                source_channel="ogimet_metar_llbg",
+                fetched_at_utc="2026-07-26T21:25:00+00:00",
+            ),
+        )
+        monkeypatch.setattr(
+            era,
+            "runtime_cities_by_name",
+            lambda: {"Tel Aviv": city},
+        )
+
+        current = era._latest_day0_current_temperature_native(
+            world_conn=conn,
+            family=SimpleNamespace(
+                city="Tel Aviv",
+                target_date="2026-07-27",
+                metric="high",
+            ),
+            decision_time=datetime(2026, 7, 26, 21, 30, tzinfo=UTC),
+        )
+        conn.close()
+
+        assert current == (
+            27.0,
+            datetime(2026, 7, 26, 21, 20, tzinfo=UTC),
+            "ogimet_metar_llbg",
+        )
+
     def test_fahrenheit_fast_current_temperature_requires_precise_t_group(
         self, monkeypatch
     ):

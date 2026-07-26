@@ -4,6 +4,25 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-26 Native hourly publication-ledger continuity
+
+After canonical `temp_current` became available, held-position redecision still
+reported `DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE`. The remaining-window
+conditioner correctly admits only the append-only `observation_prints` ledger,
+not the mutable hourly projection. The live tick wrote WU extrema to that
+ledger, omitted each bucket's non-extreme latest report, and wrote no Ogimet
+prints at all. Thus the current-state fact existed in the source response and
+hourly projection but was absent from probability authority.
+
+Both native WU and Ogimet hourly paths now append three independently deduped
+facts per bucket: max, min, and latest causal report temperature. The ledger
+remains append-only; the hourly projection and event publication commit under
+the same writer lock. SCOPE is the exact city/station/source/report identity;
+DRAIN is the next successful native-source tick; RESET is an admitted ledger
+print followed by the normal held-position monitor cycle. This restores source
+truth to current-state probability without substituting market price or adding
+trade-specific thresholds.
+
 ## 2026-07-26 Same-hour latest-temperature advance
 
 The latest-temperature repair exposed a second writer-side discontinuity.

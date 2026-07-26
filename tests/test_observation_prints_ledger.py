@@ -40,6 +40,52 @@ def _conn() -> sqlite3.Connection:
 
 
 class TestAppendOnly:
+    def test_native_hour_bucket_keeps_non_extreme_latest_report(self):
+        from scripts.obs_live_tick import (
+            _append_hourly_prints_to_ledger,
+            _hourly_observation_prints,
+        )
+        from src.data.wu_hourly_client import HourlyObservation
+
+        obs = HourlyObservation(
+            city="Tel Aviv",
+            target_date="2026-07-27",
+            local_hour=0.0,
+            local_timestamp="2026-07-27T00:00:00+03:00",
+            utc_timestamp="2026-07-26T21:00:00+00:00",
+            utc_offset_minutes=180,
+            dst_active=1,
+            is_ambiguous_local_hour=0,
+            is_missing_local_hour=0,
+            time_basis="utc_hour_bucket_extremum",
+            hour_max_temp=28.0,
+            hour_min_temp=26.0,
+            hour_max_raw_ts="2026-07-26T21:00:00+00:00",
+            hour_min_raw_ts="2026-07-26T21:10:00+00:00",
+            temp_unit="C",
+            station_id="LLBG",
+            observation_count=3,
+            latest_raw_ts="2026-07-26T21:20:00+00:00",
+            latest_temp=27.0,
+        )
+        prints = _hourly_observation_prints(
+            obs,
+            source_channel="ogimet_metar_llbg",
+            fetched_at_utc="2026-07-26T21:25:00+00:00",
+        )
+        conn = _conn()
+        _append_hourly_prints_to_ledger(conn, prints)
+
+        rows = conn.execute(
+            "SELECT source_channel, publish_ts_utc, value_native "
+            "FROM observation_prints ORDER BY publish_ts_utc"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("ogimet_metar_llbg", "2026-07-26T21:00:00+00:00", 28.0),
+            ("ogimet_metar_llbg", "2026-07-26T21:10:00+00:00", 26.0),
+            ("ogimet_metar_llbg", "2026-07-26T21:20:00+00:00", 27.0),
+        ]
+
     def test_append_dedup_is_free_noop(self):
         conn = _conn()
         first = append_print(
@@ -437,7 +483,7 @@ class TestLedgerWriteFailSoft:
         # entirely -- append_print raises OperationalError inside the
         # ledger helper, which must swallow it without touching the caller.
         conn = sqlite3.connect(":memory:")
-        obs_tick._append_wu_prints_to_ledger(
+        obs_tick._append_hourly_prints_to_ledger(
             conn,
             [{
                 "city": "Paris", "station_id": "LFPB", "source_channel": "wu_icao_history",
