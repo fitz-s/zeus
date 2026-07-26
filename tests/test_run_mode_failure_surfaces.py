@@ -6745,6 +6745,62 @@ def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
     assert pending.is_set() is True
 
 
+def test_active_monitor_owns_day0_priority_without_starving_reactor(
+    monkeypatch,
+) -> None:
+    import threading
+
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    wake = wake_module.ReactorWake(
+        "wake-day0-queued-behind-monitor",
+        "2026-07-26T10:00:00+00:00",
+        "day0_extreme_updated_trigger",
+        "day0_extreme_event_committed",
+        ("event-day0-queued",),
+        (("Wellington", "2026-07-26", "high"),),
+    )
+    pending = threading.Event()
+    pending.set()
+    acknowledgements: list[str] = []
+    monitor_dispatches: list[str] = []
+
+    monkeypatch.setattr(
+        wake_module,
+        "reactor_urgent_wake_identity",
+        lambda: (wake.wake_id, wake.reason),
+    )
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
+    monkeypatch.setattr(
+        wake_module,
+        "coalescible_reactor_wakes",
+        lambda _wake: (wake,),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    monkeypatch.setattr(main_module, "_day0_urgent_wake_pending", pending)
+    monkeypatch.setattr(
+        main_module,
+        "_dispatch_day0_exit_monitor",
+        lambda wake_id, _families: monitor_dispatches.append(wake_id) or True,
+    )
+    main_module._day0_exit_monitor_attempts.clear()
+    main_module._held_position_monitor_active.set()
+    try:
+        assert main_module._unowned_day0_urgent_wake_pending() is False
+        assert main_module._edli_reactor_wake_poll_once() is False
+        assert monitor_dispatches == []
+        assert acknowledgements == []
+        assert pending.is_set() is True
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._day0_exit_monitor_attempts.clear()
+
+
 def test_processed_day0_wake_runs_held_monitor_before_ack(monkeypatch) -> None:
     import threading
 
