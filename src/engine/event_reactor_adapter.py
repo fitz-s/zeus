@@ -771,7 +771,21 @@ def _evict_superseded_global_probability_family_cache(
     reason: str,
     actuation: object,
 ) -> bool:
-    if not reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
+    # FROZEN-POSTERIOR RATCHET (2026-07-26, 2,001 self-suppressions/day): a
+    # ``model_identity_drift`` rejection means the cached family witness's bound
+    # posterior_id can NEVER re-verify again — read_current_instrument_values always
+    # serves latest-as-of-now, so once any bound model advances a run past this
+    # posterior's frozen snapshot the mismatch is permanent. Without eviction here,
+    # _prepare_current_scope_event's per-(family_key, event_id) cache keeps reissuing
+    # the SAME dead posterior on every retry (bit-identical q, same event_id, for as
+    # long as the cached witness's max_age window allows), so the winner is stuck
+    # re-selecting a candidate that can never submit. Retiring the cache entry forces
+    # the next attempt to bind a fresh posterior and make a genuinely new decision —
+    # never grafts a newer posterior onto the stale certificate in place.
+    if not (
+        reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
+        or "model_identity_drift" in reason
+    ):
         return False
     decision = getattr(actuation, "decision", None)
     candidate = getattr(decision, "candidate", None)
@@ -20411,6 +20425,7 @@ def _forecast_authority_payload_from_posterior(
     payload: dict[str, object],
     decision_time: datetime,
     bound_posterior_id: int | None = None,
+    reason_out: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], EvidenceClock] | None:
     """GATE-1 C: build the no-submit cert's FORECAST_AUTHORITY payload + clock from
     ``forecast_posteriors`` + ``raw_model_forecasts`` (mx2t3-independent), NOT ensemble_snapshots.
@@ -20430,12 +20445,23 @@ def _forecast_authority_payload_from_posterior(
     FAIL-CLOSED: returns ``None`` only for ordinary missing posterior evidence. If a newer live
     raw input exists than the selected posterior's source cycle, this raises a typed blocker so the
     replacement lane cannot fall back to legacy ensemble evidence and trade on an old belief.
+
+    ``reason_out`` (additive, optional; every existing caller omits it and sees byte-identical
+    behavior): populated with a distinct code per failing gate so a no-submit receipt can name
+    WHY without code tracing (2026-07-26 frozen-posterior ratchet fix).
     """
+
+    def _fail(code: str) -> None:
+        if reason_out is not None:
+            reason_out["reason"] = code
+
     city_config = runtime_cities_by_name().get(family.city)
     if city_config is None:
+        _fail("city_config_missing")
         return None
     posterior_table = _authority_table_ref(conn, "forecast_posteriors")
     if posterior_table is None:
+        _fail("posterior_table_missing")
         return None
     _decision_iso = decision_time.astimezone(UTC).isoformat()
     posterior_id_filter = ""
@@ -20469,8 +20495,10 @@ def _forecast_authority_payload_from_posterior(
             tuple(params),
         ).fetchone()
     except Exception:  # noqa: BLE001 — fall back to the ensemble path on any read fault
+        _fail("posterior_read_fault")
         return None
     if prow is None:
+        _fail("no_row")
         return None
     (
         p_source_id,
@@ -20488,6 +20516,7 @@ def _forecast_authority_payload_from_posterior(
         p_provenance_json,
     ) = prow
     if not p_identity_hash or not p_source_cycle_time:
+        _fail("identity_hash_or_cycle_missing")
         return None
     raw_lag_reason = _replacement_live_input_lag_reason(
         conn,
@@ -20504,8 +20533,10 @@ def _forecast_authority_payload_from_posterior(
         p_q_ucb = json.loads(str(p_q_ucb_json))
         p_provenance = json.loads(str(p_provenance_json))
     except (TypeError, ValueError, json.JSONDecodeError):
+        _fail("q_json_unparseable")
         return None
     if not all(isinstance(value, Mapping) and value for value in (p_q, p_q_lcb, p_q_ucb, p_provenance)):
+        _fail("q_mapping_empty")
         return None
     if current_evidence_shape_semantics_mismatch(p_provenance):
         raise ValueError(
@@ -20516,6 +20547,7 @@ def _forecast_authority_payload_from_posterior(
         p_bootstrap_draws = int(p_provenance.get("q_lcb_bootstrap_draws"))
         p_posterior_id = int(p_posterior_id)
     except (TypeError, ValueError):
+        _fail("bootstrap_draws_or_posterior_id_unparseable")
         return None
     p_q_mode = str(p_provenance.get("replacement_q_mode") or "").strip()
     p_q_lcb_basis = str(p_provenance.get("q_lcb_basis") or "").strip()
@@ -20529,6 +20561,7 @@ def _forecast_authority_payload_from_posterior(
         or not p_bin_topology
         or stable_hash(p_bin_topology) != p_bin_topology_hash
     ):
+        _fail("bin_topology_hash_mismatch")
         return None
     try:
         p_canonical_bound_hash = replacement_probability_bundle_hash(
@@ -20546,6 +20579,7 @@ def _forecast_authority_payload_from_posterior(
             q_ucb=p_q_ucb,
         )
     except (TypeError, ValueError):
+        _fail("canonical_bound_hash_unparseable")
         return None
     fusion = p_provenance.get("bayes_precision_fusion")
     bound_serving = (
@@ -20554,13 +20588,17 @@ def _forecast_authority_payload_from_posterior(
         else None
     )
     if isinstance(bound_serving, Mapping) and bound_serving:
+        members_reason: dict[str, str] = {}
         members_native = _posterior_bound_multimodel_members(
             conn,
             family=family,
             decision_time=decision_time,
             source_cycle_time=p_source_cycle_time,
             provenance=p_provenance,
+            reason_out=members_reason,
         )
+        if members_native is None:
+            _fail(members_reason.get("reason") or "multimodel_members_unavailable")
     elif event.event_type in _FORECAST_DECISION_EVENT_TYPES:
         legacy_members = _spine_multimodel_members_for_event(
             conn,
@@ -20569,16 +20607,21 @@ def _forecast_authority_payload_from_posterior(
             decision_time=decision_time,
         )
         members_native = None if legacy_members is None else tuple(legacy_members[0])
+        if members_native is None:
+            _fail("legacy_spine_members_unavailable")
     else:
         members_native = None
+        _fail("event_type_not_forecast_decision")
     source_clock_present, source_clock_certificate = (
         _source_clock_model_count_certificate(p_provenance)
     )
     if source_clock_present and source_clock_certificate is None:
+        _fail("source_clock_certificate_missing")
         return None
     if members_native is None:
         return None
     if not source_clock_present and len(members_native) < 3:
+        _fail("member_count_insufficient")
         return None
     member_count = len(members_native)
     members_json_hash = stable_hash(tuple(sorted(float(v) for v in members_native)))
@@ -20714,6 +20757,7 @@ def _forecast_authority_payload_from_posterior(
     agent_time = _parse_utc(p_computed_at) or source_time
     persisted_time = _parse_utc(p_computed_at) or source_time
     if source_time is None or agent_time is None or persisted_time is None:
+        _fail("clock_fields_unparseable")
         return None
     return payload_out, EvidenceClock(source_time, agent_time, persisted_time)
 
@@ -20725,11 +20769,26 @@ def _posterior_bound_multimodel_members(
     decision_time: datetime,
     source_cycle_time: object,
     provenance: Mapping[str, object],
+    reason_out: dict[str, str] | None = None,
 ) -> tuple[float, ...] | None:
-    """Read the exact current inputs recorded by one replacement posterior."""
+    """Read the exact current inputs recorded by one replacement posterior.
+
+    ``reason_out`` (additive, optional; every existing caller omits it and sees
+    byte-identical behavior): when the read fails, ``reason_out["reason"]`` is set to
+    a distinct code identifying WHICH gate failed. This lets the pre-submit caller
+    distinguish an ordinary missing-evidence gap from ``model_identity_drift`` — the
+    live-vs-frozen mismatch that means THIS posterior_id can never re-verify again
+    (a bound model advanced a run since this posterior was computed) and its cached
+    selection must be retired, not merely retried (2026-07-26 frozen-posterior ratchet).
+    """
+
+    def _fail(code: str) -> None:
+        if reason_out is not None:
+            reason_out["reason"] = code
 
     fusion = provenance.get("bayes_precision_fusion")
     if not isinstance(fusion, Mapping):
+        _fail("fusion_missing")
         return None
     raw_models = fusion.get("used_models")
     serving = fusion.get("current_value_serving")
@@ -20738,20 +20797,24 @@ def _posterior_bound_multimodel_members(
         or not isinstance(raw_models, (list, tuple))
         or not isinstance(serving, Mapping)
     ):
+        _fail("serving_shape_invalid")
         return None
     models = tuple(str(model or "").strip() for model in raw_models)
     source_clock_present, source_clock_certificate = (
         _source_clock_model_count_certificate(provenance)
     )
     if source_clock_present and source_clock_certificate is None:
+        _fail("source_clock_certificate_missing")
         return None
     if (
         (not source_clock_present and len(models) < 3)
         or any(not model for model in models)
         or len(set(models)) != len(models)
     ):
+        _fail("model_count_insufficient")
         return None
     if set(models) != {str(model) for model in serving}:
+        _fail("serving_model_set_mismatch")
         return None
 
     from src.data.replacement_current_value_serving import (
@@ -20772,6 +20835,7 @@ def _posterior_bound_multimodel_members(
         or ""
     ).upper()
     if unit not in {"C", "F"}:
+        _fail("unit_invalid")
         return None
 
     members: list[float] = []
@@ -20779,11 +20843,13 @@ def _posterior_bound_multimodel_members(
         recorded = serving.get(model)
         served = current.get(model)
         if not isinstance(recorded, Mapping) or served is None:
+            _fail(f"served_instrument_missing:{model}")
             return None
         try:
             recorded_id = int(recorded.get("raw_model_forecast_id"))
             value_c = float(served.value_c)
         except (TypeError, ValueError):
+            _fail(f"served_value_unparseable:{model}")
             return None
         if (
             recorded_id != served.raw_model_forecast_id
@@ -20791,6 +20857,12 @@ def _posterior_bound_multimodel_members(
             or str(recorded.get("served_cycle") or "") != served.served_cycle
             or not math.isfinite(value_c)
         ):
+            # The posterior's FROZEN snapshot of this model's serving instrument no
+            # longer matches what is served NOW: a bound model advanced a run since
+            # this posterior was computed. This posterior_id can never re-verify
+            # again (read_current_instrument_values always serves latest-as-of-now);
+            # the caller must retire it, not retry it.
+            _fail(f"model_identity_drift:{model}")
             return None
         members.append(value_c if unit == "C" else value_c * 9.0 / 5.0 + 32.0)
     return tuple(members)
@@ -20970,6 +21042,7 @@ def _forecast_authority_payload_and_clock(
             and bound_posterior_id is not None
         )
     ):
+        posterior_reason: dict[str, str] = {}
         posterior = _forecast_authority_payload_from_posterior(
             conn,
             event=event,
@@ -20977,10 +21050,20 @@ def _forecast_authority_payload_and_clock(
             payload=payload,
             decision_time=decision_time,
             bound_posterior_id=bound_posterior_id,
+            reason_out=posterior_reason,
         )
         if posterior is not None:
             return posterior
-        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior")
+        # Distinct suffix per failing gate (2026-07-26 frozen-posterior ratchet fix):
+        # collapsing ~15 branches to one bare "replacement_posterior" reason made this
+        # class undiagnosable from logs. ``model_identity_drift`` specifically means the
+        # bound posterior_id can never re-verify again (a bound model advanced a run
+        # since it was computed); the caller's cache-eviction gate keys off that exact
+        # suffix to retire the pinned candidate instead of retrying it forever.
+        raise ValueError(
+            "FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior:"
+            f"{posterior_reason.get('reason') or 'unknown'}"
+        )
     allow_latest = event.event_type == "DAY0_EXTREME_UPDATED"
     snapshot = _forecast_snapshot_row_for_event(
         conn,

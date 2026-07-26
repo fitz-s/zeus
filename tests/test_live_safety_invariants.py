@@ -7678,6 +7678,25 @@ def test_replacement_forecast_authority_missing_posterior_does_not_fallback(monk
         )
 
 
+def test_forecast_authority_missing_posterior_carries_distinct_reason_suffix():
+    """2026-07-26 frozen-posterior ratchet fix: the no-submit reason must name WHICH
+    gate failed, not collapse to the bare 'replacement_posterior' that made this
+    class undiagnosable from logs (~15 branches all raised the same bare string)."""
+    from src.engine import event_reactor_adapter as adapter
+
+    with pytest.raises(
+        ValueError,
+        match="FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior:posterior_table_missing",
+    ):
+        adapter._forecast_authority_payload_and_clock(
+            sqlite3.connect(":memory:"),  # no forecast_posteriors table at all
+            event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
+            family=SimpleNamespace(city="Singapore", target_date="2026-07-01", metric="high"),
+            payload={},
+            decision_time=datetime(2026, 6, 29, 13, 0, tzinfo=timezone.utc),
+        )
+
+
 def test_monitoring_skips_blocking_review_fact_position_without_exit(monkeypatch):
     """Review facts stop automatic exit but still emit an explicit monitor hold."""
     from src.engine import cycle_runtime

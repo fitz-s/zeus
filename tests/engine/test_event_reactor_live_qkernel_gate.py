@@ -5043,3 +5043,21 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
         )
         is None
     )
+
+    # 2026-07-26 frozen-posterior ratchet fix: this exact drift (a bound model's
+    # served instrument no longer matches what the posterior recorded) must emit a
+    # distinct, greppable reason code — not the collapsed bare "replacement_posterior"
+    # that made 2,001/day self-suppressions undiagnosable from logs.
+    drift_reason: dict[str, str] = {}
+    assert (
+        era._posterior_bound_multimodel_members(
+            conn,
+            family=family,
+            decision_time=decision_time,
+            source_cycle_time="2026-07-13T06:00:00+00:00",
+            provenance=provenance,
+            reason_out=drift_reason,
+        )
+        is None
+    )
+    assert drift_reason["reason"] == "model_identity_drift:c"

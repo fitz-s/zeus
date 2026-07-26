@@ -5709,6 +5709,57 @@ def test_superseded_preflight_evicts_only_selected_family_probability_cache(
     assert other_family in era._GLOBAL_PROBABILITY_FAMILY_CACHE
 
 
+def test_model_identity_drift_evicts_pinned_probability_family_cache(monkeypatch):
+    """2026-07-26 frozen-posterior ratchet fix.
+
+    A ``model_identity_drift`` no-submit reason means the cached family witness's
+    bound posterior_id can never re-verify again (read_current_instrument_values
+    always serves latest-as-of-now). Without eviction here, the per-(family_key,
+    event_id) probability cache in _prepare_current_scope_event keeps reissuing the
+    SAME dead posterior on every retry of the same event, so the auction re-selects
+    a candidate that can never submit (2,001 self-suppressions/day, Austin/SF
+    2026-07-25). Eviction forces the next attempt to bind a fresh posterior.
+    """
+    namespace = "probability-cache-drift-test"
+    family_key = "family-drifted"
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", namespace)
+    monkeypatch.setattr(
+        era,
+        "_GLOBAL_PROBABILITY_FAMILY_CACHE",
+        {family_key: ("event-1", "binding-1", object())},
+    )
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
+    actuation = SimpleNamespace(
+        decision=SimpleNamespace(candidate=SimpleNamespace(family_key=family_key)),
+    )
+
+    evicted = era._evict_superseded_global_probability_family_cache(
+        namespace,
+        reason=(
+            "LIVE_INFERENCE_INPUTS_MISSING:FORECAST_AUTHORITY_MISSING:"
+            "replacement_posterior:model_identity_drift:openmeteo_ecmwf_ifs9"
+        ),
+        actuation=actuation,
+    )
+
+    assert evicted is True
+    assert family_key not in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+
+    # Close the loop: the SAME event_id retried after eviction must MISS the cache
+    # (never reissue the dead posterior_id) so the next attempt is forced to bind a
+    # genuinely fresh posterior instead of re-emitting the same one forever.
+    assert (
+        era._probe_global_probability_family_cache(
+            namespace,
+            family_key=family_key,
+            event_id="event-1",
+            causal_snapshot_id="snapshot-1",
+            captured_at_utc=_dt.datetime(2026, 7, 26, 3, 0, tzinfo=_dt.timezone.utc),
+        )
+        is None
+    )
+
+
 def test_live_adapter_excludes_closed_forecast_family_before_probability_prepare(
     monkeypatch,
 ):
