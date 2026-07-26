@@ -4105,7 +4105,7 @@ def process_current_global_batch(
             binding_token = preflight.binding_token
 
         actuation_at = current_time()
-        if cancelled("actuation"):
+        if preflight_winner is None and cancelled("actuation"):
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         if preflight_winner is not None and actuation_at > auction_deadline:
             return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")

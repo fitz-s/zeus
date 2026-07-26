@@ -17047,6 +17047,122 @@ def test_global_batch_preempts_after_preflight_before_actuation(monkeypatch):
     )
 
 
+def test_global_batch_stable_preflight_token_survives_later_unrelated_wake(
+    monkeypatch,
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    witness = SimpleNamespace(
+        family_key=scope.family_keys[0],
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="q-run-a",
+    )
+    prepared = SimpleNamespace(probability_witness=witness)
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(family_key=scope.family_keys[0]),
+            no_trade_reason=None,
+        ),
+        winner_event_id=event.event_id,
+        actuation=SimpleNamespace(
+            actuation_identity="actuation-a",
+            wealth_witness_identity="wealth-1",
+        ),
+    )
+    cancelled = [False]
+    calls = {"actuation": 0, "venue": 0}
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-1",
+            economic_identity="wealth-economics-1",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        lambda *_args, **_kwargs: selected,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def store_stable_preflight(*_args, **_kwargs):
+        cancelled[0] = True
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_preflight_receipt",
+        store_stable_preflight,
+    )
+
+    def actuate(current, *_args):
+        calls["actuation"] += 1
+        calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            current.event_id,
+            current.causal_snapshot_id,
+            venue_call_started=True,
+            venue_ack_received=True,
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=lambda *_: pytest.fail("preflighted path must own actuation"),
+        preflight_winner=lambda *_: global_batch_runtime.GlobalWinnerPreflight(
+            status="STABLE",
+            binding_token="binding-a",
+        ),
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            actuate
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=lambda probabilities, _at: (
+            probabilities,
+            _global_test_book("book-fence", price="0.40"),
+        ),
+        selection_cancelled=lambda: cancelled[0],
+    )
+
+    assert calls == {"actuation": 1, "venue": 1}
+    assert result.winner_event_id == event.event_id
+    assert result.venue_submit_count == 1
+    assert result.receipts[event.event_id].submitted is True
+
+
 def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     monkeypatch,
 ):
