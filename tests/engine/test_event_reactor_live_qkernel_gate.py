@@ -4163,6 +4163,33 @@ def test_day0_replacement_route_delegates_fdr_to_bound_qkernel_certificate():
     assert qkernel_fdr.selected_post_fdr == ("h7",)
 
 
+def test_day0_global_mean_route_delegates_fdr_to_current_state_certificate():
+    proof = SimpleNamespace(
+        passed_prefilter=True,
+        q_posterior=0.8682666666666666,
+        q_lcb_5pct=0.31522844025,
+        execution_price=SimpleNamespace(value=0.335893),
+        trade_score=0.5323736666666666,
+        probability_authority="day0_absorbing_hard_fact",
+        missing_reason=None,
+        qkernel_execution_economics={
+            "global_candidate_id": "global-candidate-current",
+            "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        },
+    )
+
+    assert (
+        _day0_selected_route_fdr_proof(
+            event_type="DAY0_EXTREME_UPDATED",
+            family_id="family-current",
+            all_hypothesis_ids=tuple(f"h{i}" for i in range(22)),
+            selected_hypothesis_id="h7",
+            selected_proof=proof,
+        )
+        is None
+    )
+
+
 def test_day0_replacement_route_without_qkernel_certificate_uses_legacy_fdr():
     proof = SimpleNamespace(
         passed_prefilter=True,

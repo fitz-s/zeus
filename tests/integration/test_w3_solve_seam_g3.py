@@ -9580,6 +9580,7 @@ def test_global_current_state_mean_buy_uses_current_point_and_keeps_lcb_as_evide
     assert current["edge_lcb"] == pytest.approx(-0.05)
     assert current["global_current_sample_payoff_q_lcb"] == pytest.approx(0.50)
     assert current["global_expected_ev_usd"] == pytest.approx(1.5)
+    assert current["false_edge_rate"] == pytest.approx(1.0 / 401.0)
     assert "global_robust_ev_usd" not in current
 
     uncapped = era._global_current_state_execution_economics(

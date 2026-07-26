@@ -9183,6 +9183,16 @@ def _day0_selected_route_fdr_proof(
 
     if str(event_type or "") not in _DAY0_LANE_EVENT_TYPES:
         return None
+    cert = getattr(selected_proof, "qkernel_execution_economics", None)
+    if (
+        _declares_global_current_state_execution_economics(cert)
+        and cert.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    ):
+        # The global current-state certificate uses the posterior mean for the
+        # fixed action and its own sampled false-edge rate for confidence.  The
+        # q_lcb remains evidence; it is not the expected payoff of that action.
+        return None
     from src.events.money_path_adapters import FdrProof
     from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
@@ -11507,6 +11517,16 @@ def _global_current_state_execution_economics(
     if prior_payoff_lcb is not None and not prior_payoff_lcb.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_PRIOR_LCB_INVALID")
     unit_cost = cost / shares
+    false_edge_rate = (
+        0.0
+        if isinstance(witness, DeterministicBinPayoffWitness)
+        else _finite_sample_false_edge_rate(
+            tuple(float(value) for value in payoff_samples),
+            cost=float(unit_cost),
+        )
+    )
+    if false_edge_rate is None:
+        raise ValueError("GLOBAL_CURRENT_STATE_FALSE_EDGE_RATE_INVALID")
     if not math.isclose(
         float(decision_ev),
         float(cut_win_probability * shares - cost),
@@ -11611,11 +11631,7 @@ def _global_current_state_execution_economics(
             "edge_lcb": float(edge_lcb),
             "route_edge_lcb": float(edge_lcb),
             "edge_expected": float(edge_expected),
-            "false_edge_rate": (
-                0.0
-                if isinstance(witness, DeterministicBinPayoffWitness)
-                else alpha
-            ),
+            "false_edge_rate": false_edge_rate,
             "sample_hash": sample_hash,
             "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
             "q_lcb_guard_abstained": False,
