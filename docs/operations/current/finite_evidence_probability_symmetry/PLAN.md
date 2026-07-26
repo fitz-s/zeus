@@ -4,6 +4,23 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-26 Pre-submit DB-lock exit continuity
+
+The restored Tel Aviv remaining-window probability selected a live 33C YES
+SELL at 14c. Command persistence hit SQLite `database is locked` before the
+venue boundary. `executor.py` returned the typed clean transient reason
+`pre_submit_db_locked_transient` and explicitly required retry on the next
+cycle, but exit lifecycle did not classify it and applied the generic
+five-minute economic backoff.
+
+The lifecycle now gives only that exact pre-venue typed rejection zero
+cooldown and preserves the retry budget. The next monitor/global-auction cycle
+must recapture current probability, wealth, and book before submitting; no
+old command or quote is reused. SCOPE is the affected pending-exit position;
+DRAIN is the next canonical retry scan/global auction; RESET is a fresh submit
+or a newly justified HOLD. Runtime submit gates, venue-side unknown outcomes,
+price bands, liquidity waits, and active-order locks are unchanged.
+
 ## 2026-07-26 Native hourly publication-ledger continuity
 
 After canonical `temp_current` became available, held-position redecision still

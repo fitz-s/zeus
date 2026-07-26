@@ -7700,6 +7700,65 @@ def test_exit_active_order_lock_retry_does_not_consume_backoff_budget(conn):
     assert current["next_exit_retry_at"]
 
 
+def test_exit_pre_submit_db_lock_retries_next_cycle_without_budget(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    now = datetime(2026, 7, 26, 22, 7, 59, tzinfo=timezone.utc)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
+    pos = Position(
+        trade_id="pos-pre-submit-db-lock",
+        market_id="mkt-db-lock",
+        city="Tel Aviv",
+        cluster="Asia",
+        target_date="2026-07-27",
+        bin_label="33C",
+        direction="buy_yes",
+        size_usd=26.5,
+        shares=30.6,
+        cost_basis_usd=26.5,
+        entry_price=0.86,
+        p_posterior=0.124,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-db-lock",
+        unit="C",
+        env="live",
+        strategy_key="forecast_qkernel_entry",
+        exit_state="exit_intent",
+        exit_retry_count=4,
+        exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+    )
+
+    exit_lifecycle._mark_exit_retry(
+        pos,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL [SELL_ERROR]",
+        error="pre_submit_db_locked_transient: database is locked",
+        conn=conn,
+    )
+
+    assert pos.exit_state == "retry_pending"
+    assert pos.exit_retry_count == 4
+    assert pos.next_exit_retry_at == now.isoformat()
+    row = conn.execute(
+        "SELECT exit_retry_count, next_exit_retry_at FROM position_current "
+        "WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert tuple(row) == (4, now.isoformat())
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM position_events WHERE position_id = ? "
+            "ORDER BY sequence_no DESC LIMIT 1",
+            (pos.trade_id,),
+        ).fetchone()[0]
+    )
+    assert payload["status"] == "pre_submit_db_lock"
+    assert payload["side_effect_boundary_crossed"] is False
+
+
 def test_mutex_reacquire_released_row_fails_closed_on_stale_compare(conn):
     from src.execution.exit_safety import ExitMutex
 

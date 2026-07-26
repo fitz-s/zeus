@@ -431,6 +431,16 @@ def _is_exit_transient_lock_error(error: str) -> bool:
     )
 
 
+def _is_pre_submit_db_locked_error(error: str) -> bool:
+    """True only for the executor's clean pre-venue SQLite lock rejection."""
+
+    e = str(error or "").lower()
+    return (
+        "pre_submit_db_locked_transient" in e
+        and "database is locked" in e
+    )
+
+
 def _is_runtime_submit_gate_block_error(error: str) -> bool:
     """True for deterministic runtime/code-plane blocks before venue submit."""
 
@@ -6975,6 +6985,40 @@ def _mark_exit_retry(
         logger.info(
             "EXIT CHANNEL-NOT-READY %s: %s (budget NOT consumed; next retry %s)",
             position.trade_id, reason, position.next_exit_retry_at,
+        )
+        return
+
+    if _is_pre_submit_db_locked_error(error):
+        # The executor emits this typed reason only when command persistence
+        # failed before place_limit_order. No venue side effect exists, so the
+        # next monitor/global-auction cycle must recapture current q/book and
+        # retry immediately instead of entering the generic five-minute
+        # economic backoff.
+        position.last_exit_error = error[:500]
+        position.exit_state = "retry_pending"
+        position.order_status = "retry_pending"
+        position.next_exit_retry_at = _utcnow().isoformat()
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=reason,
+            error=error,
+            event_type="EXIT_ORDER_REJECTED",
+            extra_payload={
+                "status": "pre_submit_db_lock",
+                "side_effect_boundary_crossed": False,
+                "retry_count": int(
+                    getattr(position, "exit_retry_count", 0) or 0
+                ),
+                "next_retry_at": position.next_exit_retry_at,
+            },
+        )
+        logger.info(
+            "EXIT PRE-SUBMIT DB LOCK %s: %s "
+            "(budget NOT consumed; eligible next cycle at %s)",
+            position.trade_id,
+            reason,
+            position.next_exit_retry_at,
         )
         return
 
