@@ -1,5 +1,5 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-26
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
 #   book) + docs/evidence/upstream_physical_2026_07_17/day0_latency_chain_measurement.md (the
 #   measured bottleneck is the ~40-min SCHEDULED posterior recompute cadence, HOP 2b p50 39.9 min
@@ -407,6 +407,62 @@ def test_day0_extreme_bridge_no_observed_extreme_is_failsoft(tmp_path, monkeypat
         city="Shanghai", target_date="2026-07-19", metric="high",
     )
     assert report["status"] == "DAY0_EXTREME_BRIDGE_NO_OBSERVED_EXTREME"
+
+
+def test_day0_extreme_bridge_materializes_zero_observation_state(
+    tmp_path, monkeypatch
+) -> None:
+    """A typed zero-observation fact is evidence, not an unsupported kwarg."""
+
+    _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "_day0_observed_extreme_seed_payload",
+        lambda **_kwargs: {
+            "day0_observation_state": "zero_target_date_observations"
+        },
+    )
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (cycle, ()),
+    )
+    captured: dict[str, object] = {}
+
+    def _capture_seed(_conn_arg, **kwargs):
+        captured.update(kwargs)
+        seed_file = Path(kwargs["seed_path"]) / "zero-observation.seed.json"
+        seed_file.parent.mkdir(parents=True, exist_ok=True)
+        seed_file.write_text("{}", encoding="utf-8")
+        return seed_file
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "_build_and_write_advance_seed",
+        _capture_seed,
+    )
+
+    report = cycle_advance._materialize_day0_extreme_updated_seed(
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 0, 1, tzinfo=UTC),
+        held_position=False,
+    )
+
+    assert report["status"] == "CYCLE_ADVANCE_FIRST_MATERIALIZATION_ENQUEUED"
+    assert report["enqueued"] is True
+    assert (
+        captured["day0_observation_state"]
+        == "zero_target_date_observations"
+    )
 
 
 def test_day0_extreme_bridge_config_lookup_failure_is_failsoft(monkeypatch) -> None:

@@ -936,6 +936,7 @@ def enqueue_cycle_advance_reseeds(
                         "day0_observed_extreme_sample_count"
                     ),
                     day0_observed_extreme_unit=day0_payload.get("day0_observed_extreme_unit"),
+                    day0_observation_state=day0_payload.get("day0_observation_state"),
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 report["seed_build_failed"] = int(report.get("seed_build_failed", 0)) + 1
@@ -994,6 +995,7 @@ def enqueue_single_family_cycle_advance_reseed(
     day0_observed_extreme_observation_time: str | None = None,
     day0_observed_extreme_sample_count: int | None = None,
     day0_observed_extreme_unit: str | None = None,
+    day0_observation_state: str | None = None,
     held_position: bool = False,
 ) -> dict[str, object]:
     """ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12). Single-family variant of
@@ -1034,7 +1036,9 @@ def enqueue_single_family_cycle_advance_reseed(
     city = str(city)
     target_date = str(target_date)
     metric = str(metric)
-    has_day0_observed_extreme = day0_observed_extreme_c is not None
+    has_day0_evidence = (
+        day0_observed_extreme_c is not None or day0_observation_state is not None
+    )
     report: dict[str, object] = {
         "status": "SINGLE_FAMILY_CYCLE_ADVANCE",
         "city": city,
@@ -1118,7 +1122,7 @@ def enqueue_single_family_cycle_advance_reseed(
             return report
         if not verdict["needs_advance"]:
             if verdict.get("consumed_cycle") is not None:
-                if has_day0_observed_extreme:
+                if has_day0_evidence:
                     if (
                         family_cycle is None
                         or family_cycle < consumed_cycle_dt(consumed_cycle_iso)
@@ -1175,6 +1179,7 @@ def enqueue_single_family_cycle_advance_reseed(
                             day0_observed_extreme_sample_count
                         ),
                         day0_observed_extreme_unit=day0_observed_extreme_unit,
+                        day0_observation_state=day0_observation_state,
                     )
                     if seed_file is None:
                         report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
@@ -1221,7 +1226,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 target_date=target_date,
                 metric=metric,
                 target_cycle_iso=target_cycle_iso,
-                allow_missing_seed_file_reenqueue=has_day0_observed_extreme,
+                allow_missing_seed_file_reenqueue=has_day0_evidence,
                 day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
             ):
                 if held_position:
@@ -1260,6 +1265,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
                 day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
                 day0_observed_extreme_unit=day0_observed_extreme_unit,
+                day0_observation_state=day0_observation_state,
             )
             if seed_file is None:
                 report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
@@ -1274,7 +1280,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 held_position=held_position,
                 seed_file=str(seed_file),
                 reason="MISSING_LIVE_POSTERIOR",
-                replace_existing_seed_file=has_day0_observed_extreme,
+                replace_existing_seed_file=has_day0_evidence,
                 day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
             )
             conn.commit()
@@ -1301,7 +1307,7 @@ def enqueue_single_family_cycle_advance_reseed(
             target_date=target_date,
             metric=metric,
             target_cycle_iso=target_cycle_iso,
-            allow_missing_seed_file_reenqueue=has_day0_observed_extreme,
+            allow_missing_seed_file_reenqueue=has_day0_evidence,
             day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
         ):
             if held_position:
@@ -1340,6 +1346,7 @@ def enqueue_single_family_cycle_advance_reseed(
             day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
             day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
             day0_observed_extreme_unit=day0_observed_extreme_unit,
+            day0_observation_state=day0_observation_state,
         )
         if seed_file is None:
             report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
@@ -1353,7 +1360,7 @@ def enqueue_single_family_cycle_advance_reseed(
             target_cycle_iso=target_cycle_iso,
             held_position=held_position,
             seed_file=str(seed_file),
-            replace_existing_seed_file=has_day0_observed_extreme,
+            replace_existing_seed_file=has_day0_evidence,
             day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
         )
         conn.commit()
@@ -1770,6 +1777,7 @@ def _build_and_write_advance_seed(
     day0_observed_extreme_observation_time: str | None = None,
     day0_observed_extreme_sample_count: int | None = None,
     day0_observed_extreme_unit: str | None = None,
+    day0_observation_state: str | None = None,
 ) -> Path | None:
     """Build one re-materialization seed for a scope using the existing seed-builder pieces and
     write it into seed_dir. Returns the seed Path, or None when the required manifests/context are
@@ -1818,6 +1826,7 @@ def _build_and_write_advance_seed(
         day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
         day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
         day0_observed_extreme_unit=day0_observed_extreme_unit,
+        day0_observation_state=day0_observation_state,
     )
     if not seed_result.ok or seed_result.seed is None:
         return None

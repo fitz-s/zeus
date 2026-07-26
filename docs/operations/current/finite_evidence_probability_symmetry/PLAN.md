@@ -4,6 +4,23 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-26 Zero-observation Day0 reseed contract
+
+The live Day0 source clock emitted a current Paris report and queued immediate
+posterior materialization, but the canonical settlement-channel reader
+truthfully returned the typed state `zero_target_date_observations`. The seed
+schema and builder already admit that state; the single-family cycle-advance
+wrapper did not, so the bridge retried forever with
+`unexpected keyword argument 'day0_observation_state'`.
+
+The wrapper now carries the existing typed state through the same
+single-family seed transport and treats it as Day0 evidence while preserving
+the builder's state-versus-extreme mutual exclusion. The poll-lane twin carries
+the same field. SCOPE is the exact city/date/metric family; DRAIN is the
+existing held/entry materialization worker queue; RESET is a committed
+posterior followed by normal redecision. No source role, probability formula,
+market-price substitution, lifecycle, action law, or exit threshold changes.
+
 ## 2026-07-26 Pre-submit DB-lock exit continuity
 
 The restored Tel Aviv remaining-window probability selected a live 33C YES
