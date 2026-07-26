@@ -69,7 +69,10 @@ except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallbac
 
 from src.config import cities_by_name, get_mode, settings
 from src.contracts.canonical_lifecycle import VenueOrderStatus
-from src.observability.scheduler_health import _write_scheduler_health
+from src.observability.scheduler_health import (
+    _write_scheduler_health,
+    read_scheduler_job_health,
+)
 from src.runtime import bankroll_provider
 from src.state.db import (
     init_schema,
@@ -4752,6 +4755,53 @@ def _edli_command_recovery_cycle() -> None:
     _emit_command_recovery_redecision_continuations(summary, log_context="edli_command_recovery")
 
 
+_CHAIN_MIRROR_RECONCILE_CADENCE_SECONDS = 600  # matches the "interval" job's minutes=10
+# 3x cadence (30 min) -- the SAME bound at which a stale chain_seen_at fails
+# closed and erases every native holding from the global auction (see the
+# docstring below / docs/rebuild/chain_mirror_state_model_2026-07-04.md). A
+# single missed trigger (one cadence, 10 min) is ordinary scheduling jitter;
+# three consecutive misses is the earliest gap that is unambiguously
+# abnormal, and it lands exactly where this backstop's own failure mode
+# begins -- warning any later would already be too late to matter.
+_CHAIN_MIRROR_RECONCILE_GAP_WARNING_SECONDS = 3 * _CHAIN_MIRROR_RECONCILE_CADENCE_SECONDS
+
+
+def _chain_mirror_reconcile_warn_on_silent_misfire_gap(now: datetime) -> None:
+    """WARN when this job's own durable health record shows a scheduling gap.
+
+    Detection only -- the cause is unknown (suspected APScheduler misfire,
+    unconfirmed); observed post-fix gaps of 36, 115, and 290 minutes with no
+    error, defer, or restart logged anywhere. Reads the per-job entry this
+    job's own ``@_scheduler_job`` decorator already writes on every
+    completion (``state/scheduler_jobs_health.json`` via
+    ``read_scheduler_job_health``) instead of a fresh in-process timestamp,
+    so a gap spanning a daemon restart is still caught.
+    """
+    entry = read_scheduler_job_health("chain_mirror_reconcile")
+    last_success_at = str(entry.get("last_success_at") or "").strip()
+    if not last_success_at:
+        return  # no prior recorded success to compare against
+    try:
+        previous = datetime.fromisoformat(last_success_at.replace("Z", "+00:00"))
+    except ValueError:
+        return
+    if previous.tzinfo is None:
+        previous = previous.replace(tzinfo=timezone.utc)
+    gap_seconds = (now - previous).total_seconds()
+    if gap_seconds <= _CHAIN_MIRROR_RECONCILE_GAP_WARNING_SECONDS:
+        return
+    missed_cycles = int(gap_seconds // _CHAIN_MIRROR_RECONCILE_CADENCE_SECONDS)
+    logger.warning(
+        "chain_mirror_reconcile: silent scheduling gap of %.0fs (~%d missed "
+        "%ds cycles) since last success at %s -- cause unknown (suspected "
+        "APScheduler misfire); the chain_seen_at fail-closed bound is 1800s",
+        gap_seconds,
+        missed_cycles,
+        _CHAIN_MIRROR_RECONCILE_CADENCE_SECONDS,
+        last_success_at,
+    )
+
+
 @_scheduler_job("chain_mirror_reconcile")
 def _chain_mirror_reconcile_cycle() -> None:
     """Scheduler hook — body owned by src.state.chain_mirror_reconciler (R4-b
@@ -4766,7 +4816,13 @@ def _chain_mirror_reconcile_cycle() -> None:
     performs its venue GET before opening the trade DB and commits one short
     SQLite transaction; normal SQLite serialization preserves order writes
     without sacrificing this liveness guarantee.
+
+    Also checks its own last-recorded completion for a silent scheduling gap
+    (see ``_chain_mirror_reconcile_warn_on_silent_misfire_gap``) before
+    running -- detection only, does not change or retry the schedule.
     """
+    _chain_mirror_reconcile_warn_on_silent_misfire_gap(datetime.now(timezone.utc))
+
     from src.state.chain_mirror_reconciler import run_cycle
 
     run_cycle()

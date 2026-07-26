@@ -112,3 +112,25 @@ def _write_scheduler_health(
         logger.debug(
             "failed to write scheduler health for %s", job_name, exc_info=True
         )
+
+
+def read_scheduler_job_health(job_name: str) -> dict[str, Any]:
+    """Return the durable per-job health entry, or ``{}`` if absent/corrupt.
+
+    Lets a job compare its own current run against its last recorded
+    completion (e.g. to detect a silent scheduling gap) without maintaining
+    a second, in-process-only timestamp that would forget any gap spanning
+    a daemon restart.
+    """
+    path = _SCHEDULER_HEALTH_PATH
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    entry = data.get(job_name)
+    return entry if isinstance(entry, dict) else {}
