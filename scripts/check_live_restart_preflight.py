@@ -2184,11 +2184,18 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
                 "position_id": command.get("position_id"),
                 "command_state": command.get("state"),
                 "venue_order_id": venue_order_id,
+                "size": command.get("size"),
                 "position_phase": command.get("position_phase"),
                 "position_shares": command.get("position_shares"),
                 "position_cost_basis_usd": command.get("position_cost_basis_usd"),
                 "position_chain_shares": command.get("position_chain_shares"),
+                "latest_fact_venue_order_id": command.get(
+                    "latest_fact_venue_order_id"
+                ),
                 "positive_trade_fact_state": command.get("positive_trade_fact_state"),
+                "positive_trade_venue_order_id": command.get(
+                    "positive_trade_venue_order_id"
+                ),
                 "positive_trade_filled_size": command.get("positive_trade_filled_size"),
                 "positive_trade_fill_price": command.get("positive_trade_fill_price"),
                 "positive_trade_observed_at": command.get("positive_trade_observed_at"),
@@ -2230,7 +2237,7 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
                         "point_error": repr(exc),
                         "open_orders_fallback_match": False,
                     }
-                    if _terminal_fak_entry_has_no_resting_remainder(risk_item):
+                    if _terminal_fak_order_has_no_resting_remainder(risk_item):
                         covered.append(
                             {
                                 **risk_item,
@@ -2284,7 +2291,7 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
             }
             if (
                 payload is None or status in {"", "UNKNOWN", "NOT_FOUND"}
-            ) and _terminal_fak_entry_has_no_resting_remainder(item):
+            ) and _terminal_fak_order_has_no_resting_remainder(item):
                 covered.append(
                     {
                         **item,
@@ -3121,7 +3128,7 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
                 }
             )
             continue
-        if _terminal_fak_entry_has_no_resting_remainder(item):
+        if _terminal_fak_order_has_no_resting_remainder(item):
             covered.append(
                 {
                     **item,
@@ -3261,26 +3268,49 @@ def _terminal_partial_entry_has_no_resting_remainder(item: dict[str, Any]) -> bo
     )
 
 
-def _terminal_fak_entry_has_no_resting_remainder(item: dict[str, Any]) -> bool:
-    """Recognize settled FAK projection debt without inventing venue exposure."""
+def _terminal_fak_order_has_no_resting_remainder(item: dict[str, Any]) -> bool:
+    """Recognize an exact settled FAK short fill as non-resting.
+
+    FAK cancels its unmatched remainder at submission for both ENTRY BUY and
+    EXIT SELL.  Require the persisted envelope plus exact order-bound trade and
+    order quantities so an ordinary partial GTC cannot inherit this coverage.
+    """
 
     fact_state = str(
         item.get("latest_fact_state") or item.get("local_fact_state") or ""
     ).upper()
-    matched_size = item.get("latest_fact_matched_size")
-    if matched_size in (None, ""):
-        matched_size = item.get("local_fact_matched_size")
+    matched = _decimal_float(
+        item.get("latest_fact_matched_size")
+        if item.get("latest_fact_matched_size") not in (None, "")
+        else item.get("local_fact_matched_size")
+    )
+    filled = _decimal_float(item.get("positive_trade_filled_size"))
+    requested = _decimal_float(item.get("size"))
+    command_order_id = str(item.get("venue_order_id") or "").strip().lower()
+    fact_order_id = str(
+        item.get("latest_fact_venue_order_id") or ""
+    ).strip().lower()
+    trade_order_id = str(
+        item.get("positive_trade_venue_order_id") or ""
+    ).strip().lower()
     return (
-        str(item.get("intent_kind") or "").upper() == "ENTRY"
+        str(item.get("intent_kind") or "").upper() in {"ENTRY", "EXIT"}
         and str(item.get("command_state") or item.get("state") or "").upper()
         == "REVIEW_REQUIRED"
         and str(item.get("position_phase") or "") == "settled"
         and str(item.get("order_type") or "").upper() == "FAK"
         and str(item.get("positive_trade_fact_state") or "").upper()
         == "CONFIRMED"
-        and _positive_float(item.get("positive_trade_filled_size")) is not None
         and fact_state in {"MATCHED", "FILLED", "PARTIAL", "PARTIALLY_MATCHED"}
-        and _positive_float(matched_size) is not None
+        and bool(command_order_id)
+        and fact_order_id == command_order_id
+        and trade_order_id == command_order_id
+        and matched is not None
+        and matched > 0.0
+        and filled is not None
+        and abs(filled - matched) <= 1e-6
+        and requested is not None
+        and requested - filled > 0.01
     )
 
 

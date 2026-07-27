@@ -3545,9 +3545,11 @@ def test_review_required_entry_with_positive_trade_fact_is_boot_recoverable(
     )
 
 
-def test_settled_fak_entry_remainder_is_not_classified_as_resting(
+@pytest.mark.parametrize("intent_kind", ("ENTRY", "EXIT"))
+def test_settled_fak_remainder_is_not_classified_as_resting(
     monkeypatch,
     tmp_path,
+    intent_kind,
 ):
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"
@@ -3557,7 +3559,7 @@ def test_settled_fak_entry_remainder_is_not_classified_as_resting(
     _init_resting_command_trade_db(
         trade_db,
         phase="settled",
-        intent_kind="ENTRY",
+        intent_kind=intent_kind,
     )
     conn = sqlite3.connect(trade_db)
     now = datetime.now(timezone.utc).isoformat()
@@ -3616,6 +3618,36 @@ def test_settled_fak_entry_remainder_is_not_classified_as_resting(
     assert result.evidence["risky"] == []
     assert result.evidence["covered_count"] == 1
     assert result.evidence["settled_fak_non_resting_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("latest_fact_venue_order_id", "other-order"),
+        ("positive_trade_venue_order_id", "other-order"),
+        ("positive_trade_filled_size", 5.04),
+        ("size", 5.05),
+    ),
+)
+def test_settled_fak_remainder_requires_exact_short_fill_proof(field, value):
+    item = {
+        "intent_kind": "EXIT",
+        "command_state": "REVIEW_REQUIRED",
+        "position_phase": "settled",
+        "order_type": "FAK",
+        "venue_order_id": "order-1",
+        "size": 12.0,
+        "latest_fact_state": "PARTIALLY_MATCHED",
+        "latest_fact_venue_order_id": "order-1",
+        "latest_fact_matched_size": 5.05,
+        "positive_trade_fact_state": "CONFIRMED",
+        "positive_trade_venue_order_id": "order-1",
+        "positive_trade_filled_size": 5.05,
+    }
+
+    assert not preflight._terminal_fak_order_has_no_resting_remainder(
+        {**item, field: value}
+    )
 
 
 def test_resting_exit_order_allows_pending_exit(monkeypatch, tmp_path):
