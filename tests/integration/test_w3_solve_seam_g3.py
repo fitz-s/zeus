@@ -20159,6 +20159,484 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
     assert result.receipts[event.event_id].submitted is True
 
 
+def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
+    monkeypatch,
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    event_c = _global_scope_event(city="Gamma", source_run_id="run-c")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b, event_c), captured_at_utc=decision_at
+    )
+    witnesses = {
+        family_key: SimpleNamespace(
+            family_key=family_key,
+            captured_at_utc=decision_at,
+            posterior_identity_hash=run_id,
+            witness_identity=f"q-{run_id}",
+        )
+        for family_key, run_id in zip(
+            scope.family_keys,
+            ("run-a", "run-b", "run-c"),
+        )
+    }
+    prepared = {
+        event.event_id: SimpleNamespace(
+            probability_witness=witnesses[family_key]
+        )
+        for event, family_key in zip(
+            (event_a, event_b, event_c),
+            scope.family_keys,
+        )
+    }
+    candidates = (
+        SimpleNamespace(
+            candidate_id="buy-a",
+            action="BUY",
+            family_key=scope.family_keys[0],
+            bin_id="bin-a",
+            side="YES",
+            token_id="token-a",
+        ),
+        SimpleNamespace(
+            candidate_id="buy-b",
+            action="BUY",
+            family_key=scope.family_keys[1],
+            bin_id="bin-b",
+            side="YES",
+            token_id="token-b",
+        ),
+        SimpleNamespace(
+            candidate_id="sell-c",
+            action="SELL",
+            family_key=scope.family_keys[2],
+            bin_id="bin-c",
+            side="NO",
+            token_id="token-c",
+        ),
+    )
+    selections = iter(
+        SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate),
+                actuation_identity=f"actuation-{candidate.candidate_id}",
+                economic_identity=f"economic-{candidate.candidate_id}",
+                wealth_witness_identity="wealth-1",
+            ),
+        )
+        for candidate, event in zip(
+            candidates,
+            (event_a, event_b, event_c),
+        )
+    )
+    blocked_reason = (
+        "FDR_REJECTED:event_type=DAY0_EXTREME_UPDATED:"
+        "attempted=22:selected_post_fdr=0:alpha=0.100000"
+    )
+    claim_unavailable_reason = (
+        "GLOBAL_WINNER_CLAIM_UNAVAILABLE_THIS_EPOCH"
+    )
+    base_book = _global_test_book("book-claim-fallthrough", price="0.40")
+    base_asset = base_book.assets[0]
+
+    def book_asset(candidate):
+        return SimpleNamespace(
+            **(
+                vars(base_asset)
+                | {
+                    "family_key": candidate.family_key,
+                    "bin_id": candidate.bin_id,
+                    "side": candidate.side,
+                    "token_id": candidate.token_id,
+                }
+            )
+        )
+
+    book = SimpleNamespace(
+        witness_identity=base_book.witness_identity,
+        captured_at_utc=base_book.captured_at_utc,
+        max_age=base_book.max_age,
+        assets=tuple(book_asset(candidate) for candidate in candidates[:2]),
+        sell_assets=(book_asset(candidates[2]),),
+    )
+    calls = {
+        "select": 0,
+        "preflight": [],
+        "claim": [],
+        "venue": 0,
+    }
+    selection_exclusions = []
+    receipt_family_exclusions = []
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "global_single_order_actuation_identity",
+        lambda **_: "rebound-actuation",
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-1",
+            economic_identity="wealth-economic-1",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_args, **kwargs: receipt_family_exclusions.append(
+            dict(kwargs["excluded_by_family"] or {})
+        ),
+    )
+
+    def select(_prepared, **kwargs):
+        policy = kwargs["candidate_policy_rejection_resolver"]
+        selection_exclusions.append(
+            (
+                dict(kwargs["preflight_excluded_by_family"] or {}),
+                tuple(policy(candidate) for candidate in candidates),
+            )
+        )
+        calls["select"] += 1
+        return next(selections)
+
+    def preflight(_event, actuation, _at, _authority):
+        candidate = actuation.decision.candidate
+        calls["preflight"].append(candidate.candidate_id)
+        if candidate is candidates[0]:
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="CANDIDATE_BLOCKED",
+                reason=blocked_reason,
+            )
+        assert candidate is candidates[2]
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="STABLE",
+            binding_token="sell-c-binding",
+        )
+
+    def claim(target):
+        calls["claim"].append(target)
+        return None
+
+    def actuate(_event, actuation, _at, token, _authority):
+        assert actuation.decision.candidate is candidates[2]
+        assert token == "sell-c-binding"
+        calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            event_c.event_id,
+            event_c.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    def run_batch(
+        events,
+        *,
+        selector,
+        preflight_callback,
+        claim_callback,
+        actuate_callback,
+        venue_submit_count,
+    ):
+        monkeypatch.setattr(
+            global_batch_runtime,
+            "select_prepared_global_auction",
+            selector,
+        )
+        return global_batch_runtime.process_current_global_batch(
+            events,
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=object(),
+            payload_reader=lambda current: json.loads(current.payload_json),
+            prepare_event=lambda current, _at: EventSubmissionReceipt(
+                False,
+                current.event_id,
+                current.causal_snapshot_id,
+                prepared_global_family=prepared[current.event_id],
+            ),
+            actuate_winner=lambda *_: pytest.fail(
+                "preflighted lane owns actuation"
+            ),
+            preflight_winner=preflight_callback,
+            actuate_preflighted_winner=(
+                global_batch_runtime.GlobalOneShotActuator(
+                    actuate_callback
+                )
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=venue_submit_count,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            current_book_epoch_provider=lambda probabilities, _at: (
+                probabilities,
+                book,
+            ),
+            claim_unpaged_winner=claim_callback,
+        )
+
+    result = run_batch(
+        (event_a, event_c),
+        selector=select,
+        preflight_callback=preflight,
+        claim_callback=claim,
+        actuate_callback=actuate,
+        venue_submit_count=lambda: calls["venue"],
+    )
+
+    assert calls["select"] == 3
+    assert calls["preflight"] == ["buy-a", "sell-c"]
+    assert calls["venue"] == 1
+    assert len(calls["claim"]) == 1
+    assert calls["claim"][0].causal_snapshot_id == event_b.causal_snapshot_id
+    assert selection_exclusions[0] == ({}, (None, None, None))
+    assert selection_exclusions[1] == (
+        {},
+        (
+            f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{blocked_reason}",
+            None,
+            None,
+        ),
+    )
+    assert selection_exclusions[2] == (
+        {scope.family_keys[1]: claim_unavailable_reason},
+        (
+            f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{blocked_reason}",
+            None,
+            None,
+        ),
+    )
+    assert receipt_family_exclusions[:3] == [
+        {},
+        {},
+        {scope.family_keys[1]: claim_unavailable_reason},
+    ]
+    assert result.winner_event_id == event_c.event_id
+    assert result.next_claim_event is not calls["claim"][0]
+    assert result.venue_submit_count == 1
+    assert result.receipts[event_c.event_id].submitted is True
+
+    resumed_selections = iter(
+        SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate),
+                actuation_identity=f"resumed-{candidate.candidate_id}",
+                economic_identity=f"resumed-economic-{candidate.candidate_id}",
+                universe_witness_identity="universe-1",
+                wealth_witness_identity="wealth-1",
+                selection_epoch_identity="selection-1",
+                selection_cut_at_utc=decision_at,
+                decision_at_utc=decision_at,
+            ),
+        )
+        for candidate, event in (
+            (candidates[0], event_a),
+            (candidates[1], event_b),
+        )
+    )
+    resumed_calls = {
+        "select": 0,
+        "preflight": [],
+        "claim": [],
+        "venue": 0,
+    }
+    resumed_exclusions = []
+
+    def resumed_select(_prepared, **kwargs):
+        policy = kwargs["candidate_policy_rejection_resolver"]
+        resumed_exclusions.append(
+            (
+                dict(kwargs["preflight_excluded_by_family"] or {}),
+                tuple(policy(candidate) for candidate in candidates),
+            )
+        )
+        resumed_calls["select"] += 1
+        return next(resumed_selections)
+
+    def resumed_preflight(_event, actuation, _at, _authority):
+        candidate = actuation.decision.candidate
+        resumed_calls["preflight"].append(candidate.candidate_id)
+        if candidate is candidates[0]:
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="CANDIDATE_BLOCKED",
+                reason=blocked_reason,
+            )
+        assert candidate is candidates[1]
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="STABLE",
+            binding_token="buy-b-binding",
+        )
+
+    def resumed_claim(target):
+        resumed_calls["claim"].append(target)
+        return target
+
+    def resumed_actuate(event, actuation, _at, token, _authority):
+        assert actuation.decision.candidate is candidates[1]
+        assert event is resumed_calls["claim"][0]
+        assert token == "buy-b-binding"
+        resumed_calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            event.event_id,
+            event.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    resumed = run_batch(
+        (event_a, event_c),
+        selector=resumed_select,
+        preflight_callback=resumed_preflight,
+        claim_callback=resumed_claim,
+        actuate_callback=resumed_actuate,
+        venue_submit_count=lambda: resumed_calls["venue"],
+    )
+
+    assert resumed_calls["select"] == 2
+    assert resumed_calls["preflight"] == ["buy-a", "buy-b"]
+    assert len(resumed_calls["claim"]) == 1
+    assert resumed_calls["venue"] == 1
+    assert resumed_exclusions[0] == ({}, (None, None, None))
+    assert resumed_exclusions[1][0] == {}
+    assert resumed_exclusions[1][1] == (
+        f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{blocked_reason}",
+        None,
+        None,
+    )
+    assert resumed.winner_event_id == resumed_calls["claim"][0].event_id
+    assert resumed.receipts[resumed.winner_event_id].submitted is True
+
+    no_trade = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=None,
+            no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+            rejection_reasons={},
+            candidate_evaluations=(),
+        ),
+        winner_event_id=None,
+        actuation=None,
+    )
+    exhausted_selections = iter(
+        (
+            SimpleNamespace(
+                decision=SimpleNamespace(
+                    candidate=candidates[0],
+                    no_trade_reason=None,
+                ),
+                winner_event_id=event_a.event_id,
+                actuation=SimpleNamespace(
+                    decision=SimpleNamespace(candidate=candidates[0]),
+                    actuation_identity="exhausted-buy-a",
+                    economic_identity="exhausted-economic-buy-a",
+                    wealth_witness_identity="wealth-1",
+                ),
+            ),
+            SimpleNamespace(
+                decision=SimpleNamespace(
+                    candidate=candidates[1],
+                    no_trade_reason=None,
+                ),
+                winner_event_id=event_b.event_id,
+                actuation=SimpleNamespace(
+                    decision=SimpleNamespace(candidate=candidates[1]),
+                    actuation_identity="exhausted-buy-b",
+                    economic_identity="exhausted-economic-buy-b",
+                    wealth_witness_identity="wealth-1",
+                ),
+            ),
+            SimpleNamespace(
+                decision=SimpleNamespace(
+                    candidate=candidates[2],
+                    no_trade_reason=None,
+                ),
+                winner_event_id=event_c.event_id,
+                actuation=SimpleNamespace(
+                    decision=SimpleNamespace(candidate=candidates[2]),
+                    actuation_identity="exhausted-sell-c",
+                    economic_identity="exhausted-economic-sell-c",
+                    wealth_witness_identity="wealth-1",
+                ),
+            ),
+            no_trade,
+        )
+    )
+    exhausted_calls = {
+        "select": 0,
+        "preflight": [],
+        "claim": [],
+    }
+    exhausted_exclusions = []
+
+    def exhausted_select(_prepared, **kwargs):
+        exhausted_exclusions.append(
+            dict(kwargs["preflight_excluded_by_family"] or {})
+        )
+        exhausted_calls["select"] += 1
+        return next(exhausted_selections)
+
+    def exhausted_preflight(_event, actuation, _at, _authority):
+        candidate = actuation.decision.candidate
+        exhausted_calls["preflight"].append(candidate.candidate_id)
+        assert candidate is candidates[0]
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="CANDIDATE_BLOCKED",
+            reason=blocked_reason,
+        )
+
+    def exhausted_claim(target):
+        exhausted_calls["claim"].append(target)
+        return None
+
+    exhausted = run_batch(
+        (event_a,),
+        selector=exhausted_select,
+        preflight_callback=exhausted_preflight,
+        claim_callback=exhausted_claim,
+        actuate_callback=lambda *_: pytest.fail(
+            "an exhausted feasible set must not actuate"
+        ),
+        venue_submit_count=lambda: 0,
+    )
+
+    assert exhausted_calls == {
+        "select": 4,
+        "preflight": ["buy-a"],
+        "claim": exhausted_calls["claim"],
+    }
+    assert len(exhausted_calls["claim"]) == 2
+    assert exhausted_exclusions[2] == {
+        scope.family_keys[1]: claim_unavailable_reason
+    }
+    assert exhausted_exclusions[3] == {
+        scope.family_keys[1]: claim_unavailable_reason,
+        scope.family_keys[2]: claim_unavailable_reason,
+    }
+    assert exhausted.venue_submit_count == 0
+    assert exhausted.next_claim_event is None
+    assert exhausted.receipts[event_a.event_id].reason.startswith(
+        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+    )
+
+
 @pytest.mark.parametrize(
     "batch_reason",
     (

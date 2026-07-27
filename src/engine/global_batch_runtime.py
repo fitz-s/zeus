@@ -4451,59 +4451,95 @@ def process_current_global_batch(
                         reason,
                         len(excluded_by_family),
                     )
-                fallthrough_epoch_identity = (
-                    _selection_epoch_identity_with_preflight_exclusions(
-                        selection_epoch_base_identity,
-                        excluded_by_family,
-                        excluded_by_candidate,
-                        payoff_q_lcb_by_candidate,
-                    )
-                    if (
-                        excluded_by_family
-                        or excluded_by_candidate
-                        or payoff_q_lcb_by_candidate
-                    )
-                    else selection_epoch_identity
-                )
-                selected = select_once(
-                    probabilities_fence,
-                    attempt_book_epoch,
-                    prepared_fence,
-                    attempt_selection_epoch_identity=fallthrough_epoch_identity,
-                    preflight_excluded_by_family=excluded_by_family,
-                    preflight_excluded_by_candidate=excluded_by_candidate,
-                    payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
-                    wealth_reauction_audit=wealth_reauction_audit,
-                )
-                log_stage(
-                    "select_preflight_fallthrough",
-                    families=len(prepared_by_event) - len(excluded_by_family),
-                )
-                if selected.decision.candidate is None:
-                    log_no_trade("select_preflight_fallthrough", selected.decision)
-                    return reject(
-                        _global_preflight_exhaustion_reason(
-                            selected.decision.no_trade_reason,
-                            excluded_by_family=excluded_by_family,
-                            excluded_by_candidate=excluded_by_candidate,
+                while True:
+                    fallthrough_epoch_identity = (
+                        _selection_epoch_identity_with_preflight_exclusions(
+                            selection_epoch_base_identity,
+                            excluded_by_family,
+                            excluded_by_candidate,
+                            payoff_q_lcb_by_candidate,
                         )
+                        if (
+                            excluded_by_family
+                            or excluded_by_candidate
+                            or payoff_q_lcb_by_candidate
+                        )
+                        else selection_epoch_identity
                     )
-                log_winner(
-                    "select_preflight_fallthrough",
-                    selected,
-                    probabilities_fence,
-                )
-                if selected.actuation is None:
-                    return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
-                selected, winner, next_claim = bind_selected_winner(selected)
-                if winner is None:
+                    selected = select_once(
+                        probabilities_fence,
+                        attempt_book_epoch,
+                        prepared_fence,
+                        attempt_selection_epoch_identity=(
+                            fallthrough_epoch_identity
+                        ),
+                        preflight_excluded_by_family=excluded_by_family,
+                        preflight_excluded_by_candidate=excluded_by_candidate,
+                        payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
+                        wealth_reauction_audit=wealth_reauction_audit,
+                    )
+                    log_stage(
+                        "select_preflight_fallthrough",
+                        families=len(prepared_by_event) - len(excluded_by_family),
+                    )
+                    if selected.decision.candidate is None:
+                        log_no_trade(
+                            "select_preflight_fallthrough",
+                            selected.decision,
+                        )
+                        return reject(
+                            _global_preflight_exhaustion_reason(
+                                selected.decision.no_trade_reason,
+                                excluded_by_family=excluded_by_family,
+                                excluded_by_candidate=excluded_by_candidate,
+                            )
+                        )
+                    log_winner(
+                        "select_preflight_fallthrough",
+                        selected,
+                        probabilities_fence,
+                    )
+                    if selected.actuation is None:
+                        return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
+                    selected, winner, next_claim = bind_selected_winner(selected)
+                    if winner is not None:
+                        winner_id = winner.event_id
+                        break
                     if next_claim is None:
-                        return reject("GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING")
-                    return reject(
-                        "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
-                        next_claim_event=next_claim,
+                        return reject(
+                            "GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING"
+                        )
+                    candidate = selected.decision.candidate
+                    family_key = str(
+                        getattr(candidate, "family_key", "") or ""
+                    ).strip()
+                    if not family_key:
+                        return reject(
+                            "GLOBAL_REAUCTION_WINNER_FAMILY_MISSING"
+                        )
+                    claim_reason = (
+                        "GLOBAL_WINNER_CLAIM_UNAVAILABLE_THIS_EPOCH"
                     )
-                winner_id = winner.event_id
+                    if family_key in excluded_by_family:
+                        return reject(
+                            "GLOBAL_REAUCTION_CLAIM_EXCLUSION_NO_PROGRESS"
+                        )
+                    # SCOPE: only the selected family's causal carrier in this
+                    # immutable epoch. DRAIN: keep ranking the remaining
+                    # current q/book/wealth feasible set now. RESET: the map is
+                    # epoch-local, so the next complete cut retries the family.
+                    excluded_by_family[family_key] = claim_reason
+                    preflight_ineligible_by_event[
+                        str(getattr(selected, "winner_event_id", "") or "")
+                    ] = claim_reason
+                    _LOG.info(
+                        "global batch claim-unavailable family excluded: "
+                        "family=%s event=%s reason=%s excluded=%d",
+                        family_key,
+                        getattr(selected, "winner_event_id", ""),
+                        claim_reason,
+                        len(excluded_by_family),
+                    )
             binding_token = preflight.binding_token
 
         actuation_at = current_time()
