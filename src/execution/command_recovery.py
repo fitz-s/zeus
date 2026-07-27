@@ -8490,6 +8490,40 @@ def _exit_close_target_size(candidate: dict, current: dict) -> Decimal | None:
     return max(sizes)
 
 
+def _chain_zero_retires_terminal_exit_dust(
+    candidate: dict,
+    current: dict,
+    *,
+    filled_size: Decimal,
+) -> bool:
+    """Return true when current chain truth closes a one-tick SELL residual."""
+
+    command_size = _positive_decimal_or_none(candidate.get("cmd_size"))
+    current_shares = _positive_decimal_or_none(current.get("shares"))
+    chain_shares = _decimal_or_none(current.get("chain_shares"))
+    if (
+        str(candidate.get("cmd_state") or "").upper() != CommandState.FILLED.value
+        or str(current.get("phase") or "") != "pending_exit"
+        or str(current.get("chain_state") or "").lower() != "chain_confirmed_zero"
+        or command_size is None
+        or current_shares is None
+        or chain_shares != Decimal("0")
+    ):
+        return False
+    residual = command_size - filled_size
+    if not (Decimal("0") < residual <= Decimal("0.01")):
+        return False
+    if abs(current_shares - residual) > Decimal("0.000000001"):
+        return False
+    fill_observed_at = _parse_ts(str(candidate.get("fill_observed_at") or ""))
+    chain_absence_at = _parse_ts(str(current.get("chain_absence_at") or ""))
+    return (
+        fill_observed_at is not None
+        and chain_absence_at is not None
+        and chain_absence_at >= fill_observed_at
+    )
+
+
 def _exit_trade_fact_covers_full_close(candidate: dict, current: dict) -> bool:
     # C3: accumulate exact Decimal fill atoms (canonical TEXT). A SQLite REAL SUM
     # would lose binary precision on the close/settlement boundary and mis-decide
@@ -8504,12 +8538,23 @@ def _exit_trade_fact_covers_full_close(candidate: dict, current: dict) -> bool:
     # exact atomics with NO dust tolerance. target_size >= command_size, so
     # `>= target_size` subsumes the command-fill guard; a residual is otherwise
     # retired only by the chain-confirmed-zero reconciler.
-    return (
+    exact_fill_close = (
         filled_size is not None
         and fill_notional is not None
         and command_size is not None
         and target_size is not None
         and filled_size >= target_size
+    )
+    if exact_fill_close:
+        return True
+    return (
+        filled_size is not None
+        and fill_notional is not None
+        and _chain_zero_retires_terminal_exit_dust(
+            candidate,
+            current,
+            filled_size=filled_size,
+        )
     )
 
 
@@ -8559,6 +8604,11 @@ def _append_exit_filled_projection(
     current_shares = _positive_decimal_or_none(current.get("shares"))
     current_cost_basis = _decimal_or_none(current.get("cost_basis_usd"))
     entry_price_guard = _decimal_or_none(current.get("entry_price"))
+    chain_zero_dust_close = _chain_zero_retires_terminal_exit_dust(
+        candidate,
+        current,
+        filled_size=filled_size,
+    )
     # Chain reconciliation can observe the post-fill residual before command
     # recovery projects the earlier venue fill.  In that ordering,
     # position_current carries only dust shares and dust cost basis; those
@@ -8566,6 +8616,18 @@ def _append_exit_filled_projection(
     # still preserves the position's unit cost, so allocate that unit cost to
     # the exact filled shares.  Normal ordering is algebraically unchanged.
     if (
+        chain_zero_dust_close
+        and current_shares is not None
+        and current_cost_basis is not None
+        and current_cost_basis >= 0
+    ):
+        close_target = _exit_close_target_size(candidate, current)
+        filled_cost_basis = (
+            current_cost_basis / current_shares * close_target
+            if close_target is not None
+            else current_cost_basis
+        )
+    elif (
         current_shares is not None
         and current_cost_basis is not None
         and current_cost_basis >= 0
@@ -8631,6 +8693,27 @@ def _append_exit_filled_projection(
         for event in events:
             if event.get("event_type") == "EXIT_ORDER_FILLED":
                 event["command_id"] = command_id
+                if chain_zero_dust_close:
+                    payload = _json_dict(event.get("payload_json"))
+                    command_size = _positive_decimal_or_none(candidate.get("cmd_size"))
+                    residual = (
+                        command_size - filled_size
+                        if command_size is not None
+                        else Decimal("0")
+                    )
+                    payload["chain_zero_dust_close"] = {
+                        "authority": "chain_confirmed_zero_after_terminal_exit_fill",
+                        "filled_shares": _decimal_text(filled_size),
+                        "residual_shares": _decimal_text(residual),
+                        "closed_cost_basis_usd": _decimal_text(filled_cost_basis),
+                        "chain_absence_at": current.get("chain_absence_at"),
+                    }
+                    event["caused_by"] = "exit_fill_plus_chain_confirmed_zero"
+                    event["payload_json"] = json.dumps(
+                        payload,
+                        default=str,
+                        sort_keys=True,
+                    )
         append_many_and_project(conn, events, projection)
 
     log_execution_fact(

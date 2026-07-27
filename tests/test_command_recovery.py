@@ -16999,6 +16999,141 @@ class TestRecoveryResolutionTable:
         )
         assert close_payload["pnl"] == pytest.approx(0.58)
 
+    def test_chain_zero_retires_one_tick_terminal_exit_residual_with_full_basis(
+        self,
+        conn,
+    ):
+        """A post-fill exact zero closes venue dust without erasing its cost."""
+        from src.execution.command_recovery import reconcile_exit_pending_projections
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=16.15, price=0.20)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 0.01,
+                   chain_state = 'chain_confirmed_zero',
+                   chain_shares = 0,
+                   chain_absence_at = '2026-04-26T00:07:00Z',
+                   cost_basis_usd = 0.002,
+                   entry_price = 0.20,
+                   order_status = 'sell_pending_confirmation',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=16.15,
+            price=0.40,
+            token_id="tok-001",
+        )
+        _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit-001",
+            state="CONFIRMED",
+            filled_size="16.14",
+            fill_price="0.40",
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-exit",
+                "filled_size": "16.14",
+                "fill_price": "0.40",
+            },
+        )
+
+        summary = reconcile_exit_pending_projections(conn)
+
+        assert summary == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, realized_pnl_usd, exit_price, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "economically_closed",
+            "realized_pnl_usd": pytest.approx(3.23),
+            "exit_price": pytest.approx(0.40),
+            "order_status": "sell_filled",
+        }
+        event = conn.execute(
+            """
+            SELECT caused_by, payload_json
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'EXIT_ORDER_FILLED'
+            """
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["caused_by"] == "exit_fill_plus_chain_confirmed_zero"
+        assert payload["chain_zero_dust_close"] == {
+            "authority": "chain_confirmed_zero_after_terminal_exit_fill",
+            "filled_shares": "16.14",
+            "residual_shares": "0.01",
+            "closed_cost_basis_usd": "3.23",
+            "chain_absence_at": "2026-04-26T00:07:00Z",
+        }
+
+    def test_chain_zero_dust_authority_requires_post_fill_exact_zero(self):
+        from src.execution.command_recovery import (
+            _chain_zero_retires_terminal_exit_dust,
+        )
+
+        candidate = {
+            "cmd_state": "FILLED",
+            "cmd_size": "16.15",
+            "fill_observed_at": "2026-04-26T00:06:00Z",
+        }
+        current = {
+            "phase": "pending_exit",
+            "chain_state": "chain_confirmed_zero",
+            "chain_shares": "0",
+            "shares": "0.01",
+            "chain_absence_at": "2026-04-26T00:07:00Z",
+        }
+        assert _chain_zero_retires_terminal_exit_dust(
+            candidate,
+            current,
+            filled_size=Decimal("16.14"),
+        )
+        assert not _chain_zero_retires_terminal_exit_dust(
+            candidate,
+            {**current, "chain_absence_at": "2026-04-26T00:05:00Z"},
+            filled_size=Decimal("16.14"),
+        )
+        assert not _chain_zero_retires_terminal_exit_dust(
+            candidate,
+            {**current, "chain_state": "synced"},
+            filled_size=Decimal("16.14"),
+        )
+        assert not _chain_zero_retires_terminal_exit_dust(
+            {**candidate, "cmd_size": "16.16"},
+            {**current, "shares": "0.02"},
+            filled_size=Decimal("16.14"),
+        )
+
     def test_partial_exit_uses_canonical_order_truth_over_later_weaker_fact(
         self,
         conn,
