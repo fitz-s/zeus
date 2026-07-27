@@ -13054,6 +13054,47 @@ def test_global_actuation_rebinds_only_selected_buy_no_admission(missing_reason)
     assert rebound[1] is sibling
 
 
+def test_current_global_day0_payload_replaces_local_transform_and_provenance():
+    payload = {
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_lcb_transform": {"NO": 0.0},
+        "probability_authority": "local_day0_probability",
+    }
+    provenance = {
+        "global_day0_binding": {"probability_base_identity": "stale"},
+        "day0_probability_authority": {"lcb_transform": {"NO": 0.0}},
+    }
+    current = {
+        "_edli_q_source": "day0_remaining_day",
+        "q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_lcb_transform": {"NO": 0.26666666666666666},
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+        "_edli_global_day0_binding": {
+            "probability_base_identity": "current-witness",
+        },
+    }
+
+    era._bind_current_global_day0_payload(payload, provenance, current)
+
+    assert payload["_edli_day0_lcb_transform"] == {
+        "NO": pytest.approx(0.26666666666666666)
+    }
+    assert payload["probability_authority"] == (
+        "day0_remaining_day_global_probability_v1"
+    )
+    assert provenance["global_day0_binding"] == {
+        "probability_base_identity": "current-witness"
+    }
+    assert provenance["day0_probability_authority"]["lcb_transform"] == {
+        "NO": pytest.approx(0.26666666666666666)
+    }
+    assert provenance["day0_probability_authority"][
+        "global_current_observation_payload"
+    ] == current
+
+
 @pytest.mark.parametrize("invalid_cap", (float("nan"), -0.01, 1.01))
 def test_global_current_admission_rejects_invalid_probability_cap(invalid_cap):
     witness = _current_global_book_probability()

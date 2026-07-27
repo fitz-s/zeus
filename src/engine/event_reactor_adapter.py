@@ -12833,6 +12833,25 @@ def _current_global_actuation_prepared_family(
     )
 
 
+def _bind_current_global_day0_payload(
+    payload: dict[str, object],
+    provenance_capture: dict[str, Any],
+    current_day0_payload: Mapping[str, object],
+) -> None:
+    """Restore the selected current witness after local proof construction."""
+
+    if not current_day0_payload:
+        return
+    current = dict(current_day0_payload)
+    payload.update(current)
+    provenance_capture["global_day0_binding"] = dict(
+        current.get("_edli_global_day0_binding") or {}
+    )
+    provenance_capture["day0_probability_authority"] = (
+        _global_day0_probability_authority_payload(current)
+    )
+
+
 def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
@@ -12931,16 +12950,11 @@ def _build_event_bound_no_submit_receipt_core(
                 ),
                 proof_accepted=False,
             )
-        if current_actuation_day0_payload:
-            payload.update(current_actuation_day0_payload)
-            provenance_capture["global_day0_binding"] = dict(
-                current_actuation_day0_payload.get("_edli_global_day0_binding") or {}
-            )
-            provenance_capture["day0_probability_authority"] = (
-                _global_day0_probability_authority_payload(
-                    current_actuation_day0_payload
-                )
-            )
+        _bind_current_global_day0_payload(
+            payload,
+            provenance_capture,
+            current_actuation_day0_payload,
+        )
     source_conn = forecast_conn
     topology_authority_conn = topology_conn
     family_topology_rows = _event_family_market_topology_rows(topology_authority_conn, payload)
@@ -13343,6 +13357,16 @@ def _build_event_bound_no_submit_receipt_core(
                 metric=family.metric,
                 family_id=family.family_id,
             )
+        # Candidate proof generation rebuilds the legacy/local Day0 transform in
+        # place.  The selected global actuation was revalidated against
+        # ``current_actuation_family`` above, so its matching payload must remain
+        # the sole submit authority as well; otherwise one receipt carries the
+        # global q_lcb beside an unrelated local transform.
+        _bind_current_global_day0_payload(
+            payload,
+            provenance_capture,
+            current_actuation_day0_payload,
+        )
     # S4 (operator directive 2026-06-08): the pre-selection scalar-Kelly sizing
     # (_candidate_selection_kelly_size_usd_by_id) is RETIRED. Exposure-aware sizing
     # now comes from RobustCandidateScore.optimal_stake_usd inside the marginal-
