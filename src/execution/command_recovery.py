@@ -21568,18 +21568,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     if scope == "live_tick":
         _capital_recovery_fast_pass()
         _entry_posterior_recovery_fast_pass()
-        # An aggregate abandoned at ExecutionCommandCreated holds a RESERVED
-        # live-cap row and blocks its whole weather family.  The venue-absence
-        # reconciler already requires the full safe-replay grace and proves no
-        # command/venue/user fact exists; run that bounded local proof before
-        # maintenance can exhaust the live-tick DB budget.
-        _db_pass(
-            "abandoned_unsubmitted_ghosts",
-            reconcile_abandoned_unsubmitted_ghosts,
-            "abandoned_unsubmitted_ghosts",
-            updated_before=started_at,
-        )
 
+    # Confirmed fills are current exposure truth. They outrank absence proofs:
+    # if the bounded live-tick DB budget expires, an abandoned command may keep
+    # one family reserved for another minute, but a filled command must not stay
+    # invisible to risk, monitoring, and capital accounting.
     _db_pass(
         "authenticated_entry_trade_fact",
         reconcile_authenticated_entry_trade_facts,
@@ -21602,6 +21595,19 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         reconcile_review_required_matched_submit_trade_facts,
         "review_required_matched_submit_trade_fact",
     )
+
+    if scope == "live_tick":
+        # An aggregate abandoned at ExecutionCommandCreated holds a RESERVED
+        # live-cap row and blocks its whole weather family. The absence proof is
+        # still ahead of general maintenance, after positive exposure has been
+        # projected.
+        _db_pass(
+            "abandoned_unsubmitted_ghosts",
+            reconcile_abandoned_unsubmitted_ghosts,
+            "abandoned_unsubmitted_ghosts",
+            updated_before=started_at,
+        )
+
     _db_pass(
         "review_required_exit_mutex_release",
         reconcile_review_required_exit_mutex_releases,

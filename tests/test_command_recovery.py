@@ -1533,7 +1533,7 @@ def test_live_tick_current_q_fast_lane_survives_capital_lane_budget_defer(
     assert summary["edli_entry_posterior_projection_repair_fast"]["advanced"] == 1
 
 
-def test_live_tick_recovers_abandoned_ghost_before_general_budget_defer(
+def test_live_tick_recovers_confirmed_fill_before_abandoned_ghost_budget_defer(
     monkeypatch,
 ):
     from src.execution import command_recovery
@@ -1547,18 +1547,16 @@ def test_live_tick_recovers_abandoned_ghost_before_general_budget_defer(
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _abandoned(_conn, **_kwargs):
-        calls.append("abandoned_unsubmitted_ghosts")
-        return {
-            "scanned": 1,
-            "advanced": 1,
-            "stayed": 0,
-            "errors": 0,
-            "continuations": [{"aggregate_id": "ghost-1"}],
-        }
-
     def _authenticated(_conn):
         calls.append("authenticated_entry_trade_fact")
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+    def _matched_review(_conn):
+        calls.append("review_required_matched_submit_trade_fact")
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    def _abandoned(_conn, **_kwargs):
+        calls.append("abandoned_unsubmitted_ghosts")
         now[0] = 1.0
         raise sqlite3.OperationalError("interrupted")
 
@@ -1574,6 +1572,11 @@ def test_live_tick_recovers_abandoned_ghost_before_general_budget_defer(
         "reconcile_authenticated_entry_trade_facts",
         _authenticated,
     )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_review_required_matched_submit_trade_facts",
+        _matched_review,
+    )
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     command_recovery._reconcile_passes_short_conn(
@@ -1584,12 +1587,13 @@ def test_live_tick_recovers_abandoned_ghost_before_general_budget_defer(
     )
 
     assert calls == [
-        "abandoned_unsubmitted_ghosts",
         "authenticated_entry_trade_fact",
+        "review_required_matched_submit_trade_fact",
+        "abandoned_unsubmitted_ghosts",
     ]
-    assert summary["abandoned_unsubmitted_ghosts"]["advanced"] == 1
+    assert summary["review_required_matched_submit_trade_fact"]["advanced"] == 1
     assert summary["db_budget_deferred"] is True
-    assert summary["db_budget_deferred_at"] == "authenticated_entry_trade_fact"
+    assert summary["db_budget_deferred_at"] == "abandoned_unsubmitted_ghosts"
 
 
 def test_live_tick_recovers_confirmed_review_fill_before_maintenance_budget_defer(
