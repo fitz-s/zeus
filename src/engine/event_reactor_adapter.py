@@ -11469,6 +11469,9 @@ def _global_current_state_execution_economics(
     try:
         n_draws = int(payoff_samples.shape[0])
         alpha = float(getattr(witness, "band_alpha"))
+        sample_probability_mean = Decimal(
+            str(float(np.mean(np.asarray(payoff_samples, dtype=np.float64))))
+        )
         sample_payoff_q_lcb = Decimal(
             str(
                 _lower_cvar(
@@ -11484,6 +11487,8 @@ def _global_current_state_execution_economics(
         not sample_hash
         or n_draws < 2
         or not (0.0 < alpha < 0.5)
+        or not sample_probability_mean.is_finite()
+        or not Decimal("0") <= sample_probability_mean <= Decimal("1")
         or not sample_payoff_q_lcb.is_finite()
         or not Decimal("0") <= sample_payoff_q_lcb <= Decimal("1")
     ):
@@ -11623,7 +11628,7 @@ def _global_current_state_execution_economics(
     )
     payoff_q_lcb = current_band_payoff_q_lcb
     edge_lcb = payoff_q_lcb - unit_cost
-    edge_expected = point_q - unit_cost
+    edge_expected = sample_probability_mean - unit_cost
     if not all(
         Decimal("0") <= value <= Decimal("1")
         for value in (
@@ -11650,12 +11655,12 @@ def _global_current_state_execution_economics(
     ):
         raise _GlobalProbabilityTightened(float(payoff_q_lcb))
     if mean_action and not math.isclose(
-        float(point_q),
+        float(sample_probability_mean),
         float(cut_win_probability),
         rel_tol=0.0,
         abs_tol=1e-12,
     ):
-        raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_SUPERSEDED")
+        raise ValueError("GLOBAL_CURRENT_STATE_PREDICTIVE_MEAN_SUPERSEDED")
     if (edge_expected if mean_action else edge_lcb) <= 0:
         raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
     current = dict(cert)
@@ -11680,7 +11685,7 @@ def _global_current_state_execution_economics(
             "q_dot_payoff": float(point_q),
             "payoff_q_lcb": float(payoff_q_lcb),
             "payoff_q_action": float(
-                point_q if mean_action else payoff_q_lcb
+                sample_probability_mean if mean_action else payoff_q_lcb
             ),
             "cost": float(unit_cost),
             "cost_basis": float(unit_cost),
@@ -11702,7 +11707,7 @@ def _global_current_state_execution_economics(
             "selection_guard_cell_key": sample_hash,
             "selection_guard_n": n_draws,
             "selection_guard_q_safe": float(
-                point_q if mean_action else payoff_q_lcb
+                sample_probability_mean if mean_action else payoff_q_lcb
             ),
             "global_probability_functional": (
                 "POSTERIOR_PREDICTIVE_MEAN"
@@ -11710,6 +11715,9 @@ def _global_current_state_execution_economics(
                 else "LOWER_CVAR_PARAMETER_DRAWS"
             ),
             "global_current_band_payoff_q_lcb": float(current_band_payoff_q_lcb),
+            "global_current_sample_payoff_q_mean": float(
+                sample_probability_mean
+            ),
             "global_current_sample_payoff_q_lcb": float(sample_payoff_q_lcb),
             "global_current_served_payoff_q_lcb": float(served_lcb),
             "global_current_prior_payoff_q_lcb": float(prior_payoff_lcb),
@@ -11723,7 +11731,13 @@ def _global_current_state_execution_economics(
                 expected_value
             ),
             "global_expected_value_usd": float(
-                (point_q if mean_action else payoff_q_lcb) * shares - cost
+                (
+                    sample_probability_mean
+                    if mean_action
+                    else payoff_q_lcb
+                )
+                * shares
+                - cost
             ),
             "global_expected_value_semantics": (
                 "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
@@ -11750,9 +11764,11 @@ def _global_current_state_execution_economics(
                 "global_cut_time_loss_probability_mean": float(
                     cut_loss_probability
                 ),
-                "global_terminal_win_probability_mean": float(point_q),
+                "global_terminal_win_probability_mean": float(
+                    sample_probability_mean
+                ),
                 "global_terminal_loss_probability_mean": float(
-                    Decimal("1") - point_q
+                    Decimal("1") - sample_probability_mean
                 ),
             }
         )
@@ -11943,7 +11959,7 @@ def _bind_global_current_state_economics_to_proof(
         # Identity, source, and executable-book parents were proved before this
         # seam. The selected current witness owns the action scalar; retaining a
         # legacy served q here creates an exact-equality ratchet after re-decision.
-        "q_posterior": q_point,
+        "q_posterior": action_q,
         "q_lcb_5pct": q_lcb,
         "trade_score": action_edge,
         "p_value": false_edge_rate,
@@ -11952,6 +11968,8 @@ def _bind_global_current_state_economics_to_proof(
         "qkernel_execution_economics": dict(cert),
         "selection_authority_applied": "qkernel_spine",
     }
+    if str(cert.get("side") or "").strip().upper() == "NO":
+        replacement["same_bin_yes_posterior"] = 1.0 - action_q
     if _global_current_taker_action(proof, cert):
         replacement.update(
             execution_mode_intent="TAKER",

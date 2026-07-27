@@ -1917,7 +1917,7 @@ def test_mature_mean_sell_cannot_masquerade_as_robust_certificate():
         )
 
 
-def test_buy_posterior_mean_changes_size_and_expected_growth():
+def test_buy_plugin_point_does_not_change_posterior_mean_size_or_growth():
     buy = _global_candidate(
         candidate_id="robust-buy-common-mean-ranking",
         family="robust-buy-common-mean-ranking-family",
@@ -1933,15 +1933,14 @@ def test_buy_posterior_mean_changes_size_and_expected_growth():
 
     assert low_decision.candidate is low_mean
     assert high_decision.candidate is high_mean
-    assert low_decision.shares < high_decision.shares
+    assert low_decision.shares == high_decision.shares
     assert low_decision.robust_delta_log_wealth == 0
     assert high_decision.robust_delta_log_wealth == 0
     assert low_decision.expected_growth is not None
     assert high_decision.expected_growth is not None
-    assert (
-        high_decision.expected_growth.expected_delta_log_wealth
-        > low_decision.expected_growth.expected_delta_log_wealth
-        > 0.0
+    assert low_decision.expected_growth.expected_delta_log_wealth > 0.0
+    assert high_decision.expected_growth.expected_delta_log_wealth == pytest.approx(
+        low_decision.expected_growth.expected_delta_log_wealth
     )
 
 

@@ -141,6 +141,7 @@ def _current_state_mean_buy_econ(**overrides) -> dict:
         payoff_q_point=point,
         payoff_q_lcb=lcb,
         payoff_q_action=point,
+        global_current_sample_payoff_q_mean=point,
         cost=price,
         edge_lcb=lcb - price,
         edge_expected=point - price,

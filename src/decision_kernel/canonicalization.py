@@ -551,6 +551,7 @@ def _qkernel_global_mean_buy_rejection_reason(
         "payoff_q_point",
         "payoff_q_lcb",
         "payoff_q_action",
+        "global_current_sample_payoff_q_mean",
         "cost",
         "edge_lcb",
         "edge_expected",
@@ -581,6 +582,7 @@ def _qkernel_global_mean_buy_rejection_reason(
     point = numeric["payoff_q_point"]
     lcb = numeric["payoff_q_lcb"]
     action_q = numeric["payoff_q_action"]
+    sample_mean = numeric["global_current_sample_payoff_q_mean"]
     cost = numeric["cost"]
     edge_lcb = numeric["edge_lcb"]
     edge_expected = numeric["edge_expected"]
@@ -601,10 +603,13 @@ def _qkernel_global_mean_buy_rejection_reason(
     wealth_after_win = numeric["global_terminal_wealth_after_win_usd"]
     cut_ev = numeric["global_cut_time_expected_value_usd"]
     current_ev = numeric["global_expected_value_usd"]
-    if not (0.0 <= lcb <= point <= 1.0):
+    if not (
+        0.0 <= lcb <= min(point, action_q, sample_mean)
+        and max(point, action_q, sample_mean) <= 1.0
+    ):
         return "probability_order"
     if not (
-        math.isclose(action_q, point, rel_tol=0.0, abs_tol=1e-12)
+        math.isclose(action_q, sample_mean, rel_tol=0.0, abs_tol=1e-12)
         and 0.0 < cost < 1.0
         and edge_expected > 0.0
         and math.isclose(
@@ -635,10 +640,15 @@ def _qkernel_global_mean_buy_rejection_reason(
     if not (
         0.0 <= terminal_win <= 1.0
         and 0.0 <= terminal_loss <= 1.0
-        and math.isclose(cut_win, point, rel_tol=0.0, abs_tol=1e-12)
-        and math.isclose(cut_loss, 1.0 - point, rel_tol=0.0, abs_tol=1e-12)
-        and math.isclose(terminal_win, point, rel_tol=0.0, abs_tol=1e-12)
-        and math.isclose(terminal_loss, 1.0 - point, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(cut_win, action_q, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(cut_loss, 1.0 - action_q, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(terminal_win, action_q, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            terminal_loss,
+            1.0 - action_q,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
         and math.isclose(
             terminal_win + terminal_loss,
             1.0,

@@ -29,6 +29,7 @@ import src.engine.global_batch_runtime as global_batch_runtime
 import src.engine.global_auction_universe as universe
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
+    _qkernel_global_mean_buy_rejection_reason,
     qkernel_current_state_identity_hash,
     stable_hash,
 )
@@ -75,6 +76,7 @@ from src.solve.solver import (
     ExpectedBuyTerminalWealthCertificate,
     ExpectedGrowthComparison,
     ExpectedTerminalWealthCertificate,
+    GlobalAuctionUniverseWitness,
     GlobalSingleOrderCandidate,
     GlobalSingleOrderCandidateEvaluation,
     GlobalSingleOrderDecision,
@@ -84,6 +86,7 @@ from src.solve.solver import (
     OutcomeTokenBinding,
     PortfolioWealthWitness,
     family_payoff_q_samples,
+    global_auction_universe_identity,
     global_candidate_from_native,
     global_sell_fill_prefix_objective,
     executable_curve_identity,
@@ -91,6 +94,7 @@ from src.solve.solver import (
     joint_probability_content_identity,
     joint_probability_witness_identity,
     portfolio_wealth_identity,
+    select_global_single_order,
     _score_global_single_order,
 )
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
@@ -9569,7 +9573,7 @@ def test_global_current_state_economics_tightens_on_current_candidate_cap():
         )
 
 
-def test_global_current_state_mean_buy_uses_current_point_and_keeps_lcb_as_evidence():
+def test_global_current_state_mean_buy_rejects_plugin_point_and_uses_draw_mean():
     at = _dt.datetime(2026, 7, 26, 12, 0, tzinfo=_dt.timezone.utc)
     family = "Seoul|2026-07-27|high"
     bindings = (
@@ -9624,17 +9628,17 @@ def test_global_current_state_mean_buy_uses_current_point_and_keeps_lcb_as_evide
     win_payoff = shares - cost
     loss_wealth = Decimal("98")
     win_wealth = Decimal("103")
-    expected_du = 0.30 * math.log(0.98) + 0.70 * math.log(1.03)
+    expected_du = 0.50 * math.log(0.98) + 0.50 * math.log(1.03)
     terminal = ExpectedBuyTerminalWealthCertificate(
         probability_basis="POSTERIOR_PREDICTIVE_MEAN",
-        win_probability_mean=0.70,
-        loss_probability_mean=0.30,
+        win_probability_mean=0.50,
+        loss_probability_mean=0.50,
         loss_payoff_usd=loss_payoff,
         win_payoff_usd=win_payoff,
         wealth_after_loss_usd=loss_wealth,
         wealth_after_win_usd=win_wealth,
         expected_delta_log_wealth=expected_du,
-        expected_ev_usd=1.5,
+        expected_ev_usd=0.5,
     )
     decision = SimpleNamespace(
         candidate=candidate,
@@ -9651,6 +9655,9 @@ def test_global_current_state_mean_buy_uses_current_point_and_keeps_lcb_as_evide
             "receipt_hash": "receipt-current",
             "payoff_q_point": 0.70,
             "payoff_q_lcb": 0.35,
+            "global_target_shares": float(shares),
+            "global_expected_cost_usd": float(cost),
+            "global_max_spend_usd": float(cost),
         },
         decision=decision,
         witness=witness,
@@ -9660,13 +9667,21 @@ def test_global_current_state_mean_buy_uses_current_point_and_keeps_lcb_as_evide
     assert current["global_probability_functional"] == (
         "POSTERIOR_PREDICTIVE_MEAN"
     )
-    assert current["payoff_q_action"] == pytest.approx(0.70)
-    assert current["edge_expected"] == pytest.approx(0.30)
+    assert current["payoff_q_action"] == pytest.approx(0.50)
+    assert current["edge_expected"] == pytest.approx(0.10)
     assert current["edge_lcb"] == pytest.approx(-0.05)
+    assert current["global_current_sample_payoff_q_mean"] == pytest.approx(0.50)
     assert current["global_current_sample_payoff_q_lcb"] == pytest.approx(0.50)
-    assert current["global_expected_ev_usd"] == pytest.approx(1.5)
+    assert current["global_expected_ev_usd"] == pytest.approx(0.5)
     assert current["false_edge_rate"] == pytest.approx(1.0 / 401.0)
     assert "global_robust_ev_usd" not in current
+    assert (
+        _qkernel_global_mean_buy_rejection_reason(
+            current,
+            direction="buy_yes",
+        )
+        is None
+    )
     from src.events.day0_authority import (
         assert_live_day0_qkernel_guard_authority,
     )
@@ -9695,6 +9710,38 @@ def test_global_current_state_mean_buy_uses_current_point_and_keeps_lcb_as_evide
     )
     assert uncapped["payoff_q_lcb"] == pytest.approx(0.50)
     assert uncapped["edge_lcb"] == pytest.approx(0.10)
+
+    plugin_terminal = replace(
+        terminal,
+        win_probability_mean=0.70,
+        loss_probability_mean=0.30,
+        expected_delta_log_wealth=(
+            0.30 * math.log(0.98) + 0.70 * math.log(1.03)
+        ),
+        expected_ev_usd=1.5,
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_PREDICTIVE_MEAN_SUPERSEDED",
+    ):
+        era._global_current_state_execution_economics(
+            {
+                "source": "qkernel_spine",
+                "decision_id": "decision-plugin",
+                "receipt_hash": "receipt-plugin",
+                "payoff_q_point": 0.70,
+                "payoff_q_lcb": 0.35,
+            },
+            decision=SimpleNamespace(
+                candidate=candidate,
+                shares=shares,
+                cost_usd=cost,
+                terminal_wealth=None,
+                expected_terminal_wealth=plugin_terminal,
+            ),
+            witness=witness,
+            payoff_q_lcb_cap=0.35,
+        )
 
 
 def test_time_dependent_candidate_caps_are_not_probability_cached(monkeypatch):
@@ -18535,6 +18582,121 @@ def _global_test_candidate_book(
             captured_at_utc=epoch_captured_at,
         ),
     )
+
+
+def test_global_buy_expected_objective_uses_probability_draw_mean_not_plugin_point():
+    decision_at = _dt.datetime(2026, 7, 27, 3, 0, tzinfo=_dt.timezone.utc)
+    bindings = (
+        OutcomeTokenBinding("bin-a", "condition-a", "yes-a", "no-a"),
+        OutcomeTokenBinding("bin-b", "condition-b", "yes-b", "no-b"),
+    )
+    point_q = np.asarray((0.80, 0.20))
+    samples = np.tile(np.asarray(((0.40, 0.60),)), (400, 1))
+    witness_id = joint_probability_witness_identity(
+        family_key="family",
+        bindings=bindings,
+        q_version="q-version",
+        resolution_identity="resolution",
+        topology_identity="topology",
+        posterior_identity_hash="posterior",
+        source_truth_identity="source",
+        authority_certificate_hash="certificate",
+        band_alpha=0.05,
+        band_basis="PARAMETER_POSTERIOR_SIMPLEX_V1",
+        yes_point_q=point_q,
+        yes_q_samples=samples,
+        captured_at_utc=decision_at,
+    )
+    witness = JointOutcomeProbabilityWitness(
+        family_key="family",
+        bindings=bindings,
+        yes_point_q=point_q,
+        yes_q_samples=samples,
+        q_version="q-version",
+        resolution_identity="resolution",
+        topology_identity="topology",
+        posterior_identity_hash="posterior",
+        source_truth_identity="source",
+        authority_certificate_hash="certificate",
+        band_alpha=0.05,
+        band_basis="PARAMETER_POSTERIOR_SIMPLEX_V1",
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=witness_id,
+    )
+    candidate = _global_test_buy_candidate(
+        family_key="family",
+        probability_witness_identity=witness_id,
+        book_identity="book",
+        price="0.60",
+        captured_at=decision_at,
+        bin_id="bin-a",
+        condition_id="condition-a",
+        token_id="yes-a",
+    )
+    resolution_at = decision_at + _dt.timedelta(days=1)
+    universe_id = global_auction_universe_identity(
+        family_bindings=(("family", witness.family_binding_identity),),
+        family_resolution_at_utc=(("family", resolution_at),),
+        venue_universe_identity="venue",
+        captured_at_utc=decision_at,
+    )
+    universe = GlobalAuctionUniverseWitness(
+        family_bindings=(("family", witness.family_binding_identity),),
+        family_resolution_at_utc=(("family", resolution_at),),
+        venue_universe_identity="venue",
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=universe_id,
+    )
+    wealth_id = portfolio_wealth_identity(
+        ledger_snapshot_id="ledger",
+        position_set_hash="positions",
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=decision_at,
+    )
+    wealth = PortfolioWealthWitness(
+        ledger_snapshot_id="ledger",
+        position_set_hash="positions",
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=wealth_id,
+    )
+
+    decision = select_global_single_order(
+        (candidate,),
+        probability_witnesses={"family": witness},
+        universe_witness=universe,
+        current_universe_identity_resolver=lambda: universe_id,
+        current_probability_resolver=lambda _family: (
+            CurrentFamilyProbabilityAuthority.from_witness(witness)
+        ),
+        current_execution_resolver=lambda selected: CurrentExecutionAuthority(
+            token_id=selected.token_id,
+            side=selected.side,
+            book_snapshot_id=selected.book_snapshot_id,
+            execution_curve_identity=selected.execution_curve_identity,
+        ),
+        current_wealth_identity_resolver=lambda: wealth.economic_identity,
+        wealth_witness=wealth,
+        capital_limit_usd=Decimal("100"),
+        decision_at_utc=decision_at,
+    )
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons[candidate.candidate_id] in {
+        "NON_POSITIVE_EXPECTED_OBJECTIVE",
+        "NON_POSITIVE_EXPECTED_FILL_PREFIX",
+    }
 
 
 def test_global_batch_overlays_jit_curve_without_full_universe_refresh(monkeypatch):

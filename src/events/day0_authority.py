@@ -1325,7 +1325,11 @@ def assert_live_day0_qkernel_guard_authority(
             str(economics.get("selection_guard_basis") or "")
             == "CURRENT_POSTERIOR_PREDICTIVE_MEAN"
         )
-        selection_q = payoff_q_point if mean_selected else payoff_q_lcb
+        payoff_q_action = _first_float(economics, {}, "payoff_q_action")
+        if mean_selected and payoff_q_action is None:
+            raise Day0AuthorityError("day0_qkernel payoff_q_action missing")
+        selection_q = payoff_q_action if mean_selected else payoff_q_lcb
+        assert selection_q is not None
         if not math.isclose(
             selection_guard_q_safe,
             selection_q,
@@ -1334,7 +1338,7 @@ def assert_live_day0_qkernel_guard_authority(
         ):
             raise Day0AuthorityError(
                 "day0_qkernel selection_guard_q_safe mismatches "
-                f"{'payoff_q_point' if mean_selected else 'payoff_q_lcb'}"
+                f"{'payoff_q_action' if mean_selected else 'payoff_q_lcb'}"
             )
         if deterministic_payoff:
             observation = block.get("global_current_observation_payload")

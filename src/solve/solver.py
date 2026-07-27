@@ -6020,14 +6020,12 @@ def select_global_single_order(
             joint_buy_candidates_by_family.setdefault(
                 candidate.family_key, []
             ).append(candidate)
-        payoff_probability_mean = family_payoff_point_q(
-            probability_witnesses[candidate.family_key],
-            bin_id=candidate.bin_id,
-            side=candidate.side,
-        )
-        if payoff_probability_mean is None:
-            rejections[candidate.candidate_id] = "POINT_PROBABILITY_UNAVAILABLE"
-            continue
+        # BUY and statistical SELL share one posterior-predictive functional.
+        # A plug-in point can differ materially from E[q] when the current
+        # probability witness carries parameter draws; expected log wealth is
+        # linear in q for a fixed binary action, so its exact expectation uses
+        # the draw mean. SELL already follows this law above.
+        payoff_probability_mean = float(np.mean(q_samples))
         score = _score_global_single_order_buy_expected(
             candidate,
             payoff_probability_mean=payoff_probability_mean,
