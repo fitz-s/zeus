@@ -70,11 +70,17 @@ NOAA_METAR_STATION_ENDPOINT = (
 #: Canonical source id carried in event payload provenance.
 FAST_OBS_SOURCE_ID = "aviationweather_metar"
 
+
+class Day0PublicationLedgerUnavailable(RuntimeError):
+    """Raised when an event cannot bind its causal publication state."""
+
+
 #: T-group (temperature to tenths C) presence in the raw METAR remarks,
 #: e.g. "T02110150". Required for F-settled extreme tracking (see module doc).
 _T_GROUP_RE = re.compile(r"\bT\d{8}\b")
 _CYCLE_DATE_RE = re.compile(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}$")
 _METAR_TEMP_RE = re.compile(r"(?:^|\s)(M?\d{2})/(?:M?\d{2}|//)(?:\s|$)")
+_METAR_VALID_TIME_RE = re.compile(r"\b(\d{2})(\d{2})(\d{2})Z\b")
 
 #: Standalone-emitter throttle. The scheduled ingest lane sets this to zero
 #: because its own cadence drives the cycle cursor; AWC recovery stays bounded.
@@ -202,14 +208,23 @@ def fast_obs_source_for_city(city: Any) -> Optional[FastObsSource]:
       - wu_icao cities -> aviationweather.gov METAR for the SAME ICAO station
         the WU settlement page reads. Covers all 50 wu_icao cities including
         international (NOAA redistributes global METAR; measured 3-6 min).
+      - noaa cities -> aviationweather.gov METAR for the SAME ICAO station
+        named by the weather.gov settlement contract. Ogimet remains the
+        canonical hourly/history writer; its slower mirror cannot veto a
+        newer same-station NOAA publication on the live source clock.
       - hko (Hong Kong) -> None here. HKO open data is free and faster but has
         its own client/lane (settlement_source_type='hko' settles on HKO, not
         WU; cross-source semantics differ). SPEC'd, not wired in this pass.
-      - noaa (Istanbul/Moscow/Tel Aviv) -> None (ogimet METAR lanes already
-        exist for these; day0 families for them are not WU-settled).
     """
     source_type = str(getattr(city, "settlement_source_type", "") or "")
     station = str(getattr(city, "wu_station", "") or "").strip().upper()
+    if source_type == "noaa" and station:
+        return FastObsSource(
+            source_id=FAST_OBS_SOURCE_ID,
+            station_id=station,
+            authority="ICAO_STATION_NATIVE",
+            notes="same physical NOAA settlement station; direct NOAA/NWS distribution",
+        )
     if source_type == "wu_icao" and station:
         # SETTLEMENT-FAITHFULNESS MARGIN (operator correction 2026-06-10,
         # measured config/wu_metar_divergence.json; ABSORBED not excluded as
@@ -707,6 +722,43 @@ def settlement_temp_for_report(report: MetarReport, unit: str) -> Optional[float
     return None
 
 
+def metar_observation_time_from_raw(
+    raw_report: str,
+    *,
+    published_at: datetime,
+) -> datetime | None:
+    """Recover the METAR valid time without confusing it with publication."""
+
+    match = _METAR_VALID_TIME_RE.search(str(raw_report or ""))
+    if match is None or published_at.tzinfo is None:
+        return None
+    day, hour, minute = (int(value) for value in match.groups())
+    published_utc = published_at.astimezone(UTC)
+    candidates: list[datetime] = []
+    for offset in range(-32, 2):
+        candidate_date = (published_utc + timedelta(days=offset)).date()
+        if candidate_date.day != day:
+            continue
+        try:
+            candidate = datetime(
+                candidate_date.year,
+                candidate_date.month,
+                candidate_date.day,
+                hour,
+                minute,
+                tzinfo=UTC,
+            )
+        except ValueError:
+            continue
+        if published_utc - timedelta(hours=36) <= candidate <= (
+            published_utc + timedelta(minutes=15)
+        ):
+            candidates.append(candidate)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda candidate: abs(candidate - published_utc))
+
+
 @dataclass(frozen=True)
 class FastObsExtremes:
     city: str
@@ -1024,9 +1076,14 @@ def fast_obs_to_day0_observation(
     )
     expected_station = str(getattr(city, "wu_station", "") or "").strip().upper()
     station_match = "MATCH" if expected_station and extremes.station_id == expected_station else "MISMATCH"
+    source_type = str(getattr(city, "settlement_source_type", "") or "")
     source_match = (
         "MATCH"
-        if str(getattr(city, "settlement_source_type", "") or "") == "wu_icao" and station_match == "MATCH"
+        if (
+            source.source_id == FAST_OBS_SOURCE_ID
+            and source_type in {"wu_icao", "noaa"}
+            and station_match == "MATCH"
+        )
         else "MISMATCH"
     )
     local_date_status, dst_status = _observation_local_date_status(
@@ -1090,6 +1147,193 @@ def fast_obs_to_day0_observation(
         # config that could be regenerated later with a different number.
         "metar_margin_units_applied": float(source.margin_units),
     }
+
+
+def read_noaa_fast_obs_context_from_ledger(
+    world_conn: Any,
+    *,
+    city: Any,
+    target_date: str,
+    decision_time: datetime,
+):
+    """Read one exact-station NOAA Day0 context from the publication ledger.
+
+    This is the held-position consumer for NOAA-settled cities. It performs no
+    network I/O and admits only the configured ICAO station, the direct
+    AviationWeather channel, source publications available by ``decision_time``,
+    and samples inside the settlement-local target day.
+    """
+
+    if (
+        str(getattr(city, "settlement_source_type", "") or "").strip().lower()
+        != "noaa"
+        or decision_time.tzinfo is None
+    ):
+        return None
+    source = fast_obs_source_for_city(city)
+    if source is None or source.source_id != FAST_OBS_SOURCE_ID:
+        return None
+    city_name = str(getattr(city, "name", "") or "").strip()
+    timezone_name = str(getattr(city, "timezone", "") or "").strip()
+    station = str(source.station_id or "").strip().upper()
+    if not city_name or not timezone_name or not station:
+        return None
+    try:
+        target_day = date.fromisoformat(str(target_date)[:10])
+        tz = ZoneInfo(timezone_name)
+    except (TypeError, ValueError):
+        return None
+    decision_utc = decision_time.astimezone(UTC)
+    day_start = datetime.combine(
+        target_day,
+        datetime.min.time(),
+        tzinfo=tz,
+    ).astimezone(UTC)
+    day_end = datetime.combine(
+        target_day + timedelta(days=1),
+        datetime.min.time(),
+        tzinfo=tz,
+    ).astimezone(UTC)
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT publish_ts_utc, value_native, unit, station_id, raw_report,
+                   fetched_at_utc
+              FROM observation_prints
+             WHERE city = ?
+               AND station_id = ?
+               AND source_channel = ?
+               AND publish_ts_utc >= ?
+               AND publish_ts_utc < ?
+               AND publish_ts_utc <= ?
+               AND julianday(fetched_at_utc) <= julianday(?)
+             ORDER BY publish_ts_utc, id
+            """,
+            (
+                city_name,
+                station,
+                FAST_OBS_SOURCE_ID,
+                (day_start - timedelta(hours=1)).isoformat(),
+                (day_end + timedelta(hours=1)).isoformat(),
+                decision_utc.isoformat(),
+                decision_utc.isoformat(),
+            ),
+        ).fetchall()
+    except Exception:
+        return None
+    reports: list[MetarReport] = []
+    for (
+        publish_raw,
+        value_raw,
+        unit_raw,
+        station_raw,
+        raw_report,
+        fetched_raw,
+    ) in rows:
+        if str(station_raw or "").strip().upper() != station:
+            continue
+        if str(unit_raw or "").strip().upper() != "C":
+            continue
+        try:
+            published = datetime.fromisoformat(
+                str(publish_raw).replace("Z", "+00:00")
+            )
+            fetched = datetime.fromisoformat(
+                str(fetched_raw).replace("Z", "+00:00")
+            )
+            value = float(value_raw)
+        except (TypeError, ValueError, OSError, OverflowError):
+            continue
+        if (
+            published.tzinfo is None
+            or fetched.tzinfo is None
+            or published.astimezone(UTC) > decision_utc
+            or fetched.astimezone(UTC) > decision_utc
+        ):
+            continue
+        published_utc = published.astimezone(UTC)
+        observed_utc = metar_observation_time_from_raw(
+            str(raw_report or ""),
+            published_at=published_utc,
+        )
+        if observed_utc is None:
+            continue
+        reports.append(
+            MetarReport(
+                station_id=station,
+                obs_time=observed_utc,
+                receipt_time=published_utc,
+                temp_c=value,
+                metar_type="METAR",
+                raw=str(raw_report or ""),
+            )
+        )
+    if not reports:
+        return None
+    extremes = running_extremes_for_local_day(
+        reports,
+        city=city,
+        target_date=target_day.isoformat(),
+        as_of=decision_utc,
+        margin_units=source.margin_units,
+    )
+    if (
+        extremes.sample_count <= 0
+        or extremes.current_temp is None
+        or extremes.high_so_far is None
+        or extremes.low_so_far is None
+        or extremes.first_obs_time is None
+        or extremes.last_obs_time is None
+    ):
+        return None
+
+    from src.data.observation_client import (
+        Day0ObservationContext,
+        _coverage_status_from_sample_times,
+    )
+
+    (
+        coverage_status,
+        max_gap_minutes,
+        gap_suspect_metrics,
+        sample_times,
+    ) = _coverage_status_from_sample_times(
+        first_local=extremes.first_obs_time.astimezone(tz),
+        n_samples=extremes.sample_count,
+        sample_times_utc=extremes.sample_times_utc,
+        target_day=target_day,
+        timezone_name=timezone_name,
+        reference_utc=decision_utc,
+    )
+    observation_time = extremes.last_obs_time.astimezone(UTC).isoformat()
+    available_at = (
+        extremes.last_receipt_time.astimezone(UTC).isoformat()
+        if extremes.last_receipt_time is not None
+        else observation_time
+    )
+    return Day0ObservationContext(
+        current_temp=float(extremes.current_temp),
+        high_so_far=float(extremes.high_so_far),
+        low_so_far=float(extremes.low_so_far),
+        source=FAST_OBS_SOURCE_ID,
+        observation_time=observation_time,
+        unit=extremes.unit,
+        station_id=station,
+        sample_count=extremes.sample_count,
+        first_sample_time=extremes.first_obs_time.astimezone(UTC).isoformat(),
+        last_sample_time=observation_time,
+        coverage_status=coverage_status,
+        observation_available_at=available_at,
+        provider_reported_time="direct_noaa_publication",
+        source_role="runtime_monitoring",
+        source_authority=source.authority,
+        data_version="aviationweather_metar_publication_v1",
+        training_allowed=False,
+        causality_status="OK",
+        max_gap_minutes=max_gap_minutes,
+        gap_suspect_metrics=gap_suspect_metrics,
+        sample_times_utc=tuple(instant.isoformat() for instant in sample_times),
+    )
 
 
 #: Source freshness states for one fetch pass (PR#404 operator review P0-3).
@@ -2273,6 +2517,8 @@ class Day0FastObsEmitter:
         Consumed EXCLUSIVELY by observation_client._fetch_wu_observation fallback
         (Option-B wiring). Do NOT call from hot paths outside the monitor lane.
         """
+        if str(getattr(city, "settlement_source_type", "") or "") != "wu_icao":
+            return None
         source = fast_obs_source_for_city(city)
         if source is None:
             return None
@@ -2319,6 +2565,8 @@ class Day0FastObsEmitter:
         shares the ENTRY freshness rule with ``latest_extremes`` and never opens
         a network request or recovers old event-store facts.
         """
+        if str(getattr(city, "settlement_source_type", "") or "") != "wu_icao":
+            return None
         source = fast_obs_source_for_city(city)
         if source is None:
             return None
@@ -2368,6 +2616,8 @@ class Day0FastObsEmitter:
 
         eligible: list[tuple[Any, FastObsSource, str]] = []
         for city in cities:
+            if str(getattr(city, "settlement_source_type", "") or "") != "wu_icao":
+                continue
             source = fast_obs_source_for_city(city)
             if source is None:
                 continue
@@ -2533,7 +2783,10 @@ class Day0FastObsEmitter:
             item
             for item in eligible
             if (
-                status in (FETCH_FRESH, FETCH_CACHE_HIT)
+                str(
+                    getattr(item[0], "settlement_source_type", "") or ""
+                ) == "wu_icao"
+                and status in (FETCH_FRESH, FETCH_CACHE_HIT)
                 and self._station_is_current(item[1].station_id, station_status_map)
             )
         )
@@ -2650,7 +2903,10 @@ class Day0FastObsEmitter:
         DENIED for stale-after-failure data older than the city's staleness
         budget and for observations without live authority (publication clock
         missing, etc.) — those may only advance the monotone kill memo (P0-3).
-
+        When ``persist_ledger`` is true, the exact publication is materialized
+        before its event is inserted. Both writes share the caller's transaction,
+        so a committed event can never wake a reader against older trajectory
+        state.
         """
         from src.events.event_writer import EventWriter
         from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
@@ -2674,6 +2930,13 @@ class Day0FastObsEmitter:
             self.hydrate_from_ledger(world_conn, prefetch.eligible)
         if not prefetch.eligible or not prefetch.reports:
             return 0
+        if persist_ledger and not self.persist_prefetched_ledger(
+            world_conn=world_conn,
+            prefetch=prefetch,
+        ):
+            raise Day0PublicationLedgerUnavailable(
+                "publication ledger unavailable before Day0 event"
+            )
         reports = list(prefetch.reports)
         decision_time = prefetch.decision_time
         emission_eligible = prefetch.eligible
@@ -2914,11 +3177,6 @@ class Day0FastObsEmitter:
                 if str(report.station_id).strip().upper() in complete_stations
                 and (key := _report_publication_key(report)) is not None
             )
-        if persist_ledger:
-            self.persist_prefetched_ledger(
-                world_conn=world_conn,
-                prefetch=prefetch,
-            )
         if deferred_memo_updates is None:
             self.apply_memo_updates(pending_memo_updates)
         else:
@@ -2931,12 +3189,13 @@ class Day0FastObsEmitter:
         world_conn,
         prefetch: FastObsPrefetch,
     ) -> bool:
-        """Persist additive publication history after the trade fact is durable.
+        """Persist the causal publication state consumed by Day0 redecision.
 
-        ``observation_prints`` makes restart recovery better, but it is not the
-        executable Day0 fact. The ingest source clock calls this in a separate,
-        best-effort transaction on a later non-emitting pass so ledger volume
-        can never contend with a new ``DAY0_EXTREME_UPDATED`` decision.
+        The live source clock calls this inside the same transaction and before
+        inserting ``DAY0_EXTREME_UPDATED``. A persistence failure therefore
+        withholds the event instead of pairing a new extreme with stale
+        trajectory state. Callers using ``persist_ledger=False`` own an
+        equivalent causal-state proof.
         """
 
         if not prefetch.eligible:

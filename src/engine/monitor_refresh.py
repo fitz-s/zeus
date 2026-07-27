@@ -2236,21 +2236,79 @@ def _city_supports_executable_day0_observation(city) -> bool:
 def _fetch_day0_observation(city: Position | object, target_d: date):
     reference_time = datetime.now(timezone.utc)
     if str(getattr(city, "settlement_source_type", "") or "").strip() == "noaa":
-        canonical = _fetch_canonical_day0_observation_from_instants(
+        observation = _fetch_noaa_day0_observation(
             city,
             target_d,
             reference_time=reference_time,
         )
-        if canonical is not None:
-            return canonical
+        if observation is not None:
+            return observation
         raise ObservationUnavailableError(
-            f"Canonical Day0 observation unavailable for "
+            f"NOAA Day0 observation unavailable for "
             f"{getattr(city, 'name', '?')}/noaa/{target_d.isoformat()}"
         )
     try:
         return get_current_observation(city, target_date=target_d, reference_time=reference_time)
     except TypeError:
         return get_current_observation(city)
+
+
+def _fetch_noaa_day0_observation(
+    city: object,
+    target_d: date,
+    *,
+    reference_time: datetime,
+):
+    """Return the newest causal exact-station NOAA monitor context."""
+
+    conn = None
+    try:
+        from src.data.day0_fast_obs import (
+            read_noaa_fast_obs_context_from_ledger,
+        )
+        from src.data.day0_observation_reader import (
+            read_day0_observation_context_from_instants,
+        )
+        from src.state.db import get_world_connection_read_only
+
+        conn = get_world_connection_read_only()
+        try:
+            direct = read_noaa_fast_obs_context_from_ledger(
+                conn,
+                city=city,
+                target_date=target_d.isoformat(),
+                decision_time=reference_time,
+            )
+        except Exception:
+            direct = None
+        try:
+            canonical = read_day0_observation_context_from_instants(
+                conn,
+                city=city,
+                target_date=target_d.isoformat(),
+                decision_time_utc=reference_time,
+            )
+        except Exception:
+            canonical = None
+        candidates = [item for item in (direct, canonical) if item is not None]
+        if not candidates:
+            return None
+
+        def _causal_time(item) -> datetime:
+            parsed = _parse_utc_datetime(
+                _day0_observation_field(item, "observation_time")
+            )
+            return parsed or datetime.min.replace(tzinfo=timezone.utc)
+
+        return max(candidates, key=_causal_time)
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _fetch_canonical_day0_observation_from_instants(

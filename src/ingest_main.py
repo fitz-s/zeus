@@ -563,6 +563,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
 
         import sqlite3
 
+        from src.data.day0_fast_obs import Day0PublicationLedgerUnavailable
         from src.state.db import get_world_connection, world_write_mutex
         from src.state.write_coordinator import (
             DBIdentity,
@@ -613,7 +614,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                     inserted_families=inserted_families,
                     evaluated_report_keys=evaluated_report_keys,
                     deferred_memo_updates=deferred_memo_updates,
-                    persist_ledger=False,
+                    persist_ledger=True,
                 )
                 commit_started = time.monotonic()
                 conn.commit()
@@ -635,6 +636,20 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                 if callable(mark_evaluated):
                     mark_evaluated(evaluated_report_keys)
                 del _DAY0_METAR_PENDING_COMMITS[0]
+        except Day0PublicationLedgerUnavailable as exc:
+            if conn is not None:
+                conn.rollback()
+            logger.info(
+                "DAY0_METAR_COMMIT_DEFERRED origin=%s "
+                "reason=publication_ledger_unavailable pending_reports=%d exc=%r",
+                origin,
+                pending_reports,
+                exc,
+            )
+            return {
+                "status": "WRITE_CONTENDED",
+                "pending_reports": pending_reports,
+            }
         except WriteLeaseTimeout as exc:
             logger.info(
                 "DAY0_METAR_COMMIT_DEFERRED origin=%s reason=world_writer_gate_busy "
@@ -680,21 +695,13 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
             event_ids=tuple(inserted_event_ids),
             families=tuple(inserted_families),
         )
-    # Never reacquire the world writer after waking the reactor for a new
-    # trade fact. The emitter retains unledgered publication identities, and a
-    # later non-emitting source pass persists them outside the alpha window.
-    ledger_persisted = (
-        _persist_day0_metar_ledger_after_wake(prefetch)
-        if emitted == 0
-        else False
-    )
     logger.info(
         "DAY0_METAR_COMMIT_COMPLETED origin=%s pending_reports=%d emitted=%d "
         "ledger_persisted=%s",
         origin,
         pending_reports,
         emitted,
-        ledger_persisted,
+        True,
     )
     return {
         "status": "COMMITTED",

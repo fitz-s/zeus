@@ -327,7 +327,7 @@ files:
   src/data/day0_fast_obs.py:
     zone: K1_truth
     authority_role: same_station_day0_physical_clock
-    why: Appends same-station METAR prints and emits authorized Day0 redecision events. The absorbing extreme and source observation version are independent monotone state; a newer plateau advances the remaining-window clock once without promoting the monitoring channel to final settlement truth.
+    why: Appends same-station METAR prints and emits authorized Day0 redecision events. WU-settled cities use the audited same-station distribution contract; NOAA-settled Istanbul/Moscow/Tel Aviv also consume the direct NOAA/NWS publication for their configured settlement station while Ogimet remains the canonical hourly/history mirror. The absorbing extreme and source observation version are independent monotone state; a newer plateau advances the remaining-window clock once without promoting the monitoring channel to final settlement truth.
     downstream:
     - src/ingest_main.py
     - src/events/triggers/day0_extreme_updated.py

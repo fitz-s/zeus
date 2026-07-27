@@ -1227,6 +1227,109 @@ class TestMonitorPrimaryAuthority:
             allow_incomplete_window_bound=True,
         ) is None
 
+    def test_noaa_monitor_prefers_newer_direct_publication(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        from src.state.schema.observation_prints_schema import (
+            append_print,
+            ensure_table,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE observation_instants (
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                source TEXT NOT NULL,
+                timezone_name TEXT NOT NULL,
+                utc_timestamp TEXT NOT NULL,
+                temp_current REAL,
+                running_max REAL,
+                running_min REAL,
+                authority TEXT NOT NULL,
+                causality_status TEXT NOT NULL,
+                source_role TEXT NOT NULL,
+                training_allowed INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO observation_instants (
+                city, target_date, source, timezone_name, utc_timestamp,
+                temp_current, running_max, running_min, authority,
+                causality_status, source_role, training_allowed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Istanbul", "2026-07-27", "ogimet_metar_ltfm",
+                "Europe/Istanbul", "2026-07-27T12:50:00+00:00",
+                31.0, 31.0, 25.0, "VERIFIED", "OK",
+                "runtime_monitoring", 0,
+            ),
+        )
+        ensure_table(conn)
+        append_print(
+            conn,
+            city="Istanbul",
+            station_id="LTFM",
+            source_channel="aviationweather_metar",
+            publish_ts_utc="2026-07-27T13:25:24+00:00",
+            value_native=32.0,
+            unit="C",
+            fetched_at_utc="2026-07-27T13:25:26+00:00",
+            raw_report="METAR LTFM 271320Z 32/18",
+        )
+        append_print(
+            conn,
+            city="Istanbul",
+            station_id="LTFM",
+            source_channel="aviationweather_metar",
+            publish_ts_utc="2026-07-27T13:25:50+00:00",
+            value_native=99.0,
+            unit="F",
+            fetched_at_utc="2026-07-27T13:25:51+00:00",
+            raw_report="METAR LTFM 271321Z 99/18",
+        )
+        conn.commit()
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection_read_only",
+            lambda: conn,
+        )
+        city = type(
+            "City",
+            (),
+            {
+                "name": "Istanbul",
+                "timezone": "Europe/Istanbul",
+                "settlement_unit": "C",
+                "settlement_source_type": "noaa",
+                "wu_station": "LTFM",
+            },
+        )()
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                fixed = datetime(2026, 7, 27, 13, 26, tzinfo=timezone.utc)
+                return fixed if tz is None else fixed.astimezone(tz)
+
+        monkeypatch.setattr(mr, "datetime", FixedDateTime)
+
+        obs = mr._fetch_day0_observation(city, date(2026, 7, 27))
+
+        assert obs.source == "aviationweather_metar"
+        assert obs.station_id == "LTFM"
+        assert obs.current_temp == pytest.approx(32.0)
+        assert obs.high_so_far == pytest.approx(32.0)
+        assert obs.observation_time == "2026-07-27T13:20:00+00:00"
+        assert mr._day0_observation_source_rejection_reason(
+            city,
+            obs,
+            consumer_label="held-position monitor refresh",
+        ) is None
+
     def test_day0_monitor_accepts_incomplete_window_only_as_bound(self, monkeypatch):
         import src.engine.monitor_refresh as mr
 

@@ -4,6 +4,46 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-27 Direct NOAA publication continuity
+
+The Istanbul Jul-27 31C YES position entered at 13:07 UTC from a current LTFM
+31C report. NOAA/NWS published the next LTFM METAR at 13:20 with 32C, while
+the live monitor still held the 12:50 Ogimet mirror snapshot and q≈0.962 after
+13:33 as the market collapsed. The existing five-second AviationWeather/NOAA
+source clock already polls exact held-position stations, but its registry
+excluded every `settlement_source_type=noaa` city solely because an Ogimet
+lane existed. Downstream Day0 event and remaining-window readers already admit
+`aviationweather_metar` for NOAA cities.
+
+The hot-fix admits only configured NOAA cities with an exact configured ICAO
+station into that existing clock and authorizes the direct publication only
+when station, local date, unit, publication clock, and source type all match.
+Ogimet remains the canonical hourly/history writer; direct NOAA is the faster
+same-authority live publication, not a cross-source proxy or market-price
+substitute. The direct print and `DAY0_EXTREME_UPDATED` now commit atomically,
+with the publication ledger inserted before the event and reactor wake after
+commit. Held-position monitoring compares direct and Ogimet contexts from one
+causal read boundary and selects the newer exact-station fact. The typed event
+separates canonical `settlement_source_type=noaa` from the
+`aviationweather_metar` vendor channel. WU-only tail fusion, pre-Day0 LOW
+conditioning, and WU-vs-METAR divergence comparison remain WU-only. SCOPE is
+the exact configured city/date/station/metric family; DRAIN is the next
+five-second station poll and atomic publication/event commit; RESET is the
+newer same-station observation version followed by normal posterior
+materialization and global redecision. A failed ledger write withholds the
+event and enters the existing bounded commit retry instead of waking against
+stale trajectory state.
+
+Acceptance requires a two-poll Istanbul 12:50 31C -> 13:20 32C causal replay
+that proves ledger-before-event order and emits an authorized 32C event, held
+monitor selection of the newer direct 32C context over the 31C Ogimet mirror,
+a proof that NOAA cities never enter the WU divergence comparator, unchanged
+non-WU fallback behavior, focused fast-source and remaining-day tests,
+planning-lock/source-contract checks, compilation, and `git diff --check`.
+Live proof requires the exact loaded SHA, fresh ingest heartbeat, a new LTFM
+direct publication in the canonical event/print path, and a resulting current
+held-family probability/redecision receipt.
+
 ## 2026-07-26 Zero-observation Day0 reseed contract
 
 The live Day0 source clock emitted a current Paris report and queued immediate

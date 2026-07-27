@@ -194,11 +194,15 @@ DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
     # Hong Kong has no valid WU/VHHH route; the live Day0 monitor source is the
     # HKO native accumulator only.
     "hko": frozenset({"hko_hourly_accumulator"}),
-    # NOAA-settled Polymarket weather cities (for example Moscow/UUWW and
-    # Tel Aviv/LLBG) do not have a WU executable source. The live Day0 monitor
-    # consumes the canonical observation_instants surface populated from Ogimet
-    # METAR rows for those settlement stations.
-    "noaa": frozenset({"ogimet_metar_ltfm", "ogimet_metar_uuww", "ogimet_metar_llbg"}),
+    # NOAA-settled cities consume the exact configured ICAO station. Direct
+    # AviationWeather publications are the low-latency current-state channel;
+    # Ogimet remains the canonical hourly/history mirror of the same station.
+    "noaa": frozenset({
+        "aviationweather_metar",
+        "ogimet_metar_ltfm",
+        "ogimet_metar_uuww",
+        "ogimet_metar_llbg",
+    }),
 }
 DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
 DAY0_HOURLY_SOURCE_PUBLICATION_GRACE_HOURS = 1.0

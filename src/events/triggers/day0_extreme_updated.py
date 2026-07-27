@@ -59,10 +59,15 @@ def build_day0_extreme_updated_event(
     if available_at > decision_time.astimezone(UTC):
         raise ValueError("observation_available_at is after decision_time")
 
+    city_name = str(observation["city"])
+    city_config = runtime_cities_by_name().get(city_name)
+    settlement_source_type = str(
+        getattr(city_config, "settlement_source_type", "") or ""
+    ).strip().lower()
     raw_value = float(observation["raw_value"])
     rounded_value = int(settlement_semantics.round_single(raw_value))
     payload = Day0ExtremeUpdatedPayload(
-        city=str(observation["city"]),
+        city=city_name,
         target_date=str(observation["target_date"]),
         metric=str(observation["metric"]),  # type: ignore[arg-type]
         settlement_source=str(observation["settlement_source"]),
@@ -73,6 +78,7 @@ def build_day0_extreme_updated_event(
         rounded_value=rounded_value,
         high_so_far=observation.get("high_so_far"),
         low_so_far=observation.get("low_so_far"),
+        settlement_source_type=settlement_source_type,
         source_match_status=str(observation.get("source_match_status", "UNKNOWN")),
         local_date_status=str(observation.get("local_date_status", "UNKNOWN")),
         station_match_status=str(observation.get("station_match_status", "UNKNOWN")),

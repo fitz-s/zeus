@@ -34971,8 +34971,8 @@ def _latest_day0_current_temperature_native(
         (
             str(family.city),
             *channels,
-            start.isoformat(),
-            end.isoformat(),
+            (start - timedelta(hours=1)).isoformat(),
+            (end + timedelta(hours=1)).isoformat(),
             decision_time.astimezone(UTC).isoformat(),
             decision_time.astimezone(UTC).isoformat(),
         ),
@@ -35015,9 +35015,16 @@ def _latest_day0_current_temperature_native(
             # whole-C report is not precise enough to condition a bin path.
             from src.data.day0_fast_obs import (
                 _T_GROUP_RE,
+                metar_observation_time_from_raw,
                 metar_t_group_temperature_c,
             )
 
+            observation_time = metar_observation_time_from_raw(
+                str(raw_report or ""),
+                published_at=published,
+            )
+            if observation_time is None:
+                continue
             if expected_unit == "F":
                 if not _T_GROUP_RE.search(str(raw_report or "")):
                     continue
@@ -35029,9 +35036,13 @@ def _latest_day0_current_temperature_native(
                 continue
         elif str(unit_raw or "").strip().upper() != expected_unit:
             continue
+        else:
+            observation_time = published
+        if observation_time.astimezone(tz).date() != target:
+            continue
         if not math.isfinite(value):
             continue
-        return value, published.astimezone(UTC), str(channel_raw)
+        return value, observation_time.astimezone(UTC), str(channel_raw)
     return None
 
 

@@ -42,6 +42,7 @@ in_scope:
 - src/engine/cycle_runtime.py
 - src/engine/event_reactor_adapter.py
 - src/events/day0_authority.py
+- src/events/opportunity_event.py
 - src/events/triggers/day0_extreme_updated.py
 - src/decision_kernel/verifier.py
 - src/control/live_health.py

@@ -75,6 +75,7 @@ class Day0ExtremeUpdatedPayload:
     rounded_value: int
     high_so_far: float | None = None
     low_so_far: float | None = None
+    settlement_source_type: str = ""
     source_match_status: str = "UNKNOWN"
     local_date_status: str = "UNKNOWN"
     station_match_status: str = "UNKNOWN"

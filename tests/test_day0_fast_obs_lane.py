@@ -39,6 +39,7 @@ import pytest
 
 from src.data.day0_fast_obs import (
     Day0FastObsEmitter,
+    Day0PublicationLedgerUnavailable,
     FastObsSource,
     MetarReport,
     NoaaMetarCycleCursor,
@@ -46,6 +47,7 @@ from src.data.day0_fast_obs import (
     fast_obs_to_day0_observation,
     parse_metar_api_payload,
     parse_noaa_metar_cycle_payload,
+    read_noaa_fast_obs_context_from_ledger,
     running_extremes_for_local_day,
     settlement_temp_for_report,
 )
@@ -100,8 +102,18 @@ def _london():
     )
 
 
+def _istanbul():
+    return SimpleNamespace(
+        name="Istanbul", timezone="Europe/Istanbul", settlement_unit="C",
+        wu_station="LTFM", settlement_source_type="noaa",
+    )
+
+
 def _report(station, obs_time, temp_c, *, t_group=True, receipt_offset_min=4.0):
-    raw = f"METAR {station} 101200Z 16008KT 10SM 21/15 A3004"
+    raw = (
+        f"METAR {station} {obs_time.astimezone(UTC):%d%H%M}Z "
+        "16008KT 10SM 21/15 A3004"
+    )
     if t_group:
         raw += " RMK AO2 T02110150"
     return MetarReport(
@@ -915,6 +927,24 @@ class TestObservationStatuses:
         )
         assert fast_obs_source_for_city(hko) is None
 
+    def test_noaa_city_uses_direct_same_station_source(self):
+        city = _istanbul()
+        source = fast_obs_source_for_city(city)
+        assert source is not None
+        assert source.source_id == "aviationweather_metar"
+        assert source.station_id == "LTFM"
+        assert source.margin_units == 0.0
+
+        obs = fast_obs_to_day0_observation(
+            city=city,
+            extremes=self._extremes(city, target_date="2026-06-10"),
+            metric="high",
+            source=source,
+        )
+        assert obs["source_match_status"] == "MATCH"
+        assert obs["source_authorized_status"] == "AUTHORIZED"
+        assert obs["live_authority_status"] == "live"
+
 
 # ===========================================================================
 # R6 — monotone emission through the real event store
@@ -964,6 +994,109 @@ class TestEmitterMonotone:
         payloads = [_json.loads(r["payload_json"]) for r in rows]
         assert all(p["settlement_source"] == "aviationweather_metar" for p in payloads)
         assert all(p["live_authority_status"] == "live" for p in payloads)
+
+    def test_noaa_print_advances_before_slower_ogimet_mirror(self):
+        """Istanbul loss replay: direct LTFM 32C must wake redecision even
+        while the canonical Ogimet hourly mirror still ends at 31C."""
+        conn = _world_conn()
+        first = datetime(2026, 7, 27, 12, 50, tzinfo=UTC)
+        latest = datetime(2026, 7, 27, 13, 20, tzinfo=UTC)
+        reports = [
+            _report("LTFM", first, 31.0, t_group=False, receipt_offset_min=2.0)
+        ]
+        emitter = Day0FastObsEmitter(
+            fetcher=lambda stations, **kw: reports,
+            min_fetch_interval_s=0.0,
+        )
+
+        assert emitter.emit_events(
+            world_conn=conn,
+            cities=[_istanbul()],
+            decision_time=first + timedelta(minutes=3),
+            received_at=(first + timedelta(minutes=3)).isoformat(),
+            limit=20,
+        ) == 2
+        conn.commit()
+
+        reports.append(
+            _report("LTFM", latest, 32.0, t_group=False, receipt_offset_min=2.0)
+        )
+        second_decision = max(
+            latest + timedelta(minutes=3),
+            datetime.now(UTC) + timedelta(minutes=1),
+        )
+        traced: list[str] = []
+        conn.set_trace_callback(traced.append)
+        assert emitter.emit_events(
+            world_conn=conn,
+            cities=[_istanbul()],
+            decision_time=second_decision,
+            received_at=second_decision.isoformat(),
+            limit=20,
+        ) == 2
+        conn.commit()
+        conn.set_trace_callback(None)
+
+        ledger_insert = next(
+            index
+            for index, sql in enumerate(traced)
+            if "INSERT OR IGNORE INTO observation_prints" in sql
+        )
+        event_insert = next(
+            index
+            for index, sql in enumerate(traced)
+            if "INSERT OR IGNORE INTO opportunity_events" in sql
+        )
+        assert ledger_insert < event_insert
+        high = conn.execute(
+            """
+            SELECT payload_json
+              FROM opportunity_events
+             WHERE event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(payload_json, '$.metric') = 'high'
+             ORDER BY rowid DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        payload = json.loads(high["payload_json"])
+        assert payload["settlement_source"] == "aviationweather_metar"
+        assert payload["settlement_source_type"] == "noaa"
+        assert payload["station_id"] == "LTFM"
+        assert payload["rounded_value"] == 32
+        assert payload["observation_time"].startswith("2026-07-27T13:20")
+        assert payload["observation_available_at"].startswith("2026-07-27T13:22")
+        assert payload["live_authority_status"] == "live"
+
+        context = read_noaa_fast_obs_context_from_ledger(
+            conn,
+            city=_istanbul(),
+            target_date="2026-07-27",
+            decision_time=second_decision,
+        )
+        assert context is not None
+        assert context.source == "aviationweather_metar"
+        assert context.station_id == "LTFM"
+        assert context.current_temp == pytest.approx(32.0)
+        assert context.high_so_far == pytest.approx(32.0)
+        assert context.observation_time.startswith("2026-07-27T13:20")
+
+    def test_noaa_fast_source_never_enters_wu_divergence_comparator(self):
+        first = datetime(2026, 7, 27, 12, 50, tzinfo=UTC)
+        reports = [_report("LTFM", first, 31.0, t_group=False)]
+        checked: list[str] = []
+        emitter = Day0FastObsEmitter(
+            fetcher=lambda stations, **kw: reports,
+            min_fetch_interval_s=0.0,
+        )
+
+        prefetch = emitter.prefetch(
+            cities=[_istanbul()],
+            decision_time=first + timedelta(minutes=3),
+            anomaly_check=lambda city, *_args: checked.append(city.name),
+        )
+
+        assert len(prefetch.eligible) == 1
+        assert checked == []
 
     def test_restart_short_window_cannot_emit_regressed_high(self):
         conn = _world_conn()
@@ -1540,11 +1673,12 @@ class TestLedgerPublicationDelta:
             cities=[_tokyo()],
             decision_time=t0 + timedelta(minutes=5),
         )
-        emitter.emit_prefetched(
-            world_conn=conn,
-            prefetch=pf1,
-            received_at=(t0 + timedelta(minutes=5)).isoformat(),
-        )
+        with pytest.raises(Day0PublicationLedgerUnavailable):
+            emitter.emit_prefetched(
+                world_conn=conn,
+                prefetch=pf1,
+                received_at=(t0 + timedelta(minutes=5)).isoformat(),
+            )
         pf2 = emitter.prefetch(
             cities=[_tokyo()],
             decision_time=t0 + timedelta(minutes=6),

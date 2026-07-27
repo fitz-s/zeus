@@ -1283,7 +1283,8 @@ class TestDay0MetarSourceClockTick:
 
             def emit_prefetched(self, **_kw):
                 self.family_admission = _kw["family_admission"]
-                assert _kw["persist_ledger"] is False
+                assert _kw["persist_ledger"] is True
+                assert self.persist_prefetched_ledger(**_kw)
                 order.append("emit")
                 _kw["inserted_event_ids"].extend(("event-b", "event-a"))
                 _kw["inserted_families"].extend(
@@ -1382,7 +1383,7 @@ class TestDay0MetarSourceClockTick:
             < order.index("gate_exit")
             < order.index(wake_entry)
         )
-        assert "ledger" not in order
+        assert order.index("ledger") < order.index("emit") < order.index("commit")
         assert "wake:event-b,event-a" in wake_entry
         assert "(('Paris', '2026-06-12', 'high'),)" in wake_entry
         assert emitter.hydrate_admission is admission
@@ -1405,7 +1406,8 @@ class TestDay0MetarSourceClockTick:
                 return prefetch
 
             def emit_prefetched(self, **_kw):
-                assert _kw["persist_ledger"] is False
+                assert _kw["persist_ledger"] is True
+                assert self.persist_prefetched_ledger(**_kw)
                 order.append("emit")
                 return 0
 
@@ -1454,7 +1456,56 @@ class TestDay0MetarSourceClockTick:
             "pending_reports": 1,
             "events_emitted": 0,
         }
-        assert order.index("commit") < order.index("ledger")
+        assert order.index("ledger") < order.index("emit") < order.index("commit")
+
+    def test_publication_ledger_failure_keeps_fact_for_bounded_retry(
+        self,
+        monkeypatch,
+    ):
+        import src.ingest_main as im
+        from src.data.day0_fast_obs import Day0PublicationLedgerUnavailable
+
+        self._enable(monkeypatch)
+        prefetch = SimpleNamespace(
+            ledger_reports=(object(),),
+            eligible=((_wu_icao_city(), object(), "2026-06-12"),),
+        )
+
+        class _Emitter:
+            def emit_prefetched(self, **_kwargs):
+                raise Day0PublicationLedgerUnavailable("injected")
+
+        class _Conn:
+            total_changes = 0
+
+            def execute(self, _sql, _params=()):
+                return self
+
+            def rollback(self):
+                return None
+
+            def close(self):
+                return None
+
+        mutex = SimpleNamespace(
+            acquire=lambda **_kwargs: True,
+            release=lambda: None,
+        )
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: _Emitter())
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection",
+            lambda **_kwargs: _Conn(),
+        )
+        monkeypatch.setattr("src.state.db.world_write_mutex", lambda: mutex)
+        im._stage_day0_metar_commit(
+            prefetch,
+            received_at="2026-06-12T00:00:00+00:00",
+        )
+
+        result = im._commit_pending_day0_metar(origin="test")
+
+        assert result == {"status": "WRITE_CONTENDED", "pending_reports": 1}
+        assert im._DAY0_METAR_PENDING_COMMITS[0][0] is prefetch
 
     def test_already_evaluated_publications_bypass_event_writer(self, monkeypatch):
         import src.ingest_main as im
