@@ -603,9 +603,9 @@ def test_reconcile_wrapper_keeps_fill_commit_and_reports_redecision_failure(
     )
     result = wrapped()
 
-    assert result["scheduler_failed"] is True
+    assert result["scheduler_failed"] is False
     assert "fill wake unavailable" in result["scheduler_failure_reason"]
-    assert health_writes[-1]["failed"] is True
+    assert health_writes[-1]["failed"] is False
     assert health_writes[-1]["extra"] == result
     durable = _conn(db_path).execute(
         """

@@ -1739,7 +1739,10 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
         )
 
     return {
-        "scheduler_failed": bool(fill_redecision_error),
+        # Canonical user-channel/reconcile truth is already committed above.
+        # A derived redecision wake has its own durable retry source and cannot
+        # relabel the authenticated channel/reconcile job as unavailable.
+        "scheduler_failed": False,
         "scheduler_failure_reason": fill_redecision_error,
         "status": (
             "processed_with_fill_redecision_error"

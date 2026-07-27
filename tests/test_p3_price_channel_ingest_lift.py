@@ -2257,7 +2257,7 @@ def test_position_fill_without_causal_carrier_is_not_rebuilt_every_cycle(
     assert event_facts_again == set()
 
 
-def test_position_fill_redecision_reads_before_world_write_and_degrades_health():
+def test_position_fill_redecision_reads_before_world_write_without_poisoning_channel_health():
     from src.events import price_channel_redecision_router as router
     from src.ingest import price_channel_ingest as lane
 
@@ -2272,7 +2272,7 @@ def test_position_fill_redecision_reads_before_world_write_and_degrades_health()
     assert "(evaluated_fact_ids - event_fact_ids) | acknowledged_fact_ids" in cycle_src
 
     reconcile_src = inspect.getsource(lane._edli_user_channel_reconcile_cycle)
-    assert '"scheduler_failed": bool(fill_redecision_error)' in reconcile_src
+    assert '"scheduler_failed": False' in reconcile_src
     assert '"scheduler_failure_reason": fill_redecision_error' in reconcile_src
     assert "processed_with_fill_redecision_error" in reconcile_src
 
