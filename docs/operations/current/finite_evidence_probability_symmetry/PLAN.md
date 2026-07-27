@@ -1996,3 +1996,38 @@ Acceptance requires:
 - after the already-running migration reaches a safe commit, hot-fix landing
   and restart prove loaded SHA, fresh ingest heartbeat, released world writer,
   advancing EDLI claims, and current monitor/rejection evidence.
+
+## 2026-07-27 Global receipt probability-parent coherence
+
+Two current-state handoff defects survived the first candidate-fallthrough
+repair. The selected-proof builder converted posterior-parent mismatches into a
+returned no-submit receipt before the outer preflight wrapper could classify
+them, so one stale BUY-NO candidate still vetoed the complete BUY/SELL/HOLD/CASH
+cut. Separately, a global BUY-NO execution could use a current posterior point
+on the receipt while retaining an older served YES scalar. The venue order
+could fill before the receipt-level complement check rejected that mixed-parent
+pair and requeued the event.
+
+The correction keeps stale selected-leg proof failures candidate-local whether
+they are raised or returned. For accepted current-state BUY-NO actions, the
+receipt's NO point and same-bin YES point are exact complements from the same
+current witness. The immutable served replacement certificate remains separate
+provenance and is not rewritten.
+
+SCOPE is global winner preflight classification and BUY-NO receipt scalar
+binding. DRAIN is immediate same-cut candidate exclusion/re-auction before any
+venue side effect. RESET is a current selected proof whose receipt point pair
+passes the existing exact parent check. No probability model, FDR, Kelly,
+execution band, sizing objective, source, lifecycle, or settlement rule changes.
+
+Acceptance requires:
+
+- a returned selected-leg mismatch is converted to a candidate-local no-submit
+  receipt while unclassified faults remain fail-loud;
+- a predictive-mean BUY-NO action carries the current point complement on its
+  receipt while preserving the older served certificate separately;
+- focused integration tests, relevant global-auction/admission tests, compile,
+  lint, and diff checks pass;
+- hot-fix landing and restart prove current loaded SHA, no new batch-wide
+  posterior mismatch, no receipt scalar mismatch, advancing exits, and fresh
+  canonical runtime evidence.

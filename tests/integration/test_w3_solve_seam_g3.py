@@ -9943,6 +9943,36 @@ def test_global_preflight_selected_leg_proof_failure_becomes_no_submit_receipt()
     )
 
 
+def test_global_preflight_returned_selected_leg_failure_is_candidate_local():
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+
+    def return_selected_leg_failure(*_args, **_kwargs):
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason="GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH",
+            proof_accepted=False,
+        )
+
+    receipt = era._global_preflight_candidate_receipt(
+        return_selected_leg_failure,
+        event=event,
+        actuation=object(),
+        decision_time=_dt.datetime(
+            2026, 7, 27, 7, 0, tzinfo=_dt.timezone.utc
+        ),
+    )
+
+    assert receipt.submitted is False
+    assert receipt.proof_accepted is False
+    assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.reason == (
+        "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
+        "GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH"
+    )
+
+
 def test_global_preflight_unclassified_exception_remains_fail_loud():
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
 
@@ -12919,6 +12949,36 @@ def test_global_actuation_rebinds_only_selected_buy_no_admission(missing_reason)
         "global_current_probability_witness"
     )
     assert rebound[1] is sibling
+
+
+def test_global_current_buy_no_receipt_scalars_share_one_probability_parent():
+    _family, proofs, _payload = _corpus()[0]
+    proof = next(row for row in proofs if row.direction == "buy_no")
+    proof = replace(
+        proof,
+        q_posterior=0.6,
+        q_lcb_5pct=0.5,
+        same_bin_yes_posterior=0.4,
+        replacement_no_bound_certificate={"served_yes_q": 0.4},
+        missing_reason=None,
+    )
+    rebound = era._bind_global_current_state_economics_to_proof(
+        proof,
+        {
+            "side": "NO",
+            "payoff_q_point": 0.75,
+            "payoff_q_lcb": 0.7,
+            "payoff_q_action": 0.8,
+            "edge_lcb": 0.2,
+            "edge_expected": 0.3,
+            "false_edge_rate": 0.1,
+            "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        },
+    )
+
+    assert rebound.q_posterior == pytest.approx(0.8)
+    assert rebound.same_bin_yes_posterior == pytest.approx(0.25)
+    assert rebound.replacement_no_bound_certificate == {"served_yes_q": 0.4}
 
 
 def test_current_global_day0_payload_replaces_local_transform_and_provenance():

@@ -10958,7 +10958,7 @@ def _global_preflight_candidate_receipt(
     """Convert only selected-leg proof defects into a zero-side-effect receipt."""
 
     try:
-        return submit_inner(
+        receipt = submit_inner(
             event,
             decision_time,
             global_actuation=actuation,
@@ -10975,6 +10975,24 @@ def _global_preflight_candidate_receipt(
             reason=candidate_reason,
             proof_accepted=False,
         )
+    candidate_reason = _global_preflight_candidate_proof_failure_reason(
+        ValueError(str(receipt.reason or ""))
+    )
+    if candidate_reason is None:
+        return receipt
+    if (
+        receipt.submitted
+        or receipt.venue_call_started
+        or receipt.side_effect_status != "NO_SUBMIT"
+    ):
+        raise ValueError("GLOBAL_PREFLIGHT_CANDIDATE_PROOF_SIDE_EFFECT")
+    return dataclass_replace(
+        receipt,
+        submitted=False,
+        side_effect_status="NO_SUBMIT",
+        reason=candidate_reason,
+        proof_accepted=False,
+    )
 
 
 def _global_preflight_block_status(reason: str) -> str:
@@ -12088,13 +12106,13 @@ def _bind_global_current_state_economics_to_proof(
         "qkernel_execution_economics": dict(cert),
         "selection_authority_applied": "qkernel_spine",
     }
-    if (
-        str(cert.get("side") or "").strip().upper() == "NO"
-        and not isinstance(proof.replacement_no_bound_certificate, Mapping)
-    ):
-        # A replacement certificate binds this field to its source-clock YES
-        # parent; the current action complement already lives in ``cert``.
-        replacement["same_bin_yes_posterior"] = 1.0 - action_q
+    if str(cert.get("side") or "").strip().upper() == "NO":
+        # ``same_bin_yes_posterior`` travels beside receipt.q_live, whose global
+        # authority is cert.payoff_q_point. Keep that pair on one current
+        # witness even when the optimizer acts on a predictive mean. The
+        # immutable served YES parent remains separately preserved inside the
+        # replacement certificate and pre-qkernel provenance.
+        replacement["same_bin_yes_posterior"] = 1.0 - q_point
     if _global_current_taker_action(proof, cert):
         replacement.update(
             execution_mode_intent="TAKER",
