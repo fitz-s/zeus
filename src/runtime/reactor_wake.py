@@ -24,6 +24,7 @@ URGENT_WAKE_REASONS = frozenset(
         "day0_extreme_event_committed",
         "forecast_posterior_advanced",
         "market_price_advanced",
+        "position_fill_projected",
     }
 )
 _WAKE_QUEUE_CACHE_LOCK = threading.Lock()
@@ -322,9 +323,9 @@ def read_reactor_wake(
     """Read the queued fact with the shortest alpha clock first.
 
     Day0 observations can reverse value in milliseconds and always preempt.
-    Price and probability are joint decision inputs, so after Day0 the oldest
-    unconsumed material input gets one turn. This preserves the price fast path
-    without letting a continuous book stream starve probability indefinitely.
+    A confirmed fill changes the actual portfolio endowment. Fill, price, and
+    probability are therefore joint material inputs; after Day0 their oldest
+    unconsumed input gets one turn, so no continuous stream can starve another.
     Forecast hints carry incremental family scopes; selecting the newest hint
     does not lose older scopes because same-reason wakes are coalesced and
     acknowledgement remains exact.
@@ -338,6 +339,8 @@ def read_reactor_wake(
         if wake.reason == "day0_extreme_event_committed":
             return wake
     for _queue_file, wake in queued:
+        if wake.reason == "position_fill_projected":
+            return wake
         if wake.reason == "market_price_advanced":
             return wake
         if wake.reason == "forecast_posterior_advanced":
@@ -430,6 +433,7 @@ def coalescible_reactor_wakes(
     if selected.reason in {
         "forecast_posterior_advanced",
         "market_price_advanced",
+        "position_fill_projected",
     }:
         candidates = [
             wake

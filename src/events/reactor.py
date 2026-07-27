@@ -5737,7 +5737,15 @@ def run_edli_event_reactor_cycle(
         producer_wake_reason == "market_price_advanced"
         and bool(producer_wake_event_ids)
     )
-    committed_event_wake = committed_day0_wake or committed_price_wake
+    committed_position_fill_wake = (
+        producer_wake_reason == "position_fill_projected"
+        and bool(producer_wake_event_ids)
+    )
+    committed_event_wake = (
+        committed_day0_wake
+        or committed_price_wake
+        or committed_position_fill_wake
+    )
     forecast_wake_family_order: list[tuple[str, str, str]] = []
     forecast_wake_families: set[tuple[str, str, str]] = set()
     for raw_family in producer_wake_families:

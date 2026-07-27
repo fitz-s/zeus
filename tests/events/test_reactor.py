@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-07-27
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -764,11 +764,106 @@ def test_reactor_wake_day0_still_preempts_older_joint_inputs(tmp_path):
         wake_id="day0-new",
         published_at=datetime(2026, 7, 25, 12, 0, 1, tzinfo=timezone.utc),
     )
+    reactor_wake.publish_reactor_wake(
+        source="fill",
+        reason="position_fill_projected",
+        path=path,
+        wake_id="fill-newest",
+        published_at=datetime(2026, 7, 25, 12, 0, 2, tzinfo=timezone.utc),
+        event_ids=("fill-event",),
+    )
 
     selected = reactor_wake.read_reactor_wake(path=path)
 
     assert selected is not None
     assert selected.wake_id == "day0-new"
+
+
+def test_reactor_wake_fill_is_bounded_fair_with_continuous_joint_inputs(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="price-old",
+        published_at=datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="fill",
+        reason="position_fill_projected",
+        path=path,
+        wake_id="fill-first",
+        published_at=datetime(2026, 7, 25, 12, 0, 1, tzinfo=timezone.utc),
+        event_ids=("fill-event-first",),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="forecast-new",
+        published_at=datetime(2026, 7, 25, 12, 0, 2, tzinfo=timezone.utc),
+        forecast_families=(("Paris", "2026-07-26", "high"),),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="fill",
+        reason="position_fill_projected",
+        path=path,
+        wake_id="fill-second",
+        published_at=datetime(2026, 7, 25, 12, 0, 3, tzinfo=timezone.utc),
+        event_ids=("fill-event-second",),
+    )
+
+    first = reactor_wake.read_reactor_wake(path=path)
+    assert first is not None
+    assert first.wake_id == "price-old"
+    assert reactor_wake.acknowledge_reactor_wake(first, path=path)
+
+    reactor_wake.publish_reactor_wake(
+        source="fill",
+        reason="position_fill_projected",
+        path=path,
+        wake_id="fill-later",
+        published_at=datetime(2026, 7, 25, 12, 0, 4, tzinfo=timezone.utc),
+        event_ids=("fill-event-later",),
+    )
+
+    second = reactor_wake.read_reactor_wake(path=path)
+    assert second is not None
+    assert second.wake_id == "fill-first"
+    assert "position_fill_projected" in reactor_wake.URGENT_WAKE_REASONS
+    fill_batch = reactor_wake.coalescible_reactor_wakes(second, path=path)
+    assert tuple(wake.wake_id for wake in fill_batch) == (
+        "fill-first",
+        "fill-second",
+        "fill-later",
+    )
+    assert reactor_wake.acknowledge_reactor_wakes(fill_batch, path=path)
+
+    reactor_wake.publish_reactor_wake(
+        source="fill",
+        reason="position_fill_projected",
+        path=path,
+        wake_id="fill-newest",
+        published_at=datetime(2026, 7, 25, 12, 0, 5, tzinfo=timezone.utc),
+        event_ids=("fill-event-newest",),
+    )
+
+    third = reactor_wake.read_reactor_wake(path=path)
+    assert third is not None
+    assert third.wake_id == "forecast-new"
+
+
+def test_position_fill_wake_is_an_exact_targeted_reactor_fast_path():
+    from src.events.reactor import run_edli_event_reactor_cycle
+
+    source = inspect.getsource(run_edli_event_reactor_cycle)
+
+    assert 'producer_wake_reason == "position_fill_projected"' in source
+    assert "committed_position_fill_wake" in source
+    assert "or committed_position_fill_wake" in source
+    assert "targeted_only=producer_fast_path and bool(targeted_event_ids)" in source
 
 
 def test_targeted_forecast_wake_ignores_only_older_remaining_backlog(monkeypatch):
