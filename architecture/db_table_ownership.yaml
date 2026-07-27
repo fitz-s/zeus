@@ -1544,6 +1544,20 @@ tables:
       persist_grade now archives the prior row into
       settlement_attribution_supersessions (append-only) before any re-grade
       UPDATE — see that table's entry.
+      READ CONTRACT for fresher_cycle_existed_at_decision (2026-07-27): the
+      column holds TWO incompatible meanings under one literal 1. Rows graded
+      before src/analysis/settlement_skill_attribution.STALE_PREDICATE_FIX_LANDED_AT
+      came from the discredited predicate (settlement-eve vs time-reconstructed
+      decision posterior) and their 1s are systematically false — 266/266
+      joinable flagged rows had that "fresher" posterior computed AFTER their own
+      POSITION_OPEN_INTENT (median +26.8h). schema_version does NOT distinguish
+      them: it is 1 on every row and tracks table shape, never predicate
+      identity. graded_at is the discriminator — filter with
+      fresher_flag_is_trustworthy(graded_at), never the literal 1 alone.
+      The affected rows are deliberately NOT re-graded: 203 carry a q_live that
+      is the last copy of that decision's belief after the 2026-07-24
+      certificate deletion, and a re-grade would resolve 38 while destroying 165
+      into UNATTRIBUTABLE_Q_MISSING. Whether to re-grade is an operator decision.
 
   - name: settlement_attribution_supersessions
     db: world
