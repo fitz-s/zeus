@@ -994,12 +994,18 @@ def _edli_write_price_channel_redecision_events(world_conn, events) -> int:
 def _edli_write_price_channel_redecision_event_ids(
     world_conn,
     events,
+    *,
+    recheck_pending: bool = True,
 ) -> tuple[str, ...]:
     """Write debounced events and return only IDs committed by this call."""
 
     from src.events.event_writer import EventWriter
 
-    claimed = _edli_pending_redecision_entity_keys(world_conn)
+    claimed = (
+        _edli_pending_redecision_entity_keys(world_conn)
+        if recheck_pending
+        else set()
+    )
     admitted = []
     for event in events:
         entity_key = str(getattr(event, "entity_key", "") or "").strip()
@@ -1009,6 +1015,10 @@ def _edli_write_price_channel_redecision_event_ids(
         admitted.append(event)
     emitted = EventWriter(world_conn).write_many(admitted)
     return tuple(result.event_id for result in emitted if result.inserted)
+
+
+class PriceChannelRedecisionSnapshotChanged(RuntimeError):
+    """The WORLD debounce snapshot advanced before its write lock was acquired."""
 
 
 class _PriceChannelRedecisionSink:
@@ -1042,23 +1052,79 @@ class _PriceChannelRedecisionSink:
             raise
         return stack, (world_read, trade_read, forecasts_read)
 
-    def _build(self, events) -> list:  # noqa: ANN001
+    @staticmethod
+    def _world_data_version(world_conn) -> int:  # noqa: ANN001
+        row = world_conn.execute("PRAGMA data_version").fetchone()
+        if row is None:
+            raise RuntimeError("WORLD data_version unavailable")
+        return int(row[0])
+
+    def _build(self, events) -> tuple[list, object, int]:  # noqa: ANN001
         thread_id = threading.get_ident()
         if self._reads is None:
             self._read_stack, self._reads = self._open_reads()
             self._read_thread_id = thread_id
         elif self._read_thread_id != thread_id:
             raise RuntimeError("price-channel read connections changed worker thread")
-        return _edli_price_channel_redecision_events_for_events(
+        events_to_emit = _edli_price_channel_redecision_events_for_events(
             *self._reads,
             events,
             received_at=datetime.now(timezone.utc).isoformat(),
             trade_schema="",
         )
+        world_read = self._reads[0]
+        return (
+            events_to_emit,
+            world_read,
+            (
+                self._world_data_version(world_read)
+                if events_to_emit
+                else -1
+            ),
+        )
+
+    def _write_if_current(
+        self,
+        *,
+        events_to_emit,
+        world_read,
+        read_data_version: int,
+    ) -> tuple[str, ...]:  # noqa: ANN001
+        from src.ingest.price_channel_ingest import (
+            _edli_price_channel_world_write_connection,
+        )
+
+        with _edli_price_channel_world_write_connection(
+            owner="price_channel_redecision_emit"
+        ) as world_write:
+            # The build already read the complete pending-family set. Once the
+            # cross-process WORLD writer flock is held, an unchanged SQLite
+            # data_version proves no competing WORLD commit landed between that
+            # read and this write unit. Re-reading every pending event here used
+            # to turn the writer critical section into random I/O over the large
+            # append DB under page-cache pressure.
+            if self._world_data_version(world_read) != read_data_version:
+                raise PriceChannelRedecisionSnapshotChanged(
+                    "WORLD changed between price-channel debounce read and write"
+                )
+            emitted_event_ids = _edli_write_price_channel_redecision_event_ids(
+                world_write,
+                events_to_emit,
+                recheck_pending=False,
+            )
+            world_write.commit()
+        return emitted_event_ids
 
     def __call__(self, events) -> None:  # noqa: ANN001
         if self._reuse_read_connections:
-            events_to_emit = self._build(events)
+            events_to_emit, world_read, read_data_version = self._build(events)
+            if not events_to_emit:
+                return
+            emitted_event_ids = self._write_if_current(
+                events_to_emit=events_to_emit,
+                world_read=world_read,
+                read_data_version=read_data_version,
+            )
         else:
             stack, reads = self._open_reads()
             with stack:
@@ -1068,21 +1134,15 @@ class _PriceChannelRedecisionSink:
                     received_at=datetime.now(timezone.utc).isoformat(),
                     trade_schema="",
                 )
-        if not events_to_emit:
-            return
-
-        from src.ingest.price_channel_ingest import (
-            _edli_price_channel_world_write_connection,
-        )
-
-        with _edli_price_channel_world_write_connection(
-            owner="price_channel_redecision_emit"
-        ) as world_write:
-            emitted_event_ids = _edli_write_price_channel_redecision_event_ids(
-                world_write,
-                events_to_emit,
-            )
-            world_write.commit()
+                if not events_to_emit:
+                    return
+                world_read = reads[0]
+                read_data_version = self._world_data_version(world_read)
+                emitted_event_ids = self._write_if_current(
+                    events_to_emit=events_to_emit,
+                    world_read=world_read,
+                    read_data_version=read_data_version,
+                )
         if emitted_event_ids:
             from src.runtime.reactor_wake import publish_reactor_wake
 

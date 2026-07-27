@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-19 (price-channel durable-event reactor wake)
+# Last reused or audited: 2026-07-27 (WORLD writer critical-section read cut)
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
 #   §8 Step 3 (lift the user-channel WS thread + market-channel + reconcile cycles),
 #   §9 (regression-unconstructable proof — failure-domain isolation).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P3 — lift the
 #   price-channel / CLOB-fact ingest (the persistent user/market WebSocket lifecycle)
 #   out of the order daemon into its own process (com.zeus.price-channel-ingest).
@@ -1078,7 +1078,9 @@ def test_price_channel_redecision_carries_exact_changed_tokens():
     assert payload["price_changed_token_ids"] == ["token-a", "token-b"]
 
 
-def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypatch):
+def test_price_channel_redecision_sink_keeps_world_version_proof_through_write(
+    monkeypatch,
+):
     from src.events import price_channel_redecision_router as router
     from src.ingest import price_channel_ingest
     from src.runtime import reactor_wake
@@ -1093,6 +1095,11 @@ def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypa
         def __init__(self, name: str) -> None:
             self.name = name
             order.append(f"open:{name}")
+
+        def execute(self, sql: str):
+            assert self.name == "world"
+            assert sql == "PRAGMA data_version"
+            return types.SimpleNamespace(fetchone=lambda: (7,))
 
         def close(self) -> None:
             order.append(f"close:{self.name}")
@@ -1132,9 +1139,10 @@ def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypa
         world_writer,
     )
 
-    def write(_conn, events):  # noqa: ANN001
+    def write(_conn, events, *, recheck_pending: bool):  # noqa: ANN001
         assert len(events) == 1
         assert events[0].event_id == "evt-price-1"
+        assert recheck_pending is False
         order.append("write:redecision")
         return ("evt-price-1",)
 
@@ -1156,15 +1164,95 @@ def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypa
         "open:trade",
         "open:forecasts",
         "build",
-        "close:forecasts",
-        "close:trade",
-        "close:world",
         "enter:world-writer",
         "write:redecision",
         "commit:world",
         "exit:world-writer",
+        "close:forecasts",
+        "close:trade",
+        "close:world",
         "wake:{'source': 'price_channel_redecision_router', "
         "'reason': 'market_price_advanced', 'event_ids': ('evt-price-1',)}",
+    ]
+
+
+def test_price_channel_redecision_retries_when_world_changes_before_write(
+    monkeypatch,
+):
+    from src.events import price_channel_redecision_router as router
+    from src.ingest import price_channel_ingest
+    from src.runtime import reactor_wake
+    from src.state import db
+
+    versions = iter((11, 12))
+    order: list[str] = []
+
+    class ReadConnection:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def execute(self, sql: str):
+            assert self.name == "world"
+            assert sql == "PRAGMA data_version"
+            return types.SimpleNamespace(fetchone=lambda: (next(versions),))
+
+        def close(self) -> None:
+            order.append(f"close:{self.name}")
+
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: ReadConnection("world"))
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: ReadConnection("trade"))
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda: ReadConnection("forecasts"),
+    )
+    monkeypatch.setattr(
+        router,
+        "_edli_price_channel_redecision_events_for_events",
+        lambda *_args, **_kwargs: [types.SimpleNamespace(event_id="evt-raced")],
+    )
+
+    @contextlib.contextmanager
+    def world_writer(*, owner: str):
+        assert owner == "price_channel_redecision_emit"
+        order.append("enter:world-writer")
+        try:
+            yield types.SimpleNamespace(commit=lambda: order.append("commit:world"))
+        finally:
+            order.append("exit:world-writer")
+
+    monkeypatch.setattr(
+        price_channel_ingest,
+        "_edli_price_channel_world_write_connection",
+        world_writer,
+    )
+    monkeypatch.setattr(
+        router,
+        "_edli_write_price_channel_redecision_event_ids",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("changed WORLD snapshot must not write")
+        ),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("uncommitted event must not wake")
+        ),
+    )
+
+    with pytest.raises(
+        router.PriceChannelRedecisionSnapshotChanged,
+        match="WORLD changed",
+    ):
+        router._edli_price_channel_redecision_sink()(["quote"])
+
+    assert order == [
+        "enter:world-writer",
+        "exit:world-writer",
+        "close:forecasts",
+        "close:trade",
+        "close:world",
     ]
 
 
