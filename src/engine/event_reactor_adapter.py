@@ -11985,7 +11985,12 @@ def _bind_global_current_state_economics_to_proof(
         "qkernel_execution_economics": dict(cert),
         "selection_authority_applied": "qkernel_spine",
     }
-    if str(cert.get("side") or "").strip().upper() == "NO":
+    if (
+        str(cert.get("side") or "").strip().upper() == "NO"
+        and not isinstance(proof.replacement_no_bound_certificate, Mapping)
+    ):
+        # A replacement certificate binds this field to its source-clock YES
+        # parent; the current action complement already lives in ``cert``.
         replacement["same_bin_yes_posterior"] = 1.0 - action_q
     if _global_current_taker_action(proof, cert):
         replacement.update(

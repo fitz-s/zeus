@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-15; last_reviewed=2026-07-25; last_reused=2026-07-25
+# Lifecycle: created=2026-06-15; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: Prove the live q-kernel bridge preserves probability and execution invariants.
 # Reuse: Re-audit overlay probability authority and live blockers before q-kernel changes.
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
@@ -14,7 +14,7 @@
 #     3. day0 observation lane: _DAY0_LANE_EVENT_TYPES feed live observed-boundary
 #        state into the same qkernel family optimizer.
 #     4. current exposure in SELECTION (per-bin family exposure into argmax ΔU).
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-27
 """Integration tests for the four PR #409 live-path blockers (RED-on-revert)."""
 from __future__ import annotations
 
@@ -2020,6 +2020,8 @@ def test_overlay_uses_qkernel_probability_fields_and_updates_score():
 
 
 def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tightening():
+    from dataclasses import replace
+
     body = {
         "schema": "replacement_native_no_bound_v1",
         "probability_authority": "replacement_0_1",
@@ -2057,6 +2059,7 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
         economics=economics,
         replacement_no_bound_certificate=bound,
     )
+    new_proof = replace(new_proof, same_bin_yes_posterior=0.348)
     expected = {
         key: bound[key]
         for key in (
@@ -2092,7 +2095,7 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
         expected=expected,
         q_direction=new_proof.q_posterior,
         q_lcb=new_proof.q_lcb_5pct,
-        same_bin_yes_posterior=0.348,
+        same_bin_yes_posterior=new_proof.same_bin_yes_posterior,
         qkernel_execution_economics=new_proof.qkernel_execution_economics,
         probability_authority="replacement_0_1",
         posterior_id=1,
@@ -2102,7 +2105,10 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
     current_cert = {
         **new_proof.qkernel_execution_economics,
         "payoff_q_point": 0.59,
+        "payoff_q_action": 0.59,
         "payoff_q_lcb": 0.58,
+        "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        "edge_expected": 0.27,
         "edge_lcb": 0.26,
     }
     current_proof = era._bind_global_current_state_economics_to_proof(
@@ -2112,19 +2118,20 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
 
     assert current_proof.q_posterior == pytest.approx(0.59)
     assert current_proof.q_lcb_5pct == pytest.approx(0.58)
-    assert current_proof.trade_score == pytest.approx(0.26)
+    assert current_proof.trade_score == pytest.approx(0.27)
     assert current_proof.qkernel_execution_economics[
         "pre_qkernel_q_posterior"
     ] == pytest.approx(0.652)
     assert current_proof.qkernel_execution_economics[
         "payoff_q_point"
     ] == pytest.approx(0.59)
+    assert current_proof.same_bin_yes_posterior == pytest.approx(0.348)
     assert era.replacement_no_bound_certificate_matches(
         current_proof.replacement_no_bound_certificate,
         expected=expected,
         q_direction=current_proof.q_posterior,
         q_lcb=current_proof.q_lcb_5pct,
-        same_bin_yes_posterior=0.348,
+        same_bin_yes_posterior=current_proof.same_bin_yes_posterior,
         qkernel_execution_economics=current_proof.qkernel_execution_economics,
         probability_authority="replacement_0_1",
         posterior_id=1,
@@ -2146,7 +2153,10 @@ def test_global_current_state_proof_replaces_legacy_bound_with_current_witness()
     )
     cert = {
         **proof.qkernel_execution_economics,
+        "payoff_q_action": 0.652,
         "payoff_q_lcb": 0.61,
+        "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        "edge_expected": 0.29,
         "edge_lcb": 0.29,
     }
 
@@ -2173,7 +2183,10 @@ def test_global_current_state_proof_rebinds_selected_day0_point():
     cert = {
         **proof.qkernel_execution_economics,
         "payoff_q_point": 0.71,
+        "payoff_q_action": 0.71,
         "payoff_q_lcb": 0.61,
+        "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        "edge_expected": 0.30,
         "edge_lcb": 0.29,
     }
 
@@ -2187,6 +2200,7 @@ def test_global_current_state_proof_rebinds_selected_day0_point():
     assert current.qkernel_execution_economics[
         "payoff_q_point"
     ] == pytest.approx(0.71)
+    assert current.same_bin_yes_posterior == pytest.approx(0.29)
 
 
 def test_global_current_state_proof_preserves_rest_then_cross_policy():
