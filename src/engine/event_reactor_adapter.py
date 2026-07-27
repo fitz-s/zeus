@@ -3824,7 +3824,14 @@ def _entry_recent_same_token_exit_cooldown_reason(
     token_id: str,
     now: datetime | None = None,
 ) -> str | None:
-    """Return a selection-exclusion reason when the same token was just exited."""
+    """Return a selection exclusion only for the outcome token actually exited.
+
+    ``position_current.token_id`` is the YES token identity even for a ``buy_no``
+    position; the NO token actually held by that position lives in
+    ``no_token_id``.  Matching a candidate against both columns therefore turns an
+    exited NO into a false cooldown on the opposite YES outcome.  Resolve the
+    position's native held token from its direction before applying the cooldown.
+    """
     token = str(token_id or "").strip()
     if conn is None or not token:
         return None
@@ -3832,13 +3839,17 @@ def _entry_recent_same_token_exit_cooldown_reason(
         if not _adapter_table_exists(conn, "position_current"):
             return None
         columns = _position_current_columns(conn)
-        token_columns = [name for name in ("token_id", "no_token_id") if name in columns]
-        if not token_columns or "phase" not in columns or "updated_at" not in columns:
+        if not {
+            "direction",
+            "token_id",
+            "no_token_id",
+            "phase",
+            "updated_at",
+        }.issubset(columns):
             return None
         phase_sql = "phase IN ({})".format(
             ",".join("?" for _ in _ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES)
         )
-        token_sql = " OR ".join(f"NULLIF({name}, '') = ?" for name in token_columns)
         position_id_expr = "position_id" if "position_id" in columns else "''"
         exit_reason_expr = "exit_reason" if "exit_reason" in columns else "''"
         row = conn.execute(
@@ -3850,13 +3861,18 @@ def _entry_recent_same_token_exit_cooldown_reason(
                 {exit_reason_expr} AS exit_reason
               FROM position_current
              WHERE {phase_sql}
-               AND ({token_sql})
+               AND (
+                    (LOWER(direction) = 'buy_yes' AND NULLIF(token_id, '') = ?)
+                    OR
+                    (LOWER(direction) = 'buy_no' AND NULLIF(no_token_id, '') = ?)
+               )
              ORDER BY updated_at DESC
              LIMIT 1
             """,
             (
                 *sorted(_ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES),
-                *(token for _ in token_columns),
+                token,
+                token,
             ),
         ).fetchone()
         if row is None:
@@ -12271,6 +12287,7 @@ def _global_actuation_selected_proof(
     forecast_conn: sqlite3.Connection,
     decision_time: datetime,
     trade_conn: sqlite3.Connection | None = None,
+    selection_rejection_by_candidate: Mapping[str, str] | None = None,
 ) -> "_CandidateProof":
     """Bind the exact global winner to its current proof and sealed economics."""
 
@@ -12336,7 +12353,10 @@ def _global_actuation_selected_proof(
     current_proof = current_matches[0]
     if not matches:
         current_reason = str(
-            getattr(current_proof, "missing_reason", None)
+            (selection_rejection_by_candidate or {}).get(
+                _candidate_evaluation_id(current_proof)
+            )
+            or getattr(current_proof, "missing_reason", None)
             or "CURRENT_SELECTION_SCOPE"
         )
         raise ValueError(
@@ -13414,6 +13434,7 @@ def _build_event_bound_no_submit_receipt_core(
     _prepared_global_family = current_actuation_family
     _global_prepare_reason = None
     _spine_prepare_global = prepare_global_auction and global_actuation is None
+    _selection_scope_rejections: dict[str, str] = {}
     # Fix #4 generalized: pass REAL current per-bin family exposure into the
     # ΔU SELECTION before the instrument is chosen. A flat/empty baseline can
     # pick a leg the account is already heavy in; re-sizing after selection
@@ -13445,6 +13466,7 @@ def _build_event_bound_no_submit_receipt_core(
             allow_global_current_state_rebind=True,
             enforce_win_rate_floor=False,
             telemetry_out=_selection_scope_telemetry,
+            rejection_reason_by_candidate=_selection_scope_rejections,
         )
         proof = _spine_entry_proofs[0] if len(_spine_entry_proofs) == 1 else None
         if proof is None:
@@ -13467,6 +13489,7 @@ def _build_event_bound_no_submit_receipt_core(
             allow_global_current_state_rebind=global_actuation is not None,
             enforce_win_rate_floor=False,
             telemetry_out=_selection_scope_telemetry,
+            rejection_reason_by_candidate=_selection_scope_rejections,
         )
         _pre_day0_low_block_reason = payload.get("_edli_spine_pre_day0_low_block_reason")
         if _pre_day0_low_block_reason is not None:
@@ -13697,6 +13720,7 @@ def _build_event_bound_no_submit_receipt_core(
                 forecast_conn=source_conn,
                 decision_time=decision_time,
                 trade_conn=trade_conn,
+                selection_rejection_by_candidate=_selection_scope_rejections,
             )
         except _GlobalProbabilityTightened as exc:
             return EventSubmissionReceipt(
@@ -23259,7 +23283,15 @@ def _selection_scoped_proofs(
     allow_global_current_state_rebind: bool = False,
     enforce_win_rate_floor: bool = True,
     telemetry_out: dict[str, object] | None = None,
+    rejection_reason_by_candidate: dict[str, str] | None = None,
 ) -> tuple[_CandidateProof, ...]:
+    def record_rejection(proof: _CandidateProof, reason: object) -> None:
+        if rejection_reason_by_candidate is None:
+            return
+        rejection_reason_by_candidate[_candidate_evaluation_id(proof)] = str(
+            reason or "CURRENT_SELECTION_SCOPE"
+        )
+
     def record_empty(stage: str, reasons: list[object], input_count: int) -> None:
         if telemetry_out is None or "empty_reason" in telemetry_out:
             return
@@ -23304,6 +23336,7 @@ def _selection_scoped_proofs(
             live_admitted.append(proof)
         else:
             live_rejections.append(rejection)
+            record_rejection(proof, rejection)
     executable = live_admitted
     if not executable and live_rejections:
         record_empty("live_selection", live_rejections, len(live_rejections))
@@ -23352,6 +23385,7 @@ def _selection_scoped_proofs(
                 executable.append(proof)
             else:
                 admission_rejections.append(proof.missing_reason)
+                record_rejection(proof, proof.missing_reason)
     else:
         admission_input = executable
         executable = []
@@ -23364,6 +23398,7 @@ def _selection_scoped_proofs(
                 executable.append(proof)
             else:
                 admission_rejections.append(proof.missing_reason)
+                record_rejection(proof, proof.missing_reason)
     if not executable and admission_rejections:
         record_empty("admission", admission_rejections, len(admission_input))
     tradeable_limit = [
@@ -23373,6 +23408,10 @@ def _selection_scoped_proofs(
     ]
     scoped = executable
     if tradeable_limit:
+        for proof in executable:
+            reason = _candidate_limit_price_untradeable_reason(proof)
+            if reason is not None:
+                record_rejection(proof, reason)
         scoped = tradeable_limit
     if locked_opportunity_conn is not None:
         unlocked: list[_CandidateProof] = []
@@ -23386,6 +23425,7 @@ def _selection_scoped_proofs(
                 unlocked.append(proof)
             else:
                 locked_rejections.append(locked_reason)
+                record_rejection(proof, locked_reason)
         if unlocked:
             scoped = unlocked
         elif scoped:
@@ -23403,6 +23443,7 @@ def _selection_scoped_proofs(
                 unheld.append(proof)
                 continue
             held_rejections.append(reason)
+            record_rejection(proof, reason)
         if unheld:
             scoped = unheld
         elif scoped:

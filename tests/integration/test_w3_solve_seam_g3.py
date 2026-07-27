@@ -9985,6 +9985,34 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             decision_time=at,
         )
 
+    proof.missing_reason = (
+        "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:"
+        "ev_per_dollar=-1.000000:q_lcb=0.000000:price=0.290080"
+    )
+    scoped_reason = (
+        "RECENT_EXIT_SAME_TOKEN_COOLDOWN:"
+        "position_id=pos-closed:phase=economically_closed"
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:"
+        ".*RECENT_EXIT_SAME_TOKEN_COOLDOWN",
+    ):
+        era._global_actuation_selected_proof(
+            global_actuation=actuation,
+            prepared_global_family=SimpleNamespace(probability_witness=witness),
+            family=SimpleNamespace(family_id=family_key),
+            event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            all_proofs=(proof,),
+            eligible_proofs=(),
+            forecast_conn=object(),
+            decision_time=at,
+            selection_rejection_by_candidate={
+                era._candidate_evaluation_id(proof): scoped_reason,
+            },
+        )
+    proof.missing_reason = None
+
     duplicate = SimpleNamespace(**vars(proof))
     with pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROOF_BINDING_MISSING"):
         era._global_actuation_selected_proof(

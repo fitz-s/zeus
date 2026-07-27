@@ -1357,6 +1357,7 @@ def test_recent_same_token_exit_cooldown_blocks_fresh_entry_and_redecision_scope
         CREATE TABLE position_current (
             position_id TEXT,
             phase TEXT,
+            direction TEXT,
             token_id TEXT,
             no_token_id TEXT,
             updated_at TEXT,
@@ -1367,8 +1368,9 @@ def test_recent_same_token_exit_cooldown_blocks_fresh_entry_and_redecision_scope
     conn.execute(
         """
         INSERT INTO position_current (
-            position_id, phase, token_id, no_token_id, updated_at, exit_reason
-        ) VALUES (?, 'economically_closed', ?, '', ?, ?)
+            position_id, phase, direction, token_id, no_token_id, updated_at,
+            exit_reason
+        ) VALUES (?, 'economically_closed', 'buy_yes', ?, '', ?, ?)
         """,
         (
             "pos-just-exited",
@@ -1401,6 +1403,73 @@ def test_recent_same_token_exit_cooldown_blocks_fresh_entry_and_redecision_scope
     assert "position_id=pos-just-exited" in str(reason)
 
 
+def test_recent_opposite_outcome_exit_does_not_block_selected_native_token():
+    import sqlite3
+
+    row = _snapshot_row(
+        yes_asks=(("0.20", "1000000"),),
+        condition_id="cond-B",
+        yes_token_id="yes-B",
+        no_token_id="no-B",
+        snapshot_id="snapB",
+    )
+    buy_yes = _proof_from_row(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-B",
+        q_posterior=0.75,
+        q_lcb_5pct=0.0,
+        bin_obj=_BIN_Y,
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT,
+            phase TEXT,
+            direction TEXT,
+            token_id TEXT,
+            no_token_id TEXT,
+            updated_at TEXT,
+            exit_reason TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, direction, token_id, no_token_id, updated_at,
+            exit_reason
+        ) VALUES (
+            'pos-exited-no', 'economically_closed', 'buy_no', 'yes-B', 'no-B',
+            ?, 'COMMAND_RECOVERY_EXIT_FILL'
+        )
+        """,
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+
+    assert era._selection_scoped_proofs(
+        proofs=(buy_yes,),
+        held_position_conn=conn,
+        honor_admission_rejections=False,
+        allow_global_current_state_rebind=True,
+        enforce_win_rate_floor=False,
+    ) == (buy_yes,)
+    assert (
+        era._entry_recent_same_token_exit_cooldown_reason(
+            conn,
+            token_id="yes-B",
+        )
+        is None
+    )
+    assert str(
+        era._entry_recent_same_token_exit_cooldown_reason(
+            conn,
+            token_id="no-B",
+        )
+    ).startswith("RECENT_EXIT_SAME_TOKEN_COOLDOWN:")
+
+
 def test_recent_same_token_exit_cooldown_expires_without_permanent_token_ban():
     import sqlite3
 
@@ -1414,6 +1483,7 @@ def test_recent_same_token_exit_cooldown_expires_without_permanent_token_ban():
         CREATE TABLE position_current (
             position_id TEXT,
             phase TEXT,
+            direction TEXT,
             token_id TEXT,
             no_token_id TEXT,
             updated_at TEXT,
@@ -1427,8 +1497,9 @@ def test_recent_same_token_exit_cooldown_expires_without_permanent_token_ban():
     conn.execute(
         """
         INSERT INTO position_current (
-            position_id, phase, token_id, no_token_id, updated_at, exit_reason
-        ) VALUES (?, 'economically_closed', ?, '', ?, ?)
+            position_id, phase, direction, token_id, no_token_id, updated_at,
+            exit_reason
+        ) VALUES (?, 'economically_closed', 'buy_yes', ?, '', ?, ?)
         """,
         (
             "pos-old-exit",

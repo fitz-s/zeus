@@ -2353,17 +2353,28 @@ def _recent_same_token_exit_cooldown_detail(
     token_id: str,
     now: datetime | None = None,
 ) -> dict[str, object] | None:
+    """Describe a cooldown only when ``token_id`` is the exited native outcome.
+
+    A ``buy_no`` row carries the condition's YES token in ``token_id`` and its
+    actually-held NO token in ``no_token_id``.  Treating both columns as held
+    identities cancels a new YES order after a NO exit, exactly when fresh
+    probability evidence may require switching sides.
+    """
     token = str(token_id or "").strip()
     if not token or not _table_exists_in_schema(conn, "main", "position_current"):
         return None
     columns = _table_columns_in_schema(conn, "main", "position_current")
-    token_columns = [name for name in ("token_id", "no_token_id") if name in columns]
-    if not token_columns or "phase" not in columns or "updated_at" not in columns:
+    if not {
+        "direction",
+        "token_id",
+        "no_token_id",
+        "phase",
+        "updated_at",
+    }.issubset(columns):
         return None
     phase_sql = "phase IN ({})".format(
         ",".join("?" for _ in _ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES)
     )
-    token_sql = " OR ".join(f"NULLIF({name}, '') = ?" for name in token_columns)
     position_id_expr = "position_id" if "position_id" in columns else "''"
     exit_reason_expr = "exit_reason" if "exit_reason" in columns else "''"
     try:
@@ -2376,13 +2387,18 @@ def _recent_same_token_exit_cooldown_detail(
                 {exit_reason_expr} AS exit_reason
               FROM position_current
              WHERE {phase_sql}
-               AND ({token_sql})
+               AND (
+                    (LOWER(direction) = 'buy_yes' AND NULLIF(token_id, '') = ?)
+                    OR
+                    (LOWER(direction) = 'buy_no' AND NULLIF(no_token_id, '') = ?)
+               )
              ORDER BY updated_at DESC
              LIMIT 1
             """,
             (
                 *sorted(_ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES),
-                *(token for _ in token_columns),
+                token,
+                token,
             ),
         ).fetchone()
     except Exception:

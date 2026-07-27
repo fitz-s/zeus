@@ -2346,6 +2346,81 @@ def test_entry_order_cleanup_cancels_recent_same_token_exit_rest(monkeypatch, tm
     assert state == "CANCELLED"
 
 
+def test_entry_order_cleanup_keeps_opposite_outcome_after_recent_no_exit(
+    monkeypatch,
+    tmp_path,
+):
+    conn = get_connection(tmp_path / "recent-opposite-exit-resting-entry.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-entry",
+        selected_outcome_token_id="tok-entry",
+        yes_token_id="tok-entry",
+        no_token_id="no-entry",
+        condition_id="m-entry",
+        top_bid="0.008",
+        top_ask="0.010",
+        min_tick_size="0.001",
+    )
+    _seed_pending_entry_command(conn, order_price=0.008)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date,
+            bin_label, direction, unit, size_usd, shares, cost_basis_usd,
+            entry_price, p_posterior, entry_method, strategy_key, edge_source,
+            discovery_mode, chain_state, order_id, order_status, updated_at,
+            temperature_metric, token_id, no_token_id, exit_reason
+        ) VALUES (
+            'pos-recent-no-exit', 'economically_closed', 'pos-recent-no-exit',
+            'm-entry', 'Tokyo', 'Tokyo', '2026-05-22', '75°F or higher',
+            'buy_no', 'F', 7.5, 0.0, 0.0, 0.992, 0.25,
+            'executable_forecast', 'forecast_qkernel_entry',
+            'forecast_qkernel_entry', 'update_reaction', 'synced',
+            'order-exit', 'sell_filled', ?, 'high', 'tok-entry', 'no-entry',
+            'COMMAND_RECOVERY_EXIT_FILL'
+        )
+        """,
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    conn.commit()
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    monkeypatch.setattr(
+        "src.execution.exit_safety.gate_for_intent",
+        lambda intent: types.SimpleNamespace(
+            allow_cancel=True,
+            block_reason=None,
+            state=types.SimpleNamespace(value="READY"),
+        ),
+    )
+
+    try:
+        cancelled_count = cycle_runtime.cleanup_stale_entry_orders(
+            DummyClob(),
+            deps=types.SimpleNamespace(
+                logger=logging.getLogger("test_recent_opposite_exit_entry_keep")
+            ),
+            conn=conn,
+        )
+        state = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'cmd-entry'"
+        ).fetchone()["state"]
+    finally:
+        conn.close()
+
+    assert cancelled_count == 0
+    assert cancelled == []
+    assert state == "ACKED"
+
+
 def test_entry_order_cleanup_recent_same_token_exit_cooldown_expires(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "old-exit-resting-entry.db")
     init_schema(conn)
