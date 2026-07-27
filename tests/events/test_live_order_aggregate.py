@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-07-27
 # Authority basis: PR332 full-live split verdict; live-order aggregate substrate PR A.
 from __future__ import annotations
 
@@ -2365,8 +2365,9 @@ def _pre_submit_payload(**overrides):
 
 
 def test_pre_submit_mean_winner_binds_action_probability_through_all_verifiers():
-    point = 0.65
     action = 0.70
+    point = action
+    sample_mean = 0.65
     lcb = 0.35
     cost = 0.40
     shares = 5.0
@@ -2398,7 +2399,7 @@ def test_pre_submit_mean_winner_binds_action_probability_through_all_verifiers()
         "payoff_q_point": point,
         "payoff_q_lcb": lcb,
         "payoff_q_action": action,
-        "global_current_sample_payoff_q_mean": action,
+        "global_current_sample_payoff_q_mean": sample_mean,
         "cost": cost,
         "edge_lcb": lcb - cost,
         "edge_expected": action - cost,

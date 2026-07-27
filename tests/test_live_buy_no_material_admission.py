@@ -658,7 +658,7 @@ def test_receipt_gate_binds_global_current_certificate_to_exact_receipt() -> Non
     )
 
 
-def test_receipt_gate_binds_mean_action_q_and_point_yes_parent_separately() -> None:
+def test_receipt_gate_binds_mean_action_point_and_yes_complement() -> None:
     economics = _sealed_global_current_buy_no_economics()
     for field in (
         "global_robust_delta_log_wealth",
@@ -684,9 +684,9 @@ def test_receipt_gate_binds_mean_action_q_and_point_yes_parent_separately() -> N
     )
     economics.update(
         {
-            "payoff_q_point": 0.65,
+            "payoff_q_point": action_q,
             "payoff_q_action": action_q,
-            "global_current_sample_payoff_q_mean": action_q,
+            "global_current_sample_payoff_q_mean": 0.65,
             "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
             "selection_guard_basis": "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
             "edge_expected": action_q - cost,
@@ -714,7 +714,7 @@ def test_receipt_gate_binds_mean_action_q_and_point_yes_parent_separately() -> N
         "q_lcb": 0.61,
         "execution_price": 0.32,
         "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
-        "same_bin_yes_posterior": 0.35,
+        "same_bin_yes_posterior": 0.30,
         "qkernel_execution_economics": economics,
         "probability_authority": "global_current_probability_witness",
         "condition_id": "condition-current",
@@ -738,7 +738,7 @@ def test_receipt_gate_binds_mean_action_q_and_point_yes_parent_separately() -> N
         c_fee_adjusted=cost,
         trade_score=action_q - cost,
         q_lcb_calibration_source="FORECAST_BOOTSTRAP",
-        same_bin_yes_posterior=0.35,
+        same_bin_yes_posterior=0.30,
         probability_authority="global_current_probability_witness",
         qkernel_execution_economics=economics,
         trade_score_positive=True,

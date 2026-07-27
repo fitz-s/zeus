@@ -11765,7 +11765,7 @@ def _global_current_state_execution_economics(
     )
     payoff_q_lcb = current_band_payoff_q_lcb
     edge_lcb = payoff_q_lcb - unit_cost
-    edge_expected = sample_probability_mean - unit_cost
+    edge_expected = point_q - unit_cost
     if not all(
         Decimal("0") <= value <= Decimal("1")
         for value in (
@@ -11792,7 +11792,7 @@ def _global_current_state_execution_economics(
     ):
         raise _GlobalProbabilityTightened(float(payoff_q_lcb))
     if mean_action and not math.isclose(
-        float(sample_probability_mean),
+        float(point_q),
         float(cut_win_probability),
         rel_tol=0.0,
         abs_tol=1e-12,
@@ -11822,7 +11822,7 @@ def _global_current_state_execution_economics(
             "q_dot_payoff": float(point_q),
             "payoff_q_lcb": float(payoff_q_lcb),
             "payoff_q_action": float(
-                sample_probability_mean if mean_action else payoff_q_lcb
+                point_q if mean_action else payoff_q_lcb
             ),
             "cost": float(unit_cost),
             "cost_basis": float(unit_cost),
@@ -11844,7 +11844,7 @@ def _global_current_state_execution_economics(
             "selection_guard_cell_key": sample_hash,
             "selection_guard_n": n_draws,
             "selection_guard_q_safe": float(
-                sample_probability_mean if mean_action else payoff_q_lcb
+                point_q if mean_action else payoff_q_lcb
             ),
             "global_probability_functional": (
                 "POSTERIOR_PREDICTIVE_MEAN"
@@ -11869,7 +11869,7 @@ def _global_current_state_execution_economics(
             ),
             "global_expected_value_usd": float(
                 (
-                    sample_probability_mean
+                    point_q
                     if mean_action
                     else payoff_q_lcb
                 )
@@ -11902,10 +11902,10 @@ def _global_current_state_execution_economics(
                     cut_loss_probability
                 ),
                 "global_terminal_win_probability_mean": float(
-                    sample_probability_mean
+                    point_q
                 ),
                 "global_terminal_loss_probability_mean": float(
-                    Decimal("1") - sample_probability_mean
+                    Decimal("1") - point_q
                 ),
             }
         )

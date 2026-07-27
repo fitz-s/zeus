@@ -9405,7 +9405,7 @@ def test_global_current_state_economics_tightens_on_current_candidate_cap():
         )
 
 
-def test_global_current_state_mean_buy_rejects_plugin_point_and_uses_draw_mean():
+def test_global_current_state_mean_buy_uses_point_and_keeps_sample_telemetry():
     at = _dt.datetime(2026, 7, 26, 12, 0, tzinfo=_dt.timezone.utc)
     family = "Seoul|2026-07-27|high"
     bindings = (
@@ -9460,17 +9460,17 @@ def test_global_current_state_mean_buy_rejects_plugin_point_and_uses_draw_mean()
     win_payoff = shares - cost
     loss_wealth = Decimal("98")
     win_wealth = Decimal("103")
-    expected_du = 0.50 * math.log(0.98) + 0.50 * math.log(1.03)
+    expected_du = 0.30 * math.log(0.98) + 0.70 * math.log(1.03)
     terminal = ExpectedBuyTerminalWealthCertificate(
         probability_basis="POSTERIOR_PREDICTIVE_MEAN",
-        win_probability_mean=0.50,
-        loss_probability_mean=0.50,
+        win_probability_mean=0.70,
+        loss_probability_mean=0.30,
         loss_payoff_usd=loss_payoff,
         win_payoff_usd=win_payoff,
         wealth_after_loss_usd=loss_wealth,
         wealth_after_win_usd=win_wealth,
         expected_delta_log_wealth=expected_du,
-        expected_ev_usd=0.5,
+        expected_ev_usd=1.5,
     )
     decision = SimpleNamespace(
         candidate=candidate,
@@ -9499,12 +9499,12 @@ def test_global_current_state_mean_buy_rejects_plugin_point_and_uses_draw_mean()
     assert current["global_probability_functional"] == (
         "POSTERIOR_PREDICTIVE_MEAN"
     )
-    assert current["payoff_q_action"] == pytest.approx(0.50)
-    assert current["edge_expected"] == pytest.approx(0.10)
+    assert current["payoff_q_action"] == pytest.approx(0.70)
+    assert current["edge_expected"] == pytest.approx(0.30)
     assert current["edge_lcb"] == pytest.approx(-0.05)
     assert current["global_current_sample_payoff_q_mean"] == pytest.approx(0.50)
     assert current["global_current_sample_payoff_q_lcb"] == pytest.approx(0.50)
-    assert current["global_expected_ev_usd"] == pytest.approx(0.5)
+    assert current["global_expected_ev_usd"] == pytest.approx(1.5)
     assert current["false_edge_rate"] == pytest.approx(1.0 / 401.0)
     assert "global_robust_ev_usd" not in current
     assert (
@@ -9543,14 +9543,14 @@ def test_global_current_state_mean_buy_rejects_plugin_point_and_uses_draw_mean()
     assert uncapped["payoff_q_lcb"] == pytest.approx(0.50)
     assert uncapped["edge_lcb"] == pytest.approx(0.10)
 
-    plugin_terminal = replace(
+    confidence_mean_terminal = replace(
         terminal,
-        win_probability_mean=0.70,
-        loss_probability_mean=0.30,
+        win_probability_mean=0.50,
+        loss_probability_mean=0.50,
         expected_delta_log_wealth=(
-            0.30 * math.log(0.98) + 0.70 * math.log(1.03)
+            0.50 * math.log(0.98) + 0.50 * math.log(1.03)
         ),
-        expected_ev_usd=1.5,
+        expected_ev_usd=0.5,
     )
     with pytest.raises(
         ValueError,
@@ -9569,7 +9569,7 @@ def test_global_current_state_mean_buy_rejects_plugin_point_and_uses_draw_mean()
                 shares=shares,
                 cost_usd=cost,
                 terminal_wealth=None,
-                expected_terminal_wealth=plugin_terminal,
+                expected_terminal_wealth=confidence_mean_terminal,
             ),
             witness=witness,
             payoff_q_lcb_cap=0.35,
@@ -19085,7 +19085,7 @@ def _global_test_candidate_book(
     )
 
 
-def test_global_buy_expected_objective_uses_probability_draw_mean_not_plugin_point():
+def test_global_buy_expected_objective_uses_current_point_not_confidence_mean():
     decision_at = _dt.datetime(2026, 7, 27, 3, 0, tzinfo=_dt.timezone.utc)
     bindings = (
         OutcomeTokenBinding("bin-a", "condition-a", "yes-a", "no-a"),
@@ -19193,11 +19193,12 @@ def test_global_buy_expected_objective_uses_probability_draw_mean_not_plugin_poi
         decision_at_utc=decision_at,
     )
 
-    assert decision.candidate is None
-    assert decision.rejection_reasons[candidate.candidate_id] in {
-        "NON_POSITIVE_EXPECTED_OBJECTIVE",
-        "NON_POSITIVE_EXPECTED_FILL_PREFIX",
-    }
+    assert decision.candidate is candidate
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.win_probability_mean == pytest.approx(
+        0.80
+    )
+    assert decision.expected_terminal_wealth.expected_ev_usd > 0.0
 
 
 def test_global_batch_overlays_jit_curve_without_full_universe_refresh(monkeypatch):

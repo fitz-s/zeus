@@ -5277,14 +5277,13 @@ def _expected_growth_comparison(
         expected_ev = score.expected_terminal_wealth.expected_ev_usd
     else:
         terminal = score.terminal_wealth
-        q_samples = family_payoff_q_samples(
+        held_q = family_payoff_point_q(
             probability_witness,
             bin_id=candidate.bin_id,
             side=candidate.side,
         )
-        if terminal is None or q_samples is None:
+        if terminal is None or held_q is None:
             raise ValueError("posterior-mean comparison authority is unavailable")
-        held_q = float(np.mean(q_samples))
         favorable_q = (
             1.0 - held_q
             if isinstance(candidate, GlobalSingleOrderSellCandidate)
@@ -5932,10 +5931,14 @@ def select_global_single_order(
                 point_counterfactual
             )
             if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
-                held_probability_mean = float(np.mean(q_samples))
+                if point_q is None:
+                    rejections[candidate.candidate_id] = (
+                        "POINT_PROBABILITY_UNAVAILABLE"
+                    )
+                    continue
                 score = _score_global_single_order_sell_expected(
                     candidate,
-                    held_probability_mean=held_probability_mean,
+                    held_probability_mean=point_q,
                     sample_count=q_samples.size,
                     band_alpha=band_alpha,
                     endowment=sell_endowment,
@@ -6026,12 +6029,15 @@ def select_global_single_order(
             joint_buy_candidates_by_family.setdefault(
                 candidate.family_key, []
             ).append(candidate)
-        # BUY and statistical SELL share one posterior-predictive functional.
-        # A plug-in point can differ materially from E[q] when the current
-        # probability witness carries parameter draws; expected log wealth is
-        # linear in q for a fixed binary action, so its exact expectation uses
-        # the draw mean. SELL already follows this law above.
-        payoff_probability_mean = float(np.mean(q_samples))
+        probability_witness = probability_witnesses[candidate.family_key]
+        payoff_probability_mean = family_payoff_point_q(
+            probability_witness,
+            bin_id=candidate.bin_id,
+            side=candidate.side,
+        )
+        if payoff_probability_mean is None:
+            rejections[candidate.candidate_id] = "POINT_PROBABILITY_UNAVAILABLE"
+            continue
         score = _score_global_single_order_buy_expected(
             candidate,
             payoff_probability_mean=payoff_probability_mean,
@@ -6202,13 +6208,17 @@ def select_global_single_order(
                 bin_id=primary.bin_id,
                 side=primary.side,
             )
-            assert q_samples is not None
+            payoff_probability_mean = family_payoff_point_q(
+                witness,
+                bin_id=primary.bin_id,
+                side=primary.side,
+            )
+            assert q_samples is not None and payoff_probability_mean is not None
             try:
                 target_cost = _single_order_cost(
                     primary.executable_cost_curve,
                     target.shares,
                 )
-                payoff_probability_mean = float(np.mean(q_samples))
                 fixed = _score_global_single_order_buy_expected(
                     primary,
                     payoff_probability_mean=payoff_probability_mean,

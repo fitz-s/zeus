@@ -1,5 +1,5 @@
 # Created: 2026-07-01
-# Last reused/audited: 2026-07-26
+# Last reused/audited: 2026-07-27
 # Authority basis: current q-kernel final-entry economics and selected-side probability quality law.
 from __future__ import annotations
 
@@ -113,8 +113,9 @@ def _current_state_econ(**overrides) -> dict:
 
 
 def _current_state_mean_buy_econ(**overrides) -> dict:
-    point = 0.65
+    point = 0.70
     action = 0.70
+    sample_mean = 0.65
     lcb = 0.35
     price = 0.40
     shares = 5.0
@@ -142,7 +143,7 @@ def _current_state_mean_buy_econ(**overrides) -> dict:
         payoff_q_point=point,
         payoff_q_lcb=lcb,
         payoff_q_action=action,
-        global_current_sample_payoff_q_mean=action,
+        global_current_sample_payoff_q_mean=sample_mean,
         cost=price,
         edge_lcb=lcb - price,
         edge_expected=action - price,

@@ -609,7 +609,7 @@ def _qkernel_global_mean_buy_rejection_reason(
     ):
         return "probability_order"
     if not (
-        math.isclose(action_q, sample_mean, rel_tol=0.0, abs_tol=1e-12)
+        math.isclose(action_q, point, rel_tol=0.0, abs_tol=1e-12)
         and 0.0 < cost < 1.0
         and edge_expected > 0.0
         and math.isclose(

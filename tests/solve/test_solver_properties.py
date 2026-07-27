@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-26
+# Last reused/audited: 2026-07-27
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -1014,7 +1014,7 @@ def test_family_joint_does_not_spend_fixed_capital_fraction_above_kelly_target()
     assert fractional.no_trade_reason == "FAMILY_JOINT_NO_POSITIVE_TARGET"
 
 
-def test_family_joint_repair_uses_draw_mean_not_plugin_point():
+def test_family_joint_repair_uses_current_point_not_confidence_sample_mean():
     candidate = _global_candidate(
         candidate_id="family-joint-draw-mean",
         family="family-joint-draw-mean",
@@ -1047,10 +1047,10 @@ def test_family_joint_repair_uses_draw_mean_not_plugin_point():
     assert decision.buy_sizing_mode == "FAMILY_JOINT_FRACTIONAL_TARGET"
     assert decision.expected_terminal_wealth is not None
     assert decision.expected_terminal_wealth.win_probability_mean == pytest.approx(
-        0.50
+        0.70
     )
     assert decision.expected_terminal_wealth.expected_ev_usd == pytest.approx(
-        0.50 * float(decision.shares) - float(decision.cost_usd)
+        0.70 * float(decision.shares) - float(decision.cost_usd)
     )
 
 
@@ -1800,11 +1800,11 @@ def test_sell_point_counterfactual_is_identity_bound_and_cannot_change_live_acti
         ),
     ),
 )
-def test_statistical_sell_uses_posterior_draw_mean_across_temporal_status(
+def test_statistical_sell_uses_current_point_across_temporal_status(
     exit_authority_status,
     exit_authority_reason,
 ):
-    """Fixed-action utility integrates the witness draws, not its point field."""
+    """Confidence stress rows cannot replace the fixed-action expectation."""
 
     sell = _global_sell_candidate(
         candidate_id=f"{exit_authority_status}-day0-point-functional",
@@ -1819,12 +1819,12 @@ def test_statistical_sell_uses_posterior_draw_mean_across_temporal_status(
     )
     held_q_samples = np.concatenate((np.full(380, 0.10), np.full(20, 0.90)))
     sell = _replace_global_q_samples(sell, held_q_samples)
-    sell = _replace_global_point_q(sell, 0.90)
+    sell = _replace_global_point_q(sell, 0.10)
     alternate_tail = _replace_global_q_samples(
         sell,
-        np.concatenate((np.full(200, 0.01), np.full(200, 0.27))),
+        np.full(400, 0.60),
     )
-    alternate_tail = _replace_global_point_q(alternate_tail, 0.90)
+    alternate_tail = _replace_global_point_q(alternate_tail, 0.10)
 
     decision = _global_select((sell,))
     alternate_decision = _global_select((alternate_tail,))
@@ -1835,7 +1835,7 @@ def test_statistical_sell_uses_posterior_draw_mean_across_temporal_status(
     assert decision.terminal_wealth is None
     assert decision.expected_terminal_wealth is not None
     assert decision.expected_terminal_wealth.held_probability_mean == pytest.approx(
-        0.14
+        0.10
     )
     assert decision.expected_terminal_wealth.expected_delta_log_wealth > 0.0
     assert decision.expected_terminal_wealth.expected_ev_usd > 0.0
@@ -1888,8 +1888,8 @@ def test_cape_town_immature_day0_reversal_enters_capital_auction():
     assert decision.candidate_evaluations[0].sell_exit_authority_status == "immature"
 
 
-def test_hong_kong_day0_sell_uses_draw_mean_when_point_probability_is_stale():
-    """Regression: held point 0.9977 cannot override current draw mean 0.7127."""
+def test_hong_kong_day0_sell_uses_current_point_not_confidence_stress_mean():
+    """Regression: confidence stress mass cannot suppress a current profitable exit."""
 
     sell = _global_sell_candidate(
         candidate_id="hong-kong-2026-07-25-low-28c",
@@ -1904,9 +1904,9 @@ def test_hong_kong_day0_sell_uses_draw_mean_when_point_probability_is_stale():
     )
     sell = _replace_global_q_samples(
         sell,
-        np.full(500, 0.7126666666666668),
+        np.full(500, 0.9977),
     )
-    sell = _replace_global_point_q(sell, 0.9977)
+    sell = _replace_global_point_q(sell, 0.7126666666666668)
 
     decision = _global_select((sell,))
 
@@ -1957,13 +1957,14 @@ def test_mature_mean_sell_cannot_masquerade_as_robust_certificate():
         )
 
 
-def test_buy_plugin_point_does_not_change_posterior_mean_size_or_growth():
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_current_point_symmetrically_controls_buy_admission(side):
     buy = _global_candidate(
         candidate_id="robust-buy-common-mean-ranking",
         family="robust-buy-common-mean-ranking-family",
-        side="YES",
+        side=side,
         q=0.80,
-        levels=(("0.20", "1000"),),
+        levels=(("0.80", "1000"),),
     )
     low_mean = _replace_global_point_q(buy, 0.70)
     high_mean = _replace_global_point_q(buy, 0.95)
@@ -1971,17 +1972,39 @@ def test_buy_plugin_point_does_not_change_posterior_mean_size_or_growth():
     low_decision = _global_select((low_mean,), cap="100")
     high_decision = _global_select((high_mean,), cap="100")
 
-    assert low_decision.candidate is low_mean
-    assert high_decision.candidate is high_mean
-    assert low_decision.shares == high_decision.shares
-    assert low_decision.robust_delta_log_wealth == 0
-    assert high_decision.robust_delta_log_wealth == 0
-    assert low_decision.expected_growth is not None
-    assert high_decision.expected_growth is not None
-    assert low_decision.expected_growth.expected_delta_log_wealth > 0.0
-    assert high_decision.expected_growth.expected_delta_log_wealth == pytest.approx(
-        low_decision.expected_growth.expected_delta_log_wealth
+    assert low_decision.candidate is None
+    assert low_decision.rejection_reasons[low_mean.candidate_id] == (
+        "NON_POSITIVE_EXPECTED_OBJECTIVE"
     )
+    assert high_decision.candidate is high_mean
+    assert high_decision.robust_delta_log_wealth == 0
+    assert high_decision.expected_growth is not None
+    assert high_decision.expected_growth.expected_delta_log_wealth > 0.0
+
+
+def test_global_ranking_uses_current_point_not_confidence_sample_mean():
+    stressed_tail = _global_candidate(
+        candidate_id="stressed-tail",
+        family="stressed-tail-family",
+        side="YES",
+        q=0.99,
+        levels=(("0.40", "1000"),),
+    )
+    stressed_tail = _replace_global_point_q(stressed_tail, 0.45)
+    strong_point = _global_candidate(
+        candidate_id="strong-point",
+        family="strong-point-family",
+        side="YES",
+        q=0.51,
+        levels=(("0.40", "1000"),),
+    )
+    strong_point = _replace_global_point_q(strong_point, 0.80)
+
+    decision = _global_select((stressed_tail, strong_point), cap="100")
+
+    assert decision.candidate is strong_point
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.expected_delta_log_wealth > 0.0
 
 
 def test_sell_point_counterfactual_failure_cannot_block_profitable_live_sell(
