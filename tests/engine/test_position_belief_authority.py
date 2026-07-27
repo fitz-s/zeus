@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-07-24
+# Last reused or audited: 2026-07-27
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
 #   719/719 monitor refreshes with last_monitor_prob_is_fresh=False while the
 #   entry authority forecast_posteriors was live and had re-ranked the held bin
@@ -38,6 +38,7 @@ from src.contracts import EntryMethod
 from src.engine.position_belief import (
     DEFAULT_MAX_AGE_HOURS,
     LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+    POSTERIOR_PREDICTIVE_MEAN,
     SELECTED_METHOD_REPLACEMENT_POSTERIOR,
     ReplacementBelief,
     load_replacement_belief,
@@ -105,7 +106,10 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             runtime_layer="live", source_id=LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
             posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
             semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION,
-            q_lcb=None, q_ucb=None):
+            q_lcb=None, q_ucb=None, q_samples=None,
+            q_samples_basis="global_simplex_current_finite_moment_evidence_v3"):
+    if q_samples is None:
+        q_samples = {key: [value, value] for key, value in q.items()}
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -128,7 +132,9 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
                         "current_evidence_shape": {
                             "semantics_revision": semantics_revision,
                         }
-                    }
+                    },
+                    "q_bootstrap_samples_basis": q_samples_basis,
+                    "q_bootstrap_samples_by_bin": q_samples,
                 }
             ),
         ),
@@ -221,6 +227,7 @@ class TestLoadReplacementBelief:
         assert belief.q_yes_lcb == pytest.approx(0.18)
         assert belief.q_yes_ucb == pytest.approx(0.31)
         assert belief.held_side_prob == pytest.approx(1.0 - 0.242)
+        assert belief.probability_functional == POSTERIOR_PREDICTIVE_MEAN
         assert belief.held_side_lcb == pytest.approx(1.0 - 0.31)
         assert belief.held_side_ucb == pytest.approx(1.0 - 0.18)
         assert belief.posterior_id == "p1"
@@ -235,6 +242,49 @@ class TestLoadReplacementBelief:
         assert belief.held_side_prob == pytest.approx(0.242)
         assert belief.held_side_lcb == pytest.approx(0.18)
         assert belief.held_side_ucb == pytest.approx(0.31)
+
+    def test_held_probability_uses_predictive_mean_not_central_point(
+        self, forecasts_db
+    ):
+        _insert(
+            forecasts_db,
+            posterior_id="predictive-mean",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            q={BIN: 0.1475},
+            q_lcb={BIN: 0.01},
+            q_ucb={BIN: 0.54},
+            q_samples={BIN: [0.05, 0.10, 0.15]},
+        )
+
+        belief = _load(forecasts_db, direction="buy_no")
+
+        assert belief is not None
+        assert belief.q_yes_bin == pytest.approx(0.1475)
+        assert belief.held_side_prob == pytest.approx(0.90)
+        assert belief.probability_functional == POSTERIOR_PREDICTIVE_MEAN
+
+    @pytest.mark.parametrize(
+        ("q_samples", "q_samples_basis"),
+        [
+            ({}, "global_simplex_current_finite_moment_evidence_v3"),
+            ({BIN: [0.10, 0.20]}, "unknown_probability_world"),
+        ],
+    )
+    def test_missing_or_unrecognized_action_samples_fail_closed(
+        self, forecasts_db, q_samples, q_samples_basis
+    ):
+        _insert(
+            forecasts_db,
+            posterior_id="no-action-authority",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            q={BIN: 0.15},
+            q_lcb={BIN: 0.01},
+            q_ucb={BIN: 0.54},
+            q_samples=q_samples,
+            q_samples_basis=q_samples_basis,
+        )
+
+        assert _load(forecasts_db, direction="buy_no") is None
 
     def test_incoherent_current_evidence_bounds_fail_closed(self, forecasts_db):
         _insert(
@@ -480,7 +530,10 @@ class TestLoadReplacementBelief:
                             "current_evidence_shape": {
                                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                             },
-                        }
+                        },
+                        "q_bootstrap_samples_basis":
+                            "global_simplex_current_finite_moment_evidence_v3",
+                        "q_bootstrap_samples_by_bin": {BIN: [0.242, 0.242]},
                     }
                 ),
             ),
@@ -584,7 +637,10 @@ class TestLoadReplacementBelief:
                             "current_evidence_shape": {
                                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                             },
-                        }
+                        },
+                        "q_bootstrap_samples_basis":
+                            "global_simplex_current_finite_moment_evidence_v3",
+                        "q_bootstrap_samples_by_bin": {BIN: [0.242, 0.242]},
                     }
                 ),
             ),

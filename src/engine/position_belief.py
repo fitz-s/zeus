@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-28
+# Last reused or audited: 2026-07-27
 # Authority basis: settlement-losses incident 2026-06-12 (719/719 stale monitor
 #   refreshes on the Karachi position; entry authority = forecast_posteriors,
 #   exit authority = dead legacy day0/ens chain) + external consult
@@ -69,6 +69,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_AGE_HOURS = 3.0
 BELIEF_SOURCE_TABLE = "forecast_posteriors"
 SELECTED_METHOD_REPLACEMENT_POSTERIOR = "replacement_posterior"
+POSTERIOR_PREDICTIVE_MEAN = "POSTERIOR_PREDICTIVE_MEAN"
+
+_CURRENT_SAMPLE_BASES = frozenset(
+    {
+        "global_simplex_v1",
+        "global_simplex_current_finite_moment_evidence_v3",
+        "served_rho_mixed_simplex_v2",
+    }
+)
 
 _WS_RE = re.compile(r"\s+")
 
@@ -79,7 +88,12 @@ def _normalize_label(label: str) -> str:
 
 @dataclass(frozen=True)
 class ReplacementBelief:
-    """One held-position belief read from the replacement posterior authority."""
+    """One held-position belief read from the replacement posterior authority.
+
+    ``held_side_prob`` is the fixed-action posterior predictive mean used by
+    BUY/SELL/HOLD/CASH. ``q_yes_bin`` remains the central-scenario point carried
+    by ``q_json``; it is provenance, not an action objective.
+    """
 
     held_side_prob: float
     held_side_lcb: float
@@ -93,6 +107,7 @@ class ReplacementBelief:
     fresh: bool
     bin_key: str
     direction: str
+    probability_functional: str = POSTERIOR_PREDICTIVE_MEAN
     source_table: str = BELIEF_SOURCE_TABLE
     source_cycle_time: str | None = None
     source_cycle_age_hours: float | None = None
@@ -320,6 +335,51 @@ def _match_bin(q: Mapping[str, object], bin_label: str) -> tuple[str, float] | N
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def _predictive_mean_yes(
+    provenance: Mapping[str, object],
+    *,
+    bin_key: str,
+) -> float | None:
+    """Return the current fixed-action YES mean, or fail closed.
+
+    The global auction accepts these same producer bases. A city-calibrated row
+    is actionable only when its samples are already the served rho-mixed
+    simplex; consuming the pre-mix draws would recreate a second probability
+    authority for held positions.
+    """
+    basis = str(provenance.get("q_bootstrap_samples_basis") or "").strip()
+    try:
+        city_rho = float(provenance.get("city_calibration_rho") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(city_rho):
+        return None
+    city_mix_applied = bool(
+        provenance.get("city_calibration_layer_applied") or city_rho > 0.0
+    )
+    if (
+        basis not in _CURRENT_SAMPLE_BASES
+        or (city_mix_applied and basis != "served_rho_mixed_simplex_v2")
+    ):
+        return None
+    samples_by_bin = provenance.get("q_bootstrap_samples_by_bin")
+    if not isinstance(samples_by_bin, Mapping):
+        return None
+    raw_samples = samples_by_bin.get(bin_key)
+    if not isinstance(raw_samples, (list, tuple)) or len(raw_samples) < 2:
+        return None
+    samples: list[float] = []
+    for raw in raw_samples:
+        try:
+            sample = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(sample) or not 0.0 <= sample <= 1.0:
+            return None
+        samples.append(sample)
+    return math.fsum(samples) / len(samples)
 
 
 # ---------------------------------------------------------------------------
@@ -710,6 +770,7 @@ def load_replacement_belief(
         conn.close()
     if row is None:
         return None
+    provenance: Mapping[str, object] = {}
     if row["provenance_json"] is not None:
         try:
             provenance = json.loads(str(row["provenance_json"]))
@@ -825,7 +886,15 @@ def load_replacement_belief(
     if raw_input_lag_reason:
         fresh = False
         freshness_basis = _raw_input_lag_basis(raw_input_lag_reason) or "replacement_raw_input_hwm"
-    held = q_yes if direction == "buy_yes" else 1.0 - q_yes
+    if not isinstance(provenance, Mapping):
+        return None
+    q_yes_action = _predictive_mean_yes(provenance, bin_key=bin_key)
+    if (
+        q_yes_action is None
+        or not q_yes_lcb <= q_yes_action <= q_yes_ucb
+    ):
+        return None
+    held = q_yes_action if direction == "buy_yes" else 1.0 - q_yes_action
     held_lcb = q_yes_lcb if direction == "buy_yes" else 1.0 - q_yes_ucb
     held_ucb = q_yes_ucb if direction == "buy_yes" else 1.0 - q_yes_lcb
     return ReplacementBelief(
@@ -841,6 +910,7 @@ def load_replacement_belief(
         fresh=fresh,
         bin_key=bin_key,
         direction=direction,
+        probability_functional=POSTERIOR_PREDICTIVE_MEAN,
         source_cycle_time=(
             source_cycle_time.isoformat() if source_cycle_time is not None else None
         ),

@@ -1,7 +1,7 @@
 # Created: 2026-05-20
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-27
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3; finite-evidence probability symmetry packet held/entry single-q law
-# Lifecycle: created=2026-05-20; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-05-20; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
@@ -216,6 +216,7 @@ def test_fresh_probability_refresh_drops_prior_cut_validations(monkeypatch) -> N
     assert refreshed.applied_validations == [
         "replacement_posterior",
         "replacement_current_evidence_probability_bounds",
+        "probability_functional=POSTERIOR_PREDICTIVE_MEAN",
         belief.freshness_validation(),
     ]
     assert refresh_input.applied_validations == prior.applied_validations

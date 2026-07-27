@@ -1,5 +1,5 @@
 # Created: prior
-# Last audited: 2026-06-03
+# Last audited: 2026-07-27
 # Authority basis: current replacement probability and held-position redecision law.
 """Monitor refresh: recompute fresh probability for held positions.
 
@@ -4974,6 +4974,7 @@ def monitor_probability_refresh(
         )
 
     from src.engine.position_belief import (
+        POSTERIOR_PREDICTIVE_MEAN,
         SELECTED_METHOD_REPLACEMENT_POSTERIOR,
         load_replacement_belief,
         monitor_belief_max_age_hours,
@@ -5000,6 +5001,7 @@ def monitor_probability_refresh(
             np.isfinite(belief.held_side_lcb)
             and np.isfinite(belief.held_side_prob)
             and np.isfinite(belief.held_side_ucb)
+            and belief.probability_functional == POSTERIOR_PREDICTIVE_MEAN
             and 0.0
             <= belief.held_side_lcb
             <= belief.held_side_prob
@@ -5027,6 +5029,10 @@ def monitor_probability_refresh(
         _append_monitor_validation(
             fresh_pos,
             "replacement_current_evidence_probability_bounds",
+        )
+        _append_monitor_validation(
+            fresh_pos,
+            f"probability_functional={POSTERIOR_PREDICTIVE_MEAN}",
         )
         _append_monitor_validation(fresh_pos, belief.freshness_validation())
         _set_monitor_probability_fresh(fresh_pos, True)
