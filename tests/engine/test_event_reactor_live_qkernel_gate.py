@@ -2725,7 +2725,26 @@ def test_global_actuation_submit_revalidates_current_wealth_economics(monkeypatc
         object(),
         global_actuation=actuation,
         decision_time=datetime.now(timezone.utc),
-    ) == "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED"
+    ) == (
+        "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:"
+        "expected=wealth-economics-old:current=wealth-economics-1"
+    )
+
+
+def test_global_preflight_classifies_current_wealth_supersession_for_reauction():
+    reason = (
+        "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+        "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:"
+        "expected=wealth-economics-old:current=wealth-economics-1"
+    )
+
+    assert era._global_preflight_block_status(reason) == "WEALTH_SUPERSEDED"
+    assert (
+        era._global_preflight_block_status(
+            "GLOBAL_PREFLIGHT_WEALTH_UNAVAILABLE:ValueError:ambiguous"
+        )
+        == "BATCH_BLOCKED"
+    )
 
 
 def test_global_actuation_submit_blocks_ambiguous_current_wealth(monkeypatch):

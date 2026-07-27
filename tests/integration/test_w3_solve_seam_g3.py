@@ -38,7 +38,9 @@ from src.engine.global_single_order_auction import (
     _candidate_portfolio_endowment,
     _family_portfolio_endowment,
     GlobalHoldingAuctionCoverage,
+    PreparedGlobalAuctionResult,
     GlobalSingleOrderActuation,
+    global_sell_book_witness_identity,
     global_single_order_actuation_identity,
     global_single_order_economic_identity,
     select_prepared_global_auction,
@@ -531,6 +533,18 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         book_max_age=_dt.timedelta(seconds=30),
         expected_holding_obligations=holding_obligations,
         holding_probability_witnesses=holding_probability_witnesses,
+        wealth_reauction_audit=global_batch_runtime._WealthReauctionAudit(
+            attempt=1,
+            previous_wealth_economic_identity="wealth-economics-old",
+            current_wealth_economic_identity="wealth-economics-current",
+            changed_fields=(
+                "position_set_hash",
+                "spendable_cash_usd",
+                "native_holdings_micro",
+            ),
+            previous_selection_decision_log_id=41,
+            superseded_preflight_decision_log_id=42,
+        ),
         excluded_by_candidate={
             (
                 "BUY",
@@ -574,7 +588,19 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 17
+    assert summary["schema_version"] == 18
+    assert summary["wealth_reauction"] == {
+        "attempt": 1,
+        "previous_wealth_economic_identity": "wealth-economics-old",
+        "current_wealth_economic_identity": "wealth-economics-current",
+        "changed_fields": [
+            "position_set_hash",
+            "spendable_cash_usd",
+            "native_holdings_micro",
+        ],
+        "previous_selection_decision_log_id": 41,
+        "superseded_preflight_decision_log_id": 42,
+    }
     assert summary["held_position_coverage_complete"] is True
     assert summary["held_position_expected_count"] == 2
     assert summary["held_position_evaluated_count"] == 1
@@ -7243,7 +7269,7 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
             (row_id,),
         ).fetchone()[0]
     )["summary"]
-    assert stored["schema_version"] == 17
+    assert stored["schema_version"] == 18
     probabilities = {
         "family": SimpleNamespace(
             family_key="family",
@@ -15015,6 +15041,7 @@ def test_two_prepared_families_choose_one_globally_unique_order():
             side=candidate.side,
             book_snapshot_id=candidate.book_snapshot_id,
             execution_curve_identity=candidate.execution_curve_identity,
+            action=getattr(candidate, "action", "BUY"),
         ),
         current_wealth_identity_resolver=lambda: wealth.economic_identity,
         wealth_witness=wealth,
@@ -15148,6 +15175,173 @@ def test_two_prepared_families_choose_one_globally_unique_order():
             "current_capital_limit_resolver": current_capital_limit,
         },
     )
+    weakest_binding = min(
+        held_probability.bindings,
+        key=lambda binding: float(
+            family_payoff_q_samples(
+                held_probability,
+                bin_id=binding.bin_id,
+                side="YES",
+            ).mean()
+        ),
+    )
+    weakest_token = weakest_binding.yes_token_id
+    actual_position = SimpleNamespace(
+        trade_id="position-actual-sell",
+        position_id="position-actual-sell",
+        condition_id=weakest_binding.condition_id,
+        direction="buy_yes",
+        token_id=weakest_token,
+        no_token_id=weakest_binding.no_token_id,
+        shares=Decimal("10"),
+        chain_shares=Decimal("10"),
+        city="Chicago",
+        target_date="2026-07-11",
+        temperature_metric="high",
+        bin_label=weakest_binding.bin_id,
+    )
+    actual_portfolio = PortfolioState(
+        positions=[actual_position],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+    actual_wealth_identity = portfolio_wealth_identity(
+        ledger_snapshot_id="ledger-actual-sell",
+        position_set_hash="positions-actual-sell",
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=decision_at,
+    )
+    actual_wealth = PortfolioWealthWitness(
+        ledger_snapshot_id="ledger-actual-sell",
+        position_set_hash="positions-actual-sell",
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=1),
+        witness_identity=actual_wealth_identity,
+        native_holdings_micro=((weakest_token, 10_000_000),),
+    )
+    actual_prepared = global_batch_runtime._bind_selection_holdings(
+        prepared_by_event,
+        portfolio_state=actual_portfolio,
+        wealth_witness=actual_wealth,
+    )
+    actual_prepared = {
+        event_id: (
+            prepared
+            if event_id == held_event_id
+            else replace(
+                prepared,
+                holdings_snapshot=replace(
+                    prepared.holdings_snapshot,
+                    holdings=(),
+                    pending_endowments=(),
+                ),
+            )
+        )
+        for event_id, prepared in actual_prepared.items()
+    }
+    actual_sell_curve = ExecutableSellCurve(
+        token_id=weakest_token,
+        side="YES",
+        snapshot_id="actual-sell-book",
+        book_hash="actual-sell-book-hash",
+        levels=(BookLevel(price=Decimal("0.95"), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    actual_sell_states = tuple(
+        (*row[:5], "NO_ASK", *row[6:])
+        for row in book_epoch.asset_states
+    )
+    actual_sell_book = CurrentGlobalBookEpoch(
+        assets=(),
+        sell_assets=(
+            CurrentGlobalSellAsset(
+                family_key=held_probability.family_key,
+                bin_id=weakest_binding.bin_id,
+                condition_id=weakest_binding.condition_id,
+                gamma_market_id="gamma-actual-sell",
+                market_event_id="market-event-actual-sell",
+                side="YES",
+                token_id=weakest_token,
+                curve=actual_sell_curve,
+                captured_at_utc=decision_at,
+            ),
+        ),
+        asset_states=actual_sell_states,
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=1),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=actual_sell_states,
+            captured_at_utc=decision_at,
+        ),
+    )
+    actual_sell_selected = select_prepared_global_auction(
+        actual_prepared,
+        **{
+            **auction_kwargs,
+            "venue_universe_identity": actual_sell_book.witness_identity,
+            "current_venue_universe_identity_resolver": (
+                lambda: actual_sell_book.witness_identity
+            ),
+            "current_execution_resolver": (
+                lambda candidate: actual_sell_book.execution_authority(
+                    candidate,
+                    checked_at_utc=decision_at,
+                )
+            ),
+            "current_wealth_identity_resolver": (
+                lambda: actual_wealth.economic_identity
+            ),
+            "wealth_witness": actual_wealth,
+            "book_epoch": actual_sell_book,
+            "current_capital_limit_resolver": current_capital_limit,
+        },
+    )
+    assert actual_sell_selected.decision.candidate is not None, (
+        actual_sell_selected.decision.no_trade_reason,
+        {
+            evaluation.candidate_id: evaluation.rejection_reason
+            for evaluation in actual_sell_selected.decision.candidate_evaluations
+            if evaluation.action == "SELL"
+        },
+    )
+    assert isinstance(
+        actual_sell_selected.decision.candidate,
+        GlobalSingleOrderSellCandidate,
+    )
+    assert actual_sell_selected.decision.candidate.position_id == (
+        "position-actual-sell"
+    )
+    assert actual_sell_selected.decision.candidate.held_shares == Decimal("10")
+    assert actual_sell_selected.actuation is not None
+    assert actual_sell_selected.actuation.wealth_witness_identity == (
+        actual_wealth.witness_identity
+    )
+    assert {
+        row.position_id: (
+            row.status,
+            row.held_shares,
+            row.wealth_economic_identity,
+        )
+        for row in actual_sell_selected.holding_coverage
+    } == {
+        "position-actual-sell": (
+            "EVALUATED",
+            Decimal("10"),
+            actual_wealth.economic_identity,
+        )
+    }
     assert {
         row.position_id: row.status
         for row in book_selected.holding_coverage
@@ -19930,6 +20124,635 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch, batch_rea
     )
     assert result.receipts[runner_up.event_id].reason == (
         f"GLOBAL_PREFLIGHT_BATCH_BLOCKED:{batch_reason}"
+    )
+
+
+@pytest.mark.parametrize("scope_changed", (False, True))
+def test_global_batch_reauctions_complete_cut_on_current_wealth(
+    monkeypatch,
+    scope_changed,
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    payload = json.loads(event.payload_json)
+    family_key = scope.family_keys[0]
+    binding = OutcomeTokenBinding(
+        bin_id="32C",
+        condition_id="condition-a",
+        yes_token_id="token-yes-a",
+        no_token_id="token-no-a",
+    )
+    extra_binding = OutcomeTokenBinding(
+        bin_id="33C",
+        condition_id="condition-b",
+        yes_token_id="token-yes-b",
+        no_token_id="token-no-b",
+    )
+    witness = SimpleNamespace(
+        family_key=family_key,
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="q-run-a",
+        probability_content_identity="q-content-run-a",
+        bindings=(binding,),
+    )
+    @dataclass(frozen=True)
+    class Prepared:
+        probability_witness: object
+        holdings_snapshot: object | None = None
+        sell_action_authority_identity: str = ""
+
+    prepared = Prepared(
+        probability_witness=witness,
+        holdings_snapshot=None,
+    )
+
+    def position(
+        shares: Decimal,
+        *,
+        current_binding: OutcomeTokenBinding = binding,
+        city: str = payload["city"],
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            trade_id=f"position-{current_binding.condition_id}",
+            position_id=f"position-{current_binding.condition_id}",
+            condition_id=current_binding.condition_id,
+            direction="buy_no",
+            token_id=current_binding.yes_token_id,
+            no_token_id=current_binding.no_token_id,
+            shares=shares,
+            chain_shares=shares,
+            city=city,
+            target_date=payload["target_date"],
+            temperature_metric=payload["metric"],
+            bin_label=current_binding.bin_id,
+        )
+
+    states = iter(
+        (
+            PortfolioState(
+                positions=[position(Decimal("5"))],
+                authority="canonical_db",
+                authority_scope="runtime_exposure",
+            ),
+            PortfolioState(
+                positions=[
+                    position(Decimal("8")),
+                    *(
+                        [
+                            position(
+                                Decimal("1"),
+                                current_binding=extra_binding,
+                                city="Beta",
+                            )
+                        ]
+                        if scope_changed
+                        else []
+                    ),
+                ],
+                authority="canonical_db",
+                authority_scope="runtime_exposure",
+            ),
+        )
+    )
+
+    def wealth(
+        shares: Decimal,
+        *,
+        include_extra: bool = False,
+    ) -> PortfolioWealthWitness:
+        holdings = [(binding.no_token_id, int(shares * Decimal("1000000")))]
+        if include_extra:
+            holdings.append((extra_binding.no_token_id, 1000000))
+        ledger_id = f"ledger-{shares}-{include_extra}"
+        position_hash = f"positions-{shares}-{include_extra}"
+        witness_identity = portfolio_wealth_identity(
+            ledger_snapshot_id=ledger_id,
+            position_set_hash=position_hash,
+            wealth_floor_usd=Decimal("20"),
+            wealth_ceiling_usd=Decimal("20"),
+            spendable_cash_usd=Decimal("10"),
+            reservations_usd=Decimal("0"),
+            collateral_authority="CHAIN",
+            captured_at_utc=decision_at,
+        )
+        return PortfolioWealthWitness(
+            ledger_snapshot_id=ledger_id,
+            position_set_hash=position_hash,
+            wealth_floor_usd=Decimal("20"),
+            wealth_ceiling_usd=Decimal("20"),
+            spendable_cash_usd=Decimal("10"),
+            reservations_usd=Decimal("0"),
+            collateral_authority="CHAIN",
+            captured_at_utc=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            witness_identity=witness_identity,
+            native_holdings_micro=tuple(holdings),
+        )
+
+    wealths = iter(
+        (
+            wealth(Decimal("5")),
+            wealth(Decimal("8"), include_extra=scope_changed),
+        )
+    )
+    sell_curve = ExecutableSellCurve(
+        token_id=binding.no_token_id,
+        side="NO",
+        snapshot_id="sell-book-a",
+        book_hash="sell-book-a-hash",
+        levels=(BookLevel(price=Decimal("0.60"), size=Decimal("8")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    sell_asset = CurrentGlobalSellAsset(
+        family_key=family_key,
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        gamma_market_id="gamma-a",
+        market_event_id="market-event-a",
+        side="NO",
+        token_id=binding.no_token_id,
+        curve=sell_curve,
+        captured_at_utc=decision_at,
+    )
+    book_states = (
+        (
+            family_key,
+            binding.bin_id,
+            binding.condition_id,
+            "NO",
+            binding.no_token_id,
+            "NO_ASK",
+            sell_curve.book_hash,
+            "market-event-a",
+            "gamma-a",
+        ),
+    )
+    book = CurrentGlobalBookEpoch(
+        assets=(),
+        sell_assets=(sell_asset,),
+        asset_states=book_states,
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=book_states,
+            captured_at_utc=decision_at,
+        ),
+    )
+    calls = {
+        "wealth": 0,
+        "selection_wealth": [],
+        "selection_shares": [],
+        "selection_receipts": [],
+        "preflight_receipts": [],
+        "published_shares": [],
+        "preflight": 0,
+        "books": 0,
+        "venue": 0,
+    }
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+
+    def current_wealth(*_, **__):
+        calls["wealth"] += 1
+        return next(wealths)
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        current_wealth,
+    )
+
+    def select(prepared_by_event, **kwargs):
+        current_wealth = kwargs["wealth_witness"]
+        holding = prepared_by_event[event.event_id].holdings_snapshot.holdings[0]
+        calls["selection_wealth"].append(
+            current_wealth.economic_identity
+        )
+        calls["selection_shares"].append(holding.shares)
+        current = len(calls["selection_shares"]) == 2
+        candidate = SimpleNamespace(
+            candidate_id=("sell-current" if current else "buy-old"),
+            action=("SELL" if current else "BUY"),
+            family_key=family_key,
+            bin_id=binding.bin_id,
+            condition_id=binding.condition_id,
+            side="NO",
+            token_id=binding.no_token_id,
+            position_id=holding.position_id,
+            held_shares=holding.shares,
+        )
+        decision = SimpleNamespace(candidate=candidate, no_trade_reason=None)
+        coverage = GlobalHoldingAuctionCoverage(
+            position_id=holding.position_id,
+            family_key=family_key,
+            bin_id=binding.bin_id,
+            bin_label=binding.bin_id,
+            condition_id=binding.condition_id,
+            side="NO",
+            token_id=binding.no_token_id,
+            held_shares=holding.shares,
+            ledger_snapshot_id=current_wealth.ledger_snapshot_id,
+            probability_witness_identity=witness.witness_identity,
+            probability_content_identity=witness.probability_content_identity,
+            wealth_economic_identity=current_wealth.economic_identity,
+            selection_epoch_identity=kwargs["selection_epoch_identity"],
+            book_epoch_identity=kwargs["book_epoch"].witness_identity,
+            selection_cut_at_utc=decision_at,
+            decision_at_utc=decision_at,
+            book_deadline_at_utc=decision_at + _dt.timedelta(seconds=30),
+            status="EVALUATED",
+            candidate_id=f"coverage-{holding.shares}",
+            sell_book_witness_identity=global_sell_book_witness_identity(
+                sell_curve
+            ),
+        )
+        return PreparedGlobalAuctionResult(
+            decision=decision,
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                actuation_identity=(
+                    "actuation-current" if current else "actuation-old"
+                ),
+                wealth_witness_identity=current_wealth.witness_identity,
+                wealth_economic_identity=current_wealth.economic_identity,
+                decision=decision,
+                winner_event_id=event.event_id,
+            ),
+            holding_coverage=(coverage,),
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        select,
+    )
+
+    def store_selection(*_args, **kwargs):
+        calls["selection_receipts"].append(kwargs)
+        return 41 if len(calls["selection_receipts"]) == 1 else 43
+
+    def store_preflight(*_args, **kwargs):
+        calls["preflight_receipts"].append(kwargs)
+        return 42 if len(calls["preflight_receipts"]) == 1 else 44
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        store_selection,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_preflight_receipt",
+        store_preflight,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_publish_global_holding_coverage",
+        lambda rows, **_: calls["published_shares"].append(
+            rows[0].held_shares
+        ),
+    )
+
+    def preflight(_event, actuation, _at, _authority):
+        calls["preflight"] += 1
+        assert calls["venue"] == 0
+        if calls["preflight"] == 1:
+            reason = (
+                "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+                "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:"
+                f"expected={actuation.wealth_economic_identity}:"
+                "current=wealth-economics-current"
+            )
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status=era._global_preflight_block_status(reason),
+                reason=reason,
+            )
+        assert actuation.actuation_identity == "actuation-current"
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="STABLE",
+            binding_token="binding-current",
+        )
+
+    def actuate(_event, actuation, _at, token, _authority):
+        assert actuation.actuation_identity == "actuation-current"
+        assert actuation.decision.candidate.action == "SELL"
+        assert actuation.decision.candidate.held_shares == Decimal("8")
+        assert token == "binding-current"
+        calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            event.event_id,
+            event.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    def current_book(probabilities, _at):
+        calls["books"] += 1
+        return probabilities, book
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
+        preflight_winner=preflight,
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            actuate
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=current_book,
+        portfolio_state_provider=lambda: next(states),
+    )
+
+    assert calls["wealth"] == 2
+    assert len(set(calls["selection_wealth"])) == (1 if scope_changed else 2)
+    assert calls["selection_shares"] == (
+        [Decimal("5")] if scope_changed else [Decimal("5"), Decimal("8")]
+    )
+    assert calls["published_shares"] == (
+        [Decimal("5")] if scope_changed else [Decimal("5"), Decimal("8")]
+    )
+    assert calls["preflight"] == (1 if scope_changed else 2)
+    assert calls["books"] == 1
+    assert calls["venue"] == (0 if scope_changed else 1)
+    if scope_changed:
+        assert [
+            row["wealth_reauction_audit"]
+            for row in calls["selection_receipts"]
+        ] == [None]
+    else:
+        assert [
+            row["wealth_reauction_audit"]
+            for row in calls["selection_receipts"]
+        ] == [
+            None,
+            global_batch_runtime._WealthReauctionAudit(
+                attempt=1,
+                previous_wealth_economic_identity=calls["selection_wealth"][0],
+                current_wealth_economic_identity=calls["selection_wealth"][1],
+                changed_fields=("position_set_hash", "native_holdings_micro"),
+                previous_selection_decision_log_id=41,
+                superseded_preflight_decision_log_id=42,
+            ),
+        ]
+    assert calls["preflight_receipts"][0]["venue_submit_count_before"] == 0
+    assert calls["preflight_receipts"][0]["venue_submit_count_after"] == 0
+    if scope_changed:
+        assert result.winner_event_id is None
+        assert result.venue_submit_count == 0
+        assert result.receipts[event.event_id].reason == (
+            "GLOBAL_REAUCTION_WEALTH_SCOPE_CHANGED:families=1:tokens=1"
+        )
+    else:
+        assert result.winner_event_id == event.event_id
+        assert result.venue_submit_count == 1
+        assert result.receipts[event.event_id].submitted is True
+
+
+@pytest.mark.parametrize(
+    ("economic_identities", "expected_rejection"),
+    (
+        (
+            ("wealth-economics-same", "wealth-economics-same"),
+            "GLOBAL_REAUCTION_WEALTH_NO_PROGRESS",
+        ),
+        (
+            ("wealth-economics-old", "wealth-economics-unexplained"),
+            "GLOBAL_REAUCTION_WEALTH_CHANGE_UNEXPLAINED",
+        ),
+    ),
+)
+def test_global_batch_stops_if_wealth_reauction_makes_no_progress(
+    monkeypatch,
+    economic_identities,
+    expected_rejection,
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    witness = SimpleNamespace(
+        family_key=scope.family_keys[0],
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="q-run-a",
+    )
+    prepared = SimpleNamespace(probability_witness=witness)
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
+        winner_event_id=event.event_id,
+        actuation=SimpleNamespace(
+            actuation_identity="actuation-old",
+            wealth_witness_identity="wealth-old",
+        ),
+    )
+    calls = {"wealth": 0, "select": 0, "preflight": 0, "venue": 0}
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+
+    def current_wealth(*_, **__):
+        calls["wealth"] += 1
+        return SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity=f"wealth-{calls['wealth']}",
+            economic_identity=economic_identities[calls["wealth"] - 1],
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        current_wealth,
+    )
+
+    def select(*_, **__):
+        calls["select"] += 1
+        return selected
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        select,
+    )
+
+    reason = (
+        "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:"
+        "expected=wealth-economics-same:current=wealth-economics-other"
+    )
+
+    def preflight(*_):
+        calls["preflight"] += 1
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="WEALTH_SUPERSEDED",
+            reason=reason,
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
+        preflight_winner=preflight,
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            lambda *_: pytest.fail("no-progress wealth cannot actuate")
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=lambda probabilities, _at: (
+            probabilities,
+            _global_test_book("book-current", price="0.40"),
+        ),
+    )
+
+    assert calls == {"wealth": 2, "select": 1, "preflight": 1, "venue": 0}
+    assert result.winner_event_id is None
+    assert result.venue_submit_count == 0
+    assert result.receipts[event.event_id].reason == (
+        f"{expected_rejection}:{reason}"
+    )
+
+
+def test_global_batch_bounds_repeated_wealth_supersession(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            family_key=scope.family_keys[0],
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-a",
+            witness_identity="q-run-a",
+        )
+    )
+    wealths = iter(
+        SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity=f"wealth-{index}",
+            economic_identity=f"wealth-economics-{index}",
+            position_set_hash=f"positions-{index}",
+        )
+        for index in range(1, 4)
+    )
+    calls = {"wealth": 0, "select": 0, "preflight": 0, "venue": 0}
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+
+    def current_wealth(*_, **__):
+        calls["wealth"] += 1
+        return next(wealths)
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        current_wealth,
+    )
+
+    def select(*_, **kwargs):
+        calls["select"] += 1
+        current = kwargs["wealth_witness"]
+        decision = SimpleNamespace(candidate=object(), no_trade_reason=None)
+        return SimpleNamespace(
+            decision=decision,
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                actuation_identity=f"actuation-{calls['select']}",
+                wealth_witness_identity=current.witness_identity,
+                decision=decision,
+            ),
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        select,
+    )
+
+    def preflight(*_):
+        calls["preflight"] += 1
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="WEALTH_SUPERSEDED",
+            reason=f"wealth moved {calls['preflight']}",
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
+        preflight_winner=preflight,
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            lambda *_: pytest.fail("unstable wealth cannot actuate")
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=lambda probabilities, _at: (
+            probabilities,
+            _global_test_book("book-current", price="0.40"),
+        ),
+    )
+
+    assert calls == {"wealth": 3, "select": 3, "preflight": 3, "venue": 0}
+    assert result.winner_event_id is None
+    assert result.venue_submit_count == 0
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_REAUCTION_WEALTH_UNSTABLE:wealth moved 3"
     )
 
 

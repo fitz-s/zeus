@@ -5473,7 +5473,7 @@ def _latest_global_auction_candidate_counts(
             return invalid("ENCODING")
         holding_payload = None
         if candidate_encoding == "zlib+base64+canonical-json-v11":
-            if schema_version != 17:
+            if schema_version not in {17, 18}:
                 return invalid("SCHEMA_VERSION_CONTRACT")
             if summary.get("holding_auction_coverage_encoding") != (
                 "zlib+base64+canonical-json-v2"

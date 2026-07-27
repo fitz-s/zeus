@@ -1435,7 +1435,7 @@ def _global_book_receipt_token_pairs(
             compressed_b64,
         ) = receipt_row
         if (
-            schema_version not in {12, 13, 14, 15, 16, 17}
+            schema_version not in {12, 13, 14, 15, 16, 17, 18}
             or coverage_status != "COMPLETE"
             or coverage_complete != 1
             or encoding != "zlib+base64+canonical-json-v1"
@@ -10947,6 +10947,19 @@ def _global_preflight_candidate_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
+    if (
+        reason.startswith("GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:")
+        or reason
+        == "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED"
+        or reason.startswith(
+            "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+            "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED"
+        )
+    ):
+        # Capital truth changed after selection but before any venue side
+        # effect. Keep the gate strict and rebuild the complete BUY/SELL/HOLD/
+        # CASH ranking with the current endowment inside this bounded cut.
+        return "WEALTH_SUPERSEDED"
     if reason == (
         "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
         "GLOBAL_SELL_POSITION_EXIT_ALREADY_ACTIVE"
@@ -12764,8 +12777,12 @@ def _global_actuation_current_wealth_block_reason(
         )
     except Exception as exc:  # noqa: BLE001 - capital ambiguity is a submit veto.
         return f"GLOBAL_PREFLIGHT_WEALTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
-    if current.economic_identity != expected:
-        return "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED"
+    current_identity = str(current.economic_identity or "").strip()
+    if current_identity != expected:
+        return (
+            "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:"
+            f"expected={expected}:current={current_identity}"
+        )
     return None
 
 

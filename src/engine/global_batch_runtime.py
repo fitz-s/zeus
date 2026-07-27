@@ -65,6 +65,7 @@ UTC = timezone.utc
 _LOG = logging.getLogger(__name__)
 _SLOW_BATCH_STAGE_SECONDS = 2.0
 _SLOW_BATCH_TOTAL_SECONDS = 5.0
+_WEALTH_REAUCTION_MAX_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,62 @@ class _GlobalAuctionPayloadRef:
     repair: _GlobalAuctionComponentRef
     holding: _GlobalAuctionComponentRef
     book: _GlobalAuctionComponentRef
+
+
+@dataclass(frozen=True)
+class _WealthReauctionAudit:
+    """Durably link one superseded selection to its refreshed endowment."""
+
+    attempt: int
+    previous_wealth_economic_identity: str
+    current_wealth_economic_identity: str
+    changed_fields: tuple[str, ...]
+    previous_selection_decision_log_id: int | None
+    superseded_preflight_decision_log_id: int | None
+
+    def __post_init__(self) -> None:
+        linked_ids = (
+            self.previous_selection_decision_log_id,
+            self.superseded_preflight_decision_log_id,
+        )
+        if (
+            self.attempt <= 0
+            or self.attempt > _WEALTH_REAUCTION_MAX_ATTEMPTS
+            or not self.previous_wealth_economic_identity
+            or not self.current_wealth_economic_identity
+            or self.previous_wealth_economic_identity
+            == self.current_wealth_economic_identity
+            or not self.changed_fields
+            or len(self.changed_fields) != len(set(self.changed_fields))
+            or any(not field for field in self.changed_fields)
+            or any(row is not None and row <= 0 for row in linked_ids)
+            or (linked_ids[0] is None) != (linked_ids[1] is None)
+        ):
+            raise ValueError("GLOBAL_WEALTH_REAUCTION_AUDIT_INVALID")
+
+
+def _wealth_reauction_changed_fields(
+    previous: object,
+    current: object,
+) -> tuple[str, ...]:
+    """Name the economic inputs that forced a fresh complete ranking."""
+
+    fields = (
+        "position_set_hash",
+        "wealth_floor_usd",
+        "wealth_ceiling_usd",
+        "spendable_cash_usd",
+        "reservations_usd",
+        "collateral_authority",
+        "native_holdings_micro",
+        "pending_entry_endowments_micro",
+        "native_commitments_micro",
+    )
+    return tuple(
+        field
+        for field in fields
+        if getattr(previous, field, None) != getattr(current, field, None)
+    )
 
 
 _GLOBAL_AUCTION_PAYLOAD_REFS: dict[str, _GlobalAuctionPayloadRef] = {}
@@ -610,6 +667,7 @@ class GlobalWinnerPreflight:
             "STABLE",
             "CURVE_SUPERSEDED",
             "PROBABILITY_TIGHTENED",
+            "WEALTH_SUPERSEDED",
             "CANDIDATE_BLOCKED",
             "BLOCKED",
             "BATCH_BLOCKED",
@@ -1385,6 +1443,7 @@ def _store_global_auction_receipt(
     book_max_age: timedelta | None = None,
     expected_holding_obligations: Sequence[_CurrentHeldObligation] = (),
     holding_probability_witnesses: Mapping[str, object] | None = None,
+    wealth_reauction_audit: _WealthReauctionAudit | None = None,
 ) -> int | None:
     """Persist one complete auction comparison before any venue side effect."""
 
@@ -1739,7 +1798,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 17,
+        "schema_version": 18,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -1784,6 +1843,11 @@ def _store_global_auction_receipt(
         ),
         "wealth_economic_identity": str(
             getattr(wealth_witness, "economic_identity", "") or ""
+        ),
+        "wealth_reauction": (
+            asdict(wealth_reauction_audit)
+            if wealth_reauction_audit is not None
+            else None
         ),
         "fractional_kelly_multiplier": str(fractional_kelly_multiplier),
         "hold_cash": {
@@ -3633,6 +3697,7 @@ def process_current_global_batch(
         )
         log_stage(initial_book_stage, families=len(prepared_by_event))
         probability_manifest = _probability_manifest(probabilities)
+        last_selection_receipt_row_id: int | None = None
         # Selection is a comparison over one immutable information vector.  Scope and
         # q are frozen at ``scope_at``; the complete native YES/NO book and wealth
         # witnesses join that vector below.  A later family update belongs to the next
@@ -3653,7 +3718,9 @@ def process_current_global_batch(
                 tuple[str, str, str, str], float
             ]
             | None = None,
+            wealth_reauction_audit: _WealthReauctionAudit | None = None,
         ):
+            nonlocal last_selection_receipt_row_id
             selection_at = current_time()
             prepared_for_selection = attempt_prepared
             if attempt_book_epoch is not None and selection_state is not None:
@@ -3863,7 +3930,9 @@ def process_current_global_batch(
                 ),
                 expected_holding_obligations=holding_obligations,
                 holding_probability_witnesses=attempt_probabilities,
+                wealth_reauction_audit=wealth_reauction_audit,
             )
+            last_selection_receipt_row_id = receipt_row_id
             _LOG.info(
                 "global auction receipt store completed: elapsed_s=%.3f",
                 time.monotonic() - receipt_store_started,
@@ -3965,6 +4034,7 @@ def process_current_global_batch(
             payoff_q_lcb_by_candidate: dict[
                 tuple[str, str, str, str], float
             ] = dict(initial_payoff_q_lcb_by_candidate)
+            wealth_reauction_count = 0
             while True:
                 if cancelled("winner_preflight_start"):
                     return reject(
@@ -3997,7 +4067,7 @@ def process_current_global_batch(
                 after_preflight = venue_submit_count()
                 if after_preflight != before_preflight:
                     return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
-                _store_global_preflight_receipt(
+                preflight_receipt_row_id = _store_global_preflight_receipt(
                     trade_conn,
                     selected=selected,
                     preflight=preflight,
@@ -4014,6 +4084,101 @@ def process_current_global_batch(
                     trade_conn.commit()
                 if preflight.status == "STABLE":
                     break
+                wealth_reauction_audit = None
+                if preflight.status == "WEALTH_SUPERSEDED":
+                    if wealth_reauction_count >= _WEALTH_REAUCTION_MAX_ATTEMPTS:
+                        return reject(
+                            "GLOBAL_REAUCTION_WEALTH_UNSTABLE:"
+                            f"{preflight.reason or preflight.status}"
+                        )
+                    previous_wealth = selection_wealth
+                    try:
+                        refreshed_state, refreshed_wealth = capture_selection_wealth()
+                        refreshed_obligations = (
+                            _current_held_obligations(
+                                refreshed_state,
+                                refreshed_wealth,
+                            )
+                            if refreshed_state is not None
+                            else ()
+                        )
+                    except Exception as exc:  # noqa: BLE001 - ambiguous capital ends this cut
+                        return reject(
+                            "GLOBAL_REAUCTION_WEALTH_REFRESH_FAILED:"
+                            f"{type(exc).__name__}:{exc}"
+                        )
+                    previous_identity = str(
+                        getattr(previous_wealth, "economic_identity", "") or ""
+                    )
+                    refreshed_identity = str(
+                        getattr(refreshed_wealth, "economic_identity", "") or ""
+                    )
+                    if not refreshed_identity or refreshed_identity == previous_identity:
+                        return reject(
+                            "GLOBAL_REAUCTION_WEALTH_NO_PROGRESS:"
+                            f"{preflight.reason or preflight.status}"
+                        )
+                    refreshed_family_keys = {
+                        obligation.family_key
+                        for obligation in refreshed_obligations
+                    }
+                    refreshed_tokens = {
+                        obligation.token_id
+                        for obligation in refreshed_obligations
+                    }
+                    covered_families = set(probabilities_fence)
+                    covered_sell_tokens = {
+                        str(getattr(asset, "token_id", "") or "")
+                        for asset in tuple(
+                            getattr(attempt_book_epoch, "sell_assets", ()) or ()
+                        )
+                    }
+                    if (
+                        not refreshed_family_keys.issubset(covered_families)
+                        or not refreshed_tokens.issubset(covered_sell_tokens)
+                    ):
+                        return reject(
+                            "GLOBAL_REAUCTION_WEALTH_SCOPE_CHANGED:"
+                            f"families={len(refreshed_family_keys - covered_families)}:"
+                            f"tokens={len(refreshed_tokens - covered_sell_tokens)}"
+                        )
+                    changed_fields = _wealth_reauction_changed_fields(
+                        previous_wealth,
+                        refreshed_wealth,
+                    )
+                    if not changed_fields:
+                        return reject(
+                            "GLOBAL_REAUCTION_WEALTH_CHANGE_UNEXPLAINED:"
+                            f"{preflight.reason or preflight.status}"
+                        )
+                    next_attempt = wealth_reauction_count + 1
+                    wealth_reauction_audit = _WealthReauctionAudit(
+                        attempt=next_attempt,
+                        previous_wealth_economic_identity=previous_identity,
+                        current_wealth_economic_identity=refreshed_identity,
+                        changed_fields=changed_fields,
+                        previous_selection_decision_log_id=(
+                            last_selection_receipt_row_id
+                        ),
+                        superseded_preflight_decision_log_id=(
+                            preflight_receipt_row_id
+                        ),
+                    )
+                    selection_state = refreshed_state
+                    selection_wealth = refreshed_wealth
+                    holding_obligations = refreshed_obligations
+                    wealth_reauction_count = next_attempt
+                    _invalidate_global_holding_coverage_for_wealth(
+                        refreshed_identity
+                    )
+                    _LOG.warning(
+                        "global batch wealth superseded; re-ranking current cut: "
+                        "attempt=%d expected=%s current=%s changed=%s",
+                        wealth_reauction_count,
+                        previous_identity,
+                        refreshed_identity,
+                        ",".join(changed_fields) or "identity_only",
+                    )
                 if preflight.status == "BATCH_BLOCKED":
                     return reject(
                         "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
@@ -4099,6 +4264,10 @@ def process_current_global_batch(
                     ):
                         return reject("GLOBAL_REAUCTION_Q_TIGHTENING_NO_PROGRESS")
                     payoff_q_lcb_by_candidate[selected_key] = tightened_q
+                elif preflight.status == "WEALTH_SUPERSEDED":
+                    # The refreshed complete endowment is already installed
+                    # above. Preserve every candidate and re-run the argmax.
+                    pass
                 else:
                     family_key = str(
                         getattr(selected.decision.candidate, "family_key", "") or ""
@@ -4138,6 +4307,7 @@ def process_current_global_batch(
                     preflight_excluded_by_family=excluded_by_family,
                     preflight_excluded_by_candidate=excluded_by_candidate,
                     payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
+                    wealth_reauction_audit=wealth_reauction_audit,
                 )
                 log_stage(
                     "select_preflight_fallthrough",

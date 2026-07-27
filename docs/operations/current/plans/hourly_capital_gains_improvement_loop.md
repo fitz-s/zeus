@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-07-27 02:53 CDT tick — wealth supersession 触发同 epoch 资本重拍，不再吞掉 statistical SELL
+- **live 反例:** Beijing Jul-27 HIGH34 NO 在 held q `0.056667`、可执行 bid `0.08`、edge `-0.023333` 时已满足 local statistical SELL；global auction 也完整覆盖 held obligations，但 winner preflight 发现 `GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED` 后把整批重排推迟到未来 scan，monitor 将该 SELL 覆盖为 `GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE`。Tokyo Jul-27 HIGH30 NO 曾在 q `0`、bid 回升至 `0.06` 时遭遇同一阻断。两笔均没有 EXIT intent、command 或 venue call。
+- **第一性修复:** wealth gate 保持 fail-closed；local statistical SELL 仍不得绕过 global BUY/SELL/HOLD/CASH optimizer。若 submit-side preflight 证明经济 endowment 已变化，当前 batch 立即重读 canonical wealth/portfolio，要求所有新 held obligations 仍被当前 probability+book cut 覆盖，然后用新 endowment 重算完整 argmax。position/book scope 变化或连续 supersession 仍终止该 cut 并交给下一完整 epoch。
+- **可观测性:** supersession receipt 记录 expected/current economic identity；同-epoch重拍记录发生变化的 wealth fields。禁止把 freshness-only ledger heartbeat 当经济变化，也禁止复用旧 shares、reservation、cash 或 position set。
+- **验收:** antibody 必须证明 wealth-1 选出的 winner 在 zero-side-effect preflight 被 supersede 后，以 wealth-2 重算并可选择/提交新的最优 action；普通 unknown authority 仍 batch-block；连续/无进展变化有界终止；完整 global-auction 与 event-reactor wealth suites 通过。部署后 Beijing34 若仍有可执行正回收且 SELL 为全局最优，必须出现新的 auction winner/EXIT command 或精确的新经济拒绝原因，不能再只留下 generic monitor HOLD。
+
 ### 2026-07-24 19:55 CDT tick — Day0 SELL 的 posterior mean 不再被 point estimate 冒充
 - **live 反例:** Hong Kong Jul-25 LOW28 NO 的同一 current witness 在 `00:50Z` 同时携带 `held point_q=0.9977` 与 500-draw posterior mean `0.7127`；held monitor 正确报告 `0.7127`，global auction 却把 `point_q` 传给标记为 `POSTERIOR_PREDICTIVE_MEAN` 的 SELL action law，因而在可执行 bid `0.73` 错误拒绝退出。该 split-brain 来自 solver 概率 functional 的语义实现，不是 cache、quote 或香港定制数据问题。
 - **第一性修复:** Day0 statistical SELL 的固定动作期望效用/EV 使用 current probability witness 对 exact held payoff 的 draw mean；frozen point estimate 仅保留为 identity-bound counterfactual telemetry，不再支配 live action。BUY robust admission、non-Day0 lower-CVaR SELL、same-family endowment、JIT book/fee/depth、price band、RiskGuard、lifecycle 与 settlement authority 均不改变。
