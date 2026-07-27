@@ -230,6 +230,7 @@ _ALLOCATE_DUST = 0.01  # minimum size difference treated as dust, not a gap
 # correctly classifying long-lived synced positions on daemon restart.
 _CHAIN_SEEN_AT_MAX_AGE_SECONDS: int = 1800  # 30 minutes
 _CONFIRMED_CHAIN_ABSENCE_RECENT_POSITIVE_SECONDS: int = 6 * 3600
+_ENTRY_FILL_CHAIN_VISIBILITY_SECONDS: int = 60
 
 
 def allocate_chain_truth(
@@ -1432,6 +1433,32 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 return True
         return False
 
+    def _entry_fill_is_awaiting_chain_visibility(position_id: str) -> bool:
+        if conn is None or not position_id:
+            return False
+        try:
+            row = conn.execute(
+                """
+                SELECT occurred_at
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'ENTRY_ORDER_FILLED'
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+        except Exception:
+            return False
+        filled_at = _parse_reconcile_dt(
+            None if row is None else (row["occurred_at"] if hasattr(row, "keys") else row[0])
+        )
+        now_dt = _parse_reconcile_dt(now)
+        if filled_at is None or now_dt is None:
+            return False
+        age_seconds = (now_dt - filled_at).total_seconds()
+        return 0.0 <= age_seconds <= _ENTRY_FILL_CHAIN_VISIBILITY_SECONDS
+
     def _recent_positive_chain_observation(position: Position) -> tuple[bool, str, str]:
         """Return whether recent positive chain evidence should veto absence quarantine.
 
@@ -2558,6 +2585,21 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     local_shares,
                 )
             elif abs(chain.size - local_shares) > 0.01:
+                if (
+                    chain.size < local_shares
+                    and _entry_fill_is_awaiting_chain_visibility(pos.trade_id)
+                ):
+                    corrected.chain_shares = local_shares
+                    stats["entry_fill_chain_visibility_deferred"] = (
+                        stats.get("entry_fill_chain_visibility_deferred", 0) + 1
+                    )
+                    logger.info(
+                        "ENTRY_FILL_CHAIN_VISIBILITY_DEFERRED: %s local %.4f vs chain %.4f",
+                        pos.trade_id,
+                        local_shares,
+                        chain.size,
+                    )
+                    continue
                 # This is a wallet reduction below the one attributed open
                 # slice. Current sellable exposure follows chain immediately,
                 # while acquisition provenance stays command/fill-owned.

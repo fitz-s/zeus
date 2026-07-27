@@ -1306,6 +1306,39 @@ def test_size_mismatch_still_uses_correction_path() -> None:
     )
 
 
+def test_recent_entry_fill_is_not_erased_by_lagging_chain_snapshot() -> None:
+    trade_id = "recent-fill-chain-lag"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+        pos = _make_position(trade_id=trade_id, token_id="tok-lag", shares=24.5)
+        _seed_position_current(conn, pos, chain_shares=24.5)
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, source_module, env, payload_json
+            ) VALUES (?, ?, 1, 'ENTRY_ORDER_FILLED', ?, 'active', 'active',
+                      'test', 'live', '{}')
+            """,
+            (f"{trade_id}:filled", trade_id, datetime.now(timezone.utc).isoformat()),
+        )
+
+        stats = reconcile(
+            PortfolioState(positions=[pos]),
+            [ChainPosition(token_id="tok-lag", size=6.0, avg_price=0.31)],
+            conn=conn,
+        )
+        persisted = conn.execute(
+            "SELECT shares, chain_shares FROM position_current WHERE position_id = ?",
+            (trade_id,),
+        ).fetchone()
+
+    assert stats["entry_fill_chain_visibility_deferred"] == 1
+    assert persisted["shares"] == pytest.approx(24.5)
+    assert persisted["chain_shares"] == pytest.approx(24.5)
+
+
 def test_wallet_excess_does_not_expand_single_owned_lot() -> None:
     """A wallet token aggregate may contain inventory outside this position."""
     trade_id = "wallet-excess-pos"
