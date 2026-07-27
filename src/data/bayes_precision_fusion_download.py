@@ -100,6 +100,7 @@ _RMF_LOGICAL_KEY_COLUMNS = (
 OPENMETEO_PROVIDER = "open-meteo"
 SINGLE_RUNS_SOURCE_FAMILY = "openmeteo_single_runs"
 PREVIOUS_RUNS_SOURCE_FAMILY = "openmeteo_previous_runs"
+STANDARD_META_STAMPED_SOURCE_FAMILY = "openmeteo_standard_meta_stamped"
 # 2026-06-17 CELL-SELECTION FIX (operator "fix the math, not a hardcoded value"): the prior
 # "nearest" pick snapped coastal airports to the nearest OFFSHORE grid cell, so the model
 # returned the SEA-surface temperature (cold by day) instead of the airport's land surface — the
@@ -174,7 +175,13 @@ def _model_domain_hash(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _bayes_precision_fusion_product_identity(model: str, endpoint: str, target: "BayesPrecisionFusionDownloadTarget") -> dict:
+def _bayes_precision_fusion_product_identity(
+    model: str,
+    endpoint: str,
+    target: "BayesPrecisionFusionDownloadTarget",
+    *,
+    standard_meta_stamp: _StandardMetaStampedTransport | None = None,
+) -> dict:
     """BLOCKER 4 — the full product-identity payload for one (model, endpoint, target) capture.
 
     Resolves the OM model id actually addressed (model_name), the source_id/source_family/
@@ -205,15 +212,23 @@ def _bayes_precision_fusion_product_identity(model: str, endpoint: str, target: 
             "timezone": target.timezone_name,
             "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
-    else:  # single_runs
+    else:  # current-value capture
         from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
             SINGLE_RUNS_FORECAST_URL,
+            STANDARD_FORECAST_URL,
         )
 
         model_name = OPENMETEO_MODEL_IDS.get(model, model)
-        source_family = SINGLE_RUNS_SOURCE_FAMILY
-        source_id = f"{model}_single_runs"
-        base_url = SINGLE_RUNS_FORECAST_URL
+        if standard_meta_stamp is None:
+            source_family = SINGLE_RUNS_SOURCE_FAMILY
+            source_id = f"{model}_single_runs"
+            base_url = SINGLE_RUNS_FORECAST_URL
+            endpoint_mode = "single_runs"
+        else:
+            source_family = STANDARD_META_STAMPED_SOURCE_FAMILY
+            source_id = f"{model}_standard_meta_stamped"
+            base_url = STANDARD_FORECAST_URL
+            endpoint_mode = "standard_api_meta_stamped"
         request_params = {
             "latitude": target.latitude,
             "longitude": target.longitude,
@@ -223,18 +238,27 @@ def _bayes_precision_fusion_product_identity(model: str, endpoint: str, target: 
             "timezone": target.timezone_name,
             "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
+        if standard_meta_stamp is not None:
+            request_params["forecast_hours"] = standard_meta_stamp.forecast_hours
     request_params_json = json.dumps(request_params, sort_keys=True, separators=(",", ":"))
     request_url_hash = hashlib.sha256(
         f"{base_url}?{request_params_json}".encode("utf-8")
     ).hexdigest()
     product_id = f"{model_name}::{endpoint}"
+    if standard_meta_stamp is not None:
+        product_id = (
+            f"{model_name}::standard_api_meta_stamped"
+            f"::run={standard_meta_stamp.run.isoformat()}"
+            f"::modified={standard_meta_stamp.modification_time.isoformat()}"
+        )
+    endpoint_mode = endpoint if endpoint == "previous_runs" else endpoint_mode
     model_domain_hash = _model_domain_hash(
         provider=OPENMETEO_PROVIDER,
         model_name=model_name,
         cell_selection=BAYES_PRECISION_FUSION_CELL_SELECTION,
         elevation_param=BAYES_PRECISION_FUSION_ELEVATION_PARAM,
         downscaling_policy=BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
-        endpoint_mode=endpoint,
+        endpoint_mode=endpoint_mode,
     )
     return {
         "source_id": source_id,
@@ -250,7 +274,7 @@ def _bayes_precision_fusion_product_identity(model: str, endpoint: str, target: 
         "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         "elevation_param": BAYES_PRECISION_FUSION_ELEVATION_PARAM,
         "downscaling_policy": BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
-        "endpoint_mode": endpoint,
+        "endpoint_mode": endpoint_mode,
         "model_domain_hash": model_domain_hash,
         "coverage_status": "COVERED",
     }
@@ -342,10 +366,6 @@ MODEL_PUBLISH_CYCLE_HOURS: dict[str, frozenset[int]] = {
 _ALL_CYCLES: frozenset[int] = frozenset({0, 6, 12, 18})
 SOURCE_CLOCK_STANDARD_CYCLE_MODELS: frozenset[str] = frozenset(
     {
-        # Open-Meteo model-updates advertises hourly NBM availability, but the
-        # single-runs Forecast API rejects off-standard runs observed live
-        # (for example 2026-06-26T05:00Z returned HTTP 400 for CONUS cities).
-        "ncep_nbm_conus",
         # Model Updates exposes hourly rolling products while Single Runs
         # exposes only their 3-hour archived initialization cycles.
         "gfs_hrrr",
@@ -374,6 +394,14 @@ def source_clock_metadata_run_is_single_runs_served(model: str, cycle_hour: int)
 class _SourceClockSingleRunsRequest:
     run: datetime
     source_available_at: str
+
+
+@dataclass(frozen=True)
+class _StandardMetaStampedTransport:
+    run: datetime
+    source_available_at: datetime
+    modification_time: datetime
+    forecast_hours: int
 
 
 def _read_source_clock_single_runs_requests(
@@ -488,6 +516,7 @@ SingleRunsFetchFn = Callable[..., float | None]
 PreviousRunsFetchFn = Callable[..., float | None]
 
 _BATCH_TRANSPORT_ERROR_KEY = "__BAYES_PRECISION_FUSION_BATCH_TRANSPORT_ERROR__"
+_BATCH_TRANSPORT_PROVENANCE_KEY = "__BAYES_PRECISION_FUSION_BATCH_TRANSPORT_PROVENANCE__"
 _SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
 
 
@@ -623,6 +652,102 @@ def _deadline_fetch_kwargs(deadline_monotonic: float | None) -> dict[str, float 
     }
 
 
+def _utc_datetime(value: datetime | str) -> datetime:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("metadata-stamped transport timestamps must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _fetch_nbm_standard_meta_stamped_payloads(
+    *,
+    locations: Sequence[tuple[float, float, str, Sequence[date]]],
+    run: datetime,
+    source_available_at: datetime | str | None,
+    forecast_hours: int,
+    deadline_monotonic: float | None,
+) -> tuple[tuple[Mapping[str, object], ...], _StandardMetaStampedTransport]:
+    """Fetch current hourly NBM from the standard API under an atomic metadata window."""
+
+    if source_available_at is None:
+        raise ValueError("NBM standard fallback requires frozen source availability")
+    from src.data.openmeteo_client import fetch  # noqa: PLC0415
+    from src.data.openmeteo_ecmwf_ifs9_anchor import STANDARD_FORECAST_URL  # noqa: PLC0415
+    from src.data.openmeteo_model_updates import fetch_model_updates  # noqa: PLC0415
+
+    expected_run = _utc_datetime(run)
+    expected_available = _utc_datetime(source_available_at)
+
+    def _meta() -> object:
+        deadline_kwargs = _deadline_fetch_kwargs(deadline_monotonic)
+        timeout_seconds = float(deadline_kwargs.get("timeout", 30.0))
+        updates = fetch_model_updates(
+            ("ncep_nbm_conus",),
+            timeout_seconds=timeout_seconds,
+            max_workers=1,
+        )
+        if len(updates) != 1:
+            raise ValueError(f"NBM metadata response count must be 1, got {len(updates)}")
+        if str(updates[0].model) != "ncep_nbm_conus":
+            raise ValueError(f"NBM metadata identity mismatch: {updates[0].model!r}")
+        return updates[0]
+
+    meta_before = _meta()
+    before_run = meta_before.last_run_initialisation_time.astimezone(UTC)
+    before_available = meta_before.last_run_availability_time.astimezone(UTC)
+    before_modified = meta_before.last_run_modification_time
+    if before_run != expected_run or before_available != expected_available:
+        raise ValueError(
+            "NBM standard fallback refused: provider metadata no longer matches frozen run"
+        )
+    if before_modified is None:
+        raise ValueError("NBM standard fallback refused: modification timestamp missing")
+    before_modified = before_modified.astimezone(UTC)
+
+    params = {
+        "latitude": ",".join(str(latitude) for latitude, _, _, _ in locations),
+        "longitude": ",".join(str(longitude) for _, longitude, _, _ in locations),
+        "hourly": "temperature_2m",
+        "models": OPENMETEO_MODEL_IDS.get("ncep_nbm_conus", "ncep_nbm_conus"),
+        "forecast_hours": forecast_hours,
+        "temperature_unit": "celsius",
+        "timezone": ",".join(timezone_name for _, _, timezone_name, _ in locations),
+        "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
+    }
+    payload = fetch(
+        STANDARD_FORECAST_URL,
+        params,
+        endpoint_label="bayes_precision_fusion_nbm_standard_meta_stamped",
+        quota=_BPF_OPENMETEO_QUOTA_TRACKER,
+        fast_fail_429=True,
+        **_deadline_fetch_kwargs(deadline_monotonic),
+    )
+    payloads = (payload,) if len(locations) == 1 and isinstance(payload, Mapping) else payload
+    if (
+        not isinstance(payloads, Sequence)
+        or isinstance(payloads, (str, bytes))
+        or len(payloads) != len(locations)
+        or any(not isinstance(item, Mapping) for item in payloads)
+    ):
+        raise ValueError("NBM standard fallback multi-location response shape mismatch")
+
+    meta_after = _meta()
+    after_modified = meta_after.last_run_modification_time
+    if (
+        meta_after.last_run_initialisation_time.astimezone(UTC) != before_run
+        or meta_after.last_run_availability_time.astimezone(UTC) != before_available
+        or after_modified is None
+        or after_modified.astimezone(UTC) != before_modified
+    ):
+        raise ValueError("NBM standard fallback discarded: provider metadata changed mid-fetch")
+    return tuple(payloads), _StandardMetaStampedTransport(
+        run=before_run,
+        source_available_at=before_available,
+        modification_time=before_modified,
+        forecast_hours=int(forecast_hours),
+    )
+
+
 # ── BATCHED FETCH HELPERS (R1+R2 collapse, 2026-06-13) ──────────────────────────────────
 # Open-Meteo `models=a,b,c` returns temperature_2m_a / temperature_2m_b / temperature_2m_c
 # keys (or bare `temperature_2m` when a single model). ONE call covers all in-domain models
@@ -639,6 +764,7 @@ def _default_live_fetch_batched(
     run: "datetime",
     target_local_date: "date",
     forecast_hours: int,
+    source_available_at: datetime | str | None = None,
     allow_per_model_fallback: bool = True,
     deadline_monotonic: float | None = None,
 ) -> dict[str, tuple[float | None, float | None]]:
@@ -692,6 +818,40 @@ def _default_live_fetch_batched(
                 exc,
             )
             return {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
+        if models == ["ncep_nbm_conus"]:
+            try:
+                payloads, meta_stamp = _fetch_nbm_standard_meta_stamped_payloads(
+                    locations=(
+                        (
+                            latitude,
+                            longitude,
+                            timezone_name,
+                            (target_local_date,),
+                        ),
+                    ),
+                    run=run,
+                    source_available_at=source_available_at,
+                    forecast_hours=forecast_hours,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                parsed = _parse_batched_single_runs_payload(
+                    payloads[0],
+                    models,
+                    target_local_date,
+                    timezone_name,
+                )
+                parsed[_BATCH_TRANSPORT_PROVENANCE_KEY] = {
+                    "ncep_nbm_conus": meta_stamp,
+                }
+                return parsed
+            except Exception as fallback_exc:
+                if _is_quota_transport_error(fallback_exc):
+                    return {
+                        _BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(fallback_exc)
+                    }
+                batched_error_text = (
+                    f"{batched_error_text}; nbm_standard_meta_stamped_failed={fallback_exc}"
+                )
         if not allow_per_model_fallback:
             _LOG.warning(
                 "BAYES_PRECISION_FUSION batched single_runs fetch failed; "
@@ -786,6 +946,7 @@ def _default_live_fetch_locations_batched(
     locations: Sequence[tuple[float, float, str, Sequence[date]]],
     run: datetime,
     forecast_hours: int,
+    source_available_at: datetime | str | None = None,
     deadline_monotonic: float | None = None,
 ) -> list[dict[date, dict[str, tuple[float | None, float | None]]]]:
     """Fetch one run per city and parse every requested target date from its payload."""
@@ -841,6 +1002,43 @@ def _default_live_fetch_locations_batched(
             )
         ]
     except Exception as exc:
+        if models == ["ncep_nbm_conus"] and not _is_quota_transport_error(exc):
+            try:
+                payloads, meta_stamp = _fetch_nbm_standard_meta_stamped_payloads(
+                    locations=locations,
+                    run=run,
+                    source_available_at=source_available_at,
+                    forecast_hours=forecast_hours,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                return [
+                    {
+                        target_local_date: {
+                            **_parse_batched_single_runs_payload(
+                                location_payload,
+                                models,
+                                target_local_date,
+                                timezone_name,
+                            ),
+                            _BATCH_TRANSPORT_PROVENANCE_KEY: {
+                                "ncep_nbm_conus": meta_stamp,
+                            },
+                        }
+                        for target_local_date in target_local_dates
+                    }
+                    for location_payload, (_, _, timezone_name, target_local_dates) in zip(
+                        payloads,
+                        locations,
+                        strict=True,
+                    )
+                ]
+            except Exception as fallback_exc:
+                if _is_quota_transport_error(fallback_exc):
+                    exc = fallback_exc
+                else:
+                    exc = RuntimeError(
+                        f"{exc}; nbm_standard_meta_stamped_failed={fallback_exc}"
+                    )
         error = {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
         return [
             {target_local_date: dict(error) for target_local_date in target_local_dates}
@@ -1620,6 +1818,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     locations=locations,
                     run=run,
                     forecast_hours=forecast_hours,
+                    source_available_at=_single_runs_request_for_model(
+                        model
+                    ).source_available_at,
                     deadline_monotonic=(
                         wall_clock_deadline - 0.25
                         if wall_clock_deadline is not None
@@ -1803,11 +2004,20 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         run=single_run,
                         target_local_date=target_local_date,
                         forecast_hours=forecast_hours,
+                        source_available_at=(
+                            single_request_by_model[single_models[0]].source_available_at
+                            if len(single_models) == 1
+                            else None
+                        ),
                         allow_per_model_fallback=allow_single_runs_fallback,
                         deadline_monotonic=wall_clock_deadline,
                     )
                 )
                 single_transport_error = sv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
+                single_transport_provenance = sv_map.pop(
+                    _BATCH_TRANSPORT_PROVENANCE_KEY,
+                    {},
+                )
                 if single_transport_error is not None:
                     single_error_text = str(single_transport_error[0])
                     transport_errors.append(
@@ -1859,7 +2069,16 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             "source_available_at": request.source_available_at, "captured_at": captured_iso,
                             "lead_days": int(t.lead_days), "forecast_value_c": float(val),
                             "endpoint": "single_runs",
-                            **_bayes_precision_fusion_product_identity(model, "single_runs", t),
+                            **_bayes_precision_fusion_product_identity(
+                                model,
+                                "single_runs",
+                                t,
+                                standard_meta_stamp=(
+                                    single_transport_provenance.get(model)
+                                    if isinstance(single_transport_provenance, Mapping)
+                                    else None
+                                ),
+                            ),
                         })
 
             # R4a: immutable previous_runs — only fetch models NOT already in prev_runs_done.

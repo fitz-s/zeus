@@ -279,6 +279,190 @@ def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypa
     ]
 
 
+def test_nbm_hourly_run_falls_back_to_atomic_meta_stamped_standard_api(
+    monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+    import src.data.openmeteo_model_updates as metadata
+
+    run = datetime(2026, 7, 27, 15, tzinfo=UTC)
+    available = datetime(2026, 7, 27, 16, 4, tzinfo=UTC)
+    modified = datetime(2026, 7, 27, 16, 3, tzinfo=UTC)
+    update = metadata.OpenMeteoModelUpdate(
+        model="ncep_nbm_conus",
+        last_run_initialisation_time=run,
+        last_run_availability_time=available,
+        last_run_modification_time=modified,
+    )
+    metadata_reads: list[object] = []
+    fetches: list[tuple[str, dict[str, object]]] = []
+
+    def _metadata(*_args, **_kwargs):
+        metadata_reads.append(object())
+        return (update,)
+
+    def _payload(base: float) -> dict[str, object]:
+        return {
+            "hourly": {
+                "time": [
+                    "2026-07-28T00:00",
+                    "2026-07-28T03:00",
+                    "2026-07-28T12:00",
+                    "2026-07-28T21:00",
+                ],
+                "temperature_2m": [base - 1.0, base, base + 2.0, base + 1.0],
+            },
+            "hourly_units": {"temperature_2m": "°C"},
+        }
+
+    def _fetch(url, params, **_kwargs):
+        fetches.append((url, params))
+        if "single-runs" in url:
+            raise RuntimeError("Client error '400 Bad Request'")
+        return [_payload(30.0), _payload(25.0)]
+
+    monkeypatch.setattr(metadata, "fetch_model_updates", _metadata)
+    monkeypatch.setattr(client, "fetch", _fetch)
+    got = dl._default_live_fetch_locations_batched(
+        models=["ncep_nbm_conus"],
+        locations=[
+            (30.267, -97.743, "America/Chicago", (date(2026, 7, 28),)),
+            (40.713, -74.006, "America/New_York", (date(2026, 7, 28),)),
+        ],
+        run=run,
+        source_available_at=available,
+        forecast_hours=120,
+    )
+
+    assert len(metadata_reads) == 2
+    assert len(fetches) == 2
+    assert fetches[1][0].endswith("/v1/forecast")
+    assert "run" not in fetches[1][1]
+    assert got[0][date(2026, 7, 28)]["ncep_nbm_conus"] == (32.0, 29.0)
+    stamp = got[0][date(2026, 7, 28)][dl._BATCH_TRANSPORT_PROVENANCE_KEY][
+        "ncep_nbm_conus"
+    ]
+    assert stamp.run == run
+    assert stamp.modification_time == modified
+
+
+def test_nbm_standard_fallback_discards_payload_when_metadata_changes(
+    monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+    import src.data.openmeteo_model_updates as metadata
+
+    run = datetime(2026, 7, 27, 15, tzinfo=UTC)
+    available = datetime(2026, 7, 27, 16, 4, tzinfo=UTC)
+    updates = iter(
+        (
+            metadata.OpenMeteoModelUpdate(
+                model="ncep_nbm_conus",
+                last_run_initialisation_time=run,
+                last_run_availability_time=available,
+                last_run_modification_time=datetime(2026, 7, 27, 16, 3, tzinfo=UTC),
+            ),
+            metadata.OpenMeteoModelUpdate(
+                model="ncep_nbm_conus",
+                last_run_initialisation_time=run,
+                last_run_availability_time=available,
+                last_run_modification_time=datetime(2026, 7, 27, 16, 5, tzinfo=UTC),
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        metadata,
+        "fetch_model_updates",
+        lambda *_args, **_kwargs: (next(updates),),
+    )
+
+    def _fetch(url, _params, **_kwargs):
+        if "single-runs" in url:
+            raise RuntimeError("Client error '400 Bad Request'")
+        return {
+            "hourly": {
+                "time": ["2026-07-28T00:00", "2026-07-28T12:00"],
+                "temperature_2m": [20.0, 30.0],
+            }
+        }
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    got = dl._default_live_fetch_locations_batched(
+        models=["ncep_nbm_conus"],
+        locations=[
+            (30.267, -97.743, "America/Chicago", (date(2026, 7, 28),)),
+        ],
+        run=run,
+        source_available_at=available,
+        forecast_hours=120,
+    )
+
+    result = got[0][date(2026, 7, 28)]
+    assert "ncep_nbm_conus" not in result
+    assert dl._BATCH_TRANSPORT_ERROR_KEY in result
+    assert "metadata changed mid-fetch" in result[dl._BATCH_TRANSPORT_ERROR_KEY][0]
+
+
+def test_nbm_meta_stamped_transport_is_persisted_as_physical_identity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+
+    db = _forecast_db(tmp_path)
+    run = datetime(2026, 7, 27, 15, tzinfo=UTC)
+    available = datetime(2026, 7, 27, 16, 4, tzinfo=UTC)
+    stamp = dl._StandardMetaStampedTransport(
+        run=run,
+        source_available_at=available,
+        modification_time=datetime(2026, 7, 27, 16, 3, tzinfo=UTC),
+        forecast_hours=120,
+    )
+
+    monkeypatch.setattr(
+        dl,
+        "_default_live_fetch_locations_batched",
+        lambda **kwargs: [
+            {
+                target_date: {
+                    "ncep_nbm_conus": (32.0, 20.0),
+                    dl._BATCH_TRANSPORT_PROVENANCE_KEY: {
+                        "ncep_nbm_conus": stamp,
+                    },
+                }
+                for target_date in location[3]
+            }
+            for location in kwargs["locations"]
+        ],
+    )
+    monkeypatch.setattr(dl, "_model_in_domain", lambda *_args, **_kwargs: True)
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=run,
+        targets=_two_city_targets(),
+        models=("ncep_nbm_conus",),
+        include_previous_runs=False,
+        prune_after=False,
+        allow_single_runs_fallback=False,
+        frozen_source_runs={"ncep_nbm_conus": (run, available)},
+    )
+
+    assert report["written_row_count"] == 2
+    conn = sqlite3.connect(str(db))
+    rows = conn.execute(
+        "SELECT endpoint, endpoint_mode, source_family, product_id, request_params_json"
+        " FROM raw_model_forecasts ORDER BY city"
+    ).fetchall()
+    conn.close()
+    assert {row[0] for row in rows} == {"single_runs"}
+    assert {row[1] for row in rows} == {"standard_api_meta_stamped"}
+    assert {row[2] for row in rows} == {"openmeteo_standard_meta_stamped"}
+    assert all("modified=2026-07-27T16:03:00+00:00" in row[3] for row in rows)
+    assert all('"forecast_hours":120' in row[4] for row in rows)
+
+
 def test_source_clock_download_reuses_one_multi_location_response(
     tmp_path, monkeypatch
 ) -> None:

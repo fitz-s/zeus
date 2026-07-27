@@ -423,7 +423,7 @@ def test_source_clock_cursor_identity_includes_initialisation_time(
     assert changed.updated_sources == ("ecmwf_ifs",)
 
 
-def test_source_clock_probe_filters_nbm_metadata_runs_not_served_by_single_runs(tmp_path) -> None:
+def test_source_clock_probe_admits_nbm_hourly_run_for_standard_fallback(tmp_path) -> None:
     updates_path = tmp_path / "updates.jsonl"
     cursor_path = tmp_path / "cursor.json"
     write_model_updates_jsonl(
@@ -444,10 +444,12 @@ def test_source_clock_probe_filters_nbm_metadata_runs_not_served_by_single_runs(
         advance_cursor=False,
     )
 
-    assert report.status == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE"
-    assert report.updated_sources == ()
+    assert report.status == "SOURCE_CLOCK_UPDATES_CHANGED"
+    assert report.updated_sources == ("ncep_nbm_conus",)
     assert not cursor_path.exists()
-    assert not source_clock_metadata_run_is_single_runs_served("ncep_nbm_conus", 5)
+    # NBM is hourly. Its off-grid runs use the metadata-stamped standard API
+    # fallback when Single Runs has not archived the declared run yet.
+    assert source_clock_metadata_run_is_single_runs_served("ncep_nbm_conus", 5)
     assert source_clock_metadata_run_is_single_runs_served("ncep_nbm_conus", 6)
     assert not source_clock_metadata_run_is_single_runs_served("gfs_hrrr", 1)
     assert source_clock_metadata_run_is_single_runs_served("gfs_hrrr", 3)
