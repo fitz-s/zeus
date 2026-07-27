@@ -4127,20 +4127,25 @@ def process_current_global_batch(
                         for obligation in refreshed_obligations
                     }
                     covered_families = set(probabilities_fence)
-                    covered_sell_tokens = {
-                        str(getattr(asset, "token_id", "") or "")
-                        for asset in tuple(
-                            getattr(attempt_book_epoch, "sell_assets", ()) or ()
+                    # asset_states is the complete book universe; sell_assets is
+                    # only its currently executable bid-curve subset. A held
+                    # token with no bid must remain a HOLD obligation without
+                    # vetoing executable actions elsewhere in this same cut.
+                    covered_book_tokens = {
+                        str(state[4] or "")
+                        for state in tuple(
+                            getattr(attempt_book_epoch, "asset_states", ()) or ()
                         )
+                        if len(state) > 4
                     }
                     if (
                         not refreshed_family_keys.issubset(covered_families)
-                        or not refreshed_tokens.issubset(covered_sell_tokens)
+                        or not refreshed_tokens.issubset(covered_book_tokens)
                     ):
                         return reject(
                             "GLOBAL_REAUCTION_WEALTH_SCOPE_CHANGED:"
                             f"families={len(refreshed_family_keys - covered_families)}:"
-                            f"tokens={len(refreshed_tokens - covered_sell_tokens)}"
+                            f"tokens={len(refreshed_tokens - covered_book_tokens)}"
                         )
                     changed_fields = _wealth_reauction_changed_fields(
                         previous_wealth,

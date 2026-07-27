@@ -20219,11 +20219,21 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch, batch_rea
     )
 
 
-@pytest.mark.parametrize("scope_changed", (False, True))
+@pytest.mark.parametrize(
+    "wealth_change",
+    (
+        "same_token",
+        "same_family_unexecutable",
+        "same_family_new_token",
+        "new_family",
+    ),
+)
 def test_global_batch_reauctions_complete_cut_on_current_wealth(
     monkeypatch,
-    scope_changed,
+    wealth_change,
 ):
+    scope_changed = wealth_change in {"same_family_new_token", "new_family"}
+    same_family_unexecutable = wealth_change == "same_family_unexecutable"
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     scope = current_global_auction_scope_from_events(
@@ -20249,7 +20259,10 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
         posterior_identity_hash="run-a",
         witness_identity="q-run-a",
         probability_content_identity="q-content-run-a",
-        bindings=(binding,),
+        bindings=(
+            binding,
+            *((extra_binding,) if same_family_unexecutable else ()),
+        ),
     )
     @dataclass(frozen=True)
     class Prepared:
@@ -20298,10 +20311,18 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
                             position(
                                 Decimal("1"),
                                 current_binding=extra_binding,
-                                city="Beta",
+                                city=(
+                                    payload["city"]
+                                    if wealth_change
+                                    in {
+                                        "same_family_unexecutable",
+                                        "same_family_new_token",
+                                    }
+                                    else "Beta"
+                                ),
                             )
                         ]
-                        if scope_changed
+                        if wealth_change != "same_token"
                         else []
                     ),
                 ],
@@ -20348,7 +20369,10 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
     wealths = iter(
         (
             wealth(Decimal("5")),
-            wealth(Decimal("8"), include_extra=scope_changed),
+            wealth(
+                Decimal("8"),
+                include_extra=wealth_change != "same_token",
+            ),
         )
     )
     sell_curve = ExecutableSellCurve(
@@ -20385,6 +20409,23 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
             "market-event-a",
             "gamma-a",
         ),
+        *(
+            (
+                (
+                    family_key,
+                    extra_binding.bin_id,
+                    extra_binding.condition_id,
+                    "NO",
+                    extra_binding.no_token_id,
+                    "EXECUTABLE",
+                    "no-executable-sell-book",
+                    "market-event-a",
+                    "gamma-b",
+                ),
+            )
+            if same_family_unexecutable
+            else ()
+        ),
     )
     book = CurrentGlobalBookEpoch(
         assets=(),
@@ -20404,6 +20445,7 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
         "selection_receipts": [],
         "preflight_receipts": [],
         "published_shares": [],
+        "published_statuses": [],
         "preflight": 0,
         "books": 0,
         "venue": 0,
@@ -20466,6 +20508,39 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
                 sell_curve
             ),
         )
+        coverage_rows = [coverage]
+        if current and same_family_unexecutable:
+            extra_holding = next(
+                row
+                for row in prepared_by_event[
+                    event.event_id
+                ].holdings_snapshot.holdings
+                if row.token_id == extra_binding.no_token_id
+            )
+            coverage_rows.append(
+                GlobalHoldingAuctionCoverage(
+                    position_id=extra_holding.position_id,
+                    family_key=family_key,
+                    bin_id=extra_binding.bin_id,
+                    bin_label=extra_binding.bin_id,
+                    condition_id=extra_binding.condition_id,
+                    side="NO",
+                    token_id=extra_binding.no_token_id,
+                    held_shares=extra_holding.shares,
+                    ledger_snapshot_id=current_wealth.ledger_snapshot_id,
+                    probability_witness_identity=None,
+                    probability_content_identity=None,
+                    wealth_economic_identity=current_wealth.economic_identity,
+                    selection_epoch_identity=kwargs["selection_epoch_identity"],
+                    book_epoch_identity=kwargs["book_epoch"].witness_identity,
+                    selection_cut_at_utc=decision_at,
+                    decision_at_utc=decision_at,
+                    book_deadline_at_utc=decision_at
+                    + _dt.timedelta(seconds=30),
+                    status="EXCLUDED",
+                    reason="SELL_BOOK_NO_BID",
+                )
+            )
         return PreparedGlobalAuctionResult(
             decision=decision,
             winner_event_id=event.event_id,
@@ -20478,7 +20553,7 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
                 decision=decision,
                 winner_event_id=event.event_id,
             ),
-            holding_coverage=(coverage,),
+            holding_coverage=tuple(coverage_rows),
         )
 
     monkeypatch.setattr(
@@ -20505,12 +20580,16 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
         "_store_global_preflight_receipt",
         store_preflight,
     )
+    def publish_coverage(rows, **_):
+        calls["published_shares"].append(rows[0].held_shares)
+        calls["published_statuses"].append(
+            tuple((row.position_id, row.status) for row in rows)
+        )
+
     monkeypatch.setattr(
         global_batch_runtime,
         "_publish_global_holding_coverage",
-        lambda rows, **_: calls["published_shares"].append(
-            rows[0].held_shares
-        ),
+        publish_coverage,
     )
 
     def preflight(_event, actuation, _at, _authority):
@@ -20585,6 +20664,11 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
     assert calls["published_shares"] == (
         [Decimal("5")] if scope_changed else [Decimal("5"), Decimal("8")]
     )
+    if same_family_unexecutable:
+        assert calls["published_statuses"][-1] == (
+            ("position-condition-a", "EVALUATED"),
+            ("position-condition-b", "EXCLUDED"),
+        )
     assert calls["preflight"] == (1 if scope_changed else 2)
     assert calls["books"] == 1
     assert calls["venue"] == (0 if scope_changed else 1)
@@ -20613,8 +20697,10 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
     if scope_changed:
         assert result.winner_event_id is None
         assert result.venue_submit_count == 0
+        expected_missing_families = int(wealth_change == "new_family")
         assert result.receipts[event.event_id].reason == (
-            "GLOBAL_REAUCTION_WEALTH_SCOPE_CHANGED:families=1:tokens=1"
+            "GLOBAL_REAUCTION_WEALTH_SCOPE_CHANGED:"
+            f"families={expected_missing_families}:tokens=1"
         )
     else:
         assert result.winner_event_id == event.event_id
