@@ -892,6 +892,107 @@ def active_weather_token_ids_from_snapshots(
     )
 
 
+def _bounded_latest_snapshot_rows(
+    conn: sqlite3.Connection,
+    *,
+    latest_table: str,
+    latest_columns: set[str],
+    snapshot_columns: set[str],
+    limit: int,
+    priority_token_ids: set[str],
+    now: datetime,
+) -> list[sqlite3.Row | tuple]:
+    """Hydrate only the bounded latest-market rows from append-only history."""
+
+    projection_required = {
+        "snapshot_id",
+        "condition_id",
+        "yes_token_id",
+        "no_token_id",
+        "captured_at",
+    }
+    if not projection_required <= latest_columns:
+        return []
+
+    predicates: list[str] = []
+    if "active" in snapshot_columns and "active" in latest_columns:
+        predicates.append("COALESCE(active, 0) = 1")
+    if "closed" in snapshot_columns and "closed" in latest_columns:
+        predicates.append("COALESCE(closed, 0) = 0")
+    if "event_slug" in snapshot_columns and "event_slug" in latest_columns:
+        predicates.append(
+            "(LOWER(COALESCE(event_slug, '')) LIKE '%weather%' "
+            "OR LOWER(COALESCE(event_slug, '')) LIKE '%temperature%')"
+        )
+    where_clause = "WHERE " + " AND ".join(predicates) if predicates else ""
+    projected = conn.execute(
+        f"""
+        WITH ranked AS (
+            SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
+                   captured_at,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY condition_id
+                       ORDER BY captured_at DESC, snapshot_id DESC
+                   ) AS _rn
+              FROM {latest_table}
+              {where_clause}
+        )
+        SELECT snapshot_id, condition_id, yes_token_id, no_token_id, captured_at
+          FROM ranked
+         WHERE _rn = 1
+         ORDER BY captured_at DESC, snapshot_id DESC
+        """
+    ).fetchall()
+
+    priority_refs: list[sqlite3.Row | tuple] = []
+    other_refs: list[sqlite3.Row | tuple] = []
+    for row in projected:
+        target = (
+            priority_refs
+            if {str(row[2]), str(row[3])} & priority_token_ids
+            else other_refs
+        )
+        target.append(row)
+
+    market_end_expr = (
+        "market_end_at" if "market_end_at" in snapshot_columns else "NULL AS market_end_at"
+    )
+    end_predicate = ""
+    end_params: tuple[object, ...] = ()
+    if "market_end_at" in snapshot_columns:
+        end_predicate = "AND (market_end_at IS NULL OR market_end_at > ?)"
+        end_params = (now.astimezone(timezone.utc).isoformat(),)
+
+    def hydrate(refs: list[sqlite3.Row | tuple]) -> list[sqlite3.Row | tuple]:
+        hydrated: dict[str, sqlite3.Row | tuple] = {}
+        for offset in range(0, len(refs), 400):
+            batch = refs[offset : offset + 400]
+            placeholders = ",".join("?" for _ in batch)
+            snapshot_ids = [str(row[0]) for row in batch]
+            rows = conn.execute(
+                f"""
+                SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
+                       min_tick_size, min_order_size, neg_risk, {market_end_expr}
+                  FROM executable_market_snapshots
+                 WHERE snapshot_id IN ({placeholders})
+                   {end_predicate}
+                """,
+                (*snapshot_ids, *end_params),
+            ).fetchall()
+            hydrated.update({str(row[0]): row for row in rows})
+        return [hydrated[str(ref[0])] for ref in refs if str(ref[0]) in hydrated]
+
+    selected = hydrate(priority_refs)
+    remaining = max(0, max(1, int(limit)) - len(selected))
+    for offset in range(0, len(other_refs), 400):
+        if remaining <= 0:
+            break
+        valid = hydrate(other_refs[offset : offset + 400])
+        selected.extend(valid[:remaining])
+        remaining = max(0, max(1, int(limit)) - len(selected))
+    return selected
+
+
 def active_weather_token_metadata_from_snapshots(
     conn: sqlite3.Connection,
     *,
@@ -942,6 +1043,25 @@ def active_weather_token_metadata_from_snapshots(
         and conn.execute(f"SELECT 1 FROM {latest_table} LIMIT 1").fetchone()
         is not None
     )
+    priority = {str(t) for t in (priority_token_ids or set()) if t}
+    capped_limit = max(1, int(limit))
+    bounded_projection_rows: list[sqlite3.Row | tuple] | None = None
+    if use_latest_projection and {
+        "condition_id",
+        "snapshot_id",
+        "yes_token_id",
+        "no_token_id",
+        "captured_at",
+    } <= latest_columns:
+        bounded_projection_rows = _bounded_latest_snapshot_rows(
+            conn,
+            latest_table=latest_table,
+            latest_columns=latest_columns,
+            snapshot_columns=columns,
+            limit=capped_limit,
+            priority_token_ids=priority,
+            now=now or datetime.now(timezone.utc),
+        )
     prefix = "snapshot." if use_latest_projection else ""
     predicates = []
     if "active" in columns:
@@ -1016,19 +1136,21 @@ def active_weather_token_metadata_from_snapshots(
         {source}
         {where_clause}
     """
-    rows = conn.execute(
-        f"""
-        WITH latest AS ({latest_per_condition})
-        SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
-               min_tick_size, min_order_size, neg_risk, market_end_at
-        FROM latest
-        WHERE _rn = 1
-        ORDER BY snapshot_id
-        """
-    ).fetchall()
+    rows = (
+        bounded_projection_rows
+        if bounded_projection_rows is not None
+        else conn.execute(
+            f"""
+            WITH latest AS ({latest_per_condition})
+            SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
+                   min_tick_size, min_order_size, neg_risk, market_end_at
+            FROM latest
+            WHERE _rn = 1
+            ORDER BY snapshot_id
+            """
+        ).fetchall()
+    )
 
-    priority = {str(t) for t in (priority_token_ids or set()) if t}
-    capped_limit = max(1, int(limit))
     # Partition markets: candidate-bearing markets are pinned (always captured);
     # the rest are bounded by the limit. Sort the non-priority markets newest-first
     # so the bounded slice prefers freshly-captured markets (round-robin the tail).
@@ -1042,8 +1164,8 @@ def active_weather_token_metadata_from_snapshots(
         )
         (priority_rows if is_priority else other_rows).append(row)
 
-    selected = list(priority_rows)
-    if len(selected) < capped_limit:
+    selected = list(rows) if bounded_projection_rows is not None else list(priority_rows)
+    if bounded_projection_rows is None and len(selected) < capped_limit:
         selected.extend(other_rows[: capped_limit - len(selected)])
 
     metadata: dict[str, MarketTokenMetadata] = {}

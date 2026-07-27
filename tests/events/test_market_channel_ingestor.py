@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-27
 # Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract.
 from __future__ import annotations
 
@@ -3707,6 +3707,159 @@ def test_active_weather_metadata_reads_latest_projection_not_snapshot_history():
     assert set(metadata) == {"yes-current", "no-current"}
     assert metadata["yes-current"].min_tick_size == "0.001"
     assert metadata["no-current"].min_order_size == "10"
+
+
+def test_active_weather_metadata_bounds_append_history_hydration():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            event_slug TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            min_tick_size TEXT,
+            min_order_size TEXT,
+            neg_risk INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            captured_at TEXT,
+            market_end_at TEXT
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            snapshot_id TEXT,
+            event_slug TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            active INTEGER,
+            closed INTEGER,
+            captured_at TEXT,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        """
+    )
+    for index in range(200):
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                f"history-{index}",
+                f"history-condition-{index}",
+                "weather-history",
+                f"history-yes-{index}",
+                f"history-no-{index}",
+                "0.01",
+                "5",
+                0,
+                1,
+                0,
+                f"2026-07-26T{index % 24:02d}:00:00+00:00",
+                "2026-07-28T00:00:00+00:00",
+            ),
+        )
+
+    current_rows = (
+        (
+            "priority",
+            "condition-priority",
+            "priority-weather",
+            "yes-priority",
+            "no-priority",
+            "2026-07-27T01:00:00+00:00",
+            "2026-07-28T00:00:00+00:00",
+        ),
+        (
+            "fresh-b",
+            "condition-fresh-b",
+            "fresh-b-weather",
+            "yes-fresh-b",
+            "no-fresh-b",
+            "2026-07-27T02:00:00+00:00",
+            "2026-07-28T00:00:00+00:00",
+        ),
+        (
+            "fresh-a",
+            "condition-fresh-a",
+            "fresh-a-weather",
+            "yes-fresh-a",
+            "no-fresh-a",
+            "2026-07-27T03:00:00+00:00",
+            "2026-07-28T00:00:00+00:00",
+        ),
+        (
+            "expired",
+            "condition-expired",
+            "expired-weather",
+            "yes-expired",
+            "no-expired",
+            "2026-07-27T04:00:00+00:00",
+            "2026-07-26T00:00:00+00:00",
+        ),
+    )
+    for snapshot_id, condition_id, slug, yes, no, captured_at, market_end_at in current_rows:
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                snapshot_id,
+                condition_id,
+                slug,
+                yes,
+                no,
+                "0.01",
+                "5",
+                0,
+                1,
+                0,
+                captured_at,
+                market_end_at,
+            ),
+        )
+        for selected_token in (yes, no):
+            conn.execute(
+                "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    condition_id,
+                    selected_token,
+                    snapshot_id,
+                    slug,
+                    yes,
+                    no,
+                    1,
+                    0,
+                    captured_at,
+                ),
+            )
+
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    metadata = active_weather_token_metadata_from_snapshots(
+        conn,
+        limit=2,
+        priority_token_ids={"yes-priority"},
+        now=datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc),
+    )
+    conn.set_trace_callback(None)
+
+    assert set(metadata) == {
+        "yes-priority",
+        "no-priority",
+        "yes-fresh-a",
+        "no-fresh-a",
+    }
+    assert "yes-expired" not in metadata
+    snapshot_reads = [
+        statement
+        for statement in traced
+        if "FROM executable_market_snapshots" in statement
+    ]
+    assert snapshot_reads
+    assert all("snapshot_id IN (" in statement for statement in snapshot_reads)
+    assert all(
+        "JOIN executable_market_snapshots" not in statement
+        for statement in traced
+    )
 
 
 def test_min_order_size_enforced():
