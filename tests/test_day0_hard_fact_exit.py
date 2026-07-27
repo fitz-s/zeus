@@ -31,6 +31,7 @@ Relationship contracts:
 from __future__ import annotations
 
 import sqlite3
+from datetime import date as Date
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -126,6 +127,13 @@ def _paris():
     )
 
 
+def _istanbul():
+    return SimpleNamespace(
+        name="Istanbul", timezone="Europe/Istanbul", settlement_unit="C",
+        wu_station="LTFM", settlement_source_type="noaa",
+    )
+
+
 def _manila():
     return SimpleNamespace(
         name="Manila", timezone="Asia/Manila", settlement_unit="C",
@@ -201,9 +209,15 @@ def _final_daily_observation_conn(
 
 def _final_wu_hourly_observation_conn(
     *,
+    city: str = "Paris",
+    timezone_name: str = "Europe/Paris",
+    source: str = "wu_icao_history",
+    station_id: str = "LFPB",
+    target_date: str = "2026-07-15",
     missing_hour: int | None = None,
     include_following_day: bool = True,
     following_utc_offset: timedelta = timedelta(0),
+    following_imported_offset: timedelta = timedelta(minutes=15),
     time_basis: str = "utc_hour_bucket_extremum",
 ) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
@@ -228,40 +242,48 @@ def _final_wu_hourly_observation_conn(
         )
         """
     )
-    zone = ZoneInfo("Europe/Paris")
-    target = datetime(2026, 7, 15, tzinfo=zone)
+    zone = ZoneInfo(timezone_name)
+    target_day = Date.fromisoformat(target_date)
+    start = datetime.combine(target_day, datetime.min.time(), tzinfo=zone).astimezone(UTC)
+    following_day = target_day + timedelta(days=1)
+    end = datetime.combine(
+        following_day, datetime.min.time(), tzinfo=zone
+    ).astimezone(UTC)
     rows = []
-    for hour in range(24):
-        if hour == missing_hour:
+    for offset in range(int((end - start).total_seconds() // 3600)):
+        if offset == missing_hour:
             continue
-        local = target.replace(hour=hour)
-        value = 35.4 if hour == 16 else 20.0 - abs(12 - hour) / 2
+        observed_at = start + timedelta(hours=offset)
+        local = observed_at.astimezone(zone)
+        value = 35.4 if offset == 16 else 20.0 - abs(12 - offset) / 2
         rows.append(
             (
-                "Paris",
-                "2026-07-15",
-                "wu_icao_history",
-                "LFPB",
+                city,
+                target_date,
+                source,
+                station_id,
                 local.isoformat(),
-                local.astimezone(UTC).isoformat(),
+                observed_at.isoformat(),
                 time_basis,
                 value,
                 value,
                 "C",
-                (local.astimezone(UTC) + timedelta(minutes=15)).isoformat(),
+                (observed_at + timedelta(minutes=15)).isoformat(),
                 "VERIFIED",
                 "OK",
                 "historical_hourly",
             )
         )
     if include_following_day:
-        following_local = datetime(2026, 7, 16, tzinfo=zone)
+        following_local = datetime.combine(
+            following_day, datetime.min.time(), tzinfo=zone
+        )
         rows.append(
             (
-                "Paris",
-                "2026-07-16",
-                "wu_icao_history",
-                "LFPB",
+                city,
+                following_day.isoformat(),
+                source,
+                station_id,
                 following_local.isoformat(),
                 (
                     following_local.astimezone(UTC) + following_utc_offset
@@ -273,7 +295,7 @@ def _final_wu_hourly_observation_conn(
                 (
                     following_local.astimezone(UTC)
                     + following_utc_offset
-                    + timedelta(minutes=15)
+                    + following_imported_offset
                 ).isoformat(),
                 "VERIFIED",
                 "OK",
@@ -401,6 +423,103 @@ def test_post_local_day_complete_wu_hours_and_following_day_are_final():
     assert final.settled_extreme == 35.0
     assert final.source == "wu_icao_history:following_day_observed"
     assert final.station_id == "LFPB"
+
+
+@pytest.mark.parametrize(
+    ("metric", "raw_extreme", "settled_extreme"),
+    (("high", 35.4, 35.0), ("low", 14.0, 14.0)),
+)
+def test_post_local_day_complete_noaa_hours_are_final(
+    metric,
+    raw_extreme,
+    settled_extreme,
+):
+    conn = _final_wu_hourly_observation_conn(
+        city="Istanbul",
+        timezone_name="Europe/Istanbul",
+        source="ogimet_metar_ltfm",
+        station_id="LTFM",
+    )
+
+    final = _final_daily_observation_extreme(
+        city=_istanbul(),
+        target_date="2026-07-15",
+        metric=metric,
+        now=datetime(2026, 7, 16, 1, 0, tzinfo=UTC),
+        conn=conn,
+    )
+
+    assert final is not None
+    assert final.raw_extreme == pytest.approx(raw_extreme)
+    assert final.settled_extreme == settled_extreme
+    assert final.source == "ogimet_metar_ltfm:following_day_observed"
+    assert final.station_id == "LTFM"
+
+
+@pytest.mark.parametrize(
+    "target_date",
+    ("2026-03-29", "2026-10-25"),
+    ids=("dst-23-hours", "dst-25-hours"),
+)
+def test_post_local_day_complete_hourly_dst_day_is_final(target_date):
+    conn = _final_wu_hourly_observation_conn(
+        city="Paris",
+        timezone_name="Europe/Paris",
+        source="wu_icao_history",
+        station_id="LFPB",
+        target_date=target_date,
+    )
+    target = Date.fromisoformat(target_date)
+
+    final = _final_daily_observation_extreme(
+        city=_paris(),
+        target_date=target_date,
+        metric="high",
+        now=datetime.combine(
+            target + timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=ZoneInfo("Europe/Paris"),
+        ).astimezone(UTC) + timedelta(hours=1),
+        conn=conn,
+    )
+
+    assert final is not None
+    assert final.source == "wu_icao_history:following_day_observed"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"include_following_day": False},
+        {"missing_hour": 7},
+        {"following_utc_offset": timedelta(hours=4)},
+        {"time_basis": "snap_to_hour"},
+        {"source": "ogimet_metar_llbg"},
+        {"station_id": "LLBG"},
+        {"following_imported_offset": timedelta(hours=5)},
+    ),
+)
+def test_post_local_day_incomplete_or_wrong_noaa_evidence_is_not_final(overrides):
+    params = {
+        "city": "Istanbul",
+        "timezone_name": "Europe/Istanbul",
+        "source": "ogimet_metar_ltfm",
+        "station_id": "LTFM",
+    }
+    params.update(overrides)
+    conn = _final_wu_hourly_observation_conn(
+        **params,
+    )
+
+    final = _final_daily_observation_extreme(
+        city=_istanbul(),
+        target_date="2026-07-15",
+        metric="high",
+        now=datetime(2026, 7, 16, 1, 0, tzinfo=UTC),
+        conn=conn,
+    )
+
+    assert final is None
 
 
 @pytest.mark.parametrize(

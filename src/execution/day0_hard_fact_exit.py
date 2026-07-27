@@ -141,9 +141,8 @@ def _final_daily_source_matches(city: Any, source: str) -> bool:
         # hko_realtime_api is sampled current-temperature accumulation, not
         # the final daily maximum/minimum product.
         return source == "hko_daily_api" or source.startswith("hko_daily_api_")
-    # WU rows require a separate proof that the first following-day datapoint
-    # has published; NOAA/Ogimet rows require their own resolver-finality
-    # credential. A daily value alone is not sufficient to call either final.
+    # WU and NOAA/Ogimet rows require complete hourly coverage plus the first
+    # following-day datapoint; a daily value alone is insufficient.
     return False
 
 
@@ -158,7 +157,7 @@ def _as_causal_utc(value: Any, *, now: datetime) -> datetime | None:
     return parsed if parsed <= now.astimezone(UTC) else None
 
 
-def _final_wu_hourly_observation_extreme(
+def _final_complete_hourly_observation_extreme(
     *,
     city: Any,
     target_date: str,
@@ -166,18 +165,24 @@ def _final_wu_hourly_observation_extreme(
     now: datetime,
     conn: Any,
 ) -> FinalDailyObservation | None:
-    """Promote a complete WU local-day timeline after its next-day publication.
+    """Promote a complete settlement-family timeline after day advancement.
 
-    WU has no separate daily-final row in the canonical observation plane. The
-    first causal observation of the following local day proves that the source
-    has advanced past the target day; exact hourly coverage proves that no
-    target-day interval was silently omitted. Both facts are required.
+    WU and NOAA/Ogimet have no separate daily-final row in the canonical
+    observation plane. The first causal observation of the following local day
+    proves that the source has advanced past the target day; exact hourly
+    coverage proves that no target-day interval was silently omitted. Both
+    facts are required.
     """
 
-    if (
-        str(getattr(city, "settlement_source_type", "") or "").lower()
-        != "wu_icao"
-    ):
+    source_type = str(
+        getattr(city, "settlement_source_type", "") or "wu_icao"
+    ).strip().lower()
+    station = str(getattr(city, "wu_station", "") or "").strip().upper()
+    if source_type == "wu_icao":
+        hourly_source = "wu_icao_history"
+    elif source_type == "noaa" and station:
+        hourly_source = f"ogimet_metar_{station.lower()}"
+    else:
         return None
     try:
         target = date.fromisoformat(str(target_date))
@@ -199,7 +204,6 @@ def _final_wu_hourly_observation_extreme(
     )
     if not field or not expected_hours:
         return None
-    station = str(getattr(city, "wu_station", "") or "").strip().upper()
     unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
     if not station or not unit:
         return None
@@ -242,10 +246,10 @@ def _final_wu_hourly_observation_extreme(
                 SELECT target_date, source, station_id, utc_timestamp,
                        time_basis, {field} AS extreme, temp_unit, imported_at,
                        authority, causality_status, source_role
-                  FROM {table_ref}
+                 FROM {table_ref}
                  WHERE city = ?
                    AND target_date IN (?, ?)
-                   AND source = 'wu_icao_history'
+                   AND source = ?
                    AND station_id = ?
                  ORDER BY utc_timestamp
                 """,
@@ -253,6 +257,7 @@ def _final_wu_hourly_observation_extreme(
                     str(getattr(city, "name", "") or ""),
                     str(target_date),
                     following_date,
+                    hourly_source,
                     station,
                 ),
             ).fetchall()
@@ -295,7 +300,7 @@ def _final_wu_hourly_observation_extreme(
             except (KeyError, IndexError, TypeError, ValueError):
                 continue
             if (
-                row_source != "wu_icao_history"
+                row_source != hourly_source
                 or row_station != station
                 or time_basis != "utc_hour_bucket_extremum"
                 or row_unit != unit
@@ -333,7 +338,7 @@ def _final_wu_hourly_observation_extreme(
         return FinalDailyObservation(
             raw_extreme=float(raw),
             settled_extreme=float(settled),
-            source="wu_icao_history:following_day_observed",
+            source=f"{hourly_source}:following_day_observed",
             station_id=station,
             unit=unit,
             fetched_at=fetched_at,
@@ -428,7 +433,7 @@ def _final_daily_observation_extreme(
                 unit=str(unit).strip().upper(),
                 fetched_at=fetched_at,
             )
-    return _final_wu_hourly_observation_extreme(
+    return _final_complete_hourly_observation_extreme(
         city=city,
         target_date=target_date,
         metric=metric,

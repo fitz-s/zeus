@@ -19,6 +19,7 @@ import zlib
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pytest
@@ -4839,8 +4840,55 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
     forecast.close()
 
 
-def test_post_day_wu_hourly_observation_conn_builds_exact_global_simplex(
+@pytest.mark.parametrize(
+    (
+        "city",
+        "source",
+        "station",
+        "timezone_name",
+        "unit",
+        "bin_rows",
+        "peak",
+        "baseline",
+        "expected_q",
+    ),
+    (
+        (
+            "Dallas",
+            "wu_icao_history",
+            "KDAL",
+            "America/Chicago",
+            "F",
+            (("69F or below", None, 69.0), ("70-71F", 70.0, 71.0), ("72F or above", 72.0, None)),
+            72.4,
+            68.0,
+            np.asarray([0.0, 0.0, 1.0]),
+        ),
+        (
+            "Istanbul",
+            "ogimet_metar_ltfm",
+            "LTFM",
+            "Europe/Istanbul",
+            "C",
+            (("28C or below", None, 28.0), ("29C", 29.0, 29.0), ("30C or above", 30.0, None)),
+            29.4,
+            26.0,
+            np.asarray([0.0, 1.0, 0.0]),
+        ),
+    ),
+    ids=("wu", "noaa-ogimet"),
+)
+def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
     monkeypatch,
+    city,
+    source,
+    station,
+    timezone_name,
+    unit,
+    bin_rows,
+    peak,
+    baseline,
+    expected_q,
 ):
     forecast = sqlite3.connect(":memory:")
     forecast.row_factory = sqlite3.Row
@@ -4856,10 +4904,19 @@ def test_post_day_wu_hourly_observation_conn_builds_exact_global_simplex(
     )
     forecast.executemany(
         "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            ("Dallas", "2026-07-11", "high", "c0", "yes0", "a", "69F or below", None, 69.0),
-            ("Dallas", "2026-07-11", "high", "c1", "yes1", "b", "70-71F", 70.0, 71.0),
-            ("Dallas", "2026-07-11", "high", "c2", "yes2", "c", "72F or above", 72.0, None),
+        tuple(
+            (
+                city,
+                "2026-07-11",
+                "high",
+                f"c{index}",
+                f"yes{index}",
+                chr(ord("a") + index),
+                label,
+                low,
+                high,
+            )
+            for index, (label, low, high) in enumerate(bin_rows)
         ),
     )
     observations = sqlite3.connect(":memory:")
@@ -4874,15 +4931,17 @@ def test_post_day_wu_hourly_observation_conn_builds_exact_global_simplex(
         )
         """
     )
-    target_start = _dt.datetime(2026, 7, 11, 5, tzinfo=_dt.timezone.utc)
+    target_start = _dt.datetime(
+        2026, 7, 11, tzinfo=ZoneInfo(timezone_name)
+    ).astimezone(_dt.timezone.utc)
     rows = []
     for offset in range(24):
         observed_at = target_start + _dt.timedelta(hours=offset)
-        value = 72.4 if offset == 16 else 68.0
+        value = peak if offset == 16 else baseline
         rows.append(
             (
-                "Dallas", "2026-07-11", "wu_icao_history", "KDAL",
-                observed_at.isoformat(), "utc_hour_bucket_extremum", value, value, "F",
+                city, "2026-07-11", source, station,
+                observed_at.isoformat(), "utc_hour_bucket_extremum", value, value, unit,
                 (observed_at + _dt.timedelta(minutes=15)).isoformat(),
                 "VERIFIED", "OK", "historical_hourly",
             )
@@ -4890,8 +4949,8 @@ def test_post_day_wu_hourly_observation_conn_builds_exact_global_simplex(
     following_at = target_start + _dt.timedelta(hours=24)
     rows.append(
         (
-            "Dallas", "2026-07-12", "wu_icao_history", "KDAL",
-            following_at.isoformat(), "utc_hour_bucket_extremum", 68.0, 68.0, "F",
+            city, "2026-07-12", source, station,
+            following_at.isoformat(), "utc_hour_bucket_extremum", baseline, baseline, unit,
             (following_at + _dt.timedelta(minutes=15)).isoformat(),
             "VERIFIED", "OK", "historical_hourly",
         )
@@ -4904,20 +4963,20 @@ def test_post_day_wu_hourly_observation_conn_builds_exact_global_simplex(
         era,
         "_forecast_snapshot_row_for_event",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("final WU observation must not require a forecast snapshot")
+            AssertionError("final hourly observation must not require a forecast snapshot")
         ),
     )
     monkeypatch.setattr(
         era,
         "_day0_remaining_global_probability_components",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("final WU observation must not request remaining hours")
+            AssertionError("final hourly observation must not request remaining hours")
         ),
     )
 
     day0_payload: dict[str, object] = {}
     prepared = era._prepare_current_global_probability_family(
-        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        _global_day0_scope_event(city=city, source_run_id=f"run-{city.lower()}"),
         forecast_conn=forecast,
         topology_conn=forecast,
         observation_conn=observations,
@@ -4930,7 +4989,7 @@ def test_post_day_wu_hourly_observation_conn_builds_exact_global_simplex(
     assert witness.band_basis == (
         "final_daily_observation_exact_settlement_simplex_v1"
     )
-    assert np.all(witness.yes_q_samples == np.asarray([0.0, 0.0, 1.0]))
+    assert np.all(witness.yes_q_samples == expected_q)
     assert day0_payload["probability_authority"] == (
         "final_daily_observation_exact_global_probability_v1"
     )
