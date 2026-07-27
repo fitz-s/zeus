@@ -7165,7 +7165,21 @@ def event_bound_live_adapter_from_trade_conn(
                 return False
             return True
 
+        _stable_preflight_monitor_handoff = [False]
+
         def _day0_selection_cancelled() -> bool:
+            current = reactor_urgent_wake_revision()
+            if (
+                current is not None
+                and current != _global_batch_urgent_wake_revision[0]
+                and reactor_urgent_wake_reason()
+                == "day0_extreme_event_committed"
+            ):
+                _stable_preflight_monitor_handoff[0] = False
+                return True
+            if _stable_preflight_monitor_handoff[0]:
+                _stable_preflight_monitor_handoff[0] = False
+                return False
             if selection_cancelled is not None:
                 try:
                     if selection_cancelled():
@@ -7174,13 +7188,7 @@ def event_bound_live_adapter_from_trade_conn(
                     logging.getLogger(__name__).exception(
                         "global selection cancellation probe failed"
                     )
-            current = reactor_urgent_wake_revision()
-            return (
-                current is not None
-                and current != _global_batch_urgent_wake_revision[0]
-                and reactor_urgent_wake_reason()
-                == "day0_extreme_event_committed"
-            )
+            return False
 
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
@@ -7432,6 +7440,7 @@ def event_bound_live_adapter_from_trade_conn(
 
         def _preflight(event, actuation, at, authority):
             nonlocal pending_preflight_jit_candidate
+            _stable_preflight_monitor_handoff[0] = False
             jit_candidate = pending_preflight_jit_candidate
             pending_preflight_jit_candidate = None
             receipt = _global_preflight_candidate_receipt(
@@ -7461,6 +7470,12 @@ def event_bound_live_adapter_from_trade_conn(
                 receipt.decision_proof_bundle is not None
                 or reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
             ):
+                if reason == "GLOBAL_SELL_PREFLIGHT_STABLE":
+                    # The runtime probes cancellation immediately after this
+                    # submit-time proof. A routine held-position monitor must
+                    # not preempt the global SELL lane it cannot execute. A
+                    # newer committed Day0 fact still wins in the probe above.
+                    _stable_preflight_monitor_handoff[0] = True
                 issued_at, expires_at = _global_preflight_token_window(
                     authority.actuation_deadline
                 )
