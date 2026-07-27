@@ -100,18 +100,26 @@ def test_confirmed_ws_trade_fact_uses_command_order_after_matched_submit_unknown
 
 
 @pytest.mark.parametrize(
-    ("position_condition", "chain_shares", "entry_price", "resolved"),
+    (
+        "position_condition",
+        "entry_filled_shares",
+        "entry_price",
+        "phase",
+        "resolved",
+    ),
     [
-        ("condition-1", 7.0, 0.72, True),
-        ("wrong-condition", 7.0, 0.72, False),
-        ("condition-1", 0.0, 0.72, False),
-        ("condition-1", 7.0, 0.60, False),
+        ("condition-1", 7.0, 0.72, "active", True),
+        ("wrong-condition", 7.0, 0.72, "active", False),
+        ("condition-1", 0.0, 0.72, "active", False),
+        ("condition-1", 7.0, 0.60, "active", False),
+        ("condition-1", 7.0, 0.72, "settled", True),
     ],
 )
-def test_confirmed_absorbed_fill_consumes_stuck_cap_only_on_exact_chain_proof(
+def test_confirmed_absorbed_fill_consumes_stuck_cap_only_on_exact_entry_fill_proof(
     position_condition,
-    chain_shares,
+    entry_filled_shares,
     entry_price,
+    phase,
     resolved,
 ):
     conn = _conn()
@@ -153,12 +161,13 @@ def test_confirmed_absorbed_fill_consumes_stuck_cap_only_on_exact_chain_proof(
             shares, entry_price, fill_authority, chain_state, chain_shares,
             updated_at, temperature_metric
         ) VALUES (
-            'pos-1', 'active', ?, 'buy_no', 'yes-token-1', 'token-1',
-            7, ?, 'venue_confirmed_full', 'synced', ?, ?, 'high'
+            'pos-1', ?, ?, 'buy_no', 'yes-token-1', 'token-1',
+            0, ?, 'venue_confirmed_full', 'synced', 0, ?, 'high'
         )
         """,
-        (position_condition, entry_price, chain_shares, NOW.isoformat()),
+        (phase, position_condition, entry_price, NOW.isoformat()),
     )
+    _insert_entry_fill_event(conn, shares=entry_filled_shares)
     append_order_fact(
         conn,
         venue_order_id="venue-1",
@@ -197,6 +206,100 @@ def test_confirmed_absorbed_fill_consumes_stuck_cap_only_on_exact_chain_proof(
     assert conn.execute(
         "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
     ).fetchone()[0] == 1
+
+
+def test_rest_confirmed_price_improvement_rebuilds_submit_and_drains_cap_after_exit():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger, include_ack=False, include_attempt=False)
+    _insert_command(conn)
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, decision_time, cap_scope,
+            max_notional_usd, max_orders_per_day, reserved_notional_usd,
+            order_count, reservation_status, final_intent_id,
+            execution_command_id, created_at, schema_version
+        ) VALUES (
+            'usage-1', 'event-1', ?, 'live_execution_reservation',
+            5.04, 1, 5.04, 1, 'RESERVED', 'intent-1',
+            'command-1', ?, 1
+        )
+        """,
+        (NOW.isoformat(), NOW.isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, condition_id, direction, token_id, no_token_id,
+            shares, entry_price, fill_authority, chain_state, chain_shares,
+            updated_at, temperature_metric
+        ) VALUES (
+            'pos-1', 'economically_closed', 'condition-1', 'buy_no',
+            'yes-token-1', 'token-1', 0, 0.68, 'venue_confirmed_full',
+            'chain_confirmed_zero', 0, ?, 'high'
+        )
+        """,
+        (NOW.isoformat(),),
+    )
+    _insert_entry_fill_event(conn, shares=7.5, entry_price=0.68)
+    append_order_fact(
+        conn,
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="7.5",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash="f" * 64,
+        raw_payload_json={"test": "price-improved terminal fill"},
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-price-improved",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7.5",
+        fill_price="0.68",
+        source="REST",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="9" * 64,
+        raw_payload_json="{}",
+    )
+
+    assert append_rest_filled_orphan_trade_facts_to_edli(conn, now=NOW) == 1
+
+    projection = ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "USER_TRADE_OBSERVED"
+    assert projection.pending_reconcile is False
+    assert conn.execute(
+        "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id='usage-1'"
+    ).fetchone()[0] == "CONSUMED"
+    assert [
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT event_type
+              FROM edli_live_order_events
+             WHERE aggregate_id='event-1:intent-1'
+               AND event_type IN (
+                   'VenueSubmitAttempted',
+                   'VenueSubmitAcknowledged',
+                   'UserTradeObserved',
+                   'CapTransitioned'
+               )
+             ORDER BY event_sequence
+            """
+        ).fetchall()
+    ] == [
+        "VenueSubmitAttempted",
+        "VenueSubmitAcknowledged",
+        "UserTradeObserved",
+        "CapTransitioned",
+    ]
 
 
 def test_confirmed_ws_trade_bridge_skips_terminal_reconciled_aggregate():
@@ -422,6 +525,7 @@ def _seed_edli_chain(
     ledger: LiveOrderAggregateLedger,
     *,
     include_ack: bool = True,
+    include_attempt: bool = True,
 ) -> None:
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -465,14 +569,20 @@ def _seed_edli_chain(
         occurred_at=NOW,
         source_authority="engine_adapter",
     )
-    ledger.append_event(
-        aggregate_id="event-1:intent-1",
-        event_type="VenueSubmitAttempted",
-        payload={"event_id": "event-1", "final_intent_id": "intent-1", "execution_command_id": "command-1"},
-        occurred_at=NOW,
-        source_authority="existing_executor",
-    )
+    if include_attempt:
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="VenueSubmitAttempted",
+            payload={
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "execution_command_id": "command-1",
+            },
+            occurred_at=NOW,
+            source_authority="existing_executor",
+        )
     if include_ack:
+        assert include_attempt
         ledger.append_event(
             aggregate_id="event-1:intent-1",
             event_type="VenueSubmitAcknowledged",
@@ -485,6 +595,38 @@ def _seed_edli_chain(
             occurred_at=NOW,
             source_authority="existing_executor",
         )
+
+
+def _insert_entry_fill_event(
+    conn: sqlite3.Connection,
+    *,
+    shares: float,
+    entry_price: float = 0.72,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, command_id, order_id,
+            source_module, env, payload_json
+        ) VALUES (
+            'pos-1:entry-fill', 'pos-1', 1, 1, 'ENTRY_ORDER_FILLED',
+            ?, 'pending_entry', 'active', 'cmd-1', 'venue-1',
+            'tests.events.test_edli_trade_fact_bridge', 'live', ?
+        )
+        """,
+        (
+            NOW.isoformat(),
+            json.dumps(
+                {
+                    "shares": shares,
+                    "entry_price": entry_price,
+                    "venue_order_id": "venue-1",
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
 
 
 def _pre_submit_payload() -> dict:
