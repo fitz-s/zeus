@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-07-14
+# Last reused or audited: 2026-07-27
 # Authority basis: EDLI live-order aggregate event-sourcing law
 #   (src/events/live_order_aggregate.py), executor pre-venue depth validation
 #   (src/execution/executor.py:1773), live-cap ledger (src/events/live_cap.py),
@@ -25,6 +25,7 @@ from types import SimpleNamespace
 import pytest
 
 import src.engine.event_bound_final_intent as ebfi
+import src.engine.event_reactor_adapter as era
 from src.engine.event_bound_final_intent import (
     EventBoundExecutorSubmitResult,
     PreVenueSubmitError,
@@ -147,6 +148,24 @@ def test_post_venue_unknown_still_blocks_as_post_submit_unknown():
     assert result.venue_call_started is True
     assert result.side_effect_known is False
     assert result.reconciliation_followup_required is True
+
+
+def test_command_built_before_certificate_persist_failure_requires_terminalization():
+    """A returned command proves live-cap/order state exists, independent of ledger persist."""
+    command = SimpleNamespace(payload={"execution_command_id": "cmd-1"})
+
+    assert era._live_command_failure_requires_terminalization(
+        command=command,
+        phase="live_order_certificates_built",
+    )
+    assert not era._live_command_failure_requires_terminalization(
+        command=None,
+        phase="building_live_order_certificates",
+    )
+    assert not era._live_command_failure_requires_terminalization(
+        command=command,
+        phase="submit_terminal_appended",
+    )
 
 
 @pytest.mark.parametrize(

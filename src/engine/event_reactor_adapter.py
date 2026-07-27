@@ -6947,10 +6947,9 @@ def event_bound_live_adapter_from_trade_conn(
                     proof_accepted=True,
                     submit_lane=SUBMIT_LANE_LIVE_PRE_VENUE_ABORT,
                 )
-            if (
-                command_certificates_persisted
-                and command is not None
-                and _live_order_build_phase != "submit_terminal_appended"
+            if _live_command_failure_requires_terminalization(
+                command=command,
+                phase=_live_order_build_phase,
             ):
                 try:
                     terminal_result = submit_result
@@ -15945,6 +15944,22 @@ def _fallback_submit_result_after_live_command_failure(
         venue_ack_received=False,
         side_effect_known=True,
     )
+
+
+def _live_command_failure_requires_terminalization(
+    *,
+    command: DecisionCertificate | None,
+    phase: str,
+) -> bool:
+    """Whether a failed submit path already owns durable pre-venue order state.
+
+    `_build_live_execution_command_certificates` appends
+    `ExecutionCommandCreated` and reserves live cap before the separate
+    decision-certificate ledger write. Once it returns a command, every later
+    failure must append a terminal aggregate event and release/transition that
+    reservation even when certificate persistence itself failed.
+    """
+    return command is not None and phase != "submit_terminal_appended"
 
 
 def _normalize_event_bound_executor_submit_result(
