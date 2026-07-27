@@ -108,22 +108,10 @@ _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
         "market_discovery",
     }
 )
-_HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS = (
-    _HELD_POSITION_MONITOR_DEFER_JOBS
-    | frozenset(
-        {
-            "edli_command_recovery",
-            "edli_continuous_redecision_screen",
-            "edli_day0_hourly_refresh",
-            "c3_staleness_cancel",
-            "live_health_composite",
-            "settlement_guard_report",
-            "settlement_skill_attribution",
-            "trades_wal_checkpoint",
-            "world_wal_checkpoint",
-        }
-    )
-)
+# Bootstrap protects the new-entry decision lane. Recovery, held-q refresh,
+# cancels, health, settlement, and passive checkpoints are prerequisites or
+# independent drains; starving them cannot establish held-position coverage.
+_HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS = _HELD_POSITION_MONITOR_DEFER_JOBS
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 _EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS = 60.0
@@ -6658,7 +6646,11 @@ def _exit_monitor_cycle(
         if monitor_succeeded is not True:
             raise RuntimeError("EXIT_MONITOR_CYCLE_INCOMPLETE")
         if target_families is None:
-            _held_position_monitor_bootstrap_complete.set()
+            # Canonical MONITOR_REFRESHED coverage, observed by
+            # _promote_held_position_monitor_bootstrap_from_canonical_progress,
+            # is the only bootstrap completion authority. A cycle may return
+            # without a Python exception while every position was deferred for
+            # missing executable books; that is not coverage.
             _periodic_exit_monitor_day0_yielded.clear()
         return True
     finally:

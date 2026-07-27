@@ -6371,7 +6371,7 @@ def test_periodic_exit_monitor_forces_full_book_after_one_continuous_day0_yield(
 
         assert main_module._exit_monitor_cycle() is True
         assert calls == ["run"]
-        assert main_module._held_position_monitor_bootstrap_complete.is_set()
+        assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
         assert not main_module._periodic_exit_monitor_day0_yielded.is_set()
 
         assert main_module._exit_monitor_cycle() is True
@@ -6980,9 +6980,7 @@ def test_entry_reactor_monitor_defer_contract_is_effective(monkeypatch) -> None:
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
 
 
-def test_monitor_bootstrap_owns_database_io_before_background_jobs(monkeypatch) -> None:
-    import inspect
-
+def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> None:
     import src.main as main_module
     import src.runtime.reactor_wake as wake_module
 
@@ -6999,45 +6997,9 @@ def test_monitor_bootstrap_owns_database_io_before_background_jobs(monkeypatch) 
         handoff_pending,
     )
 
-    for job_name in (
-        "edli_event_reactor",
-        "edli_command_recovery",
-        "edli_continuous_redecision_screen",
-        "edli_day0_hourly_refresh",
-        "c3_staleness_cancel",
-        "live_health_composite",
-        "settlement_guard_report",
-        "settlement_skill_attribution",
-        "trades_wal_checkpoint",
-        "world_wal_checkpoint",
-    ):
+    for job_name in ("edli_event_reactor", "market_discovery"):
         assert main_module._defer_for_held_position_monitor(job_name) is True
 
-    routed_jobs = {
-        main_module._edli_continuous_redecision_screen_cycle: (
-            "edli_continuous_redecision_screen"
-        ),
-        main_module._edli_day0_hourly_refresh_cycle: "edli_day0_hourly_refresh",
-        main_module._live_health_composite_cycle: "live_health_composite",
-        main_module._settlement_guard_report_tick: "settlement_guard_report",
-        main_module._settlement_skill_attribution_tick: "settlement_skill_attribution",
-        main_module._trades_wal_checkpoint_cycle: "trades_wal_checkpoint",
-        main_module._world_wal_checkpoint_cycle: "world_wal_checkpoint",
-    }
-    for job, job_name in routed_jobs.items():
-        assert (
-            f'_defer_for_held_position_monitor("{job_name}")'
-            in inspect.getsource(job)
-        )
-
-    monkeypatch.setattr(
-        wake_module,
-        "read_reactor_wake",
-        lambda: pytest.fail("wake queue must not scan before monitor bootstrap"),
-    )
-    assert main_module._edli_reactor_wake_poll_once() is False
-
-    bootstrap_complete.set()
     for job_name in (
         "edli_command_recovery",
         "edli_continuous_redecision_screen",
@@ -7050,6 +7012,47 @@ def test_monitor_bootstrap_owns_database_io_before_background_jobs(monkeypatch) 
         "world_wal_checkpoint",
     ):
         assert main_module._defer_for_held_position_monitor(job_name) is False
+
+    monkeypatch.setattr(
+        wake_module,
+        "read_reactor_wake",
+        lambda: pytest.fail("wake queue must not scan before monitor bootstrap"),
+    )
+    assert main_module._edli_reactor_wake_poll_once() is False
+
+    bootstrap_complete.set()
+    for job_name in ("edli_event_reactor", "market_discovery"):
+        assert main_module._defer_for_held_position_monitor(job_name) is False
+
+
+def test_full_book_monitor_without_canonical_progress_does_not_complete_bootstrap(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    def _run(**kwargs) -> bool:
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._day0_urgent_wake_pending.clear()
+    main_module._day0_held_monitor_preempt_requested.clear()
+    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._day0_exit_monitor_attempts.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
+
+    assert main_module._exit_monitor_cycle() is True
+    assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
 
 
 def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> None:

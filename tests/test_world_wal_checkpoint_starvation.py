@@ -231,13 +231,6 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
     from src import main as main_module
     from src.state import db as db_module
 
-    # The world checkpoint cycle defers until the first held-position monitor cycle
-    # completes (operator guard); no monitor runs in this unit test, so bypass the
-    # deferral to exercise the checkpoint path.
-    monkeypatch.setattr(
-        main_module, "_defer_for_held_position_monitor", lambda _name: False, raising=True
-    )
-
     # Patch the helper at the source module so the job's local import resolves it.
     calls = {"n": 0}
 
