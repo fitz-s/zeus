@@ -18244,6 +18244,13 @@ def test_global_batch_rejects_when_all_families_lack_current_q(monkeypatch):
             "an empty current-q scope must not select"
         ),
     )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_invalidate_global_holding_coverage",
+        lambda: pytest.fail(
+            "an incomplete replacement epoch must preserve last committed coverage"
+        ),
+    )
 
     def prepare(event, _at):
         return EventSubmissionReceipt(

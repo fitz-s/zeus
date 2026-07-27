@@ -2889,7 +2889,11 @@ def process_current_global_batch(
         or any(not str(family_key or "").strip() for family_key in restrict_to_family_keys)
     ):
         raise ValueError("GLOBAL_AUCTION_RESTRICTED_SCOPE_INVALID")
-    _invalidate_global_holding_coverage()
+    # Keep the last committed coverage live while this epoch is being built.
+    # Its q/book/wealth/share witnesses are revalidated on every monitor use,
+    # so an obsolete row already fails closed.  Clearing it here creates an
+    # authority gap until the replacement receipt commits and can starve
+    # statistical SELL whenever auction and monitor cycles overlap.
     claimed_target_by_scope_and_economics: dict[
         tuple[str, str], OpportunityEvent
     ] = {}
