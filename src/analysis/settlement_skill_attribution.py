@@ -83,6 +83,33 @@ stale — its outcome carries no skill signal either way). UNATTRIBUTABLE_Q_MISS
 rows are likewise excluded (no immutable decision-q means no attributable skill
 signal).
 
+READING A HISTORICAL ROW'S fresher_cycle_existed_at_decision (2026-07-27)
+-------------------------------------------------------------------------
+The flag means what this module says ONLY on rows graded at/after
+``STALE_PREDICATE_FIX_LANDED_AT``. Earlier rows were produced by the discredited
+predicate (settlement-eve vs time-reconstructed decision posterior) and their 1s
+are systematically false — verified read-only on live: 266/266 joinable flagged
+rows had that "fresher" posterior computed AFTER the position's own
+POSITION_OPEN_INTENT, median +26.8h. Predicate identity is NOT in
+``schema_version`` (which is 1 on every row and tracks table shape, never
+algorithm), so ``graded_at`` is the discriminator — use
+``fresher_flag_is_trustworthy`` / ``TRUSTWORTHY_FRESHER_FLAG_SQL``, never the
+literal 1 alone:
+
+    SELECT * FROM settlement_attribution
+     WHERE fresher_cycle_existed_at_decision = 1
+       AND graded_at >= '<STALE_PREDICATE_FIX_LANDED_AT>';
+
+The affected rows are NOT re-graded and NOT corrected. 203 of them carry a
+persisted ``q_live`` that is the LAST COPY of that decision's belief — a
+2026-07-24 migration deleted 1,290,540 certificates, so a re-grade would resolve
+only 38 and destroy the other 165 into UNATTRIBUTABLE_Q_MISSING. Destroying
+irreplaceable evidence to repair a flag is the larger data crime; the flag is
+made legible instead, and whether to re-grade is an operator decision.
+``count_discredited_stale_brands`` counts the STALE brands with no surviving
+basis (the age-vs-budget test is unaffected by the defect, so a row that also
+fails it stays stale on grounds that hold).
+
 THRESHOLD DERIVATION (no bare magic numbers)
 --------------------------------------------
   "market disagreed by a large factor" = market_in_bin_prob / our_q_in_bin >=
@@ -146,6 +173,32 @@ SUPPORT_BOUNDARY: float = 0.5
 # a decision consuming a cycle already superseded by the next 6-hourly cycle is
 # born stale. Recorded on each row as freshness_budget_hours.
 DEFAULT_FRESHNESS_BUDGET_HOURS: float = 6.0
+
+# The instant commit 7d6fefa37 ("fix(analysis): brand stale from decision-time
+# truth") was authored — the immutable git fact that dates the predicate change.
+# EVERY row graded strictly before it was produced by the DISCREDITED predicate,
+# which compared settlement-eve data against a time-reconstructed decision
+# posterior and so reduced to "did anyone publish a posterior after we traded"
+# (live, read-only: 266/266 joinable flagged rows had that "fresher" posterior
+# computed AFTER their own POSITION_OPEN_INTENT, median +26.8h, min +0.10h).
+#
+# NO COLUMN RECORDS THIS. schema_version is 1 on every row and tracks table SHAPE,
+# not predicate identity, so a stored 1 alone cannot say which predicate produced
+# it. graded_at can, and already does — hence a named boundary rather than new
+# schema. Rows at/after the boundary are the trustworthy subset; the interval
+# between this instant and the daemon's reload is the only theoretically
+# ambiguous window, and the live corpus has ZERO rows graded in it (last pre-fix
+# grade 2026-07-26T18:02:09Z, first post-fix grade 2026-07-27T04:46:35Z —
+# verified read-only), so the partition is exact on the corpus that exists.
+STALE_PREDICATE_FIX_LANDED_AT: str = "2026-07-26T23:04:34+00:00"
+
+
+def fresher_flag_is_trustworthy(graded_at: Optional[str]) -> bool:
+    """Was this row's ``fresher_cycle_existed_at_decision`` produced by the CURRENT
+    predicate? An unknown/absent ``graded_at`` is NOT trustworthy (fail-closed:
+    a value that cannot prove its provenance is never promoted to true evidence).
+    """
+    return bool(graded_at) and str(graded_at) >= STALE_PREDICATE_FIX_LANDED_AT
 
 
 # ---------------------------------------------------------------------------
@@ -1546,17 +1599,69 @@ def compute_skill_win_rate(world_conn: sqlite3.Connection) -> SkillWinRate:
     )
 
 
-def skill_win_rate_log_line(rate: SkillWinRate) -> str:
-    """The one-line INFO summary the operator sees at each grading."""
+TRUSTWORTHY_FRESHER_FLAG_SQL: str = (
+    "graded_at >= '" + STALE_PREDICATE_FIX_LANDED_AT + "'"
+)
+
+
+def count_discredited_stale_brands(world_conn: sqlite3.Connection) -> int:
+    """STALE_DECISION rows whose brand rests SOLELY on a discredited flag value.
+
+    A row qualifies when all three hold: it was graded before the predicate fix
+    (so its flag is untrustworthy), the flag is the 1 that drove the brand, and
+    its decision-posterior age did NOT independently exceed the freshness budget
+    (the age test is unaffected by the defect, so a row failing it is stale on a
+    basis that survives). Live at the time of writing: 232 pre-fix flag-driven
+    STALE rows, of which 21 are also age-stale, leaving 211.
+
+    A COUNT, not a re-grade and not a correction: the rows keep their category,
+    their q_live, and every other persisted value. Whether they are ever
+    re-graded is an operator decision — and 165 of the 203 that carry a q_live
+    would lose it to UNATTRIBUTABLE_Q_MISSING if they were, because the
+    2026-07-24 certificate deletion left those q_live values as the last copy.
+    """
+    return int(
+        world_conn.execute(
+            f"""
+            SELECT COUNT(*)
+              FROM settlement_attribution
+             WHERE category = 'STALE_DECISION'
+               AND fresher_cycle_existed_at_decision = 1
+               AND NOT ({TRUSTWORTHY_FRESHER_FLAG_SQL})
+               AND (
+                     decision_posterior_age_hours IS NULL
+                     OR freshness_budget_hours IS NULL
+                     OR decision_posterior_age_hours <= freshness_budget_hours
+               )
+            """
+        ).fetchone()[0]
+    )
+
+
+def skill_win_rate_log_line(
+    rate: SkillWinRate,
+    discredited_stale: Optional[int] = None,
+) -> str:
+    """The one-line INFO summary the operator sees at each grading.
+
+    ``discredited_stale`` (count_discredited_stale_brands) is reported inline
+    because the STALE count it qualifies is otherwise read as one homogeneous
+    number: at the time of writing 232 of 243 STALE brands rest on a pre-fix flag
+    value and 211 of those have no surviving basis. Omitted from the line only
+    when it is 0 or unavailable — a reader must not have to remember to ask.
+    """
     swr = rate.skill_win_rate
     nwr = rate.naive_win_rate
     swr_s = "n/a" if swr is None else f"{swr * 100:.1f}%"
     nwr_s = "n/a" if nwr is None else f"{nwr * 100:.1f}%"
+    stale_s = f"STALE={rate.stale_decision}"
+    if discredited_stale:
+        stale_s += f" (of which {discredited_stale} on a discredited pre-fix flag)"
     return (
         f"settlement_skill_attribution: SKILL win-rate={swr_s} "
         f"(naive={nwr_s}) | SKILL_WIN={rate.skill_win} LUCKY_WIN={rate.lucky_win} "
         f"SKILL_LOSS={rate.skill_loss} MISCALIBRATED_LOSS={rate.miscalibrated_loss} "
-        f"STALE={rate.stale_decision} UNATTRIBUTABLE_Q={rate.unattributable_q_missing} "
+        f"{stale_s} UNATTRIBUTABLE_Q={rate.unattributable_q_missing} "
         f"(denom={rate.skill_denominator})"
     )
 
@@ -1659,7 +1764,8 @@ def _run_with_conn(
         pass
 
     rate = compute_skill_win_rate(world_conn)
-    logger.info(skill_win_rate_log_line(rate))
+    discredited_stale = count_discredited_stale_brands(world_conn)
+    logger.info(skill_win_rate_log_line(rate, discredited_stale))
 
     return {
         "graded": graded,
@@ -1669,6 +1775,7 @@ def _run_with_conn(
         "skill_win_rate": rate.skill_win_rate,
         "naive_win_rate": rate.naive_win_rate,
         "skill_denominator": rate.skill_denominator,
+        "discredited_stale_brands": discredited_stale,
     }
 
 

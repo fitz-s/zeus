@@ -1449,3 +1449,114 @@ def test_regrade_refreshes_every_recomputed_column(tmp_path) -> None:
     assert prior is not None
     assert json.loads(prior[0])["q_live"] == pytest.approx(0.80, abs=1e-9)
     wconn.close()
+
+
+# ---------------------------------------------------------------------------
+# PROVENANCE — a pre-fix `1` must be distinguishable from a post-fix `1`
+# ---------------------------------------------------------------------------
+
+def test_PROV1_pre_fix_flag_is_never_trustworthy_post_fix_is() -> None:
+    """The defect this closes: a reader could not tell a FALSE pre-fix `1` from a
+    TRUE post-fix `1` — both are the same literal, and schema_version is 1 on
+    every row. graded_at is the discriminator, so the predicate boundary must
+    partition the corpus exactly, and an unknown graded_at must fail closed.
+    """
+    from src.analysis.settlement_skill_attribution import (
+        STALE_PREDICATE_FIX_LANDED_AT,
+        fresher_flag_is_trustworthy,
+    )
+
+    assert fresher_flag_is_trustworthy(STALE_PREDICATE_FIX_LANDED_AT), (
+        "a row graded exactly at the boundary was produced by the fixed predicate"
+    )
+    # The live corpus's first post-fix grade — a trustworthy value.
+    assert fresher_flag_is_trustworthy("2026-07-27T04:46:35.900639+00:00")
+    # The live corpus's last pre-fix grade — the value whose `1`s are false.
+    assert not fresher_flag_is_trustworthy("2026-07-26T18:02:09.095671+00:00")
+    # Fail-closed: provenance that cannot be proven is never promoted to true.
+    assert not fresher_flag_is_trustworthy(None)
+    assert not fresher_flag_is_trustworthy("")
+
+
+def test_PROV2_discredited_stale_count_excludes_age_stale_and_post_fix(tmp_path) -> None:
+    """count_discredited_stale_brands counts ONLY brands with no surviving basis.
+
+    A pre-fix flag-driven STALE row whose decision posterior ALSO exceeded the
+    freshness budget is stale on a test the defect never touched — counting it
+    would overstate the damage. A post-fix flag-driven row is trustworthy and is
+    not damage at all. Both must be excluded; only the pre-fix, flag-only row
+    counts. And no row is re-graded or altered: q_live survives the count.
+    """
+    from src.analysis.settlement_skill_attribution import (
+        STALE_PREDICATE_FIX_LANDED_AT,
+        count_discredited_stale_brands,
+    )
+
+    wconn = sqlite3.connect(str(tmp_path / "world.db"))
+    init_schema(wconn)
+
+    pre = "2026-07-26T18:02:09.095671+00:00"
+    post = "2026-07-27T04:46:35.900639+00:00"
+
+    def _insert(pid, graded_at, *, flag, age_h, category="STALE_DECISION"):
+        wconn.execute(
+            """
+            INSERT INTO settlement_attribution (
+                attribution_id, position_id, category, won, counts_as_skill_win,
+                q_live, decision_posterior_age_hours, freshness_budget_hours,
+                fresher_cycle_existed_at_decision, graded_at, schema_version
+            ) VALUES (?, ?, ?, 0, 0, 0.77, ?, 6.0, ?, ?, 1)
+            """,
+            (f"attr-{pid}", pid, category, age_h, flag, graded_at),
+        )
+
+    # Counted: pre-fix, flag-driven, age WITHIN budget (no surviving basis).
+    _insert("p_damaged", pre, flag=1, age_h=1.5)
+    # Not counted: age ALSO over budget — stale on a basis the defect never touched.
+    _insert("p_age_stale", pre, flag=1, age_h=9.0)
+    # Not counted: graded by the FIXED predicate, so the flag is trustworthy.
+    _insert("p_post_fix", post, flag=1, age_h=1.5)
+    # Not counted: the flag never drove this brand.
+    _insert("p_flag_zero", pre, flag=0, age_h=9.0)
+    # Not counted: a different category is not a STALE brand at all.
+    _insert("p_other", pre, flag=1, age_h=1.5, category="UNATTRIBUTABLE_Q_MISSING")
+
+    assert count_discredited_stale_brands(wconn) == 1
+
+    # The count is a READ. Every row keeps its category and its irreplaceable q_live.
+    rows = wconn.execute(
+        "SELECT position_id, category, q_live FROM settlement_attribution "
+        "ORDER BY position_id"
+    ).fetchall()
+    assert len(rows) == 5
+    assert all(r[2] == pytest.approx(0.77, abs=1e-9) for r in rows), (
+        "counting discredited brands must never touch a persisted q_live"
+    )
+    assert {r[1] for r in rows} == {"STALE_DECISION", "UNATTRIBUTABLE_Q_MISSING"}
+    assert STALE_PREDICATE_FIX_LANDED_AT < post
+    wconn.close()
+
+
+def test_PROV3_log_line_surfaces_discredited_stale_by_default() -> None:
+    """The honest subset must arrive without the reader remembering to ask.
+
+    A bare `STALE=243` reads as one homogeneous fact. When brands rest on a
+    discredited flag, the operator's one-line summary must say so inline.
+    """
+    from src.analysis.settlement_skill_attribution import (
+        SkillWinRate,
+        skill_win_rate_log_line,
+    )
+
+    rate = SkillWinRate(
+        skill_win=45, lucky_win=3, skill_loss=30, miscalibrated_loss=11,
+        stale_decision=243, unattributable_q_missing=94,
+    )
+    line = skill_win_rate_log_line(rate, 211)
+    assert "STALE=243" in line
+    assert "211" in line and "discredited" in line, (
+        "a discredited-brand count must be visible in the default summary line"
+    )
+    # Nothing to disclose -> no noise.
+    assert "discredited" not in skill_win_rate_log_line(rate, 0)
+    assert "discredited" not in skill_win_rate_log_line(rate)
