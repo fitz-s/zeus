@@ -502,8 +502,17 @@ class Day0ExtremeUpdatedTrigger:
         observation_times: dict[tuple[str, str, str, str], datetime] = {}
         try:
             conn = self._writer.conn
+            city_clause = ""
+            params: list[Any] = [target_floor]
+            if self._scan_cities is not None:
+                placeholders = ",".join("?" for _ in self._scan_cities)
+                city_clause = (
+                    "AND json_extract(payload_json, '$.city') "
+                    f"IN ({placeholders})"
+                )
+                params.extend(self._scan_cities)
             rows = conn.execute(
-                """
+                f"""
                 SELECT json_extract(payload_json, '$.city')        AS c,
                        json_extract(payload_json, '$.target_date') AS td,
                        json_extract(payload_json, '$.station_id')  AS st,
@@ -514,12 +523,13 @@ class Day0ExtremeUpdatedTrigger:
                 FROM opportunity_events INDEXED BY idx_opportunity_events_fsr_target_date
                 WHERE event_type = 'DAY0_EXTREME_UPDATED'
                   AND json_extract(payload_json, '$.target_date') >= ?
+                  {city_clause}
                 ORDER BY datetime(json_extract(payload_json, '$.observation_time')) DESC,
                          available_at DESC,
                          created_at DESC,
                          event_id DESC
                 """,
-                (target_floor,),
+                tuple(params),
             ).fetchall()
         except Exception:  # noqa: BLE001 — fail-soft: no marks => prior always-emit behavior
             return high_water, low_water, observation_times

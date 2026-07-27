@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-27
 # Authority basis: EDLI v1 implementation prompt §9 Day0 trigger availability and hard-fact gates.
 from __future__ import annotations
 
@@ -664,6 +664,12 @@ def test_scan_observation_instants_rows_scopes_index_seek_to_admitted_cities():
     ]
     assert {payload["city"] for payload in payloads} == {"Paris"}
     assert any("city IN ('Paris')" in statement for statement in traced)
+    assert any(
+        "FROM opportunity_events INDEXED BY idx_opportunity_events_fsr_target_date"
+        in statement
+        and "json_extract(payload_json, '$.city') IN ('Paris')" in statement
+        for statement in traced
+    )
 
 
 def test_scan_observation_instants_rows_empty_city_scope_skips_table_scan():
