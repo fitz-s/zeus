@@ -3855,10 +3855,11 @@ def plan_family_joint_buy_targets(
             empty,
             no_trade_reason="FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED",
         )
-    mean_q = np.asarray(
-        probability_witness.yes_point_q,
-        dtype=np.float64,
-    ).reshape(1, -1)
+    mean_q = np.mean(
+        np.asarray(probability_witness.yes_q_samples, dtype=np.float64),
+        axis=0,
+        keepdims=True,
+    )
     weights = np.ones(1, dtype=np.float64)
     try:
         direct, _u, _iterations = _ru_cvar_optimum(
@@ -5271,14 +5272,14 @@ def _expected_growth_comparison(
         expected_ev = score.expected_terminal_wealth.expected_ev_usd
     else:
         terminal = score.terminal_wealth
-        point_q = family_payoff_point_q(
+        q_samples = family_payoff_q_samples(
             probability_witness,
             bin_id=candidate.bin_id,
             side=candidate.side,
         )
-        if terminal is None or point_q is None:
+        if terminal is None or q_samples is None:
             raise ValueError("posterior-mean comparison authority is unavailable")
-        held_q = float(point_q)
+        held_q = float(np.mean(q_samples))
         favorable_q = (
             1.0 - held_q
             if isinstance(candidate, GlobalSingleOrderSellCandidate)
@@ -6202,13 +6203,7 @@ def select_global_single_order(
                     primary.executable_cost_curve,
                     target.shares,
                 )
-                payoff_probability_mean = family_payoff_point_q(
-                    witness,
-                    bin_id=primary.bin_id,
-                    side=primary.side,
-                )
-                if payoff_probability_mean is None:
-                    raise ValueError("POINT_PROBABILITY_UNAVAILABLE")
+                payoff_probability_mean = float(np.mean(q_samples))
                 fixed = _score_global_single_order_buy_expected(
                     primary,
                     payoff_probability_mean=payoff_probability_mean,

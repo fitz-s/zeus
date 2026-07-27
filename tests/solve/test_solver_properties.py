@@ -1014,6 +1014,46 @@ def test_family_joint_does_not_spend_fixed_capital_fraction_above_kelly_target()
     assert fractional.no_trade_reason == "FAMILY_JOINT_NO_POSITIVE_TARGET"
 
 
+def test_family_joint_repair_uses_draw_mean_not_plugin_point():
+    candidate = _global_candidate(
+        candidate_id="family-joint-draw-mean",
+        family="family-joint-draw-mean",
+        side="YES",
+        q=0.50,
+        levels=(("0.40", "1000"),),
+    )
+    candidate = _replace_global_point_q(candidate, 0.70)
+    witness = _global_probability_witness(candidate)
+    endowment = S.FamilyPortfolioEndowment(
+        family_key=candidate.family_key,
+        payout_by_bin_usd=tuple(
+            (bin_id, Decimal("0")) for bin_id in witness.bin_ids
+        ),
+        current_token_shares=(),
+        wealth_floor_usd=Decimal("100"),
+        spendable_cash_usd=Decimal("100"),
+        portfolio_capital_usd=Decimal("100"),
+        committed_capital_usd=Decimal("0"),
+        ledger_snapshot_id="ledger-current",
+    )
+
+    decision = _global_select(
+        (candidate,),
+        cap="100",
+        family_portfolio_endowment_resolver=lambda _: endowment,
+    )
+
+    assert decision.candidate is candidate
+    assert decision.buy_sizing_mode == "FAMILY_JOINT_FRACTIONAL_TARGET"
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.win_probability_mean == pytest.approx(
+        0.50
+    )
+    assert decision.expected_terminal_wealth.expected_ev_usd == pytest.approx(
+        0.50 * float(decision.shares) - float(decision.cost_usd)
+    )
+
+
 def _global_witness(
     *,
     floor="100",
@@ -1984,7 +2024,13 @@ def test_missing_posterior_mean_blocks_cross_action_selection_fail_closed(
         bids=(("0.50", "10"),),
         shares="10",
     )
-    monkeypatch.setattr(S, "family_payoff_point_q", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        S,
+        "_expected_growth_comparison",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("posterior mean unavailable")
+        ),
+    )
 
     decision = _global_select((sell,))
 
@@ -1993,11 +2039,6 @@ def test_missing_posterior_mean_blocks_cross_action_selection_fail_closed(
     assert decision.rejection_reasons == {
         sell.candidate_id: "EXPECTED_COMPARISON_UNAVAILABLE"
     }
-    counterfactual = decision.candidate_evaluations[0].sell_point_counterfactual
-    assert counterfactual is not None
-    assert counterfactual.status == "UNAVAILABLE"
-    assert counterfactual.point_held_payoff_q is None
-    assert counterfactual.rejection_reason == "POINT_PROBABILITY_UNAVAILABLE"
 
 
 def test_global_single_order_capital_authority_failure_preserves_sell_and_stops_retries():
