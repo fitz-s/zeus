@@ -7,6 +7,7 @@
   ],
   "method": "same-station timestamp-matched WU(wu_icao_history bucket extremes @ raw METAR ts) vs IEM ASOS archive METAR (report_type 3/4); rounded_delta after WMO half-up on METAR",
   "threshold_formula": "max(p99(|rounded_delta|) + 1.0, 1.0) per settlement unit",
+  "window_note": "The top-level window describes the original cohort. Later bounded measurements carry per-city measurement_window fields.",
   "defaults": {
     "F": 1.5,
     "C": 1.0,
@@ -408,6 +409,78 @@
       "unit": "C",
       "wu_pairs": 729,
       "metar_reports": 821
+    },
+    "Beijing": {
+      "matched_pairs": 225,
+      "median_abs_raw_delta": 0.0,
+      "p95_abs_raw_delta": 0.0,
+      "p99_abs_raw_delta": 0.0,
+      "max_abs_raw_delta": 0.0,
+      "p95_abs_rounded_delta": 0.0,
+      "p99_abs_rounded_delta": 0.0,
+      "max_abs_rounded_delta": 0.0,
+      "disagree_rate_ge_1unit": 0.0,
+      "empirical_threshold": 1.0,
+      "threshold_provenance": "empirical",
+      "settlement_faithful": true,
+      "station_id": "ZBAA",
+      "unit": "C",
+      "wu_pairs": 237,
+      "metar_reports": 339,
+      "measurement_window_days": 7,
+      "measurement_window": [
+        "2026-07-20T07:30:13.105666+00:00",
+        "2026-07-27T07:30:13.105666+00:00"
+      ],
+      "measurement_generated_at": "2026-07-27T07:31:26.733402+00:00"
+    },
+    "Guangzhou": {
+      "matched_pairs": 220,
+      "median_abs_raw_delta": 0.0,
+      "p95_abs_raw_delta": 0.0,
+      "p99_abs_raw_delta": 0.0,
+      "max_abs_raw_delta": 0.0,
+      "p95_abs_rounded_delta": 0.0,
+      "p99_abs_rounded_delta": 0.0,
+      "max_abs_rounded_delta": 0.0,
+      "disagree_rate_ge_1unit": 0.0,
+      "empirical_threshold": 1.0,
+      "threshold_provenance": "empirical",
+      "settlement_faithful": true,
+      "station_id": "ZGGG",
+      "unit": "C",
+      "wu_pairs": 233,
+      "metar_reports": 357,
+      "measurement_window_days": 7,
+      "measurement_window": [
+        "2026-07-20T07:30:13.105666+00:00",
+        "2026-07-27T07:30:13.105666+00:00"
+      ],
+      "measurement_generated_at": "2026-07-27T07:31:26.733402+00:00"
+    },
+    "Wellington": {
+      "matched_pairs": 216,
+      "median_abs_raw_delta": 0.0,
+      "p95_abs_raw_delta": 0.0,
+      "p99_abs_raw_delta": 0.0,
+      "max_abs_raw_delta": 0.0,
+      "p95_abs_rounded_delta": 0.0,
+      "p99_abs_rounded_delta": 0.0,
+      "max_abs_rounded_delta": 0.0,
+      "disagree_rate_ge_1unit": 0.0,
+      "empirical_threshold": 1.0,
+      "threshold_provenance": "empirical",
+      "settlement_faithful": true,
+      "station_id": "NZWN",
+      "unit": "C",
+      "wu_pairs": 223,
+      "metar_reports": 336,
+      "measurement_window_days": 7,
+      "measurement_window": [
+        "2026-07-20T07:30:13.105666+00:00",
+        "2026-07-27T07:30:13.105666+00:00"
+      ],
+      "measurement_generated_at": "2026-07-27T07:31:26.733402+00:00"
     }
   }
 }

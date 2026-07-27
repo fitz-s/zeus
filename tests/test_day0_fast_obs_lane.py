@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-21
-# Lifecycle: created=2026-06-10; last_reviewed=2026-07-21; last_reused=2026-07-21
+# Last reused/audited: 2026-07-27
+# Lifecycle: created=2026-06-10; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -1160,15 +1160,44 @@ class TestEmpiricalThresholds:
         assert provenance == "empirical"
         assert threshold == pytest.approx(2.0)  # real +-1C spread measured
 
+    @pytest.mark.parametrize(
+        ("city_name", "station_id"),
+        (
+            ("Beijing", "ZBAA"),
+            ("Guangzhou", "ZGGG"),
+            ("Wellington", "NZWN"),
+        ),
+    )
+    def test_recent_loss_cities_use_measured_zero_margin_fast_lane(
+        self, city_name, station_id,
+    ):
+        from src.data.day0_oracle_anomaly import (
+            divergence_threshold_for_city,
+            metar_margin_units_for_city,
+        )
+
+        threshold, provenance = divergence_threshold_for_city(city_name, "C")
+        assert provenance == "empirical"
+        assert threshold == pytest.approx(1.0)
+        assert metar_margin_units_for_city(city_name, "C") == pytest.approx(0.0)
+
+        source = fast_obs_source_for_city(SimpleNamespace(
+            name=city_name,
+            timezone="UTC",
+            settlement_unit="C",
+            wu_station=station_id,
+            settlement_source_type="wu_icao",
+        ))
+        assert source is not None
+        assert source.station_id == station_id
+        assert source.margin_units == pytest.approx(0.0)
+
     def test_unmeasured_city_falls_back_to_conservative_default(self):
         from src.data.day0_oracle_anomaly import (
             DIVERGENCE_THRESHOLD,
             divergence_threshold_for_city,
         )
 
-        threshold, provenance = divergence_threshold_for_city("Wellington", "C")
-        assert provenance == "default_guess"
-        assert threshold == pytest.approx(DIVERGENCE_THRESHOLD["C"])
         threshold_f, _ = divergence_threshold_for_city("NoSuchCity", "F")
         assert threshold_f == pytest.approx(DIVERGENCE_THRESHOLD["F"])
 
@@ -1372,12 +1401,13 @@ class TestMetarMarginAbsorption:
         assert city_metar_settlement_faithful("Shenzhen", path=path) is False
         assert metar_margin_units_for_city("Shenzhen", "C", path=path) is None
 
-    def test_all_22_measured_cities_margin_unchanged(self):
+    def test_all_25_measured_cities_have_expected_margin(self):
         """Regression: the (b) default-direction fix changes behavior for
         UNMEASURED cities only. Every already-measured city in the real
         config/wu_metar_divergence.json (no path override) must keep its
-        pre-fix margin byte-identical, including Seoul (measured-unfaithful,
-        adequate sample -> absorbed at its measured 2.0C, not excluded)."""
+        expected margin, including Seoul (measured-unfaithful, adequate
+        sample -> absorbed at its measured 2.0C, not excluded) and the three
+        2026-07-27 bounded seven-day measurements."""
         from src.data.day0_oracle_anomaly import metar_margin_units_for_city
 
         f_cities = {
@@ -1387,7 +1417,8 @@ class TestMetarMarginAbsorption:
         expected_margin = {name: 0.0 for name in (
             f_cities | {
                 "London", "Paris", "Amsterdam", "Milan", "Munich", "Madrid",
-                "Tokyo", "Singapore", "Taipei", "Toronto",
+                "Tokyo", "Singapore", "Taipei", "Toronto", "Beijing",
+                "Guangzhou", "Wellington",
             }
         )}
         expected_margin["Seoul"] = 2.0
