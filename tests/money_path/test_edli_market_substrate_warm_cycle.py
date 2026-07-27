@@ -2048,7 +2048,7 @@ def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
 
 
 def test_money_path_priority_cycle_prioritizes_claim_order_families(monkeypatch):
-    """The priority producer must warm the families the reactor can claim next."""
+    """The single live priority producer cannot be disabled by a retired config flag."""
 
     calls: list[dict] = []
     claim_families = [("Tokyo", "2026-06-28", "high"), ("Shanghai", "2026-06-28", "low")]
@@ -2073,7 +2073,7 @@ def test_money_path_priority_cycle_prioritizes_claim_order_families(monkeypatch)
         "src.data.job_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
-    _enable_edli_cfg(monkeypatch, enabled=True)
+    _enable_edli_cfg(monkeypatch, enabled=False)
 
     substrate_observer._edli_money_path_substrate_priority_cycle()
 
@@ -3011,8 +3011,8 @@ def test_substrate_priority_marker_can_explicitly_merge_same_request_scope(tmp_p
     assert money_path_substrate_priority_condition_ids() == ["cond-1", "cond-2"]
 
 
-def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):
-    """Config gate: disabled edli → no refresh side effect."""
+def test_market_substrate_warm_cycle_ignores_retired_edli_enabled_flag(monkeypatch):
+    """The only live substrate producer runs even if a stale local flag says disabled."""
     calls: list[int] = []
     monkeypatch.setattr(
         substrate_observer,
@@ -3025,10 +3025,16 @@ def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):
     monkeypatch.setattr(
         state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **_kwargs: _FakeConn())
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.job_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
     _enable_edli_cfg(monkeypatch, enabled=False)
 
     substrate_observer._edli_market_substrate_warm_cycle()
-    assert calls == [], "disabled edli_v1 must skip the refresh"
+    assert calls == [1], "single-live substrate production must not have a config kill switch"
 
 
 def test_market_substrate_warm_cycle_failsoft_on_refresh_error(monkeypatch):

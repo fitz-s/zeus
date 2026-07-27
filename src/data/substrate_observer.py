@@ -2659,9 +2659,6 @@ def _edli_market_substrate_warm_cycle() -> None:
     crashes this job (the next tick retries; consumers stay fail-closed in the interim).
     """
 
-    edli_cfg = _settings_section("edli_v1", {})
-    if not edli_cfg.get("enabled"):
-        return
     priority_marker_active = money_path_substrate_priority_active()
     priority_marker_request = (
         money_path_substrate_priority_request() if priority_marker_active else None
@@ -2782,10 +2779,6 @@ def _edli_market_substrate_warm_cycle() -> None:
 
 def _edli_money_path_substrate_priority_cycle() -> dict | None:
     """Refresh only the executable books that can unblock live money-path decisions."""
-
-    edli_cfg = _settings_section("edli_v1", {})
-    if not edli_cfg.get("enabled"):
-        return None
 
     priority_marker_active = money_path_substrate_priority_active()
     priority_marker_request = (
