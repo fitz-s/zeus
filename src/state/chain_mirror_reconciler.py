@@ -28,7 +28,9 @@ Public surface:
 
 No network I/O and no venue mutation happens in this module. The CLI wrapper
 (scripts/reconcile_chain_mirror.py) owns adapter construction; this module only
-consumes already-fetched chain facts.
+consumes already-fetched chain facts. Apply mode also refreshes append-first
+positive-chain observations before their executable-inventory authority
+expires; that write preserves phase, owned shares, and cost basis.
 
 P0b (2026-07-04, docs/rebuild/chain_mirror_state_model_2026-07-04.md §5
 follow-up): the REVIEW_OPEN_ABSENT class (open-phase row, held token absent,
@@ -49,6 +51,8 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+
+from src.state.chain_reconciliation import _CHAIN_SEEN_AT_MAX_AGE_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +99,11 @@ _OPEN_NO_FILL_ENTRY_ORDER_FACT_STATES = frozenset(
 )
 
 _SIZE_MISMATCH_TOLERANCE = 0.05  # shares; below this the chain/local delta is noise.
+# The wealth witness rejects a local positive-chain observation at 30 minutes.
+# Refresh at half that age so the 10-minute scheduled mirror keeps one full
+# cadence plus jitter between the last durable observation and fail-closed
+# expiry.
+_CHAIN_OBSERVATION_REFRESH_SECONDS = _CHAIN_SEEN_AT_MAX_AGE_SECONDS // 2
 
 # Phases considered "still open" for the purposes of the REVIEW (e) class —
 # mirrors the phases that require an on-chain holding per position_current's
@@ -163,6 +172,7 @@ class LocalPositionRow:
     strategy_key: str
     chain_avg_price: Optional[float] = None
     chain_cost_basis_usd: Optional[float] = None
+    chain_seen_at: Optional[str] = None
 
     def held_token_id(self) -> str:
         if self.direction == "buy_no":
@@ -602,7 +612,7 @@ _LOCAL_ROW_COLUMNS = (
     "position_id", "phase", "chain_state", "city", "target_date",
     "temperature_metric", "bin_label", "direction", "token_id", "no_token_id",
     "condition_id", "chain_shares", "shares", "fill_authority", "strategy_key",
-    "chain_avg_price", "chain_cost_basis_usd",
+    "chain_avg_price", "chain_cost_basis_usd", "chain_seen_at",
 )
 
 
@@ -639,9 +649,43 @@ def load_local_position_rows(conn: sqlite3.Connection) -> list[LocalPositionRow]
                     if row["chain_cost_basis_usd"] is not None
                     else None
                 ),
+                chain_seen_at=str(row["chain_seen_at"] or "") or None,
             )
         )
     return out
+
+
+def _chain_observation_refresh_due(
+    row: LocalPositionRow,
+    *,
+    now: datetime,
+) -> bool:
+    """Whether a fresh positive chain read must be durably re-observed.
+
+    SCOPE: only one chain-present active/day0/pending-exit position.
+    DRAIN: the scheduled 10-minute chain mirror appends the positive
+    observation before the 30-minute wealth-witness expiry.
+    RESET: that append advances chain_seen_at; token absence never refreshes
+    positive authority and therefore continues to fail closed.
+    """
+    if row.phase not in {"active", "day0_window", "pending_exit"}:
+        return False
+    raw_seen_at = str(row.chain_seen_at or "").strip()
+    if not raw_seen_at:
+        return True
+    try:
+        seen_at = datetime.fromisoformat(raw_seen_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if seen_at.tzinfo is None:
+        return True
+    age_seconds = (
+        now.astimezone(timezone.utc) - seen_at.astimezone(timezone.utc)
+    ).total_seconds()
+    return (
+        age_seconds < 0.0
+        or age_seconds >= _CHAIN_OBSERVATION_REFRESH_SECONDS
+    )
 
 
 def load_settlement_lookup(forecasts_conn: sqlite3.Connection) -> dict[tuple, SettlementFact]:
@@ -1190,7 +1234,7 @@ def _apply_settlement_finding(
 def apply_size_correction_finding(
     conn: sqlite3.Connection, finding: MirrorFinding, *, now: datetime
 ) -> bool:
-    """Append a CHAIN_SIZE_CORRECTED event + upsert position_current.
+    """Append a chain correction/observation event + upsert position_current.
 
     Returns True iff a durable write happened; False (no-op) when no
     position_current row exists yet for this position_id — there is nothing
@@ -1230,8 +1274,10 @@ def apply_size_correction_finding(
 
     fill_authority = str(current["fill_authority"] or "")
     owned_shares_before = float(current["shares"] or 0.0)
+    observation_only = finding.details.get("reason") == "chain_economics_observed"
     owned_reduction = (
-        fill_authority in FILL_GRADE_FILL_AUTHORITIES
+        not observation_only
+        and fill_authority in FILL_GRADE_FILL_AUTHORITIES
         and owned_shares_before > 0.0
         and chain_size < owned_shares_before
     )
@@ -1286,8 +1332,14 @@ def apply_size_correction_finding(
         sort_keys=True,
     )
     sequence_no = _next_sequence_no(conn, position_id)
+    event_suffix = (
+        "chain_mirror_observed" if observation_only else "chain_mirror_size"
+    )
+    caused_by = (
+        "chain_economics_observed" if observation_only else "chain_mirror_reconciler"
+    )
     event = {
-        "event_id": f"{position_id}:chain_mirror_size:{sequence_no}",
+        "event_id": f"{position_id}:{event_suffix}:{sequence_no}",
         "position_id": position_id,
         "event_version": 1,
         "sequence_no": sequence_no,
@@ -1300,7 +1352,7 @@ def apply_size_correction_finding(
         "snapshot_id": None,
         "order_id": None,
         "command_id": None,
-        "caused_by": "chain_mirror_reconciler",
+        "caused_by": caused_by,
         "idempotency_key": None,
         "venue_status": None,
         "source_module": "src.state.chain_mirror_reconciler",
@@ -1451,7 +1503,8 @@ def reconcile(
     now: Optional[datetime] = None,
 ) -> ReconcileReport:
     """Classify every local row + every chain-only asset, optionally applying
-    the safe repair classes (SETTLED closes, size corrections).
+    the safe repair classes (SETTLED closes, size corrections, and
+    phase-preserving positive-chain observation refreshes).
 
     Never mutates on dry-run (apply=False, the default everywhere this is
     invoked). Idempotent: a second call with unchanged inputs re-derives
@@ -1536,6 +1589,26 @@ def reconcile(
                 has_open_orders=has_open_orders,
                 has_confirmed_entry_fill=has_confirmed_entry_fill,
             )
+            chain_fact = chain_by_asset.get(held)
+            if (
+                finding.classification == CONSISTENT
+                and chain_fact is not None
+                and chain_fact.size > 0.0
+                and _chain_observation_refresh_due(row, now=now)
+            ):
+                finding = MirrorFinding(
+                    classification=SIZE_CORRECTED,
+                    position_id=row.position_id,
+                    asset=held,
+                    writes=True,
+                    details={
+                        "reason": "chain_economics_observed",
+                        "chain_size": chain_fact.size,
+                        "local_shares": row.local_reported_shares(),
+                        "shares_unchanged": True,
+                        "chain_seen_at_before": row.chain_seen_at,
+                    },
+                )
             report.findings.append(finding)
             if apply:
                 if finding.classification == REVIEW_OPEN_ABSENT:
@@ -1554,7 +1627,9 @@ def reconcile(
                         _apply_settlement_finding(conn_trades, finding, now=now)
                         report.applied += 1
                     elif finding.classification == SIZE_CORRECTED:
-                        if apply_size_correction_finding(conn_trades, finding, now=now):
+                        if apply_size_correction_finding(
+                            conn_trades, finding, now=now
+                        ):
                             report.applied += 1
                     elif finding.classification == CLOSED_EXITED:
                         _apply_closed_exited_finding(conn_trades, finding, now=now)
@@ -1597,8 +1672,9 @@ def run_cycle() -> None:
     docs/rebuild/chain_mirror_state_model_2026-07-04.md, and auto-applies the
     two safe repair classes: (a) settlement closes when a graded position's
     held token is absent from chain and its market has a VERIFIED
-    settlement_outcomes row, and (b) chain_shares corrections when a held
-    token's chain size differs from the local record. Every other class
+    settlement_outcomes row, (b) chain_shares corrections when a held token's
+    chain size differs from the local record, and (c) phase-preserving
+    positive-chain observation refreshes before SELL authority expires. Every other class
     (foreign tokens, missing local rows, open-but-absent ambiguity) is logged
     as a finding only — never written.
 

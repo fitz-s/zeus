@@ -1803,6 +1803,41 @@ fallback antibody, the full Day0 remaining-day suite, compile/diff checks, and
 no weakening of model completeness, capture-skew, freshness, or causal-window
 gates.
 
+## 2026-07-27 chain-mirror continuity for held-position SELL authority
+
+The loss reconstruction found that the scheduled chain mirror successfully
+read the wallet every ten minutes but classified exact positive matches as
+`CONSISTENT` without appending a new observation. `position_current.chain_seen_at`
+therefore froze. Once it exceeded the 30-minute wealth-witness bound, open
+positions remained capital liabilities but disappeared from the executable
+SELL endowment. After restart the global auction consequently claimed complete
+coverage while evaluating only two of roughly sixty-five open positions.
+
+The structural contract is continuous positive-chain observation, not a
+one-time synced label. A fresh complete chain read for an active, Day0, or
+pending-exit position must refresh durable `chain_seen_at` with enough margin
+before the consumer's fail-closed bound. The write is append-first,
+phase-preserving, and may update only chain-observation fields; it must never
+mutate owned shares or cost basis. Missing tokens remain absence evidence and
+must not receive a positive timestamp.
+
+This is a K2 reconciliation continuity hot-fix. Allowed files are
+`src/state/chain_mirror_reconciler.py`, its focused test, the existing operator
+CLI help, and this plan. No schema, lifecycle grammar, probability, entry/exit
+threshold, settlement, or venue-action law changes are allowed.
+
+Acceptance requires:
+
+- a Beijing-shaped matching-position antibody whose stale observation becomes
+  fresh before wealth-witness expiry;
+- the event and projection preserve phase, owned shares, and cost basis;
+- an immediate second pass is idempotent and emits no duplicate event;
+- absent and terminal rows cannot receive positive observation refreshes;
+- focused reconciliation, compile, lint, planning-lock, and diff checks pass;
+- after live deployment, canonical `chain_seen_at` coverage, global-auction
+  held-position counts, and subsequent SELL selection/command evidence are
+  re-sampled independently.
+
 ## 2026-07-24 provisional match versus economic ownership
 
 The loss/lifecycle audit found one Tel Aviv July 25 position whose canonical

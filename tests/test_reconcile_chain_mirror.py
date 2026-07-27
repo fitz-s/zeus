@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-07-04; last_reviewed=2026-07-15; last_reused=2026-07-15
+# Lifecycle: created=2026-07-04; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: Regression tests for the chain-mirror reconciler.
 # Reuse: Run when position_current chain-mirror classification, the
 #   scripts/reconcile_chain_mirror.py CLI, or the market-rule state model
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -355,6 +356,7 @@ def _insert_position_current(
     cost_basis_usd: float | None = None,
     fill_authority: str = "venue_confirmed_full",
     strategy_key: str = "edli",
+    chain_seen_at: str | None = None,
     updated_at: str = "2026-07-04T00:00:00+00:00",
 ) -> None:
     conn.execute(
@@ -363,14 +365,14 @@ def _insert_position_current(
             position_id, phase, trade_id, city, target_date, bin_label,
             direction, chain_state, token_id, no_token_id, condition_id,
             chain_shares, shares, cost_basis_usd, fill_authority, strategy_key,
-            updated_at, temperature_metric
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            chain_seen_at, updated_at, temperature_metric
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             position_id, phase, position_id, city, target_date, bin_label,
             direction, chain_state, token_id, no_token_id, condition_id,
             chain_shares, shares, cost_basis_usd, fill_authority, strategy_key,
-            updated_at, temperature_metric,
+            chain_seen_at, updated_at, temperature_metric,
         ),
     )
     conn.commit()
@@ -639,6 +641,325 @@ def test_apply_corrects_size_mismatch(trades_conn, forecasts_conn):
         for finding in second.findings
         if finding.position_id == "pos-dallas"
     ] == [CONSISTENT]
+
+
+def test_matching_chain_position_refreshes_sell_authority_before_expiry(
+    trades_conn, forecasts_conn
+):
+    """A long-lived matched holding must not age out of the SELL universe."""
+    position_id = "pos-beijing-no-34"
+    token_id = "tok-beijing-no-34"
+    now = datetime(2026, 7, 27, 18, 30, tzinfo=timezone.utc)
+    stale_seen_at = datetime(2026, 7, 27, 18, 10, tzinfo=timezone.utc).isoformat()
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="day0_window",
+        city="beijing",
+        target_date="2026-07-27",
+        bin_label="34°C",
+        direction="buy_no",
+        no_token_id=token_id,
+        chain_state="synced",
+        chain_shares=10.0,
+        shares=10.0,
+        cost_basis_usd=6.0,
+        chain_seen_at=stale_seen_at,
+    )
+    chain = {
+        token_id: ChainPositionFact(
+            token_id=token_id,
+            condition_id="cond-beijing",
+            size=10.0,
+            redeemable=False,
+            current_value=0.9,
+            side="No",
+        )
+    }
+
+    refreshed = reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset=chain,
+        apply=True,
+        now=now,
+    )
+
+    assert refreshed.applied == 1
+    findings = [
+        finding for finding in refreshed.findings
+        if finding.position_id == position_id
+    ]
+    assert len(findings) == 1
+    assert findings[0].classification == SIZE_CORRECTED
+    assert findings[0].details["reason"] == "chain_economics_observed"
+    row = trades_conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd, chain_shares, chain_seen_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert row["phase"] == "day0_window"
+    assert row["shares"] == pytest.approx(10.0)
+    assert row["cost_basis_usd"] == pytest.approx(6.0)
+    assert row["chain_shares"] == pytest.approx(10.0)
+    assert row["chain_seen_at"] == now.isoformat()
+    event = trades_conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert (event["event_type"], event["phase_before"], event["phase_after"]) == (
+        "CHAIN_SIZE_CORRECTED",
+        "day0_window",
+        "day0_window",
+    )
+    payload = json.loads(event["payload_json"])
+    assert payload["reason"] == "chain_economics_observed"
+    assert payload["shares_unchanged"] is True
+
+    unchanged = reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset=chain,
+        apply=True,
+        now=now + timedelta(minutes=10),
+    )
+    assert unchanged.applied == 0
+    assert [
+        finding.classification
+        for finding in unchanged.findings
+        if finding.position_id == position_id
+    ] == [CONSISTENT]
+    event_count = trades_conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    assert event_count == 1
+
+    refreshed_again = reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset=chain,
+        apply=True,
+        now=now + timedelta(minutes=20),
+    )
+    assert refreshed_again.applied == 1
+    row = trades_conn.execute(
+        "SELECT chain_seen_at FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    assert row["chain_seen_at"] == (now + timedelta(minutes=20)).isoformat()
+    event_count = trades_conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    assert event_count == 2
+
+
+def test_chain_observation_refresh_excludes_absent_and_terminal_positions(
+    trades_conn, forecasts_conn
+):
+    stale_seen_at = "2026-07-27T17:00:00+00:00"
+    now = datetime(2026, 7, 27, 18, 30, tzinfo=timezone.utc)
+    _insert_position_current(
+        trades_conn,
+        position_id="pos-open-absent",
+        phase="day0_window",
+        direction="buy_yes",
+        token_id="tok-open-absent",
+        chain_shares=5.0,
+        shares=5.0,
+        chain_seen_at=stale_seen_at,
+    )
+    _insert_position_current(
+        trades_conn,
+        position_id="pos-settled-present",
+        phase="settled",
+        direction="buy_yes",
+        token_id="tok-settled-present",
+        chain_shares=5.0,
+        shares=5.0,
+        chain_seen_at=stale_seen_at,
+    )
+    _insert_position_current(
+        trades_conn,
+        position_id="pos-pending-entry-present",
+        phase="pending_entry",
+        direction="buy_yes",
+        token_id="tok-pending-entry-present",
+        chain_shares=5.0,
+        shares=5.0,
+        chain_seen_at=stale_seen_at,
+    )
+    chain = {
+        "tok-settled-present": ChainPositionFact(
+            token_id="tok-settled-present",
+            condition_id="cond-settled",
+            size=5.0,
+            redeemable=False,
+            current_value=0.0,
+            side="Yes",
+        ),
+        "tok-pending-entry-present": ChainPositionFact(
+            token_id="tok-pending-entry-present",
+            condition_id="cond-pending-entry",
+            size=5.0,
+            redeemable=False,
+            current_value=0.0,
+            side="Yes",
+        ),
+    }
+
+    report = reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset=chain,
+        apply=True,
+        now=now,
+    )
+
+    assert not any(
+        finding.details.get("reason") == "chain_economics_observed"
+        for finding in report.findings
+    )
+    rows = trades_conn.execute(
+        """
+        SELECT position_id, chain_seen_at
+          FROM position_current
+         WHERE position_id IN (
+             'pos-open-absent',
+             'pos-pending-entry-present',
+             'pos-settled-present'
+         )
+         ORDER BY position_id
+        """
+    ).fetchall()
+    assert [(row["position_id"], row["chain_seen_at"]) for row in rows] == [
+        ("pos-open-absent", stale_seen_at),
+        ("pos-pending-entry-present", stale_seen_at),
+        ("pos-settled-present", stale_seen_at),
+    ]
+    excluded_events = trades_conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id IN (
+             'pos-pending-entry-present',
+             'pos-settled-present'
+         )
+        """
+    ).fetchone()[0]
+    assert excluded_events == 0
+
+
+def test_pending_exit_small_chain_delta_refreshes_without_owned_reduction(
+    trades_conn, forecasts_conn
+):
+    position_id = "pos-seoul-no-31"
+    token_id = "tok-seoul-no-31"
+    now = datetime(2026, 7, 27, 18, 30, tzinfo=timezone.utc)
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="pending_exit",
+        direction="buy_no",
+        no_token_id=token_id,
+        chain_shares=10.0,
+        shares=10.0,
+        cost_basis_usd=5.7,
+        chain_seen_at="2026-07-27T18:00:00+00:00",
+    )
+    chain = {
+        token_id: ChainPositionFact(
+            token_id=token_id,
+            condition_id="cond-seoul",
+            size=9.98,
+            redeemable=False,
+            current_value=0.06,
+            side="No",
+        )
+    }
+
+    report = reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset=chain,
+        apply=True,
+        now=now,
+    )
+
+    assert report.applied == 1
+    row = trades_conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd, chain_shares, chain_seen_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert row["phase"] == "pending_exit"
+    assert row["shares"] == pytest.approx(10.0)
+    assert row["cost_basis_usd"] == pytest.approx(5.7)
+    assert row["chain_shares"] == pytest.approx(9.98)
+    assert row["chain_seen_at"] == now.isoformat()
+
+
+def test_active_wallet_residual_refreshes_without_overattributing_owned_lot(
+    trades_conn, forecasts_conn
+):
+    token_id = "tok-shared-wallet"
+    now = datetime(2026, 7, 27, 18, 30, tzinfo=timezone.utc)
+    _insert_position_current(
+        trades_conn,
+        position_id="pos-owned-slice",
+        phase="active",
+        direction="buy_no",
+        no_token_id=token_id,
+        chain_shares=6.0,
+        shares=6.0,
+        cost_basis_usd=3.6,
+        chain_seen_at="2026-07-27T18:00:00+00:00",
+    )
+    chain = {
+        token_id: ChainPositionFact(
+            token_id=token_id,
+            condition_id="cond-shared",
+            size=24.5,
+            redeemable=False,
+            current_value=2.45,
+            side="No",
+        )
+    }
+
+    report = reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset=chain,
+        apply=True,
+        now=now,
+    )
+
+    assert report.applied == 1
+    row = trades_conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd, chain_shares, chain_seen_at
+          FROM position_current
+         WHERE position_id = 'pos-owned-slice'
+        """
+    ).fetchone()
+    assert (
+        row["phase"],
+        row["shares"],
+        row["cost_basis_usd"],
+        row["chain_shares"],
+        row["chain_seen_at"],
+    ) == ("active", 6.0, 3.6, 6.0, now.isoformat())
 
 
 def test_open_phase_absent_token_unresolved_market_first_run_marks_review_no_close(

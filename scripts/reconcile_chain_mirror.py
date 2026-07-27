@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-07-04; last_reviewed=2026-07-04; last_reused=never
+# Lifecycle: created=2026-07-04; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: Reconcile position_current against venue chain truth (data-api
 #   wallet position snapshot) per docs/rebuild/chain_mirror_state_model_2026-07-04.md.
 # Reuse: Run without --apply first; use --apply only after operator review of
@@ -13,12 +13,15 @@ Read-only against the venue (a single GET /positions data-api call via
 PolymarketClient.get_positions_from_api() — the exact call that produced the
 2026-07-04 divergence snapshot this script was built to close). NEVER submits
 a venue order, NEVER submits a redeem transaction. Writes (only under
---apply) are scoped to two safe classes:
+--apply) are scoped to three safe classes:
   (a) local rows whose held token is absent on chain AND the market has a
       VERIFIED settlement_outcomes row -> close to phase=settled via
       append_many_and_project (CLOSED_REDEEMED / CLOSED_WORTHLESS).
   (b) local rows whose held token is present on chain with a different size
       -> chain_shares corrected via append_many_and_project (CHAIN_SIZE_CORRECTED).
+  (c) open local rows whose held token is positively observed on chain and
+      whose prior positive observation is approaching expiry -> append-first,
+      phase-preserving chain_seen_at refresh without owned-share/cost mutation.
 Every other class (missing local row, foreign token, open-but-absent) is
 report-only in every run, --apply or not.
 """
@@ -33,8 +36,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.state.chain_mirror_reconciler import load_chain_positions_by_asset, reconcile
-from src.state.db import get_trade_connection, get_trade_connection_read_only
+from src.state.chain_mirror_reconciler import (  # noqa: E402
+    load_chain_positions_by_asset,
+    reconcile,
+)
+from src.state.db import (  # noqa: E402
+    get_trade_connection,
+    get_trade_connection_read_only,
+)
 
 
 def run(*, apply: bool) -> dict:
@@ -80,8 +89,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--apply", action="store_true",
-        help="Write the safe repair classes (settlement closes, size corrections). "
-             "Default is dry-run (report only, no writes).",
+        help=(
+            "Write the safe repair classes (settlement closes, size corrections, "
+            "positive-chain observation refreshes). Default is dry-run "
+            "(report only, no writes)."
+        ),
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON.")
     args = parser.parse_args(argv)
