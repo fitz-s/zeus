@@ -13071,6 +13071,27 @@ def test_global_actuation_rebinds_only_selected_buy_no_admission(missing_reason)
     )
     assert rebound[1] is sibling
 
+    current_typed = era._global_actuation_current_admission_proofs(
+        proofs=(replace(proof, missing_reason=None), sibling),
+        global_actuation=SimpleNamespace(
+            decision=SimpleNamespace(candidate=selected_candidate)
+        ),
+        prepared_global_family=prepared,
+        family=family,
+        day0_payload={
+            "_edli_q_source": "day0_conditioned_replacement",
+            "q_source": "day0_conditioned_replacement",
+            "probability_authority": (
+                "day0_conditioned_replacement_global_probability_v1"
+            ),
+        },
+    )
+    assert current_typed[0].q_source == "day0_conditioned_replacement"
+    assert current_typed[0].probability_authority == (
+        "day0_conditioned_replacement_global_probability_v1"
+    )
+    assert current_typed[1] is sibling
+
 
 def test_global_current_buy_no_receipt_separates_action_and_point_parents():
     _family, proofs, _payload = _corpus()[0]

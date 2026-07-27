@@ -2135,3 +2135,32 @@ Acceptance requires:
   auction/preflight evidence are green;
 - `replacement_day0_probability_authority required:missing` does not recur
   after the loaded repair SHA.
+
+## 2026-07-27 Selected Day0 receipt type continuity
+
+The authority-block repair advanced the live winner through calibration and
+exposed a later split identity. Submit-time revalidation selected the current
+`day0_conditioned_replacement` witness and its typed authority block, while the
+selected `_CandidateProof` retained the earlier local proof's
+`day0_remaining_day` q-source. Receipt reconstruction therefore combined a
+current conditioned block with a stale top-level source label and correctly
+failed the exact-source verifier.
+
+The correction rebinds the selected proof's q-source and probability authority
+from the same current Day0 payload that owns its action q. Sibling proofs remain
+untouched; forecast families retain their existing global-current witness
+labels; q values, bounds, selection, and sizing are unchanged.
+
+SCOPE is the selected global Day0 candidate's submit-time receipt type. DRAIN is
+the next winner revalidation and typed receipt reconstruction. RESET is one
+receipt whose top-level q-source, probability authority, nested typed block, and
+current action q all name the same witness. No fallback or alternate probability
+regime is introduced.
+
+Acceptance requires:
+
+- a selected proof with no local scalar rejection still receives the current
+  Day0 q-source and authority while its sibling remains byte-identical;
+- existing BUY-NO cap rebinding and non-Day0 fallback behavior remain green;
+- post-restart live preflight no longer reports mixed
+  `day0_conditioned_replacement`/`day0_remaining_day` sources.

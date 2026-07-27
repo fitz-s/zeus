@@ -12678,8 +12678,9 @@ def _global_actuation_current_admission_proofs(
     global_actuation: object,
     prepared_global_family: object,
     family: object,
+    day0_payload: Mapping[str, object] | None = None,
 ) -> tuple["_CandidateProof", ...]:
-    """Rebind only the selected proof to its sealed current global witness cap."""
+    """Rebind only the selected proof to its sealed current global authority."""
 
     decision = getattr(global_actuation, "decision", None)
     candidate = getattr(decision, "candidate", None)
@@ -12716,7 +12717,26 @@ def _global_actuation_current_admission_proofs(
     )
     if len(matches) != 1:
         raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_PROOF_MISSING")
-    selected = matches[0]
+    selected_proof = matches[0]
+    selected = selected_proof
+    current_q_source = ""
+    current_probability_authority = ""
+    if day0_payload:
+        current_q_source = str(
+            day0_payload.get("_edli_q_source")
+            or day0_payload.get("q_source")
+            or ""
+        ).strip()
+        current_probability_authority = str(
+            day0_payload.get("probability_authority") or ""
+        ).strip()
+        if not current_q_source or not current_probability_authority:
+            raise ValueError("GLOBAL_ACTUATION_DAY0_PROBABILITY_TYPE_MISSING")
+        selected = dataclass_replace(
+            selected,
+            q_source=current_q_source,
+            probability_authority=current_probability_authority,
+        )
     missing_reason = str(getattr(selected, "missing_reason", "") or "")
     if not missing_reason.startswith(
         (
@@ -12724,7 +12744,10 @@ def _global_actuation_current_admission_proofs(
             "ADMISSION_BUY_NO_REPLACEMENT_BOUND_CERTIFICATE_MISSING:",
         )
     ):
-        return proofs
+        return tuple(
+            selected if proof is selected_proof else proof
+            for proof in proofs
+        )
     if side != "NO":
         raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_SIDE_MISMATCH")
 
@@ -12765,14 +12788,22 @@ def _global_actuation_current_admission_proofs(
         q_posterior=q_point,
         q_lcb_5pct=cap,
         same_bin_yes_posterior=same_bin_yes,
-        q_source="global_current_probability_witness",
+        q_source=(
+            current_q_source or "global_current_probability_witness"
+        ),
         q_lcb_calibration_source="GLOBAL_CURRENT_WITNESS_CAP",
-        probability_authority="global_current_probability_witness",
+        probability_authority=(
+            current_probability_authority
+            or "global_current_probability_witness"
+        ),
         p_cal_vector_hash=sample_identity,
         p_live_vector_hash=sample_identity,
         missing_reason=None,
     )
-    return tuple(rebound if proof is selected else proof for proof in proofs)
+    return tuple(
+        rebound if proof is selected_proof else proof
+        for proof in proofs
+    )
 
 
 def _global_prepare_failure_reason(spine_result: object) -> str | None:
@@ -13506,6 +13537,7 @@ def _build_event_bound_no_submit_receipt_core(
                 global_actuation=global_actuation,
                 prepared_global_family=current_actuation_family,
                 family=family,
+                day0_payload=current_actuation_day0_payload,
             )
         except ValueError as exc:
             return EventSubmissionReceipt(
