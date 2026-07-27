@@ -9454,7 +9454,7 @@ def test_global_current_state_mean_buy_rejects_plugin_point_and_uses_draw_mean()
             "_edli_q_source": "day0_remaining_day",
             "_edli_day0_remaining_models": 15,
             "direction": "buy_yes",
-            "q_live": current["payoff_q_point"],
+            "q_live": current["payoff_q_action"],
             "q_lcb_5pct": current["payoff_q_lcb"],
         },
     )
@@ -12951,7 +12951,7 @@ def test_global_actuation_rebinds_only_selected_buy_no_admission(missing_reason)
     assert rebound[1] is sibling
 
 
-def test_global_current_buy_no_receipt_scalars_share_one_probability_parent():
+def test_global_current_buy_no_receipt_separates_action_and_point_parents():
     _family, proofs, _payload = _corpus()[0]
     proof = next(row for row in proofs if row.direction == "buy_no")
     proof = replace(
@@ -12979,6 +12979,9 @@ def test_global_current_buy_no_receipt_scalars_share_one_probability_parent():
     assert rebound.q_posterior == pytest.approx(0.8)
     assert rebound.same_bin_yes_posterior == pytest.approx(0.25)
     assert rebound.replacement_no_bound_certificate == {"served_yes_q": 0.4}
+    assert era._event_bound_execution_probability_pair(rebound) == pytest.approx(
+        (0.8, 0.7)
+    )
 
 
 def test_current_global_day0_payload_replaces_local_transform_and_provenance():

@@ -22939,6 +22939,19 @@ def _event_bound_execution_probability_pair(proof: "_CandidateProof") -> tuple[f
 
     qkernel_q_point = _qkernel_execution_q_point(proof)
     qkernel_q_lcb = _qkernel_execution_q_lcb(proof)
+    economics = _qkernel_execution_economics(proof)
+    if (
+        economics is not None
+        and economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    ):
+        qkernel_q_action = _qkernel_execution_float(proof, "payoff_q_action")
+        if (
+            qkernel_q_action is not None
+            and 0.0 <= qkernel_q_action <= 1.0
+            and qkernel_q_lcb is not None
+        ):
+            return qkernel_q_action, qkernel_q_lcb
     if qkernel_q_point is not None and qkernel_q_lcb is not None:
         return qkernel_q_point, qkernel_q_lcb
     return float(proof.q_posterior), float(proof.q_lcb_5pct)
