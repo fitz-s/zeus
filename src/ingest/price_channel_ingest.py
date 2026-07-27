@@ -1452,14 +1452,13 @@ def _edli_durable_fill_bridge_scan(
 # applies its own scheduler-health wrapper (the P2 pattern).
 # ---------------------------------------------------------------------------
 
-def _edli_user_channel_reconcile_cycle() -> None:
+def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
     """EDLI user-channel/reconcile service boundary.
 
     The live-order aggregate may only accept fill/lifecycle facts from
     authenticated user channel or explicit reconcile writers; public
     market-channel data remains quote evidence only.
     """
-    from src.observability.scheduler_health import _write_scheduler_health
     from src.state.db import get_world_connection_with_trades_required
 
     edli_cfg = _settings_section("edli_v1", {})
@@ -1719,18 +1718,42 @@ def _edli_user_channel_reconcile_cycle() -> None:
                 except Exception:  # noqa: BLE001
                     pass
 
-    _write_scheduler_health(
-        "edli_user_channel_reconcile",
-        failed=False,
-        extra={
-            "status": "processed_user_channel_reconcile_cycle",
-            "fill_authority": "user_channel_or_reconcile_only",
-            "public_market_channel_fill_truth": "forbidden",
-            "user_channel_messages": message_count,
-            "venue_reconciliations": reconcile_count,
-            "edli_positions_bridged": bridged_positions,
-        },
-    )
+    fill_redecision_events = 0
+    fill_redecision_error = ""
+    try:
+        from src.events.price_channel_redecision_router import (
+            _edli_position_fill_redecision_cycle,
+        )
+
+        fill_redecision_events = _edli_position_fill_redecision_cycle()
+    except Exception as exc:  # noqa: BLE001
+        fill_redecision_error = f"{type(exc).__name__}: {exc}"
+        # The canonical fill is already committed. Its confirmed trade fact is the
+        # durable retry source, so a derived wake failure must not roll back or
+        # hide fill truth; the next reconcile cycle retries the uncovered event.
+        logger.error(
+            "EDLI position-fill redecision emit failed (non-fatal; durable "
+            "trade fact retries next cycle): %s",
+            exc,
+            exc_info=True,
+        )
+
+    return {
+        "scheduler_failed": bool(fill_redecision_error),
+        "scheduler_failure_reason": fill_redecision_error,
+        "status": (
+            "processed_with_fill_redecision_error"
+            if fill_redecision_error
+            else "processed_user_channel_reconcile_cycle"
+        ),
+        "fill_authority": "user_channel_or_reconcile_only",
+        "public_market_channel_fill_truth": "forbidden",
+        "user_channel_messages": message_count,
+        "venue_reconciliations": reconcile_count,
+        "edli_positions_bridged": bridged_positions,
+        "position_fill_redecision_events": fill_redecision_events,
+        "position_fill_redecision_error": fill_redecision_error,
+    }
 
 
 # ---------------------------------------------------------------------------

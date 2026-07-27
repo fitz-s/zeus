@@ -513,6 +513,111 @@ def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch,
     assert payload["fill_authority_state"] == "FILL_CONFIRMED"
 
 
+def test_reconcile_wrapper_keeps_fill_commit_and_reports_redecision_failure(
+    monkeypatch,
+    tmp_path,
+):
+    from src.events import price_channel_redecision_router as router
+    from src.ingest import price_channel_daemon as daemon
+    from src.ingest import price_channel_ingest as lane
+    import src.observability.scheduler_health as scheduler_health
+    import src.state.db as state_db
+
+    db_path = tmp_path / "world.db"
+    conn = _conn(db_path)
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed(ledger)
+    conn.commit()
+    conn.close()
+    queue_path = tmp_path / "user_channel.jsonl"
+    queue_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "source": "polymarket_user_channel",
+                        "type": "order",
+                        "aggregate_id": "event-1:intent-1",
+                        "event_id": "event-1",
+                        "final_intent_id": "intent-1",
+                        "venue_order_id": "venue-1",
+                        "order_update_type": "UPDATE",
+                        "message_hash": "order-health-1",
+                        "occurred_at": NOW.isoformat(),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "source": "polymarket_user_channel",
+                        "type": "trade",
+                        "aggregate_id": "event-1:intent-1",
+                        "event_id": "event-1",
+                        "final_intent_id": "intent-1",
+                        "venue_order_id": "venue-1",
+                        "trade_status": "CONFIRMED",
+                        "message_hash": "trade-health-1",
+                        "occurred_at": NOW.isoformat(),
+                    }
+                ),
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        lane,
+        "settings",
+        {
+            "edli": {
+                "enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "edli_user_channel_message_queue_path": str(queue_path),
+                "edli_venue_reconcile_facts_path": "",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_with_world_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
+    monkeypatch.setattr(
+        router,
+        "_edli_position_fill_redecision_cycle",
+        lambda: (_ for _ in ()).throw(RuntimeError("fill wake unavailable")),
+    )
+    health_writes = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: health_writes.append(
+            {"job_name": job_name, **kwargs}
+        ),
+    )
+
+    wrapped = daemon._scheduler_job("edli_user_channel_reconcile")(
+        lane._edli_user_channel_reconcile_cycle
+    )
+    result = wrapped()
+
+    assert result["scheduler_failed"] is True
+    assert "fill wake unavailable" in result["scheduler_failure_reason"]
+    assert health_writes[-1]["failed"] is True
+    assert health_writes[-1]["extra"] == result
+    durable = _conn(db_path).execute(
+        """
+        SELECT payload_json
+          FROM edli_live_order_events
+         WHERE event_type = 'UserTradeObserved'
+        """
+    ).fetchone()
+    assert durable is not None
+    assert json.loads(durable["payload_json"])["fill_authority_state"] == "FILL_CONFIRMED"
+
+
 def test_user_channel_reconcile_cycle_recovers_rest_filled_orphan(monkeypatch, tmp_path):
     from src.ingest import price_channel_ingest as main
     import src.observability.scheduler_health as _sched_health

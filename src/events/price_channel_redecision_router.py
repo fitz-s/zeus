@@ -497,6 +497,337 @@ def _edli_redecision_event_with_origin(
         return event
 
 
+def _edli_open_position_fill_rows(trade_conn) -> list[dict[str, str | int]]:
+    """Read the latest canonical confirmed entry fill for each held family.
+
+    ``venue_trade_facts`` records every confirmed fill leg, including later
+    partial fills. ``position_events.ENTRY_ORDER_FILLED`` only records initial
+    position creation, so using it here would miss later endowment changes.
+    """
+
+    rows = trade_conn.execute(
+        """
+        WITH ranked AS (
+            SELECT tf.trade_fact_id,
+                   tf.ingested_at,
+                   vc.position_id,
+                   pc.city,
+                   pc.target_date,
+                   pc.temperature_metric,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY pc.city, pc.target_date, pc.temperature_metric
+                       ORDER BY julianday(tf.ingested_at) DESC,
+                                tf.trade_fact_id DESC
+                   ) AS family_rank
+              FROM position_current pc
+              JOIN venue_commands vc
+                ON vc.position_id = pc.position_id
+               AND vc.intent_kind = 'ENTRY'
+              JOIN venue_trade_facts tf
+                ON tf.command_id = vc.command_id
+               AND tf.state = 'CONFIRMED'
+             WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
+               AND (
+                    COALESCE(pc.shares, 0.0) > 0.0
+                    OR COALESCE(pc.chain_shares, 0.0) > 0.0
+               )
+               AND pc.city IS NOT NULL AND TRIM(pc.city) != ''
+               AND pc.target_date IS NOT NULL AND TRIM(pc.target_date) != ''
+               AND pc.temperature_metric IN ('high', 'low')
+        )
+        SELECT trade_fact_id,
+               ingested_at,
+               position_id,
+               city,
+               target_date,
+               temperature_metric
+          FROM ranked
+         WHERE family_rank = 1
+         ORDER BY julianday(ingested_at), trade_fact_id
+        """
+    ).fetchall()
+
+    out: list[dict[str, str | int]] = []
+    for row in rows:
+        try:
+            fact_id = int(row["trade_fact_id"])
+            ingested_at = str(row["ingested_at"] or "").strip()
+            position_id = str(row["position_id"] or "").strip()
+            city = str(row["city"] or "").strip()
+            target_date = str(row["target_date"] or "").strip()
+            metric = str(row["temperature_metric"] or "").strip()
+        except (IndexError, KeyError, TypeError):
+            fact_id = int(row[0])
+            ingested_at = str(row[1] or "").strip()
+            position_id = str(row[2] or "").strip()
+            city = str(row[3] or "").strip()
+            target_date = str(row[4] or "").strip()
+            metric = str(row[5] or "").strip()
+        if (
+            fact_id > 0
+            and ingested_at
+            and position_id
+            and city
+            and target_date
+            and metric in {"high", "low"}
+        ):
+            out.append(
+                {
+                    "trade_fact_id": fact_id,
+                    "ingested_at": ingested_at,
+                    "position_id": position_id,
+                    "city": city,
+                    "target_date": target_date,
+                    "metric": metric,
+                }
+            )
+    return out
+
+
+def _edli_redecision_event_with_position_fill_origin(
+    event,
+    *,
+    fill_row: dict[str, str | int],
+):
+    """Bind the wake to the durable fill fact that changed family endowment."""
+
+    event = _edli_redecision_event_with_origin(event, "position_fill")
+    from src.events.opportunity_event import make_opportunity_event
+
+    payload = json.loads(str(event.payload_json or "{}"))
+    if not isinstance(payload, dict):
+        raise ValueError("position-fill redecision payload must be a JSON object")
+    payload["position_fill_trade_fact_ids"] = [int(fill_row["trade_fact_id"])]
+    payload["position_fill_position_ids"] = [str(fill_row["position_id"])]
+    return make_opportunity_event(
+        event_type=event.event_type,
+        entity_key=event.entity_key,
+        source=event.source,
+        observed_at=event.observed_at,
+        available_at=event.available_at,
+        received_at=event.received_at,
+        causal_snapshot_id=event.causal_snapshot_id,
+        payload=payload,
+        priority=event.priority,
+        expires_at=event.expires_at,
+        created_at=event.created_at,
+    )
+
+
+def _edli_position_fill_redecision_events(
+    world_conn,
+    trade_conn,
+    forecasts_conn,
+    *,
+    fill_rows: list[dict[str, str | int]] | None = None,
+    seen_trade_fact_ids: set[int] | None = None,
+) -> tuple[list, set[int]]:
+    """Build deterministic family redecisions after confirmed fill projection.
+
+    Each event is keyed by the canonical trade-fact ID and uses that fact's
+    ingestion time as its causal decision boundary. Retrying the same fact
+    therefore rebuilds the same event ID; ``INSERT OR IGNORE`` is the durable
+    acknowledgement, with no scan of the multi-million-row world event log.
+    """
+
+    rows = (
+        list(fill_rows)
+        if fill_rows is not None
+        else _edli_open_position_fill_rows(trade_conn)
+    )
+    if not rows:
+        return [], set()
+    seen = {int(value) for value in (seen_trade_fact_ids or set())}
+    rows = [row for row in rows if int(row["trade_fact_id"]) not in seen]
+    if not rows:
+        return [], set()
+
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.forecast_snapshot_ready import (
+        ForecastSnapshotReadyTrigger,
+        executable_forecast_live_eligible_reader,
+    )
+
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=executable_forecast_live_eligible_reader(
+            forecasts_conn
+        ),
+    )
+    out = []
+    attempted_fact_ids: set[int] = set()
+    for row in rows:
+        family = (
+            str(row["city"]),
+            str(row["target_date"]),
+            str(row["metric"]),
+        )
+        try:
+            decision_time = datetime.fromisoformat(
+                str(row["ingested_at"]).replace("Z", "+00:00")
+            )
+        except Exception:
+            continue
+        if decision_time.tzinfo is None:
+            decision_time = decision_time.replace(tzinfo=timezone.utc)
+        decision_time = decision_time.astimezone(timezone.utc)
+        events = trigger.build_committed_snapshot_events(
+            forecasts_conn=forecasts_conn,
+            decision_time=decision_time,
+            received_at=decision_time.isoformat(),
+            limit=None,
+            source=f"position-fill-trade-fact:{int(row['trade_fact_id'])}",
+            already_pending_keys=set(),
+            event_type="EDLI_REDECISION_PENDING",
+            restrict_to_families={family},
+            phase_filter_exempt_families={family},
+        )
+        for event in events:
+            out.append(
+                _edli_redecision_event_with_position_fill_origin(
+                    event,
+                    fill_row=row,
+                )
+            )
+            attempted_fact_ids.add(int(row["trade_fact_id"]))
+    return out, attempted_fact_ids
+
+
+def _edli_write_position_fill_redecision_event_ids(
+    world_conn,
+    events,
+) -> tuple[str, ...]:
+    """Write exact fill wakes independently of stale generic family work."""
+
+    from src.events.event_writer import EventWriter
+
+    results = EventWriter(world_conn).write_many(list(events))
+    return tuple(result.event_id for result in results if result.inserted)
+
+
+def _edli_acknowledged_position_fill_fact_ids(world_conn, events) -> set[int]:
+    """Return fill facts whose exact deterministic event is durable."""
+
+    acknowledged: set[int] = set()
+    for event in events:
+        if (
+            world_conn.execute(
+                "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+                (event.event_id,),
+            ).fetchone()
+            is None
+        ):
+            continue
+        payload = json.loads(str(event.payload_json or "{}"))
+        acknowledged.update(
+            int(fact_id)
+            for fact_id in payload.get("position_fill_trade_fact_ids") or ()
+        )
+    return acknowledged
+
+
+def _edli_emit_position_fill_redecisions(
+    world_conn,
+    trade_conn,
+    forecasts_conn,
+    *,
+    seen_trade_fact_ids: set[int] | None = None,
+) -> tuple[tuple[str, ...], set[int], set[int]]:
+    rows = _edli_open_position_fill_rows(trade_conn)
+    current_fact_ids = {int(row["trade_fact_id"]) for row in rows}
+    events, attempted_fact_ids = _edli_position_fill_redecision_events(
+        world_conn,
+        trade_conn,
+        forecasts_conn,
+        fill_rows=rows,
+        seen_trade_fact_ids=seen_trade_fact_ids,
+    )
+    emitted = _edli_write_position_fill_redecision_event_ids(world_conn, events)
+    acknowledged_fact_ids = _edli_acknowledged_position_fill_fact_ids(
+        world_conn,
+        events,
+    )
+    if not acknowledged_fact_ids.issubset(attempted_fact_ids):
+        raise RuntimeError("position-fill event acknowledged an unattempted trade fact")
+    return emitted, acknowledged_fact_ids, current_fact_ids
+
+
+_EDLI_POSITION_FILL_REDECISION_SEEN_FACT_IDS: set[int] = set()
+_EDLI_POSITION_FILL_REDECISION_LOCK = threading.Lock()
+
+
+def _edli_position_fill_redecision_cycle() -> int:
+    """Persist and wake fill-driven redecision after the fill transaction commits."""
+
+    from src.ingest.price_channel_ingest import (
+        _edli_price_channel_world_write_connection,
+    )
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_trade_connection_read_only,
+        get_world_connection_read_only,
+    )
+
+    with _EDLI_POSITION_FILL_REDECISION_LOCK:
+        seen_fact_ids = set(_EDLI_POSITION_FILL_REDECISION_SEEN_FACT_IDS)
+    with contextlib.ExitStack() as reads:
+        world_read = reads.enter_context(
+            contextlib.closing(get_world_connection_read_only())
+        )
+        trade_read = reads.enter_context(
+            contextlib.closing(get_trade_connection_read_only())
+        )
+        forecasts_read = reads.enter_context(
+            contextlib.closing(get_forecasts_connection_read_only())
+        )
+        rows = _edli_open_position_fill_rows(trade_read)
+        current_fact_ids = {int(row["trade_fact_id"]) for row in rows}
+        events, attempted_fact_ids = _edli_position_fill_redecision_events(
+            world_read,
+            trade_read,
+            forecasts_read,
+            fill_rows=rows,
+            seen_trade_fact_ids=seen_fact_ids,
+        )
+
+    with _edli_price_channel_world_write_connection(
+        owner="position_fill_redecision_emit"
+    ) as world_write:
+        emitted_event_ids = _edli_write_position_fill_redecision_event_ids(
+            world_write,
+            events,
+        )
+        acknowledged_fact_ids = _edli_acknowledged_position_fill_fact_ids(
+            world_write,
+            events,
+        )
+        if not acknowledged_fact_ids.issubset(attempted_fact_ids):
+            raise RuntimeError(
+                "position-fill event acknowledged an unattempted trade fact"
+            )
+        world_write.commit()
+    with _EDLI_POSITION_FILL_REDECISION_LOCK:
+        _EDLI_POSITION_FILL_REDECISION_SEEN_FACT_IDS.intersection_update(
+            current_fact_ids
+        )
+        _EDLI_POSITION_FILL_REDECISION_SEEN_FACT_IDS.update(
+            acknowledged_fact_ids
+        )
+    if emitted_event_ids:
+        from src.runtime.reactor_wake import publish_reactor_wake
+
+        publish_reactor_wake(
+            source="position_fill_redecision_router",
+            reason="position_fill_projected",
+            event_ids=emitted_event_ids,
+        )
+        logger.info(
+            "EDLI position-fill trigger emitted redecision events=%d",
+            len(emitted_event_ids),
+        )
+    return len(emitted_event_ids)
+
+
 def _edli_price_channel_redecision_events_for_events(
     world_conn,
     trade_conn,

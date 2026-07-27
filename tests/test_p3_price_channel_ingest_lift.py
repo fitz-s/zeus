@@ -1931,6 +1931,302 @@ def test_price_channel_redecision_writer_returns_only_committed_event_ids():
     ) == (first.event_id,)
 
 
+def _position_fill_redecision_test_dbs():
+    from src.state.db import init_schema
+
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            shares REAL,
+            chain_shares REAL
+        );
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            intent_kind TEXT NOT NULL
+        );
+        CREATE TABLE venue_trade_facts (
+            trade_fact_id INTEGER PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            ingested_at TEXT NOT NULL
+        );
+        INSERT INTO position_current VALUES
+            ('beijing-33-yes', 'day0_window', 'Beijing', '2026-07-27', 'high', 8.22, 8.22);
+        INSERT INTO venue_commands VALUES
+            ('entry-beijing-33', 'beijing-33-yes', 'ENTRY');
+        INSERT INTO venue_trade_facts VALUES
+            (41, 'entry-beijing-33', 'CONFIRMED', '2026-07-27T01:02:03+00:00');
+        """
+    )
+    forecasts = sqlite3.connect(":memory:")
+    return world, trade, forecasts
+
+
+def _install_position_fill_redecision_trigger(monkeypatch):
+    from src.events.opportunity_event import make_opportunity_event
+    from src.events.triggers import forecast_snapshot_ready as trigger_module
+
+    calls = []
+
+    class Trigger:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def build_committed_snapshot_events(self, **kwargs):
+            calls.append(kwargs)
+            at = kwargs["decision_time"].isoformat()
+            return [
+                make_opportunity_event(
+                    event_type=kwargs["event_type"],
+                    entity_key="Beijing|2026-07-27|high|run-beijing",
+                    source=kwargs["source"],
+                    observed_at=at,
+                    available_at=at,
+                    received_at=kwargs["received_at"],
+                    causal_snapshot_id="posterior-beijing",
+                    payload={
+                        "city": "Beijing",
+                        "target_date": "2026-07-27",
+                        "metric": "high",
+                        "source_run_id": "run-beijing",
+                    },
+                )
+            ]
+
+    monkeypatch.setattr(trigger_module, "ForecastSnapshotReadyTrigger", Trigger)
+    monkeypatch.setattr(
+        trigger_module,
+        "executable_forecast_live_eligible_reader",
+        lambda _conn: None,
+    )
+    return calls
+
+
+def test_position_fill_redecision_is_deterministic_and_bound_to_canonical_fill(
+    monkeypatch,
+):
+    from src.engine.event_reactor_adapter import (
+        _event_allows_same_family_monitor_owned,
+        _global_projected_book_refresh_tokens,
+    )
+    from src.events.price_channel_redecision_router import (
+        _edli_emit_position_fill_redecisions,
+    )
+    from src.events.candidate_binding import weather_family_id
+
+    calls = _install_position_fill_redecision_trigger(monkeypatch)
+    world, trade, forecasts = _position_fill_redecision_test_dbs()
+
+    first, attempted, current = _edli_emit_position_fill_redecisions(
+        world,
+        trade,
+        forecasts,
+    )
+
+    assert len(first) == 1
+    assert attempted == {41}
+    assert current == {41}
+    assert calls[0]["decision_time"].isoformat() == "2026-07-27T01:02:03+00:00"
+    assert calls[0]["phase_filter_exempt_families"] == {
+        ("Beijing", "2026-07-27", "high")
+    }
+    payload = json.loads(
+        world.execute(
+            "SELECT payload_json FROM opportunity_events WHERE event_id = ?",
+            (first[0],),
+        ).fetchone()[0]
+    )
+    assert payload["redecision_origin"] == "position_fill"
+    assert payload["position_fill_trade_fact_ids"] == [41]
+    assert payload["position_fill_position_ids"] == ["beijing-33-yes"]
+    assert _event_allows_same_family_monitor_owned("EDLI_REDECISION_PENDING")
+    assert _global_projected_book_refresh_tokens(
+        (
+            types.SimpleNamespace(
+                event_type="EDLI_REDECISION_PENDING",
+                payload_json=json.dumps(payload),
+            ),
+        )
+    ) == {
+        weather_family_id(
+            city="Beijing",
+            target_date="2026-07-27",
+            metric="high",
+        ): None
+    }
+
+    world.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processed'
+         WHERE event_id = ?
+        """,
+        (first[0],),
+    )
+    second, attempted_again, current_again = _edli_emit_position_fill_redecisions(
+        world,
+        trade,
+        forecasts,
+    )
+
+    assert second == ()
+    assert attempted_again == {41}
+    assert current_again == {41}
+    assert (
+        world.execute(
+            "SELECT COUNT(*) FROM opportunity_events "
+            "WHERE json_extract(payload_json, '$.redecision_origin') = 'position_fill'"
+        ).fetchone()[0]
+        == 1
+    )
+
+
+@pytest.mark.parametrize("prior_status", ["pending", "processing"])
+def test_position_fill_redecision_persists_alongside_prior_family_work(
+    monkeypatch,
+    prior_status,
+):
+    from src.events.event_store import EventStore
+    from src.events.event_writer import EventWriter
+    from src.events.opportunity_event import make_opportunity_event
+    from src.events.price_channel_redecision_router import (
+        _edli_emit_position_fill_redecisions,
+    )
+
+    _install_position_fill_redecision_trigger(monkeypatch)
+    world, trade, forecasts = _position_fill_redecision_test_dbs()
+    at = "2026-07-27T01:02:02+00:00"
+    prior = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Beijing|2026-07-27|high|run-prior",
+        source="market-price",
+        observed_at=at,
+        available_at=at,
+        received_at=at,
+        payload={
+            "city": "Beijing",
+            "target_date": "2026-07-27",
+            "metric": "high",
+            "redecision_origin": "market_price",
+        },
+    )
+    EventWriter(world).write(prior)
+    world.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = ?
+         WHERE event_id = ?
+        """,
+        (prior_status, prior.event_id),
+    )
+
+    emitted, attempted, current = _edli_emit_position_fill_redecisions(
+        world,
+        trade,
+        forecasts,
+    )
+    assert len(emitted) == 1
+    assert attempted == {41}
+    assert current == {41}
+    assert (
+        world.execute(
+            "SELECT COUNT(*) FROM opportunity_events "
+            "WHERE event_type = 'EDLI_REDECISION_PENDING'"
+        ).fetchone()[0]
+        == 2
+    )
+    targeted = EventStore(world).fetch_pending(
+        decision_time="2026-07-27T01:02:05+00:00",
+        targeted_event_ids=frozenset(emitted),
+        targeted_only=True,
+    )
+    assert [event.event_id for event in targeted] == list(emitted)
+
+    duplicate, acknowledged, current = _edli_emit_position_fill_redecisions(
+        world,
+        trade,
+        forecasts,
+    )
+    assert duplicate == ()
+    assert acknowledged == {41}
+    assert current == {41}
+
+
+def test_position_fill_redecision_debounce_does_not_ack_unwritten_exact_event(
+    monkeypatch,
+):
+    from src.events import price_channel_redecision_router as router
+
+    _install_position_fill_redecision_trigger(monkeypatch)
+    world, trade, forecasts = _position_fill_redecision_test_dbs()
+    monkeypatch.setattr(
+        router,
+        "_edli_write_position_fill_redecision_event_ids",
+        lambda _world, _events: (),
+    )
+
+    emitted, acknowledged, current = router._edli_emit_position_fill_redecisions(
+        world,
+        trade,
+        forecasts,
+    )
+
+    assert emitted == ()
+    assert acknowledged == set()
+    assert current == {41}
+
+
+def test_position_fill_redecision_uses_latest_partial_fill_fact():
+    from src.events.price_channel_redecision_router import (
+        _edli_open_position_fill_rows,
+    )
+
+    _world, trade, _forecasts = _position_fill_redecision_test_dbs()
+    trade.execute(
+        "INSERT INTO venue_trade_facts VALUES (?,?,?,?)",
+        (
+            42,
+            "entry-beijing-33",
+            "CONFIRMED",
+            "2026-07-27T01:02:04+00:00",
+        ),
+    )
+
+    rows = _edli_open_position_fill_rows(trade)
+
+    assert len(rows) == 1
+    assert rows[0]["trade_fact_id"] == 42
+
+
+def test_position_fill_redecision_reads_before_world_write_and_degrades_health():
+    from src.events import price_channel_redecision_router as router
+    from src.ingest import price_channel_ingest as lane
+
+    cycle_src = inspect.getsource(router._edli_position_fill_redecision_cycle)
+    read_build = cycle_src.index(
+        "events, attempted_fact_ids = _edli_position_fill_redecision_events"
+    )
+    world_write = cycle_src.index(
+        "with _edli_price_channel_world_write_connection"
+    )
+    assert read_build < world_write
+
+    reconcile_src = inspect.getsource(lane._edli_user_channel_reconcile_cycle)
+    assert '"scheduler_failed": bool(fill_redecision_error)' in reconcile_src
+    assert '"scheduler_failure_reason": fill_redecision_error' in reconcile_src
+    assert "processed_with_fill_redecision_error" in reconcile_src
+
+
 def _seed_committed_denver_2026_06_20(forecasts_conn) -> None:
     """COMPLETE/LIVE_ELIGIBLE Denver low coverage for target 2026-06-20 (same
     shape as tests/events/test_forecast_snapshot_ready.py's Chicago seed)."""
