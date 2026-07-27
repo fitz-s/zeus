@@ -893,6 +893,7 @@ class GlobalBatchSubmitResult:
     winner_event_id: str | None
     venue_submit_count: int
     next_claim_event: OpportunityEvent | None = None
+    continuation_event: OpportunityEvent | None = None
 
     def __post_init__(self) -> None:
         if self.venue_submit_count not in {0, 1}:
@@ -905,6 +906,15 @@ class GlobalBatchSubmitResult:
             or self.next_claim_event.event_id in self.receipts
         ):
             raise ValueError("next global claim must be unclaimed and side-effect free")
+        if self.continuation_event is not None and (
+            self.winner_event_id is None
+            or self.venue_submit_count != 1
+            or self.continuation_event.event_id in self.receipts
+            or self.next_claim_event is not None
+        ):
+            raise ValueError(
+                "global continuation must be a fresh event after one selected submit"
+            )
         if self.winner_event_id is not None and self.winner_event_id not in self.receipts:
             raise ValueError("global batch winner must have one event-bound receipt")
         if any(key != receipt.event_id for key, receipt in self.receipts.items()):
@@ -965,6 +975,7 @@ class GlobalEpochOutcome:
     submitted: bool
     finalized: bool
     claimed_event_ids: frozenset[str]
+    continuation_event_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -1233,18 +1244,27 @@ class OpportunityEventReactor:
                 # candidate) is debited from the budget exactly once, not once per
                 # rescan.
                 claimed_event_ids_seen: set[str] = set()
+                epoch_decision_time = decision_time
                 while True:
                     epoch = self._process_global_event_batch(
                         events,
-                        decision_time=decision_time,
+                        decision_time=epoch_decision_time,
                         result=result,
                         budget=budget,
                         cycle_start=cycle_start,
                         remaining=remaining,
+                        already_charged_event_ids=frozenset(
+                            claimed_event_ids_seen
+                        ),
                         cancelled=cycle_cancelled,
                     )
                     epochs_run += 1
                     if remaining is not None:
+                        # A continuation is control work created by a charged
+                        # winner, not a new discovery event. Exempt its fresh
+                        # identity before the next claim so an exhausted first-
+                        # claim limit cannot strand the serialized frontier.
+                        claimed_event_ids_seen |= epoch.continuation_event_ids
                         # Debit by CLAIMED events, deduped across epochs — not by
                         # `epoch.attempted` (raw scanned count). The prior debit
                         # conflated page scanning with auction progress: a full
@@ -1297,6 +1317,22 @@ class OpportunityEventReactor:
                     # wealth witness, so the next epoch's scope scan and wealth cut
                     # see the updated world — the same re-decision lane the engine
                     # already runs cross-cycle.
+                    #
+                    # Advance the causal cut as well. Reusing the wake-start
+                    # decision_time here would let q remain frozen while
+                    # observations and books advanced between serialized submits.
+                    # Derive wall progress from the cycle's monotonic clock rather
+                    # than calling utc-now again: the caller's initial causal cut
+                    # remains the authority and wall-clock adjustment cannot jump
+                    # an event across a market horizon mid-cycle.
+                    epoch_decision_time = max(
+                        epoch_decision_time + timedelta(microseconds=1),
+                        decision_time
+                        + timedelta(
+                            seconds=max(0.0, time.monotonic() - cycle_start)
+                        ),
+                    )
+                    fetch_kwargs["decision_time"] = epoch_decision_time.isoformat()
                     events = self._store.fetch_pending(**fetch_kwargs)
                     if not events:
                         break
@@ -1350,6 +1386,7 @@ class OpportunityEventReactor:
         budget: float | None,
         cycle_start: float,
         remaining: int | None,
+        already_charged_event_ids: frozenset[str],
         cancelled: Callable[[], bool],
     ) -> GlobalEpochOutcome:
         """Claim/gate all epoch events, then let one opaque adapter auction act once.
@@ -1363,14 +1400,23 @@ class OpportunityEventReactor:
         claim_generations: dict[str, str] = {}
         claim_lock_bounced_event_ids: set[str] = set()
         attempted = 0
+        newly_claimed = 0
         for event in events:
             if cancelled():
-                break
-            if remaining is not None and attempted >= remaining:
                 break
             if budget is not None and (time.monotonic() - cycle_start) >= budget:
                 break
             attempted += 1
+            previously_charged = event.event_id in already_charged_event_ids
+            if (
+                not previously_charged
+                and remaining is not None
+                and newly_claimed >= max(0, remaining)
+            ):
+                # Keep scanning the bounded fetch page: a previously charged
+                # durable continuation can appear after a new event that the
+                # finite first-claim budget does not admit this wake.
+                continue
             claim_generation = self._process_event_unit(
                 event,
                 decision_time=decision_time,
@@ -1380,6 +1426,8 @@ class OpportunityEventReactor:
             if claim_generation is not None:
                 claimed.append(event)
                 claim_generations[event.event_id] = claim_generation
+                if not previously_charged:
+                    newly_claimed += 1
             if cancelled():
                 break
         if not claimed:
@@ -1532,6 +1580,9 @@ class OpportunityEventReactor:
                 decision_time=_finalization_time(event),
                 result=result,
                 wait_ms=None if side_effect_possible else _reactor_claim_busy_timeout_ms(),
+                continuation_event=(
+                    batch_result.continuation_event if is_winner else None
+                ),
             )
             if not finalized:
                 finalization_lock_busy = True
@@ -1545,6 +1596,11 @@ class OpportunityEventReactor:
             submitted=batch_result.venue_submit_count == 1,
             finalized=winner_finalized,
             claimed_event_ids=frozenset(event.event_id for event in claimed),
+            continuation_event_ids=(
+                frozenset({batch_result.continuation_event.event_id})
+                if winner_finalized and batch_result.continuation_event is not None
+                else frozenset()
+            ),
         )
 
     def _queue_global_winner_for_claim(
@@ -2002,8 +2058,17 @@ class OpportunityEventReactor:
         decision_time: datetime,
         result: ReactorResult,
         wait_ms: int | None = None,
+        continuation_event: OpportunityEvent | None = None,
     ) -> bool:
-        """Window B for an event whose Window A joined a global auction epoch."""
+        """Window B for an event whose Window A joined a global auction epoch.
+
+        A durably submitted global winner creates one fresh serialized frontier
+        carrier. Its receipt/certificate, committed reservation, terminal event
+        disposition, and new PENDING continuation are one world-DB transaction.
+        The fresh event identity prevents the prior command/cap idempotency key
+        from being reused; the next epoch still rebuilds the complete scope and
+        never reuses the prior order envelope.
+        """
 
         mutex = world_write_mutex()
         lock_wait_ms = (
@@ -2057,6 +2122,28 @@ class OpportunityEventReactor:
             result.retried += 1
             return False
         try:
+            result_counters_before = {
+                name: getattr(result, name)
+                for name in (
+                    "processed",
+                    "rejected",
+                    "proof_accepted",
+                    "dead_lettered",
+                    "retried",
+                    "claim_lock_bounces",
+                    "snapshot_refreshes",
+                    "cycle_advance_enqueues",
+                    "day0_hourly_refreshes",
+                    "drained_truncated",
+                )
+            }
+            rejection_reasons_before = len(result.rejection_reasons)
+
+            def restore_result_counters() -> None:
+                for name, value in result_counters_before.items():
+                    setattr(result, name, value)
+                del result.rejection_reasons[rejection_reasons_before:]
+
             try:
                 with _scoped_sqlite_busy_timeout(
                     self._store.conn, lock_wait_ms
@@ -2080,9 +2167,47 @@ class OpportunityEventReactor:
                         result=result,
                         proof_emitted=emitted,
                     )
+                    if continuation_event is not None:
+                        if not emitted:
+                            raise ValueError(
+                                "global winner continuation requires accepted submit proof"
+                            )
+                        inserted = self._store.insert_or_ignore(
+                            continuation_event
+                        )
+                        processing_row = self._store.conn.execute(
+                            """
+                            SELECT processing_status
+                              FROM opportunity_event_processing
+                             WHERE consumer_name = ? AND event_id = ?
+                            """,
+                            (
+                                self._store.consumer_name,
+                                continuation_event.event_id,
+                            ),
+                        ).fetchone()
+                        if processing_row is None:
+                            raise RuntimeError(
+                                "GLOBAL_WINNER_CONTINUATION_PROCESSING_ROW_MISSING"
+                            )
+                        continuation_status = str(processing_row[0] or "")
+                        if inserted or continuation_status == "pending":
+                            self._store.requeue_pending(
+                                continuation_event.event_id,
+                                last_error=GLOBAL_WINNER_TARGETED_CLAIM,
+                            )
+                        elif continuation_status not in {
+                            "processing",
+                            "processed",
+                        }:
+                            raise RuntimeError(
+                                "GLOBAL_WINNER_CONTINUATION_IDENTITY_REUSED:"
+                                f"{continuation_status or 'missing'}"
+                            )
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                     self._commit_event_unit()
             except Exception as exc:
+                restore_result_counters()
                 if _is_sqlite_lock_error(exc):
                     with contextlib.suppress(Exception):
                         self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")

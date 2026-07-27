@@ -4511,6 +4511,31 @@ def process_current_global_batch(
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         if preflight_winner is not None and actuation_at > auction_deadline:
             return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
+        candidate_family_key = str(
+            getattr(selected.decision.candidate, "family_key", "") or ""
+        ).strip()
+        if not candidate_family_key:
+            candidate_family_key = _family_key(
+                winner,
+                payload_reader(winner),
+            )
+        continuation_scope_event = full_scope_event_by_family.get(
+            candidate_family_key
+        )
+        if continuation_scope_event is None:
+            return reject("GLOBAL_CONTINUATION_SCOPE_CARRIER_MISSING")
+        # Construct and validate the next serialized frontier before any venue
+        # side effect. A post-ACK exception must never fall through the broad
+        # fail-closed handler and rewrite an observed submit as NO_SUBMIT.
+        prepared_continuation_event = _next_claim_carrier(
+            continuation_scope_event,
+            targeted_at=actuation_at,
+            economic_identity=(
+                "continuation:"
+                f"{selected.actuation.actuation_identity}"
+            ),
+            payload=payload_reader(continuation_scope_event),
+        )
         before_calls = venue_submit_count()
         release_selection_snapshot()
         _invalidate_global_holding_coverage()
@@ -4528,6 +4553,15 @@ def process_current_global_batch(
         venue_delta = venue_submit_count() - before_calls
         if venue_delta not in {0, 1}:
             raise RuntimeError("GLOBAL_ACTUATION_VENUE_COUNT_INVALID")
+        continuation_event = (
+            prepared_continuation_event
+            if (
+                venue_delta == 1
+                and winner_receipt.submitted
+                and winner_receipt.proof_accepted is True
+            )
+            else None
+        )
         receipts = {
             event.event_id: (
                 winner_receipt
@@ -4613,6 +4647,7 @@ def process_current_global_batch(
             receipts=receipts,
             winner_event_id=winner_id,
             venue_submit_count=venue_delta,
+            continuation_event=continuation_event,
         )
     except Exception as exc:  # noqa: BLE001 - one authority fault invalidates epoch
         _LOG.exception("global auction epoch failed closed")

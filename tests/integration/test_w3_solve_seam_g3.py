@@ -18766,7 +18766,10 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     )
     actuation = SimpleNamespace(actuation_identity="actuation-a")
     selected = SimpleNamespace(
-        decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(family_key=scope.family_keys[0]),
+            no_trade_reason=None,
+        ),
         winner_event_id=event.event_id,
         actuation=actuation,
     )
@@ -18836,6 +18839,115 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     assert result.receipts[event.event_id].submitted is True
     assert result.receipts[duplicate.event_id].reason == (
         f"GLOBAL_DUPLICATE_FAMILY_CARRIER:{event.event_id}"
+    )
+    continuation = result.continuation_event
+    assert continuation is not None
+    assert continuation.event_id not in result.receipts
+    assert continuation.event_type == event.event_type
+    assert continuation.entity_key == event.entity_key
+    assert continuation.causal_snapshot_id == event.causal_snapshot_id
+    assert continuation.available_at == event.available_at
+    assert continuation.received_at == decision_at.isoformat()
+    assert continuation.source == (
+        f"global_auction_winner_target:{event.event_id}:"
+        "continuation:actuation-a"
+    )
+
+
+def test_global_batch_continuation_failure_precedes_any_venue_side_effect(
+    monkeypatch,
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,),
+        captured_at_utc=decision_at,
+    )
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            family_key=scope.family_keys[0],
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-a",
+        )
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(family_key=scope.family_keys[0]),
+            no_trade_reason=None,
+        ),
+        winner_event_id=event.event_id,
+        actuation=SimpleNamespace(actuation_identity="actuation-a"),
+    )
+    calls = {"venue": 0}
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        lambda *_, **__: selected,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime.CurrentFamilyProbabilityAuthority,
+        "from_witness",
+        classmethod(lambda cls, witness: object()),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_next_claim_carrier",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("continuation-construction-failed")
+        ),
+    )
+
+    def actuate(*_args):
+        calls["venue"] += 1
+        raise AssertionError("venue side effect preceded continuation validation")
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: __import__("json").loads(
+            current.payload_json
+        ),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=actuate,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert calls["venue"] == 0
+    assert result.venue_submit_count == 0
+    assert result.winner_event_id is None
+    assert result.receipts[event.event_id].submitted is False
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_FAILED:ValueError:continuation-construction-failed"
     )
 
 

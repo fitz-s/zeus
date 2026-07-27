@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.decision_kernel import claims
-from src.events.event_store import EventStore
+from src.events.event_store import EventStore, GLOBAL_WINNER_TARGETED_CLAIM
 from src.events.opportunity_event import (
     Day0ExtremeUpdatedPayload,
     ForecastSnapshotReadyPayload,
@@ -1390,7 +1390,16 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
     monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "123")
     calls = []
 
-    def _finalize(event, receipt, *, decision_time, result, wait_ms=None):
+    def _finalize(
+        event,
+        receipt,
+        *,
+        decision_time,
+        result,
+        wait_ms=None,
+        continuation_event=None,
+    ):
+        del decision_time, continuation_event
         calls.append((event.event_id, receipt.side_effect_status, wait_ms))
         if event.event_id == winner.event_id and winner_finalized:
             return True
@@ -4866,8 +4875,16 @@ def _requeue_losers_finalize(reactor):
     ``_process_one_post_submit`` requires for a real accept, which is covered
     elsewhere."""
 
-    def _finalize(event, receipt, *, decision_time, result, wait_ms=None):
-        del decision_time, wait_ms
+    def _finalize(
+        event,
+        receipt,
+        *,
+        decision_time,
+        result,
+        wait_ms=None,
+        continuation_event=None,
+    ):
+        del decision_time, wait_ms, continuation_event
         if receipt.submitted:
             result.proof_accepted += 1
         else:
@@ -4896,10 +4913,54 @@ def _terminal_losers_finalize(reactor):
     ``_process_one_post_submit`` requires for a real accept, which is covered
     elsewhere."""
 
-    def _finalize(event, receipt, *, decision_time, result, wait_ms=None):
+    def _finalize(
+        event,
+        receipt,
+        *,
+        decision_time,
+        result,
+        wait_ms=None,
+        continuation_event=None,
+    ):
+        del decision_time, wait_ms, continuation_event
+        if receipt.submitted:
+            result.proof_accepted += 1
+        else:
+            reactor._store.mark_processed(event.event_id)
+            result.rejected += 1
+        return True
+
+    return _finalize
+
+
+def _serialized_frontier_finalize(reactor):
+    """Model the production winner-frontier disposition without proof plumbing."""
+
+    def _finalize(
+        event,
+        receipt,
+        *,
+        decision_time,
+        result,
+        wait_ms=None,
+        continuation_event=None,
+    ):
         del decision_time, wait_ms
         if receipt.submitted:
             result.proof_accepted += 1
+            reactor._store.mark_processed(event.event_id)
+            if continuation_event is not None:
+                assert reactor._store.insert_or_ignore(continuation_event)
+                reactor._store.requeue_pending(
+                    continuation_event.event_id,
+                    last_error=GLOBAL_WINNER_TARGETED_CLAIM,
+                )
+        elif _is_transient_money_path_reason(receipt.reason):
+            reactor._store.requeue_pending(
+                event.event_id,
+                last_error=receipt.reason,
+            )
+            result.retried += 1
         else:
             reactor._store.mark_processed(event.event_id)
             result.rejected += 1
@@ -4925,6 +4986,146 @@ def _multiwinner_reactor(store, process_global_batch):
     )
     reactor._finalize_deferred_event_unit = _requeue_losers_finalize(reactor)
     return reactor
+
+
+def test_global_winner_finalize_commits_fresh_frontier_with_terminal_carrier():
+    conn, store = _store()
+    event = _multiwinner_events("frontier-finalize", 1)[0]
+    store.insert_or_ignore(event)
+    assert store.claim(event.event_id, claimed_at=_DT_VENUE_OPEN.isoformat())
+    continuation = make_opportunity_event(
+        event_type=event.event_type,
+        entity_key=event.entity_key,
+        source=f"test_global_continuation:{event.event_id}",
+        observed_at=event.observed_at,
+        available_at=event.available_at,
+        received_at=_DT_VENUE_OPEN.isoformat(),
+        causal_snapshot_id=event.causal_snapshot_id,
+        payload=json.loads(event.payload_json),
+        priority=event.priority,
+        created_at=_DT_VENUE_OPEN.isoformat(),
+    )
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda *_args: None,
+        reject=lambda *_args: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+    def _accepted(_event, _receipt, *, decision_time, result):
+        del decision_time
+        result.proof_accepted += 1
+        return None
+
+    reactor._process_one_post_submit = _accepted
+    result = ReactorResult()
+    finalized = reactor._finalize_deferred_event_unit(
+        event,
+        EventSubmissionReceipt(
+            submitted=True,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="VENUE_SUBMIT_ACKED",
+            venue_call_started=True,
+            venue_ack_received=True,
+        ),
+        decision_time=_DT_VENUE_OPEN,
+        result=result,
+        continuation_event=continuation,
+    )
+
+    assert finalized is True
+    assert result.proof_accepted == 1
+    assert result.processed == 1
+    assert _processing_status(conn, event.event_id) == "processed"
+    assert _processing_status(conn, continuation.event_id) == "pending"
+    assert (
+        store.processing_last_error(continuation.event_id)
+        == GLOBAL_WINNER_TARGETED_CLAIM
+    )
+    assert conn.in_transaction is False
+
+
+def test_global_winner_continuation_write_failure_rolls_back_window_b(monkeypatch):
+    conn, store = _store()
+    event = _multiwinner_events("frontier-write-failure", 1)[0]
+    store.insert_or_ignore(event)
+    assert store.claim(event.event_id, claimed_at=_DT_VENUE_OPEN.isoformat())
+    continuation = make_opportunity_event(
+        event_type=event.event_type,
+        entity_key=event.entity_key,
+        source=f"test_global_continuation:{event.event_id}",
+        observed_at=event.observed_at,
+        available_at=event.available_at,
+        received_at=_DT_VENUE_OPEN.isoformat(),
+        causal_snapshot_id=event.causal_snapshot_id,
+        payload=json.loads(event.payload_json),
+        priority=event.priority,
+        created_at=_DT_VENUE_OPEN.isoformat(),
+    )
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda *_args: None,
+        reject=lambda *_args: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+    def _accepted(_event, _receipt, *, decision_time, result):
+        del decision_time
+        result.proof_accepted += 1
+        return None
+
+    reactor._process_one_post_submit = _accepted
+    original_insert = store.insert_or_ignore
+
+    def _fail_continuation_insert(candidate):
+        if candidate.event_id == continuation.event_id:
+            raise sqlite3.OperationalError("database is locked")
+        return original_insert(candidate)
+
+    monkeypatch.setattr(store, "insert_or_ignore", _fail_continuation_insert)
+    result = ReactorResult()
+    finalized = reactor._finalize_deferred_event_unit(
+        event,
+        EventSubmissionReceipt(
+            submitted=True,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="VENUE_SUBMIT_ACKED",
+            venue_call_started=True,
+            venue_ack_received=True,
+        ),
+        decision_time=_DT_VENUE_OPEN,
+        result=result,
+        continuation_event=continuation,
+    )
+
+    assert finalized is False
+    assert result.proof_accepted == 0
+    assert result.processed == 0
+    assert result.retried == 1
+    assert result.rejection_reasons == [
+        "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"
+    ]
+    assert _processing_status(conn, event.event_id) == "pending"
+    assert (
+        conn.execute(
+            "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+            (continuation.event_id,),
+        ).fetchone()
+        is None
+    )
+    assert conn.in_transaction is False
 
 
 def _sequential_winner_batch(claimed, _decision_time, *, claim_unpaged_winner=None, on_winner=None):
@@ -5306,4 +5507,172 @@ def test_multiwinner_loop_debits_finite_budget_once_per_claimed_event():
     assert statuses[bounce_id] == "processing", (
         "the bounced candidate must have been reclaimed and consumed as its "
         f"own winner in epoch #2: {statuses}"
+    )
+
+
+def test_multiwinner_winner_frontier_survives_spent_budget_and_advances_causal_cut(
+    monkeypatch,
+):
+    """Each durable winner transfers one frontier until a fresh CASH proof.
+
+    The second and third source carriers become available only after known
+    monotonic elapsed intervals. This catches both stale wake-start cuts and an
+    erroneous jump to the machine's present wall date (which would cross the
+    fixture market horizon).
+    """
+
+    monkeypatch.setenv("ZEUS_REACTOR_FETCH_BATCH_LIMIT", "1")
+    clock = {"value": 100.0}
+    monkeypatch.setattr("src.events.reactor.time.monotonic", lambda: clock["value"])
+
+    conn, store = _store()
+    raw_events = _multiwinner_events("durable-frontier", 3)
+    available_offsets = (0.0, 2.0, 5.0)
+    events = tuple(
+        replace(
+            event,
+            available_at=(_DT_VENUE_OPEN + timedelta(seconds=offset)).isoformat(),
+            received_at=(_DT_VENUE_OPEN + timedelta(seconds=offset)).isoformat(),
+        )
+        for event, offset in zip(raw_events, available_offsets, strict=True)
+    )
+    for event in events:
+        store.insert_or_ignore(event)
+
+    observations: dict[str, list] = {
+        "decision_times": [],
+        "winner_ids": [],
+        "claimed_ids": [],
+        "continuation_ids": [],
+    }
+    winner_queue: list = []
+
+    def _batch(claimed, decision_time, *, claim_unpaged_winner=None):
+        observations["decision_times"].append(decision_time)
+        observations["claimed_ids"].append(
+            tuple(event.event_id for event in claimed)
+        )
+        batch_events = list(claimed)
+        if not winner_queue:
+            first = claimed[0]
+            winner_queue.extend(
+                event for event in events if event.event_id != first.event_id
+            )
+            winner = first
+        elif winner_queue:
+            target = winner_queue.pop(0)
+            assert claim_unpaged_winner is not None
+            winner = claim_unpaged_winner(target)
+            assert winner is not None
+            batch_events.append(winner)
+        else:  # pragma: no cover - kept explicit for type narrowing
+            raise AssertionError("unreachable")
+
+        observations["winner_ids"].append(winner.event_id)
+        receipts = {
+            event.event_id: EventSubmissionReceipt(
+                submitted=event.event_id == winner.event_id,
+                event_id=event.event_id,
+                causal_snapshot_id=event.causal_snapshot_id,
+                side_effect_status=(
+                    "VENUE_SUBMIT_ACKED"
+                    if event.event_id == winner.event_id
+                    else "NO_SUBMIT"
+                ),
+                venue_call_started=event.event_id == winner.event_id,
+                venue_ack_received=event.event_id == winner.event_id,
+                reason=(
+                    "TEST_WINNER_SUBMITTED"
+                    if event.event_id == winner.event_id
+                    else f"GLOBAL_NOT_SELECTED:{winner.event_id}"
+                ),
+                proof_accepted=event.event_id == winner.event_id,
+            )
+            for event in batch_events
+        }
+        clock["value"] += 2.5
+        if len(observations["winner_ids"]) == 3:
+            # The third winner's requeued carrier performs one final complete
+            # epoch. CASH/HOLD is then terminal and consumes the frontier.
+            def _cash_batch(
+                cash_claimed,
+                cash_decision_time,
+                *,
+                claim_unpaged_winner=None,
+            ):
+                del claim_unpaged_winner
+                observations["decision_times"].append(cash_decision_time)
+                observations["claimed_ids"].append(
+                    tuple(event.event_id for event in cash_claimed)
+                )
+                cash_receipts = {
+                    event.event_id: EventSubmissionReceipt(
+                        submitted=False,
+                        event_id=event.event_id,
+                        causal_snapshot_id=event.causal_snapshot_id,
+                        reason=(
+                            "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL:"
+                            "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+                        ),
+                        proof_accepted=False,
+                    )
+                    for event in cash_claimed
+                }
+                return GlobalBatchSubmitResult(
+                    receipts=cash_receipts,
+                    winner_event_id=None,
+                    venue_submit_count=0,
+                )
+
+            reactor._submit.process_global_batch = _cash_batch
+        continuation_event = make_opportunity_event(
+            event_type=winner.event_type,
+            entity_key=winner.entity_key,
+            source=(
+                "test_global_continuation:"
+                f"{len(observations['winner_ids'])}:{winner.event_id}"
+            ),
+            observed_at=winner.observed_at,
+            available_at=winner.available_at,
+            received_at=decision_time.isoformat(),
+            causal_snapshot_id=winner.causal_snapshot_id,
+            payload=json.loads(winner.payload_json),
+            priority=winner.priority,
+            expires_at=winner.expires_at,
+            created_at=decision_time.isoformat(),
+        )
+        observations["continuation_ids"].append(continuation_event.event_id)
+        return GlobalBatchSubmitResult(
+            receipts=receipts,
+            winner_event_id=winner.event_id,
+            venue_submit_count=1,
+            continuation_event=continuation_event,
+        )
+
+    reactor = _multiwinner_reactor(store, _batch)
+    reactor._finalize_deferred_event_unit = _serialized_frontier_finalize(
+        reactor
+    )
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert observations["winner_ids"] == [event.event_id for event in events]
+    assert observations["claimed_ids"] == [
+        (events[0].event_id,),
+        (observations["continuation_ids"][0],),
+        (observations["continuation_ids"][1],),
+        (observations["continuation_ids"][2],),
+    ]
+    decision_times = observations["decision_times"]
+    assert decision_times == [
+        _DT_VENUE_OPEN,
+        _DT_VENUE_OPEN + timedelta(seconds=2.5),
+        _DT_VENUE_OPEN + timedelta(seconds=5.0),
+        _DT_VENUE_OPEN + timedelta(seconds=7.5),
+    ]
+    assert all(value.date() == _DT_VENUE_OPEN.date() for value in decision_times)
+    assert result.proof_accepted == 3
+    assert result.retried == 0
+    assert all(
+        _processing_status(conn, event.event_id) == "processed"
+        for event in events
     )
