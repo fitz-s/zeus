@@ -20997,7 +20997,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         token_id="yes-token",
         no_token_id="no-token",
         condition_id="condition-1",
-        chain_shares=10.006602,
+        chain_shares=10.0066,
         effective_shares=10.006602,
         exit_state="",
         last_exit_order_id="",

@@ -10260,15 +10260,16 @@ def _current_global_sell_position(
     sellable = Decimal(str(getattr(candidate, "held_shares", "0") or "0"))
     chain = Decimal(str(getattr(position, "chain_shares", 0) or 0))
     effective = Decimal(str(getattr(position, "effective_shares", 0) or 0))
-    tolerance = Decimal("1e-9")
-    exact_sellable = effective.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+    share_step = Decimal("0.01")
+    chain_sellable = chain.quantize(share_step, rounding=ROUND_FLOOR)
+    effective_sellable = effective.quantize(share_step, rounding=ROUND_FLOOR)
     if (
         not all(
             value.is_finite() and value > 0
             for value in (sellable, chain, effective)
         )
-        or abs(chain - effective) > tolerance
-        or sellable != exact_sellable
+        or chain_sellable != effective_sellable
+        or sellable != chain_sellable
     ):
         raise ValueError("GLOBAL_SELL_POSITION_SHARES_SUPERSEDED")
     exit_state_raw = getattr(position, "exit_state", "")
