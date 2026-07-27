@@ -1033,6 +1033,63 @@ def test_rest_seed_uses_request_start_not_last_venue_mutation_as_capture_time():
     assert capture_time > datetime.fromisoformat(old_venue_time)
 
 
+def test_rest_seed_does_not_retry_each_token_under_shared_endpoint_embargo():
+    from src.data.polymarket_request_governor import RequestAdmissionDenied
+
+    _conn, writer = _conn_writer()
+    single_fetches: list[str] = []
+
+    def denied_batch(_token_ids: list[str]) -> dict[str, dict]:
+        raise RequestAdmissionDenied(
+            "POLYMARKET_ENDPOINT_EMBARGOED:clob.polymarket.com:clob-market-data:"
+            "2026-07-27T18:10:00+00:00"
+        )
+
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids={"token-1", "token-2", "token-3"},
+            token_metadata={},
+        ),
+        fetch_orderbook=lambda token_id: single_fetches.append(token_id) or {},
+        fetch_orderbooks=denied_batch,
+    )
+
+    assert service._fetch_rest_seed_books(["token-1", "token-2", "token-3"]) == {}
+    assert single_fetches == []
+
+
+def test_rest_seed_preserves_partial_batch_before_single_fetch_embargo():
+    from src.data.polymarket_request_governor import RequestAdmissionDenied
+
+    _conn, writer = _conn_writer()
+    single_fetches: list[str] = []
+
+    def partial_batch(_token_ids: list[str]) -> dict[str, dict]:
+        return {"token-1": _fake_book("token-1")}
+
+    def denied_single(token_id: str) -> dict:
+        single_fetches.append(token_id)
+        raise RequestAdmissionDenied(
+            "POLYMARKET_REQUEST_EMBARGOED:2026-07-27T18:10:00+00:00"
+        )
+
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids={"token-1", "token-2", "token-3"},
+            token_metadata={},
+        ),
+        fetch_orderbook=denied_single,
+        fetch_orderbooks=partial_batch,
+    )
+
+    captured = service._fetch_rest_seed_books(["token-1", "token-2", "token-3"])
+
+    assert set(captured) == {"token-1"}
+    assert single_fetches == ["token-2"]
+
+
 def test_quote_projection_pump_commits_one_available_stream_batch():
     conn, writer = _conn_writer()
     metadata = {

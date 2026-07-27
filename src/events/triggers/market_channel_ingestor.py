@@ -47,6 +47,14 @@ RefreshSnapshotResult = Literal["completed", "deferred"]
 _RefreshActionStatus = Literal["completed", "deferred", "dropped"]
 
 
+def _is_shared_request_embargo(exc: BaseException) -> bool:
+    """Return whether the request governor proved this whole lane unavailable."""
+
+    return type(exc).__name__ == "RequestAdmissionDenied" and str(exc).startswith(
+        ("POLYMARKET_ENDPOINT_EMBARGOED:", "POLYMARKET_REQUEST_EMBARGOED:")
+    )
+
+
 def _is_sqlite_write_contention(exc: BaseException) -> bool:
     if isinstance(exc, TimeoutError):
         return True
@@ -2256,6 +2264,8 @@ class MarketChannelOnlineService:
                     type(exc).__name__,
                     exc,
                 )
+                if _is_shared_request_embargo(exc):
+                    return {}
                 books = {}
             if isinstance(books, dict) and books:
                 wanted = set(token_ids)
@@ -2316,6 +2326,8 @@ class MarketChannelOnlineService:
                     type(exc).__name__,
                     exc,
                 )
+                if _is_shared_request_embargo(exc):
+                    break
         return pre_captured_books
 
     def on_disconnect(self, *, gap_start: str) -> None:
