@@ -2066,6 +2066,42 @@ def test_global_target_atomically_supersedes_only_older_pending_targets():
     assert states[unrelated.event_id] == ("pending", None)
 
 
+def test_global_target_uses_primed_winner_point_lookup():
+    conn, store = _store()
+    old = _day0_event("old-point-target")
+    new = _forecast_event("new-point-target", target_date="2026-05-24")
+    assert store.prioritize_global_winner(old)
+
+    statements = []
+    conn.set_trace_callback(statements.append)
+    try:
+        assert store.prioritize_global_winner(new)
+    finally:
+        conn.set_trace_callback(None)
+
+    target_reads = [
+        statement
+        for statement in statements
+        if "SELECT p.event_id, e.source, e.received_at" in statement
+    ]
+    assert target_reads
+    assert all(
+        "INDEXED BY idx_opportunity_event_processing_status" not in statement
+        for statement in target_reads
+    )
+    assert any("p.event_id =" in statement for statement in target_reads)
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (old.event_id,),
+    ).fetchone() == ("expired", "GLOBAL_WINNER_TARGET_SUPERSEDED")
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (new.event_id,),
+    ).fetchone() == ("pending", "GLOBAL_WINNER_TARGETED_CLAIM")
+
+
 def test_global_target_keeps_same_causal_fact_across_economic_epochs():
     conn, store = _store()
     from src.engine.global_batch_runtime import _next_claim_carrier

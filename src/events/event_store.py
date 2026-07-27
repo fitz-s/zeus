@@ -2684,6 +2684,7 @@ class EventStore:
                 return None
 
         processing_claims: dict[str, str] = {}
+        family_pending_targets: dict[str, sqlite3.Row | tuple] = {}
         target_source_event_id = _global_winner_target_source_event_id(
             event.source
         )
@@ -2719,6 +2720,30 @@ class EventStore:
                 if not event_id:
                     continue
                 processing_claims[event_id] = str(row[2] or "")
+            target_rows = self.conn.execute(
+                f"""
+                SELECT p.event_id, e.source, e.received_at
+                  FROM opportunity_events e INDEXED BY {index_name}
+                  JOIN opportunity_event_processing p
+                    ON p.consumer_name = ? AND p.event_id = e.event_id
+                 WHERE e.event_type = {event_type_sql}
+                   AND json_extract(e.payload_json, '$.city') = ?
+                   AND json_extract(e.payload_json, '$.target_date') = ?
+                   AND json_extract(e.payload_json, '$.metric') = ?
+                   AND p.processing_status = 'pending'
+                   AND p.last_error = ?
+                """,
+                (
+                    self.consumer_name,
+                    *family,
+                    GLOBAL_WINNER_TARGETED_CLAIM,
+                ),
+            ).fetchall()
+            family_pending_targets.update(
+                (str(row[0]), row)
+                for row in target_rows
+                if str(row[0] or "")
+            )
 
         if any(
             allowed_claims.get(event_id) != claimed_at
@@ -2727,18 +2752,49 @@ class EventStore:
             return None
 
         now = _utc_now()
-        pending_targets = self.conn.execute(
-            """
-            SELECT p.event_id, e.source, e.received_at
-              FROM opportunity_event_processing p
-                   INDEXED BY idx_opportunity_event_processing_status
-              JOIN opportunity_events e ON e.event_id = p.event_id
-             WHERE p.consumer_name = ?
-               AND p.processing_status = 'pending'
-               AND p.last_error = ?
-            """,
-            (self.consumer_name, GLOBAL_WINNER_TARGETED_CLAIM),
-        ).fetchall()
+        # fetch_pending primes this hint before every live auction. Point-read
+        # that carrier and scan only the selected family; a status-index scan
+        # joined every pending row to the append-only event log and pinned the
+        # production reactor for minutes before preflight.
+        winner_hint = self._winner_hint()
+        pending_targets = list(family_pending_targets.values())
+        if winner_hint is not _WINNER_HINT_MISSING:
+            if winner_hint is not None:
+                hinted_event_id = winner_hint[0]
+                hinted_row = self.conn.execute(
+                    """
+                    SELECT p.event_id, e.source, e.received_at
+                      FROM opportunity_event_processing p
+                      JOIN opportunity_events e ON e.event_id = p.event_id
+                     WHERE p.consumer_name = ?
+                       AND p.event_id = ?
+                       AND p.processing_status = 'pending'
+                       AND p.last_error = ?
+                    """,
+                    (
+                        self.consumer_name,
+                        hinted_event_id,
+                        GLOBAL_WINNER_TARGETED_CLAIM,
+                    ),
+                ).fetchone()
+                if hinted_row is None:
+                    self._forget_winner(hinted_event_id)
+                    winner_hint = _WINNER_HINT_MISSING
+                elif hinted_event_id not in family_pending_targets:
+                    pending_targets.append(hinted_row)
+        if winner_hint is _WINNER_HINT_MISSING:
+            pending_targets = self.conn.execute(
+                """
+                SELECT p.event_id, e.source, e.received_at
+                  FROM opportunity_event_processing p
+                       INDEXED BY idx_opportunity_event_processing_status
+                  JOIN opportunity_events e ON e.event_id = p.event_id
+                 WHERE p.consumer_name = ?
+                   AND p.processing_status = 'pending'
+                   AND p.last_error = ?
+                """,
+                (self.consumer_name, GLOBAL_WINNER_TARGETED_CLAIM),
+            ).fetchall()
         same_source_targets = [
             row
             for row in pending_targets
