@@ -4192,6 +4192,13 @@ def test_current_day0_global_probability_uses_conditioned_replacement_simplex(
                 "city": "Dallas",
                 "target_date": "2026-07-11",
                 "metric": "high",
+                "observation_time": "2026-07-11T17:00:00+00:00",
+                "observation_available_at": "2026-07-11T17:05:00+00:00",
+                "station_id": "KDFW",
+                "settlement_source": "wu_icao_history",
+                "settlement_unit": "F",
+                "observed_extreme_native": rounded,
+                "sample_count": 5,
                 "rounded_value": rounded,
                 "posterior_id": kwargs["posterior_id"],
                 "probability_base_identity": base_identity,
@@ -4260,6 +4267,45 @@ def test_current_day0_global_probability_uses_conditioned_replacement_simplex(
         day0_payload["probability_authority"]
         == "day0_conditioned_replacement_global_probability_v1"
     )
+    conditioned_authority_payload = {
+        **day0_payload,
+        # This is the local proof's older supporting row. The current
+        # conditioned witness is bound by its nested observation/base identity,
+        # not by this legacy top-level scalar parent.
+        "posterior_id": 16,
+        "city": "Dallas",
+        "target_date": "2026-07-11",
+        "metric": "high",
+        "condition_id": "c2",
+        "direction": "buy_yes",
+        "q_live": 0.6,
+        "q_lcb_5pct": 0.3,
+        "day0_probability_authority": (
+            era._global_day0_probability_authority_payload(day0_payload)
+        ),
+    }
+    assert_live_day0_probability_authority(
+        conditioned_authority_payload,
+        direction="buy_yes",
+        condition_id="c2",
+        q_live=0.6,
+        q_lcb=0.3,
+    )
+    forged_conditioned = json.loads(json.dumps(conditioned_authority_payload))
+    forged_conditioned["day0_probability_authority"][
+        "global_current_observation_payload"
+    ]["_edli_global_day0_binding"]["posterior_id"] = 18
+    with pytest.raises(
+        ValueError,
+        match="replacement_day0_posterior_id mismatch",
+    ):
+        assert_live_day0_probability_authority(
+            forged_conditioned,
+            direction="buy_yes",
+            condition_id="c2",
+            q_live=0.6,
+            q_lcb=0.3,
+        )
     assert replacement_bound_reads == 1
     caps = {
         row[:4]: row[4]
@@ -4628,6 +4674,28 @@ def test_provisional_hko_held_probability_uses_conditioned_replacement_without_e
     binding = day0_payload["_edli_global_day0_binding"]
     assert binding["evidence_finality"] == "PROVISIONAL_CURRENT_SNAPSHOT"
     assert "_edli_day0_exact_yes_payoffs" not in day0_payload
+    provisional_authority_payload = {
+        **day0_payload,
+        "posterior_id": 16,
+        "condition_id": "c2",
+        "direction": "buy_yes",
+        "q_live": 0.1,
+        "q_lcb_5pct": 0.05,
+        "day0_probability_authority": (
+            era._global_day0_probability_authority_payload(day0_payload)
+        ),
+    }
+    with pytest.raises(
+        ValueError,
+        match="replacement_day0_posterior_id mismatch",
+    ):
+        assert_live_day0_probability_authority(
+            provisional_authority_payload,
+            direction="buy_yes",
+            condition_id="c2",
+            q_live=0.1,
+            q_lcb=0.05,
+        )
 
     with pytest.raises(
         ValueError,

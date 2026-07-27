@@ -33,9 +33,13 @@ DAY0_DETERMINISTIC_BIN_PAYOFF_GLOBAL_AUTHORITY = (
     "day0_deterministic_bin_payoff_v1"
 )
 DAY0_REPLACEMENT_Q_SOURCE = "replacement_0_1"
+DAY0_CONDITIONED_REPLACEMENT_Q_SOURCE = "day0_conditioned_replacement"
 DAY0_REPLACEMENT_GLOBAL_AUTHORITY = "replacement_current_global_probability_v1"
 DAY0_PROVISIONAL_REPLACEMENT_GLOBAL_AUTHORITY = (
     "replacement_provisional_day0_global_probability_v1"
+)
+DAY0_CONDITIONED_REPLACEMENT_GLOBAL_AUTHORITY = (
+    "day0_conditioned_replacement_global_probability_v1"
 )
 DAY0_REPLACEMENT_GLOBAL_AUTHORITIES = frozenset(
     {
@@ -43,6 +47,12 @@ DAY0_REPLACEMENT_GLOBAL_AUTHORITIES = frozenset(
         DAY0_PROVISIONAL_REPLACEMENT_GLOBAL_AUTHORITY,
     }
 )
+DAY0_REPLACEMENT_GLOBAL_AUTHORITIES_BY_Q_SOURCE = {
+    DAY0_REPLACEMENT_Q_SOURCE: DAY0_REPLACEMENT_GLOBAL_AUTHORITIES,
+    DAY0_CONDITIONED_REPLACEMENT_Q_SOURCE: frozenset(
+        {DAY0_CONDITIONED_REPLACEMENT_GLOBAL_AUTHORITY}
+    ),
+}
 DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS = "CURRENT_POSTERIOR_BAND"
 DAY0_OBSERVATION_HARD_FACT_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
 DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
@@ -402,6 +412,7 @@ def _assert_replacement_global_day0_probability_authority(
     payload: Mapping[str, object],
     block: Mapping[str, object],
     *,
+    q_source: str,
     direction: object | None,
     condition_id: object | None,
     q_live: float | None,
@@ -410,7 +421,11 @@ def _assert_replacement_global_day0_probability_authority(
     """Validate one current replacement posterior conditioned on current Day0 truth."""
 
     authority = str(block.get("probability_authority") or "").strip()
-    if authority not in DAY0_REPLACEMENT_GLOBAL_AUTHORITIES:
+    allowed_authorities = DAY0_REPLACEMENT_GLOBAL_AUTHORITIES_BY_Q_SOURCE.get(
+        q_source,
+        frozenset(),
+    )
+    if authority not in allowed_authorities:
         raise Day0AuthorityError(
             "replacement_day0_probability_authority required:"
             f"{authority or 'missing'}"
@@ -424,7 +439,7 @@ def _assert_replacement_global_day0_probability_authority(
         )
         if value not in (None, "")
     }
-    if q_sources != {DAY0_REPLACEMENT_Q_SOURCE}:
+    if q_sources != {q_source}:
         raise Day0AuthorityError(
             "replacement_day0_q_source mismatch:"
             f"{sorted(q_sources) if q_sources else 'missing'}"
@@ -440,11 +455,23 @@ def _assert_replacement_global_day0_probability_authority(
     posterior_id = str(payload.get("posterior_id") or "").strip()
     block_posterior_id = str(block.get("posterior_id") or "").strip()
     bound_posterior_id = str(binding.get("posterior_id") or "").strip()
-    if (
-        not posterior_id
-        or posterior_id != block_posterior_id
-        or posterior_id != bound_posterior_id
-    ):
+    conditioned_current_witness = (
+        q_source == DAY0_CONDITIONED_REPLACEMENT_Q_SOURCE
+        and day0_evidence_finality(observation)
+        != DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+    )
+    posterior_mismatch = (
+        not block_posterior_id
+        or block_posterior_id != bound_posterior_id
+        or (
+            not conditioned_current_witness
+            and (
+                not posterior_id
+                or posterior_id != block_posterior_id
+            )
+        )
+    )
+    if posterior_mismatch:
         raise Day0AuthorityError(
             "replacement_day0_posterior_id mismatch:"
             f"selected={posterior_id or 'missing'}:"
@@ -1066,10 +1093,11 @@ def assert_live_day0_probability_authority(
         raise Day0AuthorityError("day0 hard-fact calibration cannot authorize entry probability")
 
     q_source = _first_text(payload, block, "_edli_q_source", "day0_q_source", "q_source")
-    if q_source == DAY0_REPLACEMENT_Q_SOURCE:
+    if q_source in DAY0_REPLACEMENT_GLOBAL_AUTHORITIES_BY_Q_SOURCE:
         _assert_replacement_global_day0_probability_authority(
             payload,
             block,
+            q_source=q_source,
             direction=direction,
             condition_id=condition_id,
             q_live=q_live,

@@ -2070,3 +2070,36 @@ Acceptance requires:
   green;
 - hot-fix landing and restart prove the recurring live candidate no longer
   emits `GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH`.
+
+## 2026-07-27 Conditioned Day0 calibration authority
+
+The parent-separation repair exposed the next stale taxonomy seam. The global
+producer correctly emitted `day0_conditioned_replacement` with
+`day0_conditioned_replacement_global_probability_v1`, but the calibration
+authority verifier recognized only raw `replacement_0_1`, deterministic, and
+remaining-day labels. It therefore rejected an already content-bound current
+Day0 witness before preflight.
+
+The correction admits the producer's typed conditioned-replacement pair and
+reuses the existing current-observation, binding, parent-identity, city/date,
+metric, source-clock, and probability-order checks. A non-provisional
+conditioned witness binds the supporting replacement row inside its nested
+current observation authority rather than to a stale top-level local proof ID.
+A provisional Day0 witness remains directly replacement-priced and retains
+exact selected/block/bound posterior equality.
+
+SCOPE is conditioned Day0 calibration certificate construction. DRAIN is the
+next event preflight using a current nested Day0 authority block. RESET is a
+matching typed q-source/authority pair with coherent current binding. No
+calibration math, q, FDR, Kelly, sizing, source, order band, lifecycle, or
+settlement rule changes.
+
+Acceptance requires:
+
+- a non-provisional conditioned witness with an advanced supporting row passes
+  only when its nested block and binding match;
+- tampering with the nested parent still fails closed;
+- a provisional conditioned witness with a mismatched selected parent remains
+  rejected;
+- integration, compile, lint, diff, live loaded-SHA, and post-restart receipt
+  evidence prove the taxonomy seam is closed.
