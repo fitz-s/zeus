@@ -5,6 +5,11 @@
 
 ## 现状(forward)
 
+### 2026-07-27 03:45 CDT tick — Ankara fast observation 从默认排除升级为实测 authority
+- **证据窗:** `2026-07-20T07:42:38Z` 至 `2026-07-27T07:42:38Z`，LTAC 同站 WU/METAR 251 个匹配对；rounded delta 的 p99/max 均为 `0°C`，empirical threshold 为 `1°C`，因此可吸收 margin 为 `0°C`。证据只授权同一 settlement station 的 publication-latency advantage，不改变 settlement source。
+- **money-path 作用:** Ankara Day0 held probability 与 hard-fact exit 可消费更早发布的 LTAC METAR，不再等待较慢 WU 更新；dead-bin/structural-win 对称法则、plausibility guard、oracle anomaly pause 和未测量城市 fail-closed 均保持。
+- **验收:** config station/unit/source contract、threshold/margin、fast source 与 absorbing-boundary exit 均由关系测试覆盖；Manila 继续作为真正未测量的 fail-closed counterexample。
+
 ### 2026-07-27 02:53 CDT tick — wealth supersession 触发同 epoch 资本重拍，不再吞掉 statistical SELL
 - **live 反例:** Beijing Jul-27 HIGH34 NO 在 held q `0.056667`、可执行 bid `0.08`、edge `-0.023333` 时已满足 local statistical SELL；global auction 也完整覆盖 held obligations，但 winner preflight 发现 `GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED` 后把整批重排推迟到未来 scan，monitor 将该 SELL 覆盖为 `GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE`。Tokyo Jul-27 HIGH30 NO 曾在 q `0`、bid 回升至 `0.06` 时遭遇同一阻断。两笔均没有 EXIT intent、command 或 venue call。
 - **第一性修复:** wealth gate 保持 fail-closed；local statistical SELL 仍不得绕过 global BUY/SELL/HOLD/CASH optimizer。若 submit-side preflight 证明经济 endowment 已变化，当前 batch 立即重读 canonical wealth/portfolio，要求所有新 held obligations 仍被当前 probability+book cut 覆盖，然后用新 endowment 重算完整 argmax。position/book scope 变化或连续 supersession 仍终止该 cut 并交给下一完整 epoch。

@@ -1166,6 +1166,7 @@ class TestEmpiricalThresholds:
             ("Beijing", "ZBAA"),
             ("Guangzhou", "ZGGG"),
             ("Wellington", "NZWN"),
+            ("Ankara", "LTAC"),
         ),
     )
     def test_recent_loss_cities_use_measured_zero_margin_fast_lane(
@@ -1204,7 +1205,18 @@ class TestEmpiricalThresholds:
             for row in json.loads((root / "config" / "cities.json").read_text())["cities"]
         }
 
-        for city_name in ("Beijing", "Guangzhou", "Wellington"):
+        expected_windows = {
+            city_name: [
+                "2026-07-20T07:30:13.105666+00:00",
+                "2026-07-27T07:30:13.105666+00:00",
+            ]
+            for city_name in ("Beijing", "Guangzhou", "Wellington")
+        }
+        expected_windows["Ankara"] = [
+            "2026-07-20T07:42:38.732852+00:00",
+            "2026-07-27T07:42:38.732852+00:00",
+        ]
+        for city_name, expected_window in expected_windows.items():
             measurement = divergence[city_name]
             city = cities[city_name]
             assert measurement["station_id"] == city["wu_station"]
@@ -1212,10 +1224,7 @@ class TestEmpiricalThresholds:
             assert (city.get("settlement_source_type") or "wu_icao") == "wu_icao"
             assert measurement["matched_pairs"] >= 100
             assert measurement["measurement_window_days"] == 7
-            assert measurement["measurement_window"] == [
-                "2026-07-20T07:30:13.105666+00:00",
-                "2026-07-27T07:30:13.105666+00:00",
-            ]
+            assert measurement["measurement_window"] == expected_window
 
     def test_unmeasured_city_falls_back_to_conservative_default(self):
         from src.data.day0_oracle_anomaly import (
@@ -1426,7 +1435,7 @@ class TestMetarMarginAbsorption:
         assert city_metar_settlement_faithful("Shenzhen", path=path) is False
         assert metar_margin_units_for_city("Shenzhen", "C", path=path) is None
 
-    def test_all_25_measured_cities_have_expected_margin(self):
+    def test_all_26_measured_cities_have_expected_margin(self):
         """Regression: the (b) default-direction fix changes behavior for
         UNMEASURED cities only. Every already-measured city in the real
         config/wu_metar_divergence.json (no path override) must keep its
@@ -1443,7 +1452,7 @@ class TestMetarMarginAbsorption:
             f_cities | {
                 "London", "Paris", "Amsterdam", "Milan", "Munich", "Madrid",
                 "Tokyo", "Singapore", "Taipei", "Toronto", "Beijing",
-                "Guangzhou", "Wellington",
+                "Guangzhou", "Wellington", "Ankara",
             }
         )}
         expected_margin["Seoul"] = 2.0

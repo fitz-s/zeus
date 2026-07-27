@@ -111,8 +111,8 @@ def _wellington():
 
 
 def _ankara():
-    # Still unmeasured: absence of city-specific WU/METAR divergence evidence
-    # excludes this station from the fast hard-fact lane.
+    # Seven-day same-station evidence makes LTAC settlement-faithful at zero
+    # rounded-unit margin.
     return SimpleNamespace(
         name="Ankara", timezone="Europe/Istanbul", settlement_unit="C",
         wu_station="LTAC", settlement_source_type="wu_icao",
@@ -1128,12 +1128,34 @@ class TestSourceDiscipline:
             now=NOW,
         ) is None
 
-    def test_metar_kill_at_unmeasured_city_is_excluded_not_default_margin(self, monkeypatch):
-        """An unmeasured city remains excluded rather than consuming a guessed
-        margin; authorizing Wellington must not weaken this fail-closed law."""
-        _set_metar_memo(monkeypatch, 27)
+    def test_recently_measured_ankara_uses_zero_margin_and_boundary_law(
+        self, monkeypatch,
+    ):
+        _set_metar_memo(monkeypatch, 26)
         effective, source = settlement_grade_effective_extreme(
             city=_ankara(), target_date="2026-06-10", metric="high", now=NOW,
+        )
+        assert effective == pytest.approx(26.0)
+        assert source == "same_station_fast_tail"
+        assert evaluate_hard_fact_exit(
+            position=_position(city="Ankara"),
+            city=_ankara(),
+            now=NOW,
+        ).action == "EXIT_DEAD_BIN"
+
+        _set_metar_memo(monkeypatch, 25)
+        assert evaluate_hard_fact_exit(
+            position=_position(city="Ankara"),
+            city=_ankara(),
+            now=NOW,
+        ) is None
+
+    def test_metar_kill_at_unmeasured_city_is_excluded_not_default_margin(self, monkeypatch):
+        """An unmeasured city remains excluded rather than consuming a guessed
+        margin; authorizing measured cities must not weaken this law."""
+        _set_metar_memo(monkeypatch, 27)
+        effective, source = settlement_grade_effective_extreme(
+            city=_manila(), target_date="2026-06-10", metric="high", now=NOW,
         )
         assert effective is None and source == ""
 

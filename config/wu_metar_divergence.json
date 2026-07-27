@@ -481,6 +481,30 @@
         "2026-07-27T07:30:13.105666+00:00"
       ],
       "measurement_generated_at": "2026-07-27T07:31:26.733402+00:00"
+    },
+    "Ankara": {
+      "matched_pairs": 251,
+      "median_abs_raw_delta": 0.0,
+      "p95_abs_raw_delta": 0.0,
+      "p99_abs_raw_delta": 0.0,
+      "max_abs_raw_delta": 0.0,
+      "p95_abs_rounded_delta": 0.0,
+      "p99_abs_rounded_delta": 0.0,
+      "max_abs_rounded_delta": 0.0,
+      "disagree_rate_ge_1unit": 0.0,
+      "empirical_threshold": 1.0,
+      "threshold_provenance": "empirical",
+      "settlement_faithful": true,
+      "station_id": "LTAC",
+      "unit": "C",
+      "wu_pairs": 264,
+      "metar_reports": 345,
+      "measurement_window_days": 7,
+      "measurement_window": [
+        "2026-07-20T07:42:38.732852+00:00",
+        "2026-07-27T07:42:38.732852+00:00"
+      ],
+      "measurement_generated_at": "2026-07-27T07:42:51.664296+00:00"
     }
   }
 }
