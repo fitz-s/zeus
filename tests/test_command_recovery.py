@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-25; last_reused=2026-07-25
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-25
+# Last reused/audited: 2026-07-27
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -1129,6 +1129,42 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
     client.get_order.assert_not_called()
     client.get_open_orders.assert_not_called()
     client.get_trades.assert_not_called()
+
+
+def test_boot_fast_writer_flock_contention_defers_before_scheduler(monkeypatch):
+    """Boot must reach the scheduler when another live writer owns the flock."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+
+    def _contended_factory(**kwargs):
+        calls.append(kwargs)
+        raise BlockingIOError(
+            "db_writer_lock(write_class=live) contended on test.writer-lock.live"
+        )
+
+    _contended_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _contended_factory,
+    )
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(),
+        scope="boot_fast",
+    )
+
+    assert calls
+    assert all(
+        call == {"blocking": False, "busy_timeout_ms": 0}
+        for call in calls
+    )
+    assert summary["boot_fast_deferred"] is True
+    assert summary["boot_fast_defer_reasons"][
+        "missing_filled_entry_execution_fact_repair"
+    ] == "database_locked_before_scheduler"
 
 
 @pytest.mark.parametrize(

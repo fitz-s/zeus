@@ -21191,11 +21191,14 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             )
 
         def _boot_conn_factory() -> sqlite3.Connection:
-            conn = conn_factory()
+            if getattr(conn_factory, "supports_nonblocking_flocks", False):
+                conn = conn_factory(blocking=False, busy_timeout_ms=0)
+            else:
+                conn = conn_factory()
             remaining_s = max(0.0, boot_deadline - time.monotonic())
             # Default trade connections wait up to 30s for BEGIN IMMEDIATE.
             # Boot-fast runs before the scheduler exists, so its lock wait must
-            # be capped by the same startup budget as the DB pass body.
+            # not block before this SQLite timeout can even be installed.
             conn.execute("PRAGMA busy_timeout = %d" % max(1, int(remaining_s * 1000)))
             return conn
 
@@ -21242,6 +21245,14 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                     conn_factory=_boot_conn_factory,
                     label=f"recovery.{label}",
                 )
+            except BlockingIOError as exc:
+                if (
+                    "db_writer_lock(" not in str(exc)
+                    or "contended on" not in str(exc)
+                ):
+                    raise
+                _defer_boot_pass(label, "database_locked_before_scheduler")
+                return None
             except sqlite3.OperationalError as exc:
                 msg = str(exc).lower()
                 if "interrupted" in msg:
