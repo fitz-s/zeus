@@ -1802,13 +1802,16 @@ def chain_positions_from_api(payload, *, ChainPosition):
 
 
 _CHAIN_BALANCE_UNITS = Decimal("1000000")
+_CHAIN_BALANCE_DUST = Decimal("0.01")
 _CHAIN_BALANCE_PHASES = frozenset(
     {"entered", "holding", "active", "day0_window", "pending_exit"}
 )
 
 
-def _current_money_risk_token_metadata(portfolio) -> dict[str, str]:
-    tokens: dict[str, str] = {}
+def _current_money_risk_token_targets(
+    portfolio,
+) -> dict[str, tuple[str, Decimal]]:
+    tokens: dict[str, tuple[str, Decimal]] = {}
     for position in tuple(getattr(portfolio, "positions", ()) or ()):
         state = str(
             getattr(
@@ -1836,9 +1839,10 @@ def _current_money_risk_token_metadata(portfolio) -> dict[str, str]:
         if raw_shares is None:
             raw_shares = getattr(position, "shares", 0)
         try:
-            if Decimal(str(raw_shares or 0)) <= 0:
-                continue
+            shares = Decimal(str(raw_shares or 0))
         except (InvalidOperation, ValueError):
+            continue
+        if shares <= 0:
             continue
         raw_direction = getattr(position, "direction", "")
         direction = str(
@@ -1851,8 +1855,42 @@ def _current_money_risk_token_metadata(portfolio) -> dict[str, str]:
         )
         token = str(token_id or "").strip()
         if token:
-            tokens.setdefault(token, str(getattr(position, "condition_id", "") or ""))
+            prior_condition, prior_shares = tokens.get(token, ("", Decimal("0")))
+            condition_id = prior_condition or str(
+                getattr(position, "condition_id", "") or ""
+            )
+            tokens[token] = (condition_id, prior_shares + shares)
     return tokens
+
+
+def _ambiguous_ctf_balance_targets(
+    token_targets: dict[str, tuple[str, Decimal]],
+    api_positions,
+) -> dict[str, str]:
+    api_shares: dict[str, Decimal] = {}
+    invalid_tokens: set[str] = set()
+    for position in api_positions:
+        token_id = str(getattr(position, "token_id", "") or "").strip()
+        if token_id not in token_targets:
+            continue
+        try:
+            shares = Decimal(str(getattr(position, "size", 0) or 0))
+            if not shares.is_finite() or shares < 0:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            invalid_tokens.add(token_id)
+            continue
+        api_shares[token_id] = api_shares.get(token_id, Decimal("0")) + shares
+
+    return {
+        token_id: condition_id
+        for token_id, (condition_id, local_shares) in token_targets.items()
+        if (
+            token_id in invalid_tokens
+            or token_id not in api_shares
+            or abs(api_shares[token_id] - local_shares) > _CHAIN_BALANCE_DUST
+        )
+    }
 
 
 def _overlay_current_ctf_balances(
@@ -1862,16 +1900,27 @@ def _overlay_current_ctf_balances(
     *,
     ChainPosition,
 ):
-    """Overlay direct CTF balances for local money-risk tokens.
+    """Overlay direct CTF balances for ambiguous local money-risk tokens.
 
     The Data API may omit dust or an almost-fully-exited position. A targeted
-    conditional-token balance is direct current chain truth, so it must replace
-    the API aggregate for the same token before canonical reconciliation.
+    conditional-token balance resolves only a missing or size-mismatched token;
+    repeating that slower read for an already-consistent Data API aggregate
+    adds no truth and multiplies whole-cycle network failure risk.
     """
 
-    token_metadata = _current_money_risk_token_metadata(portfolio)
+    token_targets = _current_money_risk_token_targets(portfolio)
+    if not token_targets:
+        return api_positions, {
+            "ctf_balance_tokens_refreshed": 0,
+            "ctf_balance_tokens_skipped_consistent": 0,
+        }
+    token_metadata = _ambiguous_ctf_balance_targets(token_targets, api_positions)
+    skipped_consistent = len(token_targets) - len(token_metadata)
     if not token_metadata:
-        return api_positions, {"ctf_balance_tokens_refreshed": 0}
+        return api_positions, {
+            "ctf_balance_tokens_refreshed": 0,
+            "ctf_balance_tokens_skipped_consistent": skipped_consistent,
+        }
 
     try:
         inspect.getattr_static(clob, "get_ctf_collateral_payload")
@@ -1889,7 +1938,11 @@ def _overlay_current_ctf_balances(
         adapter = ensure_adapter() if callable(ensure_adapter) else None
         reader = getattr(adapter, "get_ctf_collateral_payload", None)
     if not callable(reader):
-        return api_positions, {"ctf_balance_reader_unavailable": 1}
+        return api_positions, {
+            "ctf_balance_reader_unavailable": 1,
+            "ctf_balance_tokens_refreshed": 0,
+            "ctf_balance_tokens_skipped_consistent": skipped_consistent,
+        }
 
     payload = dict(reader(token_ids=sorted(token_metadata)) or {})
     authority = str(payload.get("authority_tier") or "").strip().upper()
@@ -1923,6 +1976,7 @@ def _overlay_current_ctf_balances(
         )
     return list(by_token.values()), {
         "ctf_balance_tokens_refreshed": len(token_metadata),
+        "ctf_balance_tokens_skipped_consistent": skipped_consistent,
         "ctf_balance_authority": authority,
     }
 

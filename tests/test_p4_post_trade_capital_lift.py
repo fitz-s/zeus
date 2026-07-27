@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-24
+# Last reused or audited: 2026-07-26
 # Reuse: Run when post-trade-capital process recovery, poller ownership, or launchd liveness changes.
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 P4->riskguard/P1 no-back-coupling + commit-before-HTTP; I4 ingest->P4),
 #   §8 Step 2 (split chain-sync READ from exit-SUBMIT), §9 (regression-unconstructable).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-26; last_reused=2026-07-26
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P4 — lift the
 #   post-trade capital lifecycle (settlement P&L resolve -> redeem -> wrap +
 #   chain-sync READ phase) OUT of the order daemon into its own process.
@@ -53,6 +53,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -647,6 +648,178 @@ def test_superiority_p4_chain_sync_does_not_hold_lock_across_per_position_http()
         "chain_sync_read_cycle must NOT import the monitoring/exit-submit phase — it lifts "
         "ONLY the chain-sync READ entry points (run_chain_sync + connection/portfolio helpers)."
     )
+
+
+def test_chain_sync_skips_direct_ctf_when_data_api_matches_local_aggregate():
+    """A consistent Data API aggregate must not fan out into per-token chain calls."""
+    from src.engine.cycle_runtime import _overlay_current_ctf_balances
+    from src.state.chain_reconciliation import ChainPosition
+
+    token_id = "shared-token"
+    portfolio = SimpleNamespace(
+        positions=[
+            SimpleNamespace(
+                state="holding",
+                chain_state="synced",
+                direction="buy_yes",
+                token_id=token_id,
+                no_token_id="",
+                condition_id="condition-1",
+                effective_shares=3.0,
+            ),
+            SimpleNamespace(
+                state="day0_window",
+                chain_state="synced",
+                direction="buy_yes",
+                token_id=token_id,
+                no_token_id="",
+                condition_id="condition-1",
+                effective_shares=2.0,
+            ),
+        ]
+    )
+    api_positions = [
+        ChainPosition(
+            token_id=token_id,
+            size=5.005,
+            avg_price=0.4,
+            cost=2.002,
+            condition_id="condition-1",
+        )
+    ]
+    direct_reader = MagicMock()
+    clob = SimpleNamespace(get_ctf_collateral_payload=direct_reader)
+
+    positions, stats = _overlay_current_ctf_balances(
+        portfolio,
+        clob,
+        api_positions,
+        ChainPosition=ChainPosition,
+    )
+
+    assert positions == api_positions
+    direct_reader.assert_not_called()
+    assert stats == {
+        "ctf_balance_tokens_refreshed": 0,
+        "ctf_balance_tokens_skipped_consistent": 1,
+    }
+
+
+def test_chain_sync_direct_ctf_targets_only_missing_or_mismatched_tokens():
+    """Direct CTF preserves ambiguity coverage without re-reading matched tokens."""
+    from src.engine.cycle_runtime import _overlay_current_ctf_balances
+    from src.state.chain_reconciliation import ChainPosition
+
+    portfolio = SimpleNamespace(
+        positions=[
+            SimpleNamespace(
+                state="holding",
+                chain_state="synced",
+                direction="buy_yes",
+                token_id="matched-token",
+                no_token_id="",
+                condition_id="condition-matched",
+                effective_shares=5.0,
+            ),
+            SimpleNamespace(
+                state="holding",
+                chain_state="synced",
+                direction="buy_yes",
+                token_id="missing-token",
+                no_token_id="",
+                condition_id="condition-missing",
+                effective_shares=0.01,
+            ),
+            SimpleNamespace(
+                state="holding",
+                chain_state="synced",
+                direction="buy_yes",
+                token_id="mismatched-token",
+                no_token_id="",
+                condition_id="condition-mismatched",
+                effective_shares=4.0,
+            ),
+        ]
+    )
+    api_positions = [
+        ChainPosition(
+            token_id="matched-token",
+            size=5.0,
+            avg_price=0.4,
+            cost=2.0,
+            condition_id="condition-matched",
+        ),
+        ChainPosition(
+            token_id="mismatched-token",
+            size=2.0,
+            avg_price=0.5,
+            cost=1.0,
+            condition_id="condition-mismatched",
+        ),
+    ]
+    requested_tokens: list[str] = []
+
+    def direct_reader(*, token_ids):
+        requested_tokens.extend(token_ids)
+        return {
+            "authority_tier": "CHAIN",
+            "ctf_token_balances_units": {
+                "missing-token": 10_000,
+                "mismatched-token": 4_000_000,
+            },
+        }
+
+    overlaid, stats = _overlay_current_ctf_balances(
+        portfolio,
+        SimpleNamespace(get_ctf_collateral_payload=direct_reader),
+        api_positions,
+        ChainPosition=ChainPosition,
+    )
+
+    assert requested_tokens == ["mismatched-token", "missing-token"]
+    by_token = {position.token_id: position for position in overlaid}
+    assert by_token["matched-token"] is api_positions[0]
+    assert by_token["missing-token"].size == pytest.approx(0.01)
+    assert by_token["mismatched-token"].size == pytest.approx(4.0)
+    assert stats == {
+        "ctf_balance_tokens_refreshed": 2,
+        "ctf_balance_tokens_skipped_consistent": 1,
+        "ctf_balance_authority": "CHAIN",
+    }
+
+
+def test_chain_sync_direct_ctf_still_fails_closed_on_targeted_omission():
+    """An ambiguous token remains blocked when its direct response is incomplete."""
+    from src.engine.cycle_runtime import _overlay_current_ctf_balances
+    from src.state.chain_reconciliation import ChainPosition
+
+    portfolio = SimpleNamespace(
+        positions=[
+            SimpleNamespace(
+                state="holding",
+                chain_state="synced",
+                direction="buy_yes",
+                token_id="missing-token",
+                no_token_id="",
+                condition_id="condition-missing",
+                effective_shares=1.0,
+            )
+        ]
+    )
+    clob = SimpleNamespace(
+        get_ctf_collateral_payload=lambda **_kwargs: {
+            "authority_tier": "CHAIN",
+            "ctf_token_balances_units": {},
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="response is incomplete"):
+        _overlay_current_ctf_balances(
+            portfolio,
+            clob,
+            [],
+            ChainPosition=ChainPosition,
+        )
 
 
 def test_collateral_degraded_snapshot_is_scheduler_failure(monkeypatch, tmp_path):
