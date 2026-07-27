@@ -1935,3 +1935,33 @@ Acceptance requires:
 - standard hot-fix deployment, targeted current-day source replay, and live
   evidence that Tel Aviv current-state remaining-window probabilities become
   fresh before evaluating exits.
+
+## 2026-07-27 Boot event-claim recovery under world-writer contention
+
+The post-auction-fix restart proved a runtime continuity defect: prerequisite
+sidecars were healthy and writing the canonical world DB, but the main daemon's
+boot-only prior-runtime claim recovery attempted `BEGIN IMMEDIATE`, received
+`SQLITE_BUSY`, and let that transient contention terminate the process before
+the scheduler and held-position monitor could start. Repeated launchd restarts
+therefore preserved process churn while eliminating continuous redecision.
+
+The correction defers only SQLite busy/locked errors from this boot-only claim
+release. All other database errors remain fail-loud. SCOPE is prior-runtime
+event claims during boot. DRAIN is the existing event reactor claim path, whose
+300-second processing lease makes stale claims reclaimable after scheduler
+start. RESET is the next successful claim transaction or later successful boot
+recovery. No event is acknowledged, discarded, or relabeled by the defer path.
+
+Allowed files are `src/main.py`, the focused runtime failure-surface antibody,
+and this plan. No probability, strategy, execution threshold, order band,
+lifecycle, schema, source, settlement, or risk change is allowed.
+
+Acceptance requires:
+
+- a real SQLite writer-contention antibody proving boot continues and closes
+  its candidate connection;
+- a non-lock `OperationalError` antibody proving corruption/I/O faults still
+  terminate boot;
+- existing boot ordering/recovery tests, source compile, and diff checks pass;
+- standard hot-fix landing followed by loaded-SHA, process, heartbeat, monitor
+  cadence, canonical event/receipt, and current rejection-reason evidence.

@@ -7103,6 +7103,68 @@ def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> N
     assert fake_conn.closed is True
 
 
+def test_edli_boot_event_claim_recovery_defers_when_world_writer_is_busy(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A sidecar world write at boot must not prevent the scheduler from starting."""
+    import src.main as main_module
+
+    db_path = tmp_path / "world.db"
+    lock_holder = sqlite3.connect(db_path, timeout=0)
+    candidate = sqlite3.connect(db_path, timeout=0)
+    lock_holder.execute("CREATE TABLE sentinel (value INTEGER)")
+    lock_holder.commit()
+    lock_holder.execute("BEGIN IMMEDIATE")
+    monkeypatch.setattr(main_module, "get_world_connection", lambda: candidate)
+
+    try:
+        assert (
+            main_module._edli_boot_event_claim_recovery(
+                boot_at=datetime.now(timezone.utc)
+            )
+            == 0
+        )
+    finally:
+        lock_holder.rollback()
+        lock_holder.close()
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        candidate.execute("SELECT 1")
+
+
+def test_edli_boot_event_claim_recovery_keeps_non_lock_db_errors_fail_loud(
+    monkeypatch,
+) -> None:
+    """Only transient SQLite lock contention may defer boot claim recovery."""
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class BrokenWriteLock:
+        def __enter__(self):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    fake_conn = FakeConn()
+    monkeypatch.setattr(main_module, "get_world_connection", lambda: fake_conn)
+    monkeypatch.setattr(state_db, "world_write_lock", lambda conn: BrokenWriteLock())
+
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+        main_module._edli_boot_event_claim_recovery(
+            boot_at=datetime.now(timezone.utc)
+        )
+
+    assert fake_conn.closed is True
+
+
 def test_main_orders_boot_command_recovery_before_reactor_registration() -> None:
     """Boot-recoverable restart drift must be consumed before any entry reactor can submit."""
     import inspect

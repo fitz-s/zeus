@@ -4928,10 +4928,21 @@ def _edli_boot_event_claim_recovery(*, boot_at: datetime) -> int:
 
     world = get_world_connection()
     try:
-        with world_write_lock(world):
-            recovered = EventStore(world).requeue_processing_before_boot(
-                boot_at=boot_at.astimezone(timezone.utc).isoformat()
+        try:
+            with world_write_lock(world):
+                recovered = EventStore(world).requeue_processing_before_boot(
+                    boot_at=boot_at.astimezone(timezone.utc).isoformat()
+                )
+        except sqlite3.OperationalError as exc:
+            if not _edli_is_sqlite_lock_error(exc):
+                raise
+            # SCOPE: only prior-runtime event claims at boot. DRAIN: EventStore's
+            # normal 300-second processing lease makes them reclaimable once the
+            # scheduler starts. RESET: the next successful claim or boot recovery.
+            logger.warning(
+                "edli_boot_event_claim_recovery: deferred because world writer is busy"
             )
+            return 0
     finally:
         world.close()
     if recovered:
