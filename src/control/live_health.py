@@ -5109,6 +5109,14 @@ _GLOBAL_AUCTION_RECEIPT_MODES = (
     "global_single_order_auction_delta",
     "global_single_order_auction_duplicate",
 )
+_LATEST_GLOBAL_AUCTION_RECEIPT_SQL = """
+    SELECT id, mode, artifact_json, timestamp
+      FROM decision_log NOT INDEXED
+     WHERE mode IN (?, ?, ?)
+       AND timestamp >= ?
+     ORDER BY id DESC
+     LIMIT 1
+"""
 
 
 def _decode_global_auction_candidate_payload(
@@ -5473,14 +5481,7 @@ def _latest_global_auction_candidate_counts(
             "skip_reason": "GLOBAL_AUCTION_DECISION_LOG_UNAVAILABLE",
         }
     row = conn.execute(
-        """
-        SELECT id, mode, artifact_json, timestamp
-          FROM decision_log
-         WHERE mode IN (?, ?, ?)
-           AND timestamp >= ?
-         ORDER BY id DESC
-         LIMIT 1
-        """,
+        _LATEST_GLOBAL_AUCTION_RECEIPT_SQL,
         (*_GLOBAL_AUCTION_RECEIPT_MODES, cutoff),
     ).fetchone()
     if row is None:

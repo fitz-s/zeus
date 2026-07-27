@@ -4995,6 +4995,31 @@ def test_high_yes_no_submit_window_uses_indexed_decision_time() -> None:
     )
 
 
+def test_high_yes_latest_auction_reads_primary_key_tail_without_temp_sort() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE decision_log ("
+        "id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT, timestamp TEXT)"
+    )
+    conn.execute("CREATE INDEX idx_decision_log_ts ON decision_log(timestamp)")
+    params = (
+        *live_health._GLOBAL_AUCTION_RECEIPT_MODES,
+        _now_iso(-48 * 3600),
+    )
+
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN " + live_health._LATEST_GLOBAL_AUCTION_RECEIPT_SQL,
+        params,
+    ).fetchall()
+    conn.close()
+
+    details = [str(row["detail"]) for row in plan]
+    assert any("SCAN decision_log" in detail for detail in details)
+    assert all("idx_decision_log_ts" not in detail for detail in details)
+    assert all("USE TEMP B-TREE" not in detail for detail in details)
+
+
 def test_high_yes_edge_degrades_when_quality_yes_no_trade_has_no_order_chain(
     tmp_path: Path,
 ) -> None:
