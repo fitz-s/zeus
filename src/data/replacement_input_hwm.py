@@ -7,10 +7,10 @@
 Moved out of ``src/engine/event_reactor_adapter.py`` (W0.1, 2026-07-02) so read
 paths other than the no-submit-cert path can enforce the SAME fail-closed
 raw-input tripwire without a private cross-module import. Compares the latest
-raw ``raw_model_forecasts`` / ``raw_forecast_artifacts`` ``source_cycle_time``
-available by ``decision_time`` against a served posterior's
-``source_cycle_time``; a newer raw input than the posterior means the
-posterior is stale and must not be served for a live trade decision. For
+materializable ``raw_model_forecasts`` cycle and anchor
+``raw_forecast_artifacts`` cycle available by ``decision_time`` against a
+served posterior's ``source_cycle_time``; a newer qualified input cycle means
+the posterior is stale and must not be served for a live trade decision. For
 used-model rows from the same cycle, a raw capture/available timestamp newer
 than the posterior ``computed_at`` is also stale: the posterior did not see the
 latest executable row for its own model family.
@@ -969,13 +969,14 @@ def replacement_live_input_lag_reason(
     if (
         rich_used_input_provenance
         and used_raw_mark is not None
+        and used_raw_mark[0] == posterior_cycle
         and posterior_computed is not None
         and used_raw_mark[1] is not None
         and used_raw_mark[1] > posterior_computed
     ):
         lag_seconds = (used_raw_mark[1] - posterior_computed).total_seconds()
         return (
-            "basis=used_raw_model_forecasts_late_input:"
+            "basis=used_raw_model_forecasts_same_cycle_late_input:"
             f"latest_raw_cycle={used_raw_mark[0].isoformat()}:"
             f"posterior_cycle={posterior_cycle.isoformat()}:"
             f"latest_raw_input_at={used_raw_mark[1].isoformat()}:"
@@ -993,20 +994,20 @@ def replacement_live_input_lag_reason(
             ),
             "source_cycle_time_raw_forecast_artifacts_lag",
         ),
+        (
+            latest_raw_model_input_cycle(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_time=decision_time,
+            ),
+            "source_cycle_time_raw_model_forecasts_lag",
+        ),
     ]
     if not rich_used_input_provenance:
         candidates.extend(
             (
-                (
-                    latest_raw_model_input_cycle(
-                        conn,
-                        city=city,
-                        target_date=target_date,
-                        metric=metric,
-                        decision_time=decision_time,
-                    ),
-                    "source_cycle_time_raw_model_forecasts_lag",
-                ),
                 (
                     used_raw_mark[0] if used_raw_mark is not None else None,
                     "source_cycle_time_used_raw_model_forecasts_lag",

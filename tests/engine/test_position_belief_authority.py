@@ -558,6 +558,66 @@ class TestLoadReplacementBelief:
         assert belief.latest_raw_cycle_time is None
         assert belief.raw_cycle_lag_hours is None
 
+    def test_partial_newer_used_model_does_not_stale_rich_posterior(self, forecasts_db):
+        """One early provider cannot invalidate the last complete source-clock carrier."""
+        posterior_cycle = NOW - timedelta(hours=12)
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=4)).isoformat(),
+            source_cycle_time=posterior_cycle.isoformat(),
+            q={BIN: 0.242},
+        )
+        conn = sqlite3.connect(forecasts_db)
+        conn.execute("ALTER TABLE raw_model_forecasts ADD COLUMN model TEXT")
+        conn.execute(
+            "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = 'p1'",
+            (
+                json.dumps(
+                    {
+                        "bayes_precision_fusion": {
+                            "used_models": ["icon_eu", "ecmwf_ifs"],
+                            "current_value_serving": {
+                                "icon_eu": {"served_via": "single_runs"},
+                                "ecmwf_ifs": {"served_via": "single_runs"},
+                            },
+                            "current_evidence_shape": {
+                                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                            },
+                        }
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO raw_model_forecasts (
+                city, target_date, metric, source_cycle_time, endpoint,
+                coverage_status, captured_at, source_available_at, model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Karachi",
+                "2026-06-12",
+                "high",
+                (NOW - timedelta(hours=6)).isoformat(),
+                "single_runs",
+                "COVERED",
+                (NOW - timedelta(minutes=30)).isoformat(),
+                (NOW - timedelta(minutes=40)).isoformat(),
+                "icon_eu",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.fresh is True
+        assert belief.freshness_basis == "source_cycle_time"
+        assert belief.raw_input_lag_reason is None
+
     def test_newer_raw_artifact_cycle_marks_posterior_stale_before_raw_model_rows(self, forecasts_db):
         """Anchor artifacts are upstream live inputs; monitor freshness cannot
         stay green just because BAYES_PRECISION_FUSION raw rows have not caught
