@@ -4303,16 +4303,81 @@ def process_current_global_batch(
                     ):
                         return reject("GLOBAL_PREFLIGHT_BLOCKED_CANDIDATE_INVALID")
                     reason = preflight.reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED"
-                    excluded_by_candidate[candidate_key] = reason
+                    candidate_exclusion_keys = (candidate_key,)
+                    entry_scope_exclusion = reason.startswith(
+                        (
+                            "LIVE_ENTRY_BLOCKED:entry_readiness_family:",
+                            "LIVE_ENTRY_BLOCKED:entry_readiness:",
+                        )
+                    )
+                    if reason.startswith(
+                        "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
+                    ):
+                        candidate_exclusion_keys = tuple(
+                            sorted(
+                                {
+                                    (
+                                        "BUY",
+                                        str(getattr(asset, "family_key", "") or ""),
+                                        str(getattr(asset, "bin_id", "") or ""),
+                                        str(getattr(asset, "side", "") or ""),
+                                        str(getattr(asset, "token_id", "") or ""),
+                                    )
+                                    for asset in tuple(
+                                        getattr(attempt_book_epoch, "assets", ())
+                                        or ()
+                                    )
+                                    if str(
+                                        getattr(asset, "family_key", "") or ""
+                                    )
+                                    == candidate_key[1]
+                                }
+                            )
+                        )
+                    elif reason.startswith(
+                        "LIVE_ENTRY_BLOCKED:entry_readiness:"
+                    ):
+                        candidate_exclusion_keys = tuple(
+                            sorted(
+                                {
+                                    (
+                                        "BUY",
+                                        str(getattr(asset, "family_key", "") or ""),
+                                        str(getattr(asset, "bin_id", "") or ""),
+                                        str(getattr(asset, "side", "") or ""),
+                                        str(getattr(asset, "token_id", "") or ""),
+                                    )
+                                    for asset in tuple(
+                                        getattr(attempt_book_epoch, "assets", ())
+                                        or ()
+                                    )
+                                }
+                            )
+                        )
+                    if (
+                        not candidate_exclusion_keys
+                        or candidate_key not in candidate_exclusion_keys
+                        or entry_scope_exclusion
+                        and any(
+                            not all(key) or key[0] != "BUY"
+                            for key in candidate_exclusion_keys
+                        )
+                    ):
+                        return reject(
+                            "GLOBAL_PREFLIGHT_ENTRY_SCOPE_EXCLUSION_INVALID"
+                        )
+                    for exclusion_key in candidate_exclusion_keys:
+                        excluded_by_candidate[exclusion_key] = reason
                     preflight_candidate_ineligible_by_event[winner_id] = (
                         f"{getattr(candidate, 'candidate_id', '')}:{reason}"
                     )
                     _LOG.info(
                         "global batch preflight candidate excluded: candidate=%s "
-                        "event=%s reason=%s excluded=%d",
+                        "event=%s reason=%s scope=%d excluded=%d",
                         getattr(candidate, "candidate_id", ""),
                         winner_id,
                         reason,
+                        len(candidate_exclusion_keys),
                         len(excluded_by_candidate),
                     )
                 elif preflight.status == "CURVE_SUPERSEDED":

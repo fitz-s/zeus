@@ -10064,6 +10064,11 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "CANDIDATE_BLOCKED",
         ),
         (
+            "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
+            "EDLI_STAGE_LIVE_CAP_RESERVED:1",
+            "CANDIDATE_BLOCKED",
+        ),
+        (
             "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
             "GLOBAL_SELL_POSITION_EXIT_ALREADY_ACTIVE",
             "CANDIDATE_BLOCKED",
@@ -19824,6 +19829,12 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "SELL",
         ),
         (
+            "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
+            "EDLI_STAGE_LIVE_CAP_RESERVED:1",
+            "BUY",
+            "SELL",
+        ),
+        (
             "FDR_REJECTED:event_type=DAY0_EXTREME_UPDATED:"
             "attempted=22:selected_post_fdr=0:alpha=0.100000",
             "BUY",
@@ -19878,14 +19889,26 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         side="NO",
         token_id="token-a",
     )
+    family_entry_block = reason.startswith(
+        "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
+    )
     candidate_b = SimpleNamespace(
         candidate_id="candidate-b",
-        action=sibling_action,
+        action=("BUY" if family_entry_block else sibling_action),
+        family_key=family_key,
+        bin_id=("bin-b" if family_entry_block else "bin-a"),
+        side=("YES" if family_entry_block else "NO"),
+        token_id=("token-b" if family_entry_block else "token-a"),
+    )
+    candidate_c = SimpleNamespace(
+        candidate_id="candidate-c",
+        action="SELL",
         family_key=family_key,
         bin_id="bin-a",
         side="NO",
         token_id="token-a",
     )
+    winner_candidate = candidate_c if family_entry_block else candidate_b
     selections = iter(
         SimpleNamespace(
             decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
@@ -19898,7 +19921,7 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         )
         for candidate, identity in (
             (candidate_a, "actuation-a"),
-            (candidate_b, "actuation-b"),
+            (winner_candidate, "actuation-b"),
         )
     )
     base_asset = _global_test_book("book-candidate", price="0.40").assets[0]
@@ -19913,11 +19936,22 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
             }
         )
     )
+    sibling_buy_asset = SimpleNamespace(
+        **(
+            vars(base_asset)
+            | {
+                "family_key": family_key,
+                "bin_id": candidate_b.bin_id,
+                "token_id": candidate_b.token_id,
+                "side": candidate_b.side,
+            }
+        )
+    )
     book = SimpleNamespace(
         witness_identity="book-candidate",
         captured_at_utc=decision_at,
         max_age=_dt.timedelta(seconds=30),
-        assets=(asset,),
+        assets=((asset, sibling_buy_asset) if family_entry_block else (asset,)),
         sell_assets=(asset,),
     )
     calls = {
@@ -19961,7 +19995,13 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
                 else None
             )
             assert policy(candidate_a) == expected_a
-            assert policy(candidate_b) is None
+            if family_entry_block:
+                assert policy(candidate_b) == (
+                    f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{reason}"
+                )
+                assert policy(candidate_c) is None
+            else:
+                assert policy(candidate_b) is None
             assert kwargs["preflight_excluded_by_family"] == {}
         calls["select"] += 1
         return next(selections)
@@ -20015,7 +20055,7 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         )
 
     def actuate(_event, actuation, _at, token, _authority):
-        assert actuation.decision.candidate is candidate_b
+        assert actuation.decision.candidate is winner_candidate
         assert token == "binding-b"
         calls["venue"] += 1
         return EventSubmissionReceipt(
@@ -20058,7 +20098,7 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
     assert calls == {
         "select": 2,
         "wealth": 1,
-        "preflight": ["candidate-a", "candidate-b"],
+        "preflight": ["candidate-a", winner_candidate.candidate_id],
         "proof_wrapper": (
             1
             if reason.startswith("GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:")

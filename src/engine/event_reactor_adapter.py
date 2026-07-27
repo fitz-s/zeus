@@ -11000,10 +11000,18 @@ def _global_preflight_block_status(reason: str) -> str:
         # current probability, book, and wealth epoch remain valid for every
         # other candidate, so exclude this SELL and re-run the same auction.
         return "CANDIDATE_BLOCKED"
-    if reason.startswith("LIVE_ENTRY_BLOCKED:entry_readiness:"):
-        # Entry readiness governs BUY admission only.  The reduce-only SELL path
-        # bypasses it above, so rejecting the complete epoch here would let an
-        # unrelated BUY-side hold starve a current executable exit.
+    if reason.startswith(
+        (
+            "LIVE_ENTRY_BLOCKED:entry_readiness:",
+            "LIVE_ENTRY_BLOCKED:entry_readiness_family:",
+        )
+    ):
+        # SCOPE: entry readiness governs BUY admission only. The batch runner
+        # expands this typed reason to every BUY in the reported global/family
+        # scope while preserving SELL. DRAIN: re-run this complete
+        # BUY/SELL/HOLD/CASH cut immediately. RESET: the next cut rebuilds
+        # readiness from current state. Rejecting the complete epoch here would
+        # let an entry hold starve an executable reduce-only SELL.
         return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (
