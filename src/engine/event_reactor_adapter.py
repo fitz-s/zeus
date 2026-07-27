@@ -12326,16 +12326,29 @@ def _bind_global_selected_probability_parent(
 ) -> "_CandidateProof":
     """Bind a forecast winner to the exact posterior generation it ranked."""
 
+    day0_event = event.event_type == "DAY0_EXTREME_UPDATED"
     replacement_day0 = (
-        event.event_type == "DAY0_EXTREME_UPDATED"
+        day0_event
         and str(
             getattr(prepared_global_family, "probability_authority", None) or ""
         ).strip()
         == "replacement_0_1"
     )
+    witness = getattr(prepared_global_family, "probability_witness", None)
+    direct_replacement_day0 = (
+        replacement_day0
+        and str(getattr(witness, "band_basis", "") or "")
+        == _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
+    )
+    if day0_event and not direct_replacement_day0:
+        # Conditioned, remaining-day, absorbing, final-daily, and deterministic
+        # Day0 witnesses are current random variables in their own right. Their
+        # content identity and freshness were already compared before this
+        # seam; a supporting replacement row is not their probability parent.
+        return proof
     if (
         event.event_type not in _FORECAST_DECISION_EVENT_TYPES
-        and not replacement_day0
+        and not direct_replacement_day0
     ):
         return proof
     raw_posterior_id = getattr(prepared_global_family, "posterior_id", None)

@@ -11521,6 +11521,59 @@ def test_global_selected_proof_binds_exact_prepared_posterior_parent():
         )
 
 
+def test_global_conditioned_day0_does_not_bind_supporting_posterior_as_parent():
+    _family, proofs, _payload = _corpus()[0]
+    proof = replace(
+        proofs[0],
+        posterior_id=41,
+        probability_authority="day0_absorbing_hard_fact",
+    )
+    event = SimpleNamespace(event_type="DAY0_EXTREME_UPDATED")
+    prepared = SimpleNamespace(
+        posterior_id=42,
+        probability_authority="replacement_0_1",
+        probability_witness=SimpleNamespace(
+            band_basis=era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+        ),
+    )
+
+    bound = era._bind_global_selected_probability_parent(
+        proof,
+        prepared_global_family=prepared,
+        event=event,
+    )
+
+    assert bound.posterior_id == 41
+    assert bound.probability_authority == "day0_absorbing_hard_fact"
+
+
+def test_global_provisional_day0_keeps_direct_posterior_parent_strict():
+    _family, proofs, _payload = _corpus()[0]
+    proof = replace(
+        proofs[0],
+        posterior_id=41,
+        probability_authority="replacement_0_1",
+    )
+    event = SimpleNamespace(event_type="DAY0_EXTREME_UPDATED")
+    prepared = SimpleNamespace(
+        posterior_id=42,
+        probability_authority="replacement_0_1",
+        probability_witness=SimpleNamespace(
+            band_basis=era._GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH",
+    ):
+        era._bind_global_selected_probability_parent(
+            proof,
+            prepared_global_family=prepared,
+            event=event,
+        )
+
+
 def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
     family, proofs, payload = _corpus()[0]
     captured_at = "2026-06-13T11:59:59.900000+00:00"

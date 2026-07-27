@@ -2035,3 +2035,38 @@ Acceptance requires:
 - hot-fix landing and restart prove current loaded SHA, no new batch-wide
   posterior mismatch, no receipt scalar mismatch, advancing exits, and fresh
   canonical runtime evidence.
+
+## 2026-07-27 Day0 global probability-parent separation
+
+Post-restart auction receipts isolated a second parent-shape defect. A current
+Day0 candidate proof truthfully carried observation authority such as
+`day0_absorbing_hard_fact`, while the independently rebuilt global witness
+carried the replacement posterior ID that supplied its remaining-day forecast.
+The selected-proof seam required both facts to have the same authority label,
+so a positive predictive-mean candidate was repeatedly rejected even after the
+complete current witness had passed freshness and identity validation.
+
+The correction keeps the two facts separate. Conditioned, remaining-day,
+absorbing, final-daily, and deterministic Day0 witnesses retain their own
+current identity and observation authority; a supporting replacement row is
+not relabeled as their probability parent. Forecast events and provisional
+Day0 witnesses directly priced by replacement q retain exact posterior-parent
+and authority-label equality.
+
+SCOPE is the selected Day0 proof-to-global-witness parent seam. DRAIN is the
+next candidate-local preflight and same-cut re-auction before any venue side
+effect. RESET is a fresh Day0 proof whose observation authority and replacement
+parent are both represented without cross-category equality. No probability
+formula, source, FDR, Kelly, sizing, order band, lifecycle, or settlement rule
+changes.
+
+Acceptance requires:
+
+- a non-provisional Day0 antibody proving its observation authority survives
+  even when a supporting replacement row advances;
+- a provisional Day0 antibody proving a mismatched direct posterior parent
+  still fails closed;
+- forecast-parent strictness and the full global-auction integration suite stay
+  green;
+- hot-fix landing and restart prove the recurring live candidate no longer
+  emits `GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH`.
