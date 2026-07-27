@@ -93,8 +93,7 @@ rows had that "fresher" posterior computed AFTER the position's own
 POSITION_OPEN_INTENT, median +26.8h. Predicate identity is NOT in
 ``schema_version`` (which is 1 on every row and tracks table shape, never
 algorithm), so ``graded_at`` is the discriminator — use
-``fresher_flag_is_trustworthy`` / ``TRUSTWORTHY_FRESHER_FLAG_SQL``, never the
-literal 1 alone:
+``fresher_flag_is_trustworthy``, never the literal 1 alone:
 
     SELECT * FROM settlement_attribution
      WHERE fresher_cycle_existed_at_decision = 1
@@ -1599,11 +1598,6 @@ def compute_skill_win_rate(world_conn: sqlite3.Connection) -> SkillWinRate:
     )
 
 
-TRUSTWORTHY_FRESHER_FLAG_SQL: str = (
-    "graded_at >= '" + STALE_PREDICATE_FIX_LANDED_AT + "'"
-)
-
-
 def count_discredited_stale_brands(world_conn: sqlite3.Connection) -> int:
     """STALE_DECISION rows whose brand rests SOLELY on a discredited flag value.
 
@@ -1622,18 +1616,19 @@ def count_discredited_stale_brands(world_conn: sqlite3.Connection) -> int:
     """
     return int(
         world_conn.execute(
-            f"""
+            """
             SELECT COUNT(*)
               FROM settlement_attribution
              WHERE category = 'STALE_DECISION'
                AND fresher_cycle_existed_at_decision = 1
-               AND NOT ({TRUSTWORTHY_FRESHER_FLAG_SQL})
+               AND graded_at < ?
                AND (
                      decision_posterior_age_hours IS NULL
                      OR freshness_budget_hours IS NULL
                      OR decision_posterior_age_hours <= freshness_budget_hours
                )
-            """
+            """,
+            (STALE_PREDICATE_FIX_LANDED_AT,),
         ).fetchone()[0]
     )
 
