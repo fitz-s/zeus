@@ -708,8 +708,6 @@ def replacement_no_bound_certificate_mismatch_reason(
 
     if not same(yes_q, same_bin_yes_posterior):
         return "served_yes_q"
-    if not same(no_q, q_direction):
-        return "served_no_q"
     if not same(no_q, 1.0 - yes_q):
         return "binary_complement_q"
     if not same(no_lcb_raw, 1.0 - yes_ucb):
@@ -718,17 +716,36 @@ def replacement_no_bound_certificate_mismatch_reason(
         no_lcb_served < no_lcb_raw - 1e-12
     ):
         return "coverage_shrink_flag"
-    if not math.isfinite(q_lcb) or q_lcb < 0.0 or q_lcb > no_q + 1e-12:
+    if (
+        not math.isfinite(q_direction)
+        or not 0.0 <= q_direction <= 1.0
+        or not math.isfinite(q_lcb)
+        or q_lcb < 0.0
+        or q_lcb > q_direction + 1e-12
+    ):
         return "served_no_lcb_order"
-    if same(q_lcb, no_lcb_served):
+    point_matches_served_parent = same(no_q, q_direction)
+    if point_matches_served_parent and same(q_lcb, no_lcb_served):
         return None
     economics = qkernel_execution_economics
     if not isinstance(economics, Mapping):
-        return "qkernel_economics_missing"
+        return (
+            "served_no_q"
+            if not point_matches_served_parent
+            else "qkernel_economics_missing"
+        )
     if economics.get("q_lcb_authority") != "qkernel_payoff_bound":
-        return "qkernel_q_lcb_authority"
+        return (
+            "served_no_q"
+            if not point_matches_served_parent
+            else "qkernel_q_lcb_authority"
+        )
     if economics.get("probability_authority") != "qkernel_payoff_direct_route":
-        return "qkernel_probability_authority"
+        return (
+            "served_no_q"
+            if not point_matches_served_parent
+            else "qkernel_probability_authority"
+        )
     try:
         pre_q = float(economics["pre_qkernel_q_posterior"])
         pre_lcb = float(economics["pre_qkernel_q_lcb_5pct"])
@@ -742,6 +759,10 @@ def replacement_no_bound_certificate_mismatch_reason(
         return "qkernel_pre_q"
     if not same(pre_lcb, no_lcb_served):
         return "qkernel_pre_lcb"
+    # The replacement certificate binds the source-clock parent (`pre_q`).
+    # A sealed current-state witness may legitimately re-decide the action at a
+    # different Day0 point; its payoff q, not the parent scalar, must then match
+    # the submitted direction.
     if not same(payoff_q, q_direction):
         return "qkernel_payoff_q"
     if not same(payoff_lcb, q_lcb):

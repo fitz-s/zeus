@@ -2101,6 +2101,7 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
 
     current_cert = {
         **new_proof.qkernel_execution_economics,
+        "payoff_q_point": 0.59,
         "payoff_q_lcb": 0.58,
         "edge_lcb": 0.26,
     }
@@ -2109,8 +2110,15 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
         current_cert,
     )
 
+    assert current_proof.q_posterior == pytest.approx(0.59)
     assert current_proof.q_lcb_5pct == pytest.approx(0.58)
     assert current_proof.trade_score == pytest.approx(0.26)
+    assert current_proof.qkernel_execution_economics[
+        "pre_qkernel_q_posterior"
+    ] == pytest.approx(0.652)
+    assert current_proof.qkernel_execution_economics[
+        "payoff_q_point"
+    ] == pytest.approx(0.59)
     assert era.replacement_no_bound_certificate_matches(
         current_proof.replacement_no_bound_certificate,
         expected=expected,
@@ -2144,9 +2152,41 @@ def test_global_current_state_proof_replaces_legacy_bound_with_current_witness()
 
     current = era._bind_global_current_state_economics_to_proof(proof, cert)
 
+    assert current.q_posterior == pytest.approx(0.652)
     assert current.q_lcb_5pct == pytest.approx(0.61)
     assert current.trade_score == pytest.approx(0.29)
     assert current.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(0.61)
+
+
+def test_global_current_state_proof_rebinds_selected_day0_point():
+    economics = _selected_economics(
+        edge_lcb=0.28,
+        cost=0.32,
+        q_dot_payoff=0.652,
+        point_ev=0.332,
+    )
+    proof = _overlay_proof(
+        q_posterior=0.652,
+        q_lcb_5pct=0.617,
+        economics=economics,
+    )
+    cert = {
+        **proof.qkernel_execution_economics,
+        "payoff_q_point": 0.71,
+        "payoff_q_lcb": 0.61,
+        "edge_lcb": 0.29,
+    }
+
+    current = era._bind_global_current_state_economics_to_proof(proof, cert)
+
+    assert current.q_posterior == pytest.approx(0.71)
+    assert current.q_lcb_5pct == pytest.approx(0.61)
+    assert current.qkernel_execution_economics[
+        "pre_qkernel_q_posterior"
+    ] == pytest.approx(0.652)
+    assert current.qkernel_execution_economics[
+        "payoff_q_point"
+    ] == pytest.approx(0.71)
 
 
 def test_global_current_state_proof_preserves_rest_then_cross_policy():

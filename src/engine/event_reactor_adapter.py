@@ -11891,7 +11891,7 @@ def _bind_global_current_state_economics_to_proof(
     proof: "_CandidateProof",
     cert: Mapping[str, Any],
 ) -> "_CandidateProof":
-    """Carry the current global bound without changing the proven order policy."""
+    """Carry the selected current probability and bound into the order proof."""
 
     missing_reason = str(getattr(proof, "missing_reason", "") or "").strip()
     if not _global_current_state_may_rebind_scalar_rejection(missing_reason):
@@ -11931,16 +11931,19 @@ def _bind_global_current_state_economics_to_proof(
         )
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_ECONOMICS_INVALID")
-    if not math.isclose(q_point, served_q_point, rel_tol=0.0, abs_tol=1e-12):
-        raise ValueError("GLOBAL_CURRENT_STATE_PROOF_POINT_MISMATCH")
     if (
-        not (0.0 <= q_lcb <= q_point <= 1.0)
+        not (0.0 <= served_q_point <= 1.0)
+        or not (0.0 <= q_lcb <= q_point <= 1.0)
         or not 0.0 <= action_q <= 1.0
         or action_edge <= 0.0
         or not (0.0 <= false_edge_rate <= 1.0)
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_ECONOMICS_NON_POSITIVE")
     replacement: dict[str, Any] = {
+        # Identity, source, and executable-book parents were proved before this
+        # seam. The selected current witness owns the action scalar; retaining a
+        # legacy served q here creates an exact-equality ratchet after re-decision.
+        "q_posterior": q_point,
         "q_lcb_5pct": q_lcb,
         "trade_score": action_edge,
         "p_value": false_edge_rate,
