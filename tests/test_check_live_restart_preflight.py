@@ -5452,6 +5452,53 @@ def test_pending_exit_accepts_exact_chain_revalidation_after_snapshot_dust(
     assert proof["latest_event_id"] == "evt-chain-revalidation"
 
 
+def test_pending_exit_accepts_chain_revalidation_with_finer_projection_precision(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    _insert_snapshot_min_order_dust_hold(
+        trade,
+        add_later_chain_revalidation=True,
+    )
+    trade.execute(
+        """
+        UPDATE position_current
+           SET shares = 3.112523,
+               chain_shares = 3.1125
+         WHERE position_id = 'snapshot-dust-pos'
+        """
+    )
+    payload = {
+        "source": "chain_reconciliation",
+        "chain_state": "synced",
+        "shares_unchanged": True,
+        "chain_shares_before": 3.1125,
+        "chain_shares_after": 3.1125,
+        "shares_after": 3.112523,
+    }
+    trade.execute(
+        """
+        UPDATE position_events
+           SET payload_json = ?
+         WHERE event_id = 'evt-chain-revalidation'
+        """,
+        (json.dumps(payload),),
+    )
+    trade.commit()
+    trade.close()
+
+    check = preflight._pending_exit_check(preflight._open_positions())
+
+    assert check.ok is True
+    proof = check.evidence["tolerated"][0]["repair_evidence"]
+    assert proof["held_shares"] == pytest.approx(3.1125)
+    assert proof["projected_shares"] == pytest.approx(3.112523)
+    assert proof["latest_event_id"] == "evt-chain-revalidation"
+
+
 @pytest.mark.parametrize(
     "mutation_sql",
     [

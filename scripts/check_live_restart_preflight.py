@@ -5309,6 +5309,7 @@ def _snapshot_min_order_dust_holds_by_position() -> dict[str, dict[str, Any]]:
                    pc.order_status,
                    pc.updated_at,
                    COALESCE(pc.chain_shares, pc.shares) AS held_shares,
+                   pc.shares AS projected_shares,
                    latest.event_id,
                    latest.sequence_no,
                    latest.event_type,
@@ -5360,6 +5361,7 @@ def _snapshot_min_order_dust_holds_by_position() -> dict[str, dict[str, Any]]:
         )
         try:
             held = Decimal(str(row["held_shares"]))
+            projected = Decimal(str(row["projected_shares"]))
         except (InvalidOperation, ValueError):
             continue
         event_error = payload.get("error")
@@ -5376,6 +5378,8 @@ def _snapshot_min_order_dust_holds_by_position() -> dict[str, dict[str, Any]]:
             and held.is_finite()
             and held > 0
             and held < snapshot_min
+            and projected.is_finite()
+            and projected > 0
         ):
             continue
         position_events = later_by_position.get(str(row["position_id"]), [])
@@ -5389,7 +5393,7 @@ def _snapshot_min_order_dust_holds_by_position() -> dict[str, dict[str, Any]]:
             if event["sequence_no"] > row["sequence_no"]
         ]
         if any(
-            not _dust_hold_preserving_chain_event(event, held)
+            not _dust_hold_preserving_chain_event(event, held, projected)
             for event in later_events
         ):
             continue
@@ -5404,6 +5408,7 @@ def _snapshot_min_order_dust_holds_by_position() -> dict[str, dict[str, Any]]:
             "event_error": event_error,
             "exit_block_class": payload["exit_block_class"],
             "held_shares": row["held_shares"],
+            "projected_shares": row["projected_shares"],
             "exit_order_submitted": False,
             "held_to_settlement_unless_aggregate_exit_available": True,
             "snapshot_min_order_size": str(snapshot_min),
@@ -5450,7 +5455,11 @@ def _strict_positive_json_decimal(value: Any) -> Decimal | None:
         return None
 
 
-def _dust_hold_preserving_chain_event(event: sqlite3.Row, held: Decimal) -> bool:
+def _dust_hold_preserving_chain_event(
+    event: sqlite3.Row,
+    held: Decimal,
+    projected_shares: Decimal,
+) -> bool:
     if (
         event["event_type"] != "CHAIN_SIZE_CORRECTED"
         or event["venue_status"] is not None
@@ -5469,7 +5478,7 @@ def _dust_hold_preserving_chain_event(event: sqlite3.Row, held: Decimal) -> bool
         and payload.get("shares_unchanged") is True
         and before == held
         and after == held
-        and projected == held
+        and projected == projected_shares
     )
 
 
