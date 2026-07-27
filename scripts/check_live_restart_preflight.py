@@ -5493,23 +5493,50 @@ def _dust_hold_preserving_chain_event(
     if (
         event["event_type"] != "CHAIN_SIZE_CORRECTED"
         or event["venue_status"] is not None
-        or event["source_module"] != "src.state.chain_reconciliation"
     ):
         return False
     payload = _strict_json_object(event["payload_json"])
     if payload is None:
         return False
-    before = _strict_positive_json_decimal(payload.get("chain_shares_before"))
-    after = _strict_positive_json_decimal(payload.get("chain_shares_after"))
-    projected = _strict_positive_json_decimal(payload.get("shares_after"))
-    return bool(
-        payload.get("source") == "chain_reconciliation"
-        and payload.get("chain_state") == "synced"
-        and payload.get("shares_unchanged") is True
-        and before == held
-        and after == held
-        and projected == projected_shares
-    )
+    source_module = str(event["source_module"] or "")
+    if source_module == "src.state.chain_reconciliation":
+        before = _strict_positive_json_decimal(payload.get("chain_shares_before"))
+        after = _strict_positive_json_decimal(payload.get("chain_shares_after"))
+        projected = _strict_positive_json_decimal(payload.get("shares_after"))
+        return bool(
+            payload.get("source") == "chain_reconciliation"
+            and payload.get("chain_state") == "synced"
+            and payload.get("shares_unchanged") is True
+            and before == held
+            and after == held
+            and projected == projected_shares
+        )
+    if source_module == "src.state.chain_mirror_reconciler":
+        chain_size = _strict_positive_json_decimal(payload.get("chain_size"))
+        attributed = _strict_positive_json_decimal(
+            payload.get("attributed_chain_shares")
+        )
+        owned_before = _strict_positive_json_decimal(
+            payload.get("owned_shares_before")
+        )
+        owned_after = _strict_positive_json_decimal(
+            payload.get("owned_shares_after")
+        )
+        local_shares = _strict_positive_json_decimal(payload.get("local_shares"))
+        return bool(
+            payload.get("reason") == "chain_economics_observed"
+            and payload.get("reconciler") == "chain_mirror"
+            and payload.get("chain_mirror_classification") == "size_corrected"
+            and payload.get("chain_state_after") == "synced"
+            and payload.get("shares_unchanged") is True
+            and payload.get("unattributed_residual") == 0
+            and chain_size == held
+            and attributed == held
+            and owned_before == projected_shares
+            and owned_after == projected_shares
+            and local_shares == projected_shares
+        )
+    return False
 
 
 def _pending_exit_active_command_monitorable_by_position() -> dict[str, dict[str, Any]]:

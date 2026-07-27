@@ -5531,6 +5531,58 @@ def test_pending_exit_accepts_chain_revalidation_with_finer_projection_precision
     assert proof["latest_event_id"] == "evt-chain-revalidation"
 
 
+def test_pending_exit_accepts_exact_chain_mirror_revalidation_after_snapshot_dust(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    _insert_snapshot_min_order_dust_hold(trade)
+    trade.execute(
+        """
+        INSERT INTO position_events VALUES (
+            'evt-chain-mirror-revalidation', 'snapshot-dust-pos', 2,
+            'CHAIN_SIZE_CORRECTED', '2026-07-23T03:11:00+00:00', NULL,
+            'src.state.chain_mirror_reconciler', ?
+        )
+        """,
+        (
+            json.dumps(
+                {
+                    "reason": "chain_economics_observed",
+                    "reconciler": "chain_mirror",
+                    "chain_mirror_classification": "size_corrected",
+                    "chain_state_after": "synced",
+                    "shares_unchanged": True,
+                    "chain_size": 3.1125,
+                    "attributed_chain_shares": 3.1125,
+                    "owned_shares_before": 3.1125,
+                    "owned_shares_after": 3.1125,
+                    "local_shares": 3.1125,
+                    "unattributed_residual": 0.0,
+                }
+            ),
+        ),
+    )
+    trade.execute(
+        """
+        UPDATE position_current
+           SET updated_at = '2026-07-23T03:11:00+00:00'
+         WHERE position_id = 'snapshot-dust-pos'
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    check = preflight._pending_exit_check(preflight._open_positions())
+
+    assert check.ok is True
+    proof = check.evidence["tolerated"][0]["repair_evidence"]
+    assert proof["revalidation_event_count"] == 1
+    assert proof["latest_event_id"] == "evt-chain-mirror-revalidation"
+
+
 @pytest.mark.parametrize(
     "mutation_sql",
     [
