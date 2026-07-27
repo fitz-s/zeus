@@ -1481,14 +1481,20 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
     user_channel_reader = _edli_user_channel_reader(edli_cfg)
     user_messages = tuple(user_channel_reader.poll(max_messages=max_messages))
 
-    conn = get_world_connection_with_trades_required(write_class="live")
-    _bound_price_channel_sqlite_wait(conn)
+    conn = None
     try:
-        ledger = LiveOrderAggregateLedger(conn)
         with _edli_price_channel_world_write_gate(
             owner="price_channel_user_inbox"
         ):
             try:
+                # Connection bootstrap runs PRAGMA journal_mode=WAL and can
+                # otherwise wait on the SQLite writer before the 25 ms
+                # coordinator deadline is active.
+                conn = get_world_connection_with_trades_required(
+                    write_class="live"
+                )
+                _bound_price_channel_sqlite_wait(conn)
+                ledger = LiveOrderAggregateLedger(conn)
                 for message in user_messages:
                     aggregate_id = _resolve_edli_user_channel_aggregate_id(
                         conn, message
@@ -1687,7 +1693,8 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                 conn.rollback()
                 raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
     # MF-1 / DEFECT-1 bridge pass (capital recoverability). The EDLI events are
     # now durable on world.db. Materialise a canonical position_current row for
@@ -1721,29 +1728,40 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
 
         bridge_conn = None
         try:
-            bridge_conn = get_trade_connection_with_world_required(write_class="live")
-            # Fast in-cycle path: bridge the fills processed THIS cycle first
-            # (zero extra scan). These will already exist by the time the durable
-            # scan runs, so the scan's absence filter skips them — no double work.
-            for _agg_id in sorted(_edli_fill_bridge_aggregate_ids):
-                try:
-                    result = materialize_position_current_from_edli_fill(
-                        bridge_conn, _agg_id, now=now
-                    )
-                    if result is not None:
-                        bridged_positions += 1
-                except Exception as exc:  # noqa: BLE001
-                    logger.error(
-                        "EDLI position bridge failed for aggregate %s (non-fatal; "
-                        "EDLI events persist, durable scan retries): %s",
-                        _agg_id,
-                        exc,
-                        exc_info=True,
-                    )
-            # Authoritative durable scan: heal ANY orphaned confirmed fill,
-            # including ones stranded by a prior restart / swallowed exception.
-            bridged_positions += _edli_durable_fill_bridge_scan(bridge_conn, now=now)
-            bridge_conn.commit()
+            with _PriceChannelWriteGate(
+                owner="price_channel_fill_bridge",
+                scope="trade",
+            ):
+                # As with WORLD above, acquire coordination before the
+                # write-capable connection runs journal bootstrap.
+                bridge_conn = get_trade_connection_with_world_required(
+                    write_class="live"
+                )
+                _bound_price_channel_sqlite_wait(bridge_conn)
+                # Fast in-cycle path: bridge the fills processed THIS cycle first
+                # (zero extra scan). These will already exist by the time the durable
+                # scan runs, so the scan's absence filter skips them — no double work.
+                for _agg_id in sorted(_edli_fill_bridge_aggregate_ids):
+                    try:
+                        result = materialize_position_current_from_edli_fill(
+                            bridge_conn, _agg_id, now=now
+                        )
+                        if result is not None:
+                            bridged_positions += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error(
+                            "EDLI position bridge failed for aggregate %s (non-fatal; "
+                            "EDLI events persist, durable scan retries): %s",
+                            _agg_id,
+                            exc,
+                            exc_info=True,
+                        )
+                # Authoritative durable scan: heal ANY orphaned confirmed fill,
+                # including ones stranded by a prior restart / swallowed exception.
+                bridged_positions += _edli_durable_fill_bridge_scan(
+                    bridge_conn, now=now
+                )
+                bridge_conn.commit()
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "EDLI position bridge pass failed (non-fatal): %s", exc, exc_info=True

@@ -1074,6 +1074,14 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
         )
         return 0
 
+    def _open_world(*args, **kwargs):
+        phase_transactions.append(("world_open", conn.in_transaction, gate_depth))
+        return conn
+
+    def _open_trade(*args, **kwargs):
+        phase_transactions.append(("trade_open", False, gate_depth))
+        return _conn(db_path)
+
     monkeypatch.setattr(
         main,
         "settings",
@@ -1094,14 +1102,19 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
         lambda *, owner: _WorldWriteGate(owner),
     )
     monkeypatch.setattr(
+        main,
+        "_PriceChannelWriteGate",
+        lambda *, owner, scope: _WorldWriteGate(owner),
+    )
+    monkeypatch.setattr(
         _state_db,
         "get_world_connection_with_trades_required",
-        lambda *args, **kwargs: conn,
+        _open_world,
     )
     monkeypatch.setattr(
         _state_db,
         "get_trade_connection_with_world_required",
-        lambda *args, **kwargs: _conn(db_path),
+        _open_trade,
     )
     monkeypatch.setattr(_trade_bridge, "append_confirmed_trade_facts_to_edli", _confirmed_phase)
     monkeypatch.setattr(
@@ -1116,13 +1129,16 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
 
     assert phase_transactions == [
         ("user_poll", False, 0),
+        ("world_open", False, 1),
         ("external_reconcile", False, 0),
         ("confirmed_scan", False, 1),
         ("rest_scan", False, 1),
+        ("trade_open", False, 1),
     ]
     assert gate_owners == [
         "price_channel_user_inbox",
         "price_channel_venue_reconcile",
+        "price_channel_fill_bridge",
     ]
     assert gate_depth == 0
     projection = LiveOrderAggregateLedger(_conn(db_path)).get_projection("event-1:intent-1")
