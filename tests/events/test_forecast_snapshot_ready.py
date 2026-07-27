@@ -602,6 +602,19 @@ def test_restricted_redecision_counts_raw_members_only_for_screened_family(monke
             ("Denver", "2026-05-24T04:17:00+00:00"),
         ],
     )
+    forecasts_conn.execute(
+        """
+        INSERT INTO market_events (
+            market_slug, city, target_date, temperature_metric, condition_id
+        ) VALUES (
+            'chicago-high-2026-05-24',
+            'Chicago',
+            '2026-05-24',
+            'high',
+            'condition-chicago'
+        )
+        """
+    )
     for city, computed_at in (
         ("Chicago", "2026-05-24T04:16:00+00:00"),
         ("Denver", "2026-05-24T04:17:00+00:00"),
@@ -666,7 +679,110 @@ def test_restricted_redecision_counts_raw_members_only_for_screened_family(monke
         phase_filter_exempt_families={("Chicago", "2026-05-24", "high")},
     )
     assert len(fallback) == 1
-    assert any("ranked_ready AS" in sql for sql in traced_sql)
+    assert any(
+        "market_families AS" in sql and "ranked_ready AS" in sql
+        for sql in traced_sql
+    )
+
+
+def test_unrestricted_redecision_drives_readiness_from_current_market_families(
+    monkeypatch,
+):
+    """The global scan must not rank forecast-only historical families first."""
+
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._raw_model_member_counts_for_posterior_rows",
+        lambda _conn, rows, *, decision_iso: [3] * len(rows),
+    )
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    traced_sql: list[str] = []
+    forecasts_conn.set_trace_callback(traced_sql.append)
+    from src.state.db import init_schema_forecasts
+
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.executemany(
+        """
+        INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date, temperature_metric,
+            source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
+            q_ucb_json, posterior_method, dependency_source_run_ids_json,
+            provenance_json, runtime_layer, training_allowed
+        ) VALUES (
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
+            ?, '2026-05-24', 'high',
+            '2026-05-24T00:00:00+00:00',
+            '2026-05-24T04:15:00+00:00',
+            ?,
+            '{"bin:28":0.42}', NULL, NULL,
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
+            '[]', '{}', 'live', 0
+        )
+        """,
+        [
+            ("Chicago", "2026-05-24T04:16:00+00:00"),
+            ("Denver", "2026-05-24T04:17:00+00:00"),
+        ],
+    )
+    for city, computed_at in (
+        ("Chicago", "2026-05-24T04:16:00+00:00"),
+        ("Denver", "2026-05-24T04:17:00+00:00"),
+    ):
+        posterior_id = forecasts_conn.execute(
+            "SELECT posterior_id FROM forecast_posteriors WHERE city=?",
+            (city,),
+        ).fetchone()[0]
+        _bind_replacement_readiness(
+            forecasts_conn,
+            posterior_id=int(posterior_id),
+            city=city,
+            target_date="2026-05-24",
+            metric="high",
+            computed_at=computed_at,
+        )
+    forecasts_conn.execute(
+        """
+        INSERT INTO market_events (
+            market_slug, city, target_date, temperature_metric, condition_id
+        ) VALUES (
+            'chicago-high-2026-05-24',
+            'Chicago',
+            '2026-05-24',
+            'high',
+            'condition-chicago'
+        )
+        """
+    )
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+    events = trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:18:00+00:00",
+        source="global-auction-current-scope",
+        limit=None,
+        phase_filter_exempt_families={("Chicago", "2026-05-24", "high")},
+    )
+
+    assert [json.loads(event.payload_json)["city"] for event in events] == [
+        "Chicago"
+    ]
+    current_scope_sql = next(
+        sql
+        for sql in traced_sql
+        if "market_families AS" in sql and "ranked_ready AS" in sql
+    )
+    assert "FROM market_families AS mf" in current_scope_sql
+    assert "rs.city = mf.city" in current_scope_sql
+    assert "rs.target_local_date = mf.target_date" in current_scope_sql
+    assert "rs.temperature_metric = mf.temperature_metric" in current_scope_sql
 
 
 def test_posterior_raw_member_counts_are_batched_for_global_scope():

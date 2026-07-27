@@ -835,8 +835,10 @@ class ForecastSnapshotReadyTrigger:
         # any market exists, require the family to have one. Non-permanent — re-scanned every
         # cycle, so a family emits as soon as its market is discovered.
         posterior_market_filter = ""
+        market_backed_current_scope = False
         if _table_exists(forecasts_conn, "market_events"):
             if _table_has_rows(forecasts_conn, "market_events"):
+                market_backed_current_scope = True
                 posterior_market_filter = (
                     " AND EXISTS (SELECT 1 FROM market_events m"
                     " WHERE m.city = fp.city"
@@ -902,7 +904,37 @@ class ForecastSnapshotReadyTrigger:
         _posterior_runtime_filter = (
             " AND fp.runtime_layer = 'live' AND fp.training_allowed = 0"
         )
+        _ranked_readiness_market_cte_sql = ""
+        _ranked_readiness_from_sql = "FROM readiness_state AS rs"
+        _ranked_readiness_prefix_params: tuple[str, ...] = ()
+        if market_backed_current_scope:
+            # Drive the current-scope scan from the much smaller executable
+            # market family set.  Ranking every historical readiness family
+            # first made the cold forecast DB path page through unrelated
+            # state before the existing market predicate could discard it.
+            # The latest-row ranking remains unchanged inside each requested
+            # family, so a newer BLOCKED row still suppresses an older READY row.
+            _ranked_readiness_market_cte_sql = """
+            market_families AS (
+                SELECT DISTINCT
+                       m.city,
+                       m.target_date,
+                       m.temperature_metric
+                  FROM market_events AS m
+                 WHERE m.target_date >= ?
+            ),
+            """
+            _ranked_readiness_from_sql = f"""
+                  FROM market_families AS mf
+                  JOIN readiness_state AS rs
+                    ON rs.strategy_key = '{REPLACEMENT_STRATEGY_KEY}'
+                   AND rs.city = mf.city
+                   AND rs.target_local_date = mf.target_date
+                   AND rs.temperature_metric = mf.temperature_metric
+            """
+            _ranked_readiness_prefix_params = (_target_date_floor,)
         _ranked_readiness_cte_sql = f"""
+            {_ranked_readiness_market_cte_sql}
             ranked_ready AS (
                 SELECT
                     rs.*,
@@ -918,7 +950,7 @@ class ForecastSnapshotReadyTrigger:
                         ORDER BY julianday(rs.computed_at) DESC,
                                  rs.readiness_id DESC
                     ) AS _family_rank
-                  FROM readiness_state AS rs
+                  {_ranked_readiness_from_sql}
                  WHERE rs.strategy_key = '{REPLACEMENT_STRATEGY_KEY}'
                    AND rs.scope_type = 'strategy'
                    AND rs.source_id = '{REPLACEMENT_SOURCE_ID}'
@@ -950,17 +982,19 @@ class ForecastSnapshotReadyTrigger:
                    AND json_type(dep.value, '$.posterior_id') = 'integer'
             )
         """
+        _ranked_readiness_params = (
+            *_ranked_readiness_prefix_params,
+            _decision_iso,
+            *_readiness_family_filter_params,
+            _decision_iso,
+            _decision_iso,
+        )
         _exact_readiness = _replacement_readiness_exact_scope_cte(
             restrict_to_families
         )
         if _exact_readiness is None:
             _readiness_cte_sql = _ranked_readiness_cte_sql
-            _readiness_params = (
-                _decision_iso,
-                *_readiness_family_filter_params,
-                _decision_iso,
-                _decision_iso,
-            )
+            _readiness_params = _ranked_readiness_params
         else:
             _readiness_cte_sql, _exact_readiness_params = _exact_readiness
             _readiness_params = (
@@ -1090,10 +1124,7 @@ class ForecastSnapshotReadyTrigger:
                     1,
                 ),
                 (
-                    _decision_iso,
-                    *_readiness_family_filter_params,
-                    _decision_iso,
-                    _decision_iso,
+                    *_ranked_readiness_params,
                     *_family_filter_params,
                     _target_date_floor,
                     _decision_iso,
