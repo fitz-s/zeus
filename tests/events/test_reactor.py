@@ -2066,7 +2066,7 @@ def test_global_target_atomically_supersedes_only_older_pending_targets():
     assert states[unrelated.event_id] == ("pending", None)
 
 
-def test_global_target_uses_primed_winner_point_lookup():
+def test_global_target_uses_dedicated_target_index():
     conn, store = _store()
     old = _day0_event("old-point-target")
     new = _forecast_event("new-point-target", target_date="2026-05-24")
@@ -2089,7 +2089,11 @@ def test_global_target_uses_primed_winner_point_lookup():
         "INDEXED BY idx_opportunity_event_processing_status" not in statement
         for statement in target_reads
     )
-    assert any("p.event_id =" in statement for statement in target_reads)
+    assert any(
+        "INDEXED BY idx_opportunity_event_processing_global_winner_target"
+        in statement
+        for statement in target_reads
+    )
     assert conn.execute(
         "SELECT processing_status, last_error "
         "FROM opportunity_event_processing WHERE event_id = ?",
