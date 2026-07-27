@@ -2566,7 +2566,6 @@ def test_retired_near_settled_rejection_is_rescored_by_current_economics(monkeyp
     assert dynamically_blocked == ()
     assert deferred_to_global_current_state == (proof,)
 
-
 def test_overlay_rejects_qkernel_point_probability_that_is_not_served_belief():
     """A direct route cannot mint a qkernel probability from a different q-space."""
 
@@ -2581,6 +2580,50 @@ def test_overlay_rejects_qkernel_point_probability_that_is_not_served_belief():
     )
 
     assert new_proof is None
+
+
+def test_global_current_state_rebind_defers_legacy_lcb_ev_rejection(monkeypatch):
+    """The sealed mean-action solve, not a legacy LCB scalar, owns preflight."""
+
+    bin_obj = Bin(low=20.0, high=20.0, unit="C", label="20C")
+    proof = _proof(
+        direction="buy_yes",
+        row=_row(
+            condition_id="condition-global-mean",
+            yes_token="yes-global-mean",
+            no_token="no-global-mean",
+            yes_ask=0.29,
+            no_ask=0.71,
+            snapshot_id="snapshot-global-mean",
+        ),
+        token_id="yes-global-mean",
+        q_posterior=0.598,
+        q_lcb_5pct=0.0,
+        bin_obj=bin_obj,
+    )
+    monkeypatch.setattr(
+        era,
+        "_live_selection_rejection_reason",
+        lambda *_args, **_kwargs: (
+            "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:"
+            "ev_per_dollar=-1.000000:q_lcb=0.000000:price=0.290080"
+        ),
+    )
+
+    ordinary = era._selection_scoped_proofs(
+        proofs=(proof,),
+        honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+    )
+    global_rebind = era._selection_scoped_proofs(
+        proofs=(proof,),
+        honor_admission_rejections=False,
+        allow_global_current_state_rebind=True,
+        enforce_win_rate_floor=False,
+    )
+
+    assert ordinary == ()
+    assert global_rebind == (proof,)
 
 
 def test_overlay_rejects_qkernel_lcb_that_loosens_served_belief():

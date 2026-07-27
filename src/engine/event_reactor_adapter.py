@@ -23295,8 +23295,11 @@ def _selection_scoped_proofs(
         )
         if rejection is None or (
             allow_global_current_state_rebind
-            and rejection
-            == "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
+            and (
+                rejection
+                == "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
+                or _global_current_state_may_rebind_scalar_rejection(rejection)
+            )
         ):
             live_admitted.append(proof)
         else:
