@@ -2103,3 +2103,35 @@ Acceptance requires:
   rejected;
 - integration, compile, lint, diff, live loaded-SHA, and post-restart receipt
   evidence prove the taxonomy seam is closed.
+
+## 2026-07-27 Submit-time Day0 authority block continuity
+
+Live verification after the conditioned-source taxonomy repair proved that the
+global winner reached submit-time probability revalidation, where the current
+Day0 payload and its typed probability block were rebuilt. The binder copied
+the current scalar fields into the money-path payload but stored the typed
+`day0_probability_authority` block only in receipt provenance. Calibration
+therefore observed a recognized q-source with no corresponding authority block
+and failed closed before preflight.
+
+The correction writes the one freshly rebuilt typed block into both the
+pre-submit payload and receipt provenance. This is evidence continuity, not a
+new authority or fallback: the existing q-source/type, observation binding,
+source clock, parent identity, selected side, and probability checks remain
+unchanged.
+
+SCOPE is global Day0 winner submit-time proof construction. DRAIN is the next
+preflight revalidation of the selected winner. RESET is a freshly rebuilt
+current payload whose typed block passes the existing authority verifier. No q,
+calibration math, FDR, Kelly, sizing, execution band, lifecycle, source, or
+settlement rule changes.
+
+Acceptance requires:
+
+- the current-global payload binder replaces stale scalar fields and installs
+  the identical typed authority content in the money-path payload and receipt
+  provenance;
+- integration, compile, lint, diff, live loaded-SHA ancestry, and post-restart
+  auction/preflight evidence are green;
+- `replacement_day0_probability_authority required:missing` does not recur
+  after the loaded repair SHA.

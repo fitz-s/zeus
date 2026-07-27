@@ -13135,6 +13135,12 @@ def test_current_global_day0_payload_replaces_local_transform_and_provenance():
     assert payload["probability_authority"] == (
         "day0_remaining_day_global_probability_v1"
     )
+    assert payload["day0_probability_authority"] == (
+        provenance["day0_probability_authority"]
+    )
+    assert payload["day0_probability_authority"][
+        "global_current_observation_payload"
+    ] == current
     assert provenance["global_day0_binding"] == {
         "probability_base_identity": "current-witness"
     }

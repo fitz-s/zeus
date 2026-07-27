@@ -13011,9 +13011,9 @@ def _bind_current_global_day0_payload(
     provenance_capture["global_day0_binding"] = dict(
         current.get("_edli_global_day0_binding") or {}
     )
-    provenance_capture["day0_probability_authority"] = (
-        _global_day0_probability_authority_payload(current)
-    )
+    probability_block = _global_day0_probability_authority_payload(current)
+    payload["day0_probability_authority"] = dict(probability_block)
+    provenance_capture["day0_probability_authority"] = dict(probability_block)
 
 
 def _build_event_bound_no_submit_receipt_core(
