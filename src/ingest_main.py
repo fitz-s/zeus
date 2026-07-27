@@ -1231,6 +1231,7 @@ def _world_schema_current_lightweight() -> bool:
             "idx_opportunity_event_processing_pending_retry_floor",
             "idx_opportunity_event_processing_stale_claim",
             "idx_opportunity_event_processing_status",
+            "idx_opportunity_event_processing_global_winner_target",
         }
     )
     try:
