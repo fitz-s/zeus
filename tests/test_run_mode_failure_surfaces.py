@@ -4185,6 +4185,9 @@ def test_day0_trace_processing_lookup_drives_composite_event_key() -> None:
     assert "p.consumer_name = 'edli_reactor_v1'" in source
     assert "p.event_id = r.event_id" in source
     assert "event_id IN" not in source
+    assert "INDEXED BY idx_opportunity_events_type_available" in source
+    assert "available_at >= ?" in source
+    assert "ORDER BY available_at DESC" in source
 
 
 def test_day0_decision_trace_accepts_processed_day0_with_regret_artifact(
@@ -4214,6 +4217,59 @@ def test_day0_decision_trace_accepts_processed_day0_with_regret_artifact(
     assert trace["processed_event_count"] == 1
     assert trace["traced_processed_event_count"] == 1
     assert "day0_decision_trace" not in result["failing_surfaces"]
+
+
+def test_forecast_trace_live_schema_drives_from_indexed_event_window(
+    tmp_path: Path,
+) -> None:
+    world_db = tmp_path / "zeus-world.db"
+    conn = sqlite3.connect(world_db)
+    try:
+        conn.execute(
+            "CREATE TABLE opportunity_events ("
+            "event_id TEXT PRIMARY KEY, event_type TEXT, entity_key TEXT, "
+            "created_at TEXT, available_at TEXT)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_opportunity_events_type_available "
+            "ON opportunity_events(event_type, available_at)"
+        )
+        conn.execute(
+            "CREATE TABLE opportunity_event_processing ("
+            "consumer_name TEXT, event_id TEXT, processing_status TEXT, "
+            "processed_at TEXT, last_error TEXT, "
+            "PRIMARY KEY (consumer_name, event_id))"
+        )
+        sql = """
+            SELECT e.event_id,
+                   e.entity_key,
+                   e.created_at,
+                   p.processing_status,
+                   p.processed_at,
+                   p.last_error
+              FROM opportunity_events e
+                   INDEXED BY idx_opportunity_events_type_available
+              CROSS JOIN opportunity_event_processing p
+             WHERE e.event_type = 'FORECAST_SNAPSHOT_READY'
+               AND e.available_at >= ?
+               AND e.created_at >= ?
+               AND p.event_id = e.event_id
+               AND p.consumer_name = 'edli_reactor_v1'
+               AND p.processing_status = 'processed'
+             ORDER BY e.available_at DESC
+             LIMIT ?
+        """
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN " + sql,
+            (_now_iso(-3600), _now_iso(-3600), 25),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    details = [str(row[3]) for row in plan]
+    assert "idx_opportunity_events_type_available" in details[0]
+    assert "sqlite_autoindex_opportunity_event_processing_1" in details[1]
+    assert all("USE TEMP B-TREE" not in detail for detail in details)
 
 
 def test_forecast_decision_trace_degrades_when_processed_fsr_has_no_artifact(

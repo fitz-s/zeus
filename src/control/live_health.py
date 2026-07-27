@@ -3822,17 +3822,39 @@ def _day0_decision_trace_surface(
         now.astimezone(timezone.utc)
         - timedelta(seconds=DAY0_DECISION_TRACE_LOOKBACK_SECONDS)
     ).isoformat()
+    event_columns, _ = _sqlite_ro_table_columns(world_db, "opportunity_events")
+    if "available_at" in event_columns:
+        day0_event_sql = """
+            SELECT event_id, entity_key, created_at
+              FROM opportunity_events INDEXED BY idx_opportunity_events_type_available
+             WHERE event_type = 'DAY0_EXTREME_UPDATED'
+               AND available_at >= ?
+               AND created_at >= ?
+             ORDER BY available_at DESC
+             LIMIT ?
+        """
+        day0_event_params = (
+            cutoff,
+            cutoff,
+            DAY0_DECISION_TRACE_SAMPLE_LIMIT,
+        )
+    else:
+        # Compatibility for pre-availability schemas used by replay/tests. Current
+        # live schemas must take the indexed branch above; an absent live index
+        # fails closed instead of falling back to an unbounded scan.
+        day0_event_sql = """
+            SELECT event_id, entity_key, created_at
+              FROM opportunity_events
+             WHERE event_type = 'DAY0_EXTREME_UPDATED'
+               AND created_at >= ?
+             ORDER BY rowid DESC
+             LIMIT ?
+        """
+        day0_event_params = (cutoff, DAY0_DECISION_TRACE_SAMPLE_LIMIT)
     day0_events, event_err = _sqlite_ro_rows(
         world_db,
-        """
-        SELECT event_id, entity_key, created_at
-          FROM opportunity_events
-         WHERE event_type = 'DAY0_EXTREME_UPDATED'
-           AND created_at >= ?
-         ORDER BY rowid DESC
-         LIMIT ?
-        """,
-        (cutoff, DAY0_DECISION_TRACE_SAMPLE_LIMIT),
+        day0_event_sql,
+        day0_event_params,
     )
     if event_err:
         return {
@@ -3996,26 +4018,54 @@ def _forecast_decision_trace_surface(
         now.astimezone(timezone.utc)
         - timedelta(seconds=FORECAST_DECISION_TRACE_LOOKBACK_SECONDS)
     ).isoformat()
+    if "available_at" in event_columns:
+        forecast_event_sql = """
+            SELECT e.event_id,
+                   e.entity_key,
+                   e.created_at,
+                   p.processing_status,
+                   p.processed_at,
+                   p.last_error
+              FROM opportunity_events e
+                   INDEXED BY idx_opportunity_events_type_available
+              CROSS JOIN opportunity_event_processing p
+             WHERE e.event_type = 'FORECAST_SNAPSHOT_READY'
+               AND e.available_at >= ?
+               AND e.created_at >= ?
+               AND p.event_id = e.event_id
+               AND p.consumer_name = 'edli_reactor_v1'
+               AND p.processing_status = 'processed'
+             ORDER BY e.available_at DESC
+             LIMIT ?
+        """
+        forecast_event_params = (
+            cutoff,
+            cutoff,
+            FORECAST_DECISION_TRACE_SAMPLE_LIMIT,
+        )
+    else:
+        forecast_event_sql = """
+            SELECT e.event_id,
+                   e.entity_key,
+                   e.created_at,
+                   p.processing_status,
+                   p.processed_at,
+                   p.last_error
+              FROM opportunity_events e
+              JOIN opportunity_event_processing p
+                ON p.event_id = e.event_id
+               AND p.consumer_name = 'edli_reactor_v1'
+             WHERE e.event_type = 'FORECAST_SNAPSHOT_READY'
+               AND e.created_at >= ?
+               AND p.processing_status = 'processed'
+             ORDER BY datetime(e.created_at) DESC, e.rowid DESC
+             LIMIT ?
+        """
+        forecast_event_params = (cutoff, FORECAST_DECISION_TRACE_SAMPLE_LIMIT)
     forecast_events, event_rows_err = _sqlite_ro_rows(
         world_db,
-        """
-        SELECT e.event_id,
-               e.entity_key,
-               e.created_at,
-               p.processing_status,
-               p.processed_at,
-               p.last_error
-          FROM opportunity_events e
-          JOIN opportunity_event_processing p
-            ON p.event_id = e.event_id
-           AND p.consumer_name = 'edli_reactor_v1'
-         WHERE e.event_type = 'FORECAST_SNAPSHOT_READY'
-           AND e.created_at >= ?
-           AND p.processing_status = 'processed'
-         ORDER BY datetime(e.created_at) DESC, e.rowid DESC
-         LIMIT ?
-        """,
-        (cutoff, FORECAST_DECISION_TRACE_SAMPLE_LIMIT),
+        forecast_event_sql,
+        forecast_event_params,
     )
     if event_rows_err:
         return {
