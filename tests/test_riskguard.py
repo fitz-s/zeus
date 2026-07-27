@@ -917,12 +917,170 @@ class TestMetrics:
         assert bound[0]["probability_identity_ready"] is True
         assert bound[0]["p_posterior"] == pytest.approx(0.68)
         assert bound[0]["entry_q_version"].startswith("filled-entry-composite:")
+        assert bound[0]["entry_q_versions"] == ("q-v1", "q-v2")
         assert (
             bound[0]["probability_identity_source"]
             == "filled_entry_commands.q_version+submit_q_live+fill_shares"
         )
         assert bound[0]["decision_law_identity_ready"] is True
         conn.close()
+
+    def test_qkernel_brier_actuation_uses_only_current_probability_semantics(
+        self,
+        tmp_path,
+    ):
+        forecasts_db = tmp_path / "zeus-forecasts.db"
+        conn = sqlite3.connect(forecasts_db)
+        conn.execute(
+            "CREATE TABLE forecast_posteriors ("
+            "posterior_identity_hash TEXT PRIMARY KEY,provenance_json TEXT)"
+        )
+
+        def provenance(
+            semantics_revision: str,
+            *,
+            stale: bool = False,
+            translated: bool = False,
+        ) -> str:
+            return json.dumps(
+                {
+                    "bayes_precision_fusion": {
+                        "current_evidence_shape": {
+                            "semantics_revision": semantics_revision,
+                            "translation_applied": translated,
+                            "shape_lag_hours": 1.0 if stale else 0.0,
+                            "stale_shape_reused": stale,
+                        }
+                    }
+                }
+            )
+
+        conn.executemany(
+            "INSERT INTO forecast_posteriors VALUES (?,?)",
+            [
+                (
+                    "q-current",
+                    provenance(
+                        riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+                    ),
+                ),
+                (
+                    "q-stale",
+                    provenance(
+                        riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+                        stale=True,
+                    ),
+                ),
+                (
+                    "q-superseded",
+                    provenance("ensemble_anomaly_transport_v3"),
+                ),
+                (
+                    "q-translated",
+                    provenance(
+                        riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                        translated=True,
+                    ),
+                ),
+            ],
+        )
+        conn.commit()
+        conn.close()
+        common = {
+            "strategy": "forecast_qkernel_entry",
+            "probability_identity_ready": True,
+            "decision_law_identity_ready": True,
+            "decision_law_id": "predicted_bin_ev_v1",
+        }
+        rows = [
+            {**common, "trade_id": "current", "entry_q_versions": ("q-current",)},
+            {**common, "trade_id": "stale", "entry_q_versions": ("q-stale",)},
+            {
+                **common,
+                "trade_id": "superseded",
+                "entry_q_versions": ("q-superseded",),
+            },
+            {
+                **common,
+                "trade_id": "translated",
+                "entry_q_versions": ("q-translated",),
+            },
+            {
+                **common,
+                "trade_id": "mixed",
+                "entry_q_versions": ("q-current", "q-superseded"),
+            },
+            {**common, "trade_id": "missing", "entry_q_versions": ("q-missing",)},
+            {
+                **common,
+                "trade_id": "no-lineage",
+                "entry_q_versions": (),
+            },
+            {
+                **common,
+                "trade_id": "day0",
+                "strategy": "day0_nowcast_entry",
+            },
+        ]
+
+        bound, status = riskguard_module._bind_qkernel_probability_semantics(
+            rows,
+            forecasts_connection_factory=lambda: sqlite3.connect(forecasts_db),
+        )
+
+        by_id = {row["trade_id"]: row for row in bound}
+        assert by_id["current"]["probability_semantics_ready"] is True
+        assert by_id["stale"]["probability_semantics_ready"] is True
+        assert by_id["superseded"]["probability_semantics_blocked_reason"] == (
+            "superseded_probability_semantics"
+        )
+        assert by_id["translated"]["probability_semantics_ready"] is False
+        assert by_id["mixed"]["probability_semantics_blocked_reason"] == (
+            "mixed_probability_semantics"
+        )
+        assert by_id["missing"]["probability_semantics_blocked_reason"] == (
+            "probability_semantics_provenance_missing"
+        )
+        assert by_id["no-lineage"]["probability_semantics_blocked_reason"] == (
+            "entry_q_version_lineage_missing"
+        )
+        assert status == {
+            "status": "ok",
+            "strategy_candidate_count": 7,
+            "current_count": 2,
+            "superseded_count": 2,
+            "missing_count": 2,
+            "mixed_count": 1,
+        }
+        assert [
+            row["trade_id"]
+            for row in riskguard_module._riskguard_brier_actuating_rows(bound)
+        ] == ["current", "stale", "day0"]
+
+    def test_qkernel_semantics_lookup_unavailable_fails_closed(self, tmp_path):
+        row = {
+            "trade_id": "qkernel",
+            "strategy": "forecast_qkernel_entry",
+            "entry_q_versions": ("q-current",),
+            "probability_identity_ready": True,
+            "decision_law_identity_ready": True,
+            "decision_law_id": "predicted_bin_ev_v1",
+        }
+
+        bound, status = riskguard_module._bind_qkernel_probability_semantics(
+            [row],
+            forecasts_connection_factory=lambda: sqlite3.connect(
+                f"file:{tmp_path / 'missing.db'}?mode=ro",
+                uri=True,
+            ),
+        )
+
+        assert status["status"] == "unavailable"
+        assert bound[0]["probability_semantics_ready"] is False
+        assert bound[0]["probability_semantics_blocked_reason"] == (
+            "probability_semantics_authority_unavailable"
+        )
+        assert riskguard_module._riskguard_brier_actuating_rows(bound) == []
 
     def test_probability_identity_binding_rejects_filled_command_without_fact(self):
         conn = sqlite3.connect(":memory:")
@@ -986,6 +1144,7 @@ def _settlement_row(
         "metric_ready": True,
         "learning_snapshot_ready": True,
         "probability_identity_ready": True,
+        "probability_semantics_ready": True,
         "entry_q_version": "test-q-version",
         "decision_law_id": decision_law_id,
         "canonical_payload_complete": True,

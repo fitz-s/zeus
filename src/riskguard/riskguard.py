@@ -33,6 +33,12 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from src.config import settings, get_mode
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+    _current_evidence_shape,
+    current_evidence_shape_semantics_mismatch,
+)
 from src.riskguard.discord_alerts import alert_halt, alert_resume, alert_warning
 from src.riskguard.metrics import (
     brier_score,
@@ -47,6 +53,7 @@ from src.state.db import (
     DECISION_LAW_IDS,
     RISK_DB_PATH,
     get_connection,
+    get_forecasts_connection_read_only,
     get_trade_connection_with_world_required,
     _zeus_trade_db_path,
     query_authoritative_settlement_rows,
@@ -1560,6 +1567,7 @@ def _bind_brier_probability_identities(
         row["p_posterior"] = composite["p_posterior"]
         row["probability_identity_ready"] = True
         row["entry_q_version"] = composite["entry_q_version"]
+        row["entry_q_versions"] = composite["entry_q_versions"]
         row["probability_identity_source"] = (
             "filled_entry_commands.q_version+submit_q_live+fill_shares"
         )
@@ -1692,7 +1700,187 @@ def _bind_brier_probability_identities(
         row["decision_law_identity_blocked_reason"] = (
             "" if row["decision_law_identity_ready"] else reason
         )
+        if (
+            row.get("probability_identity_ready") is True
+            and not row.get("entry_q_versions")
+        ):
+            q_version = str(row.get("entry_q_version") or "").strip()
+            if q_version and not q_version.startswith("filled-entry-composite:"):
+                row["entry_q_versions"] = (q_version,)
     return output
+
+
+def _bind_qkernel_probability_semantics(
+    rows: list[dict],
+    *,
+    forecasts_connection_factory=get_forecasts_connection_read_only,
+) -> tuple[list[dict], dict[str, object]]:
+    """Bind qkernel settlement rows to the probability law that emitted them.
+
+    Strategy is the governance identity; posterior semantics are metric
+    lineage. A settlement grades only the probability mechanism that produced
+    its filled entries. Superseded current-evidence shapes remain telemetry but
+    cannot convict the replacement chain now eligible to trade.
+
+    SCOPE: only ``forecast_qkernel_entry`` Brier actuation.
+    DRAIN: every 60-second RiskGuard tick re-reads immutable posterior
+    provenance for the bounded settlement sample.
+    RESET: a successful read classifies each q_version; the DATA_DEGRADED
+    fallback clears on the first successful lookup.
+    """
+
+    output = [dict(row) for row in rows]
+    qkernel_rows = [
+        row
+        for row in output
+        if str(row.get("strategy") or "").strip() == "forecast_qkernel_entry"
+    ]
+    candidates = [
+        row
+        for row in qkernel_rows
+        if not isinstance(row.get("probability_semantics_ready"), bool)
+    ]
+    status: dict[str, object] = {
+        "status": "not_applicable",
+        "strategy_candidate_count": len(qkernel_rows),
+        "current_count": sum(
+            row.get("probability_semantics_ready") is True for row in qkernel_rows
+        ),
+        "superseded_count": sum(
+            row.get("probability_semantics_ready") is False for row in qkernel_rows
+        ),
+        "missing_count": 0,
+        "mixed_count": 0,
+    }
+    if not qkernel_rows:
+        return output, status
+    if not candidates:
+        status["status"] = "ok"
+        return output, status
+
+    versions = sorted(
+        {
+            str(version).strip()
+            for row in candidates
+            for version in (row.get("entry_q_versions") or ())
+            if str(version).strip()
+        }
+    )
+    if not versions:
+        for row in candidates:
+            row["probability_semantics_ready"] = False
+            row["probability_semantics_revisions"] = ()
+            row["probability_semantics_blocked_reason"] = (
+                "entry_q_version_lineage_missing"
+            )
+        status.update(status="ok", missing_count=len(candidates))
+        return output, status
+
+    provenance_by_version: dict[str, object] = {}
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = forecasts_connection_factory()
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=250")
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
+        }
+        if not {"posterior_identity_hash", "provenance_json"}.issubset(columns):
+            raise sqlite3.OperationalError(
+                "forecast_posteriors probability provenance schema unavailable"
+            )
+        for start in range(0, len(versions), 500):
+            chunk = versions[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            for q_version, provenance_json in conn.execute(
+                "SELECT posterior_identity_hash,provenance_json "
+                "FROM forecast_posteriors "
+                f"WHERE posterior_identity_hash IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall():
+                provenance_by_version[str(q_version)] = provenance_json
+    except (OSError, sqlite3.Error) as exc:
+        for row in candidates:
+            row["probability_semantics_ready"] = False
+            row["probability_semantics_revisions"] = ()
+            row["probability_semantics_blocked_reason"] = (
+                "probability_semantics_authority_unavailable"
+            )
+        status.update(
+            status="unavailable",
+            missing_count=len(candidates),
+            error=type(exc).__name__,
+        )
+        return output, status
+    finally:
+        if conn is not None:
+            conn.close()
+
+    version_lineage: dict[str, tuple[str, str]] = {}
+    accepted_revisions = {
+        CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+    }
+    for q_version in versions:
+        provenance = provenance_by_version.get(q_version)
+        shape = _current_evidence_shape(provenance)
+        if shape is None:
+            version_lineage[q_version] = ("missing", "")
+            continue
+        revision = str(shape.get("semantics_revision") or "").strip()
+        current = (
+            revision in accepted_revisions
+            and shape.get("translation_applied") is False
+            and not current_evidence_shape_semantics_mismatch(provenance)
+        )
+        version_lineage[q_version] = (
+            "current" if current else "superseded",
+            revision,
+        )
+
+    for row in candidates:
+        row_versions = tuple(
+            str(version).strip()
+            for version in (row.get("entry_q_versions") or ())
+            if str(version).strip()
+        )
+        lineages = [version_lineage.get(version, ("missing", "")) for version in row_versions]
+        kinds = {kind for kind, _revision in lineages}
+        revisions = tuple(sorted({revision for _kind, revision in lineages if revision}))
+        row["probability_semantics_revisions"] = revisions
+        if row_versions and kinds == {"current"}:
+            classification = "current"
+            row["probability_semantics_ready"] = True
+            row["probability_semantics_blocked_reason"] = ""
+        elif kinds == {"superseded"}:
+            classification = "superseded"
+            row["probability_semantics_ready"] = False
+            row["probability_semantics_blocked_reason"] = (
+                "superseded_probability_semantics"
+            )
+        elif not row_versions:
+            classification = "missing"
+            row["probability_semantics_ready"] = False
+            row["probability_semantics_blocked_reason"] = (
+                "entry_q_version_lineage_missing"
+            )
+        elif kinds == {"missing"}:
+            classification = "missing"
+            row["probability_semantics_ready"] = False
+            row["probability_semantics_blocked_reason"] = (
+                "probability_semantics_provenance_missing"
+            )
+        else:
+            classification = "mixed"
+            row["probability_semantics_ready"] = False
+            row["probability_semantics_blocked_reason"] = (
+                "mixed_probability_semantics"
+            )
+        count_key = f"{classification}_count"
+        status[count_key] = int(status[count_key]) + 1
+    status["status"] = "ok"
+    return output, status
 
 
 def _filled_entry_probability_composites(
@@ -1897,6 +2085,9 @@ def _filled_entry_probability_composites(
         composites[position_id] = {
             "p_posterior": p_posterior,
             "entry_q_version": f"filled-entry-composite:{identity}",
+            "entry_q_versions": tuple(
+                sorted({str(entry["q_version"]) for entry in entries})
+            ),
         }
     return composites
 
@@ -1920,6 +2111,11 @@ def _riskguard_brier_actuating_rows(
         if not row.get("decision_law_identity_ready", False):
             continue
         if str(row.get("decision_law_id") or "").strip() not in DECISION_LAW_IDS:
+            continue
+        if (
+            str(row.get("strategy") or "").strip() == "forecast_qkernel_entry"
+            and row.get("probability_semantics_ready") is not True
+        ):
             continue
         actuating.append(row)
         if len(actuating) >= limit:
@@ -2703,6 +2899,10 @@ def _tick_once() -> RiskLevel:
             zeus_conn,
             settlement_scan_rows,
         )
+        (
+            settlement_scan_rows,
+            probability_semantics_binding,
+        ) = _bind_qkernel_probability_semantics(settlement_scan_rows)
         settlement_rows = settlement_scan_rows[:RISKGUARD_SETTLEMENT_LIMIT]
         brier_candidate_rows = settlement_scan_rows[:RISKGUARD_BRIER_SCAN_LIMIT]
         settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
@@ -2858,6 +3058,14 @@ def _tick_once() -> RiskLevel:
         execution_observed = int(execution_overall.get("terminal_observed", 0) or 0)
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
+        probability_semantics_level = RiskLevel.GREEN
+        if probability_semantics_binding.get("status") == "unavailable":
+            probability_semantics_level = RiskLevel.DATA_DEGRADED
+            _append_reason(
+                recommended_strategy_gate_reasons,
+                "forecast_qkernel_entry",
+                "probability_semantics_authority_unavailable",
+            )
         degraded_brier_strategies = brier_strategy_breakdown.get("degraded_strategies", {})
         clean_brier_attribution = (
             isinstance(degraded_brier_strategies, dict)
@@ -3231,6 +3439,7 @@ def _tick_once() -> RiskLevel:
             collateral_identity_level,
             portfolio_consistency_level,
             unresolved_exposure_level,
+            probability_semantics_level,
         )
 
         risk_conn.execute("""
@@ -3259,6 +3468,8 @@ def _tick_once() -> RiskLevel:
                 "localized_red_scope": localized_red_scope,
                 "brier_strategy_breakdown": brier_strategy_breakdown,
                 "brier_strategy_localization": brier_strategy_localization,
+                "probability_semantics_level": probability_semantics_level.value,
+                "probability_semantics_binding": probability_semantics_binding,
                 "settlement_quality_level": settlement_quality_level.value,
                 "execution_quality_level": execution_quality_level.value,
                 "strategy_signal_level": strategy_signal_level.value,
@@ -3468,6 +3679,7 @@ def _tick_once() -> RiskLevel:
             "collateral_identity": collateral_identity_level,
             "portfolio_consistency": portfolio_consistency_level,
             "unresolved_exposure": unresolved_exposure_level,
+            "probability_semantics": probability_semantics_level,
         }
         component_detail = {
             "brier": f"score={b_score:.4f} (n={len(p_forecasts)}, red>={thresholds['brier_red']})",
@@ -3492,6 +3704,13 @@ def _tick_once() -> RiskLevel:
                 f"excluded_duplicate={portfolio_truth.get('excluded_duplicate_count', 0)}"
             ),
             "unresolved_exposure": "unbounded current exposure truth",
+            "probability_semantics": (
+                f"status={probability_semantics_binding.get('status')} "
+                f"current={probability_semantics_binding.get('current_count')} "
+                f"superseded={probability_semantics_binding.get('superseded_count')} "
+                f"missing={probability_semantics_binding.get('missing_count')} "
+                f"mixed={probability_semantics_binding.get('mixed_count')}"
+            ),
         }
         driving, breakdown = _component_breakdown(level, component_levels, component_detail)
         log_fn = logger.warning if level != RiskLevel.GREEN else logger.info
