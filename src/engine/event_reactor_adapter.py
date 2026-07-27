@@ -7434,11 +7434,11 @@ def event_bound_live_adapter_from_trade_conn(
             nonlocal pending_preflight_jit_candidate
             jit_candidate = pending_preflight_jit_candidate
             pending_preflight_jit_candidate = None
-            receipt = _submit_inner(
-                event,
-                at,
-                global_actuation=actuation,
-                preflight_only=True,
+            receipt = _global_preflight_candidate_receipt(
+                _submit_inner,
+                event=event,
+                actuation=actuation,
+                decision_time=at,
             )
             receipt = _global_preflight_entry_authority_receipt(
                 event,
@@ -10896,6 +10896,54 @@ def _global_probability_tightening_from_receipt(
     )
 
 
+_GLOBAL_PREFLIGHT_CANDIDATE_PROOF_FAILURE_PREFIXES = (
+    "REPLACEMENT_NO_BOUND_CERTIFICATE_MISSING",
+    "REPLACEMENT_NO_BOUND_CANONICAL_BIN_MISSING",
+    "REPLACEMENT_NO_BOUND_SERVED_LCB_MISSING",
+    "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:",
+)
+
+
+def _global_preflight_candidate_proof_failure_reason(
+    exc: ValueError,
+) -> str | None:
+    """Name exact selected-leg proof failures without invalidating the epoch."""
+
+    reason = str(exc)
+    if not reason.startswith(_GLOBAL_PREFLIGHT_CANDIDATE_PROOF_FAILURE_PREFIXES):
+        return None
+    return f"GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:{reason}"
+
+
+def _global_preflight_candidate_receipt(
+    submit_inner: Callable[..., EventSubmissionReceipt],
+    *,
+    event: OpportunityEvent,
+    actuation: object,
+    decision_time: datetime,
+) -> EventSubmissionReceipt:
+    """Convert only selected-leg proof defects into a zero-side-effect receipt."""
+
+    try:
+        return submit_inner(
+            event,
+            decision_time,
+            global_actuation=actuation,
+            preflight_only=True,
+        )
+    except ValueError as exc:
+        candidate_reason = _global_preflight_candidate_proof_failure_reason(exc)
+        if candidate_reason is None:
+            raise
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason=candidate_reason,
+            proof_accepted=False,
+        )
+
+
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
@@ -10919,11 +10967,12 @@ def _global_preflight_block_status(reason: str) -> str:
             "GLOBAL_PREFLIGHT_CANDIDATE_NOT_ACTIONABLE:",
             "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:",
             "GLOBAL_PREFLIGHT_CANDIDATE_UNIT_PRICE_INVALID:",
+            "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:",
         )
     ):
-        # FDR rejects the selected hypothesis, not the current q/book/wealth
-        # epoch. Exclude that exact action and let the complete auction compare
-        # its remaining candidates with CASH.
+        # These reject the selected action, not the current q/book/wealth epoch.
+        # Exclude that exact action and let the complete auction compare its
+        # remaining candidates with CASH.
         return "CANDIDATE_BLOCKED"
     if reason == (
         "GLOBAL_ACTUATION_PREPARE_FAILED:"

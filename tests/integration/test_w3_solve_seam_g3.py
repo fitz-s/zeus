@@ -10138,10 +10138,81 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "policy=MAKER_TAKER_FORBIDDEN",
             "CANDIDATE_BLOCKED",
         ),
+        (
+            "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
+            "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:served_yes_q",
+            "CANDIDATE_BLOCKED",
+        ),
     ),
 )
 def test_global_preflight_block_scope_is_explicit(reason, status):
     assert era._global_preflight_block_status(reason) == status
+
+
+@pytest.mark.parametrize(
+    "proof_failure",
+    (
+        "REPLACEMENT_NO_BOUND_CERTIFICATE_MISSING",
+        "REPLACEMENT_NO_BOUND_CANONICAL_BIN_MISSING",
+        "REPLACEMENT_NO_BOUND_SERVED_LCB_MISSING",
+        "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:served_yes_q",
+    ),
+)
+def test_global_preflight_selected_leg_proof_failure_is_candidate_local(
+    proof_failure,
+):
+    assert era._global_preflight_candidate_proof_failure_reason(
+        ValueError(proof_failure)
+    ) == f"GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:{proof_failure}"
+    assert (
+        era._global_preflight_candidate_proof_failure_reason(
+            ValueError(f"UNRELATED_PROOF_ERROR:{proof_failure}")
+        )
+        is None
+    )
+
+
+def test_global_preflight_selected_leg_proof_failure_becomes_no_submit_receipt():
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+
+    def fail_selected_leg(*_args, **_kwargs):
+        raise ValueError(
+            "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:served_yes_q"
+        )
+
+    receipt = era._global_preflight_candidate_receipt(
+        fail_selected_leg,
+        event=event,
+        actuation=object(),
+        decision_time=_dt.datetime(
+            2026, 7, 27, 7, 0, tzinfo=_dt.timezone.utc
+        ),
+    )
+
+    assert receipt.submitted is False
+    assert receipt.proof_accepted is False
+    assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.reason == (
+        "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
+        "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:served_yes_q"
+    )
+
+
+def test_global_preflight_unclassified_exception_remains_fail_loud():
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+
+    def fail_shared_epoch(*_args, **_kwargs):
+        raise ValueError("UNRELATED_PROOF_ERROR")
+
+    with pytest.raises(ValueError, match="UNRELATED_PROOF_ERROR"):
+        era._global_preflight_candidate_receipt(
+            fail_shared_epoch,
+            event=event,
+            actuation=object(),
+            decision_time=_dt.datetime(
+                2026, 7, 27, 7, 0, tzinfo=_dt.timezone.utc
+            ),
+        )
 
 
 @pytest.mark.parametrize(
@@ -19485,6 +19556,12 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "SELL",
             "BUY",
         ),
+        (
+            "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
+            "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:served_yes_q",
+            "BUY",
+            "SELL",
+        ),
     ),
 )
 def test_global_batch_candidate_block_keeps_sibling_eligible(
@@ -19557,7 +19634,14 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         assets=(asset,),
         sell_assets=(asset,),
     )
-    calls = {"select": 0, "wealth": 0, "preflight": [], "books": 0, "venue": 0}
+    calls = {
+        "select": 0,
+        "wealth": 0,
+        "preflight": [],
+        "proof_wrapper": 0,
+        "books": 0,
+        "venue": 0,
+    }
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
     )
@@ -19604,6 +19688,37 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         candidate = actuation.decision.candidate
         calls["preflight"].append(candidate.candidate_id)
         if candidate is candidate_a:
+            if reason.startswith("GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"):
+                proof_failure = reason.partition(":")[2]
+
+                def fail_selected_leg(
+                    event_arg,
+                    decision_time_arg,
+                    *,
+                    global_actuation,
+                    preflight_only,
+                ):
+                    calls["proof_wrapper"] += 1
+                    assert event_arg is _event
+                    assert decision_time_arg == _at
+                    assert global_actuation is actuation
+                    assert preflight_only is True
+                    assert calls["venue"] == 0
+                    raise ValueError(proof_failure)
+
+                receipt = era._global_preflight_candidate_receipt(
+                    fail_selected_leg,
+                    event=_event,
+                    actuation=actuation,
+                    decision_time=_at,
+                )
+                assert receipt.submitted is False
+                assert receipt.side_effect_status == "NO_SUBMIT"
+                assert calls["venue"] == 0
+                return global_batch_runtime.GlobalWinnerPreflight(
+                    status=era._global_preflight_block_status(receipt.reason),
+                    reason=receipt.reason,
+                )
             return global_batch_runtime.GlobalWinnerPreflight(
                 status=era._global_preflight_block_status(reason),
                 reason=reason,
@@ -19658,6 +19773,11 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         "select": 2,
         "wealth": 1,
         "preflight": ["candidate-a", "candidate-b"],
+        "proof_wrapper": (
+            1
+            if reason.startswith("GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:")
+            else 0
+        ),
         "books": 1,
         "venue": 1,
     }
