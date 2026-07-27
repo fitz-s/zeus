@@ -29129,6 +29129,7 @@ def _global_day0_execution_payload(
         "evidence_finality": evidence_finality,
     }
     physical_clock: dict[str, object] | None = None
+    physical_probability_boundary: dict[str, object] | None = None
     if physical_fact is not None:
         try:
             physical_native = float(physical_fact["observed_extreme_native"])
@@ -29150,23 +29151,44 @@ def _global_day0_execution_payload(
         physical_source = str(
             physical_fact.get("observation_source") or ""
         ).strip()
-        # A same-station physical channel advances only the INFORMATION CLOCK.
-        # The settlement-channel value remains the sole deterministic payoff
-        # boundary. Equality is required so a faster proxy can neither invent
-        # nor retract settlement certainty.
-        if (
+        physical_identity_valid = (
             math.isfinite(physical_native)
-            and math.isclose(
-                physical_native,
-                observed_native,
-                rel_tol=0.0,
-                abs_tol=1e-9,
-            )
-            and physical_at > observed_at
+            and physical_at <= physical_available_at
             and physical_available_at <= decision_time.astimezone(UTC)
             and physical_station == station_id
             and physical_unit == unit
             and physical_source
+        )
+        physical_equals_settlement = math.isclose(
+            physical_native,
+            observed_native,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        physical_is_more_absorbing = (
+            metric == "high" and physical_native > observed_native + 1e-9
+        ) or (
+            metric == "low" and physical_native < observed_native - 1e-9
+        )
+        # Settlement-channel truth remains the sole deterministic payoff
+        # boundary. A faster same-station proxy may nevertheless remove
+        # physically impossible probability mass after its measured
+        # WU|METAR margin is applied by _latest_authorized_day0_fact.
+        if physical_identity_valid and physical_is_more_absorbing:
+            physical_probability_boundary = {
+                "observed_extreme_native": physical_native,
+                "observation_time": physical_at.isoformat(),
+                "observation_available_at": physical_available_at.isoformat(),
+                "source": physical_source,
+                "station_id": physical_station,
+                "unit": physical_unit,
+                "value_role": "margin_adjusted_statistical_absorbing_boundary",
+            }
+            binding["statistical_physical_boundary"] = physical_probability_boundary
+        elif (
+            physical_identity_valid
+            and physical_equals_settlement
+            and physical_at > observed_at
         ):
             physical_clock = {
                 "observation_time": physical_at.isoformat(),
@@ -29221,6 +29243,23 @@ def _global_day0_execution_payload(
                     physical_clock["observation_available_at"]
                 ),
                 "_edli_day0_physical_frontier_source": physical_clock["source"],
+            }
+        )
+    if physical_probability_boundary is not None:
+        payload.update(
+            {
+                "_edli_day0_probability_boundary_native": (
+                    physical_probability_boundary["observed_extreme_native"]
+                ),
+                "_edli_day0_probability_boundary_observation_time": (
+                    physical_probability_boundary["observation_time"]
+                ),
+                "_edli_day0_probability_boundary_available_at": (
+                    physical_probability_boundary["observation_available_at"]
+                ),
+                "_edli_day0_probability_boundary_source": (
+                    physical_probability_boundary["source"]
+                ),
             }
         )
     _record_day0_temporal_exit_authority(
@@ -33223,14 +33262,14 @@ def _make_day0_bootstrap_sampler(
             day0_evidence_finality,
         )
 
-        rounded = (
-            _optional_float(payload.get("rounded_value"))
-            if day0_evidence_finality(payload) in DAY0_ABSORBING_FINALITIES
-            else None
-        )
         metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
         if metric not in {"high", "low"}:
             raise ValueError(f"unsupported day0 metric for bootstrap: {metric!r}")
+        probability_boundary = (
+            _day0_probability_boundary_native(payload, metric)
+            if day0_evidence_finality(payload) in DAY0_ABSORBING_FINALITIES
+            else None
+        )
         mask = _day0_absorbing_mask(payload=payload, family=family)
         sigma = _day0_process_sigma_native(
             payload=payload, family=family, unit=unit, decision_time=decision_time
@@ -33248,7 +33287,7 @@ def _make_day0_bootstrap_sampler(
 
     return _Day0BootstrapSampler(
         members=members,
-        rounded=rounded,
+        rounded=probability_boundary,
         metric=metric,
         sigma=float(sigma),
         mask=np.asarray(mask, dtype=float),
@@ -33283,7 +33322,15 @@ def _day0_analysis_rng_seed(
             {
                 "schema": "day0_analysis_probability_content_v1",
                 "family_id": str(getattr(family, "family_id", "") or ""),
-                "observed_extreme": payload.get("rounded_value"),
+                "observed_extreme": _day0_probability_boundary_native(
+                    payload,
+                    str(
+                        payload.get("metric")
+                        or payload.get("temperature_metric")
+                        or getattr(family, "metric", "")
+                        or ""
+                    ),
+                ),
                 "observation_time": payload.get("observation_time"),
                 "member_values": [float(value) for value in member_values],
             }
@@ -34337,14 +34384,14 @@ def _day0_remaining_p_raw_vector(
     from src.signal.ensemble_signal import sigma_instrument_for_city
 
     members = _day0_probability_content_members(future_extremes)
-    rounded = _optional_float(payload.get("rounded_value"))
     metric = str(
         payload.get("metric") or payload.get("temperature_metric") or ""
     ).strip().lower()
+    probability_boundary = _day0_probability_boundary_native(payload, metric)
     if (
         members.size == 0
         or not np.isfinite(members).all()
-        or rounded is None
+        or probability_boundary is None
         or metric not in {"high", "low"}
         or extra_member_sigma < 0.0
         or not math.isfinite(extra_member_sigma)
@@ -34363,7 +34410,7 @@ def _day0_remaining_p_raw_vector(
                 "operator": "day0_extreme_observed_then_noisy_future_v1",
                 "city": str(getattr(city, "name", "") or ""),
                 "metric": metric,
-                "rounded": rounded,
+                "probability_boundary": probability_boundary,
                 "future_extremes": sorted(float(v) for v in members.tolist()),
                 "sigma": sigma,
                 "n_mc": n_mc,
@@ -34375,9 +34422,9 @@ def _day0_remaining_p_raw_vector(
     rng = np.random.default_rng(seed)
     future = members + rng.normal(0.0, sigma, (n_mc, members.size))
     final = (
-        np.maximum(future, rounded)
+        np.maximum(future, probability_boundary)
         if metric == "high"
-        else np.minimum(future, rounded)
+        else np.minimum(future, probability_boundary)
     )
     measured = settlement_semantics.round_values(final)
     probabilities = bin_counts_from_array(measured.reshape(-1), bins).astype(float)
@@ -34616,17 +34663,18 @@ def _day0_observation_age_minutes(
 ) -> float | None:
     """Age of the latest conservative Day0 physical frontier, in minutes.
 
-    A same-station physical channel may advance this clock only when its
-    conservative running extreme exactly equals the settlement-channel bound;
-    the settlement value remains authoritative. Measured from observation valid
-    time, never fetch/availability time.
+    A same-station physical channel may advance this clock when its
+    margin-adjusted running extreme equals or statistically supersedes the
+    settlement-channel bound. Settlement value authority remains separate.
+    Measured from observation valid time, never fetch/availability time.
     Returns None when unparseable (callers must treat None as MAXIMALLY STALE —
     fail-closed; see day0 first-principles review 2026-06-10, charge #1).
     """
     if decision_time is None:
         return None
     raw = (
-        payload.get("_edli_day0_physical_frontier_observation_time")
+        payload.get("_edli_day0_probability_boundary_observation_time")
+        or payload.get("_edli_day0_physical_frontier_observation_time")
         or payload.get("observation_time")
         or payload.get("observation_available_at")
     )
@@ -34647,12 +34695,37 @@ def _day0_observation_age_minutes(
 _DAY0_LOW_EXTREME_AUTHORITY_HOURS = 6.0
 
 
-def _observed_day0_extreme_native(payload: dict[str, object], metric: str) -> float | None:
+def _observed_day0_extreme_native(
+    payload: Mapping[str, object],
+    metric: str,
+) -> float | None:
     raw = payload.get("high_so_far") if metric == "high" else payload.get("low_so_far")
     value = _optional_float(raw)
     if value is not None:
         return value
     return _optional_float(payload.get("rounded_value"))
+
+
+def _day0_probability_boundary_native(
+    payload: Mapping[str, object],
+    metric: str,
+) -> float | None:
+    """Return the physical bound for statistical q without promoting payoff truth."""
+
+    settlement_boundary = _optional_float(payload.get("rounded_value"))
+    physical_boundary = _optional_float(
+        payload.get("_edli_day0_probability_boundary_native")
+    )
+    if physical_boundary is None:
+        return settlement_boundary
+    settlement_observed = _observed_day0_extreme_native(payload, metric)
+    if settlement_observed is None:
+        return settlement_boundary
+    if metric == "high" and physical_boundary >= settlement_observed - 1e-9:
+        return physical_boundary
+    if metric == "low" and physical_boundary <= settlement_observed + 1e-9:
+        return physical_boundary
+    return settlement_boundary
 
 
 def _settled_day0_extreme(
@@ -35371,20 +35444,23 @@ def _day0_remaining_day_members(
             decision_time=probability_clock,
             world_conn=world_conn,
         )
-        rounded = _optional_float(payload.get("rounded_value"))
+        probability_boundary = _day0_probability_boundary_native(
+            payload,
+            metric,
+        )
         from src.events.day0_authority import (
             DAY0_ABSORBING_FINALITIES,
             day0_evidence_finality,
         )
 
         if (
-            rounded is not None
+            probability_boundary is not None
             and day0_evidence_finality(payload) in DAY0_ABSORBING_FINALITIES
         ):
             values = (
-                np.maximum(values, float(rounded))
+                np.maximum(values, float(probability_boundary))
                 if metric == "high"
-                else np.minimum(values, float(rounded))
+                else np.minimum(values, float(probability_boundary))
             )
         payload["_edli_day0_remaining_models"] = int(values.size)
         payload["_edli_day0_remaining_model_names"] = [str(vector.model) for vector in vectors]

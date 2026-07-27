@@ -1150,6 +1150,103 @@ class TestRemainingDayMembers:
         ]
         assert payload["_edli_day0_remaining_models"] == 2
 
+    @pytest.mark.parametrize(
+        ("metric", "settlement_boundary", "physical_boundary", "future", "impossible_bin"),
+        (
+            ("high", 29.0, 30.0, 20.0, 0),
+            ("low", 10.0, 9.0, 20.0, 2),
+        ),
+    )
+    def test_statistical_physical_boundary_removes_impossible_q_mass(
+        self,
+        monkeypatch,
+        metric,
+        settlement_boundary,
+        physical_boundary,
+        future,
+        impossible_bin,
+    ):
+        """Fast physical evidence constrains q without becoming settlement truth."""
+        import src.engine.event_reactor_adapter as era
+        from src.contracts.settlement_semantics import SettlementSemantics
+
+        vectors = [
+            _vector(model="icon_d2", temps=[future] * 24),
+            _vector(
+                model="meteofrance_arome_france_hd",
+                temps=[future] * 24,
+            ),
+        ]
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            lambda **kw: vectors,
+        )
+        monkeypatch.setattr(
+            era,
+            "_day0_process_sigma_native",
+            lambda **kw: 1.0,
+        )
+        monkeypatch.setattr(
+            era,
+            "_day0_absorbing_mask",
+            lambda **kw: np.ones(3, dtype=float),
+        )
+        payload = {
+            "metric": metric,
+            "rounded_value": settlement_boundary,
+            "high_so_far": settlement_boundary if metric == "high" else None,
+            "low_so_far": settlement_boundary if metric == "low" else None,
+            "settlement_source": "wu_api",
+            "_edli_day0_probability_boundary_native": physical_boundary,
+        }
+        family = SimpleNamespace(
+            city="Paris",
+            target_date="2026-06-10",
+            metric=metric,
+        )
+
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=family,
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+        )
+        assert members is not None
+        assert np.all(members == physical_boundary)
+
+        bins = (
+            [
+                Bin(None, 29, "C", "29C or below"),
+                Bin(30, 30, "C", "30C"),
+                Bin(31, None, "C", "31C or above"),
+            ]
+            if metric == "high"
+            else [
+                Bin(None, 8, "C", "8C or below"),
+                Bin(9, 9, "C", "9C"),
+                Bin(10, None, "C", "10C or above"),
+            ]
+        )
+        q = era._day0_remaining_p_raw_vector(
+            np.asarray([future, future], dtype=float),
+            city=_paris(),
+            settlement_semantics=SettlementSemantics.for_city(_paris()),
+            bins=bins,
+            payload=payload,
+            extra_member_sigma=0.0,
+        )
+        assert q[impossible_bin] == 0.0
+
+        sampler = era._make_day0_bootstrap_sampler(
+            members_native=np.asarray([future, future], dtype=float),
+            payload=payload,
+            family=family,
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+        )
+        assert sampler is not None
+        assert sampler.rounded == physical_boundary
+
     def test_remaining_members_keep_source_clock_exact_but_freeze_temporal_q_clock(
         self, monkeypatch
     ):
@@ -2617,8 +2714,21 @@ class TestRequestHashProvenance:
         ]
 
 
-def test_global_day0_plateau_advances_clock_without_promoting_proxy_value():
-    """A same-value fast print advances time, never settlement value authority."""
+@pytest.mark.parametrize(
+    ("metric", "settlement_value", "physical_value", "future_unavailable_value", "extreme_key"),
+    (
+        ("high", 35.0, 36.0, 37.0, "high_so_far"),
+        ("low", 25.0, 24.0, 23.0, "low_so_far"),
+    ),
+)
+def test_global_day0_fast_fact_is_statistical_and_causal(
+    metric,
+    settlement_value,
+    physical_value,
+    future_unavailable_value,
+    extreme_key,
+):
+    """Fast physical facts move q symmetrically, never settlement authority."""
     import src.engine.event_reactor_adapter as era
     from src.events.opportunity_event import make_opportunity_event
     from src.state.schema.observation_prints_schema import append_print, ensure_table
@@ -2646,9 +2756,9 @@ def test_global_day0_plateau_advances_clock_without_promoting_proxy_value():
         ),
     )
     ensure_table(conn)
-    for published, fetched in (
-        ("2026-07-14T14:30:00+00:00", "2026-07-14T14:34:00+00:00"),
-        ("2026-07-14T15:00:00+00:00", "2026-07-14T16:00:00+00:00"),
+    for published, fetched, value in (
+        ("2026-07-14T14:30:00+00:00", "2026-07-14T14:34:00+00:00", settlement_value),
+        ("2026-07-14T15:00:00+00:00", "2026-07-14T16:00:00+00:00", future_unavailable_value),
     ):
         append_print(
             conn,
@@ -2656,14 +2766,14 @@ def test_global_day0_plateau_advances_clock_without_promoting_proxy_value():
             station_id="LFPB",
             source_channel="aviationweather_metar",
             publish_ts_utc=published,
-            value_native=35.0,
+            value_native=value,
             unit="C",
             fetched_at_utc=fetched,
-            raw_report="METAR LFPB 141430Z 35/14",
+            raw_report=f"METAR LFPB 141430Z {int(value):02d}/14",
         )
     carrier = make_opportunity_event(
         event_type="DAY0_EXTREME_UPDATED",
-        entity_key="Paris|2026-07-14|high|LFPB",
+        entity_key=f"Paris|2026-07-14|{metric}|LFPB",
         source="global_auction_winner_target:old-carrier",
         observed_at="2026-07-14T14:00:00+00:00",
         available_at="2026-07-14T14:05:00+00:00",
@@ -2671,15 +2781,15 @@ def test_global_day0_plateau_advances_clock_without_promoting_proxy_value():
         payload={
             "city": "Paris",
             "target_date": "2026-07-14",
-            "metric": "high",
+            "metric": metric,
             "station_id": "LFPB",
             "settlement_source": "wu_icao_history",
             "settlement_unit": "C",
             "observation_time": "2026-07-14T14:00:00+00:00",
             "observation_available_at": "2026-07-14T14:05:00+00:00",
-            "raw_value": 35.0,
-            "rounded_value": 35,
-            "high_so_far": 35.0,
+            "raw_value": settlement_value,
+            "rounded_value": int(settlement_value),
+            extreme_key: settlement_value,
             "source_match_status": "MATCH",
             "local_date_status": "MATCH",
             "station_match_status": "MATCH",
@@ -2691,26 +2801,69 @@ def test_global_day0_plateau_advances_clock_without_promoting_proxy_value():
         },
         causal_snapshot_id="old-day0-carrier",
     )
-    decision_time = datetime(2026, 7, 14, 15, 30, tzinfo=UTC)
+    decision_time = datetime(2026, 7, 14, 14, 40, tzinfo=UTC)
     rebound = era._global_day0_execution_payload(
         carrier,
-        family=SimpleNamespace(city="Paris", target_date="2026-07-14", metric="high"),
+        family=SimpleNamespace(
+            city="Paris",
+            target_date="2026-07-14",
+            metric=metric,
+        ),
         resolution=SimpleNamespace(measurement_unit="C", station_id="LFPB"),
         conditioning=None,
         observation_conn=conn,
         decision_time=decision_time,
         posterior_id=29914,
     )
-    conn.close()
 
     assert rebound["observation_time"] == "2026-07-14T14:00:00+00:00"
     assert rebound["settlement_source"] == "wu_icao_history"
-    assert rebound["rounded_value"] == 35
+    assert rebound["rounded_value"] == int(settlement_value)
     assert rebound["_edli_day0_physical_frontier_observation_time"] == (
         "2026-07-14T14:30:00+00:00"
     )
     assert rebound["_edli_day0_physical_frontier_source"] == "aviationweather_metar"
-    assert era._day0_observation_age_minutes(rebound, decision_time) == 60.0
+    assert era._day0_observation_age_minutes(rebound, decision_time) == 10.0
     assert rebound["_edli_global_day0_binding"]["physical_frontier_clock"][
         "value_role"
     ] == "clock_only_equal_settlement_frontier"
+    append_print(
+        conn,
+        city="Paris",
+        station_id="LFPB",
+        source_channel="aviationweather_metar",
+        publish_ts_utc="2026-07-14T14:45:00+00:00",
+        value_native=physical_value,
+        unit="C",
+        fetched_at_utc="2026-07-14T14:46:00+00:00",
+        raw_report=f"METAR LFPB 141445Z {int(physical_value):02d}/14",
+    )
+    stronger_decision = datetime(2026, 7, 14, 15, 0, tzinfo=UTC)
+    stronger = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(
+            city="Paris",
+            target_date="2026-07-14",
+            metric=metric,
+        ),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="LFPB"),
+        conditioning=None,
+        observation_conn=conn,
+        decision_time=stronger_decision,
+        posterior_id=29914,
+    )
+    conn.close()
+
+    assert stronger["rounded_value"] == int(settlement_value)
+    assert stronger[extreme_key] == settlement_value
+    assert stronger["_edli_global_day0_binding"]["observed_extreme_native"] == settlement_value
+    assert stronger["_edli_day0_probability_boundary_native"] == physical_value
+    assert (
+        stronger["_edli_global_day0_binding"]["statistical_physical_boundary"][
+            "value_role"
+        ]
+        == "margin_adjusted_statistical_absorbing_boundary"
+    )
+    assert "_edli_day0_physical_frontier_observation_time" not in stronger
+    assert era._day0_observation_age_minutes(stronger, stronger_decision) == 15.0
+    assert stronger["observation_context_id"] != rebound["observation_context_id"]
