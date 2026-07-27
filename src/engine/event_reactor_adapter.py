@@ -10340,8 +10340,11 @@ def _global_sell_candidate_from_raw_book(
     if raw_token != token_id:
         raise ValueError("GLOBAL_SELL_JIT_TOKEN_MISMATCH")
     raw_bids = raw_book.get("bids")
+    raw_asks = raw_book.get("asks")
     if not isinstance(raw_bids, list) or not raw_bids:
         raise ValueError("GLOBAL_SELL_JIT_BIDS_MISSING")
+    if raw_asks is not None and not isinstance(raw_asks, list):
+        raise ValueError("GLOBAL_SELL_JIT_ASK_LEVEL_INVALID")
     try:
         levels = tuple(
             BookLevel(
@@ -10355,6 +10358,24 @@ def _global_sell_candidate_from_raw_book(
         raise ValueError("GLOBAL_SELL_JIT_BID_LEVEL_INVALID") from exc
     if len(levels) != len(raw_bids):
         raise ValueError("GLOBAL_SELL_JIT_BID_LEVEL_INVALID")
+    try:
+        ask_levels = tuple(
+            sorted(
+                (
+                    BookLevel(
+                        price=Decimal(str(raw["price"])),
+                        size=Decimal(str(raw["size"])),
+                    )
+                    for raw in (raw_asks or ())
+                    if isinstance(raw, Mapping)
+                ),
+                key=lambda level: level.price,
+            )
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_SELL_JIT_ASK_LEVEL_INVALID") from exc
+    if len(ask_levels) != len(raw_asks or ()):
+        raise ValueError("GLOBAL_SELL_JIT_ASK_LEVEL_INVALID")
     selected_curve = getattr(candidate, "executable_sell_curve", None)
     if selected_curve is None:
         raise ValueError("GLOBAL_SELL_SELECTED_CURVE_MISSING")
@@ -10397,6 +10418,7 @@ def _global_sell_candidate_from_raw_book(
         book_captured_at_utc=captured_at_utc,
         execution_curve_identity=executable_curve_identity(curve),
         executable_sell_curve=curve,
+        native_ask_levels=ask_levels,
         eligibility_reason=None,
     )
 
@@ -10877,11 +10899,6 @@ def _global_curve_supersession_from_receipt(
     replacement = receipt.global_jit_candidate
     if replacement is None:
         return "BLOCKED", None, f"{reason}:replacement_candidate_missing"
-    if getattr(replacement, "action", "BUY") == "SELL":
-        # The current overlay/re-auction mutates BUY asks only.  Never inject a
-        # SELL bid curve into that shape; the recurring loop rebuilds the complete
-        # bid/ask universe on the next current epoch.
-        return "BATCH_BLOCKED", None, reason
     return "CURVE_SUPERSEDED", replacement, reason
 
 

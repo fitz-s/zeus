@@ -22558,7 +22558,7 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
     ) == "global_sell_execution_authority_required"
 
 
-def test_global_sell_worse_jit_bid_batch_blocks_without_buy_overlay():
+def test_global_sell_worse_jit_bid_requires_complete_reauction():
     event = _global_scope_event(city="Alpha", source_run_id="run-sell")
     actuation = _adapter_sell_actuation(event)
     worse = era._global_sell_candidate_from_raw_book(
@@ -22569,6 +22569,7 @@ def test_global_sell_worse_jit_bid_batch_blocks_without_buy_overlay():
             "tick_size": "0.01",
             "min_order_size": "5",
             "bids": [{"price": "0.49", "size": "10"}],
+            "asks": [{"price": "0.51", "size": "10"}],
         },
         captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
     )
@@ -22588,9 +22589,131 @@ def test_global_sell_worse_jit_bid_batch_blocks_without_buy_overlay():
         jit_candidate=worse,
     )
     assert era._global_curve_supersession_from_receipt(receipt) == (
-        "BATCH_BLOCKED",
-        None,
+        "CURVE_SUPERSEDED",
+        worse,
         receipt.reason,
+    )
+
+
+def test_global_sell_jit_overlay_replaces_same_book_buy_and_sell_curves():
+    event = _global_scope_event(city="Alpha", source_run_id="run-sell")
+    selected = _adapter_sell_actuation(event).decision.candidate
+    captured_at = selected.book_captured_at_utc + _dt.timedelta(seconds=1)
+    raw_book = {
+        "asset_id": selected.token_id,
+        "hash": "worse",
+        "tick_size": "0.01",
+        "min_order_size": "5",
+        "bids": [{"price": "0.49", "size": "10"}],
+        "asks": [{"price": "0.51", "size": "6"}, {"price": "0.52", "size": "4"}],
+    }
+    replacement = era._global_sell_candidate_from_raw_book(
+        selected,
+        raw_book,
+        captured_at_utc=captured_at,
+    )
+    old_buy_curve = ExecutableCostCurve(
+        token_id=selected.token_id,
+        side=selected.side,
+        snapshot_id="selected-buy-book",
+        book_hash=selected.executable_sell_curve.book_hash,
+        levels=(BookLevel(price=Decimal("0.61"), size=Decimal("10")),),
+        fee_model=selected.executable_sell_curve.fee_model,
+        min_tick=selected.executable_sell_curve.min_tick,
+        min_order_size=selected.executable_sell_curve.min_order_size,
+        quote_ttl=selected.executable_sell_curve.quote_ttl,
+    )
+    state = (
+        selected.family_key,
+        selected.bin_id,
+        selected.condition_id,
+        selected.side,
+        selected.token_id,
+        "EXECUTABLE",
+        selected.executable_sell_curve.book_hash,
+        "event-1",
+        "gamma-1",
+    )
+    epoch = CurrentGlobalBookEpoch(
+        assets=(
+            CurrentGlobalBookAsset(
+                family_key=selected.family_key,
+                bin_id=selected.bin_id,
+                condition_id=selected.condition_id,
+                gamma_market_id="gamma-1",
+                market_event_id="event-1",
+                side=selected.side,
+                token_id=selected.token_id,
+                curve=old_buy_curve,
+                captured_at_utc=selected.book_captured_at_utc,
+                bid_levels=selected.executable_sell_curve.levels,
+            ),
+        ),
+        asset_states=(state,),
+        captured_at_utc=selected.book_captured_at_utc,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=(state,),
+            captured_at_utc=selected.book_captured_at_utc,
+        ),
+        sell_assets=(
+            CurrentGlobalSellAsset(
+                family_key=selected.family_key,
+                bin_id=selected.bin_id,
+                condition_id=selected.condition_id,
+                gamma_market_id="gamma-1",
+                market_event_id="event-1",
+                side=selected.side,
+                token_id=selected.token_id,
+                curve=selected.executable_sell_curve,
+                captured_at_utc=selected.book_captured_at_utc,
+            ),
+        ),
+    )
+
+    overlaid = global_batch_runtime._book_epoch_with_replacement_candidate(
+        epoch,
+        selected,
+        replacement,
+    )
+
+    assert overlaid.sell_assets[0].curve is replacement.executable_sell_curve
+    assert tuple(level.price for level in overlaid.assets[0].curve.levels) == (
+        Decimal("0.51"),
+        Decimal("0.52"),
+    )
+    assert overlaid.assets[0].bid_levels == replacement.executable_sell_curve.levels
+    assert (
+        overlaid.assets[0].curve.book_hash
+        == replacement.executable_sell_curve.book_hash
+    )
+    assert overlaid.asset_states[0][5:7] == (
+        "EXECUTABLE",
+        replacement.executable_sell_curve.book_hash,
+    )
+    assert overlaid.witness_identity != epoch.witness_identity
+
+    no_ask = era._global_sell_candidate_from_raw_book(
+        selected,
+        {
+            "asset_id": selected.token_id,
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [],
+        },
+        captured_at_utc=captured_at,
+    )
+    no_ask_epoch = global_batch_runtime._book_epoch_with_replacement_candidate(
+        epoch,
+        selected,
+        no_ask,
+    )
+    assert no_ask_epoch.assets == ()
+    assert no_ask_epoch.sell_assets[0].curve is no_ask.executable_sell_curve
+    assert no_ask_epoch.asset_states[0][5:7] == (
+        "NO_ASK",
+        no_ask.executable_sell_curve.book_hash,
     )
 
 

@@ -17,11 +17,14 @@ import zlib
 from types import SimpleNamespace
 from typing import Callable, Mapping, Sequence
 
+from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.engine.global_auction_universe import (
     CurrentGlobalAuctionScope,
+    CurrentGlobalBookAsset,
     CurrentGlobalBookEpoch,
+    CurrentGlobalSellAsset,
     GlobalAuctionScopeCancelled,
     current_global_book_epoch_identity,
     current_global_auction_scope_from_events,
@@ -41,6 +44,7 @@ from src.events.opportunity_event import OpportunityEvent, make_opportunity_even
 from src.events.reactor import EventSubmissionReceipt, GlobalBatchSubmitResult
 from src.solve.solver import (
     CurrentFamilyProbabilityAuthority,
+    ExecutableSellCurve,
     executable_curve_identity,
     family_payoff_q_samples,
 )
@@ -2489,7 +2493,7 @@ def _book_epoch_with_replacement_candidate(
     selected_candidate: object,
     replacement_candidate: object,
 ) -> CurrentGlobalBookEpoch:
-    """Overlay one exact JIT BUY curve without recapturing unrelated books."""
+    """Overlay one exact JIT native book without recapturing unrelated books."""
 
     selected_key = tuple(
         str(getattr(selected_candidate, field, "") or "")
@@ -2499,9 +2503,15 @@ def _book_epoch_with_replacement_candidate(
         str(getattr(replacement_candidate, field, "") or "")
         for field in ("family_key", "bin_id", "condition_id", "side", "token_id")
     )
+    selected_action = str(
+        getattr(selected_candidate, "action", "BUY") or "BUY"
+    ).upper()
+    replacement_action = str(
+        getattr(replacement_candidate, "action", "BUY") or "BUY"
+    ).upper()
     if (
-        str(getattr(selected_candidate, "action", "BUY") or "BUY") != "BUY"
-        or str(getattr(replacement_candidate, "action", "BUY") or "BUY") != "BUY"
+        selected_action not in {"BUY", "SELL"}
+        or replacement_action != selected_action
         or not all(selected_key)
         or replacement_key != selected_key
         or str(
@@ -2517,7 +2527,12 @@ def _book_epoch_with_replacement_candidate(
     ):
         raise ValueError("GLOBAL_REAUCTION_REPLACEMENT_IDENTITY_MISMATCH")
 
-    curve = getattr(replacement_candidate, "executable_cost_curve", None)
+    curve_field = (
+        "executable_sell_curve"
+        if selected_action == "SELL"
+        else "executable_cost_curve"
+    )
+    curve = getattr(replacement_candidate, curve_field, None)
     captured_at = getattr(replacement_candidate, "book_captured_at_utc", None)
     if (
         curve is None
@@ -2531,29 +2546,110 @@ def _book_epoch_with_replacement_candidate(
     ):
         raise ValueError("GLOBAL_REAUCTION_REPLACEMENT_CURVE_INVALID")
 
-    assets = []
-    asset_matches = 0
-    for asset in book_epoch.assets:
-        asset_key = (
-            str(asset.family_key),
-            str(asset.bin_id),
-            str(asset.condition_id),
-            str(asset.side),
-            str(asset.token_id),
+    def key(asset: object) -> tuple[str, ...]:
+        return tuple(
+            str(getattr(asset, field, "") or "")
+            for field in ("family_key", "bin_id", "condition_id", "side", "token_id")
         )
-        if asset_key == selected_key:
-            if (
-                str(getattr(asset.curve, "snapshot_id", "") or "")
-                != str(getattr(selected_candidate, "book_snapshot_id", "") or "")
-                or executable_curve_identity(asset.curve)
-                != str(
-                    getattr(selected_candidate, "execution_curve_identity", "") or ""
-                )
-            ):
-                raise ValueError("GLOBAL_REAUCTION_SELECTED_CURVE_MISMATCH")
-            asset = replace(asset, curve=curve, captured_at_utc=captured_at)
-            asset_matches += 1
-        assets.append(asset)
+
+    assets_by_key = {key(asset): asset for asset in book_epoch.assets}
+    sell_assets_by_key = {key(asset): asset for asset in book_epoch.sell_assets}
+    if (
+        len(assets_by_key) != len(book_epoch.assets)
+        or len(sell_assets_by_key) != len(book_epoch.sell_assets)
+    ):
+        raise ValueError("GLOBAL_REAUCTION_BOOK_TOPOLOGY_AMBIGUOUS")
+    selected_assets = (
+        sell_assets_by_key if selected_action == "SELL" else assets_by_key
+    )
+    selected_asset = selected_assets.get(selected_key)
+    if (
+        selected_asset is None
+        or str(getattr(selected_asset.curve, "snapshot_id", "") or "")
+        != str(getattr(selected_candidate, "book_snapshot_id", "") or "")
+        or executable_curve_identity(selected_asset.curve)
+        != str(getattr(selected_candidate, "execution_curve_identity", "") or "")
+    ):
+        raise ValueError("GLOBAL_REAUCTION_SELECTED_CURVE_MISMATCH")
+
+    if selected_action == "BUY":
+        cost_curve = curve
+        bid_levels = tuple(
+            getattr(replacement_candidate, "native_bid_levels", ()) or ()
+        )
+        sell_curve = (
+            ExecutableSellCurve(
+                token_id=curve.token_id,
+                side=curve.side,
+                snapshot_id=f"{curve.snapshot_id}:sell",
+                book_hash=curve.book_hash,
+                levels=bid_levels,
+                fee_model=curve.fee_model,
+                min_tick=curve.min_tick,
+                min_order_size=curve.min_order_size,
+                quote_ttl=curve.quote_ttl,
+            )
+            if bid_levels
+            else None
+        )
+    else:
+        sell_curve = curve
+        ask_levels = tuple(
+            getattr(replacement_candidate, "native_ask_levels", ()) or ()
+        )
+        prior_cost_curve = getattr(
+            assets_by_key.get(selected_key),
+            "curve",
+            None,
+        )
+        cost_curve = (
+            ExecutableCostCurve(
+                token_id=curve.token_id,
+                side=curve.side,
+                snapshot_id=f"{curve.snapshot_id}:buy",
+                book_hash=curve.book_hash,
+                levels=ask_levels,
+                fee_model=curve.fee_model,
+                min_tick=curve.min_tick,
+                min_order_size=curve.min_order_size,
+                quote_ttl=curve.quote_ttl,
+                fee_details=getattr(prior_cost_curve, "fee_details", None),
+            )
+            if ask_levels
+            else None
+        )
+        bid_levels = tuple(curve.levels)
+
+    base = selected_asset
+    if cost_curve is None:
+        assets_by_key.pop(selected_key, None)
+    else:
+        assets_by_key[selected_key] = CurrentGlobalBookAsset(
+            family_key=base.family_key,
+            bin_id=base.bin_id,
+            condition_id=base.condition_id,
+            gamma_market_id=base.gamma_market_id,
+            market_event_id=base.market_event_id,
+            side=base.side,
+            token_id=base.token_id,
+            curve=cost_curve,
+            captured_at_utc=captured_at,
+            bid_levels=bid_levels,
+        )
+    if sell_curve is None:
+        sell_assets_by_key.pop(selected_key, None)
+    else:
+        sell_assets_by_key[selected_key] = CurrentGlobalSellAsset(
+            family_key=base.family_key,
+            bin_id=base.bin_id,
+            condition_id=base.condition_id,
+            gamma_market_id=base.gamma_market_id,
+            market_event_id=base.market_event_id,
+            side=base.side,
+            token_id=base.token_id,
+            curve=sell_curve,
+            captured_at_utc=captured_at,
+        )
 
     states = []
     state_matches = 0
@@ -2561,13 +2657,13 @@ def _book_epoch_with_replacement_candidate(
         if tuple(str(value) for value in state[:5]) == selected_key:
             state = (
                 *state[:5],
-                "EXECUTABLE",
+                "EXECUTABLE" if cost_curve is not None else "NO_ASK",
                 str(getattr(curve, "book_hash", "") or ""),
                 *state[7:],
             )
             state_matches += 1
         states.append(state)
-    if asset_matches != 1 or state_matches != 1:
+    if state_matches != 1:
         raise ValueError("GLOBAL_REAUCTION_REPLACEMENT_ASSET_MISSING")
 
     identity = current_global_book_epoch_identity(
@@ -2575,12 +2671,12 @@ def _book_epoch_with_replacement_candidate(
         captured_at_utc=book_epoch.captured_at_utc,
     )
     return CurrentGlobalBookEpoch(
-        assets=tuple(assets),
+        assets=tuple(assets_by_key.values()),
         asset_states=tuple(states),
         captured_at_utc=book_epoch.captured_at_utc,
         max_age=book_epoch.max_age,
         witness_identity=identity,
-        sell_assets=book_epoch.sell_assets,
+        sell_assets=tuple(sell_assets_by_key.values()),
     )
 
 

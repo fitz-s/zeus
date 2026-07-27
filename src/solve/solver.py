@@ -1542,6 +1542,7 @@ class GlobalSingleOrderSellCandidate:
     ledger_snapshot_id: str
     executable_sell_curve: ExecutableSellCurve
     resolution_identity: str
+    native_ask_levels: tuple[BookLevel, ...] = ()
     action: Literal["SELL"] = "SELL"
     eligibility_reason: GlobalEligibilityReason | None = None
     probability_functional: Literal[
@@ -1586,6 +1587,10 @@ class GlobalSingleOrderSellCandidate:
         curve = self.executable_sell_curve
         if curve.side != self.side or curve.token_id != self.token_id:
             raise ValueError("sell candidate must use its held token's native bid curve")
+        if tuple(sorted(self.native_ask_levels, key=lambda level: level.price)) != (
+            self.native_ask_levels
+        ):
+            raise ValueError("global sell native asks must be sorted cheapest-first")
         if self.book_captured_at_utc.tzinfo is None:
             raise ValueError("book_captured_at_utc must be timezone-aware")
         functional = self.probability_functional
