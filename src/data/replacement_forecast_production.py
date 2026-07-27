@@ -2114,6 +2114,7 @@ def _enqueue_cycle_advance_reseeds_if_needed(
             scopes=scopes,
             computed_at=computed_at,
             manifests=manifests,
+            include_missing_posterior=scopes is not None,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll
         logger.warning("cycle-advance trigger skipped (fail-soft): %s", exc)

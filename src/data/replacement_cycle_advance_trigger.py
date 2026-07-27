@@ -642,14 +642,18 @@ def enqueue_cycle_advance_reseeds(
     limit: int = 50,
     scopes: Sequence[tuple[str, str, str]] | None = None,
     manifests: Sequence[RawForecastArtifactManifest] | None = None,
+    include_missing_posterior: bool = False,
 ) -> dict[str, object]:
     """For every active-window target whose latest posterior consumed a STRICTLY OLDER cycle than
     the freshest materializable in-universe cycle, enqueue exactly one re-materialization seed
     (reusing the existing seed builder + seed_dir the materialize cycle drains). HELD-position
     families are processed FIRST. Idempotent per (scope, target-cycle) via cycle_advance_enqueues.
 
-    Belongs in the EXISTING availability-poll lane (no new daemon). Fail-soft: any per-scope error
-    is logged and skipped; the function never raises into the poll. Returns a compact report.
+    Exact source-commit scopes may also opt into first materialization when no live posterior
+    exists. The default remains newer-cycle-only so global maintenance does not duplicate seed
+    discovery. Belongs in the EXISTING availability-poll lane (no new daemon). Fail-soft: any
+    per-scope error is logged and skipped; the function never raises into the poll. Returns a
+    compact report.
     """
     from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
         build_replacement_forecast_current_target_plan,
@@ -686,8 +690,10 @@ def enqueue_cycle_advance_reseeds(
         "freshest_materializable_cycle": None,
         "scopes_checked": 0,
         "advances_detected": 0,
+        "first_materializations_detected": 0,
         "held_advances_detected": 0,
         "seeds_enqueued": 0,
+        "first_materialization_seeds_enqueued": 0,
         "held_seeds_enqueued": 0,
         "already_enqueued": 0,
         "manifest_missing": 0,
@@ -830,13 +836,29 @@ def enqueue_cycle_advance_reseeds(
                 report["comparison_failed"] = int(report.get("comparison_failed", 0)) + 1
                 _LOG.debug("cycle-advance comparison failed for %s/%s/%s: %s", city, target_date, metric, exc)
                 continue
-            if not verdict["needs_advance"]:
+            missing_posterior = verdict.get("consumed_cycle") is None
+            if not verdict["needs_advance"] and not (
+                include_missing_posterior and scopes is not None and missing_posterior
+            ):
                 continue
-            report["advances_detected"] = int(report["advances_detected"]) + 1
-            if is_held:
-                report["held_advances_detected"] = int(report["held_advances_detected"]) + 1
-            consumed_cycle_iso = str(verdict["consumed_cycle"])
-            target_cycle_iso = str(verdict["target_cycle"])
+            if missing_posterior:
+                report["first_materializations_detected"] = (
+                    int(report["first_materializations_detected"]) + 1
+                )
+            else:
+                report["advances_detected"] = int(report["advances_detected"]) + 1
+                if is_held:
+                    report["held_advances_detected"] = (
+                        int(report["held_advances_detected"]) + 1
+                    )
+            consumed_cycle_iso = (
+                "NO_LIVE_POSTERIOR"
+                if missing_posterior
+                else str(verdict["consumed_cycle"])
+            )
+            target_cycle_iso = str(
+                verdict.get("target_cycle") or freshest.isoformat()
+            )
             # FINDING 2 (external review 2026-06-12): the verdict above used the UNIVERSE-wide
             # freshest cycle, which can be a FALSE advance signal when a leg's raw artifact is
             # missing for THIS family at that cycle. Re-check materializability AT FAMILY SCOPE.
@@ -892,7 +914,10 @@ def enqueue_cycle_advance_reseeds(
             if family_cycle is None:
                 report["family_cycle_missing"] = int(report.get("family_cycle_missing", 0)) + 1
                 continue
-            if family_cycle <= consumed_cycle_dt(consumed_cycle_iso):
+            if (
+                not missing_posterior
+                and family_cycle <= consumed_cycle_dt(consumed_cycle_iso)
+            ):
                 report["family_cycle_not_newer"] = int(
                     report.get("family_cycle_not_newer", 0)
                 ) + 1
@@ -929,6 +954,11 @@ def enqueue_cycle_advance_reseeds(
                     resolve_path=_resolve_path,
                     seed_name=_seed_name,
                     expected_identity=expected_replacement_dependency_identity_by_role,
+                    upgrade_trigger=(
+                        "missing_live_posterior_reseed"
+                        if missing_posterior
+                        else "newer_cycle_ingested"
+                    ),
                     day0_observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
                     day0_observed_extreme_source=day0_payload.get("day0_observed_extreme_source"),
                     day0_observed_extreme_observation_time=day0_observation_time,
@@ -954,6 +984,9 @@ def enqueue_cycle_advance_reseeds(
                 target_cycle_iso=target_cycle_iso,
                 held_position=is_held,
                 seed_file=str(seed_file),
+                reason=(
+                    "MISSING_LIVE_POSTERIOR" if missing_posterior else None
+                ),
                 replace_existing_seed_file=bool(day0_payload),
                 day0_observed_extreme_observation_time=day0_observation_time,
             )
@@ -961,6 +994,10 @@ def enqueue_cycle_advance_reseeds(
             if inserted:
                 enqueued += 1
                 report["seeds_enqueued"] = int(report["seeds_enqueued"]) + 1
+                if missing_posterior:
+                    report["first_materialization_seeds_enqueued"] = (
+                        int(report["first_materialization_seeds_enqueued"]) + 1
+                    )
                 if is_held:
                     report["held_seeds_enqueued"] = int(report["held_seeds_enqueued"]) + 1
                 report["enqueued"].append(
@@ -969,7 +1006,9 @@ def enqueue_cycle_advance_reseeds(
                         "target_date": target_date,
                         "metric": metric,
                         "held_position": is_held,
-                        "consumed_cycle": consumed_cycle_iso,
+                        "consumed_cycle": (
+                            None if missing_posterior else consumed_cycle_iso
+                        ),
                         "target_cycle": target_cycle_iso,
                         "seed_file": str(seed_file),
                     }

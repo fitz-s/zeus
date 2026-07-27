@@ -624,6 +624,7 @@ def test_source_commit_reseed_triggers_share_one_manifest_snapshot(
     assert load_calls[0][0] == (str(manifest_path),)
     assert trigger_calls[0][1]["manifests"] is loaded
     assert trigger_calls[1][1]["manifests"] is loaded
+    assert trigger_calls[1][1]["include_missing_posterior"] is True
     assert trigger_calls[0][1]["computed_at"] == trigger_calls[1][1]["computed_at"]
 
 

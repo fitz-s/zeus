@@ -662,6 +662,104 @@ def test_batch_cycle_advance_enqueues_day0_with_observed_extreme(
     assert marker["day0_observed_extreme_observation_time"] == "2026-07-03T22:00:00+00:00"
 
 
+def test_scoped_source_commit_enqueues_missing_live_posterior(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed raw-input family must not wait forever for a vanished discovery seed."""
+
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    conn.close()
+
+    target_cycle = datetime(2026, 7, 27, 6, tzinfo=UTC)
+    seed_dir = tmp_path / "seeds"
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    built: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "freshest_materializable_cycle",
+        lambda _conn: target_cycle,
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "scope_needs_cycle_advance",
+        lambda *args, **kwargs: {
+            "needs_advance": False,
+            "consumed_cycle": None,
+            "target_cycle": None,
+        },
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (target_cycle, ()),
+    )
+
+    def _fake_build_seed(*args, **kwargs):
+        built.update(kwargs)
+        seed_dir.mkdir(exist_ok=True)
+        seed_file = seed_dir / "Austin.2026-07-28.high.json"
+        seed_file.write_text("{}", encoding="utf-8")
+        return seed_file
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "_build_and_write_advance_seed",
+        _fake_build_seed,
+    )
+
+    global_semantics = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=raw_dir,
+        computed_at=datetime(2026, 7, 27, 16, tzinfo=UTC),
+        limit=5,
+        scopes=(("Austin", "2026-07-28", "high"),),
+        manifests=(),
+    )
+    assert global_semantics["seeds_enqueued"] == 0
+    assert built == {}
+
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=raw_dir,
+        computed_at=datetime(2026, 7, 27, 16, tzinfo=UTC),
+        limit=5,
+        scopes=(("Austin", "2026-07-28", "high"),),
+        manifests=(),
+        include_missing_posterior=True,
+    )
+
+    assert report["advances_detected"] == 0
+    assert report["first_materializations_detected"] == 1
+    assert report["first_materialization_seeds_enqueued"] == 1
+    assert report["seeds_enqueued"] == 1
+    assert built["upgrade_trigger"] == "missing_live_posterior_reseed"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        marker = conn.execute(
+            """
+            SELECT consumed_cycle_time, target_cycle_time, reason, seed_file
+            FROM cycle_advance_enqueues
+            WHERE city='Austin' AND target_date='2026-07-28' AND metric='high'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert marker is not None
+    assert marker["consumed_cycle_time"] == "NO_LIVE_POSTERIOR"
+    assert marker["target_cycle_time"] == target_cycle.isoformat()
+    assert marker["reason"] == "MISSING_LIVE_POSTERIOR"
+    assert marker["seed_file"]
+
+
 def test_held_marker_with_moved_seed_reheals_without_day0_optin(tmp_path) -> None:
     """LIVE FREEZE FIX (2026-06-21): a HELD position whose materialization seed was built then
     processed/moved out of the live queue but produced NO posterior (the single_runs serving race
