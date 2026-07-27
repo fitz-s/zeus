@@ -2104,7 +2104,7 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
 
     current_cert = {
         **new_proof.qkernel_execution_economics,
-        "payoff_q_point": 0.59,
+        "payoff_q_point": 0.61,
         "payoff_q_action": 0.59,
         "payoff_q_lcb": 0.58,
         "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
@@ -2124,7 +2124,7 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
     ] == pytest.approx(0.652)
     assert current_proof.qkernel_execution_economics[
         "payoff_q_point"
-    ] == pytest.approx(0.59)
+    ] == pytest.approx(0.61)
     assert current_proof.same_bin_yes_posterior == pytest.approx(0.348)
     assert era.replacement_no_bound_certificate_matches(
         current_proof.replacement_no_bound_certificate,

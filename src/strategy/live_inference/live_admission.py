@@ -749,7 +749,13 @@ def replacement_no_bound_certificate_mismatch_reason(
     try:
         pre_q = float(economics["pre_qkernel_q_posterior"])
         pre_lcb = float(economics["pre_qkernel_q_lcb_5pct"])
-        payoff_q = float(economics["payoff_q_point"])
+        payoff_q_field = (
+            "payoff_q_action"
+            if economics.get("global_probability_functional")
+            == "POSTERIOR_PREDICTIVE_MEAN"
+            else "payoff_q_point"
+        )
+        payoff_q = float(economics[payoff_q_field])
         payoff_lcb = float(economics["payoff_q_lcb"])
     except (KeyError, TypeError, ValueError):
         return "qkernel_probability_fields"
@@ -760,8 +766,8 @@ def replacement_no_bound_certificate_mismatch_reason(
     if not same(pre_lcb, no_lcb_served):
         return "qkernel_pre_lcb"
     # The replacement certificate binds the source-clock parent (`pre_q`).
-    # A sealed current-state witness may legitimately re-decide the action at a
-    # different Day0 point; its payoff q, not the parent scalar, must then match
+    # A sealed current-state witness may legitimately re-decide the action. Its
+    # declared action functional, not the source-clock parent point, must match
     # the submitted direction.
     if not same(payoff_q, q_direction):
         return "qkernel_payoff_q"
