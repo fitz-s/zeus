@@ -2164,3 +2164,32 @@ Acceptance requires:
 - existing BUY-NO cap rebinding and non-Day0 fallback behavior remain green;
 - post-restart live preflight no longer reports mixed
   `day0_conditioned_replacement`/`day0_remaining_day` sources.
+
+## 2026-07-27 Conditioned Day0 qkernel guard continuity
+
+The selected-receipt repair advanced the live winner through typed probability
+validation and exposed one final legacy dispatch in qkernel economics
+validation. The guard recognized only raw `replacement_0_1` as a current
+replacement route, so a sealed `day0_conditioned_replacement` certificate was
+later forced through the unrelated remaining-window model-count requirement.
+
+The correction classifies every q-source already registered in the replacement
+authority map as current replacement economics. The existing current-state
+identity, selected side, action-q, q-lower-bound, guard basis, and abstention
+checks remain mandatory. Only the remaining-window route requires
+`remaining_models`.
+
+SCOPE is submit-time Day0 qkernel authority dispatch. DRAIN is the next global
+winner preflight. RESET is a sealed conditioned-replacement economics
+certificate whose selected q and side match the typed probability owner. No q,
+calibration, selection, Kelly, sizing, execution band, lifecycle, source, or
+settlement rule changes.
+
+Acceptance requires:
+
+- conditioned replacement clears qkernel validation without fabricating
+  remaining-window model evidence;
+- a true remaining-window payload without positive `remaining_models` still
+  fails closed;
+- integration, compile, lint, diff, loaded-SHA, and post-restart preflight
+  evidence are green.

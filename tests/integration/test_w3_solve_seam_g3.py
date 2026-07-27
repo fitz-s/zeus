@@ -3436,6 +3436,30 @@ def test_global_day0_current_band_accepts_only_bound_absorbing_certainty():
         probability_payload=payload,
     )
 
+    conditioned_payload = {
+        "condition_id": "condition-dead",
+        "direction": "buy_no",
+        "_edli_q_source": "day0_conditioned_replacement",
+        "_edli_day0_q_mode": "conditioned_replacement",
+        "q_live": 1.0,
+        "q_lcb_5pct": 1.0,
+    }
+    assert_live_day0_qkernel_guard_authority(
+        economics,
+        probability_payload=conditioned_payload,
+    )
+
+    remaining_without_models = {
+        **conditioned_payload,
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+    }
+    with pytest.raises(ValueError, match="remaining_day_models missing"):
+        assert_live_day0_qkernel_guard_authority(
+            economics,
+            probability_payload=remaining_without_models,
+        )
+
     payload["_edli_day0_lcb_transform"]["absorbing_no_conditions"] = []
     with pytest.raises(ValueError, match="degenerate with q_live"):
         assert_live_day0_probability_authority(

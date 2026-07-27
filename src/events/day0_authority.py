@@ -1258,7 +1258,7 @@ def assert_live_day0_qkernel_guard_authority(
         if probability_payload is not None
         else ""
     )
-    replacement_global = q_source == DAY0_REPLACEMENT_Q_SOURCE
+    replacement_global = q_source in DAY0_REPLACEMENT_GLOBAL_AUTHORITIES_BY_Q_SOURCE
     deterministic_payoff = q_source == DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE
     current_band = any(
         str(economics.get(field_name) or "").strip()
