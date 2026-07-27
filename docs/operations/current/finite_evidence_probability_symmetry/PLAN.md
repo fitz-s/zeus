@@ -1823,8 +1823,9 @@ must not receive a positive timestamp.
 
 This is a K2 reconciliation continuity hot-fix. Allowed files are
 `src/state/chain_mirror_reconciler.py`, its focused test, the existing operator
-CLI help, and this plan. No schema, lifecycle grammar, probability, entry/exit
-threshold, settlement, or venue-action law changes are allowed.
+CLI help, its existing script-manifest row, and this plan. No schema, lifecycle
+grammar, probability, entry/exit threshold, settlement, or venue-action law
+changes are allowed.
 
 Acceptance requires:
 
@@ -1833,6 +1834,8 @@ Acceptance requires:
 - the event and projection preserve phase, owned shares, and cost basis;
 - an immediate second pass is idempotent and emits no duplicate event;
 - absent and terminal rows cannot receive positive observation refreshes;
+- the append writer rechecks the current phase so a concurrent terminal
+  transition cannot receive a stale positive observation;
 - focused reconciliation, compile, lint, planning-lock, and diff checks pass;
 - after live deployment, canonical `chain_seen_at` coverage, global-auction
   held-position counts, and subsequent SELL selection/command evidence are

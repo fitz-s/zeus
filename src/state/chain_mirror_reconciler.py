@@ -1275,6 +1275,11 @@ def apply_size_correction_finding(
     fill_authority = str(current["fill_authority"] or "")
     owned_shares_before = float(current["shares"] or 0.0)
     observation_only = finding.details.get("reason") == "chain_economics_observed"
+    if (
+        observation_only
+        and phase_before not in {"active", "day0_window", "pending_exit"}
+    ):
+        return False
     owned_reduction = (
         not observation_only
         and fill_authority in FILL_GRADE_FILL_AUTHORITIES

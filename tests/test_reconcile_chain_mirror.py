@@ -26,7 +26,9 @@ from src.state.chain_mirror_reconciler import (
     SIZE_CORRECTED,
     ChainPositionFact,
     LocalPositionRow,
+    MirrorFinding,
     SettlementFact,
+    apply_size_correction_finding,
     classify_chain_only_asset,
     classify_local_position,
     grade_bin,
@@ -856,6 +858,65 @@ def test_chain_observation_refresh_excludes_absent_and_terminal_positions(
         """
     ).fetchone()[0]
     assert excluded_events == 0
+
+
+def test_observation_writer_rechecks_current_phase_after_classification_race(
+    trades_conn,
+):
+    position_id = "pos-raced-to-terminal"
+    stale_seen_at = "2026-07-27T17:00:00+00:00"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="settled",
+        direction="buy_yes",
+        token_id="tok-raced-to-terminal",
+        chain_shares=5.0,
+        shares=5.0,
+        cost_basis_usd=2.5,
+        chain_seen_at=stale_seen_at,
+    )
+    finding = MirrorFinding(
+        classification=SIZE_CORRECTED,
+        position_id=position_id,
+        asset="tok-raced-to-terminal",
+        writes=True,
+        details={
+            "reason": "chain_economics_observed",
+            "chain_size": 5.0,
+            "local_shares": 5.0,
+            "shares_unchanged": True,
+            "chain_seen_at_before": stale_seen_at,
+        },
+    )
+
+    applied = apply_size_correction_finding(
+        trades_conn,
+        finding,
+        now=datetime(2026, 7, 27, 18, 30, tzinfo=timezone.utc),
+    )
+
+    assert applied is False
+    row = trades_conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd, chain_shares, chain_seen_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert (
+        row["phase"],
+        row["shares"],
+        row["cost_basis_usd"],
+        row["chain_shares"],
+        row["chain_seen_at"],
+    ) == ("settled", 5.0, 2.5, 5.0, stale_seen_at)
+    event_count = trades_conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    assert event_count == 0
 
 
 def test_pending_exit_small_chain_delta_refreshes_without_owned_reduction(

@@ -726,7 +726,7 @@ scripts:
     reason: "Provides a dry-run-first operator path for REVIEW_REQUIRED matched-order rows with positive authenticated CLOB trade truth."
   reconcile_chain_mirror.py:
     # Created: 2026-07-04
-    # Last reused or audited: 2026-07-04
+    # Last reused or audited: 2026-07-27
     # Authority basis: operator directive 2026-07-04 (root AGENTS.md §2 reconciliation
     #   order Chain > Chronicler > Portfolio); docs/rebuild/chain_mirror_state_model_2026-07-04.md
     class: repair
@@ -741,7 +741,7 @@ scripts:
     target_db: state/zeus_trades.db
     external_inputs: [live_runtime_dbs, authenticated_venue_read]
     dangerous_if_run: false
-    promotion_barrier: "Closes only local rows whose held token is absent on chain with a VERIFIED settlement_outcomes grading, or corrects chain_shares to the venue-reported size; every write goes through append_many_and_project (append-only position_events + upsert_position_current). Never creates a position_current row, never adopts a foreign (non-Zeus-origin) token, never auto-closes an open-phase row whose market has not resolved, never submits a venue order, never submits redeemPositions."
+    promotion_barrier: "Closes only local rows whose held token is absent on chain with a VERIFIED settlement_outcomes grading, corrects chain_shares to the venue-reported size, or refreshes append-first positive-chain observation authority for a current active/day0_window/pending_exit row without changing owned shares/cost; every write goes through append_many_and_project (append-only position_events + upsert_position_current). Never refreshes positive-chain authority onto pending_entry or terminal rows, never creates a position_current row, never adopts a foreign (non-Zeus-origin) token, never auto-closes an open-phase row whose market has not resolved, never submits a venue order, never submits redeemPositions."
     required_helpers: [src.state.chain_mirror_reconciler.reconcile, src.state.db.append_many_and_project]
     required_tests: [tests/test_reconcile_chain_mirror.py]
     reason: "Standing chain-mirror invariant: the local position book must mirror on-chain state (operator law 2026-07-04). Drains gradable quarantined/stale position_current rows into settled within one reconcile cycle without requiring every quarantine writer to be rewired in this slice (design doc §5)."
