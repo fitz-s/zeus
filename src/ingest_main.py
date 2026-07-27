@@ -1260,16 +1260,28 @@ def _world_schema_current_lightweight() -> bool:
         return False
 
 
-def _world_schema_boot_requires_init() -> bool:
+def _assert_world_schema_ready_for_ingest() -> None:
+    """Require current world DDL without mutating the live DB during daemon boot."""
     if _world_schema_ready_sentinel_current():
-        logger.info("init_schema skipped: current world_schema_ready sentinel matches pinned fingerprint")
-        return False
+        logger.info(
+            "world schema ready: current world_schema_ready sentinel matches pinned fingerprint"
+        )
+        return
     if _world_schema_current_lightweight():
         logger.info(
-            "init_schema skipped: lightweight world schema probe passed; refreshing sentinel"
+            "world schema ready: lightweight probe passed; refreshing sentinel"
         )
-        return False
-    return True
+        return
+
+    # SCOPE: data-ingest boot only; never acquire the world writer or stall the
+    # independent monitor/exit/global-auction lanes.
+    # DRAIN: an operator-owned fenced migration applies the pinned DDL while the
+    # live mesh is intentionally quiesced.
+    # RESET: the next boot's read-only probe passes and refreshes the sentinel.
+    raise RuntimeError(
+        "WORLD_SCHEMA_MIGRATION_REQUIRED: world DB does not match the pinned "
+        "schema; run an explicit fenced migration before starting data-ingest"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3374,15 +3386,11 @@ def main() -> None:
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     bypass_dead_proxy_env_vars()
 
-    # Schema init on world DB.  A current sentinel means a prior init_schema
-    # already returned OK for the pinned DDL; skip the repeat write path on
-    # restarts so source-clock polling is not delayed behind a world DB lock.
-    from src.state.db import init_schema, get_world_connection
-    if _world_schema_boot_requires_init():
-        conn = get_world_connection(write_class="bulk")
-        init_schema(conn)
-        conn.close()
-        logger.info("init_schema complete")
+    # Live daemon boot is not a schema-migration lane.  A read-only proof admits
+    # ingest; drift fails this daemon closed so it cannot starve independent
+    # monitor/exit/global-auction work behind a world-DB writer transaction.
+    from src.state.db import get_world_connection
+    _assert_world_schema_ready_for_ingest()
     _assert_forecasts_schema_ready_for_ingest()
     logger.info("init_schema_forecasts + assert_schema_current_forecasts complete")
 

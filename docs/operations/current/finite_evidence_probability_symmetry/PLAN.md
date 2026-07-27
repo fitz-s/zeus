@@ -1965,3 +1965,34 @@ Acceptance requires:
 - existing boot ordering/recovery tests, source compile, and diff checks pass;
 - standard hot-fix landing followed by loaded-SHA, process, heartbeat, monitor
   cadence, canonical event/receipt, and current rejection-reason evidence.
+
+## 2026-07-27 Data-ingest boot schema-migration isolation
+
+The restart after the global-auction correction exposed a second continuity
+failure. A world schema fingerprint change made data-ingest call the complete
+`init_schema()` migration engine during ordinary live boot. On the 93GB
+canonical world DB that transaction held SQLite's sole writer, accumulated a
+multi-gigabyte WAL, and starved EDLI claims, price publication, and continuous
+position redecision while the process still appeared alive.
+
+Live daemon boot is therefore a read-only schema-admission boundary, never a
+migration lane. A current sentinel or lightweight schema proof admits ingest.
+If both fail, data-ingest exits with `WORLD_SCHEMA_MIGRATION_REQUIRED`; an
+operator-owned fenced migration must apply DDL before restart. This isolates
+source degradation from the independent monitor/exit/global-auction money path.
+
+SCOPE is data-ingest boot only. DRAIN is an explicit fenced world migration
+while the mesh is intentionally quiesced. RESET is a successful read-only
+schema proof on the next boot, followed by atomic sentinel refresh. No schema,
+probability, strategy, execution threshold, order band, lifecycle, settlement,
+or risk semantics change.
+
+Acceptance requires:
+
+- a focused antibody proving lightweight readiness never opens a writer;
+- a focused antibody proving schema drift fails with the typed migration
+  requirement instead of calling `init_schema()`;
+- existing ingest boot/registry tests, compile, lint, and diff checks pass;
+- after the already-running migration reaches a safe commit, hot-fix landing
+  and restart prove loaded SHA, fresh ingest heartbeat, released world writer,
+  advancing EDLI claims, and current monitor/rejection evidence.

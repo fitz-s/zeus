@@ -162,17 +162,18 @@ def test_ingest_boot_schema_assert_failure_closes_conn(monkeypatch) -> None:
     assert calls == ["init", "assert_current", "close"]
 
 
-def test_ingest_world_schema_boot_skips_heavy_init_when_lightweight_probe_passes(monkeypatch) -> None:
+def test_ingest_world_schema_boot_accepts_lightweight_probe_without_writer(monkeypatch) -> None:
     """A stale fingerprint sentinel must not force data-ingest into 77GB world init on boot."""
 
     monkeypatch.setattr(_ingest_main, "_world_schema_ready_sentinel_current", lambda: False)
     monkeypatch.setattr(_ingest_main, "_world_schema_current_lightweight", lambda: True)
 
-    assert _ingest_main._world_schema_boot_requires_init() is False
+    assert _ingest_main._assert_world_schema_ready_for_ingest() is None
 
 
-def test_ingest_world_schema_boot_requires_init_when_sentinel_and_probe_fail(monkeypatch) -> None:
+def test_ingest_world_schema_boot_requires_fenced_migration_without_writer(monkeypatch) -> None:
     monkeypatch.setattr(_ingest_main, "_world_schema_ready_sentinel_current", lambda: False)
     monkeypatch.setattr(_ingest_main, "_world_schema_current_lightweight", lambda: False)
 
-    assert _ingest_main._world_schema_boot_requires_init() is True
+    with pytest.raises(RuntimeError, match="WORLD_SCHEMA_MIGRATION_REQUIRED"):
+        _ingest_main._assert_world_schema_ready_for_ingest()
