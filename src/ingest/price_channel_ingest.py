@@ -1145,30 +1145,37 @@ def _edli_durable_fill_bridge_scan(
 
         candidate_rows = conn.execute(sql).fetchall()
         incomplete_open_position_ids: set[str] = set()
+        positions_by_id: dict[str, object] = {}
         command_position_by_aggregate: dict[str, str] = {}
         try:
-            incomplete_rows = conn.execute(
+            position_rows = conn.execute(
                 """
-                SELECT position_id
+                SELECT position_id, p_posterior, entry_method, phase
                   FROM position_current
-                 WHERE phase IN ('active', 'day0_window', 'pending_exit')
-                   AND (
-                        p_posterior IS NULL
-                     OR p_posterior <= 0.0
-                     OR entry_method IS NULL
-                     OR entry_method = ''
-                     OR entry_method = 'ens_member_counting'
-                   )
                 """
             ).fetchall()
+            positions_by_id = {
+                str(_row_get(r, "position_id")): r
+                for r in position_rows
+                if _row_get(r, "position_id")
+            }
             incomplete_open_position_ids = {
                 str(_row_get(r, "position_id"))
-                for r in incomplete_rows
-                if _row_get(r, "position_id")
+                for r in position_rows
+                if (
+                    str(_row_get(r, "phase") or "")
+                    in {"active", "day0_window", "pending_exit"}
+                    and (
+                        not _row_get(r, "p_posterior")
+                        or float(_row_get(r, "p_posterior")) <= 0.0
+                        or str(_row_get(r, "entry_method") or "")
+                        in {"", "ens_member_counting"}
+                    )
+                )
             }
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "EDLI durable fill-bridge scan: incomplete projection query failed "
+                "EDLI durable fill-bridge scan: position projection query failed "
                 "(non-fatal; normal scan continues): %s",
                 exc,
             )
@@ -1242,28 +1249,13 @@ def _edli_durable_fill_bridge_scan(
         # and re-bridge the same aggregate into a second position_current row
         # (duplicate position identity = live-money hazard).
         legacy_position_id = edli_bridge_position_id_legacy(aggregate_id)
-        existing = conn.execute(
-            """
-            SELECT position_id, p_posterior, entry_method
-              FROM position_current
-             WHERE position_id IN (?, ?)
-             ORDER BY CASE WHEN position_id = ? THEN 0 ELSE 1 END
-             LIMIT 1
-            """,
-            (position_id, legacy_position_id, position_id),
-        ).fetchone()
+        existing = positions_by_id.get(position_id) or positions_by_id.get(
+            legacy_position_id
+        )
         if existing is None:
             command_position_id = command_position_by_aggregate.get(aggregate_id)
             if command_position_id:
-                existing = conn.execute(
-                    """
-                    SELECT position_id, p_posterior, entry_method
-                      FROM position_current
-                     WHERE position_id = ?
-                     LIMIT 1
-                    """,
-                    (command_position_id,),
-                ).fetchone()
+                existing = positions_by_id.get(command_position_id)
             else:
                 events_for_command = _aggregate_event_rows(conn, aggregate_id)
                 command = _latest_payload(events_for_command, "ExecutionCommandCreated") or {}
@@ -1273,15 +1265,7 @@ def _edli_durable_fill_bridge_scan(
                 )
                 command_position_id = str(_row_get(command_row, "position_id") or "")
                 if command_position_id:
-                    existing = conn.execute(
-                        """
-                        SELECT position_id, p_posterior, entry_method
-                          FROM position_current
-                         WHERE position_id = ?
-                         LIMIT 1
-                        """,
-                        (command_position_id,),
-                    ).fetchone()
+                    existing = positions_by_id.get(command_position_id)
         if existing is not None:
             existing_position_id = str(_row_get(existing, "position_id"))
             if already_bridged_link_sync_seen < max(0, already_bridged_repair_limit):

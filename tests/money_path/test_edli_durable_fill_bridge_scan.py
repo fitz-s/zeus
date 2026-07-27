@@ -672,3 +672,50 @@ class TestDurableFillBridgeScan:
         assert bridged == 0, (
             f"scan reported bridged={bridged} but the legacy row should have been found"
         )
+
+    def test_already_bridged_positions_are_loaded_once_per_scan(self):
+        """A healthy minute must not issue one position lookup per historical fill."""
+        from src.events.edli_position_bridge import edli_bridge_position_id
+        from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
+
+        conn = _make_conn()
+        for index in range(40):
+            aggregate_id = f"already-bridged-{index}"
+            _seed_confirmed_fill_aggregate(conn, aggregate_id=aggregate_id)
+            position_id = edli_bridge_position_id(aggregate_id)
+            conn.execute(
+                """
+                INSERT INTO position_current
+                    (position_id, phase, trade_id, strategy_key, updated_at,
+                     temperature_metric, p_posterior, entry_method)
+                VALUES (?, 'active', ?, 'settlement_capture',
+                        '2026-06-01T00:00:00', 'high', 0.8, 'qkernel')
+                """,
+                (position_id, position_id),
+            )
+        conn.commit()
+
+        statements = []
+        conn.set_trace_callback(statements.append)
+        bridged = _edli_durable_fill_bridge_scan(
+            conn,
+            now=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        )
+        conn.set_trace_callback(None)
+
+        projection_reads = [
+            statement
+            for statement in statements
+            if "SELECT position_id, p_posterior, entry_method, phase"
+            in statement
+            and "FROM position_current" in statement
+        ]
+        point_reads = [
+            statement
+            for statement in statements
+            if "FROM position_current" in statement
+            and ("WHERE position_id IN" in statement or "WHERE position_id =" in statement)
+        ]
+        assert bridged == 0
+        assert len(projection_reads) == 1
+        assert point_reads == []
