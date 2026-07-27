@@ -1097,6 +1097,13 @@ class OpportunityEventReactor:
         self._pending_cycle_advances: list[tuple[str, str, str]] = []
         self._pending_day0_hourly_refreshes: list[tuple[str, str, str]] = []
         self._claim_contention_seen = False
+        # SCOPE: only an exact event_id + (claimed_at, attempt_count) generation
+        # whose receipt is proven NO_SUBMIT. DRAIN: the next reactor wake under
+        # the bounded world-writer window, before queue fetch. RESET: a successful
+        # CAS requeue or any row/generation change removes the debt; the ordinary
+        # processing lease remains the crash fallback. Unknown side effects never
+        # enter this lane.
+        self._no_submit_claim_requeue_debt: dict[str, tuple[str, int]] = {}
         # Per-event requeue counter — LOG HYGIENE ONLY (operator law 2026-06-12:
         # a retry count is not a market fact and MUST NOT terminalize). Used
         # solely to dedupe the requeue log line (log at attempt 1, then every
@@ -1131,6 +1138,9 @@ class OpportunityEventReactor:
         cancelled: Callable[[], bool] | None = None,
     ) -> ReactorResult:
         result = ReactorResult()
+        self._drain_no_submit_claim_requeues(
+            wait_ms=_reactor_claim_busy_timeout_ms()
+        )
         if self._cycle_entry_gate is not None and not self._cycle_entry_gate():
             result.rejection_reasons.append("RISK_GUARD_BLOCKED")
             return result
@@ -1398,6 +1408,7 @@ class OpportunityEventReactor:
 
         claimed: list[OpportunityEvent] = []
         claim_generations: dict[str, str] = {}
+        claim_attempt_counts: dict[str, int] = {}
         claim_lock_bounced_event_ids: set[str] = set()
         attempted = 0
         newly_claimed = 0
@@ -1417,15 +1428,17 @@ class OpportunityEventReactor:
                 # durable continuation can appear after a new event that the
                 # finite first-claim budget does not admit this wake.
                 continue
-            claim_generation = self._process_event_unit(
+            claim_token = self._process_event_unit(
                 event,
                 decision_time=decision_time,
                 result=result,
                 defer_submit=True,
             )
-            if claim_generation is not None:
+            if claim_token is not None:
+                claim_generation, claim_attempt_count = claim_token
                 claimed.append(event)
                 claim_generations[event.event_id] = claim_generation
+                claim_attempt_counts[event.event_id] = claim_attempt_count
                 if not previously_charged:
                     newly_claimed += 1
             if cancelled():
@@ -1445,10 +1458,11 @@ class OpportunityEventReactor:
         ) -> OpportunityEvent | None:
             claimed_event, generation, lock_bounced = (
                 self._claim_global_winner_for_actuation(
-                event,
-                current_batch_claim_generations=dict(claim_generations),
-                result=result,
-            )
+                    event,
+                    current_batch_claim_generations=dict(claim_generations),
+                    result=result,
+                    claim_attempt_counts=claim_attempt_counts,
+                )
             )
             if lock_bounced:
                 claim_lock_bounced_event_ids.add(event.event_id)
@@ -1521,6 +1535,8 @@ class OpportunityEventReactor:
                     ),
                     decision_time=_finalization_time(event),
                     result=result,
+                    claim_generation=claim_generations.get(event.event_id),
+                    claim_attempt_count=claim_attempt_counts.get(event.event_id),
                 )
             return GlobalEpochOutcome(
                 attempted=attempted,
@@ -1566,6 +1582,11 @@ class OpportunityEventReactor:
                 # retry path once the writer clears.
                 with contextlib.suppress(Exception):
                     self._finalize_reservation(event, emitted=False)
+                self._remember_no_submit_claim_requeue(
+                    event.event_id,
+                    claim_generations.get(event.event_id),
+                    claim_attempt_counts.get(event.event_id),
+                )
                 result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
                 result.retried += 1
                 continue
@@ -1583,6 +1604,8 @@ class OpportunityEventReactor:
                 continuation_event=(
                     batch_result.continuation_event if is_winner else None
                 ),
+                claim_generation=claim_generations.get(event.event_id),
+                claim_attempt_count=claim_attempt_counts.get(event.event_id),
             )
             if not finalized:
                 finalization_lock_busy = True
@@ -1664,6 +1687,7 @@ class OpportunityEventReactor:
         *,
         current_batch_claim_generations: dict[str, str],
         result: ReactorResult,
+        claim_attempt_counts: dict[str, int] | None = None,
     ) -> tuple[OpportunityEvent | None, str | None, bool]:
         """Atomically materialize and claim one unpaged cut-time winner."""
 
@@ -1698,6 +1722,10 @@ class OpportunityEventReactor:
                     ):
                         self._store.conn.rollback()
                         return None, None, False
+                    if claim_attempt_counts is not None:
+                        claim_attempt_counts[prioritized_event.event_id] = (
+                            self._store.attempt_count(prioritized_event.event_id)
+                        )
                     self._store.conn.commit()
                     return prioritized_event, claimed_at, False
             except Exception as exc:
@@ -1725,7 +1753,7 @@ class OpportunityEventReactor:
         decision_time: datetime,
         result: ReactorResult,
         defer_submit: bool = False,
-    ) -> str | None:
+    ) -> tuple[str, int] | None:
         """Process ONE event as TWO serialized world-DB write units around the
         network submit boundary (#95 SEV-2.1).
 
@@ -1843,6 +1871,11 @@ class OpportunityEventReactor:
                         event.event_id,
                         claimed_at=claim_generation,
                     )
+                    claim_attempt_count = (
+                        self._store.attempt_count(event.event_id)
+                        if claimed
+                        else 0
+                    )
                 except Exception as exc:
                     if _is_sqlite_lock_error(exc):
                         # CLAIM-STORM FIX (storm amplifier): ALWAYS roll back. The old
@@ -1924,7 +1957,7 @@ class OpportunityEventReactor:
             mutex.release()
 
         if defer_submit:
-            return claim_generation
+            return claim_generation, claim_attempt_count
 
         # ---- Network submit: NO mutex held, NO open world txn (WAL lock free) ----
         # In production self._submit performs the JIT /book HTTP fetch and the
@@ -2050,6 +2083,54 @@ class OpportunityEventReactor:
         finally:
             mutex.release()
 
+    def _remember_no_submit_claim_requeue(
+        self,
+        event_id: str,
+        claim_generation: str | None,
+        claim_attempt_count: int | None,
+    ) -> None:
+        generation = str(claim_generation or "").strip()
+        if generation and claim_attempt_count is not None:
+            self._no_submit_claim_requeue_debt[event_id] = (
+                generation,
+                int(claim_attempt_count),
+            )
+
+    def _drain_no_submit_claim_requeues(self, *, wait_ms: int) -> int:
+        debt = dict(self._no_submit_claim_requeue_debt)
+        if not debt:
+            return 0
+        mutex = world_write_mutex()
+        wait_ms = max(0, int(wait_ms))
+        if not mutex.acquire(timeout=wait_ms / 1000.0):
+            return 0
+        try:
+            if self._store.conn.in_transaction:
+                self._store.conn.rollback()
+            try:
+                with _scoped_sqlite_busy_timeout(self._store.conn, wait_ms):
+                    self._store.conn.execute("BEGIN IMMEDIATE")
+                    for event_id, (claimed_at, attempt_count) in debt.items():
+                        self._store.requeue_claim_if_current(
+                            event_id,
+                            claimed_at=claimed_at,
+                            attempt_count=attempt_count,
+                            last_error=_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
+                        )
+                    self._store.conn.commit()
+            except Exception as exc:
+                with contextlib.suppress(Exception):
+                    self._store.conn.rollback()
+                if _is_sqlite_lock_error(exc):
+                    return 0
+                raise
+            for event_id, claim_token in debt.items():
+                if self._no_submit_claim_requeue_debt.get(event_id) == claim_token:
+                    self._no_submit_claim_requeue_debt.pop(event_id, None)
+            return len(debt)
+        finally:
+            mutex.release()
+
     def _finalize_deferred_event_unit(
         self,
         event: OpportunityEvent,
@@ -2059,6 +2140,8 @@ class OpportunityEventReactor:
         result: ReactorResult,
         wait_ms: int | None = None,
         continuation_event: OpportunityEvent | None = None,
+        claim_generation: str | None = None,
+        claim_attempt_count: int | None = None,
     ) -> bool:
         """Window B for an event whose Window A joined a global auction epoch.
 
@@ -2118,6 +2201,11 @@ class OpportunityEventReactor:
             # the provisional reserve and retry cleanly — unchanged pre-C1 path.
             with contextlib.suppress(Exception):
                 self._finalize_reservation(event, emitted=False)
+            self._remember_no_submit_claim_requeue(
+                event.event_id,
+                claim_generation,
+                claim_attempt_count,
+            )
             result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
             result.retried += 1
             return False
@@ -2234,16 +2322,40 @@ class OpportunityEventReactor:
                             self._store.conn.rollback()
                     try:
                         with _scoped_sqlite_busy_timeout(self._store.conn, 0):
-                            self._store.requeue_pending(
-                                event.event_id,
-                                last_error=_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
+                            proven_no_submit = (
+                                not reservation_side_effect_observed
+                                and submit_result.side_effect_status == "NO_SUBMIT"
                             )
+                            if (
+                                proven_no_submit and claim_generation
+                                and claim_attempt_count is not None
+                            ):
+                                self._store.requeue_claim_if_current(
+                                    event.event_id,
+                                    claimed_at=claim_generation,
+                                    attempt_count=claim_attempt_count,
+                                    last_error=_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
+                                )
+                            else:
+                                self._store.requeue_pending(
+                                    event.event_id,
+                                    last_error=_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
+                                )
                             self._commit_event_unit()
                     except Exception as requeue_exc:
                         if not _is_sqlite_lock_error(requeue_exc):
                             raise
                         with contextlib.suppress(Exception):
                             self._store.conn.rollback()
+                        if (
+                            not reservation_side_effect_observed
+                            and submit_result.side_effect_status == "NO_SUBMIT"
+                        ):
+                            self._remember_no_submit_claim_requeue(
+                                event.event_id,
+                                claim_generation,
+                                claim_attempt_count,
+                            )
                     result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
                     result.retried += 1
                     return False

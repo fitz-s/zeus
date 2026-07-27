@@ -2772,6 +2772,42 @@ class EventStore:
                 self._bind_winner_pointer(event_id, updated_at=_utc_now())
                 self._set_winner(event_id, str(row[0] or ""))
 
+    def requeue_claim_if_current(
+        self,
+        event_id: str,
+        *,
+        claimed_at: str,
+        attempt_count: int,
+        last_error: str | None = None,
+    ) -> bool:
+        """Requeue only the exact processing generation owned by the caller."""
+
+        self._require_world_event_tables()
+        cur = self.conn.execute(
+            """
+            UPDATE opportunity_event_processing
+               SET processing_status = 'pending',
+                   claimed_at = NULL,
+                   processed_at = NULL,
+                   last_error = ?,
+                   updated_at = ?
+             WHERE consumer_name = ?
+               AND event_id = ?
+               AND processing_status = 'processing'
+               AND claimed_at = ?
+               AND attempt_count = ?
+            """,
+            (
+                last_error,
+                _utc_now(),
+                self.consumer_name,
+                event_id,
+                claimed_at,
+                int(attempt_count),
+            ),
+        )
+        return cur.rowcount == 1
+
     def requeue_processing_before_boot(self, *, boot_at: str) -> int:
         """Recover claims whose process owner predates this runtime generation."""
 

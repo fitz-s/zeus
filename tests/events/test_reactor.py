@@ -35,6 +35,7 @@ from src.events.reactor import (
     TERMINAL_MONEY_PATH_REASONS,
     TRANSIENT_MONEY_PATH_REASONS,
     _EXECUTABLE_SNAPSHOT_RETRY,
+    _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
     _edli_emit_day0_extreme_events,
     _process_pending_cancelled,
     _rank_forecast_wake_events,
@@ -49,6 +50,282 @@ def _store() -> tuple[sqlite3.Connection, EventStore]:
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     return conn, EventStore(conn)
+
+
+def test_no_submit_claim_debt_drains_before_cycle_entry_gate():
+    conn, store = _store()
+    event = _forecast_event("claim-drain-before-gate")
+    store.insert_or_ignore(event)
+    claimed_at = "2026-05-24T18:30:00+00:00"
+    assert store.claim(event.event_id, claimed_at=claimed_at)
+    conn.commit()
+
+    reactor = OpportunityEventReactor.__new__(OpportunityEventReactor)
+    reactor._store = store
+    reactor._cycle_entry_gate = lambda: False
+    reactor._no_submit_claim_requeue_debt = {
+        event.event_id: (claimed_at, 1)
+    }
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
+
+    assert result.rejection_reasons == ["RISK_GUARD_BLOCKED"]
+    row = conn.execute(
+        """
+        SELECT processing_status, claimed_at, last_error
+          FROM opportunity_event_processing
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, event.event_id),
+    ).fetchone()
+    assert tuple(row) == (
+        "pending",
+        None,
+        _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
+    )
+    assert reactor._no_submit_claim_requeue_debt == {}
+
+
+def test_no_submit_claim_debt_cannot_requeue_newer_aba_generation():
+    conn, store = _store()
+    event = _forecast_event("claim-drain-aba")
+    store.insert_or_ignore(event)
+    old_claimed_at = "2026-05-24T18:30:00+00:00"
+    new_claimed_at = old_claimed_at
+    assert store.claim(event.event_id, claimed_at=old_claimed_at)
+    store.requeue_pending(event.event_id)
+    assert store.claim(event.event_id, claimed_at=new_claimed_at)
+    conn.commit()
+
+    reactor = OpportunityEventReactor.__new__(OpportunityEventReactor)
+    reactor._store = store
+    reactor._cycle_entry_gate = lambda: False
+    reactor._no_submit_claim_requeue_debt = {
+        event.event_id: (old_claimed_at, 1)
+    }
+
+    reactor.process_pending(decision_time=_DT_VENUE_OPEN)
+
+    row = conn.execute(
+        """
+        SELECT processing_status, claimed_at
+          FROM opportunity_event_processing
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, event.event_id),
+    ).fetchone()
+    assert tuple(row) == ("processing", new_claimed_at)
+    assert reactor._no_submit_claim_requeue_debt == {}
+
+
+def test_finalize_mutex_bounce_records_only_proven_no_submit_claim_debt(
+    monkeypatch,
+):
+    from src.events import reactor as reactor_module
+
+    stall_lock = threading.Lock()
+    monkeypatch.setattr(
+        reactor_module,
+        "world_write_mutex",
+        lambda: stall_lock,
+    )
+    reactor = OpportunityEventReactor.__new__(OpportunityEventReactor)
+    reactor._submit = SimpleNamespace()
+    reactor._no_submit_claim_requeue_debt = {}
+    claimed_at = "2026-05-24T18:30:00+00:00"
+
+    assert stall_lock.acquire(timeout=1.0)
+    try:
+        no_submit = _forecast_event("claim-debt-no-submit")
+        result = ReactorResult()
+        finalized = reactor._finalize_deferred_event_unit(
+            no_submit,
+            EventSubmissionReceipt(False, no_submit.event_id),
+            decision_time=_DT_VENUE_OPEN,
+            result=result,
+            wait_ms=0,
+            claim_generation=claimed_at,
+            claim_attempt_count=3,
+        )
+        assert finalized is False
+        assert reactor._no_submit_claim_requeue_debt == {
+            no_submit.event_id: (claimed_at, 3)
+        }
+
+        side_effect_unknown = _forecast_event("claim-debt-side-effect")
+        reactor._finalize_deferred_event_unit(
+            side_effect_unknown,
+            EventSubmissionReceipt(
+                False,
+                side_effect_unknown.event_id,
+                venue_call_started=True,
+            ),
+            decision_time=_DT_VENUE_OPEN,
+            result=ReactorResult(),
+            wait_ms=0,
+            claim_generation=claimed_at,
+            claim_attempt_count=1,
+        )
+        assert side_effect_unknown.event_id not in (
+            reactor._no_submit_claim_requeue_debt
+        )
+    finally:
+        stall_lock.release()
+
+
+def test_no_submit_double_db_lock_failure_drains_on_next_wake(
+    monkeypatch,
+    tmp_path,
+):
+    from src.events import reactor as reactor_module
+
+    db_path = tmp_path / "no-submit-claim-drain.db"
+    conn = sqlite3.connect(db_path, timeout=0)
+    init_schema(conn)
+    store = EventStore(conn)
+    event = _forecast_event("claim-debt-double-lock")
+    store.insert_or_ignore(event)
+    claimed_at = "2026-05-24T18:30:00+00:00"
+    assert store.claim(event.event_id, claimed_at=claimed_at)
+    conn.commit()
+
+    local_mutex = threading.Lock()
+    monkeypatch.setattr(
+        reactor_module,
+        "world_write_mutex",
+        lambda: local_mutex,
+    )
+    reactor = OpportunityEventReactor.__new__(OpportunityEventReactor)
+    reactor._store = store
+    reactor._submit = SimpleNamespace()
+    reactor._no_submit_claim_requeue_debt = {}
+
+    blocker = sqlite3.connect(db_path, timeout=0)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        finalized = reactor._finalize_deferred_event_unit(
+            event,
+            EventSubmissionReceipt(False, event.event_id),
+            decision_time=_DT_VENUE_OPEN,
+            result=ReactorResult(),
+            wait_ms=0,
+            claim_generation=claimed_at,
+            claim_attempt_count=1,
+        )
+        assert finalized is False
+        assert reactor._no_submit_claim_requeue_debt == {
+            event.event_id: (claimed_at, 1)
+        }
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    reactor._cycle_entry_gate = lambda: False
+    reactor.process_pending(decision_time=_DT_VENUE_OPEN)
+
+    row = conn.execute(
+        """
+        SELECT processing_status, claimed_at, last_error
+          FROM opportunity_event_processing
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, event.event_id),
+    ).fetchone()
+    assert tuple(row) == (
+        "pending",
+        None,
+        _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
+    )
+    assert reactor._no_submit_claim_requeue_debt == {}
+
+
+def test_global_batch_claim_tokens_drain_paged_and_unpaged_no_submit_losers(
+    tmp_path,
+):
+    db_path = tmp_path / "global-no-submit-claim-drain.db"
+    conn = sqlite3.connect(db_path, timeout=0)
+    init_schema(conn)
+    store = EventStore(conn)
+    paged = _forecast_event(
+        "global-claim-drain-paged",
+        target_date="2026-05-25",
+    )
+    unpaged = _forecast_event(
+        "global-claim-drain-unpaged",
+        target_date="2026-05-26",
+    )
+    store.insert_or_ignore(paged)
+    conn.commit()
+
+    reactor = _global_batch_probe_reactor(store, {})
+    blocker = sqlite3.connect(db_path, timeout=0)
+    blocker_held = False
+
+    def _batch(events, _decision_time, *, claim_unpaged_winner=None):
+        nonlocal blocker_held
+        assert claim_unpaged_winner is not None
+        claimed_unpaged = claim_unpaged_winner(unpaged)
+        assert claimed_unpaged is not None
+        blocker.execute("BEGIN IMMEDIATE")
+        blocker_held = True
+        receipts = {
+            event.event_id: EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="SUBMIT_ABORTED_PRICE_MOVED:TEST_FINALIZE_LOCK",
+            )
+            for event in (*events, claimed_unpaged)
+        }
+        return GlobalBatchSubmitResult(
+            receipts=receipts,
+            winner_event_id=None,
+            venue_submit_count=0,
+        )
+
+    reactor._submit.process_global_batch = _batch
+    try:
+        reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+        assert blocker_held
+        processing_rows = conn.execute(
+            """
+            SELECT event_id, claimed_at, attempt_count
+              FROM opportunity_event_processing
+             WHERE consumer_name = ?
+               AND event_id IN (?, ?)
+             ORDER BY event_id
+            """,
+            (store.consumer_name, paged.event_id, unpaged.event_id),
+        ).fetchall()
+        assert len(processing_rows) == 2
+        assert all(row[1] and row[2] == 1 for row in processing_rows)
+        assert reactor._no_submit_claim_requeue_debt == {
+            str(row[0]): (str(row[1]), int(row[2]))
+            for row in processing_rows
+        }
+    finally:
+        if blocker_held:
+            blocker.rollback()
+        blocker.close()
+
+    reactor._cycle_entry_gate = lambda: False
+    reactor.process_pending(decision_time=_DT_VENUE_OPEN)
+
+    drained_rows = conn.execute(
+        """
+        SELECT processing_status, claimed_at, last_error
+          FROM opportunity_event_processing
+         WHERE consumer_name = ?
+           AND event_id IN (?, ?)
+         ORDER BY event_id
+        """,
+        (store.consumer_name, paged.event_id, unpaged.event_id),
+    ).fetchall()
+    assert [tuple(row) for row in drained_rows] == [
+        ("pending", None, _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY),
+        ("pending", None, _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY),
+    ]
+    assert reactor._no_submit_claim_requeue_debt == {}
 
 
 def _processing_status(conn: sqlite3.Connection, event_id: str) -> str | None:
@@ -1400,8 +1677,15 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
         result,
         wait_ms=None,
         continuation_event=None,
+        claim_generation=None,
+        claim_attempt_count=None,
     ):
-        del decision_time, continuation_event
+        del (
+            decision_time,
+            continuation_event,
+            claim_generation,
+            claim_attempt_count,
+        )
         calls.append((event.event_id, receipt.side_effect_status, wait_ms))
         if event.event_id == winner.event_id and winner_finalized:
             return True
@@ -5118,8 +5402,16 @@ def _requeue_losers_finalize(reactor):
         result,
         wait_ms=None,
         continuation_event=None,
+        claim_generation=None,
+        claim_attempt_count=None,
     ):
-        del decision_time, wait_ms, continuation_event
+        del (
+            decision_time,
+            wait_ms,
+            continuation_event,
+            claim_generation,
+            claim_attempt_count,
+        )
         if receipt.submitted:
             result.proof_accepted += 1
         else:
@@ -5156,8 +5448,16 @@ def _terminal_losers_finalize(reactor):
         result,
         wait_ms=None,
         continuation_event=None,
+        claim_generation=None,
+        claim_attempt_count=None,
     ):
-        del decision_time, wait_ms, continuation_event
+        del (
+            decision_time,
+            wait_ms,
+            continuation_event,
+            claim_generation,
+            claim_attempt_count,
+        )
         if receipt.submitted:
             result.proof_accepted += 1
         else:
@@ -5179,8 +5479,10 @@ def _serialized_frontier_finalize(reactor):
         result,
         wait_ms=None,
         continuation_event=None,
+        claim_generation=None,
+        claim_attempt_count=None,
     ):
-        del decision_time, wait_ms
+        del decision_time, wait_ms, claim_generation, claim_attempt_count
         if receipt.submitted:
             result.proof_accepted += 1
             reactor._store.mark_processed(event.event_id)
