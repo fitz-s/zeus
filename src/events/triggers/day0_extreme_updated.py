@@ -306,7 +306,6 @@ class Day0ExtremeUpdatedTrigger:
                 decision_iso,
                 decision_iso,
                 decision_iso,
-                max(1, int(limit)),
             )
         )
         rows = _dict_rows(
@@ -390,11 +389,12 @@ class Day0ExtremeUpdatedTrigger:
             SELECT *
             FROM eligible
             ORDER BY observation_available_at DESC, observation_time DESC
-            LIMIT ?
             """,
             tuple(params),
         )
         results: list[EventWriteResult] = []
+        emitted_rows = 0
+        emit_limit = max(1, int(limit))
         # CHANGE-GATE (2026-06-15 firehose fix). The GROUP BY recomputes
         # MAX(imported_at) as observation_available_at on every scan, so an UNCHANGED
         # running extreme otherwise mints a NEW DAY0_EXTREME_UPDATED each cycle (the
@@ -406,10 +406,17 @@ class Day0ExtremeUpdatedTrigger:
         # max/min plateaus; a later import of the same report does not. Persisted
         # watermarks apply the rule cross-cycle, and in-call watermarks ensure
         # one source version emits at most once per metric.
+        #
+        # The emission limit is deliberately applied AFTER this change gate. If
+        # SQL truncates first, the same fresh-but-unchanged rows occupy every
+        # bounded scan and permanently starve older admitted held families.
+        # Reading the small admitted current-day set is work-conserving; only
+        # rows that actually reach event writing consume the per-cycle budget.
         high_water, low_water, observation_times = (
             self._emitted_extreme_watermarks(target_floor)
         )
-        for row in reversed(rows):
+        for row in rows:
+            row_emitted = False
             for metric in ("high", "low"):
                 try:
                     observation = observation_instant_row_to_day0_observation(row, metric=metric)
@@ -478,12 +485,17 @@ class Day0ExtremeUpdatedTrigger:
                 )
                 if result is not None:
                     results.append(result)
+                    row_emitted = True
                 if metric == "high":
                     high_water[key] = cur_value
                 else:
                     low_water[key] = cur_value
                 if observation_time is not None:
                     observation_times[(*key, metric)] = observation_time
+            if row_emitted:
+                emitted_rows += 1
+                if emitted_rows >= emit_limit:
+                    break
         return results
 
     def _emitted_extreme_watermarks(

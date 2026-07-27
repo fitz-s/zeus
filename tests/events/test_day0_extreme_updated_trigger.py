@@ -601,6 +601,118 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
     assert all('"source_authorized_status":"AUTHORIZED"' in payload for payload in payloads)
 
 
+def test_scan_observation_instants_limit_skips_unchanged_rows_before_budgeting():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    trigger = Day0ExtremeUpdatedTrigger(EventWriter(conn))
+    decision_time = datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc)
+
+    for metric, raw_value in (("high", 14.0), ("low", 11.0)):
+        trigger.emit_from_observation(
+            observation=_observation(
+                city="Paris",
+                target_date="2026-06-06",
+                metric=metric,
+                settlement_source="wu_icao_history",
+                station_id="LFPB",
+                observation_time="2026-06-06T05:10:00+00:00",
+                observation_available_at="2026-06-06T05:19:00+00:00",
+                raw_value=raw_value,
+                high_so_far=14.0,
+                low_so_far=11.0,
+            ),
+            settlement_semantics=FakeSettlementSemantics(round(raw_value)),
+            decision_time=decision_time,
+            received_at=decision_time.isoformat(),
+        )
+
+    insert_sql = """
+        INSERT INTO observation_instants (
+            city, target_date, source, timezone_name, local_hour, local_timestamp,
+            utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
+            is_missing_local_hour, time_basis, temp_current, running_max, running_min,
+            temp_unit, station_id, observation_count, imported_at, authority,
+            data_version, provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    for city, timezone_name, station, local_timestamp, fact_time, imported_at, high, low in (
+        (
+            "Paris",
+            "Europe/Paris",
+            "LFPB",
+            "2026-06-06T07:10:00+02:00",
+            "2026-06-06T05:10:00+00:00",
+            "2026-06-06T05:19:00+00:00",
+            14.0,
+            11.0,
+        ),
+        (
+            "London",
+            "Europe/London",
+            "EGLC",
+            "2026-06-06T06:09:00+01:00",
+            "2026-06-06T05:09:00+00:00",
+            "2026-06-06T05:18:00+00:00",
+            13.0,
+            10.0,
+        ),
+    ):
+        conn.execute(
+            insert_sql,
+            (
+                city,
+                "2026-06-06",
+                "wu_icao_history",
+                timezone_name,
+                7.0,
+                local_timestamp,
+                fact_time,
+                120 if city == "Paris" else 60,
+                1,
+                0,
+                0,
+                "observed",
+                high,
+                high,
+                low,
+                "C",
+                station,
+                1,
+                imported_at,
+                "VERIFIED",
+                "v1.wu-native",
+                json.dumps(
+                    {
+                        "source_url": "redacted",
+                        "station_id": station,
+                        "latest_raw_ts": fact_time,
+                    }
+                ),
+                1,
+                "OK",
+                "historical_hourly",
+            ),
+        )
+
+    results = trigger.scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(13),
+        decision_time=decision_time,
+        received_at=decision_time.isoformat(),
+        limit=1,
+    )
+
+    assert len(results) == 2
+    new_payloads = [
+        json.loads(row[0])
+        for row in conn.execute(
+            "SELECT payload_json FROM opportunity_events "
+            "WHERE json_extract(payload_json, '$.city') = 'London'"
+        ).fetchall()
+    ]
+    assert {payload["metric"] for payload in new_payloads} == {"high", "low"}
+
+
 def test_scan_observation_instants_rows_scopes_index_seek_to_admitted_cities():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)

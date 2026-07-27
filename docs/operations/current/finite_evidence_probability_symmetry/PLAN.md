@@ -2193,3 +2193,32 @@ Acceptance requires:
   fails closed;
 - integration, compile, lint, diff, loaded-SHA, and post-restart preflight
   evidence are green.
+
+## 2026-07-27 Day0 catch-up work conservation
+
+Live held-position refresh exposed a producer fairness defect after probability
+and submit-time authority were repaired. The Day0 catch-up scanner sorted every
+admitted family by observation freshness and applied its SQL limit before
+checking persisted event watermarks. The same fresh-but-unchanged rows could
+therefore occupy every bounded scan while a slightly older held family with a
+new canonical observation never received a Day0 event or current monitor q.
+
+The correction scans the bounded current-day admitted city set, applies the
+existing extrema/source-clock change gate, and spends the configured limit only
+on rows that reach event writing. Freshness order is preserved among actionable
+rows; unchanged rows no longer consume redecision capacity.
+
+SCOPE is canonical observation-to-Day0-event catch-up scheduling. DRAIN is the
+next reactor scan, which can now advance every changed admitted family despite
+unchanged fresher rows. RESET is the persisted per-family extrema/source-clock
+watermark after emission. No source authority, q, calibration, selection,
+Kelly, sizing, execution band, lifecycle, or settlement rule changes.
+
+Acceptance requires:
+
+- an unchanged freshest family cannot starve a changed older family when the
+  per-cycle limit is one;
+- all Day0 trigger tests, compile, lint, diff, loaded-SHA, and post-restart
+  canonical event/monitor-freshness evidence are green;
+- a held family with canonical target-day observation can no longer remain
+  eventless solely because its global freshness rank exceeds the emit limit.
