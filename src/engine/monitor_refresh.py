@@ -4251,6 +4251,51 @@ def _current_global_held_samples(
     return np.ascontiguousarray(samples)
 
 
+def _current_global_held_point_probability(
+    position: Position,
+    witness: object,
+) -> float:
+    """Select the held side's predictive point q from a joint witness."""
+
+    condition_id = _canonical_condition_id(position)
+    if condition_id is None:
+        raise ValueError("monitor canonical condition identity is missing")
+    bindings = tuple(getattr(witness, "bindings", ()) or ())
+    indexes = [
+        index
+        for index, binding in enumerate(bindings)
+        if str(getattr(binding, "condition_id", "") or "") == condition_id
+    ]
+    if len(indexes) != 1:
+        raise ValueError("monitor condition is not unique in current global witness")
+
+    from src.solve.solver import (
+        DeterministicBinPayoffWitness,
+        family_payoff_q_samples,
+    )
+
+    direction = _normalize_monitor_direction(position.direction)
+    if isinstance(witness, DeterministicBinPayoffWitness):
+        samples = family_payoff_q_samples(
+            witness,
+            bin_id=str(bindings[indexes[0]].bin_id),
+            side="NO" if direction == "buy_no" else "YES",
+        )
+        if samples is None:
+            raise ValueError("monitor held bin is unknown in deterministic witness")
+        probability = float(samples.mean())
+    else:
+        point_q = np.asarray(getattr(witness, "yes_point_q", ()), dtype=float)
+        if point_q.shape != (len(bindings),):
+            raise ValueError("monitor current-global point q is invalid")
+        probability = float(point_q[indexes[0]])
+        if direction == "buy_no":
+            probability = 1.0 - probability
+    if not np.isfinite(probability) or not 0.0 <= probability <= 1.0:
+        raise ValueError("monitor current-global held point q is invalid")
+    return probability
+
+
 def _day0_family_snapshot_token_map(
     snapshot: _CurrentGlobalDay0FamilySnapshot,
 ) -> dict[str, tuple[str, str]]:
@@ -4329,7 +4374,7 @@ def _materialize_current_global_day0_probability(
         current_token_pair=token_map[condition_id],
     )
     direction = _normalize_monitor_direction(position.direction)
-    held_probability = float(held_samples.mean())
+    held_probability = _current_global_held_point_probability(position, witness)
 
     from src.engine.event_reactor_adapter import (
         _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,

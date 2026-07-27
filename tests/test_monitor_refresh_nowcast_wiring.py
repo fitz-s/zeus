@@ -419,6 +419,7 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
             ),
         ),
         yes_q_samples=np.array([[0.1], [0.2], [0.3], [0.4]]),
+        yes_point_q=np.array([0.6]),
         witness_identity="witness-current-global",
         q_version="q-version-current-global",
         source_truth_identity="source-truth-current-global",
@@ -477,7 +478,7 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
     )
 
     assert fresh is True
-    assert probability == pytest.approx(0.75)
+    assert probability == pytest.approx(0.4)
     assert getattr(
         refreshed,
         monitor_refresh_module._GLOBAL_MONITOR_SAMPLES_ATTR,
@@ -523,6 +524,7 @@ def test_day0_monitor_reuses_family_snapshot_across_sibling_bins(monkeypatch) ->
             ),
         ),
         yes_q_samples=np.array([[0.2, 0.7], [0.4, 0.5]]),
+        yes_point_q=np.array([0.25, 0.8]),
         witness_identity="shared-family-witness",
         q_version="shared-family-q",
         source_truth_identity="shared-family-truth",
@@ -576,13 +578,13 @@ def test_day0_monitor_reuses_family_snapshot_across_sibling_bins(monkeypatch) ->
         )
     )
 
-    assert (first_probability, second_probability) == pytest.approx((0.3, 0.4))
+    assert (first_probability, second_probability) == pytest.approx((0.25, 0.2))
     assert builds == [first_condition]
     assert read_counter("monitor_day0_family_snapshot_build_total") == 1
     assert read_counter("monitor_day0_family_snapshot_cache_hit_total") == 1
 
 
-def test_unobserved_prefix_monitor_uses_global_sample_mean_not_scalar_point() -> None:
+def test_unobserved_prefix_monitor_uses_predictive_point_not_confidence_sample_mean() -> None:
     import numpy as np
 
     condition_id = "0x" + "73" * 32
@@ -596,6 +598,7 @@ def test_unobserved_prefix_monitor_uses_global_sample_mean_not_scalar_point() ->
             ),
         ),
         yes_q_samples=np.array([[0.2], [0.4]]),
+        yes_point_q=np.array([0.7]),
         witness_identity="unobserved-prefix-witness",
         q_version="unobserved-prefix-q",
         source_truth_identity="unobserved-prefix-truth",
@@ -625,7 +628,7 @@ def test_unobserved_prefix_monitor_uses_global_sample_mean_not_scalar_point() ->
         )
     )
 
-    assert probability == pytest.approx(0.3)
+    assert probability == pytest.approx(0.7)
     assert fresh is True
     assert refreshed.selected_method == "replacement_posterior"
     receipt = refreshed._day0_monitor_probability_receipt
@@ -654,6 +657,7 @@ def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None
             ),
         ),
         yes_q_samples=np.array([[0.0], [0.2]]),
+        yes_point_q=np.array([0.35]),
         witness_identity="remaining-window-witness",
         q_version="remaining-window-q",
         source_truth_identity="remaining-window-truth",
@@ -687,7 +691,7 @@ def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None
         )
     )
 
-    assert probability == pytest.approx(0.1)
+    assert probability == pytest.approx(0.35)
     assert fresh is True
     assert maturity_reason in refreshed.applied_validations
 
@@ -706,6 +710,7 @@ def test_provisional_day0_monitor_uses_replacement_probability_without_hard_fact
             ),
         ),
         yes_q_samples=np.array([[0.72], [0.84]]),
+        yes_point_q=np.array([0.65]),
         witness_identity="hko-provisional-replacement-witness",
         q_version="hko-provisional-replacement-q",
         source_truth_identity="hko-provisional-replacement-truth",
@@ -741,7 +746,7 @@ def test_provisional_day0_monitor_uses_replacement_probability_without_hard_fact
         )
     )
 
-    assert probability == pytest.approx(0.22)
+    assert probability == pytest.approx(0.35)
     assert fresh is True
     assert refreshed.selected_method == "replacement_posterior"
     receipt = refreshed._day0_monitor_probability_receipt
