@@ -74,6 +74,8 @@ _CURRENT_SOURCE_MEMO: dict[
     tuple[str, str, str], tuple[float, Optional[float], Optional[float]]
 ] = {}
 _CURRENT_SOURCE_MEMO_LOCK = threading.Lock()
+_RESTING_ENTRY_SCAN_CURSOR = 0
+_RESTING_ENTRY_SCAN_CURSOR_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -1354,10 +1356,19 @@ def cancel_day0_dead_bin_resting_entries(
     from src.data.day0_oracle_anomaly import is_day0_family_paused
     from zoneinfo import ZoneInfo
 
+    scan_limit = max(1, int(limit))
+    with _RESTING_ENTRY_SCAN_CURSOR_LOCK:
+        global _RESTING_ENTRY_SCAN_CURSOR
+        start = _RESTING_ENTRY_SCAN_CURSOR % len(open_orders)
+        scan_count = min(len(open_orders), scan_limit)
+        _RESTING_ENTRY_SCAN_CURSOR = (start + scan_count) % len(open_orders)
+    scan_orders = [
+        open_orders[(start + offset) % len(open_orders)]
+        for offset in range(scan_count)
+    ]
+
     cancelled = 0
-    for order in open_orders:
-        if cancelled >= max(1, int(limit)):
-            break
+    for order in scan_orders:
         try:
             side = _order_field(order, "side").upper()
             if side and side != "BUY":
@@ -1432,5 +1443,8 @@ def cancel_day0_dead_bin_resting_entries(
 
 
 def _reset_wu_memo_for_tests() -> None:
+    global _RESTING_ENTRY_SCAN_CURSOR
     with _CURRENT_SOURCE_MEMO_LOCK:
         _CURRENT_SOURCE_MEMO.clear()
+    with _RESTING_ENTRY_SCAN_CURSOR_LOCK:
+        _RESTING_ENTRY_SCAN_CURSOR = 0

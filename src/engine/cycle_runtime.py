@@ -5040,8 +5040,9 @@ def _current_monitor_global_holding_coverage(
     probability_content_identity: str,
     checked_at_utc: datetime,
     current_time_provider: Callable[[], datetime] | None = None,
+    wealth_witness_cache: dict[str, object] | None = None,
 ):
-    """Resolve current ledger and executable token book before local delegation."""
+    """Resolve one monitor-epoch ledger and the current held-token book."""
 
     if conn is None or checked_at_utc.tzinfo is None:
         return None
@@ -5079,14 +5080,37 @@ def _current_monitor_global_holding_coverage(
             return value.astimezone(timezone.utc)
 
         checked = checked_at_utc.astimezone(timezone.utc)
-        wealth = current_portfolio_wealth_witness(
-            conn,
-            decision_at_utc=checked,
-            max_age=timedelta(
-                seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)
-            ),
-            portfolio_state=portfolio,
+        wealth_max_age = timedelta(
+            seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)
         )
+        if wealth_witness_cache is not None and wealth_witness_cache.get(
+            "resolved"
+        ):
+            wealth = wealth_witness_cache.get("witness")
+            if wealth is None:
+                return None
+        else:
+            try:
+                wealth = current_portfolio_wealth_witness(
+                    conn,
+                    decision_at_utc=checked,
+                    max_age=wealth_max_age,
+                    portfolio_state=portfolio,
+                )
+            except Exception:
+                if wealth_witness_cache is not None:
+                    wealth_witness_cache["resolved"] = True
+                    wealth_witness_cache["witness"] = None
+                raise
+            if wealth_witness_cache is not None:
+                wealth_witness_cache["resolved"] = True
+                wealth_witness_cache["witness"] = wealth
+        wealth_captured_at = wealth.captured_at_utc.astimezone(timezone.utc)
+        if (
+            checked < wealth_captured_at
+            or checked - wealth_captured_at > wealth.max_age
+        ):
+            return None
         direction_raw = getattr(position, "direction", "")
         direction = str(
             getattr(direction_raw, "value", direction_raw) or ""
@@ -5183,26 +5207,22 @@ def _current_monitor_global_holding_coverage(
             return probability_content_identity or None
 
         def current_holding_witness(_coverage) -> _CurrentHoldingWitness | None:
-            current_wealth = current_portfolio_wealth_witness(
-                conn,
-                decision_at_utc=current_time(),
-                max_age=timedelta(
-                    seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)
-                ),
-                portfolio_state=portfolio,
-            )
+            witness_time = current_time()
+            if (
+                witness_time < wealth_captured_at
+                or witness_time - wealth_captured_at > wealth.max_age
+            ):
+                return None
             current_native = {
                 str(token): Decimal(int(amount)) / Decimal("1000000")
-                for token, amount in tuple(
-                    current_wealth.native_holdings_micro or ()
-                )
+                for token, amount in tuple(wealth.native_holdings_micro or ())
             }
             current_shares = current_native.get(token_id)
             if current_shares is None or current_shares <= 0:
                 return None
             return _CurrentHoldingWitness(
-                ledger_snapshot_id=str(current_wealth.ledger_snapshot_id),
-                wealth_economic_identity=str(current_wealth.economic_identity),
+                ledger_snapshot_id=str(wealth.ledger_snapshot_id),
+                wealth_economic_identity=str(wealth.economic_identity),
                 held_shares=current_shares,
             )
 
@@ -5615,7 +5635,7 @@ def execute_monitoring_phase(
             network_book_tokens=network_book_tokens,
         ),
     )
-    budget_guaranteed_position_ids = frozenset(
+    budget_reserved_position_ids = frozenset(
         {
             *selected_urgent_position_ids,
             *selected_coverage_position_ids,
@@ -5629,8 +5649,16 @@ def execute_monitoring_phase(
             ),
         }
     )
-    summary["held_monitor_budget_guaranteed_positions"] = len(
-        budget_guaranteed_position_ids
+    summary["held_monitor_budget_reserved_positions"] = len(
+        budget_reserved_position_ids
+    )
+    deadline_rescue_position_id = next(
+        (
+            id(pos)
+            for pos in selected_urgent_positions
+            if id(pos) in dead_bin_position_ids
+        ),
+        None,
     )
     summary["held_monitor_local_ready_positions"] = sum(
         1
@@ -5642,6 +5670,9 @@ def execute_monitoring_phase(
     network_prefetch_started = False
     network_prefetch_unavailable = False
     summary["held_monitor_budget_reservation_count"] = monitor_reservation_count
+    summary["held_monitor_budget_bypass_scanned"] = 0
+    monitor_wealth_witness_cache: dict[str, object] = {}
+    deadline_rescue_used = False
 
     for position_index, pos in enumerate(monitor_positions):
         if urgent_preemption_requested():
@@ -5651,10 +5682,12 @@ def execute_monitoring_phase(
             summary["held_monitor_defer_reason"] = "urgent_day0_wake"
             break
         monitor_deadline_expired = time.monotonic() >= monitor_deadline
-        if (
+        deadline_rescue = (
             monitor_deadline_expired
-            and id(pos) not in budget_guaranteed_position_ids
-        ):
+            and not deadline_rescue_used
+            and id(pos) == deadline_rescue_position_id
+        )
+        if monitor_deadline_expired and not deadline_rescue:
             deferred_count = len(monitor_positions) - position_index
             if deferred_count > 0:
                 summary["held_monitor_positions_deferred"] = deferred_count
@@ -5664,9 +5697,11 @@ def execute_monitoring_phase(
                     "MONITOR_DEADLINE_EXPIRED"
                 )
             break
-        if monitor_deadline_expired:
-            summary["held_monitor_budget_bypass_scanned"] = (
-                summary.get("held_monitor_budget_bypass_scanned", 0) + 1
+        if deadline_rescue:
+            deadline_rescue_used = True
+            summary["held_monitor_budget_bypass_scanned"] = 1
+            summary["held_monitor_dead_bin_deadline_rescue_position"] = str(
+                getattr(pos, "trade_id", "") or ""
             )
         summary["held_monitor_positions_scanned"] = (
             summary.get("held_monitor_positions_scanned", 0) + 1
@@ -6463,6 +6498,7 @@ def execute_monitoring_phase(
                         ),
                         checked_at_utc=coverage_checked_at,
                         current_time_provider=coverage_time,
+                        wealth_witness_cache=monitor_wealth_witness_cache,
                     )
             if (
                 should_exit

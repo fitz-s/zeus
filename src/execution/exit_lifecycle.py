@@ -7606,6 +7606,7 @@ def run_exit_monitor_cycle(
 
     summary: dict = {"monitors": 0, "exits": 0}
     succeeded = False
+    monitor_completion_marked = False
     # FIX 2c (2026-06-20): detect a lapsed MONITOR_REFRESHED cadence (whole-book
     # silence) on the first cycle after recovery. Detection only; the underlying
     # daemon supervision is operator infra.
@@ -7671,6 +7672,40 @@ def run_exit_monitor_cycle(
                 )
                 summary["monitoring_error"] = str(exc)
 
+            artifact.completed_at = datetime.now(timezone.utc).isoformat()
+
+            # INV-17 / DT#1: commit the DB transaction (monitoring state
+            # transitions) before releasing the held-monitor ownership signal.
+            # Resting ENTRY-order cleanup is a separate risk-reduction lane; it
+            # must not keep fresh held-position redecision blocked after this
+            # monitor artifact is durable.
+            _aid_box: list = [None]
+
+            def _db_op():
+                _aid_box[0] = store_artifact(conn, artifact)
+                return _aid_box[0]
+
+            def _export_portfolio():
+                if portfolio_dirty and target_families is None:
+                    save_portfolio(
+                        portfolio,
+                        last_committed_artifact_id=_aid_box[0],
+                        source="exit_monitor",
+                    )
+
+            def _export_tracker():
+                if tracker_dirty:
+                    save_tracker(tracker)
+
+            commit_then_export(
+                conn,
+                db_op=_db_op,
+                json_exports=[_export_portfolio, _export_tracker],
+            )
+            succeeded = "monitoring_error" not in summary
+            mark_held_position_monitor_complete()
+            monitor_completion_marked = True
+
             # DAY0 resting-order cancel sweep (adversarial review
             # 2026-06-10 fix 2 — finding 4 "standing free option"). Cancels OUR
             # open resting ENTRY orders whose day0 bin is hard-fact dead for the
@@ -7704,35 +7739,6 @@ def run_exit_monitor_cycle(
                         "exit_monitor: day0 dead-bin cancel sweep failed (non-fatal): %s",
                         exc,
                     )
-
-        artifact.completed_at = datetime.now(timezone.utc).isoformat()
-
-        # INV-17 / DT#1: commit the DB transaction (monitoring state transitions) FIRST,
-        # then export the derived portfolio/tracker JSON with the committed artifact id —
-        # so canonical_write.detect_stale_portfolio's marker stays valid and JSON can
-        # never lead the DB.
-        _aid_box: list = [None]
-
-        def _db_op():
-            _aid_box[0] = store_artifact(conn, artifact)
-            return _aid_box[0]
-
-        def _export_portfolio():
-            if portfolio_dirty and target_families is None:
-                save_portfolio(
-                    portfolio,
-                    last_committed_artifact_id=_aid_box[0],
-                    source="exit_monitor",
-                )
-
-        def _export_tracker():
-            if tracker_dirty:
-                save_tracker(tracker)
-
-        commit_then_export(
-            conn, db_op=_db_op, json_exports=[_export_portfolio, _export_tracker]
-        )
-        succeeded = "monitoring_error" not in summary
     except Exception as exc:
         logger.error(
             "exit_monitor: unexpected error: %s", exc, exc_info=True
@@ -7743,7 +7749,8 @@ def run_exit_monitor_cycle(
             conn.close()
         except Exception:
             pass
-        mark_held_position_monitor_complete()
+        if not monitor_completion_marked:
+            mark_held_position_monitor_complete()
 
     # EDLI status-summary freshness writer (release-gate surface).
     # In EDLI event-driven modes run_cycle() is never called, so the legacy

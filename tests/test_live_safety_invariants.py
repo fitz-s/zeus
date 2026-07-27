@@ -361,7 +361,7 @@ def test_open_portfolio_loader_marks_runtime_exposure_without_family_filter(
 @pytest.mark.parametrize(
     ("monotonic_values", "expected_count", "expected_reason"),
     (
-        ([0.0, 0.0, 1.0, 1.0], 2, "cycle_budget_exhausted"),
+        ([0.0, 0.0, 1.0, 1.0], 1, "cycle_budget_exhausted"),
         ([0.0, 0.0, 0.0, 0.0], 3, ""),
     ),
 )
@@ -484,7 +484,7 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     assert portfolio_dirty is True
     assert tracker_dirty is False
     assert summary["held_monitor_candidates"] == 3
-    assert summary["held_monitor_budget_guaranteed_positions"] == 2
+    assert summary["held_monitor_budget_reserved_positions"] == 2
     assert summary["held_monitor_budget_seconds"] == pytest.approx(0.5)
     assert summary["held_monitor_positions_scanned"] == expected_count
     assert summary.get("held_monitor_positions_deferred", 0) == 3 - expected_count
@@ -573,8 +573,8 @@ def test_monitor_full_sweep_keeps_unique_three_cycle_deadline_reservations(monke
     assert len({trade_id for batch in reserved_per_cycle for trade_id in batch}) == 9
 
 
-def test_monitor_deadline_degraded_cycles_execute_rotating_reserved_thirds(monkeypatch):
-    """Expired positive budgets still execute each reserved third before deferring."""
+def test_monitor_deadline_degraded_cycles_never_execute_reserved_thirds(monkeypatch):
+    """Rotating coverage reservations choose priority, never deadline authority."""
     from src.engine import cycle_runtime
 
     monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE", {})
@@ -644,14 +644,15 @@ def test_monitor_deadline_degraded_cycles_execute_rotating_reserved_thirds(monke
         per_cycle.append(batch)
         reserved = summary["held_monitor_budget_coverage_positions"]
         reserved_per_cycle.append(reserved)
-        assert set(reserved).issubset(batch)
-        assert summary["held_monitor_positions_deferred"] == 9 - len(batch)
+        assert batch == []
+        assert summary["held_monitor_positions_deferred"] == 9
         assert summary["held_monitor_defer_reason"] == "cycle_budget_exhausted"
+        assert summary["held_monitor_budget_bypass_scanned"] == 0
 
-    assert all(3 <= len(batch) <= 4 for batch in per_cycle)
+    assert per_cycle == [[], [], []]
     assert all(len(batch) == 3 for batch in reserved_per_cycle)
     assert len({trade_id for batch in reserved_per_cycle for trade_id in batch}) == 9
-    assert len(set(visited)) == 9
+    assert visited == []
 
 
 def test_monitor_progress_limit_covers_mixed_canonical_and_fallback_book(monkeypatch):
@@ -1131,15 +1132,16 @@ def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
         defer_partial_orderbook_gaps=True,
     )
 
-    assert events == ["network_fetch", "refresh:budget-local-0"]
+    assert events == ["network_fetch"]
     assert summary["day0_hard_fact_direct_exit_decisions"] == 1
-    assert summary["held_monitor_positions_deferred"] == 1
+    assert summary["held_monitor_positions_deferred"] == 2
+    assert summary["held_monitor_budget_bypass_scanned"] == 1
     assert monitor_results[0].position_id == dead_bin.trade_id
     assert monitor_results[0].should_exit is True
 
 
-def test_monitoring_phase_caps_and_rotates_urgent_budget_bypass(monkeypatch):
-    """Mixed urgent lanes each advance within the three-position hard cap."""
+def test_monitoring_phase_caps_and_rotates_dead_bin_deadline_rescue(monkeypatch):
+    """Only one rotating, absorbing loss may bridge an exhausted deadline."""
     from src.engine import cycle_runtime
     from src.execution.day0_hard_fact_exit import HardFactVerdict
 
@@ -1273,9 +1275,8 @@ def test_monitoring_phase_caps_and_rotates_urgent_budget_bypass(monkeypatch):
         ["rotating-dead-bin-1", "rotating-canonical-urgent-1"],
         ["rotating-dead-bin-2", "rotating-canonical-urgent-2"],
     ]
-    assert all(summary["held_monitor_budget_guaranteed_positions"] == 6 for summary in summaries)
-    assert all(summary["held_monitor_budget_bypass_scanned"] == 6 for summary in summaries)
-    assert all(summary["held_monitor_budget_bypass_scanned"] <= 6 for summary in summaries)
+    assert all(summary["held_monitor_budget_reserved_positions"] == 6 for summary in summaries)
+    assert all(summary["held_monitor_budget_bypass_scanned"] == 1 for summary in summaries)
     assert all(
         summary["held_monitor_active_local_progress_positions"]
         == [
@@ -1285,15 +1286,15 @@ def test_monitoring_phase_caps_and_rotates_urgent_budget_bypass(monkeypatch):
         ]
         for summary in summaries
     )
-    assert all(summary["held_monitor_deadline_deferred_positions"] == 4 for summary in summaries)
+    assert all(summary["held_monitor_deadline_deferred_positions"] == 9 for summary in summaries)
     assert all(
         summary["held_monitor_deadline_defer_reason"] == "MONITOR_DEADLINE_EXPIRED"
         for summary in summaries
     )
 
 
-def test_monitoring_phase_reserves_one_active_network_progress_slot(monkeypatch):
-    """Zero-budget cycles advance one local and one network lane position."""
+def test_monitoring_phase_reservations_do_not_override_zero_deadline(monkeypatch):
+    """Reservations rotate scheduling priority but never waive a deadline."""
     from src.engine import cycle_runtime
 
     monkeypatch.setattr(
@@ -1381,17 +1382,7 @@ def test_monitoring_phase_reserves_one_active_network_progress_slot(monkeypatch)
         )
         summaries.append(summary)
 
-    assert events == [
-        "refresh:bounded-local-0",
-        "network_fetch",
-        "refresh:bounded-network-0",
-        "refresh:bounded-local-1",
-        "network_fetch",
-        "refresh:bounded-network-1",
-        "refresh:bounded-local-2",
-        "network_fetch",
-        "refresh:bounded-network-0",
-    ]
+    assert events == []
     assert [
         summary["held_monitor_active_local_progress_position"]
         for summary in summaries
@@ -1400,9 +1391,9 @@ def test_monitoring_phase_reserves_one_active_network_progress_slot(monkeypatch)
         summary["held_monitor_active_network_progress_position"]
         for summary in summaries
     ] == ["bounded-network-0", "bounded-network-1", "bounded-network-0"]
-    assert all(summary["held_monitor_budget_guaranteed_positions"] == 2 for summary in summaries)
-    assert all(summary["held_monitor_budget_bypass_scanned"] <= 2 for summary in summaries)
-    assert all(summary["held_monitor_positions_deferred"] == 3 for summary in summaries)
+    assert all(summary["held_monitor_budget_reserved_positions"] == 2 for summary in summaries)
+    assert all(summary["held_monitor_budget_bypass_scanned"] == 0 for summary in summaries)
+    assert all(summary["held_monitor_positions_deferred"] == 5 for summary in summaries)
 
 
 def test_monitoring_phase_positive_budget_sweeps_unreserved_active_tail(monkeypatch):
@@ -1482,7 +1473,7 @@ def test_monitoring_phase_positive_budget_sweeps_unreserved_active_tail(monkeypa
         "cap-active-3",
         "cap-active-4",
     }
-    assert summary["held_monitor_budget_guaranteed_positions"] == 6
+    assert summary["held_monitor_budget_reserved_positions"] == 6
     assert summary.get("held_monitor_positions_deferred", 0) == 0
 
 
@@ -1703,7 +1694,7 @@ def test_monitoring_phase_network_round_robin_survives_new_no_attr_clients(
             summary,
             deps=_monitor_test_deps("test_monitor_cross_cycle_round_robin"),
             run_exit_preflight=False,
-            held_position_monitor_budget_seconds=0.0,
+            held_position_monitor_budget_seconds=10.0,
             defer_partial_orderbook_gaps=True,
         )
         summaries.append(summary)
@@ -1712,13 +1703,11 @@ def test_monitoring_phase_network_round_robin_survives_new_no_attr_clients(
         summary["held_monitor_active_network_progress_position"]
         for summary in summaries
     ] == ["cross-cycle-network-0", "cross-cycle-network-1"]
-    assert events == [
-        "network_fetch",
-        "refresh:cross-cycle-network-0",
-        "network_fetch",
-        "refresh:cross-cycle-network-1",
-    ]
-    assert all(summary["held_monitor_budget_bypass_scanned"] == 1 for summary in summaries)
+    assert events.count("network_fetch") == 2
+    assert events.count("refresh:cross-cycle-network-0") == 2
+    assert events.count("refresh:cross-cycle-network-1") == 2
+    assert events.count("refresh:cross-cycle-network-2") == 2
+    assert all(summary["held_monitor_budget_bypass_scanned"] == 0 for summary in summaries)
 
 
 def test_monitoring_phase_network_pending_exit_precedes_local_active_under_budget(
@@ -1813,10 +1802,9 @@ def test_monitoring_phase_network_pending_exit_precedes_local_active_under_budge
     assert events == [
         "network_fetch",
         "refresh:network-pending-exit",
-        "refresh:local-active",
     ]
-    assert summary["held_monitor_positions_scanned"] == 2
-    assert summary.get("held_monitor_positions_deferred", 0) == 0
+    assert summary["held_monitor_positions_scanned"] == 1
+    assert summary["held_monitor_positions_deferred"] == 1
 
 
 def test_monitoring_phase_commit_failure_defers_network_without_getter(monkeypatch):
@@ -5492,17 +5480,25 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
         native_holdings_micro=(("token-current", 12_500_000),),
         ledger_snapshot_id="ledger-current",
         economic_identity="wealth-current",
+        captured_at_utc=at,
+        max_age=timedelta(minutes=2),
     )
     content_identity = "q-content-current"
+    wealth_calls = []
+
+    def current_wealth(_conn, **kwargs):
+        wealth_calls.append(kwargs)
+        if (
+            kwargs["portfolio_state"] is not portfolio
+            or kwargs["decision_at_utc"] != at
+        ):
+            pytest.fail("monitor must bind the current portfolio and time")
+        return wealth
+
     monkeypatch.setattr(
         global_auction_universe,
         "current_portfolio_wealth_witness",
-        lambda _conn, **kwargs: (
-            wealth
-            if kwargs["portfolio_state"] is portfolio
-            and kwargs["decision_at_utc"] == at
-            else pytest.fail("monitor must bind the current portfolio and time")
-        ),
+        current_wealth,
     )
     monkeypatch.setattr(
         global_auction_universe,
@@ -5619,6 +5615,179 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
     assert captured["holding_witness"].ledger_snapshot_id == "ledger-current"
     assert captured["holding_witness"].held_shares == Decimal("12.5")
     assert captured["final_checked_at"] == at
+    assert len(wealth_calls) == 1
+
+
+def test_monitor_reuses_one_wealth_witness_across_held_sell_coverage(monkeypatch):
+    """Every SELL candidate in one monitor epoch must share one capital truth."""
+    from src.engine import (
+        cycle_runtime,
+        global_auction_universe,
+        global_batch_runtime,
+        monitor_refresh,
+    )
+
+    at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    portfolio = SimpleNamespace(positions=())
+    positions = [
+        SimpleNamespace(
+            position_id=f"position-{index}",
+            trade_id=f"position-{index}",
+            direction="buy_yes",
+            token_id=f"token-{index}",
+            no_token_id=f"no-token-{index}",
+            condition_id=f"condition-{index}",
+            city="New York City",
+            target_date="2026-07-14",
+            temperature_metric="high",
+            bin_label=f"{90 + index}F",
+        )
+        for index in range(2)
+    ]
+    wealth = SimpleNamespace(
+        native_holdings_micro=(
+            ("token-0", 5_000_000),
+            ("token-1", 7_000_000),
+        ),
+        ledger_snapshot_id="ledger-epoch",
+        economic_identity="wealth-epoch",
+        captured_at_utc=at,
+        max_age=timedelta(minutes=2),
+    )
+    wealth_calls = []
+    monkeypatch.setattr(
+        global_auction_universe,
+        "current_portfolio_wealth_witness",
+        lambda *_args, **_kwargs: wealth_calls.append(True) or wealth,
+    )
+    monkeypatch.setattr(
+        global_auction_universe,
+        "_global_book_snapshot_rows",
+        lambda _conn, **kwargs: (
+            {
+                "condition_id": kwargs["condition_ids"][0],
+                "selected_outcome_token_id": (
+                    "token-0"
+                    if kwargs["condition_ids"][0] == "condition-0"
+                    else "token-1"
+                ),
+                "yes_token_id": (
+                    "token-0"
+                    if kwargs["condition_ids"][0] == "condition-0"
+                    else "token-1"
+                ),
+                "no_token_id": "",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        global_auction_universe,
+        "_global_book_metadata_is_executable",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        global_auction_universe,
+        "_global_sell_curve",
+        lambda **kwargs: SimpleNamespace(
+            token_id=kwargs["token_id"],
+            side=kwargs["side"],
+            book_hash=f"book:{kwargs['token_id']}",
+            fee_model=SimpleNamespace(fee_rate=Decimal("0")),
+            min_tick=Decimal("0.01"),
+            min_order_size=Decimal("1"),
+            levels=(SimpleNamespace(price=Decimal("0.4"), size=Decimal("20")),),
+        ),
+    )
+
+    def current_coverage(**kwargs):
+        coverage = SimpleNamespace(
+            family_key=kwargs["family_key"],
+            bin_id=kwargs["bin_label"],
+        )
+        assert kwargs["current_holding_witness_resolver"](coverage) is not None
+        return coverage, 1
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_global_holding_coverage",
+        current_coverage,
+    )
+    clob = SimpleNamespace()
+    assert monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {
+            "token-0": {
+                "asset_id": "token-0",
+                "bids": [{"price": "0.4", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            },
+            "token-1": {
+                "asset_id": "token-1",
+                "bids": [{"price": "0.4", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            },
+        },
+    )
+    cache = {}
+
+    for position in positions:
+        assert cycle_runtime._current_monitor_global_holding_coverage(
+            conn=object(),
+            clob=clob,
+            portfolio=portfolio,
+            position=position,
+            probability_content_identity="q-epoch",
+            checked_at_utc=at,
+            current_time_provider=lambda: at,
+            wealth_witness_cache=cache,
+        )
+
+    assert wealth_calls == [True]
+
+
+def test_day0_resting_entry_sweep_bounds_and_rotates_scan_work(monkeypatch):
+    """The ENTRY cleanup tail cannot scan an unbounded wallet order list."""
+    from src.execution import day0_hard_fact_exit
+
+    day0_hard_fact_exit._reset_wu_memo_for_tests()
+    identity_calls = []
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "_resolve_order_bin_identity",
+        lambda _conn, token_id: identity_calls.append(token_id) or None,
+    )
+    orders = [
+        {"orderID": f"order-{index}", "asset_id": f"token-{index}", "side": "BUY"}
+        for index in range(5)
+    ]
+    clob = SimpleNamespace(get_open_orders=lambda: orders)
+
+    for _ in range(2):
+        assert (
+            day0_hard_fact_exit.cancel_day0_dead_bin_resting_entries(
+                clob=clob,
+                conn=object(),
+                cities_by_name={},
+                limit=2,
+            )
+            == 0
+        )
+
+    assert identity_calls == ["token-0", "token-1", "token-2", "token-3"]
+
+
+def test_exit_monitor_commits_and_releases_before_entry_cleanup():
+    """Resting ENTRY cleanup cannot own the held-monitor completion signal."""
+    import inspect
+
+    from src.execution.exit_lifecycle import run_exit_monitor_cycle
+
+    source = inspect.getsource(run_exit_monitor_cycle)
+    commit_at = source.index("commit_then_export(", source.index("with nullcontext"))
+    release_at = source.index("mark_held_position_monitor_complete()", commit_at)
+    cleanup_at = source.index("cancel_day0_dead_bin_resting_entries(", release_at)
+
+    assert commit_at < release_at < cleanup_at
 
 
 def test_global_holding_coverage_materializes_typed_q_missing_obligation():
