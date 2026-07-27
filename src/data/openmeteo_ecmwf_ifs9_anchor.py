@@ -33,6 +33,9 @@ LOW_DATA_VERSION = "openmeteo_ecmwf_ifs9_anchor_localday_low"
 MODEL = "ecmwf_ifs"
 HOURLY_VARIABLES = ("temperature_2m",)
 DEFAULT_FORECAST_HOURS = 120
+# A live "current" cycle is freshness-invalid before it can be 24h old. Asking for
+# that context makes Open-Meteo start at the pinned run, not the wall-clock hour.
+CURRENT_RUN_CONTEXT_HOURS = 24
 
 # Local-day coverage span guard (2026-06-17): the daily extreme is trustworthy ONLY if the
 # hourly samples SPAN the full settlement day, so the diurnal peak/trough is inside the window.
@@ -148,6 +151,7 @@ class OpenMeteoEcmwfIfs9AnchorRequest:
     run: datetime
     timezone_name: str
     forecast_hours: int = DEFAULT_FORECAST_HOURS
+    past_hours: int = 0
     temperature_unit: str = "celsius"
     model: str = MODEL
     hourly: tuple[str, ...] = HOURLY_VARIABLES
@@ -160,6 +164,8 @@ class OpenMeteoEcmwfIfs9AnchorRequest:
             raise ValueError("longitude out of range")
         if self.forecast_hours <= 0 or self.forecast_hours > 240:
             raise ValueError("forecast_hours must be in 1..240")
+        if self.past_hours < 0 or self.past_hours > 240:
+            raise ValueError("past_hours must be in 0..240")
         if self.model != MODEL:
             raise ValueError("Open-Meteo ECMWF IFS 9km anchor must use model=ecmwf_ifs")
         if "temperature_2m" not in self.hourly:
@@ -182,7 +188,7 @@ class OpenMeteoEcmwfIfs9AnchorRequest:
             BAYES_PRECISION_FUSION_CELL_SELECTION,
         )
 
-        return {
+        params = {
             "latitude": self.latitude,
             "longitude": self.longitude,
             "hourly": ",".join(self.hourly),
@@ -193,6 +199,9 @@ class OpenMeteoEcmwfIfs9AnchorRequest:
             "timezone": self.timezone_name,
             "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
+        if self.past_hours:
+            params["past_hours"] = self.past_hours
+        return params
 
     def url(self) -> str:
         return f"{SINGLE_RUNS_FORECAST_URL}?{urlencode(self.params())}"
@@ -205,6 +214,7 @@ class OpenMeteoEcmwfIfs9AnchorRequest:
             "openmeteo_endpoint": "single_runs_api",
             "run": self.run_iso,
             "forecast_hours": self.forecast_hours,
+            "past_hours": self.past_hours,
             "role": "soft_spatial_anchor",
             "training_allowed": False,
             "measurement_policy": "hourly_temperature_2m_localday_anchor",
@@ -218,6 +228,7 @@ def build_anchor_request(
     run: datetime | str,
     timezone_name: str,
     forecast_hours: int = DEFAULT_FORECAST_HOURS,
+    past_hours: int = 0,
 ) -> OpenMeteoEcmwfIfs9AnchorRequest:
     return OpenMeteoEcmwfIfs9AnchorRequest(
         latitude=latitude,
@@ -225,6 +236,7 @@ def build_anchor_request(
         run=_coerce_cycle(run),
         timezone_name=timezone_name,
         forecast_hours=forecast_hours,
+        past_hours=past_hours,
     )
 
 
@@ -278,6 +290,7 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
     request_shape = (
         first.run,
         first.forecast_hours,
+        first.past_hours,
         first.temperature_unit,
         first.model,
         first.hourly,
@@ -286,6 +299,7 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
         (
             request.run,
             request.forecast_hours,
+            request.past_hours,
             request.temperature_unit,
             request.model,
             request.hourly,

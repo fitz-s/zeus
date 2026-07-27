@@ -42,6 +42,7 @@ def test_anchor_request_uses_single_runs_api_and_explicit_run() -> None:
     assert params["models"] == [MODEL]
     assert params["hourly"] == ["temperature_2m"]
     assert params["forecast_hours"] == ["120"]
+    assert "past_hours" not in params
     assert params["timezone"] == ["Asia/Shanghai"]
 
     metadata = request.manifest_metadata()
@@ -50,6 +51,23 @@ def test_anchor_request_uses_single_runs_api_and_explicit_run() -> None:
     assert metadata["role"] == "soft_spatial_anchor"
     assert metadata["trade_authority_status"] == "BLOCKED"
     assert metadata["training_allowed"] is False
+    assert metadata["past_hours"] == 0
+
+
+def test_anchor_request_can_recover_current_run_context() -> None:
+    request = build_anchor_request(
+        latitude=39.9334,
+        longitude=32.8597,
+        run=datetime(2026, 7, 27, 0, tzinfo=timezone.utc),
+        timezone_name="Europe/Istanbul",
+        past_hours=24,
+    )
+
+    params = parse_qs(urlparse(request.url()).query)
+    assert params["run"] == ["2026-07-27T00:00"]
+    assert params["forecast_hours"] == ["120"]
+    assert params["past_hours"] == ["24"]
+    assert request.manifest_metadata()["past_hours"] == 24
 
 
 def test_anchor_request_rejects_non_cycle_or_missing_run() -> None:
@@ -85,6 +103,14 @@ def test_anchor_request_rejects_bad_domain_and_preserves_data_versions() -> None
             longitude=121.4737,
             run="2026-06-06T00:00:00+00:00",
             timezone_name="Asia/Shanghai",
+        )
+    with pytest.raises(ValueError, match="past_hours"):
+        build_anchor_request(
+            latitude=31.2304,
+            longitude=121.4737,
+            run="2026-06-06T00:00:00+00:00",
+            timezone_name="Asia/Shanghai",
+            past_hours=-1,
         )
 
     assert HIGH_DATA_VERSION == "openmeteo_ecmwf_ifs9_anchor_localday_high"

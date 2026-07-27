@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 
 from src.config import cities_by_name  # noqa: E402
 from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
+    CURRENT_RUN_CONTEXT_HOURS,
     HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION,
     LOW_DATA_VERSION as OPENMETEO_LOW_DATA_VERSION,
     build_anchor_request,
@@ -708,6 +709,7 @@ def download_current_target_raw_inputs(
                 run=cycle,
                 timezone_name=city_config.timezone,
                 forecast_hours=120,
+                past_hours=CURRENT_RUN_CONTEXT_HOURS,
             ),
         )
 
@@ -791,6 +793,7 @@ def download_current_target_raw_inputs(
                 run=cycle,
                 timezone_name=city_config.timezone,
                 forecast_hours=120,
+                past_hours=CURRENT_RUN_CONTEXT_HOURS,
             )
             payload_captured_at = datetime.now(tz=UTC)
             anchor_transport_provenance: dict[str, object] = {

@@ -905,11 +905,15 @@ def test_direct_downloader_batches_run_pinned_anchor_locations(
     )
     plan = _PlanStub(ready=False, rows=rows)
     wave_calls: list[tuple[tuple[str, str], ...]] = []
+    request_past_hours: list[int] = []
 
     monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
 
     def _wave(requests, **_kwargs):
         wave_calls.append(tuple(requests))
+        request_past_hours.extend(
+            request.past_hours for request in requests.values()
+        )
         captured_at = datetime.now(timezone.utc)
         return {
             key: (
@@ -949,6 +953,7 @@ def test_direct_downloader_batches_run_pinned_anchor_locations(
     assert wave_calls == [
         (("London", "2026-06-10"), ("Paris", "2026-06-10"))
     ]
+    assert request_past_hours == [24, 24]
     assert report["manifest_count"] == 2
     assert report["downloaded"]["openmeteo_transport_fetch_count"] == 2
     assert report["downloaded"]["openmeteo_single_runs_location_batch_count"] == 1
