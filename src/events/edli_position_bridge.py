@@ -435,6 +435,12 @@ def _qkernel_payload_has_live_entry_authority(
         return False
     if str(event_type or "").strip() != "DAY0_EXTREME_UPDATED":
         return True
+    q_live = (
+        economics.get("payoff_q_action")
+        if economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+        else economics.get("payoff_q_point")
+    )
     try:
         from src.events.day0_authority import (
             Day0AuthorityError,
@@ -448,7 +454,7 @@ def _qkernel_payload_has_live_entry_authority(
             or probability_payload.get("actual_direction"),
             condition_id=probability_payload.get("condition_id")
             or probability_payload.get("actual_condition_id"),
-            q_live=economics.get("payoff_q_point"),
+            q_live=q_live,
             q_lcb=economics.get("payoff_q_lcb"),
         )
         assert_live_day0_qkernel_guard_authority(
@@ -478,8 +484,14 @@ def _pre_submit_posterior(pre_submit: dict[str, Any]) -> float:
         source="pre_submit",
     ):
         return 0.0
+    q_live = (
+        economics.get("payoff_q_action")
+        if economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+        else economics.get("payoff_q_point")
+    )
     return (
-        _float_or_none(economics.get("payoff_q_point"))
+        _float_or_none(q_live)
         or _float_or_none(pre_submit.get("q_live"))
         or 0.0
     )

@@ -945,7 +945,7 @@ def _current_band_taker_quality_proof_valid(
     if mean_action:
         try:
             proof_q_mean = Decimal(str(taker_quality_proof.get("q_exec_mean")))
-            economics_q_point = Decimal(str(economics.get("payoff_q_point")))
+            economics_q_action = Decimal(str(economics.get("payoff_q_action")))
         except (ArithmeticError, TypeError, ValueError):
             return False
         return bool(
@@ -956,8 +956,8 @@ def _current_band_taker_quality_proof_valid(
             and str(taker_quality_proof.get("q_exec_mean_basis") or "").strip()
             == "POSTERIOR_PREDICTIVE_MEAN"
             and proof_q_mean.is_finite()
-            and economics_q_point.is_finite()
-            and proof_q_mean == economics_q_point
+            and economics_q_action.is_finite()
+            and proof_q_mean == economics_q_action
         )
     return bool(
         str(economics.get("selection_guard_basis") or "").strip() == basis
@@ -1477,7 +1477,9 @@ def _entry_economics_component(
     econ_optimal_delta_u = _float_field(economics.get("optimal_delta_u"))
     econ_false_edge_rate = _float_field(economics.get("false_edge_rate"))
     payoff_q_point = _float_field(economics.get("payoff_q_point"))
+    payoff_q_action = _float_field(economics.get("payoff_q_action"))
     payoff_q_lcb = _float_field(economics.get("payoff_q_lcb"))
+    bound_q_live = payoff_q_action if mean_action else payoff_q_point
     selection_guard_basis = str(economics.get("selection_guard_basis") or "").strip()
     selection_guard_abstained = _bool_field(economics.get("selection_guard_abstained"))
     selection_guard_q_safe = _float_field(economics.get("selection_guard_q_safe"))
@@ -1582,7 +1584,7 @@ def _entry_economics_component(
         or not (0.0 < econ_false_edge_rate <= max_false_edge_rate)
     ):
         reason = "qkernel_false_edge_rate_blocks"
-    elif payoff_q_point is None or payoff_q_lcb is None:
+    elif bound_q_live is None or payoff_q_point is None or payoff_q_lcb is None:
         reason = "qkernel_payoff_probability_missing"
     elif (
         econ_edge_lcb is None
@@ -1591,11 +1593,15 @@ def _entry_economics_component(
         reason = "qkernel_payoff_edge_inconsistent"
     elif mean_action and (
         econ_edge_expected is None
-        or abs((payoff_q_point - econ_cost) - econ_edge_expected) > 1e-6
+        or abs((bound_q_live - econ_cost) - econ_edge_expected) > 1e-6
     ):
         reason = "qkernel_payoff_expected_edge_inconsistent"
-    elif not math.isclose(payoff_q_point, q_live, rel_tol=0.0, abs_tol=1e-6):
-        reason = "qkernel_payoff_q_point_mismatch_q_live"
+    elif not math.isclose(bound_q_live, q_live, rel_tol=0.0, abs_tol=1e-6):
+        reason = (
+            "qkernel_payoff_q_action_mismatch_q_live"
+            if mean_action
+            else "qkernel_payoff_q_point_mismatch_q_live"
+        )
     elif not math.isclose(payoff_q_lcb, q_lcb, rel_tol=0.0, abs_tol=1e-6):
         reason = "qkernel_payoff_q_lcb_mismatch_q_lcb"
     elif not current_state_solve and economics.get("direction_law_ok") is not True:

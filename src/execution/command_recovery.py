@@ -3744,6 +3744,15 @@ def _selected_qkernel_execution_economics(payload: dict) -> dict:
     return _selected_qkernel_execution_economics_with_authority(payload)[0]
 
 
+def _qkernel_action_probability(economics: Mapping[str, Any]) -> object:
+    if (
+        economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    ):
+        return economics.get("payoff_q_action")
+    return economics.get("payoff_q_point")
+
+
 def _event_context_qkernel_authority(
     economics: dict,
     *,
@@ -3789,7 +3798,7 @@ def _event_context_qkernel_authority(
             or probability_payload.get("actual_direction"),
             condition_id=probability_payload.get("condition_id")
             or probability_payload.get("actual_condition_id"),
-            q_live=economics.get("payoff_q_point"),
+            q_live=_qkernel_action_probability(economics),
             q_lcb=economics.get("payoff_q_lcb"),
         )
         assert_live_day0_qkernel_guard_authority(
@@ -3805,7 +3814,7 @@ def _event_context_qkernel_authority(
         return {}, None, None, "venue_fact_recovery"
     return (
         economics,
-        economics.get("payoff_q_point"),
+        _qkernel_action_probability(economics),
         economics.get("payoff_q_lcb"),
         "qkernel_spine",
     )
@@ -3907,7 +3916,7 @@ def _edli_live_order_event_context(
     q_live = first("q_live", "q_lcb_5pct")
     if q_live in (None, "") and qkernel_payload:
         q_live = (
-            qkernel_payload.get("payoff_q_point")
+            _qkernel_action_probability(qkernel_payload)
             or qkernel_payload.get("q_dot_payoff")
             or qkernel_payload.get("payoff_q_lcb")
         )

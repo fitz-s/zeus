@@ -1300,16 +1300,28 @@ def _validate_qkernel_submit_probability(
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel side must match submit direction")
     payoff_q_point = _probability_number(economics.get("payoff_q_point"), "qkernel_execution_economics.payoff_q_point")
     payoff_q_lcb = _probability_number(economics.get("payoff_q_lcb"), "qkernel_execution_economics.payoff_q_lcb")
-    if not math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6):
-        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_point mismatches submit q_live")
-    if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
-        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_lcb mismatches submit q_lcb_5pct")
-    cost = _positive_number(economics.get("cost"), "qkernel_execution_economics.cost")
     mean_action = bool(
         current_state_solve
         and economics.get("global_probability_functional")
         == "POSTERIOR_PREDICTIVE_MEAN"
     )
+    action_q = (
+        _probability_number(
+            economics.get("payoff_q_action"),
+            "qkernel_execution_economics.payoff_q_action",
+        )
+        if mean_action
+        else payoff_q_point
+    )
+    if not math.isclose(action_q, q_live, rel_tol=1e-9, abs_tol=1e-6):
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated qkernel "
+            f"{'payoff_q_action' if mean_action else 'payoff_q_point'} "
+            "mismatches submit q_live"
+        )
+    if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_lcb mismatches submit q_lcb_5pct")
+    cost = _positive_number(economics.get("cost"), "qkernel_execution_economics.cost")
     edge_lcb = _finite_number(
         economics.get("edge_lcb"),
         "qkernel_execution_economics.edge_lcb",
@@ -1354,20 +1366,11 @@ def _validate_qkernel_submit_probability(
     expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
     action_edge = edge_lcb
     if mean_action:
-        action_q = _probability_number(
-            economics.get("payoff_q_action"),
-            "qkernel_execution_economics.payoff_q_action",
-        )
         edge_expected = _positive_number(
             economics.get("edge_expected"),
             "qkernel_execution_economics.edge_expected",
         )
         if not math.isclose(
-            action_q,
-            payoff_q_point,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        ) or not math.isclose(
             edge_expected,
             action_q - cost,
             rel_tol=1e-9,

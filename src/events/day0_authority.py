@@ -1307,19 +1307,32 @@ def assert_live_day0_qkernel_guard_authority(
         owner_q_lcb = _first_float(probability_payload, block, "q_lcb_5pct")
         payoff_q_point = _first_float(economics, {}, "payoff_q_point")
         payoff_q_lcb = _first_float(economics, {}, "payoff_q_lcb")
+        mean_selected = (
+            str(economics.get("selection_guard_basis") or "")
+            == "CURRENT_POSTERIOR_PREDICTIVE_MEAN"
+        )
+        payoff_q_action = _first_float(economics, {}, "payoff_q_action")
         if None in (owner_q_live, owner_q_lcb, payoff_q_point, payoff_q_lcb):
             raise Day0AuthorityError("day0_qkernel_probability_binding missing")
+        if mean_selected and payoff_q_action is None:
+            raise Day0AuthorityError("day0_qkernel payoff_q_action missing")
         assert owner_q_live is not None
         assert owner_q_lcb is not None
         assert payoff_q_point is not None
         assert payoff_q_lcb is not None
+        bound_q_live = payoff_q_action if mean_selected else payoff_q_point
+        assert bound_q_live is not None
         if not math.isclose(
             owner_q_live,
-            payoff_q_point,
+            bound_q_live,
             rel_tol=1e-9,
             abs_tol=1e-6,
         ):
-            raise Day0AuthorityError("day0_qkernel payoff_q_point mismatches q_live")
+            raise Day0AuthorityError(
+                "day0_qkernel "
+                f"{'payoff_q_action' if mean_selected else 'payoff_q_point'} "
+                "mismatches q_live"
+            )
         if not math.isclose(
             owner_q_lcb,
             payoff_q_lcb,
@@ -1327,13 +1340,6 @@ def assert_live_day0_qkernel_guard_authority(
             abs_tol=1e-6,
         ):
             raise Day0AuthorityError("day0_qkernel payoff_q_lcb mismatches q_lcb_5pct")
-        mean_selected = (
-            str(economics.get("selection_guard_basis") or "")
-            == "CURRENT_POSTERIOR_PREDICTIVE_MEAN"
-        )
-        payoff_q_action = _first_float(economics, {}, "payoff_q_action")
-        if mean_selected and payoff_q_action is None:
-            raise Day0AuthorityError("day0_qkernel payoff_q_action missing")
         selection_q = payoff_q_action if mean_selected else payoff_q_lcb
         assert selection_q is not None
         if not math.isclose(

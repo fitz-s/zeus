@@ -113,7 +113,8 @@ def _current_state_econ(**overrides) -> dict:
 
 
 def _current_state_mean_buy_econ(**overrides) -> dict:
-    point = 0.70
+    point = 0.65
+    action = 0.70
     lcb = 0.35
     price = 0.40
     shares = 5.0
@@ -122,9 +123,9 @@ def _current_state_mean_buy_econ(**overrides) -> dict:
     win_payoff = shares - expected_cost
     wealth_after_loss = 100.0 + loss_payoff
     wealth_after_win = 100.0 + win_payoff
-    expected_du = (1.0 - point) * math.log(
+    expected_du = (1.0 - action) * math.log(
         wealth_after_loss / 100.0
-    ) + point * math.log(wealth_after_win / 100.0)
+    ) + action * math.log(wealth_after_win / 100.0)
     payload = _current_state_econ()
     for field in (
         "global_robust_delta_log_wealth",
@@ -140,30 +141,30 @@ def _current_state_mean_buy_econ(**overrides) -> dict:
         selection_guard_basis="CURRENT_POSTERIOR_PREDICTIVE_MEAN",
         payoff_q_point=point,
         payoff_q_lcb=lcb,
-        payoff_q_action=point,
-        global_current_sample_payoff_q_mean=point,
+        payoff_q_action=action,
+        global_current_sample_payoff_q_mean=action,
         cost=price,
         edge_lcb=lcb - price,
-        edge_expected=point - price,
+        edge_expected=action - price,
         global_target_shares=str(shares),
         global_limit_price=str(price),
         global_expected_fill_price_before_fee=str(price),
         global_expected_cost_usd=str(expected_cost),
         global_max_spend_usd=str(expected_cost),
         global_expected_delta_log_wealth=expected_du,
-        global_expected_ev_usd=point * shares - expected_cost,
+        global_expected_ev_usd=action * shares - expected_cost,
         global_expected_capital_efficiency=expected_du / expected_cost,
-        global_cut_time_win_probability_mean=point,
-        global_cut_time_loss_probability_mean=1.0 - point,
-        global_terminal_win_probability_mean=point,
-        global_terminal_loss_probability_mean=1.0 - point,
+        global_cut_time_win_probability_mean=action,
+        global_cut_time_loss_probability_mean=1.0 - action,
+        global_terminal_win_probability_mean=action,
+        global_terminal_loss_probability_mean=1.0 - action,
         global_terminal_loss_payoff_usd=str(loss_payoff),
         global_terminal_win_payoff_usd=str(win_payoff),
         global_terminal_median_payoff_usd=str(win_payoff),
         global_terminal_wealth_after_loss_usd=str(wealth_after_loss),
         global_terminal_wealth_after_win_usd=str(wealth_after_win),
-        global_cut_time_expected_value_usd=point * shares - expected_cost,
-        global_expected_value_usd=point * shares - expected_cost,
+        global_cut_time_expected_value_usd=action * shares - expected_cost,
+        global_expected_value_usd=action * shares - expected_cost,
     )
     payload.update(overrides)
     payload["current_state_identity_hash"] = qkernel_current_state_identity_hash(

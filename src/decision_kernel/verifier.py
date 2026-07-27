@@ -761,17 +761,29 @@ def _verify_actionable_qkernel_economics(
     payoff_q_lcb = _probability_float(
         economics.get("payoff_q_lcb"), "actionable qkernel payoff_q_lcb"
     )
-    if not math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6):
-        raise CertificateVerificationError("actionable qkernel payoff_q_point mismatches q_live")
-    if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
-        raise CertificateVerificationError("actionable qkernel payoff_q_lcb mismatches q_lcb_5pct")
-    cost = _finite_float(economics.get("cost"), "actionable qkernel cost")
-    edge_lcb = _finite_float(economics.get("edge_lcb"), "actionable qkernel edge_lcb")
     mean_action = bool(
         current_state_solve
         and economics.get("global_probability_functional")
         == "POSTERIOR_PREDICTIVE_MEAN"
     )
+    payoff_q_action = (
+        _probability_float(
+            economics.get("payoff_q_action"),
+            "actionable qkernel payoff_q_action",
+        )
+        if mean_action
+        else payoff_q_point
+    )
+    if not math.isclose(payoff_q_action, q_live, rel_tol=1e-9, abs_tol=1e-6):
+        raise CertificateVerificationError(
+            "actionable qkernel "
+            f"{'payoff_q_action' if mean_action else 'payoff_q_point'} "
+            "mismatches q_live"
+        )
+    if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
+        raise CertificateVerificationError("actionable qkernel payoff_q_lcb mismatches q_lcb_5pct")
+    cost = _finite_float(economics.get("cost"), "actionable qkernel cost")
+    edge_lcb = _finite_float(economics.get("edge_lcb"), "actionable qkernel edge_lcb")
     if cost <= 0.0 or cost >= 1.0:
         raise CertificateVerificationError("actionable qkernel cost must be in (0, 1)")
     if not mean_action and edge_lcb <= 0.0:
@@ -779,23 +791,10 @@ def _verify_actionable_qkernel_economics(
     if abs((payoff_q_lcb - cost) - edge_lcb) > 1e-6:
         raise CertificateVerificationError("actionable qkernel payoff edge inconsistent")
     if mean_action:
-        payoff_q_action = _probability_float(
-            economics.get("payoff_q_action"),
-            "actionable qkernel payoff_q_action",
-        )
         edge_expected = _finite_float(
             economics.get("edge_expected"),
             "actionable qkernel edge_expected",
         )
-        if not math.isclose(
-            payoff_q_action,
-            payoff_q_point,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        ):
-            raise CertificateVerificationError(
-                "actionable qkernel payoff_q_action must equal payoff_q_point"
-            )
         if edge_expected <= 0.0:
             raise CertificateVerificationError(
                 "actionable qkernel edge_expected must be positive"
@@ -2206,8 +2205,25 @@ def _verify_pre_submit_qkernel_economics(
     payoff_q_lcb = _probability_float(
         economics.get("payoff_q_lcb"), "pre-submit qkernel payoff_q_lcb"
     )
-    if not math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6):
-        raise CertificateVerificationError("pre-submit qkernel payoff_q_point mismatches q_live")
+    mean_action = bool(
+        current_state_solve
+        and economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    payoff_q_action = (
+        _probability_float(
+            economics.get("payoff_q_action"),
+            "pre-submit qkernel payoff_q_action",
+        )
+        if mean_action
+        else payoff_q_point
+    )
+    if not math.isclose(payoff_q_action, q_live, rel_tol=1e-9, abs_tol=1e-6):
+        raise CertificateVerificationError(
+            "pre-submit qkernel "
+            f"{'payoff_q_action' if mean_action else 'payoff_q_point'} "
+            "mismatches q_live"
+        )
     if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
         raise CertificateVerificationError("pre-submit qkernel payoff_q_lcb mismatches q_lcb_5pct")
     if not current_state_solve and not _qkernel_direction_admitted(

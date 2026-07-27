@@ -134,12 +134,12 @@ def conservative_submit_expected_edge(
         )
         is None
     ):
-        point = finite_decimal(economics.get("payoff_q_point"))
+        action_q = finite_decimal(economics.get("payoff_q_action"))
         expected_edge = finite_decimal(economics.get("edge_expected"))
         max_spend = finite_decimal(economics.get("global_max_spend_usd"))
         shares = finite_decimal(economics.get("global_target_shares"))
         if (
-            point is None
+            action_q is None
             or expected_edge is None
             or limit is None
             or max_spend is None
@@ -150,8 +150,8 @@ def conservative_submit_expected_edge(
         return float(
             min(
                 expected_edge,
-                point - limit,
-                point - (max_spend / shares),
+                action_q - limit,
+                action_q - (max_spend / shares),
             )
         )
     if score is None or q_lcb is None or limit is None:

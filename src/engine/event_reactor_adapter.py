@@ -16324,12 +16324,16 @@ def _build_event_bound_taker_quality_proof(
                 "incremental_expected_profit_usd": "0",
                 "q_lcb_source": q_lcb_source,
             }
-        q_live = _optional_float(qkernel_cert.get("payoff_q_point"))
-        q_lcb = _optional_float(qkernel_cert.get("payoff_q_lcb"))
         mean_action = (
             qkernel_cert.get("global_probability_functional")
             == "POSTERIOR_PREDICTIVE_MEAN"
         )
+        q_live = _optional_float(
+            qkernel_cert.get("payoff_q_action")
+            if mean_action
+            else qkernel_cert.get("payoff_q_point")
+        )
+        q_lcb = _optional_float(qkernel_cert.get("payoff_q_lcb"))
         q_action = _optional_float(
             qkernel_cert.get("payoff_q_action")
             if mean_action
@@ -17836,7 +17840,13 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
             "LIVE_ENTRY_QKERNEL_CERT_BIN_MISMATCH:"
             f"cert_bin_id={cert_bin_id}:payload_bin_id={payload_bin_id}"
         )
-    cert_q_live = _optional_float(cert.get("payoff_q_point"))
+    mean_action = (
+        cert.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    cert_q_live = _optional_float(
+        cert.get("payoff_q_action") if mean_action else cert.get("payoff_q_point")
+    )
     cert_q_lcb = _optional_float(cert.get("payoff_q_lcb"))
     payload_q_live = _optional_float(actionable_payload.get("q_live"))
     payload_q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))

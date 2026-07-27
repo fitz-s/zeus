@@ -2364,8 +2364,9 @@ def _pre_submit_payload(**overrides):
     return payload
 
 
-def test_pre_submit_mean_winner_uses_point_action_edge_through_all_verifiers():
-    point = 0.70
+def test_pre_submit_mean_winner_binds_action_probability_through_all_verifiers():
+    point = 0.65
+    action = 0.70
     lcb = 0.35
     cost = 0.40
     shares = 5.0
@@ -2375,10 +2376,10 @@ def test_pre_submit_mean_winner_uses_point_action_edge_through_all_verifiers():
     win_payoff = shares - expected_cost
     wealth_after_loss = 100.0 + loss_payoff
     wealth_after_win = 100.0 + win_payoff
-    expected_du = (1.0 - point) * math.log(
+    expected_du = (1.0 - action) * math.log(
         wealth_after_loss / 100.0
-    ) + point * math.log(wealth_after_win / 100.0)
-    expected_ev = point * shares - expected_cost
+    ) + action * math.log(wealth_after_win / 100.0)
+    expected_ev = action * shares - expected_cost
     economics = {
         "source": "qkernel_spine",
         "decision_id": "decision-mean",
@@ -2392,14 +2393,15 @@ def test_pre_submit_mean_winner_uses_point_action_edge_through_all_verifiers():
         "selection_guard_abstained": False,
         "selection_guard_cell_key": "sample-mean",
         "selection_guard_n": 500,
-        "selection_guard_q_safe": point,
+        "selection_guard_q_safe": action,
         "side": "YES",
         "payoff_q_point": point,
         "payoff_q_lcb": lcb,
-        "payoff_q_action": point,
+        "payoff_q_action": action,
+        "global_current_sample_payoff_q_mean": action,
         "cost": cost,
         "edge_lcb": lcb - cost,
-        "edge_expected": point - cost,
+        "edge_expected": action - cost,
         "global_actuation_identity": "actuation-mean",
         "global_economic_identity": "economic-mean",
         "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
@@ -2424,10 +2426,10 @@ def test_pre_submit_mean_winner_uses_point_action_edge_through_all_verifiers():
         "global_expected_delta_log_wealth": expected_du,
         "global_expected_ev_usd": expected_ev,
         "global_expected_capital_efficiency": expected_du / expected_cost,
-        "global_cut_time_win_probability_mean": point,
-        "global_cut_time_loss_probability_mean": 1.0 - point,
-        "global_terminal_win_probability_mean": point,
-        "global_terminal_loss_probability_mean": 1.0 - point,
+        "global_cut_time_win_probability_mean": action,
+        "global_cut_time_loss_probability_mean": 1.0 - action,
+        "global_terminal_win_probability_mean": action,
+        "global_terminal_loss_probability_mean": 1.0 - action,
         "global_terminal_loss_payoff_usd": str(loss_payoff),
         "global_terminal_win_payoff_usd": str(win_payoff),
         "global_terminal_median_payoff_usd": str(win_payoff),
@@ -2443,12 +2445,12 @@ def test_pre_submit_mean_winner_uses_point_action_edge_through_all_verifiers():
     economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
         economics
     )
-    payload = _pre_submit_payload(
+    payload = _day0_pre_submit_payload(
         size=shares,
         min_order_size=1.0,
-        q_live=point,
+        q_live=action,
         q_lcb_5pct=lcb,
-        expected_edge=point - (max_spend / shares),
+        expected_edge=action - (max_spend / shares),
         min_entry_price=0.05,
         qkernel_execution_economics=economics,
     )
