@@ -14,6 +14,7 @@ removed because it is not a CalibrationSource.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -654,6 +655,118 @@ def test_receipt_gate_binds_global_current_certificate_to_exact_receipt() -> Non
     assert reason == (
         "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:"
         "global_condition_id_mismatch"
+    )
+
+
+def test_receipt_gate_binds_mean_action_q_and_point_yes_parent_separately() -> None:
+    economics = _sealed_global_current_buy_no_economics()
+    for field in (
+        "global_robust_delta_log_wealth",
+        "global_robust_ev_usd",
+        "global_cut_time_win_probability_lcb",
+        "global_cut_time_loss_probability_ucb",
+        "global_terminal_win_probability_lcb",
+        "global_terminal_loss_probability_ucb",
+    ):
+        economics.pop(field)
+    action_q = 0.70
+    shares = 10.0
+    cost = 0.32
+    expected_cost = shares * cost
+    loss_payoff = -expected_cost
+    win_payoff = shares - expected_cost
+    wealth_after_loss = 100.0 + loss_payoff
+    wealth_after_win = 100.0 + win_payoff
+    expected_ev = action_q * shares - expected_cost
+    expected_delta_log_wealth = (
+        (1.0 - action_q) * math.log(wealth_after_loss / 100.0)
+        + action_q * math.log(wealth_after_win / 100.0)
+    )
+    economics.update(
+        {
+            "payoff_q_point": 0.65,
+            "payoff_q_action": action_q,
+            "global_current_sample_payoff_q_mean": action_q,
+            "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+            "selection_guard_basis": "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+            "edge_expected": action_q - cost,
+            "global_limit_price": str(cost),
+            "global_expected_fill_price_before_fee": str(cost),
+            "global_expected_delta_log_wealth": expected_delta_log_wealth,
+            "global_expected_ev_usd": expected_ev,
+            "global_expected_capital_efficiency": (
+                expected_delta_log_wealth / expected_cost
+            ),
+            "global_cut_time_win_probability_mean": action_q,
+            "global_cut_time_loss_probability_mean": 1.0 - action_q,
+            "global_terminal_win_probability_mean": action_q,
+            "global_terminal_loss_probability_mean": 1.0 - action_q,
+            "global_cut_time_expected_value_usd": expected_ev,
+            "global_expected_value_usd": expected_ev,
+        }
+    )
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+    kwargs = {
+        "direction": "buy_no",
+        "q_direction": action_q,
+        "q_lcb": 0.61,
+        "execution_price": 0.32,
+        "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
+        "same_bin_yes_posterior": 0.35,
+        "qkernel_execution_economics": economics,
+        "probability_authority": "global_current_probability_witness",
+        "condition_id": "condition-current",
+        "token_id": "token-no-current",
+        "family_id": "family-current",
+        "candidate_id": "candidate-current",
+        **_global_current_parent_kwargs(),
+    }
+
+    assert live_buy_no_conservative_evidence_rejection_reason(**kwargs) is None
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-current-mean",
+        family_id="family-current",
+        candidate_id="candidate-current",
+        condition_id="condition-current",
+        token_id="token-no-current",
+        direction="buy_no",
+        q_live=action_q,
+        q_lcb_5pct=0.61,
+        c_fee_adjusted=cost,
+        trade_score=action_q - cost,
+        q_lcb_calibration_source="FORECAST_BOOTSTRAP",
+        same_bin_yes_posterior=0.35,
+        probability_authority="global_current_probability_witness",
+        qkernel_execution_economics=economics,
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="family-current",
+        fdr_hypothesis_count=2,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=expected_cost,
+        kelly_cost_basis_id="cost-current-mean",
+        final_intent_id="intent-current-mean",
+        side_effect_status="NO_SUBMIT",
+        proof_accepted=True,
+        global_actuation=_global_current_actuation(),
+    )
+    assert _receipt_money_path_blocker(receipt, ReactorConfig()) == (None, "")
+    assert (
+        live_buy_no_conservative_evidence_rejection_reason(
+            **{**kwargs, "q_direction": 0.65}
+        )
+        == "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch"
+    )
+    assert (
+        live_buy_no_conservative_evidence_rejection_reason(
+            **{**kwargs, "same_bin_yes_posterior": 0.42}
+        )
+        == "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch"
     )
 
 

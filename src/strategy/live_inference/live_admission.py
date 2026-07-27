@@ -482,19 +482,32 @@ def live_buy_no_conservative_evidence_rejection_reason(
         ):
             return "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_identity"
         assert isinstance(qkernel_execution_economics, Mapping)
+        mean_action = (
+            qkernel_execution_economics.get("global_probability_functional")
+            == "POSTERIOR_PREDICTIVE_MEAN"
+        )
         try:
-            certified_q = float(qkernel_execution_economics["payoff_q_point"])
+            certified_point_q = float(
+                qkernel_execution_economics["payoff_q_point"]
+            )
+            certified_action_q = float(
+                qkernel_execution_economics[
+                    "payoff_q_action" if mean_action else "payoff_q_point"
+                ]
+            )
             certified_lcb = float(qkernel_execution_economics["payoff_q_lcb"])
             certified_cost = float(qkernel_execution_economics["cost"])
         except (KeyError, TypeError, ValueError):
-            certified_q = certified_lcb = certified_cost = float("nan")
+            certified_point_q = certified_action_q = certified_lcb = (
+                certified_cost
+            ) = float("nan")
         if not all(
             math.isclose(actual, certified, rel_tol=0.0, abs_tol=1e-12)
             for actual, certified in (
-                (q_value, certified_q),
+                (q_value, certified_action_q),
                 (q_lcb_value, certified_lcb),
                 (price, certified_cost),
-                (yes_posterior, 1.0 - certified_q),
+                (yes_posterior, 1.0 - certified_point_q),
             )
         ):
             return "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch"
