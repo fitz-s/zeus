@@ -281,6 +281,11 @@ def _remaining_day_lcb_has_current_band_tightening(
     try:
         payoff_q_point = float(economics.get("payoff_q_point"))
         payoff_q_lcb = float(economics.get("payoff_q_lcb"))
+        payoff_q_action = float(
+            economics.get("payoff_q_action")
+            if mean_selection
+            else economics.get("payoff_q_point")
+        )
         selection_guard_q_safe = float(economics.get("selection_guard_q_safe"))
         selection_guard_n = int(economics.get("selection_guard_n"))
     except (TypeError, ValueError):
@@ -295,7 +300,8 @@ def _remaining_day_lcb_has_current_band_tightening(
             abs_tol=1e-6,
         )
         and q_lcb < q_live - DAY0_REMAINING_DAY_LCB_TOLERANCE
-        and math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6)
+        and math.isfinite(payoff_q_point)
+        and math.isclose(payoff_q_action, q_live, rel_tol=1e-9, abs_tol=1e-6)
         and math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6)
     )
 

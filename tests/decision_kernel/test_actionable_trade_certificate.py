@@ -365,7 +365,8 @@ def test_day0_authority_accepts_mean_selection_with_current_band_tightening():
             "no_lcb_by_condition": {"condition-1": 2.0 / 3.0},
         },
         "qkernel_execution_economics": {
-            "payoff_q_point": 0.8682666666666666,
+            "payoff_q_point": 0.82,
+            "payoff_q_action": 0.8682666666666666,
             "payoff_q_lcb": 0.31522844025,
             "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
             "q_lcb_guard_abstained": False,
