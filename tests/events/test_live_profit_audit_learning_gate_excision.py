@@ -73,6 +73,122 @@ def test_columns_no_writer_can_fill_do_not_exist(conn: sqlite3.Connection) -> No
     assert "post_fill_mark" not in cols
 
 
+def test_columns_with_no_honest_certificate_source_do_not_exist(
+    conn: sqlite3.Connection,
+) -> None:
+    """0/5566 live rows carried these two, and no authority can fill them.
+
+    ``expected_spread_cost``: no certificate carries a decision-time spread COST.
+    The only spread facts are widths (spread_at_entry / relative_spread_at_entry),
+    and the width is already recomputable from best_ask - best_bid on the row.
+    ``native_token_side``: a pure function of ``direction`` (buy_no -> NO,
+    buy_yes -> YES; 539/539 certs, zero exceptions), so it is a duplicate, not a
+    second fact. Reintroducing either means inventing a value or duplicating one.
+    """
+    cols = _columns(conn)
+    assert "expected_spread_cost" not in cols
+    assert "native_token_side" not in cols
+
+
+def test_economics_columns_are_named_for_what_they_hold(
+    conn: sqlite3.Connection,
+) -> None:
+    """Each of the three renamed columns had a name its value did not earn."""
+    cols = _columns(conn)
+    assert {"expected_fee_per_share", "p_fill_lcb", "rest_then_cross_policy"} <= cols
+    # ``expected_fee`` named no unit, which is how a rate, a worst-case bound and
+    # an order total all looked like plausible fills for one column.
+    assert "expected_fee" not in cols
+    # ``visible_depth_fill_lcb`` is false on every MAKER row since 2026-07-19.
+    assert "visible_depth_fill_lcb" not in cols
+    # ``order_policy`` collides with CostBasis.order_policy's vocabulary.
+    assert "order_policy" not in cols
+
+
+def test_execution_economics_are_stamped_from_the_authorizing_certificate() -> None:
+    """The three live columns come from the cert, under the cert's own names."""
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    ensure_table(c)
+    _seed_certificates(
+        c,
+        q_live=0.60,
+        execution_mode="TAKER",
+        fee_rate=0.05,
+        expected_fill_price=0.26,
+        p_fill_lcb=0.9992574820528436,
+        rest_then_cross_policy="GLOBAL_TAKER_LIMIT",
+    )
+    _seed_aggregate(c)
+    audit_id = record_edli_live_profit_audit_from_aggregate(c, "agg-1")
+    assert audit_id is not None
+    row = c.execute(
+        "SELECT expected_fee_per_share, p_fill_lcb, rest_then_cross_policy "
+        "FROM edli_live_profit_audit WHERE audit_id=?",
+        (audit_id,),
+    ).fetchone()
+    # A per-share AMOUNT: 0.05 * 0.26 * 0.74. Not the 0.05 rate, and not the
+    # cert's worst-case bound (which is exactly 2x this).
+    assert row["expected_fee_per_share"] == pytest.approx(0.05 * 0.26 * 0.74)
+    assert row["p_fill_lcb"] == pytest.approx(0.9992574820528436)
+    assert row["rest_then_cross_policy"] == "GLOBAL_TAKER_LIMIT"
+
+
+def test_maker_decision_expects_zero_fee_not_the_taker_leg() -> None:
+    """A post_only_passive_limit cost basis is REQUIRED to carry a zero fee rate
+    (execution_intent.py:1477-1487), yet 113/115 live MAKER certificates still
+    carry a non-zero ``global_buy_fak_*`` taker fee. Reading that key would
+    report a fee we never expected to pay on ~24% of live decisions."""
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    ensure_table(c)
+    _seed_certificates(
+        c,
+        q_live=0.60,
+        execution_mode="MAKER",
+        fee_rate=0.05,          # the taker leg, persisted on a MAKER decision
+        expected_fill_price=0.42,
+        p_fill_lcb=0.19,        # the measured maker fill probability
+        rest_then_cross_policy="REST_DEFAULT",
+    )
+    _seed_aggregate(c)
+    audit_id = record_edli_live_profit_audit_from_aggregate(c, "agg-1")
+    assert audit_id is not None
+    row = c.execute(
+        "SELECT expected_fee_per_share, p_fill_lcb FROM edli_live_profit_audit "
+        "WHERE audit_id=?",
+        (audit_id,),
+    ).fetchone()
+    assert row["expected_fee_per_share"] == 0.0
+    assert row["expected_fee_per_share"] != pytest.approx(0.05 * 0.42 * 0.58)
+    # MAKER p_fill_lcb is the measured maker probability, never the ~1.0 taker
+    # depth bound the old column name asserted.
+    assert row["p_fill_lcb"] == pytest.approx(0.19)
+
+
+def test_unknown_execution_mode_leaves_the_fee_null_rather_than_guessing() -> None:
+    """Fail-safe: a certificate with no chosen mode cannot say what fee applied,
+    and an honest NULL beats a fabricated amount."""
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    ensure_table(c)
+    _seed_certificates(
+        c,
+        q_live=0.60,
+        execution_mode=None,
+        fee_rate=0.05,
+        expected_fill_price=0.26,
+    )
+    _seed_aggregate(c)
+    audit_id = record_edli_live_profit_audit_from_aggregate(c, "agg-1")
+    assert audit_id is not None
+    row = c.execute(
+        "SELECT expected_fee_per_share FROM edli_live_profit_audit WHERE audit_id=?",
+        (audit_id,),
+    ).fetchone()
+    assert row["expected_fee_per_share"] is None
+
+
 def test_registry_does_not_require_retired_columns() -> None:
     """Boot registry must not demand columns that the schema owner retires."""
     required = required_columns_for("edli_live_profit_audit")
@@ -200,22 +316,47 @@ def test_kelly_size_is_stamped_from_the_authorizing_certificate() -> None:
 
 
 def _seed_certificates(
-    conn: sqlite3.Connection, *, q_live: float, kelly_size_usd: float | None = None
+    conn: sqlite3.Connection,
+    *,
+    q_live: float,
+    kelly_size_usd: float | None = None,
+    execution_mode: str | None = None,
+    fee_rate: float | None = None,
+    expected_fill_price: float | None = None,
+    p_fill_lcb: float | None = None,
+    rest_then_cross_policy: str | None = None,
 ) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS decision_certificates ("
         "certificate_hash TEXT, certificate_type TEXT, verifier_status TEXT,"
         "payload_json TEXT)"
     )
+    economics: dict[str, object] = {"edge_lcb": 0.07}
+    if fee_rate is not None:
+        economics["global_buy_fak_fee_rate"] = str(fee_rate)
+    if expected_fill_price is not None:
+        economics["global_expected_fill_price_before_fee"] = str(expected_fill_price)
+        # The worst-case rounding bound the live certs also carry: exactly 2x the
+        # fee. Seeded so a writer that reads it instead fails these tests.
+        if fee_rate is not None:
+            economics["global_buy_fak_worst_fee_per_share"] = str(
+                2 * fee_rate * expected_fill_price * (1 - expected_fill_price)
+            )
     edge = {
         "condition_id": COND,
         "token_id": TOKEN,
         "q_live": q_live,
         "q_lcb_5pct": q_live - 0.05,
-        "qkernel_execution_economics": {"edge_lcb": 0.07},
+        "qkernel_execution_economics": economics,
     }
     if kelly_size_usd is not None:
         edge["kelly_size_usd"] = kelly_size_usd
+    if execution_mode is not None:
+        edge["proof_execution_mode_intent"] = execution_mode
+    if p_fill_lcb is not None:
+        edge["p_fill_lcb"] = p_fill_lcb
+    if rest_then_cross_policy is not None:
+        edge["rest_then_cross_policy"] = rest_then_cross_policy
     conn.execute(
         "INSERT INTO decision_certificates VALUES (?,?,?,?)",
         (CERT_HASH, "ActionableTradeCertificate", "VERIFIED", json.dumps(edge)),
