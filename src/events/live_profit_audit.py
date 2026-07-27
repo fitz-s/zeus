@@ -66,11 +66,9 @@ _AUDIT_FIELDS = (
     "q_live",
     "q_lcb_5pct",
     "expected_cost_basis",
-    "expected_fee",
-    "expected_spread_cost",
-    "visible_depth_fill_lcb",
-    "order_policy",
-    "native_token_side",
+    "expected_fee_per_share",
+    "p_fill_lcb",
+    "rest_then_cross_policy",
     "expected_edge",
     "kelly_size_usd",
     "quote_seen_at",
@@ -226,6 +224,12 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
     # kelly_size_usd). Without it "was the size right?" is unanswerable from this
     # ledger. INV-37: reuses the already-loaded cert payload, no new connection.
     kelly_size_usd_stamp = _float_or_none((edge_cert_payload or {}).get("kelly_size_usd"))
+    # Decision-time execution economics, all from the SAME certificate. Each is
+    # the certificate's own field under the certificate's own name; none is
+    # reconstructed from the row. INV-37: reuses the loaded payload.
+    expected_fee_per_share_stamp = _expected_fee_per_share(edge_cert_payload)
+    p_fill_lcb_stamp = _float_or_none((edge_cert_payload or {}).get("p_fill_lcb"))
+    rest_then_cross_policy_stamp = (edge_cert_payload or {}).get("rest_then_cross_policy")
     return LiveProfitAuditLedger(conn).insert_record(
         event_id=pre_submit.get("event_id"),
         aggregate_id=aggregate_id,
@@ -238,11 +242,9 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         q_live=q_live_stamp,
         q_lcb_5pct=q_lcb_5pct_stamp,
         expected_cost_basis=expected_cost_basis,
-        expected_fee=pre_submit.get("expected_fee"),
-        expected_spread_cost=pre_submit.get("expected_spread_cost"),
-        visible_depth_fill_lcb=pre_submit.get("visible_depth_fill_lcb"),
-        order_policy=pre_submit.get("order_policy"),
-        native_token_side=pre_submit.get("native_token_side"),
+        expected_fee_per_share=expected_fee_per_share_stamp,
+        p_fill_lcb=p_fill_lcb_stamp,
+        rest_then_cross_policy=rest_then_cross_policy_stamp,
         expected_edge=expected_edge_stamp,
         kelly_size_usd=kelly_size_usd_stamp,
         quote_seen_at=pre_submit.get("quote_seen_at"),
@@ -341,6 +343,50 @@ def compute_fill_alpha_gap_from_authorities(
         "fill_alpha_gap": fill_alpha_gap,
         "fill_alpha_gap_usd": fill_alpha_gap * filled_size,
     }
+
+
+def _expected_fee_per_share(edge_cert_payload: dict[str, Any] | None) -> float | None:
+    """Decision-time platform fee per share, in probability units, for the mode
+    the decision actually chose.
+
+    Polymarket charges the taker ``fee_rate * p * (1-p)`` per share
+    (src/contracts/execution_price.py::polymarket_fee) and charges a maker
+    nothing: a post_only_passive_limit cost basis is REQUIRED to carry
+    worst_case_fee_rate == 0 and a maker-exempt fee_source
+    (src/contracts/execution_intent.py:1477-1487), and every MAKER
+    FinalIntentCertificate on the live DB carries fee_rate 0.0 (115/115 sampled).
+
+    The certificate's ``global_buy_fak_*`` keys are NOT that quantity and must not
+    be stamped as it, for two independent reasons:
+      - ``global_buy_fak_fee_rate`` is the RATE (0.05), not an amount;
+      - ``global_buy_fak_worst_fee_per_share`` is a WORST-CASE rounding bound,
+        exactly 2x the fee (verified 324/324 where the underlying quote is
+        unchanged, and named by the cert's own
+        ``global_buy_fak_fee_rounding_bound = ROUNDED_FEE_AT_MOST_TWO_X_UNROUNDED``);
+      - and both are the BUY-FAK (taker) leg, persisted on MAKER decisions too:
+        113/115 MAKER certificates carry a non-zero ``global_buy_fak_*`` fee
+        while their own chosen mode pays zero. Stamping it would report a fee we
+        never expected to pay on 24% of decisions.
+
+    So: zero for a MAKER decision, ``rate * p * (1-p)`` for a TAKER one, computed
+    from the cert's own rate and expected fill price. Returns None when the mode
+    or the inputs are unavailable — never a guess.
+    """
+    if not isinstance(edge_cert_payload, dict):
+        return None
+    mode = str(edge_cert_payload.get("proof_execution_mode_intent") or "").upper()
+    if mode == "MAKER":
+        return 0.0
+    if mode != "TAKER":
+        return None
+    economics = edge_cert_payload.get("qkernel_execution_economics")
+    if not isinstance(economics, dict):
+        return None
+    rate = _float_or_none(economics.get("global_buy_fak_fee_rate"))
+    price = _float_or_none(economics.get("global_expected_fill_price_before_fee"))
+    if rate is None or price is None or not (0.0 < price < 1.0):
+        return None
+    return rate * price * (1.0 - price)
 
 
 def _load_verified_certificate_payload(conn: sqlite3.Connection, certificate_hash: str) -> dict[str, Any] | None:

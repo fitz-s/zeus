@@ -1443,11 +1443,9 @@ tables:
       - {name: q_live, type: REAL, nullable: true}
       - {name: q_lcb_5pct, type: REAL, nullable: true}
       - {name: expected_cost_basis, type: REAL, nullable: true}
-      - {name: expected_fee, type: REAL, nullable: true}
-      - {name: expected_spread_cost, type: REAL, nullable: true}
-      - {name: visible_depth_fill_lcb, type: REAL, nullable: true}
-      - {name: order_policy, type: TEXT, nullable: true}
-      - {name: native_token_side, type: TEXT, nullable: true}
+      - {name: expected_fee_per_share, type: REAL, nullable: true}
+      - {name: p_fill_lcb, type: REAL, nullable: true}
+      - {name: rest_then_cross_policy, type: TEXT, nullable: true}
       - {name: expected_edge, type: REAL, nullable: true}
       - {name: kelly_size_usd, type: REAL, nullable: true}
       - {name: quote_seen_at, type: TEXT, nullable: true}

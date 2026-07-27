@@ -17,6 +17,24 @@ Column-shape law for this table (see src/events/live_profit_audit.py for why):
   - ``learning_eligible`` is retired: a learning-admission gate whose predicate
     compared a fill against our own belief, with no consumer anywhere. Learning
     admission belongs to SettlementResolution, which grades against settlement.
+  - ``expected_fee_per_share`` is a per-share AMOUNT in probability units, not a
+    rate and not an order total. Its former name ``expected_fee`` named no unit,
+    which is how a rate (0.05), a worst-case bound (0.0192) and an order total
+    (1.67) all looked like plausible fills for it. See live_profit_audit.py for
+    the mode-correct source.
+  - ``p_fill_lcb`` carries the certificate's own field name. Its former name
+    ``visible_depth_fill_lcb`` asserted a visible-depth bound, which the value
+    stopped being on 2026-07-19: for a MAKER decision the certified field is the
+    measured maker fill probability, not a depth bound (see
+    tests/engine/test_p_fill_lcb_mode_certification.py). The old name was false
+    on every MAKER row.
+  - ``rest_then_cross_policy`` carries the certificate's own field name and
+    vocabulary (GLOBAL_TAKER_LIMIT / REST_DEFAULT / TAKER_ESCALATED_AFTER_REST /
+    REST_DAY0_MAKER_ONLY). Its former name ``order_policy`` collided with a
+    live, differently-valued repo concept — CostBasis.order_policy, whose
+    vocabulary is post_only_passive_limit / marketable_limit_depth_bound /
+    limit_may_take_conservative (src/contracts/execution_intent.py). One name
+    over two vocabularies is a name that lies.
 """
 
 from __future__ import annotations
@@ -38,11 +56,9 @@ CREATE TABLE IF NOT EXISTS edli_live_profit_audit (
     q_live REAL,
     q_lcb_5pct REAL,
     expected_cost_basis REAL,
-    expected_fee REAL,
-    expected_spread_cost REAL,
-    visible_depth_fill_lcb REAL,
-    order_policy TEXT,
-    native_token_side TEXT,
+    expected_fee_per_share REAL,
+    p_fill_lcb REAL,
+    rest_then_cross_policy TEXT,
     expected_edge REAL,
     kelly_size_usd REAL,
     quote_seen_at TEXT,
@@ -117,11 +133,9 @@ CREATE INDEX IF NOT EXISTS idx_edli_live_profit_audit_supersessions_audit
 
 
 _COLUMN_MIGRATIONS = {
-    "expected_fee": "ALTER TABLE edli_live_profit_audit ADD COLUMN expected_fee REAL",
-    "expected_spread_cost": "ALTER TABLE edli_live_profit_audit ADD COLUMN expected_spread_cost REAL",
-    "visible_depth_fill_lcb": "ALTER TABLE edli_live_profit_audit ADD COLUMN visible_depth_fill_lcb REAL",
-    "order_policy": "ALTER TABLE edli_live_profit_audit ADD COLUMN order_policy TEXT",
-    "native_token_side": "ALTER TABLE edli_live_profit_audit ADD COLUMN native_token_side TEXT",
+    "expected_fee_per_share": "ALTER TABLE edli_live_profit_audit ADD COLUMN expected_fee_per_share REAL",
+    "p_fill_lcb": "ALTER TABLE edli_live_profit_audit ADD COLUMN p_fill_lcb REAL",
+    "rest_then_cross_policy": "ALTER TABLE edli_live_profit_audit ADD COLUMN rest_then_cross_policy TEXT",
     "expected_edge_source_certificate_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN expected_edge_source_certificate_hash TEXT",
     "cost_basis_source_certificate_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN cost_basis_source_certificate_hash TEXT",
     "fill_source_event_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN fill_source_event_hash TEXT",
@@ -132,18 +146,41 @@ _COLUMN_MIGRATIONS = {
     "fill_alpha_gap_usd": "ALTER TABLE edli_live_profit_audit ADD COLUMN fill_alpha_gap_usd REAL",
 }
 
-# Columns retired 2026-07-26 (see module docstring). Renames carry the historical
-# values across so the execution-quality corpus survives under its honest name;
-# the drops remove a gate that had no consumer and a size column no writer ever
-# filled. All are metadata-only operations on SQLite >= 3.35 — no row rewrite.
+# Columns retired 2026-07-26/27 (see module docstring). Renames carry the
+# historical values across so a corpus survives under its honest name; the drops
+# remove columns no writer can fill from any authority. RENAME is metadata-only;
+# DROP COLUMN rewrites each row's record but does NOT scan an index or rebuild
+# the table (measured: 0.46s over 200k rows of comparable width on SQLite
+# 3.53.2, and this table holds 5.6k rows).
 _COLUMN_RENAMES = (
     ("realized_edge", "fill_alpha_gap"),
     ("edge_value_usd", "fill_alpha_gap_usd"),
+    # 2026-07-27: the three columns below are 0/5566 non-null, so these renames
+    # carry no values. They are renames rather than drop+add so a legacy DB ends
+    # with ONE column per fact instead of a dead column beside a live one.
+    ("expected_fee", "expected_fee_per_share"),
+    ("visible_depth_fill_lcb", "p_fill_lcb"),
+    ("order_policy", "rest_then_cross_policy"),
 )
 _RETIRED_COLUMNS = (
     "learning_eligible",   # belief-confirming learning gate, zero consumers
     "live_cap_notional",   # 0/5368 non-null; the tiny_live cap it mirrored is deleted
     "post_fill_mark",      # 0/5368 non-null; no event or certificate carries it
+    # 0/5566 non-null. No certificate carries a decision-time spread COST: the
+    # only spread facts are spread_at_entry / relative_spread_at_entry (a spread
+    # WIDTH, not a cost we expect to pay), and the width is already recomputable
+    # from best_ask - best_bid on this very row (matches on 390/400 sampled; the
+    # 10 that differ are a quote refreshed between cert and pre-submit, so the
+    # cert copy is the STALER of the two). Storing a cost we never computed
+    # would be a fabricated value; storing the width under a "cost" name would
+    # be a lie by shape. Deleted rather than left hollow.
+    "expected_spread_cost",
+    # 0/5566 non-null, and not a second fact: side is a pure function of the
+    # ``direction`` column already on the row. Verified 539/539 recent
+    # certificates: buy_no -> NO, buy_yes -> YES, with zero exceptions, and the
+    # audit table's own 5566 rows carry only those two directions. A column
+    # derivable by a two-branch map from its neighbour is a duplicate.
+    "native_token_side",
 )
 _RETIRED_INDEXES = (
     "idx_edli_live_profit_audit_promotion",
