@@ -306,12 +306,15 @@ def test_kelly_size_is_stamped_from_the_authorizing_certificate() -> None:
     audit_id = record_edli_live_profit_audit_from_aggregate(c, "agg-1")
     assert audit_id is not None
     row = c.execute(
-        "SELECT kelly_size_usd, q_live, fill_alpha_gap FROM edli_live_profit_audit "
+        "SELECT kelly_size_usd, q_live, expected_edge, fill_alpha_gap "
+        "FROM edli_live_profit_audit "
         "WHERE audit_id=?",
         (audit_id,),
     ).fetchone()
     assert row["kelly_size_usd"] == pytest.approx(4.72164)
     assert row["q_live"] == pytest.approx(0.60)
+    # The auction acts on posterior-mean edge, not the confidence-bound edge.
+    assert row["expected_edge"] == pytest.approx(0.18)
     assert row["fill_alpha_gap"] is not None
 
 
@@ -331,7 +334,10 @@ def _seed_certificates(
         "certificate_hash TEXT, certificate_type TEXT, verifier_status TEXT,"
         "payload_json TEXT)"
     )
-    economics: dict[str, object] = {"edge_lcb": 0.07}
+    economics: dict[str, object] = {
+        "edge_expected": 0.18,
+        "edge_lcb": -0.07,
+    }
     if fee_rate is not None:
         economics["global_buy_fak_fee_rate"] = str(fee_rate)
     if expected_fill_price is not None:

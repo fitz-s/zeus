@@ -1,15 +1,17 @@
 """EDLI live order audit projection: decision economics vs the fill we got.
 
 # Created: 2026-05-26
-# Last audited: 2026-07-26
+# Last audited: 2026-07-27
 # Authority basis: q-provenance stamping for settlement skill attribution (lifecycle-alpha mission).
 #   2026-06-22: stamp expected_edge from the ActionableTradeCertificate's
-#   qkernel_execution_economics.edge_lcb (previously read from PreSubmitRevalidated,
+#   qkernel_execution_economics edge authority (previously read from PreSubmitRevalidated,
 #   which never carries it -> 0/1651 live rows NULL). Closes the ex-ante side of the
 #   decision->settlement audit loop. Consult REQ-20260622-021129 (Pro, HIGH).
 #   2026-07-26: learning-gate excision. Operator law: the learning-curve machinery
 #   is not first-principles — decouple it, do not repair it. Plus LX-T3
 #   (docs/rebuild/local_ledger_excision_2026-07-12.md round-2 delta).
+#   2026-07-27: expected_edge follows the acted-on posterior-predictive-mean
+#   objective (edge_expected), while edge_lcb remains confidence evidence.
 
 This projection records EX-ANTE decision economics (q_live, q_lcb_5pct,
 expected_edge, kelly_size_usd — all from the frozen ActionableTradeCertificate)
@@ -207,15 +209,16 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
     # Stamp expected_edge (decision-time ex-ante edge) from the SAME edge cert.
     # The live PreSubmitRevalidated payload carries NO expected_edge (verified
     # 0/1651 live rows), so the canonical source is the ActionableTradeCertificate's
-    # qkernel_execution_economics.edge_lcb — the LCB edge (payoff_q_lcb - cost) the
-    # decision actually acted on (== the cert's action_score / trade_score). Without
-    # it the settlement audit has no ex-ante edge to compare realized outcome
-    # against. Leaves None when the cert / field is unavailable (fail-safe; mirrors
-    # the q_live / q_lcb_5pct stamping). INV-37: reuses the loaded cert payload, no
-    # new DB connection.
+    # qkernel_execution_economics.edge_expected — the posterior-predictive-mean
+    # objective the global auction actually ranked (== the cert's action_score /
+    # trade_score). edge_lcb is confidence evidence and can be negative for an
+    # authorized positive-mean action; stamping it here would mislabel the acted-on
+    # economics. Leaves None when the cert / field is unavailable (fail-safe;
+    # mirrors the q_live / q_lcb_5pct stamping). INV-37: reuses the loaded cert
+    # payload, no new DB connection.
     _edge_economics = (edge_cert_payload or {}).get("qkernel_execution_economics")
     expected_edge_stamp = (
-        _float_or_none(_edge_economics.get("edge_lcb"))
+        _float_or_none(_edge_economics.get("edge_expected"))
         if isinstance(_edge_economics, dict)
         else None
     )
