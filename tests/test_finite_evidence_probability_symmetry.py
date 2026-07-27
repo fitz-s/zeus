@@ -1,5 +1,5 @@
 # Created: 2026-07-11
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-27
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md §1f;
 # current-evidence finite-sample and moment-ambiguity algebra.
 """First-principles symmetry tests for source-clock executable probability."""
@@ -7,15 +7,20 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
+
+import pytest
 
 from src.calibration.emos import bin_probability_settlement
 from src.data.replacement_forecast_materializer import (
     FAR_TAIL_LCB_FLOOR,
+    _apply_fast_residual_likelihood_to_probability_carrier,
     _build_fused_q_bounds,
     _current_evidence_tail_ucb_floors,
     _finite_evidence_binomial_ucb,
     _finite_evidence_zero_hit_ucb_floor,
     _stress_coherent_samples_to_marginal_ucb_floors,
+    _transport_probability_row_to_observed_extreme,
 )
 
 
@@ -345,3 +350,70 @@ def test_day0_possible_bin_keeps_finite_evidence_tail_floor() -> None:
     assert ucb["far"] >= floors["far"] - 1e-9
     # ...while the impossible below-obs bin stays hard-zero (settlement support intact).
     assert ucb["low"] <= 1e-9
+
+
+def test_fast_residual_likelihood_updates_point_and_joint_bounds_without_certainty() -> None:
+    bins = [
+        _Bin("29C", 29.0, 29.0),
+        _Bin("30C", 30.0, 30.0),
+        _Bin("31C", 31.0, 31.0),
+        _Bin("32C+", 32.0, None),
+    ]
+    baseline = {"29C": 0.70, "30C": 0.19, "31C": 0.08, "32C+": 0.03}
+    samples = {key: [value] * 200 for key, value in baseline.items()}
+    likelihood = SimpleNamespace(
+        residual_weights_c=((-1.0, 0.1), (0.0, 0.7), (1.0, 0.1)),
+        unknown_weight=0.1,
+        settlement_extreme_c=29.0,
+        identity_hash="1" * 64,
+        as_payload=lambda: {
+            "semantics_revision": "same_station_causal_residual_v1",
+            "identity_hash": "1" * 64,
+        },
+    )
+
+    q, lcb, ucb, transformed_samples, payload = (
+        _apply_fast_residual_likelihood_to_probability_carrier(
+            q=baseline,
+            q_samples_by_bin=samples,
+            bins=bins,
+            metric="high",
+            observed_extreme_c=31.0,
+            half_step=0.5,
+            rounding_rule="wmo_half_up",
+            likelihood=likelihood,
+        )
+    )
+
+    assert q == pytest.approx(
+        {"29C": 0.07, "30C": 0.108, "31C": 0.695, "32C+": 0.127},
+        abs=1e-12,
+    )
+    assert math.isclose(sum(q.values()), 1.0, abs_tol=1e-12)
+    assert 0.0 < q["29C"] < q["31C"] < 1.0
+    assert all(lcb[key] <= q[key] <= ucb[key] for key in q)
+    assert all(
+        math.isclose(sum(row), 1.0, abs_tol=1e-12)
+        for row in zip(*(transformed_samples[key] for key in q))
+    )
+    assert payload["support_truncation"] is False
+    assert payload["bound_update"] == "joint_residual_bootstrap_transport"
+
+    low_bins = [
+        _Bin("28C-", None, 28.0),
+        _Bin("29C", 29.0, 29.0),
+        _Bin("30C", 30.0, 30.0),
+        _Bin("31C", 31.0, 31.0),
+    ]
+    low = _transport_probability_row_to_observed_extreme(
+        {"28C-": 0.03, "29C": 0.08, "30C": 0.19, "31C": 0.70},
+        bins=low_bins,
+        metric="low",
+        observed_extreme_c=30.0,
+        half_step=0.5,
+        rounding_rule="wmo_half_up",
+    )
+    assert low == pytest.approx(
+        {"28C-": 0.03, "29C": 0.08, "30C": 0.89, "31C": 0.0},
+        abs=1e-12,
+    )

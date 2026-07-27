@@ -4,6 +4,50 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-27 Same-station fast residual likelihood
+
+The Seoul Jul-27 31C NO loss exposed a category error and a missing probability
+edge. RKSI published 31C at 03:04 UTC, but the source-clock posterior retained
+the slower WU 29C state until 04:34. The existing WU/METAR divergence margin is
+an absolute anomaly threshold; it is neither a signed measurement likelihood
+nor permission to turn METAR into settlement truth. The materialization bridge
+also re-read only the settlement channel, so the faster same-station print did
+not reshape q at all.
+
+The hot-fix keeps WU as the sole hard settlement bound. For a raw fast running
+extreme that supersedes WU, seed discovery requires at least 20 causal
+same-station WU/METAR pairs from the preceding seven days. It builds the signed
+residual distribution strictly before the fast print and decision clocks. The
+materializer mixes `max(O_wu, O_fast + residual)` for HIGH or the symmetric
+minimum for LOW across the final probability simplex and the same bootstrap
+draws used by executable bounds. One finite-evidence unknown state uses the
+95% zero-hit Clopper-Pearson mass `1-0.05^(1/n)` and retains only the WU
+bound, so fast evidence can move probability immediately but cannot produce
+settlement certainty. Thin, mismatched, missing, or non-WU evidence is inert
+and preserves the settlement-channel posterior.
+
+The global Day0 adapter consumes that certified posterior as the single
+conditioned point-q and bootstrap world for both entry and held-position
+redecision; it must not rebuild a second remaining-day point-q and merely use
+the fast posterior as a cap. Consumption revalidates the residual identity
+hash, exact source id, station, availability clock, latest raw fast extreme,
+unit, and simplex basis. WU still supplies the only deterministic payoff
+boundary and payload settlement source. A physical-frontier entry veto drains
+only when this exact current fast-residual posterior is present; HKO
+provisional snapshots retain their existing entry block.
+
+SCOPE is the exact city/date/metric/station posterior. DRAIN is the existing
+post-commit Day0 seed bridge and materialization queue. RESET is a newer source
+observation or WU settlement-channel advance, each producing a new
+content-addressed posterior identity. The absorbing running extreme and the
+remaining-window clock are independent state: every newer same-station print
+advances the clock and rematerializes q even when a cooler HIGH or warmer LOW
+print leaves the extreme on a plateau. Acceptance requires no-look-ahead and
+thin-sample antibodies, HIGH/LOW absorbing symmetry, coherent point/bound
+simplexes, provenance identity, a causal Seoul replay, and the existing
+replacement/Day0 suites. No market-price stop, city patch, settlement writer,
+lifecycle rule, or blanket family veto is added.
+
 ## 2026-07-27 Direct NOAA publication continuity
 
 The Istanbul Jul-27 31C YES position entered at 13:07 UTC from a current LTFM

@@ -1,11 +1,12 @@
 # Created: 2026-06-07
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-27
 # Authority basis: Operator 2026-06-07 live cutover directive: replacement 0.1
 #   posterior is the live forecast authority; NO probabilities must not be
 #   inferred from YES complements.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import replace
@@ -85,6 +86,198 @@ def _replacement_bundle() -> SimpleNamespace:
             ],
         },
     )
+
+
+def _fast_residual_conditioning(
+    *,
+    observed_extreme_c: float = 28.0,
+    observation_time: str = "2026-06-09T10:00:00+00:00",
+) -> dict[str, object]:
+    residual_weights = ((0.0, 0.9),)
+    identity = {
+        "semantics_revision": "same_station_causal_residual_v1",
+        "station_id": "TEST",
+        "settlement_channel": "wu_icao_history",
+        "fast_channel": "aviationweather_metar",
+        "unit": "C",
+        "as_of": observation_time,
+        "window_start": "2026-06-02T10:00:00+00:00",
+        "matched_pairs": 20,
+        "residual_weights_c": residual_weights,
+        "unknown_weight": 0.1,
+        "settlement_extreme_c": 27.0,
+    }
+    identity_hash = hashlib.sha256(
+        json.dumps(
+            identity,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "active": True,
+        "metric": "high",
+        "observed_extreme_c": observed_extreme_c,
+        "source": "aviationweather_metar",
+        "observation_time": observation_time,
+        "sample_count": 21,
+        "unit": "C",
+        "support_truncation": False,
+        "fast_residual_likelihood": {
+            **identity,
+            "identity_hash": identity_hash,
+            "residual_weights_c": [
+                {"residual_c": residual, "weight": weight}
+                for residual, weight in residual_weights
+            ],
+            "scenario_weights": [
+                {"observed_bound_c": observed_extreme_c, "weight": 0.9},
+                {"observed_bound_c": 27.0, "weight": 0.1},
+            ],
+            "support_truncation": False,
+        },
+    }
+
+
+def test_fast_residual_bundle_is_one_conditioned_day0_probability_world() -> None:
+    family = _family()
+    bindings = tuple(
+        OutcomeTokenBinding(
+            bin_id=f"bin-{int(candidate.bin.low)}",
+            condition_id=candidate.condition_id,
+            yes_token_id=candidate.yes_token_id,
+            no_token_id=candidate.no_token_id,
+        )
+        for candidate in family.candidates
+    )
+    bundle = _replacement_bundle()
+    bundle.provenance_json.update(
+        {
+            "q_bootstrap_samples_basis": (
+                "day0_fast_residual_joint_simplex_v1"
+            ),
+            "day0_provisional_observation": _fast_residual_conditioning(),
+        }
+    )
+
+    components = adapter._replacement_global_probability_components(
+        bundle,
+        candidates=family.candidates,
+        bindings=bindings,
+    )
+
+    assert components is not None
+    samples, point_q, basis = components
+    assert samples[0].tolist() == pytest.approx([0.2, 0.8])
+    assert point_q.tolist() == pytest.approx([0.2, 0.8])
+    assert basis == (
+        adapter._GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS
+    )
+    forged = json.loads(
+        json.dumps(bundle.provenance_json["day0_provisional_observation"])
+    )
+    forged["fast_residual_likelihood"]["identity_hash"] = "0" * 64
+    bundle.provenance_json["day0_provisional_observation"] = forged
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID",
+    ):
+        adapter._replacement_global_probability_components(
+            bundle,
+            candidates=family.candidates,
+            bindings=bindings,
+        )
+
+
+def test_day0_execution_payload_binds_fast_probability_without_promoting_settlement_truth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data import day0_fast_obs
+    from src.data import replacement_forecast_current_target_plan as target_plan
+
+    settlement_fact = {
+        "observation_source": "wu_icao_history",
+        "observation_time": "2026-06-09T09:00:00+00:00",
+        "observation_available_at": "2026-06-09T09:01:00+00:00",
+        "observed_extreme_native": 27.0,
+        "sample_count": 10,
+        "station_id": "TEST",
+        "unit": "C",
+    }
+    monkeypatch.setattr(
+        target_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **kwargs: (
+            settlement_fact if kwargs["require_settlement_channel"] else None
+        ),
+    )
+    monkeypatch.setattr(
+        day0_fast_obs,
+        "latest_fast_station_extreme_c",
+        lambda *_args, **_kwargs: (
+            28.0,
+            "2026-06-09T10:00:00+00:00",
+            21,
+            "C",
+        ),
+    )
+    city = SimpleNamespace(
+        name="Testopolis",
+        timezone="UTC",
+        settlement_unit="C",
+        settlement_source_type="wu_icao",
+        wu_station="TEST",
+    )
+    monkeypatch.setattr(
+        adapter,
+        "runtime_cities_by_name",
+        lambda: {"Testopolis": city},
+    )
+    monkeypatch.setattr(
+        adapter.SettlementSemantics,
+        "for_city",
+        lambda _city: SimpleNamespace(round_single=lambda value: int(value)),
+    )
+    event = SimpleNamespace(
+        payload_json=json.dumps(
+            {
+                "city": "Testopolis",
+                "target_date": "2026-06-09",
+                "metric": "high",
+                "source_match_status": "MATCH",
+                "local_date_status": "MATCH",
+                "station_match_status": "MATCH",
+                "dst_status": "UNAMBIGUOUS",
+                "metric_match_status": "MATCH",
+                "rounding_status": "MATCH",
+                "source_authorized_status": "AUTHORIZED",
+                "live_authority_status": "live",
+            }
+        )
+    )
+
+    payload = adapter._global_day0_execution_payload(
+        event,
+        family=SimpleNamespace(
+            city="Testopolis",
+            target_date="2026-06-09",
+            metric="high",
+        ),
+        resolution=SimpleNamespace(measurement_unit="C"),
+        conditioning=_fast_residual_conditioning(),
+        observation_conn=sqlite3.connect(":memory:"),
+        decision_time=datetime(2026, 6, 9, 10, 5, tzinfo=timezone.utc),
+        posterior_id=123,
+        probability_base_identity="posterior-fast",
+    )
+
+    assert payload["settlement_source"] == "wu_icao_history"
+    assert payload["raw_value"] == 27.0
+    statistical = payload["_edli_global_day0_binding"][
+        "statistical_probability_conditioning"
+    ]
+    assert statistical["source"] == "aviationweather_metar"
+    assert statistical["observed_extreme_c"] == 28.0
 
 
 def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refutes_drift(

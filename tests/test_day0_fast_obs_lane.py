@@ -41,10 +41,13 @@ from src.data.day0_fast_obs import (
     Day0FastObsEmitter,
     Day0PublicationLedgerUnavailable,
     FastObsSource,
+    FAST_OBS_SOURCE_ID,
     MetarReport,
     NoaaMetarCycleCursor,
+    build_fast_station_residual_likelihood,
     fast_obs_source_for_city,
     fast_obs_to_day0_observation,
+    latest_fast_station_extreme_c,
     parse_metar_api_payload,
     parse_noaa_metar_cycle_payload,
     read_noaa_fast_obs_context_from_ledger,
@@ -60,6 +63,406 @@ from src.data.day0_oracle_anomaly import (
 )
 
 UTC = timezone.utc
+
+
+def test_fast_station_residual_likelihood_is_causal_station_local_and_thin_inert(
+    monkeypatch,
+) -> None:
+    from src import config as config_module
+
+    monkeypatch.setitem(
+        config_module.cities_by_name,
+        "Residual City",
+        SimpleNamespace(
+            settlement_source_type="wu_icao",
+            wu_station="TEST",
+            settlement_unit="C",
+            timezone="UTC",
+        ),
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            station_id TEXT NOT NULL,
+            source_channel TEXT NOT NULL,
+            publish_ts_utc TEXT NOT NULL,
+            value_native REAL NOT NULL,
+            unit TEXT NOT NULL,
+            fetched_at_utc TEXT NOT NULL,
+            raw_report TEXT
+        )
+        """
+    )
+    start = datetime(2026, 7, 27, 0, 0, tzinfo=UTC)
+    for index in range(20):
+        published = start + timedelta(minutes=30 * index)
+        value = 10.0 + float(index % 5)
+        fetched = published + timedelta(minutes=1)
+        conn.execute(
+            "INSERT INTO observation_prints "
+            "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "Residual City",
+                "TEST",
+                "wu_icao_history",
+                published.isoformat(),
+                value,
+                "C",
+                fetched.isoformat(),
+                "",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO observation_prints "
+            "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "Residual City",
+                "TEST",
+                FAST_OBS_SOURCE_ID,
+                published.isoformat(),
+                value,
+                "C",
+                fetched.isoformat(),
+                f"TEST {published:%d%H%M}Z 10/05",
+            ),
+        )
+    current_time = datetime(2026, 7, 27, 10, 0, tzinfo=UTC)
+    decision_time = current_time + timedelta(minutes=5)
+    conn.execute(
+        "INSERT INTO observation_prints "
+        "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "Residual City",
+            "TEST",
+            FAST_OBS_SOURCE_ID,
+            current_time.isoformat(),
+            31.0,
+            "C",
+            (current_time + timedelta(minutes=1)).isoformat(),
+            "TEST 271000Z 31/05",
+        ),
+    )
+    # A correction fetched after the decision must not leak back into training.
+    conn.execute(
+        "INSERT INTO observation_prints "
+        "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "Residual City",
+            "TEST",
+            "wu_icao_history",
+            (start + timedelta(minutes=30 * 19)).isoformat(),
+            99.0,
+            "C",
+            (decision_time + timedelta(minutes=1)).isoformat(),
+            "",
+        ),
+    )
+    post_peak_time = current_time + timedelta(minutes=3)
+    conn.execute(
+        "INSERT INTO observation_prints "
+        "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "Residual City",
+            "TEST",
+            FAST_OBS_SOURCE_ID,
+            post_peak_time.isoformat(),
+            30.0,
+            "C",
+            (post_peak_time + timedelta(seconds=30)).isoformat(),
+            "TEST 271003Z 30/05",
+        ),
+    )
+    # A WU value published before the fast print but fetched only afterwards
+    # was not available when that fast print became the conditioning fact.
+    late_pair_time = current_time - timedelta(minutes=15)
+    conn.execute(
+        "INSERT INTO observation_prints "
+        "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "Residual City",
+            "TEST",
+            FAST_OBS_SOURCE_ID,
+            late_pair_time.isoformat(),
+            20.0,
+            "C",
+            (late_pair_time + timedelta(minutes=1)).isoformat(),
+            "TEST 270945Z 20/05",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO observation_prints "
+        "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "Residual City",
+            "TEST",
+            "wu_icao_history",
+            late_pair_time.isoformat(),
+            99.0,
+            "C",
+            (current_time + timedelta(minutes=4)).isoformat(),
+            "",
+        ),
+    )
+
+    fast = latest_fast_station_extreme_c(
+        conn,
+        city="Residual City",
+        target_date="2026-07-27",
+        metric="high",
+        decision_time=decision_time,
+    )
+    assert fast == (31.0, post_peak_time.isoformat(), 23, "C")
+    likelihood = build_fast_station_residual_likelihood(
+        conn,
+        city="Residual City",
+        target_date="2026-07-27",
+        metric="high",
+        observed_source=FAST_OBS_SOURCE_ID,
+        observation_time=post_peak_time,
+        decision_time=decision_time,
+    )
+    assert likelihood is not None
+    assert likelihood.matched_pairs == 20
+    expected_unknown = 1.0 - 0.05 ** (1.0 / 20.0)
+    assert likelihood.residual_weights_c == ((0.0, 1.0 - expected_unknown),)
+    assert likelihood.unknown_weight == expected_unknown
+    assert likelihood.settlement_extreme_c == 14.0
+    assert (
+        build_fast_station_residual_likelihood(
+            conn,
+            city="Residual City",
+            target_date="2026-07-27",
+            metric="high",
+            observed_source=f"prefix-{FAST_OBS_SOURCE_ID}",
+            observation_time=post_peak_time,
+            decision_time=decision_time,
+        )
+        is None
+    )
+
+    conn.execute(
+        "DELETE FROM observation_prints WHERE publish_ts_utc = ?",
+        (start.isoformat(),),
+    )
+    assert (
+        build_fast_station_residual_likelihood(
+            conn,
+            city="Residual City",
+            target_date="2026-07-27",
+            metric="high",
+            observed_source=FAST_OBS_SOURCE_ID,
+            observation_time=post_peak_time,
+            decision_time=decision_time,
+        )
+        is None
+    )
+
+
+def test_fast_station_extreme_invalid_timezone_fails_soft(monkeypatch) -> None:
+    from src import config as config_module
+
+    monkeypatch.setitem(
+        config_module.cities_by_name,
+        "Invalid Timezone City",
+        SimpleNamespace(
+            settlement_source_type="wu_icao",
+            wu_station="TEST",
+            settlement_unit="C",
+            timezone="Invalid/Timezone",
+        ),
+    )
+
+    assert (
+        latest_fast_station_extreme_c(
+            sqlite3.connect(":memory:"),
+            city="Invalid Timezone City",
+            target_date="2026-07-27",
+            metric="high",
+            decision_time=datetime(2026, 7, 27, tzinfo=UTC),
+        )
+        is None
+    )
+
+
+def test_fast_residual_low_fahrenheit_requires_t_group(
+    monkeypatch,
+) -> None:
+    from src import config as config_module
+
+    monkeypatch.setitem(
+        config_module.cities_by_name,
+        "Residual F City",
+        SimpleNamespace(
+            settlement_source_type="wu_icao",
+            wu_station="KFST",
+            settlement_unit="F",
+            timezone="UTC",
+        ),
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            station_id TEXT NOT NULL,
+            source_channel TEXT NOT NULL,
+            publish_ts_utc TEXT NOT NULL,
+            value_native REAL NOT NULL,
+            unit TEXT NOT NULL,
+            fetched_at_utc TEXT NOT NULL,
+            raw_report TEXT
+        )
+        """
+    )
+    start = datetime(2026, 7, 27, 0, 0, tzinfo=UTC)
+    for index in range(20):
+        published = start + timedelta(minutes=20 * index)
+        fetched = published + timedelta(minutes=1)
+        conn.execute(
+            "INSERT INTO observation_prints "
+            "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "Residual F City",
+                "KFST",
+                "wu_icao_history",
+                published.isoformat(),
+                68.0,
+                "F",
+                fetched.isoformat(),
+                "",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO observation_prints "
+            "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "Residual F City",
+                "KFST",
+                FAST_OBS_SOURCE_ID,
+                published.isoformat(),
+                20.0,
+                "C",
+                fetched.isoformat(),
+                (
+                    "KFST 270000Z 20/10"
+                    if index == 0
+                    else "KFST 270000Z 20/10 T02000100"
+                ),
+            ),
+        )
+    observation_time = datetime(2026, 7, 27, 8, 0, tzinfo=UTC)
+    decision_time = observation_time + timedelta(minutes=5)
+    assert (
+        build_fast_station_residual_likelihood(
+            conn,
+            city="Residual F City",
+            target_date="2026-07-27",
+            metric="low",
+            observed_source=FAST_OBS_SOURCE_ID,
+            observation_time=observation_time,
+            decision_time=decision_time,
+        )
+        is None
+    )
+
+    conn.execute(
+        "UPDATE observation_prints SET raw_report = ? "
+        "WHERE source_channel = ? AND publish_ts_utc = ?",
+        (
+            "KFST 270000Z 20/10 T02000100",
+            FAST_OBS_SOURCE_ID,
+            start.isoformat(),
+        ),
+    )
+    late_pair_time = observation_time - timedelta(minutes=15)
+    conn.execute(
+        "INSERT INTO observation_prints "
+        "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "Residual F City",
+            "KFST",
+            FAST_OBS_SOURCE_ID,
+            late_pair_time.isoformat(),
+            15.0,
+            "C",
+            (late_pair_time + timedelta(minutes=1)).isoformat(),
+            "KFST 270745Z 15/05 T01500050",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO observation_prints "
+        "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "Residual F City",
+            "KFST",
+            "wu_icao_history",
+            late_pair_time.isoformat(),
+            59.0,
+            "F",
+            (observation_time + timedelta(minutes=4)).isoformat(),
+            "",
+        ),
+    )
+    for published, value_c, raw_report in (
+        (observation_time, 10.0, "KFST 270800Z 10/05 T01000050"),
+        (
+            observation_time + timedelta(minutes=3),
+            12.0,
+            "KFST 270803Z 12/05 T01200050",
+        ),
+    ):
+        conn.execute(
+            "INSERT INTO observation_prints "
+            "(city,station_id,source_channel,publish_ts_utc,value_native,unit,fetched_at_utc,raw_report) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "Residual F City",
+                "KFST",
+                FAST_OBS_SOURCE_ID,
+                published.isoformat(),
+                value_c,
+                "C",
+                (published + timedelta(seconds=30)).isoformat(),
+                raw_report,
+            ),
+        )
+    post_trough_time = observation_time + timedelta(minutes=3)
+    assert latest_fast_station_extreme_c(
+        conn,
+        city="Residual F City",
+        target_date="2026-07-27",
+        metric="low",
+        decision_time=decision_time,
+    ) == (10.0, post_trough_time.isoformat(), 23, "F")
+    likelihood = build_fast_station_residual_likelihood(
+        conn,
+        city="Residual F City",
+        target_date="2026-07-27",
+        metric="low",
+        observed_source=FAST_OBS_SOURCE_ID,
+        observation_time=post_trough_time,
+        decision_time=decision_time,
+    )
+    assert likelihood is not None
+    assert likelihood.unit == "F"
+    assert likelihood.matched_pairs == 20
+    assert likelihood.residual_weights_c[0][0] == pytest.approx(0.0)
+    assert likelihood.settlement_extreme_c == pytest.approx(20.0)
 
 
 @pytest.fixture(autouse=True)

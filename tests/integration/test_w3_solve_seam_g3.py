@@ -4389,6 +4389,322 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     forecast.close()
 
 
+def test_fast_residual_day0_bundle_drives_entry_and_held_redecision_q(
+    monkeypatch,
+):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as current_target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+    from src.execution import day0_hard_fact_exit
+
+    forecast = sqlite3.connect(":memory:")
+    forecast.row_factory = sqlite3.Row
+    forecast.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            market_slug TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL
+        )
+        """
+    )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                "Beijing",
+                "2026-07-11",
+                "high",
+                "c0",
+                "yes0",
+                "test-27-or-below",
+                "27C or below",
+                None,
+                27.0,
+            ),
+            (
+                "Beijing",
+                "2026-07-11",
+                "high",
+                "c1",
+                "yes1",
+                "test-28",
+                "28C",
+                28.0,
+                28.0,
+            ),
+            (
+                "Beijing",
+                "2026-07-11",
+                "high",
+                "c2",
+                "yes2",
+                "test-29-or-above",
+                "29C or above",
+                29.0,
+                None,
+            ),
+        ),
+    )
+    observations = sqlite3.connect(":memory:")
+    observations.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            running_max REAL,
+            utc_timestamp TEXT NOT NULL,
+            local_timestamp TEXT NOT NULL,
+            source TEXT NOT NULL,
+            causality_status TEXT NOT NULL,
+            authority TEXT NOT NULL,
+            source_role TEXT NOT NULL,
+            training_allowed INTEGER NOT NULL
+        )
+        """
+    )
+    settlement_fact = {
+        "observation_source": "wu_icao_history",
+        "observation_time": "2026-07-11T06:00:00+00:00",
+        "observed_extreme_native": 27.0,
+    }
+    physical_fact = {
+        "observation_source": "aviationweather_metar",
+        "observation_time": "2026-07-11T07:00:00+00:00",
+        "observed_extreme_native": 28.0,
+    }
+    monkeypatch.setattr(
+        current_target_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **kwargs: (
+            settlement_fact
+            if kwargs["require_settlement_channel"]
+            else physical_fact
+        ),
+    )
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "_final_daily_observation_extreme",
+        lambda **_kwargs: None,
+    )
+
+    observation_time = "2026-07-11T07:00:00+00:00"
+    residual_weights = ((0.0, 0.9),)
+    likelihood_identity = {
+        "semantics_revision": "same_station_causal_residual_v1",
+        "station_id": "ZBAA",
+        "settlement_channel": "wu_icao_history",
+        "fast_channel": "aviationweather_metar",
+        "unit": "C",
+        "as_of": observation_time,
+        "window_start": "2026-07-04T07:00:00+00:00",
+        "matched_pairs": 20,
+        "residual_weights_c": residual_weights,
+        "unknown_weight": 0.1,
+        "settlement_extreme_c": 27.0,
+    }
+    likelihood_hash = hashlib.sha256(
+        json.dumps(
+            likelihood_identity,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    conditioning = {
+        "active": True,
+        "metric": "high",
+        "observed_extreme_c": 28.0,
+        "source": "aviationweather_metar",
+        "observation_time": observation_time,
+        "sample_count": 20,
+        "unit": "C",
+        "support_truncation": False,
+        "fast_residual_likelihood": {
+            **likelihood_identity,
+            "identity_hash": likelihood_hash,
+            "residual_weights_c": [
+                {"residual_c": 0.0, "weight": 0.9}
+            ],
+            "scenario_weights": [
+                {"observed_bound_c": 28.0, "weight": 0.9},
+                {"observed_bound_c": 27.0, "weight": 0.1},
+            ],
+            "support_truncation": False,
+        },
+    }
+    posterior_bins = (
+        ("p0", None, 27.0),
+        ("p1", 28.0, 28.0),
+        ("p2", 29.0, None),
+    )
+    fast_q = (0.01, 0.94, 0.05)
+    bundle = SimpleNamespace(
+        posterior_id=21,
+        posterior_identity_hash="fast-posterior-21",
+        dependency_hash="fast-dependency-21",
+        posterior_config_hash="fast-config-21",
+        q={
+            key: probability
+            for (key, _lo, _hi), probability in zip(
+                posterior_bins, fast_q
+            )
+        },
+        provenance_json={
+            "q_bootstrap_samples_basis": (
+                "day0_fast_residual_joint_simplex_v1"
+            ),
+            "q_bootstrap_samples_by_bin": {
+                key: [probability] * 400
+                for (key, _lo, _hi), probability in zip(
+                    posterior_bins, fast_q
+                )
+            },
+            "bin_topology": [
+                {"bin_id": key, "lower_c": lower, "upper_c": upper}
+                for key, lower, upper in posterior_bins
+            ],
+            "day0_provisional_observation": conditioning,
+        },
+        source_cycle_time="2026-07-11T12:00:00+00:00",
+        source_available_at="2026-07-11T07:01:00+00:00",
+    )
+    monkeypatch.setattr(
+        readiness_reader,
+        "latest_replacement_readiness",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            bundle=bundle,
+            reason_code="READY",
+        ),
+    )
+
+    def current_observation_payload(*_args, **kwargs):
+        return {
+            "observation_time": settlement_fact["observation_time"],
+            "observation_available_at": "2026-07-11T06:01:00+00:00",
+            "raw_value": 27.0,
+            "rounded_value": 27,
+            "high_so_far": 27.0,
+            "sample_count": 10,
+            "station_id": "ZBAA",
+            "settlement_source": "wu_icao_history",
+            "settlement_unit": "C",
+            "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "_edli_global_day0_binding": {
+                "city": "Beijing",
+                "target_date": "2026-07-11",
+                "metric": "high",
+                "observation_time": settlement_fact["observation_time"],
+                "observed_extreme_native": 27.0,
+                "rounded_value": 27,
+                "settlement_source": "wu_icao_history",
+                "settlement_unit": "C",
+                "posterior_id": kwargs["posterior_id"],
+                "probability_base_identity": kwargs[
+                    "probability_base_identity"
+                ],
+                "statistical_probability_conditioning": conditioning,
+            },
+        }
+
+    monkeypatch.setattr(
+        era,
+        "_global_day0_execution_payload",
+        current_observation_payload,
+    )
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        lambda *_args, **_kwargs: pytest.fail(
+            "fast residual posterior must be the point-q authority"
+        ),
+    )
+
+    base_event = _global_day0_scope_event(
+        city="Beijing",
+        source_run_id="run-fast",
+    )
+    event_payload = json.loads(base_event.payload_json)
+    event_payload.update(
+        {
+            "station_id": "ZBAA",
+            "settlement_unit": "C",
+            "unit": "C",
+            "observation_time": settlement_fact["observation_time"],
+            "observation_available_at": "2026-07-11T06:01:00+00:00",
+            "raw_value": 27.0,
+            "rounded_value": 27,
+            "high_so_far": 27.0,
+        }
+    )
+    event = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Beijing|2026-07-11|high|ZBAA",
+        source="global-auction-current-day0-scope",
+        observed_at=settlement_fact["observation_time"],
+        available_at="2026-07-11T06:01:00+00:00",
+        received_at="2026-07-11T06:01:00+00:00",
+        payload=event_payload,
+        causal_snapshot_id=str(event_payload["snapshot_id"]),
+    )
+    day0_payload: dict[str, object] = {}
+    prepared = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(
+            2026, 7, 11, 10, 0, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=day0_payload,
+        entry_authority=True,
+    )
+
+    witness = prepared.probability_witness
+    assert witness.yes_point_q.tolist() == pytest.approx(list(fast_q))
+    assert witness.yes_q_samples[0].tolist() == pytest.approx(list(fast_q))
+    assert witness.band_basis == (
+        era._GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS
+    )
+    assert witness.posterior_identity_hash == bundle.posterior_identity_hash
+    assert prepared.candidate_payoff_q_lcb_caps == ()
+    assert day0_payload["probability_authority"] == (
+        "day0_conditioned_replacement_global_probability_v1"
+    )
+    assert day0_payload["q_source"] == "day0_conditioned_replacement"
+    assert day0_payload["_edli_day0_q_mode"] == (
+        "fast_residual_conditioned_replacement"
+    )
+    conditioned_action = {
+        **day0_payload,
+        "event_type": "DAY0_EXTREME_UPDATED",
+    }
+    assert era._uses_replacement_probability_authority(conditioned_action)
+    assert not era._day0_maker_only_required(conditioned_action)
+    forecast.close()
+    observations.close()
+
+
 def test_provisional_hko_held_probability_uses_remaining_day_without_entry_authority(
     monkeypatch,
 ):

@@ -40,18 +40,22 @@ C-settled cities consume whole-C reports exactly.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import logging
+import math
 import os
 import re
+import sqlite3
 import threading
 import time
+from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Iterable, Optional
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -91,6 +95,12 @@ METAR_AWC_RECOVERY_INTERVAL_S = 90.0
 #: At 15 min the cache is still fresh enough that the running extreme it
 #: encodes is a valid local-day extreme for entry-probability computation.
 FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
+
+FAST_RESIDUAL_LIKELIHOOD_REVISION = "same_station_causal_residual_v1"
+FAST_RESIDUAL_LOOKBACK_DAYS = 7
+FAST_RESIDUAL_MIN_PAIRS = 20
+FAST_RESIDUAL_MATCH_TOLERANCE_S = 6 * 60
+FAST_RESIDUAL_UNKNOWN_ALPHA = 0.05
 
 _MemoKey = tuple[str, str, str]
 _MemoUpdate = tuple[Optional[int], Optional[int], Optional[str]]
@@ -199,6 +209,361 @@ class FastObsSource:
     #: station with an adequate sample (Seoul/RKSI class — see
     #: day0_oracle_anomaly.metar_margin_units_for_city). Never negative.
     margin_units: float = 0.0
+
+
+@dataclass(frozen=True)
+class FastStationResidualLikelihood:
+    """Causal WU-minus-METAR measurement model for one settlement station.
+
+    The residual carrier is deliberately separate from the anomaly margin.
+    ``unknown_weight`` is the 95% zero-hit Clopper-Pearson mass and leaves only
+    the settlement-channel bound active. Therefore a fast print can reshape
+    probability immediately but can never become settlement certainty.
+    """
+
+    station_id: str
+    settlement_channel: str
+    fast_channel: str
+    unit: str
+    as_of: str
+    window_start: str
+    matched_pairs: int
+    residual_weights_c: tuple[tuple[float, float], ...]
+    unknown_weight: float
+    settlement_extreme_c: float | None
+    identity_hash: str
+    semantics_revision: str = FAST_RESIDUAL_LIKELIHOOD_REVISION
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "semantics_revision": self.semantics_revision,
+            "station_id": self.station_id,
+            "settlement_channel": self.settlement_channel,
+            "fast_channel": self.fast_channel,
+            "unit": self.unit,
+            "as_of": self.as_of,
+            "window_start": self.window_start,
+            "matched_pairs": self.matched_pairs,
+            "residual_weights_c": [
+                {"residual_c": residual, "weight": weight}
+                for residual, weight in self.residual_weights_c
+            ],
+            "unknown_weight": self.unknown_weight,
+            "settlement_extreme_c": self.settlement_extreme_c,
+            "identity_hash": self.identity_hash,
+        }
+
+
+def latest_fast_station_extreme_c(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    decision_time: datetime | str,
+) -> tuple[float, str, int, str] | None:
+    """Return the raw same-station fast extreme in Celsius as of decision time."""
+
+    from src.config import cities_by_name
+
+    city_obj = cities_by_name.get(str(city))
+    decision = _fast_residual_utc(decision_time)
+    normalized_metric = str(metric or "").strip().lower()
+    if (
+        city_obj is None
+        or decision is None
+        or normalized_metric not in {"high", "low"}
+        or str(getattr(city_obj, "settlement_source_type", "") or "").lower()
+        != "wu_icao"
+    ):
+        return None
+    station = str(getattr(city_obj, "wu_station", "") or "").strip().upper()
+    unit = str(getattr(city_obj, "settlement_unit", "") or "").strip().upper()
+    try:
+        target_day = date.fromisoformat(str(target_date))
+        tz = ZoneInfo(str(getattr(city_obj, "timezone", "") or "UTC"))
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+    local_start = datetime.combine(
+        target_day, datetime.min.time(), tzinfo=tz
+    ).astimezone(UTC)
+    local_end = local_start + timedelta(days=1)
+    table = "world.observation_prints"
+    try:
+        conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+    except sqlite3.DatabaseError:
+        table = "observation_prints"
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT publish_ts_utc, value_native, unit, raw_report
+              FROM {table}
+             WHERE city = ?
+               AND upper(station_id) = ?
+               AND source_channel = ?
+               AND julianday(publish_ts_utc) >= julianday(?)
+               AND julianday(publish_ts_utc) < julianday(?)
+               AND julianday(publish_ts_utc) <= julianday(?)
+               AND julianday(fetched_at_utc) <= julianday(?)
+             ORDER BY publish_ts_utc
+            """,
+            (
+                str(city),
+                station,
+                FAST_OBS_SOURCE_ID,
+                local_start.isoformat(),
+                local_end.isoformat(),
+                decision.isoformat(),
+                decision.isoformat(),
+            ),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    candidates: list[tuple[float, str]] = []
+    for row in rows:
+        published = _fast_residual_utc(row[0])
+        value_c = _fast_residual_value_c(
+            channel=FAST_OBS_SOURCE_ID,
+            value_native=row[1],
+            unit=row[2],
+            raw_report=row[3],
+            settlement_unit=unit,
+        )
+        if published is not None and value_c is not None:
+            candidates.append((value_c, published.isoformat()))
+    if not candidates:
+        return None
+    extreme = (
+        min(value for value, _ in candidates)
+        if normalized_metric == "low"
+        else max(value for value, _ in candidates)
+    )
+    # The running extreme and the remaining-window clock are independent
+    # state. A post-peak cooler HIGH print (or warmer LOW print) leaves the
+    # extreme unchanged but still shortens the future opportunity window, so
+    # the posterior identity must advance on the latest causal station print.
+    observation_time = max(published for _value, published in candidates)
+    return float(extreme), observation_time, len(candidates), unit
+
+
+def _fast_residual_utc(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _fast_residual_value_c(
+    *,
+    channel: str,
+    value_native: object,
+    unit: object,
+    raw_report: object,
+    settlement_unit: str,
+) -> float | None:
+    try:
+        value = float(value_native)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    normalized_unit = str(unit or "").strip().upper()
+    if channel == FAST_OBS_SOURCE_ID:
+        if settlement_unit == "F":
+            precise = metar_t_group_temperature_c(str(raw_report or ""))
+            return precise if precise is not None and math.isfinite(precise) else None
+        return value if normalized_unit == "C" else None
+    if normalized_unit == "C":
+        return value
+    if normalized_unit == "F":
+        return (value - 32.0) * 5.0 / 9.0
+    return None
+
+
+def build_fast_station_residual_likelihood(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    observed_source: str,
+    observation_time: datetime | str,
+    decision_time: datetime | str,
+) -> FastStationResidualLikelihood | None:
+    """Return a same-station, seven-day, strictly causal residual likelihood.
+
+    Missing/thin/mismatched evidence is an inert ``None``: it neither blocks a
+    family nor changes its baseline probability.  WU remains the sole
+    settlement channel and the fast METAR stream remains a noisy observation.
+    """
+
+    if str(observed_source or "").strip() != FAST_OBS_SOURCE_ID:
+        return None
+    normalized_metric = str(metric or "").strip().lower()
+    if normalized_metric not in {"high", "low"}:
+        return None
+    observed_at = _fast_residual_utc(observation_time)
+    decided_at = _fast_residual_utc(decision_time)
+    if observed_at is None or decided_at is None or observed_at > decided_at:
+        return None
+
+    from src.config import cities_by_name
+
+    city_obj = cities_by_name.get(str(city))
+    if city_obj is None:
+        return None
+    if str(getattr(city_obj, "settlement_source_type", "") or "").lower() != "wu_icao":
+        return None
+    station = str(getattr(city_obj, "wu_station", "") or "").strip().upper()
+    settlement_unit = str(
+        getattr(city_obj, "settlement_unit", "") or ""
+    ).strip().upper()
+    if not station or settlement_unit not in {"C", "F"}:
+        return None
+    try:
+        target_day = date.fromisoformat(str(target_date))
+        tz = ZoneInfo(str(getattr(city_obj, "timezone", "") or "UTC"))
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+
+    training_cutoff = min(observed_at, decided_at)
+    window_start = training_cutoff - timedelta(days=FAST_RESIDUAL_LOOKBACK_DAYS)
+    table = "world.observation_prints"
+    try:
+        conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+    except sqlite3.DatabaseError:
+        table = "observation_prints"
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT id, source_channel, publish_ts_utc, value_native, unit,
+                   fetched_at_utc, raw_report
+              FROM {table}
+             WHERE city = ?
+               AND upper(station_id) = ?
+               AND source_channel IN ('wu_icao_history', ?)
+               AND julianday(publish_ts_utc) >= julianday(?)
+               AND julianday(publish_ts_utc) < julianday(?)
+               AND julianday(fetched_at_utc) < julianday(?)
+             ORDER BY publish_ts_utc, id
+            """,
+            (
+                str(city),
+                station,
+                FAST_OBS_SOURCE_ID,
+                window_start.isoformat(),
+                training_cutoff.isoformat(),
+                training_cutoff.isoformat(),
+            ),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+
+    settlement_rows: list[tuple[datetime, float]] = []
+    fast_rows: list[tuple[datetime, float]] = []
+    for row in rows:
+        channel = str(row[1] or "")
+        published = _fast_residual_utc(row[2])
+        if published is None:
+            continue
+        value_c = _fast_residual_value_c(
+            channel=channel,
+            value_native=row[3],
+            unit=row[4],
+            raw_report=row[6],
+            settlement_unit=settlement_unit,
+        )
+        if value_c is None:
+            continue
+        target = settlement_rows if channel == "wu_icao_history" else fast_rows
+        target.append((published, value_c))
+    if not settlement_rows or not fast_rows:
+        return None
+
+    fast_by_time: dict[datetime, float] = {}
+    for published, value in fast_rows:
+        fast_by_time[published] = value
+    fast_times = sorted(fast_by_time)
+    residuals: list[float] = []
+    import bisect
+
+    for published, wu_value in settlement_rows:
+        index = bisect.bisect_left(fast_times, published)
+        nearest: tuple[float, datetime] | None = None
+        for candidate_index in (index - 1, index):
+            if 0 <= candidate_index < len(fast_times):
+                candidate = fast_times[candidate_index]
+                distance = abs((candidate - published).total_seconds())
+                if (
+                    distance <= FAST_RESIDUAL_MATCH_TOLERANCE_S
+                    and (nearest is None or distance < nearest[0])
+                ):
+                    nearest = (distance, candidate)
+        if nearest is not None:
+            residuals.append(round(wu_value - fast_by_time[nearest[1]], 6))
+    if len(residuals) < FAST_RESIDUAL_MIN_PAIRS:
+        return None
+
+    counts = Counter(residuals)
+    sample_count = len(residuals)
+    unknown_weight = 1.0 - FAST_RESIDUAL_UNKNOWN_ALPHA ** (
+        1.0 / float(sample_count)
+    )
+    observed_weight = 1.0 - unknown_weight
+    weights = tuple(
+        (
+            float(residual),
+            observed_weight * float(count) / float(sample_count),
+        )
+        for residual, count in sorted(counts.items())
+    )
+
+    local_start = datetime.combine(
+        target_day, datetime.min.time(), tzinfo=tz
+    ).astimezone(UTC)
+    local_end = local_start + timedelta(days=1)
+    settlement_values = [
+        value
+        for published, value in settlement_rows
+        if local_start <= published < local_end
+    ]
+    settlement_extreme = (
+        (min(settlement_values) if normalized_metric == "low" else max(settlement_values))
+        if settlement_values
+        else None
+    )
+    identity = {
+        "semantics_revision": FAST_RESIDUAL_LIKELIHOOD_REVISION,
+        "station_id": station,
+        "settlement_channel": "wu_icao_history",
+        "fast_channel": FAST_OBS_SOURCE_ID,
+        "unit": settlement_unit,
+        "as_of": training_cutoff.isoformat(),
+        "window_start": window_start.isoformat(),
+        "matched_pairs": sample_count,
+        "residual_weights_c": weights,
+        "unknown_weight": unknown_weight,
+        "settlement_extreme_c": settlement_extreme,
+    }
+    identity_hash = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return FastStationResidualLikelihood(
+        station_id=station,
+        settlement_channel="wu_icao_history",
+        fast_channel=FAST_OBS_SOURCE_ID,
+        unit=settlement_unit,
+        as_of=training_cutoff.isoformat(),
+        window_start=window_start.isoformat(),
+        matched_pairs=sample_count,
+        residual_weights_c=weights,
+        unknown_weight=unknown_weight,
+        settlement_extreme_c=settlement_extreme,
+        identity_hash=identity_hash,
+    )
 
 
 def fast_obs_source_for_city(city: Any) -> Optional[FastObsSource]:

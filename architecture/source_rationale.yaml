@@ -327,7 +327,7 @@ files:
   src/data/day0_fast_obs.py:
     zone: K1_truth
     authority_role: same_station_day0_physical_clock
-    why: Appends same-station METAR prints and emits authorized Day0 redecision events. WU-settled cities use the audited same-station distribution contract; NOAA-settled Istanbul/Moscow/Tel Aviv also consume the direct NOAA/NWS publication for their configured settlement station while Ogimet remains the canonical hourly/history mirror. The absorbing extreme and source observation version are independent monotone state; a newer plateau advances the remaining-window clock once without promoting the monitoring channel to final settlement truth.
+    why: Appends same-station METAR prints and emits authorized Day0 redecision events. WU-settled cities use the audited same-station distribution contract and a causal seven-day signed WU-minus-METAR residual likelihood with an explicit zero-hit unknown tail; this probability witness never becomes settlement truth. NOAA-settled Istanbul/Moscow/Tel Aviv consume the direct NOAA/NWS publication for their configured settlement station while Ogimet remains the canonical hourly/history mirror. The absorbing extreme and source observation version are independent monotone state; a newer plateau advances the remaining-window clock once without promoting the monitoring channel to final settlement truth.
     downstream:
     - src/ingest_main.py
     - src/events/triggers/day0_extreme_updated.py
@@ -355,7 +355,7 @@ files:
   src/data/replacement_forecast_materializer.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_writer
-    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. The source-clock live route binds the latest causal target-specific VERIFIED ECMWF ENS snapshot plus simultaneous provider values into a decision-time current-evidence shape; absolute ENS-member displacement from the served provider center remains an explicit uncertainty component because those same members remain absolute settlement-bin evidence. Its semantics revision, snapshot id, and shape hash enter dependency/config identity, and missing or revision-mismatched current shape fails closed instead of falling back to historical residual/floor/mixture probability. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
+    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. The source-clock live route binds the latest causal target-specific VERIFIED ECMWF ENS snapshot plus simultaneous provider values into a decision-time current-evidence shape; absolute ENS-member displacement from the served provider center remains an explicit uncertainty component because those same members remain absolute settlement-bin evidence. A qualified same-station fast Day0 witness updates the final point simplex and the same bootstrap carrier through its station-local residual distribution, while WU remains the only hard support bound. Its semantics revisions, snapshot or residual identity, and shape hash enter config/dependency identity; missing or revision-mismatched current shape fails closed instead of falling back to historical residual/floor/mixture probability. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -383,6 +383,15 @@ files:
     - src/data/replacement_forecast_seed_discovery.py
     - src/data/replacement_forecast_production.py
     - src/engine/event_reactor_adapter.py
+  src/data/replacement_forecast_seed_discovery.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_seed_discovery
+    why: Builds causal replacement materialization seeds from current raw forecast artifacts and Day0 facts. A raw same-station fast extreme may supersede the slower WU seed value only when the seven-day station-local residual likelihood is qualified; thin or missing evidence preserves the settlement-channel seed byte-for-byte.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/replacement_cycle_advance_trigger.py
+    - src/data/replacement_forecast_materialization_request_builder.py
   src/data/replacement_forecast_bundle_reader.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_reader

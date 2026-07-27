@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-18
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-07; last_reused=2026-07-18
+# Last reused/audited: 2026-07-27
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: Protect automatic replacement seed discovery from DB context plus raw manifests.
 # Reuse: Run before enabling daemon-side replacement shadow materialization discovery.
 # Authority basis: Simple switch must not depend on hand-authored seeds once raw inputs exist.
@@ -30,6 +30,7 @@ from src.data.replacement_forecast_seed_discovery import (
     discover_replacement_forecast_materialization_seeds,
 )
 import src.data.replacement_forecast_seed_discovery as seed_discovery
+import src.data.day0_fast_obs as fast_obs
 
 
 def test_seed_target_sort_keeps_day0_retries_from_starving_pre_settlement_q() -> None:
@@ -169,6 +170,78 @@ def test_hko_seed_preserves_provisional_provider_source(monkeypatch) -> None:
 
     assert payload is not None
     assert payload["day0_observed_extreme_source"] == "hko_hourly_accumulator"
+
+
+def test_seed_prefers_raw_fast_extreme_only_when_residual_likelihood_exists(
+    monkeypatch,
+) -> None:
+    monkeypatch.setitem(
+        seed_discovery.cities_by_name,
+        "Residual City",
+        SimpleNamespace(settlement_unit="C"),
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "get_world_connection_read_only",
+        lambda: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **_kwargs: {
+            "observed_extreme_native": 29.0,
+            "observation_time": "2026-07-27T03:00:00+00:00",
+            "sample_count": 7,
+            "source": "observation_prints:wu_icao_history",
+            "observation_source": "wu_icao_history",
+        },
+    )
+    monkeypatch.setattr(
+        fast_obs,
+        "latest_fast_station_extreme_c",
+        lambda *_args, **_kwargs: (
+            31.0,
+            "2026-07-27T03:04:27+00:00",
+            50,
+            "C",
+        ),
+    )
+    evidence = SimpleNamespace(identity_hash="a" * 64)
+    monkeypatch.setattr(
+        fast_obs,
+        "build_fast_station_residual_likelihood",
+        lambda *_args, **_kwargs: evidence,
+    )
+
+    payload = _day0_observed_extreme_seed_payload(
+        city="Residual City",
+        target_date="2026-07-27",
+        metric="high",
+        computed_at=datetime(2026, 7, 27, 3, 13, tzinfo=timezone.utc),
+    )
+
+    assert payload == {
+        "day0_observed_extreme_c": 31.0,
+        "day0_observed_extreme_source": fast_obs.FAST_OBS_SOURCE_ID,
+        "day0_observed_extreme_observation_time": "2026-07-27T03:04:27+00:00",
+        "day0_observed_extreme_sample_count": 50,
+        "day0_observed_extreme_unit": "C",
+    }
+
+    monkeypatch.setattr(
+        fast_obs,
+        "build_fast_station_residual_likelihood",
+        lambda *_args, **_kwargs: None,
+    )
+    fallback = _day0_observed_extreme_seed_payload(
+        city="Residual City",
+        target_date="2026-07-27",
+        metric="high",
+        computed_at=datetime(2026, 7, 27, 3, 13, tzinfo=timezone.utc),
+    )
+    assert fallback is not None
+    assert fallback["day0_observed_extreme_c"] == 29.0
+    assert fallback["day0_observed_extreme_source"] == "wu_icao_history"
 
 
 def test_day0_zero_observation_state_rejects_existing_unauthorized_rows(

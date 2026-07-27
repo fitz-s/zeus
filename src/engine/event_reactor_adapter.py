@@ -370,6 +370,8 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
         "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
         "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
+        "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH",
+        "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID",
         "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
@@ -389,6 +391,8 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
         "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING",
         "GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING",
         "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
+        "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH",
+        "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID",
         "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
@@ -2926,11 +2930,19 @@ def _uses_replacement_probability_authority(
     q_source = str(
         payload.get("_edli_q_source") or payload.get("q_source") or ""
     ).strip()
-    return q_source == "replacement_0_1" and authority in {
-        "replacement_0_1",
-        "replacement_current_global_probability_v1",
-        "replacement_provisional_day0_global_probability_v1",
-    }
+    return (
+        q_source == "replacement_0_1"
+        and authority
+        in {
+            "replacement_0_1",
+            "replacement_current_global_probability_v1",
+            "replacement_provisional_day0_global_probability_v1",
+        }
+    ) or (
+        q_source == "day0_conditioned_replacement"
+        and authority
+        == "day0_conditioned_replacement_global_probability_v1"
+    )
 
 
 def _day0_maker_only_required(actionable_payload: Mapping[str, object]) -> bool:
@@ -28144,6 +28156,197 @@ _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
 )
 
 
+def _validated_fast_residual_day0_conditioning(
+    conditioning: object,
+) -> Mapping[str, object] | None:
+    """Validate one noisy same-station fast observation carried by posterior q."""
+
+    if not isinstance(conditioning, Mapping):
+        return None
+    likelihood = conditioning.get("fast_residual_likelihood")
+    if likelihood is None:
+        return None
+    if not isinstance(likelihood, Mapping):
+        raise ValueError("GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID")
+
+    from src.data.day0_fast_obs import (
+        FAST_OBS_SOURCE_ID,
+        FAST_RESIDUAL_LIKELIHOOD_REVISION,
+        FAST_RESIDUAL_MIN_PAIRS,
+    )
+
+    try:
+        observed_extreme_c = float(conditioning["observed_extreme_c"])
+        sample_count = int(conditioning["sample_count"])
+        matched_pairs = int(likelihood["matched_pairs"])
+        unknown_weight = float(likelihood["unknown_weight"])
+        settlement_extreme_raw = likelihood.get("settlement_extreme_c")
+        settlement_extreme_c = (
+            None
+            if settlement_extreme_raw is None
+            else float(settlement_extreme_raw)
+        )
+        residual_rows = likelihood["residual_weights_c"]
+        scenario_rows = likelihood["scenario_weights"]
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(
+            "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
+        ) from None
+    if not isinstance(residual_rows, (list, tuple)) or not isinstance(
+        scenario_rows, (list, tuple)
+    ):
+        raise ValueError("GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID")
+
+    residual_weights: list[tuple[float, float]] = []
+    scenario_weight_sum = 0.0
+    try:
+        for row in residual_rows:
+            if not isinstance(row, Mapping):
+                raise TypeError
+            residual = float(row["residual_c"])
+            weight = float(row["weight"])
+            if not math.isfinite(residual) or not math.isfinite(weight) or weight < 0.0:
+                raise ValueError
+            residual_weights.append((residual, weight))
+        for row in scenario_rows:
+            if not isinstance(row, Mapping):
+                raise TypeError
+            bound_raw = row.get("observed_bound_c")
+            bound = None if bound_raw is None else float(bound_raw)
+            weight = float(row["weight"])
+            if (
+                (bound is not None and not math.isfinite(bound))
+                or not math.isfinite(weight)
+                or weight < 0.0
+            ):
+                raise ValueError
+            scenario_weight_sum += weight
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(
+            "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
+        ) from None
+
+    source = str(conditioning.get("source") or "").strip()
+    metric = str(conditioning.get("metric") or "").strip().lower()
+    unit = str(conditioning.get("unit") or "").strip().upper()
+    observation_time = str(conditioning.get("observation_time") or "").strip()
+    as_of = str(likelihood.get("as_of") or "").strip()
+    window_start = str(likelihood.get("window_start") or "").strip()
+    identity_hash = str(likelihood.get("identity_hash") or "").strip().lower()
+    try:
+        observed_at = datetime.fromisoformat(observation_time.replace("Z", "+00:00"))
+        as_of_at = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        window_start_at = datetime.fromisoformat(
+            window_start.replace("Z", "+00:00")
+        )
+    except ValueError:
+        raise ValueError(
+            "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
+        ) from None
+    if (
+        conditioning.get("active") is not True
+        or bool(conditioning.get("support_truncation"))
+        or bool(likelihood.get("support_truncation"))
+        or source != FAST_OBS_SOURCE_ID
+        or str(likelihood.get("fast_channel") or "").strip()
+        != FAST_OBS_SOURCE_ID
+        or str(likelihood.get("settlement_channel") or "").strip()
+        != "wu_icao_history"
+        or str(likelihood.get("semantics_revision") or "").strip()
+        != FAST_RESIDUAL_LIKELIHOOD_REVISION
+        or metric not in {"high", "low"}
+        or unit not in {"C", "F"}
+        or str(likelihood.get("unit") or "").strip().upper() != unit
+        or observed_at.tzinfo is None
+        or as_of_at.tzinfo is None
+        or window_start_at.tzinfo is None
+        or as_of_at.astimezone(UTC) != observed_at.astimezone(UTC)
+        or window_start_at.astimezone(UTC) >= as_of_at.astimezone(UTC)
+        or not math.isfinite(observed_extreme_c)
+        or sample_count <= 0
+        or matched_pairs < FAST_RESIDUAL_MIN_PAIRS
+        or not residual_weights
+        or not math.isfinite(unknown_weight)
+        or not 0.0 < unknown_weight < 1.0
+        or (
+            settlement_extreme_c is not None
+            and not math.isfinite(settlement_extreme_c)
+        )
+        or not math.isclose(
+            sum(weight for _residual, weight in residual_weights)
+            + unknown_weight,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        or not math.isclose(
+            scenario_weight_sum,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        or len(identity_hash) != 64
+        or any(character not in "0123456789abcdef" for character in identity_hash)
+    ):
+        raise ValueError("GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID")
+
+    identity = {
+        "semantics_revision": FAST_RESIDUAL_LIKELIHOOD_REVISION,
+        "station_id": str(likelihood.get("station_id") or "").strip().upper(),
+        "settlement_channel": "wu_icao_history",
+        "fast_channel": FAST_OBS_SOURCE_ID,
+        "unit": unit,
+        "as_of": as_of,
+        "window_start": window_start,
+        "matched_pairs": matched_pairs,
+        "residual_weights_c": tuple(residual_weights),
+        "unknown_weight": unknown_weight,
+        "settlement_extreme_c": settlement_extreme_c,
+    }
+    computed_hash = hashlib.sha256(
+        json.dumps(
+            identity,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if not identity["station_id"] or computed_hash != identity_hash:
+        raise ValueError("GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID")
+    return conditioning
+
+
+def _fast_residual_day0_conditioning(
+    replacement_bundle: object,
+) -> Mapping[str, object] | None:
+    """Return a validated fast-residual conditioning block from one posterior."""
+
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    return _validated_fast_residual_day0_conditioning(
+        provenance.get("day0_provisional_observation")
+    )
+
+
+def _fast_residual_day0_fact(
+    conditioning: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Express the posterior's Celsius fast observation in settlement units."""
+
+    unit = str(conditioning.get("unit") or "").strip().upper()
+    observed_c = float(conditioning["observed_extreme_c"])
+    observed_native = (
+        observed_c if unit == "C" else observed_c * 9.0 / 5.0 + 32.0
+    )
+    return {
+        "observation_source": str(conditioning["source"]),
+        "observation_time": str(conditioning["observation_time"]),
+        "observed_extreme_native": observed_native,
+        "sample_count": int(conditioning.get("sample_count") or 0),
+        "unit": unit,
+    }
+
+
 def _assert_provisional_day0_replacement_bundle(
     replacement_bundle: object,
     payload: Mapping[str, object],
@@ -29053,6 +29256,9 @@ def _global_day0_execution_payload(
     fact_unit = str(fact.get("unit") or "").strip().upper()
     if unit not in {"C", "F"} or fact_unit != unit:
         raise ValueError("GLOBAL_DAY0_CONDITIONING_UNIT_MISMATCH")
+    fast_residual_conditioning = (
+        _validated_fast_residual_day0_conditioning(conditioning)
+    )
     if conditioning is not None:
         conditioned_metric = (
             str(conditioning.get("metric") or "").strip().lower()
@@ -29066,27 +29272,64 @@ def _global_day0_execution_payload(
             conditioning.get("observation_time"),
             reason="GLOBAL_DAY0_CONDITIONING_TIME_INVALID",
         )
-        if conditioned_at != observed_at:
-            raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH")
         try:
             conditioned_c = float(conditioning["observed_extreme_c"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_INVALID") from exc
-        observed_c = (
-            observed_native
-            if unit == "C"
-            else (observed_native - 32.0) * 5.0 / 9.0
-        )
-        # Carrier source and row count are provenance, not state variables.  A
-        # supplied posterior may bind the same station-time extreme through a
-        # different durable surface or cumulative row count.
-        if (
-            not math.isclose(
-                observed_c, conditioned_c, rel_tol=0.0, abs_tol=1e-9
+        if fast_residual_conditioning is not None:
+            from src.data.day0_fast_obs import latest_fast_station_extreme_c
+
+            latest_fast = latest_fast_station_extreme_c(
+                observation_conn,
+                city=str(getattr(family, "city", "") or ""),
+                target_date=str(getattr(family, "target_date", "") or ""),
+                metric=str(getattr(family, "metric", "") or ""),
+                decision_time=decision_time,
             )
-            or str(conditioning.get("unit") or "").strip().upper() != unit
-        ):
-            raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
+            try:
+                fast_c, fast_time, _fast_count, fast_unit = latest_fast or ()
+                fast_at = utc(
+                    fast_time,
+                    reason="GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH",
+                )
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH"
+                ) from None
+            if (
+                str(conditioning.get("unit") or "").strip().upper() != unit
+                or str(fast_unit or "").strip().upper() != unit
+                or conditioned_at != fast_at
+                or not math.isclose(
+                    conditioned_c,
+                    float(fast_c),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH"
+                )
+        else:
+            if conditioned_at != observed_at:
+                raise ValueError(
+                    "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
+                )
+            observed_c = (
+                observed_native
+                if unit == "C"
+                else (observed_native - 32.0) * 5.0 / 9.0
+            )
+            # Carrier source and row count are provenance, not state variables.
+            # A supplied posterior may bind the same station-time extreme
+            # through a different durable surface or cumulative row count.
+            if (
+                not math.isclose(
+                    observed_c, conditioned_c, rel_tol=0.0, abs_tol=1e-9
+                )
+                or str(conditioning.get("unit") or "").strip().upper() != unit
+            ):
+                raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
 
     station_id = str(fact.get("station_id") or "").strip().upper()
     observation_source = str(fact.get("observation_source") or "").strip()
@@ -29109,6 +29352,16 @@ def _global_day0_execution_payload(
         )
     ):
         raise ValueError("GLOBAL_DAY0_CONDITIONING_SOURCE_IDENTITY_MISMATCH")
+    if fast_residual_conditioning is not None:
+        likelihood = fast_residual_conditioning["fast_residual_likelihood"]
+        if (
+            not isinstance(likelihood, Mapping)
+            or str(likelihood.get("station_id") or "").strip().upper()
+            != expected_station
+        ):
+            raise ValueError(
+                "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH"
+            )
 
     rounded = int(SettlementSemantics.for_city(city).round_single(observed_native))
     metric = str(getattr(family, "metric", "") or "").strip().lower()
@@ -29128,6 +29381,10 @@ def _global_day0_execution_payload(
         "settlement_unit": unit,
         "evidence_finality": evidence_finality,
     }
+    if fast_residual_conditioning is not None:
+        binding["statistical_probability_conditioning"] = dict(
+            fast_residual_conditioning
+        )
     physical_clock: dict[str, object] | None = None
     physical_probability_boundary: dict[str, object] | None = None
     if physical_fact is not None:
@@ -29690,7 +29947,16 @@ def _replacement_global_probability_components(
         provenance.get("city_calibration_layer_applied") or city_rho > 0.0
     )
     basis = str(provenance.get("q_bootstrap_samples_basis") or "").strip()
-    if city_mix_applied:
+    fast_residual_conditioning = _fast_residual_day0_conditioning(
+        replacement_bundle
+    )
+    fast_residual_basis = basis == "day0_fast_residual_joint_simplex_v1"
+    if fast_residual_conditioning is not None:
+        if not fast_residual_basis:
+            return None
+    elif fast_residual_basis:
+        return None
+    elif city_mix_applied:
         if basis != "served_rho_mixed_simplex_v2":
             return None
     elif basis not in {
@@ -29754,10 +30020,15 @@ def _replacement_global_probability_components(
     # their common decision semantics: each row is a current coherent settlement
     # simplex evaluated at one shared alpha. Canonicalize that semantic contract
     # here while posterior identity and sample hash retain the exact producer.
+    semantic_basis = (
+        _GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS
+        if fast_residual_conditioning is not None
+        else _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
+    )
     return (
         np.ascontiguousarray(matrix, dtype=np.float64),
         np.ascontiguousarray(point_q, dtype=np.float64),
-        _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+        semantic_basis,
     )
 
 
@@ -30112,6 +30383,8 @@ def _prepare_current_global_probability_family(
     day0_base_identity = ""
     provisional_day0_observation = False
     provisional_day0_fact: Mapping[str, object] | None = None
+    fast_residual_conditioning: Mapping[str, object] | None = None
+    physical_frontier_requires_confirmation = False
     final_daily_observation = None
     source_available_at = ""
     bundle = None
@@ -30186,14 +30459,14 @@ def _prepare_current_global_probability_family(
                     decision_time=decision_time,
                     require_settlement_channel=False,
                 )
-                if entry_authority and _day0_physical_frontier_supersedes_settlement(
-                    metric=str(family.metric),
-                    physical_fact=physical_day0_fact,
-                    settlement_fact=provisional_day0_fact,
-                ):
-                    raise ValueError(
-                        "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED"
+                physical_frontier_requires_confirmation = bool(
+                    entry_authority
+                    and _day0_physical_frontier_supersedes_settlement(
+                        metric=str(family.metric),
+                        physical_fact=physical_day0_fact,
+                        settlement_fact=provisional_day0_fact,
                     )
+                )
             provisional_day0_observation = bool(
                 provisional_day0_fact is not None
                 and day0_evidence_finality(
@@ -30305,6 +30578,40 @@ def _prepare_current_global_probability_family(
             source_cycle_raw = bundle.source_cycle_time
             source_available_at = str(bundle.source_available_at or "").strip()
             day0_base_identity = posterior_identity_hash
+            fast_residual_conditioning = _fast_residual_day0_conditioning(
+                bundle
+            )
+            if fast_residual_conditioning is not None:
+                if (
+                    str(fast_residual_conditioning.get("metric") or "")
+                    .strip()
+                    .lower()
+                    != str(family.metric).strip().lower()
+                    or str(fast_residual_conditioning.get("unit") or "")
+                    .strip()
+                    .upper()
+                    != str(getattr(city, "settlement_unit", "") or "")
+                    .strip()
+                    .upper()
+                ):
+                    raise ValueError(
+                        "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
+                    )
+                provisional_day0_observation = True
+                provisional_day0_fact = _fast_residual_day0_fact(
+                    fast_residual_conditioning
+                )
+            # Family-scoped entry gate. DRAIN: the next causal seed/materialize
+            # cycle writes a posterior containing the newer same-station fast
+            # frontier. RESET: that latest valid fast-residual bundle discharges
+            # this gate; unrelated families and held-position SELLs are untouched.
+            if (
+                physical_frontier_requires_confirmation
+                and fast_residual_conditioning is None
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED"
+                )
             if provisional_day0_observation:
                 _assert_provisional_day0_replacement_bundle(
                     bundle,
@@ -30438,10 +30745,29 @@ def _prepare_current_global_probability_family(
                     raise ValueError(
                         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
                     )
-                _assert_provisional_day0_replacement_bundle(
-                    bundle,
-                    current_day0_payload,
-                )
+                if fast_residual_conditioning is not None:
+                    _assert_provisional_day0_replacement_bundle(
+                        bundle,
+                        {
+                            "settlement_source": (
+                                provisional_day0_fact or {}
+                            ).get("observation_source"),
+                            "observation_time": (
+                                provisional_day0_fact or {}
+                            ).get("observation_time"),
+                            "observed_extreme_native": (
+                                provisional_day0_fact or {}
+                            ).get("observed_extreme_native"),
+                            "settlement_unit": getattr(
+                                city, "settlement_unit", "C"
+                            ),
+                        },
+                    )
+                else:
+                    _assert_provisional_day0_replacement_bundle(
+                        bundle,
+                        current_day0_payload,
+                    )
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
@@ -30502,24 +30828,48 @@ def _prepare_current_global_probability_family(
                 }
             )
         else:
-            components = _day0_remaining_global_probability_components(
-                event,
-                forecast_conn=forecast_conn,
-                calibration_conn=day0_observation_conn,
-                family=family,
-                payload=payload,
-                decision_time=decision_time,
-                snapshot=day0_snapshot,
-            )
-            probability_authority = "day0_remaining_day_global_probability_v1"
-            payload.update(
-                {
-                    "probability_authority": probability_authority,
-                    "q_source": "day0_remaining_day",
-                    "_edli_q_source": "day0_remaining_day",
-                    "_edli_day0_q_mode": "remaining_day",
-                }
-            )
+            if fast_residual_conditioning is not None:
+                components = _replacement_global_probability_components(
+                    bundle,
+                    candidates=family.candidates,
+                    bindings=bindings,
+                )
+                if components is None:
+                    raise ValueError(
+                        "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
+                    )
+                probability_authority = (
+                    "day0_conditioned_replacement_global_probability_v1"
+                )
+                payload.update(
+                    {
+                        "probability_authority": probability_authority,
+                        "q_source": "day0_conditioned_replacement",
+                        "_edli_q_source": "day0_conditioned_replacement",
+                        "_edli_day0_q_mode": "fast_residual_conditioned_replacement",
+                    }
+                )
+            else:
+                components = _day0_remaining_global_probability_components(
+                    event,
+                    forecast_conn=forecast_conn,
+                    calibration_conn=day0_observation_conn,
+                    family=family,
+                    payload=payload,
+                    decision_time=decision_time,
+                    snapshot=day0_snapshot,
+                )
+                probability_authority = (
+                    "day0_remaining_day_global_probability_v1"
+                )
+                payload.update(
+                    {
+                        "probability_authority": probability_authority,
+                        "q_source": "day0_remaining_day",
+                        "_edli_q_source": "day0_remaining_day",
+                        "_edli_day0_q_mode": "remaining_day",
+                    }
+                )
     elif current_day0_payload is not None:
         components = _day0_absorbing_exact_probability_components(
             omega=omega,

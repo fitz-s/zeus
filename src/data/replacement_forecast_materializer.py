@@ -3417,6 +3417,197 @@ def _mix_q_samples_by_rho(
     return out
 
 
+def _transport_probability_row_to_observed_extreme(
+    row: Mapping[str, float],
+    *,
+    bins: Sequence[object],
+    metric: str,
+    observed_extreme_c: float | None,
+    half_step: float,
+    rounding_rule: str,
+) -> dict[str, float]:
+    """Apply the absorbing max/min map to one already-coherent bin simplex."""
+
+    values = {str(key): float(value) for key, value in row.items()}
+    if observed_extreme_c is None:
+        return values
+    observed = float(observed_extreme_c)
+    if not math.isfinite(observed):
+        raise ValueError("observed extreme must be finite")
+    from src.contracts.settlement_semantics import settlement_preimage_offsets
+
+    low_offset, high_offset = settlement_preimage_offsets(
+        rounding_rule,
+        half_step=half_step,
+    )
+    geometry: list[tuple[str, float | None, float | None]] = []
+    for bin_ in bins:
+        bin_id = str(bin_.bin_id)
+        low = None if bin_.lower_c is None else float(bin_.lower_c) + low_offset
+        high = None if bin_.upper_c is None else float(bin_.upper_c) + high_offset
+        geometry.append((bin_id, low, high))
+    absorbing = [
+        bin_id
+        for bin_id, low, high in geometry
+        if (low is None or observed >= low) and (high is None or observed < high)
+    ]
+    if len(absorbing) != 1:
+        raise ValueError(
+            f"observed extreme {observed} maps to {len(absorbing)} settlement bins"
+        )
+    destination = absorbing[0]
+    out = dict(values)
+    moved = 0.0
+    normalized_metric = str(metric or "").lower()
+    for bin_id, low, high in geometry:
+        impossible = (
+            normalized_metric == "high"
+            and high is not None
+            and high <= observed
+        ) or (
+            normalized_metric == "low"
+            and low is not None
+            and low >= observed
+        )
+        if impossible:
+            moved += out.get(bin_id, 0.0)
+            out[bin_id] = 0.0
+    if normalized_metric not in {"high", "low"}:
+        raise ValueError(f"metric must be high or low, got {metric!r}")
+    out[destination] = out.get(destination, 0.0) + moved
+    total = sum(out.values())
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("absorbing probability transport left the simplex")
+    return out
+
+
+def _apply_fast_residual_likelihood_to_probability_carrier(
+    *,
+    q: Mapping[str, float],
+    q_samples_by_bin: Mapping[str, Sequence[float]],
+    bins: Sequence[object],
+    metric: str,
+    observed_extreme_c: float,
+    half_step: float,
+    rounding_rule: str,
+    likelihood: object,
+) -> tuple[
+    dict[str, float],
+    dict[str, float],
+    dict[str, float],
+    dict[str, list[float]],
+    dict[str, object],
+]:
+    """Jointly mix fast-measurement residuals into point q and bootstrap draws."""
+
+    residual_weights = tuple(
+        (float(residual), float(weight))
+        for residual, weight in getattr(likelihood, "residual_weights_c")
+    )
+    unknown_weight = float(getattr(likelihood, "unknown_weight"))
+    settlement_extreme = getattr(likelihood, "settlement_extreme_c")
+    settlement_bound = (
+        None if settlement_extreme is None else float(settlement_extreme)
+    )
+    scenario_weights: dict[float | None, float] = {}
+    for residual, weight in residual_weights:
+        candidate = float(observed_extreme_c) + residual
+        if settlement_bound is not None:
+            candidate = (
+                min(settlement_bound, candidate)
+                if metric == "low"
+                else max(settlement_bound, candidate)
+            )
+        scenario_weights[candidate] = scenario_weights.get(candidate, 0.0) + weight
+    scenario_weights[settlement_bound] = (
+        scenario_weights.get(settlement_bound, 0.0) + unknown_weight
+    )
+    total_weight = sum(scenario_weights.values())
+    if not math.isclose(total_weight, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("fast residual scenario weights must sum to one")
+
+    transformed_by_scenario = {
+        bound: _transport_probability_row_to_observed_extreme(
+            q,
+            bins=bins,
+            metric=metric,
+            observed_extreme_c=bound,
+            half_step=half_step,
+            rounding_rule=rounding_rule,
+        )
+        for bound in scenario_weights
+    }
+    q_out = {
+        str(bin_.bin_id): sum(
+            weight * transformed_by_scenario[bound][str(bin_.bin_id)]
+            for bound, weight in scenario_weights.items()
+        )
+        for bin_ in bins
+    }
+    if not math.isclose(sum(q_out.values()), 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("fast residual point mixture left the simplex")
+
+    bin_ids = [str(bin_.bin_id) for bin_ in bins]
+    draw_count = {len(q_samples_by_bin[bin_id]) for bin_id in bin_ids}
+    if len(draw_count) != 1 or not draw_count or next(iter(draw_count)) < 2:
+        raise ValueError("fast residual likelihood requires coherent bootstrap draws")
+    n_draws = next(iter(draw_count))
+    import numpy as np
+
+    bounds = list(scenario_weights)
+    probabilities = np.array(
+        [scenario_weights[bound] for bound in bounds],
+        dtype=float,
+    )
+    seed = int(str(getattr(likelihood, "identity_hash"))[:16], 16) ^ _QLCB_SEED
+    rng = np.random.default_rng(seed)
+    selected = rng.choice(len(bounds), size=n_draws, p=probabilities)
+    sample_rows: list[dict[str, float]] = []
+    for draw_index in range(n_draws):
+        base_row = {
+            bin_id: float(q_samples_by_bin[bin_id][draw_index])
+            for bin_id in bin_ids
+        }
+        sample_rows.append(
+            _transport_probability_row_to_observed_extreme(
+                base_row,
+                bins=bins,
+                metric=metric,
+                observed_extreme_c=bounds[int(selected[draw_index])],
+                half_step=half_step,
+                rounding_rule=rounding_rule,
+            )
+        )
+    samples_out = {
+        bin_id: [row[bin_id] for row in sample_rows] for bin_id in bin_ids
+    }
+    q_lcb = {}
+    q_ucb = {}
+    for bin_id in bin_ids:
+        lower = float(np.percentile(samples_out[bin_id], 5.0))
+        upper = float(np.percentile(samples_out[bin_id], 95.0))
+        q_lcb[bin_id] = min(max(lower, 0.0), q_out[bin_id])
+        q_ucb[bin_id] = max(upper, q_out[bin_id])
+    payload = {
+        **dict(getattr(likelihood, "as_payload")()),
+        "observed_extreme_c": float(observed_extreme_c),
+        "scenario_weights": [
+            {"observed_bound_c": bound, "weight": weight}
+            for bound, weight in sorted(
+                scenario_weights.items(),
+                key=lambda item: (
+                    item[0] is None,
+                    0.0 if item[0] is None else float(item[0]),
+                ),
+            )
+        ],
+        "support_truncation": False,
+        "point_update": "residual_weighted_absorbing_transport",
+        "bound_update": "joint_residual_bootstrap_transport",
+    }
+    return q_out, q_lcb, q_ucb, samples_out, payload
+
+
 def _day0_conditioned_bin_probability(
     *,
     metric: str,
@@ -3811,6 +4002,8 @@ def _compute_posterior_payload(
     _day0_center_delta_c: float = 0.0
     _day0_center_vector_id: str | None = None
     _day0_center_hours_remaining: float | None = None
+    _fast_residual_likelihood: object | None = None
+    _fast_residual_likelihood_payload: dict[str, object] | None = None
     if (
         bayes_precision_fusion_override is not None
         and bayes_precision_fusion_override.predictive_sigma_c is not None
@@ -3827,6 +4020,35 @@ def _compute_posterior_payload(
                 if _target_local_day_has_started(request)
                 else None
             )
+            _provisional_extreme_c = (
+                _day0_observed_extreme_c(request)
+                if _target_local_day_has_started(request)
+                and _day0_obs_extreme_c is None
+                else None
+            )
+            if (
+                _provisional_extreme_c is not None
+                and request.day0_observed_extreme_observation_time is not None
+            ):
+                from src.data.day0_fast_obs import (
+                    build_fast_station_residual_likelihood,
+                )
+
+                _fast_residual_likelihood = (
+                    build_fast_station_residual_likelihood(
+                        conn,
+                        city=request.city,
+                        target_date=_date_text(request.target_date),
+                        metric=metric,
+                        observed_source=str(
+                            request.day0_observed_extreme_source or ""
+                        ),
+                        observation_time=(
+                            request.day0_observed_extreme_observation_time
+                        ),
+                        decision_time=request.computed_at,
+                    )
+                )
             # Wave-2 item 6 (2026-06-12): the settlement σ-floor is applied by PER-CELL DATA
             # AVAILABILITY, not a global flag (edli_settlement_sigma_floor_enabled / _required
             # merged + deleted). Look up the SAME floor the EMOS path uses (city|season|metric)
@@ -3891,8 +4113,13 @@ def _compute_posterior_payload(
             # and the bootstrap bounds integrate ONE corrected center (one probability world).
             # Deliberately NOT re-maxed with obs: the day0 support transform absorbs mass
             # below obs itself — mu below obs is exactly the intended post-peak collapse.
-            # Non-Day0: the delta machinery never runs (byte-identical).
-            if _day0_obs_extreme_c is not None:
+            # A licensed fast residual carrier is also Day0 evidence, so it
+            # consumes the same remaining-window center while keeping support
+            # probabilistic. Non-Day0 stays byte-identical.
+            if (
+                _day0_obs_extreme_c is not None
+                or _fast_residual_likelihood is not None
+            ):
                 (
                     _day0_center_delta_c,
                     _day0_center_vector_id,
@@ -4176,6 +4403,37 @@ def _compute_posterior_payload(
                     )
                 except Exception:
                     pass
+            if (
+                _fast_residual_likelihood is not None
+                and _provisional_extreme_c is not None
+                and q_bootstrap_samples_by_bin is not None
+                and q_lcb_map is not None
+                and q_ucb_map is not None
+            ):
+                (
+                    q,
+                    q_lcb_map,
+                    q_ucb_map,
+                    q_bootstrap_samples_by_bin,
+                    _fast_residual_likelihood_payload,
+                ) = _apply_fast_residual_likelihood_to_probability_carrier(
+                    q=q,
+                    q_samples_by_bin=q_bootstrap_samples_by_bin,
+                    bins=request.bins,
+                    metric=metric,
+                    observed_extreme_c=float(_provisional_extreme_c),
+                    half_step=_half_step,
+                    rounding_rule=_rounding_rule,
+                    likelihood=_fast_residual_likelihood,
+                )
+                q_shape = "fused_day0_fast_residual_likelihood"
+                if _finite_evidence_member_count is None:
+                    _far_tail_honesty_count = sum(
+                        1
+                        for _bid, _lcb in q_lcb_map.items()
+                        if float(q.get(_bid, 1.0)) < FAR_TAIL_Q_POINT_THRESH
+                        and _lcb <= FAR_TAIL_LCB_FLOOR + 1e-12
+                    )
             # FIX 1 — FULL vs PARTIAL. The fused Normal is the constructed shape either way (so the
             # live gate admits both); PARTIAL records a degraded fusion (the K3 decorrelated-provider
             # set was INCOMPLETE — reuses the override's verdict, not a parallel check). Wave-2 item 6
@@ -4289,6 +4547,10 @@ def _compute_posterior_payload(
             ),
             "support_truncation": False,
         }
+        if _fast_residual_likelihood_payload is not None:
+            posterior_config["day0_fast_residual_likelihood"] = (
+                _fast_residual_likelihood_payload
+            )
     if bayes_precision_fusion_override is not None:
         # F6: the FUSED product gets its OWN EMOS cell identity (product + resolution_mix_hash +
         # model_set_hash + lead_bucket) so it never reuses the single-anchor EMOS cell. The fused
@@ -4499,7 +4761,12 @@ def _compute_posterior_payload(
             q_bootstrap_samples_by_bin if q_lcb_basis == _QLCB_BASIS else None
         ),
         "q_bootstrap_samples_basis": (
-            "served_rho_mixed_simplex_v2"
+            "day0_fast_residual_joint_simplex_v1"
+            if (
+                q_lcb_basis == _QLCB_BASIS
+                and _fast_residual_likelihood_payload is not None
+            )
+            else "served_rho_mixed_simplex_v2"
             if q_lcb_basis == _QLCB_BASIS and city_calibration_layer_applied
             else (
                 "global_simplex_current_finite_moment_evidence_v3"
@@ -4572,6 +4839,20 @@ def _compute_posterior_payload(
             "unit": request.day0_observed_extreme_unit,
             "support_truncation": False,
         }
+        if _fast_residual_likelihood_payload is not None:
+            provenance_payload["day0_provisional_observation"][
+                "fast_residual_likelihood"
+            ] = _fast_residual_likelihood_payload
+            if _day0_center_delta_c > 0.0:
+                provenance_payload["day0_remaining_center_delta_c"] = float(
+                    _day0_center_delta_c
+                )
+                provenance_payload["day0_remaining_vector_id"] = (
+                    _day0_center_vector_id
+                )
+                provenance_payload["day0_remaining_hours"] = (
+                    _day0_center_hours_remaining
+                )
     # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
     # placed this only on the anchor provenance dict — but the anchor INSERT is OR-IGNOREd on a
     # same-cycle re-materialization (the existing anchor row wins), so the note never surfaced.

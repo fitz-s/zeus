@@ -186,6 +186,58 @@ def _day0_observed_extreme_seed_payload(
             decision_time=computed_at,
             require_settlement_channel=True,
         )
+        settlement_observed_c: float | None = None
+        if fact is not None:
+            try:
+                settlement_observed_c = _temperature_native_to_c(
+                    float(fact["observed_extreme_native"]),
+                    unit=unit,
+                )
+            except (KeyError, TypeError, ValueError):
+                return None
+        from src.data.day0_fast_obs import (
+            FAST_OBS_SOURCE_ID,
+            build_fast_station_residual_likelihood,
+            latest_fast_station_extreme_c,
+        )
+
+        fast = latest_fast_station_extreme_c(
+            world_conn,
+            city=city,
+            target_date=target_date,
+            metric=metric_norm,
+            decision_time=computed_at,
+        )
+        if fast is not None:
+            fast_c, fast_time, fast_count, fast_unit = fast
+            likelihood = build_fast_station_residual_likelihood(
+                world_conn,
+                city=city,
+                target_date=target_date,
+                metric=metric_norm,
+                observed_source=FAST_OBS_SOURCE_ID,
+                observation_time=fast_time,
+                decision_time=computed_at,
+            )
+            supersedes = (
+                settlement_observed_c is None
+                or (
+                    metric_norm == "high"
+                    and fast_c > settlement_observed_c + 1e-9
+                )
+                or (
+                    metric_norm == "low"
+                    and fast_c < settlement_observed_c - 1e-9
+                )
+            )
+            if likelihood is not None and supersedes:
+                return {
+                    "day0_observed_extreme_c": float(fast_c),
+                    "day0_observed_extreme_source": FAST_OBS_SOURCE_ID,
+                    "day0_observed_extreme_observation_time": fast_time,
+                    "day0_observed_extreme_sample_count": fast_count,
+                    "day0_observed_extreme_unit": fast_unit,
+                }
         if fact is None:
             row = world_conn.execute(
                 """
@@ -204,10 +256,7 @@ def _day0_observed_extreme_seed_payload(
                 )
             }
         try:
-            observed_c = _temperature_native_to_c(
-                float(fact["observed_extreme_native"]),
-                unit=unit,
-            )
+            observed_c = float(settlement_observed_c)
             sample_count = int(fact.get("sample_count") or 0)
             observation_time = str(fact["observation_time"])
         except (KeyError, TypeError, ValueError):

@@ -65,7 +65,8 @@ test_trust_policy:
     tests/test_replacement_forecast_materializer_cycle_policy.py: {created: "2026-06-10", last_used: "2026-07-15", note: "Shared replacement cycle and probability-semantics policy; the current revision is part of tradeable-grade coverage and materialization identity."}
     tests/engine/test_position_belief_authority.py: {created: "2026-06-12", last_used: "2026-07-20", note: "Held-position belief reads the same replacement authority as entry, excludes future-computed rows at causal replay cuts, and refuses old current-evidence probability semantics."}
     tests/execution/test_venue_sync_contract.py: {created: "2026-06-11", last_used: "2026-07-15", note: "Three-phase command-recovery DB/venue synchronization antibodies, including default canonical WORLD+TRADE blocking flocks and live-tick opt-in nonblocking flock plus zero SQLite busy timeout."}
-    tests/test_finite_evidence_probability_symmetry.py: {created: "2026-07-11", last_used: "2026-07-11", note: "INV-06/INV-41 current-evidence probability antibody: source-clock YES/NO share one coherent simplex carrier widened by exact settlement-preimage member-hit Clopper-Pearson and distribution-free current-moment tail ambiguity limits; historical far-tail floors are unreachable; Day0 absorbing truth dominates."}
+    tests/test_finite_evidence_probability_symmetry.py: {created: "2026-07-11", last_used: "2026-07-27", note: "INV-06/INV-41 current-evidence probability antibody: source-clock YES/NO share one coherent simplex carrier widened by exact settlement-preimage member-hit Clopper-Pearson and distribution-free current-moment tail ambiguity limits; Day0 hard facts dominate, while same-station fast observations update point and joint bounds through a causal residual likelihood without becoming settlement certainty."}
+    tests/test_replacement_forecast_seed_discovery.py: {created: "2026-06-06", last_used: "2026-07-27", note: "Replacement seed discovery preserves causal source identity and promotes a raw same-station fast extreme only when a station-local residual likelihood exists; thin evidence remains byte-identical to settlement-channel seeding."}
     tests/test_live_buy_no_material_admission.py: {created: "2026-06-07", last_used: "2026-07-27", note: "Material-bin BUY/NO admission binds replacement source-clock parents and requires the sealed current-global native NO point/action to exactly complement the same-bin YES parent, while confidence samples remain separate."}
     tests/test_replacement_fused_q_shape.py: {created: "2026-06-09", last_used: "2026-07-23", note: "Probability authority antibody: absolute current ENS member-center disagreement cannot be recentered out while the same members remain absolute settlement-bin evidence; aligned evidence preserves the within-plus-between decomposition; YES/NO remain exact complements."}
     tests/test_replacement_seed_coverage_gate.py: {created: "2026-06-10", last_used: "2026-07-20", note: "Replacement input-HWM and seed coverage contracts, including product-cycle indexed frozen artifact selection that ignores malformed unrelated older cycles."}
@@ -190,7 +191,7 @@ test_trust_policy:
     tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-07-27", note: "EDLI reactor contracts, including urgent Day0 preemption before periodic DB/book work, lock-free global batch epochs, exact receipt coverage, winner-first finalization, and dispatcher-lock release when pre-setup checks, connection acquisition, or connection teardown fail. 2026-07-19: multi-winner in-wake auction loop antibodies (double-submit impossibility via fresh one-shot actuator per epoch; preemption / wall-clock budget stop leaving the remainder PENDING) per auction_multiwinner_plan_2026-07-19.md. 2026-07-22: one immutable causal source fact retains its pending winner claim across changing economic epochs; re-targeting supersedes obsolete cross-family targets; refreshable MAKER_TAKER_FORBIDDEN book races requeue, and a previously processed carrier revives only with explicit no-VenueSubmitAttempted proof; when a newer economic carrier proposal reuses that causal fact, the reactor claims and actuates the retained event ID rather than the uninserted proposal. A carrier expired solely by side-effect-free cross-family supersession gets a new immutable claim identity while the terminal row remains terminal. 2026-07-27: confirmed-fill wakes share bounded oldest-input fairness with price and forecast streams, coalesce exact fill events, preserve Day0 preemption, and run as targeted reactor fast paths so changed portfolio endowment cannot remain pending behind unrelated backlog."}
     tests/events/test_claim_lock_storm.py: {created: "2026-06-11", last_used: "2026-07-22", note: "World-writer claim contention, including unpaged global-winner claim and queue paths, remains bounded, visible, rollback-safe, pending on miss, and waits at most once per contention episode before same-cycle nonblocking probes; recovered claims expose the exact claimed carrier event plus its generation."}
     tests/calibration/test_scaled_normal_uniform_q_builder.py: {created: "2026-06-29", last_used: "2026-07-10", note: "Capital-gated city rho mixture math, including row-wise simplex bootstrap-draw mixing so served q, bounds, empirical edge confidence, and CVaR share one probability world."}
-    tests/engine/test_replacement_0_1_live_authority_probability.py: {created: "2026-06-07", last_used: "2026-07-10", note: "Replacement live probability authority and city-mixed bootstrap sample-basis gate."}
+    tests/engine/test_replacement_0_1_live_authority_probability.py: {created: "2026-06-07", last_used: "2026-07-27", note: "Replacement live probability authority, fast-residual Day0 conditioning, and city-mixed bootstrap sample-basis gates."}
     tests/engine/test_event_reactor_live_qkernel_gate.py: {created: "2026-06-30", last_used: "2026-07-27", note: "Live qkernel submit authority, including symmetric sealed global YES/NO execution, complete current-family witnesses, Day0 replacement and deterministic exact-payoff parent binding, current observation admission, current-book and expected/current wealth revalidation, supersession classification, and malformed-seal rejection."}
     tests/engine/test_final_submit_mode_authority.py: {created: "2026-06-10", last_used: "2026-07-22", note: "Submit-time maker/taker authority: either valid fresh rest-then-cross verdict rebuilds through downstream mode-specific walls; missing or unknown authority remains fail-closed."}
     tests/engine/test_mode_flip_and_recapture_semantics.py: {created: "2026-06-10", last_used: "2026-07-22", note: "Milan recapture safety plus symmetric fresh-mode redecision: stale taker plans may become passive maker intents only through existing fresh-book and final-intent walls."}
@@ -821,9 +822,11 @@ categories:
     - tests/test_replacement_forecast_extras_coverage_gate.py
     - tests/test_replacement_forecast_current_target_plan.py
     - tests/test_replacement_forecast_materializer_cycle_policy.py
+    - tests/test_replacement_forecast_seed_discovery.py
     - tests/test_replacement_fused_q_shape.py
     - tests/test_day0_admission.py
     - tests/test_day0_extreme_updated_materialization_bridge.py
+    - tests/test_day0_fast_obs_lane.py
     - tests/test_day0_obs_fastlane_optionbc.py
     # T0-1 conn-across-IO ordering invariant (2026-06-13): riskguard._tick_once
     # must fetch the bankroll (wallet NETWORK fetch) BEFORE opening any
@@ -3644,7 +3647,31 @@ test_metadata:
       coherent simplex carrier consumed by YES and pointwise-complement NO.
       Historical far-tail floors are absent; Day0 observations dominate.
     created: 2026-07-11
-    last_reused_or_audited: 2026-07-11
+    last_reused_or_audited: 2026-07-27
+
+  tests/test_day0_fast_obs_lane.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/authority/replacement_final_form_2026_06_09.md
+    notes: >
+      Same-station fast publication and source-clock contracts, including the
+      causal seven-day WU-minus-METAR residual likelihood and thin-evidence
+      no-op used by replacement probability materialization.
+    created: 2026-06-10
+    last_reused_or_audited: 2026-07-27
+
+  tests/test_replacement_forecast_seed_discovery.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/authority/replacement_final_form_2026_06_09.md
+    notes: >
+      Automatic replacement seeding keeps settlement truth separate from
+      same-station fast evidence and requires a causal residual likelihood
+      before a raw fast extreme may reshape probability.
+    created: 2026-06-06
+    last_reused_or_audited: 2026-07-27
 
   tests/test_bayes_precision_fusion_model_selection_gate.py:
     cohort: law_antibody
