@@ -843,6 +843,129 @@ class TestMetrics:
         assert riskguard_module._riskguard_brier_actuating_rows(bound) == [bound[0]]
         conn.close()
 
+    def test_probability_identity_binding_composites_only_filled_entry_commands(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE venue_commands ("
+            "position_id TEXT,command_id TEXT,intent_kind TEXT,q_version TEXT,"
+            "state TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE execution_fact ("
+            "command_id TEXT,order_role TEXT,filled_at TEXT,"
+            "terminal_exec_status TEXT,shares REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE provenance_envelope_events ("
+            "subject_type TEXT,subject_id TEXT,event_type TEXT,"
+            "local_sequence INTEGER,payload_json TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE position_current ("
+            "position_id TEXT PRIMARY KEY,decision_law_id TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+            [
+                ("composite", "filled-a", "ENTRY", "q-v1", "FILLED"),
+                ("composite", "filled-b", "ENTRY", "q-v2", "FILLED"),
+                ("composite", "rejected", "ENTRY", "q-v3", "REJECTED"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO execution_fact VALUES (?,?,?,?,?)",
+            [
+                ("filled-a", "entry", "2026-07-27T00:00:00Z", "filled", 4.0),
+                ("filled-a", "entry", "2026-07-27T00:00:01Z", "filled", 4.0),
+                ("filled-b", "entry", "2026-07-27T00:01:00Z", "filled", 6.0),
+            ],
+        )
+
+        def submit_payload(q_live: float) -> str:
+            return json.dumps(
+                {
+                    "payload": {
+                        "execution_capability": {
+                            "components": [
+                                {
+                                    "component": "entry_economics",
+                                    "details": {"q_live": q_live},
+                                }
+                            ]
+                        }
+                    }
+                }
+            )
+
+        conn.executemany(
+            "INSERT INTO provenance_envelope_events VALUES (?,?,?,?,?)",
+            [
+                ("command", "filled-a", "SUBMIT_REQUESTED", 1, submit_payload(0.8)),
+                ("command", "filled-b", "SUBMIT_REQUESTED", 1, submit_payload(0.6)),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES (?,?)",
+            ("composite", "predicted_bin_ev_v1"),
+        )
+
+        bound = riskguard_module._bind_brier_probability_identities(
+            conn,
+            [{"trade_id": "composite", "p_posterior": 0.99}],
+        )
+
+        assert bound[0]["probability_identity_ready"] is True
+        assert bound[0]["p_posterior"] == pytest.approx(0.68)
+        assert bound[0]["entry_q_version"].startswith("filled-entry-composite:")
+        assert (
+            bound[0]["probability_identity_source"]
+            == "filled_entry_commands.q_version+submit_q_live+fill_shares"
+        )
+        assert bound[0]["decision_law_identity_ready"] is True
+        conn.close()
+
+    def test_probability_identity_binding_rejects_filled_command_without_fact(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE venue_commands ("
+            "position_id TEXT,command_id TEXT,intent_kind TEXT,q_version TEXT,"
+            "state TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE execution_fact ("
+            "command_id TEXT,order_role TEXT,filled_at TEXT,"
+            "terminal_exec_status TEXT,shares REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE provenance_envelope_events ("
+            "subject_type TEXT,subject_id TEXT,event_type TEXT,"
+            "local_sequence INTEGER,payload_json TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE position_current ("
+            "position_id TEXT PRIMARY KEY,decision_law_id TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+            ("incomplete", "missing-fact", "ENTRY", "q-v1", "FILLED"),
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES (?,?)",
+            ("incomplete", "predicted_bin_ev_v1"),
+        )
+
+        bound = riskguard_module._bind_brier_probability_identities(
+            conn,
+            [{"trade_id": "incomplete", "p_posterior": 0.8}],
+        )
+
+        assert bound[0]["probability_identity_ready"] is False
+        assert (
+            bound[0]["probability_identity_blocked_reason"]
+            == "filled_entry_evidence_incomplete"
+        )
+        conn.close()
+
 
 def _settlement_row(
     *,
@@ -2740,9 +2863,14 @@ class TestRiskGuardOrangeLocalization:
         assert details["brier_strategy_localization"]["residual_brier_level"] == "ORANGE"
         assert details["brier_strategy_localization"]["gate_confirmation"] == {"opening_inertia": True}
 
-    def test_red_never_localizes_even_with_confirmed_durable_gate(self, monkeypatch, tmp_path):
-        """RED stays global fail-closed unconditionally — even when a durable
-        gate for the offending strategy is ALREADY active going into the tick."""
+    def test_red_localizes_when_clean_attribution_gate_confirmed_and_residual_green(
+        self, monkeypatch, tmp_path
+    ):
+        """Severe probability failure stops its entry law, not every holding.
+
+        RED remains global unless exact strategy attribution, confirmed durable
+        gates, and a GREEN residual portfolio are all proven in the same tick.
+        """
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
         rows = [
@@ -2770,20 +2898,6 @@ class TestRiskGuardOrangeLocalization:
 
         _init_empty_canonical_portfolio_schema(zeus_db)
         _persist_decision_law_identities(zeus_db, rows)
-        conn = get_connection(zeus_db)
-        _insert_risk_action(
-            conn,
-            action_id="riskguard:gate:opening_inertia",
-            strategy_key="opening_inertia",
-            action_type="gate",
-            value="true",
-            issued_at="2026-07-03T00:00:00+00:00",
-            effective_until=None,
-            precedence=50,
-            status="active",
-        )
-        conn.commit()
-        conn.close()
         _patch_riskguard_bankroll(monkeypatch)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
@@ -2796,14 +2910,103 @@ class TestRiskGuardOrangeLocalization:
         ).fetchone()
         details = json.loads(risk_row["details_json"])
 
-        assert level == RiskLevel.RED
-        assert risk_row["level"] == RiskLevel.RED.value
+        gate_row = get_connection(zeus_db).execute(
+            """
+            SELECT strategy_key, status
+            FROM risk_actions
+            WHERE action_id = 'riskguard:gate:opening_inertia'
+            """
+        ).fetchone()
+
+        assert level == RiskLevel.GREEN
+        assert risk_row["level"] == RiskLevel.GREEN.value
         assert details["portfolio_brier_level"] == "RED"
-        assert details["brier_level"] == "RED"
+        assert details["brier_level"] == "GREEN"
         assert details["brier_all_strategies_level"] == "RED"
-        assert details["brier_active_portfolio_level"] == "RED"
+        assert details["brier_active_portfolio_level"] == "GREEN"
         assert details["localized_orange_scope"] is False
-        assert details["brier_strategy_localization"]["status"] == "not_localized"
+        assert details["localized_red_scope"] is True
+        assert details["brier_strategy_localization"]["status"] == "localized_red_scope"
+        assert details["brier_strategy_localization"]["gate_confirmation"] == {
+            "opening_inertia": True
+        }
+        assert dict(gate_row) == {
+            "strategy_key": "opening_inertia",
+            "status": "active",
+        }
+
+    def test_red_stays_global_when_durable_gate_write_is_skipped(
+        self, monkeypatch, tmp_path
+    ):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        rows = [
+            _settlement_row(
+                trade_id=f"opening-{i}",
+                strategy="opening_inertia",
+                p_posterior=0.95,
+                outcome=0,
+            )
+            for i in range(45)
+        ] + [
+            _settlement_row(
+                trade_id=f"center-{i}",
+                strategy="center_buy",
+                p_posterior=0.80,
+                outcome=1,
+            )
+            for i in range(5)
+        ]
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(bankroll=211.37),
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_tracker",
+            lambda: strategy_tracker_module.StrategyTracker(),
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda *_, **__: rows,
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "_sync_riskguard_strategy_gate_actions",
+            lambda *a, **k: {
+                "status": "skipped_dependency_lock",
+                "emitted_count": 0,
+                "expired_count": 0,
+            },
+        )
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+
+        assert level == RiskLevel.YELLOW
+        assert risk_row["level"] == RiskLevel.YELLOW.value
+        assert details["portfolio_brier_level"] == "RED"
+        assert details["brier_level"] == "YELLOW"
+        assert details["localized_red_scope"] is False
+        assert (
+            details["brier_strategy_localization"]["status"]
+            == "durable_strategy_gate_unconfirmed_global_entry_block"
+        )
 
     def test_orange_stays_global_when_read_after_write_confirmation_finds_no_gate_row(
         self, monkeypatch, tmp_path,
@@ -3352,10 +3555,31 @@ class TestStrategyBrierMinSample:
         assert law_gate is None
 
     @pytest.mark.parametrize(
-        ("sample_size", "expected_level", "expected_thin", "expected_reason"),
+        (
+            "sample_size",
+            "expected_portfolio_level",
+            "expected_active_level",
+            "expected_thin",
+            "expected_status",
+            "expected_reason",
+        ),
         [
-            (1, RiskLevel.GREEN, True, "portfolio_brier_thin_sample_no_verdict"),
-            (10, RiskLevel.RED, False, "portfolio_brier_requires_global_level"),
+            (
+                1,
+                RiskLevel.GREEN,
+                RiskLevel.GREEN,
+                True,
+                "not_applicable",
+                "portfolio_brier_thin_sample_no_verdict",
+            ),
+            (
+                10,
+                RiskLevel.RED,
+                RiskLevel.GREEN,
+                False,
+                "localized_red_scope",
+                None,
+            ),
         ],
     )
     def test_portfolio_brier_requires_minimum_evidence(
@@ -3363,8 +3587,10 @@ class TestStrategyBrierMinSample:
         monkeypatch,
         tmp_path,
         sample_size,
-        expected_level,
+        expected_portfolio_level,
+        expected_active_level,
         expected_thin,
+        expected_status,
         expected_reason,
     ):
         zeus_db = tmp_path / "zeus.db"
@@ -3412,16 +3638,26 @@ class TestStrategyBrierMinSample:
 
         assert row["brier"] > 0.8
         assert details["portfolio_brier_raw_level"] == "RED"
-        assert details["portfolio_brier_level"] == expected_level.value
-        assert details["brier_level"] == expected_level.value
+        assert (
+            details["portfolio_brier_level"]
+            == expected_portfolio_level.value
+        )
+        assert details["brier_level"] == expected_active_level.value
         assert details["portfolio_brier_thin_sample_no_verdict"] is expected_thin
         assert (
-            details["brier_strategy_localization"]["reason"]
-            == expected_reason
+            details["brier_strategy_localization"]["status"]
+            == expected_status
         )
-        assert details["recommended_strategy_gates"] == []
-        assert level == expected_level
-        assert row["level"] == expected_level.value
+        if expected_reason is not None:
+            assert (
+                details["brier_strategy_localization"]["reason"]
+                == expected_reason
+            )
+        assert details["recommended_strategy_gates"] == (
+            [] if expected_thin else ["forecast_qkernel_entry"]
+        )
+        assert level == expected_active_level
+        assert row["level"] == expected_active_level.value
 
 
 class TestRiskGuardExecutionQualityLocalization:

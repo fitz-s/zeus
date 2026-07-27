@@ -22,6 +22,7 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 #   surfaces a degraded GREEN as clean — kills the status-vs-gate split-brain.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -1516,12 +1517,17 @@ def _bind_brier_probability_identities(
     """Bind settled forecasts to one unambiguous entry-time q identity.
 
     ``p_posterior`` is only a number. A Brier verdict becomes evidence about a
-    probability system only when the actual ENTRY command carries exactly one
-    non-empty, non-conflicting ``q_version``. Actuation additionally requires
-    the persisted ``position_current.decision_law_id``; q content identity must
-    not be misread as proof of which decision law produced an old position.
-    Missing and ambiguous identities remain visible on the settlement rows but
-    are excluded from the current-law risk verdict.
+    probability system only when the actual filled ENTRY commands carry
+    reproducible q identities. Multiple fills into one position are one
+    settlement observation, not independent samples: their submit-time
+    ``q_live`` values are share-weighted into the probability of the actual
+    acquired payoff. Rejected/unfilled commands contribute neither probability
+    nor weight.
+
+    Actuation additionally requires the persisted
+    ``position_current.decision_law_id``; q content identity must not be misread
+    as proof of which decision law produced an old position. Missing and
+    ambiguous identities remain visible and are excluded.
     """
 
     output = [dict(row) for row in rows]
@@ -1533,6 +1539,41 @@ def _bind_brier_probability_identities(
             and str(row.get("entry_q_version") or "").strip()
         )
         and str(row.get("trade_id") or "").strip()
+    }
+    composites = _filled_entry_probability_composites(conn, unresolved)
+    composite_blocked: set[str] = set()
+    for row in output:
+        trade_id = str(row.get("trade_id") or "").strip()
+        composite = composites.get(trade_id)
+        if composite is None:
+            continue
+        blocked_reason = str(composite.get("blocked_reason") or "").strip()
+        if blocked_reason:
+            row["probability_identity_ready"] = False
+            row["entry_q_version"] = ""
+            row["probability_identity_source"] = (
+                "filled_entry_commands.q_version+submit_q_live+fill_shares"
+            )
+            row["probability_identity_blocked_reason"] = blocked_reason
+            composite_blocked.add(trade_id)
+            continue
+        row["p_posterior"] = composite["p_posterior"]
+        row["probability_identity_ready"] = True
+        row["entry_q_version"] = composite["entry_q_version"]
+        row["probability_identity_source"] = (
+            "filled_entry_commands.q_version+submit_q_live+fill_shares"
+        )
+        row["probability_identity_blocked_reason"] = ""
+
+    unresolved = {
+        str(row.get("trade_id") or "")
+        for row in output
+        if not (
+            row.get("probability_identity_ready") is True
+            and str(row.get("entry_q_version") or "").strip()
+        )
+        and str(row.get("trade_id") or "").strip()
+        and str(row.get("trade_id") or "").strip() not in composite_blocked
     }
     bindings: dict[str, list[str | None]] = {trade_id: [] for trade_id in unresolved}
     schema_ready = False
@@ -1567,12 +1608,14 @@ def _bind_brier_probability_identities(
                     bindings[position_id].append(q_version)
 
     for row in output:
+        trade_id = str(row.get("trade_id") or "").strip()
+        if trade_id in composite_blocked:
+            continue
         if (
             row.get("probability_identity_ready") is True
             and str(row.get("entry_q_version") or "").strip()
         ):
             continue
-        trade_id = str(row.get("trade_id") or "").strip()
         versions = bindings.get(trade_id, [])
         nonempty = {version for version in versions if version is not None}
         missing_count = sum(version is None for version in versions)
@@ -1650,6 +1693,212 @@ def _bind_brier_probability_identities(
             "" if row["decision_law_identity_ready"] else reason
         )
     return output
+
+
+def _filled_entry_probability_composites(
+    conn: sqlite3.Connection,
+    position_ids: set[str],
+) -> dict[str, dict[str, object]]:
+    """Rebuild one payoff probability from every economically filled entry.
+
+    The submit provenance is the immutable decision-time q witness; execution
+    facts provide the shares that actually became exposure. A position is
+    returned only when every filled entry has a finite q/version/weight. An
+    explicit FILLED command with incomplete execution/provenance evidence is
+    returned as blocked and may not be laundered through the q-version fallback.
+    """
+
+    required_columns = {
+        "venue_commands": {
+            "position_id",
+            "command_id",
+            "intent_kind",
+            "q_version",
+            "state",
+        },
+        "execution_fact": {
+            "command_id",
+            "order_role",
+            "filled_at",
+            "terminal_exec_status",
+            "shares",
+        },
+        "provenance_envelope_events": {
+            "subject_type",
+            "subject_id",
+            "event_type",
+            "local_sequence",
+            "payload_json",
+        },
+    }
+    if not position_ids or any(
+        not _table_exists(conn, table) for table in required_columns
+    ):
+        return {}
+    try:
+        for table, required in required_columns.items():
+            columns = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if not required.issubset(columns):
+                return {}
+    except sqlite3.Error:
+        return {}
+
+    parts: dict[str, list[dict[str, object]]] = {
+        position_id: [] for position_id in position_ids
+    }
+    invalid: set[str] = set()
+    ids = sorted(position_ids)
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        try:
+            command_rows = conn.execute(
+                """
+                SELECT vc.position_id,vc.command_id,vc.q_version,vc.state,
+                       ef.filled_at,ef.terminal_exec_status,ef.shares,
+                       ef.min_shares,ef.max_shares,
+                       (
+                         SELECT pee.payload_json
+                         FROM provenance_envelope_events AS pee
+                         WHERE pee.subject_type='command'
+                           AND pee.subject_id=vc.command_id
+                           AND pee.event_type='SUBMIT_REQUESTED'
+                         ORDER BY pee.local_sequence DESC
+                         LIMIT 1
+                       ) AS submit_payload_json
+                FROM venue_commands AS vc
+                LEFT JOIN (
+                    SELECT command_id,
+                           MAX(
+                               CASE
+                                   WHEN filled_at IS NOT NULL
+                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                   THEN filled_at
+                               END
+                           ) AS filled_at,
+                           CASE
+                               WHEN SUM(
+                                   CASE
+                                       WHEN filled_at IS NOT NULL
+                                        AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                       THEN 1 ELSE 0
+                                   END
+                               ) > 0
+                               THEN 'filled' ELSE ''
+                           END AS terminal_exec_status,
+                           MAX(
+                               CASE
+                                   WHEN filled_at IS NOT NULL
+                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                   THEN shares
+                               END
+                           ) AS shares,
+                           MIN(
+                               CASE
+                                   WHEN filled_at IS NOT NULL
+                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                   THEN shares
+                               END
+                           ) AS min_shares,
+                           MAX(
+                               CASE
+                                   WHEN filled_at IS NOT NULL
+                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                   THEN shares
+                               END
+                           ) AS max_shares
+                    FROM execution_fact
+                    WHERE order_role='entry'
+                    GROUP BY command_id
+                ) AS ef ON ef.command_id=vc.command_id
+                WHERE vc.intent_kind='ENTRY'
+                  AND vc.position_id IN ("""
+                + placeholders
+                + ")",
+                tuple(chunk),
+            ).fetchall()
+        except sqlite3.Error:
+            return {}
+
+        for command_row in command_rows:
+            position_id = str(command_row[0] or "").strip()
+            command_id = str(command_row[1] or "").strip()
+            q_version = str(command_row[2] or "").strip()
+            venue_filled = str(command_row[3] or "").strip().lower() == "filled"
+            fact_filled = (
+                command_row[4] is not None
+                and str(command_row[5] or "").strip().lower() == "filled"
+            )
+            if not venue_filled and not fact_filled:
+                continue
+            try:
+                shares = float(command_row[6])
+                min_shares = float(command_row[7])
+                max_shares = float(command_row[8])
+                payload = json.loads(command_row[9])
+                components = (
+                    payload.get("payload", {})
+                    .get("execution_capability", {})
+                    .get("components", [])
+                )
+                economics = next(
+                    component
+                    for component in components
+                    if component.get("component") == "entry_economics"
+                )
+                q_live = float(economics["details"]["q_live"])
+            except (KeyError, TypeError, ValueError, StopIteration, json.JSONDecodeError):
+                invalid.add(position_id)
+                continue
+            if (
+                not position_id
+                or not command_id
+                or not q_version
+                or not shares > 0.0
+                or abs(max_shares - min_shares)
+                > max(1e-9, abs(max_shares) * 1e-9)
+                or not 0.0 <= q_live <= 1.0
+            ):
+                invalid.add(position_id)
+                continue
+            parts[position_id].append(
+                {
+                    "command_id": command_id,
+                    "q_version": q_version,
+                    "q_live": q_live,
+                    "shares": shares,
+                }
+            )
+
+    composites: dict[str, dict[str, object]] = {}
+    for position_id, entries in parts.items():
+        if position_id in invalid:
+            composites[position_id] = {
+                "blocked_reason": "filled_entry_evidence_incomplete",
+            }
+            continue
+        if not entries:
+            continue
+        total_shares = sum(float(entry["shares"]) for entry in entries)
+        p_posterior = sum(
+            float(entry["shares"]) * float(entry["q_live"]) for entry in entries
+        ) / total_shares
+        identity_payload = sorted(entries, key=lambda entry: str(entry["command_id"]))
+        identity = hashlib.sha256(
+            json.dumps(
+                identity_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        composites[position_id] = {
+            "p_posterior": p_posterior,
+            "entry_q_version": f"filled-entry-composite:{identity}",
+        }
+    return composites
 
 
 def _riskguard_brier_actuating_rows(
@@ -2561,9 +2810,12 @@ def _tick_once() -> RiskLevel:
         d_accuracy = directional_accuracy(p_forecasts, outcomes) if p_forecasts else 0.5
 
         # Evaluate levels. Portfolio Brier is the headline quality metric, but
-        # a YELLOW breach that is fully attributable to canonical strategies can
-        # be enforced through durable strategy gates. Stronger ORANGE/RED
-        # breaches remain global fail-closed.
+        # a breach that is fully attributable to canonical strategies can be
+        # enforced through durable strategy gates. ORANGE/RED additionally
+        # require read-after-write gate confirmation and a GREEN residual
+        # portfolio; otherwise they remain global fail-closed. Brier measures
+        # an entry probability law, so even a severe but exactly attributed
+        # breach does not authorize price-insensitive liquidation of holdings.
         portfolio_brier_raw_level = (
             evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
         )
@@ -2642,17 +2894,25 @@ def _tick_once() -> RiskLevel:
                 "gated_strategies": sorted(str(strategy) for strategy in degraded_brier_strategies),
             }
             _append_brier_degraded_gate_reasons()
-        elif portfolio_brier_level == RiskLevel.ORANGE and clean_brier_attribution:
-            # ORANGE localization (live incident 2026-07-04, opening_inertia
+        elif (
+            portfolio_brier_level in {RiskLevel.ORANGE, RiskLevel.RED}
+            and clean_brier_attribution
+        ):
+            # Strong-level localization (live incident 2026-07-04,
+            # opening_inertia
             # trailing-30d Brier 0.322 froze healthy strategies for ~30 trailing
-            # days). Unlike YELLOW, ORANGE localization additionally requires
+            # days). Unlike YELLOW, ORANGE/RED localization additionally requires
             # (checked after the durable bookkeeping write below): a
             # read-after-write CONFIRMED active gate per degraded strategy, and
             # the residual (non-gated) portfolio itself recomputing to GREEN.
             # Until both are confirmed this stays "pending" and the level below
-            # remains the global portfolio_brier_level (fail closed).
+            # remains the global portfolio_brier_level (fail closed). SCOPE:
+            # exact canonical strategy keys. DRAIN: every RiskGuard tick
+            # recomputes the settled window. RESET: durable strategy actions
+            # expire when the recomputed strategy verdict clears.
+            strength = portfolio_brier_level.value.lower()
             brier_strategy_localization = {
-                "status": "pending_durable_strategy_gate_orange",
+                "status": f"pending_durable_strategy_gate_{strength}",
                 "gated_strategies": sorted(str(strategy) for strategy in degraded_brier_strategies),
             }
             _append_brier_degraded_gate_reasons()
@@ -2756,13 +3016,26 @@ def _tick_once() -> RiskLevel:
                     "status": "durable_strategy_gate_unavailable_global_yellow",
                     "durable_risk_action_status": durable_action_status.get("status"),
                 }
-        elif brier_strategy_localization.get("status") == "pending_durable_strategy_gate_orange":
-            orange_gated_strategies = list(brier_strategy_localization.get("gated_strategies", []))
+        elif brier_strategy_localization.get("status") in {
+            "pending_durable_strategy_gate_orange",
+            "pending_durable_strategy_gate_red",
+        }:
+            strong_scope = portfolio_brier_level.value.lower()
+            strong_gated_strategies = list(
+                brier_strategy_localization.get("gated_strategies", [])
+            )
             if durable_action_status.get("status") == "emitted":
-                gate_confirmation = _confirm_active_durable_strategy_gates(zeus_conn, orange_gated_strategies)
-                all_gates_confirmed = bool(orange_gated_strategies) and all(gate_confirmation.values())
+                gate_confirmation = _confirm_active_durable_strategy_gates(
+                    zeus_conn,
+                    strong_gated_strategies,
+                )
+                all_gates_confirmed = bool(strong_gated_strategies) and all(
+                    gate_confirmation.values()
+                )
             else:
-                gate_confirmation = {strategy: False for strategy in orange_gated_strategies}
+                gate_confirmation = {
+                    strategy: False for strategy in strong_gated_strategies
+                }
                 all_gates_confirmed = False
 
             if all_gates_confirmed:
@@ -2772,13 +3045,15 @@ def _tick_once() -> RiskLevel:
                     residual_sample_size,
                     residual_thin_excluded,
                 ) = _residual_active_portfolio_brier_level(
-                    brier_actuating_rows, thresholds, set(orange_gated_strategies),
+                    brier_actuating_rows,
+                    thresholds,
+                    set(strong_gated_strategies),
                 )
                 if residual_level == RiskLevel.GREEN:
                     brier_level = RiskLevel.GREEN
                     brier_strategy_localization = {
                         **brier_strategy_localization,
-                        "status": "localized_orange_scope",
+                        "status": f"localized_{strong_scope}_scope",
                         "durable_risk_action_status": durable_action_status.get("status"),
                         "gate_confirmation": gate_confirmation,
                         "residual_brier_level": residual_level.value,
@@ -2787,10 +3062,18 @@ def _tick_once() -> RiskLevel:
                         "thin_sample_excluded_strategies": residual_thin_excluded,
                     }
                 else:
-                    brier_level = portfolio_brier_level
+                    # A Brier failure governs probability-law admission. If
+                    # strong localization cannot prove a GREEN residual, block
+                    # every new entry (YELLOW) but do not convert historical
+                    # scoring error into a price-insensitive RED liquidation.
+                    brier_level = (
+                        RiskLevel.YELLOW
+                        if portfolio_brier_level == RiskLevel.RED
+                        else portfolio_brier_level
+                    )
                     brier_strategy_localization = {
                         **brier_strategy_localization,
-                        "status": "orange_residual_portfolio_not_green",
+                        "status": f"{strong_scope}_residual_portfolio_not_green",
                         "durable_risk_action_status": durable_action_status.get("status"),
                         "gate_confirmation": gate_confirmation,
                         "residual_brier_level": residual_level.value,
@@ -2799,15 +3082,31 @@ def _tick_once() -> RiskLevel:
                         "thin_sample_excluded_strategies": residual_thin_excluded,
                     }
             else:
-                brier_level = portfolio_brier_level
+                # Missing durable scope enforcement falls back to the global
+                # entry block. It does not create SELL authority.
+                brier_level = (
+                    RiskLevel.YELLOW
+                    if portfolio_brier_level == RiskLevel.RED
+                    else portfolio_brier_level
+                )
                 brier_strategy_localization = {
                     **brier_strategy_localization,
-                    "status": "durable_strategy_gate_unconfirmed_global_orange",
+                    "status": (
+                        "durable_strategy_gate_unconfirmed_"
+                        + (
+                            "global_entry_block"
+                            if portfolio_brier_level == RiskLevel.RED
+                            else f"global_{strong_scope}"
+                        )
+                    ),
                     "durable_risk_action_status": durable_action_status.get("status"),
                     "gate_confirmation": gate_confirmation,
                 }
 
         localized_orange_scope = brier_strategy_localization.get("status") == "localized_orange_scope"
+        localized_red_scope = (
+            brier_strategy_localization.get("status") == "localized_red_scope"
+        )
 
         # Execution-quality localization (same admissible-portfolio principle
         # as ORANGE Brier localization): a strategy already held behind a
@@ -2957,6 +3256,7 @@ def _tick_once() -> RiskLevel:
                 "brier_all_strategies_level": portfolio_brier_level.value,
                 "brier_active_portfolio_level": brier_level.value,
                 "localized_orange_scope": localized_orange_scope,
+                "localized_red_scope": localized_red_scope,
                 "brier_strategy_breakdown": brier_strategy_breakdown,
                 "brier_strategy_localization": brier_strategy_localization,
                 "settlement_quality_level": settlement_quality_level.value,
