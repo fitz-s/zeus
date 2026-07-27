@@ -29356,6 +29356,9 @@ _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS = (
 _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "current_coherent_day0_remaining_model_bootstrap_v3"
 )
+_GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS = (
+    "current_coherent_day0_conditioned_replacement_simplex_v1"
+)
 _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "final_daily_observation_exact_settlement_simplex_v1"
 )
@@ -30376,6 +30379,13 @@ def _prepare_current_global_probability_family(
                 raise ValueError(
                     "GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_INVALID"
                 )
+            if not provisional_day0_observation:
+                samples, point_q, _source_clock_basis = components
+                components = (
+                    samples,
+                    point_q,
+                    _GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS,
+                )
             probability_authority = (
                 "day0_conditioned_replacement_global_probability_v1"
             )
@@ -31052,6 +31062,7 @@ def current_global_probability_authority(
             str(getattr(witness, "band_basis", ""))
             not in {
                 _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+                _GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS,
                 _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,
                 _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
             }

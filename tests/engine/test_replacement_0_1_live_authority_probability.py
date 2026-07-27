@@ -298,6 +298,59 @@ def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refu
         decision_time=decision_time,
     ) is not None
 
+    # A mature Day0 conditioned witness binds the raw replacement posterior to
+    # the current observation, so its posterior identity is intentionally
+    # composite. The winner preflight has already rebuilt and content-matched
+    # that witness; this final certificate seam must validate its age and shape
+    # instead of comparing the composite identity to the raw posterior row.
+    conditioned_basis = (
+        adapter._GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS
+    )
+    conditioned_identity = joint_probability_witness_identity(
+        family_key=family_key,
+        bindings=bindings,
+        q_version="q-conditioned",
+        resolution_identity="resolution-current",
+        topology_identity="topology-current",
+        posterior_identity_hash="conditioned-posterior-identity",
+        source_truth_identity="conditioned-source-truth",
+        authority_certificate_hash="conditioned-certificate",
+        band_alpha=0.05,
+        band_basis=conditioned_basis,
+        yes_point_q=np.mean(samples, axis=0),
+        yes_q_samples=samples,
+        captured_at_utc=decision_time,
+    )
+    conditioned_witness = JointOutcomeProbabilityWitness(
+        family_key=family_key,
+        bindings=bindings,
+        yes_point_q=np.mean(samples, axis=0),
+        yes_q_samples=samples,
+        q_version="q-conditioned",
+        resolution_identity="resolution-current",
+        topology_identity="topology-current",
+        posterior_identity_hash="conditioned-posterior-identity",
+        source_truth_identity="conditioned-source-truth",
+        authority_certificate_hash="conditioned-certificate",
+        band_alpha=0.05,
+        band_basis=conditioned_basis,
+        captured_at_utc=decision_time,
+        max_age=timedelta(seconds=30),
+        witness_identity=conditioned_identity,
+    )
+    assert adapter.current_global_probability_authority(
+        conn,
+        day0_event,
+        conditioned_witness,
+        decision_time=decision_time,
+    ) is not None
+    assert adapter.current_global_probability_authority(
+        conn,
+        day0_event,
+        conditioned_witness,
+        decision_time=decision_time + timedelta(seconds=31),
+    ) is None
+
     conn.execute(
         "UPDATE forecast_posteriors SET posterior_identity_hash = ? WHERE posterior_id = ?",
         ("posterior-superseded", 123),

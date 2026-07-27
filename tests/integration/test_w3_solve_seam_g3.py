@@ -4246,7 +4246,9 @@ def test_current_day0_global_probability_uses_conditioned_replacement_simplex(
     witness = prepared.probability_witness
     binding = day0_payload["_edli_global_day0_binding"]
     assert witness.band_alpha == pytest.approx(0.05)
-    assert witness.band_basis == "current_coherent_settlement_simplex_v1"
+    assert witness.band_basis == (
+        "current_coherent_day0_conditioned_replacement_simplex_v1"
+    )
     assert witness.yes_q_samples.shape == (400, 3)
     assert witness.posterior_identity_hash
     assert binding["probability_base_identity"]
@@ -4613,6 +4615,7 @@ def test_provisional_hko_held_probability_uses_conditioned_replacement_without_e
     assert bundle_reads == 1
     assert witness.yes_point_q.tolist() == pytest.approx([0.1, 0.1, 0.8])
     assert witness.yes_q_samples[0].tolist() == pytest.approx([0.1, 0.1, 0.8])
+    assert witness.band_basis == "current_coherent_settlement_simplex_v1"
     assert witness.posterior_identity_hash == bundle.posterior_identity_hash
     assert prepared.candidate_payoff_q_lcb_caps == ()
     assert day0_payload["probability_authority"] == (
