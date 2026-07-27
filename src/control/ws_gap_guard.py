@@ -157,10 +157,19 @@ def _scheduler_job_fresh(
     max_age_seconds: int,
 ) -> datetime | None:
     job = health.get(job_name)
-    if not isinstance(job, dict) or job.get("status") != "OK":
+    if not isinstance(job, dict):
+        return None
+    last_success_at = job.get("last_success_at")
+    if last_success_at:
+        return _fresh_timestamp(
+            last_success_at,
+            now=now,
+            max_age_seconds=max_age_seconds,
+        )
+    if job.get("status") != "OK":
         return None
     return _fresh_timestamp(
-        job.get("last_success_at") or job.get("last_run_at"),
+        job.get("last_run_at"),
         now=now,
         max_age_seconds=max_age_seconds,
     )
@@ -184,6 +193,9 @@ def _durable_sidecar_status(*, now: datetime) -> WSGapStatus | None:
     sidecar evidence; real in-process disconnect/auth gaps still fail closed.
     """
 
+    # SCOPE: only the order daemon's process-local clean-boot submit latch.
+    # DRAIN: a fresh price-channel heartbeat plus a fresh successful M5 sweep.
+    # RESET: either proof expires after 180s; real in-process gaps never use this path.
     try:
         from src.config import state_path
     except Exception:

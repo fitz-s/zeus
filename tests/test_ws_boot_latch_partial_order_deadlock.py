@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-06-09
+# Last reused/audited: 2026-07-27
 # Authority basis: 2026-06-09 ws-boot-latch deadlock incident. Three requirements formed
 #   a cycle that latched submits FOREVER after any daemon restart with a resting order:
 #   (1) the pong clean-boot transition (not_configured -> AUTHED) demanded an EMPTY local
@@ -278,6 +278,72 @@ def test_user_ws_latch_ignores_market_quote_refresh_failure_when_reconcile_fresh
     assert summary["entry"]["allow_submit"] is True
     assert summary["gap_reason"] == "sidecar_durable_evidence"
     ws_gap_guard.assert_ws_allows_submit("condition-ws")
+
+
+@pytest.mark.parametrize("current_status", ["RUNNING", "SKIPPED", "FAILED"])
+def test_order_daemon_keeps_fresh_reconcile_success_during_next_attempt(
+    conn, tmp_path, monkeypatch, current_status
+) -> None:
+    """A new attempt cannot erase an unexpired successful M5 proof."""
+
+    import src.config as config
+
+    live_now = datetime.now(timezone.utc)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps(
+            {
+                "daemon": "price-channel-ingest",
+                "alive_at": live_now.isoformat(),
+                "pid": 123,
+            }
+        )
+    )
+    (tmp_path / "scheduler_jobs_health.json").write_text(
+        json.dumps(
+            {
+                "edli_user_channel_reconcile": {
+                    "status": current_status,
+                    "last_success_at": (live_now - timedelta(seconds=30)).isoformat(),
+                    "last_started_at": live_now.isoformat(),
+                }
+            }
+        )
+    )
+
+    summary = ws_gap_guard.summary(now=live_now)
+    assert summary["entry"]["allow_submit"] is True
+    assert summary["gap_reason"] == "sidecar_durable_evidence"
+
+
+def test_order_daemon_does_not_trust_running_reconcile_without_success(
+    conn, tmp_path, monkeypatch
+) -> None:
+    import src.config as config
+
+    live_now = datetime.now(timezone.utc)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps(
+            {
+                "daemon": "price-channel-ingest",
+                "alive_at": live_now.isoformat(),
+                "pid": 123,
+            }
+        )
+    )
+    (tmp_path / "scheduler_jobs_health.json").write_text(
+        json.dumps(
+            {
+                "edli_user_channel_reconcile": {
+                    "status": "RUNNING",
+                    "last_started_at": live_now.isoformat(),
+                }
+            }
+        )
+    )
+
+    assert ws_gap_guard.summary(now=live_now)["entry"]["allow_submit"] is False
 
 
 def test_order_daemon_clean_boot_latch_stays_closed_when_sidecar_evidence_stale(
