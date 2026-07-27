@@ -133,6 +133,28 @@ DRAIN is the next successful native-source tick; RESET is the atomic canonical
 row update followed by the normal held-position monitor cycle. No source,
 market-price proxy, trade threshold, lifecycle, or action law changes.
 
+## 2026-07-27 Selected-proof mismatch must not starve the capital auction
+
+Live global auctions repeatedly selected one positive-growth BUY and then
+failed its immutable posterior-parent check with
+`GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH`.  The proof stayed rejected, but
+the unclassified exception was treated as a batch-wide block, so every lower
+ranked BUY, SELL, and CASH comparison was starved on every retry.
+
+The hot-fix preserves the exact parent check and zero-side-effect rejection.
+Only that selected candidate is made ineligible for the current immutable
+epoch, after which the existing global objective re-ranks all remaining
+actions.  SCOPE is the mismatched candidate identity; DRAIN is the same-epoch
+re-auction; RESET is a later candidate carrying the current prepared posterior
+parent.  No probability, edge, sizing, price-band, venue, or batch-wide
+freshness requirement is relaxed.
+
+Acceptance requires a failing-before/passing-after proof-classification
+antibody and an integration case where the rejected BUY cannot touch the venue
+and a sibling SELL is selected and submitted.  Live proof requires the repeated
+batch block to disappear and a subsequent receipt to show candidate-local
+fallthrough or successful next-candidate preflight under the loaded hot-fix.
+
 ## 2026-07-26 Held q is independent of entry phase
 
 The current global auction correctly closed forecast-carried families to new

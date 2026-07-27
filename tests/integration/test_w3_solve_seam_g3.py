@@ -9900,6 +9900,7 @@ def test_global_preflight_block_scope_is_explicit(reason, status):
         "REPLACEMENT_NO_BOUND_CANONICAL_BIN_MISSING",
         "REPLACEMENT_NO_BOUND_SERVED_LCB_MISSING",
         "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:served_yes_q",
+        "GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH",
     ),
 )
 def test_global_preflight_selected_leg_proof_failure_is_candidate_local(
@@ -19682,6 +19683,12 @@ def test_global_batch_falls_through_family_local_preflight_block(
         (
             "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
             "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:served_yes_q",
+            "BUY",
+            "SELL",
+        ),
+        (
+            "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
+            "GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH",
             "BUY",
             "SELL",
         ),
