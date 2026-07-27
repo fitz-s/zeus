@@ -21050,8 +21050,9 @@ def _forecast_authority_payload_from_posterior(
             SELECT source_id, source_cycle_time, source_available_at, computed_at,
                    posterior_identity_hash, data_version, posterior_id, family_id,
                    bin_topology_hash, q_json, q_lcb_json, q_ucb_json, provenance_json
-              FROM {posterior_table}
+             FROM {posterior_table}
              WHERE product_id = ?
+               AND runtime_layer = 'live'
                AND city = ? AND target_date = ? AND temperature_metric = ?
                AND (source_available_at IS NULL OR source_available_at <= ?)
                AND (computed_at IS NULL OR computed_at <= ?)

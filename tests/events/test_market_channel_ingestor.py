@@ -4073,8 +4073,6 @@ def test_long_lived_seed_prunes_tokens_that_expired_after_thread_start():
 
     def recording_fetch(token_id: str) -> dict:
         fetch_calls.append(token_id)
-        if token_id == "token-expired":
-            raise AssertionError("expired token must not be REST fetched")
         return _fake_book(token_id)
 
     service.fetch_orderbook = recording_fetch
@@ -4087,6 +4085,19 @@ def test_long_lived_seed_prunes_tokens_that_expired_after_thread_start():
 
     assert written == 1
     assert fetch_calls == ["token-live"]
+    assert ingestor.active_token_ids_open_at() == {"token-live"}
+
+    fetch_calls.clear()
+    exit_written = service.seed_rest_books_in_chunks(
+        token_ids=["token-expired"],
+        received_at="2026-06-28T06:46:00+00:00",
+        write_gate=nullcontext(),
+        commit=conn.commit,
+        past_end_exit_refresh=True,
+    )
+
+    assert exit_written == 1
+    assert fetch_calls == ["token-expired"]
     assert ingestor.active_token_ids_open_at() == {"token-live"}
 
 

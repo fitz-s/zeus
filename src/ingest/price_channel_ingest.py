@@ -2714,6 +2714,7 @@ def _edli_refresh_held_position_quote_evidence(
                 logger=logger,
                 chunk_size=MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT,
                 deadline_monotonic=deadline,
+                past_end_exit_refresh=True,
             )
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
         result = {

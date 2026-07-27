@@ -222,17 +222,28 @@ class MarketChannelIngestor:
         as_of = (now or datetime.now(UTC)).astimezone(UTC)
         return end_at.astimezone(UTC) > as_of
 
+    def active_token_ids(
+        self,
+        *,
+        token_ids: Iterable[str] | None = None,
+    ) -> set[str]:
+        """Return the requested subset that belongs to this ingestor."""
+
+        if token_ids is None:
+            return set(self._active_token_ids)
+        return {
+            str(token_id)
+            for token_id in token_ids
+            if str(token_id) in self._active_token_ids
+        }
+
     def active_token_ids_open_at(
         self,
         *,
         now: datetime | None = None,
         token_ids: Iterable[str] | None = None,
     ) -> set[str]:
-        base = (
-            set(self._active_token_ids)
-            if token_ids is None
-            else {str(token_id) for token_id in token_ids if str(token_id) in self._active_token_ids}
-        )
+        base = self.active_token_ids(token_ids=token_ids)
         return {token_id for token_id in base if self._token_is_open_at(token_id, now=now)}
 
     def replace_token_metadata(
@@ -363,6 +374,7 @@ class MarketChannelIngestor:
         pre_cached: "dict[str, dict] | None" = None,
         token_ids: Iterable[str] | None = None,
         coalesce_market_events: bool = False,
+        past_end_exit_refresh: bool = False,
     ) -> list[EventWriteResult | MarketChannelQuoteResult]:
         """REST-seed current books on connect/reconnect before channel deltas.
 
@@ -382,10 +394,18 @@ class MarketChannelIngestor:
         ``pre_cached`` (or when ``pre_cached`` is ``None``) fall back to
         calling ``fetch_orderbook`` directly; this path is only safe (and
         only reached in practice) when the world mutex is NOT held.
+
+        ``past_end_exit_refresh`` is call-scoped and defaults closed. Its only
+        runtime caller first binds held tokens to current exit metadata that
+        proves the venue still enables the order book and accepts orders.
         """
         from src.state.db import assert_no_world_mutex_held_for_io
 
-        target_token_ids = self.active_token_ids_open_at(token_ids=token_ids)
+        target_token_ids = (
+            self.active_token_ids(token_ids=token_ids)
+            if past_end_exit_refresh
+            else self.active_token_ids_open_at(token_ids=token_ids)
+        )
         results: list[EventWriteResult | MarketChannelQuoteResult] = []
         for token_id in sorted(target_token_ids):
             try:
@@ -409,7 +429,12 @@ class MarketChannelIngestor:
             message.setdefault("event_type", "book")
             message.setdefault("asset_id", token_id)
             message.setdefault("timestamp", received_at)
-            event = self._book_event(message, received_at=received_at, gap_marked=False)
+            event = self._book_event(
+                message,
+                received_at=received_at,
+                gap_marked=False,
+                past_end_exit_refresh=past_end_exit_refresh,
+            )
             if event is None or self._market_quote_is_older(event):
                 continue
             self._cache_event_payload(event)
@@ -435,9 +460,15 @@ class MarketChannelIngestor:
         received_at: str,
         gap_marked: bool,
         gap_start: str | None = None,
+        past_end_exit_refresh: bool = False,
     ) -> OpportunityEvent | None:
         token_id = _message_token_id(message)
-        if token_id not in self.active_token_ids_open_at(token_ids=(token_id,)):
+        eligible_token_ids = (
+            self.active_token_ids(token_ids=(token_id,))
+            if past_end_exit_refresh
+            else self.active_token_ids_open_at(token_ids=(token_id,))
+        )
+        if token_id not in eligible_token_ids:
             return None
         metadata = self._metadata_for_message(message, token_id=token_id)
         if metadata is None:
@@ -1464,6 +1495,7 @@ class MarketChannelOnlineService:
         chunk_size: int = REST_SEED_COMMIT_CHUNK_SIZE,
         deadline_monotonic: float | None = None,
         pre_captured_books: dict[str, dict] | None = None,
+        past_end_exit_refresh: bool = False,
     ) -> int:
         """Fetch REST books off-lock and commit evidence in bounded chunks.
 
@@ -1472,7 +1504,8 @@ class MarketChannelOnlineService:
         age past the live preflight/redecision SLA while the thread was still
         fetching. This method keeps network I/O outside the DB write gate but
         commits every small batch, so fresh held/candidate evidence reaches the
-        live monitor continuously.
+        live monitor continuously. ``past_end_exit_refresh`` is the explicit
+        held-exit seam; default entry/subscription behavior stays unchanged.
         """
 
         if self.fetch_orderbook is None:
@@ -1483,11 +1516,15 @@ class MarketChannelOnlineService:
         raw_token_ids = [str(token_id) for token_id in token_ids]
         if isinstance(token_ids, (set, frozenset)):
             raw_token_ids = sorted({str(token_id) for token_id in token_ids})
-        open_token_ids = self.ingestor.active_token_ids_open_at(token_ids=raw_token_ids)
+        eligible_token_ids = (
+            self.ingestor.active_token_ids(token_ids=raw_token_ids)
+            if past_end_exit_refresh
+            else self.ingestor.active_token_ids_open_at(token_ids=raw_token_ids)
+        )
         ordered = [
             token_id
             for token_id in dict.fromkeys(raw_token_ids)
-            if token_id in open_token_ids
+            if token_id in eligible_token_ids
         ]
         written = 0
         for offset in range(0, len(ordered), size):
@@ -1539,6 +1576,7 @@ class MarketChannelOnlineService:
                     pre_cached=captured,
                     token_ids=captured.keys(),
                     coalesce_market_events=True,
+                    past_end_exit_refresh=past_end_exit_refresh,
                 )
                 written += len(results)
                 continue
@@ -1550,6 +1588,7 @@ class MarketChannelOnlineService:
                             received_at=received_at,
                             pre_cached=captured,
                             token_ids=captured.keys(),
+                            past_end_exit_refresh=past_end_exit_refresh,
                         )
                         if not self.ingestor._market_event_sink_independently_coordinated:
                             self.ingestor.flush_deferred_market_event_sink()

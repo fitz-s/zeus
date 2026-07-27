@@ -7561,6 +7561,93 @@ def test_entry_replacement_blocks_when_materializable_raw_cycle_newer_than_poste
     assert "posterior_cycle=2026-06-29T06:00:00+00:00" in reason
 
 
+def test_entry_posterior_lookup_is_live_only_and_uses_live_family_index(monkeypatch):
+    """Entry authority must reject non-live rows and avoid a temp ORDER BY tree."""
+    from src.engine import event_reactor_adapter as adapter
+
+    class RecordingConnection(sqlite3.Connection):
+        posterior_query: tuple[str, tuple[object, ...]] | None = None
+
+        def execute(self, sql, parameters=()):  # noqa: ANN001
+            if "FROM forecast_posteriors" in sql and "SELECT source_id" in sql:
+                self.posterior_query = (sql, tuple(parameters))
+            return super().execute(sql, parameters)
+
+    conn = sqlite3.connect(":memory:", factory=RecordingConnection)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            runtime_layer TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            source_id TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            computed_at TEXT,
+            posterior_identity_hash TEXT,
+            data_version TEXT,
+            family_id TEXT,
+            bin_topology_hash TEXT,
+            q_json TEXT,
+            q_lcb_json TEXT,
+            q_ucb_json TEXT,
+            provenance_json TEXT
+        );
+        CREATE INDEX idx_forecast_posteriors_live_family_cycle
+            ON forecast_posteriors (
+                product_id, city, target_date, temperature_metric,
+                source_cycle_time DESC, computed_at DESC, posterior_id DESC
+            )
+            WHERE runtime_layer = 'live';
+        INSERT INTO forecast_posteriors (
+            posterior_id, product_id, runtime_layer, city, target_date,
+            temperature_metric, source_id, source_cycle_time,
+            source_available_at, computed_at
+        ) VALUES (
+            'offline-newer', 'openmeteo_ecmwf_ifs9_bayes_fusion_v1', 'offline',
+            'Chicago', '2026-07-28', 'high', 'offline-source',
+            '2026-07-27T12:00:00+00:00', '2026-07-27T12:05:00+00:00',
+            '2026-07-27T12:06:00+00:00'
+        );
+        """
+    )
+    monkeypatch.setattr(
+        adapter,
+        "runtime_cities_by_name",
+        lambda: {"Chicago": SimpleNamespace(name="Chicago")},
+    )
+    monkeypatch.setattr(adapter, "_authority_table_ref", lambda _conn, name: name)
+    reason: dict[str, str] = {}
+
+    result = adapter._forecast_authority_payload_from_posterior(
+        conn,
+        event=SimpleNamespace(),
+        family=SimpleNamespace(
+            city="Chicago",
+            target_date="2026-07-28",
+            metric="high",
+        ),
+        payload={},
+        decision_time=datetime(2026, 7, 27, 13, 0, tzinfo=timezone.utc),
+        reason_out=reason,
+    )
+
+    assert result is None
+    assert reason == {"reason": "no_row"}
+    assert conn.posterior_query is not None
+    sql, params = conn.posterior_query
+    assert "runtime_layer = 'live'" in sql
+    plan = "\n".join(
+        str(row[3])
+        for row in conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+    )
+    assert "idx_forecast_posteriors_live_family_cycle" in plan
+    assert "TEMP B-TREE" not in plan
+
+
 def test_global_sell_jit_fee_uses_current_gamma_v2_schedule(monkeypatch):
     """A legacy CLOB base-fee cap cannot supersede the current market schedule."""
     from src.contracts import fee_authority

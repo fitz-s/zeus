@@ -3096,7 +3096,7 @@ def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(m
     from src.state import db as state_db
 
     ordered = [f"token-{idx}" for idx in range(10)]
-    seen: dict[str, list[str]] = {}
+    seen: dict[str, object] = {}
 
     monkeypatch.setattr(
         lane,
@@ -3136,6 +3136,7 @@ def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(m
         def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ANN003
             selected = list(token_ids)
             seen["rest_seed"] = selected
+            seen["past_end_exit_refresh"] = kwargs.get("past_end_exit_refresh")
             return len(selected)
 
     class FakePolymarketClient:
@@ -3171,6 +3172,7 @@ def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(m
 
     assert seen["metadata"] == ordered[:3]
     assert seen["rest_seed"] == ordered[:3]
+    assert seen["past_end_exit_refresh"] is True
     assert result["held_quote_refresh_selected_tokens"] == 3
     assert result["held_quote_refresh_deferred_tokens"] == 7
     assert result["held_quote_refresh_attempted_tokens"] == 3
