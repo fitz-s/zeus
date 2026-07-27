@@ -4170,6 +4170,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
     )
 
     remaining_day_calls = 0
+    capture_time = {"value": "2026-07-11T17:30:00+00:00"}
 
     def remaining_day_components(*_args, **kwargs):
         nonlocal remaining_day_calls
@@ -4180,7 +4181,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
                 "_edli_day0_q_mode": "remaining_day",
                 "_edli_day0_remaining_model_names": ["ecmwf", "gfs", "ukmo"],
                 "_edli_day0_remaining_capture_times_utc": [
-                    "2026-07-11T17:30:00+00:00"
+                    capture_time["value"]
                 ],
             }
         )
@@ -4242,6 +4243,28 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
         "source-clock-posterior-17"
     )
 
+    capture_time["value"] = "2026-07-11T17:31:00+00:00"
+    recaptured_payload: dict[str, object] = {}
+    recaptured = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=recaptured_payload,
+    )
+    assert np.array_equal(
+        witness.yes_q_samples,
+        recaptured.probability_witness.yes_q_samples,
+    )
+    assert witness.source_truth_identity != (
+        recaptured.probability_witness.source_truth_identity
+    )
+    assert witness.probability_content_identity != (
+        recaptured.probability_witness.probability_content_identity
+    )
+
     observed_extreme["value"] = 71.0
     joint_payload: dict[str, object] = {}
     deterministic_event = _global_day0_scope_event(
@@ -4261,7 +4284,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
         day0_payload_out=joint_payload,
     )
 
-    assert remaining_day_calls == 2
+    assert remaining_day_calls == 3
     assert isinstance(
         joint.probability_witness,
         JointOutcomeProbabilityWitness,
@@ -4314,7 +4337,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
             decision_time=deterministic_cut + _dt.timedelta(milliseconds=2),
         )
     )
-    assert remaining_day_calls == 3
+    assert remaining_day_calls == 4
     assert isinstance(
         revalidated_joint.probability_witness,
         JointOutcomeProbabilityWitness,
@@ -4335,7 +4358,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
         day0_payload_out=preferred_joint_payload,
         allow_partial_deterministic=True,
     )
-    assert remaining_day_calls == 4
+    assert remaining_day_calls == 5
     assert isinstance(
         preferred_joint.probability_witness,
         JointOutcomeProbabilityWitness,
@@ -4363,7 +4386,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
         day0_payload_out=fallback_payload,
         allow_partial_deterministic=True,
     )
-    assert remaining_day_calls == 5
+    assert remaining_day_calls == 6
     assert isinstance(
         fallback.probability_witness,
         DeterministicBinPayoffWitness,
@@ -4398,7 +4421,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
         day0_payload_out=selected_dead_payload,
         required_condition_id="c0",
     )
-    assert remaining_day_calls == 5
+    assert remaining_day_calls == 6
     assert isinstance(
         selected_dead.probability_witness,
         DeterministicBinPayoffWitness,
@@ -4426,7 +4449,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
         observation_conn=observations,
         decision_time=deterministic_cut + _dt.timedelta(milliseconds=6),
     )
-    assert remaining_day_calls == 5
+    assert remaining_day_calls == 6
     assert isinstance(
         revalidated.probability_witness,
         DeterministicBinPayoffWitness,
@@ -4446,7 +4469,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
         cache_metadata_out=held_unknown_cache_metadata,
         required_condition_id="c1",
     )
-    assert remaining_day_calls == 6
+    assert remaining_day_calls == 7
     assert isinstance(
         held_unknown.probability_witness,
         JointOutcomeProbabilityWitness,
@@ -4502,7 +4525,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
         day0_payload_out=exact_payload,
     )
 
-    assert remaining_day_calls == 6
+    assert remaining_day_calls == 7
     assert exact.probability_witness.band_basis == (
         "day0_absorbing_observation_exact_settlement_simplex_v1"
     )

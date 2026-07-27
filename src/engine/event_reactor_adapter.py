@@ -32972,6 +32972,43 @@ def _make_day0_bootstrap_sampler(
     )
 
 
+def _day0_probability_content_members(members: np.ndarray) -> np.ndarray:
+    """Canonicalize the empirical Day0 probability content."""
+
+    member_values = np.asarray(members, dtype=np.float64).ravel()
+    if not member_values.size or not np.isfinite(member_values).all():
+        raise ValueError("Day0 analysis requires finite probability members")
+    return np.sort(member_values)
+
+
+def _day0_analysis_rng_seed(
+    *,
+    family: object,
+    payload: Mapping[str, object],
+    members: np.ndarray,
+) -> int:
+    """Seed Day0 draws from probability content, never fetch metadata.
+
+    Re-capturing byte-identical provider vectors is not new atmospheric
+    evidence.  Keeping common random numbers across that recapture makes the
+    probability curve change only when its physical/model inputs change.
+    """
+
+    member_values = _day0_probability_content_members(members)
+    return int(
+        stable_hash(
+            {
+                "schema": "day0_analysis_probability_content_v1",
+                "family_id": str(getattr(family, "family_id", "") or ""),
+                "observed_extreme": payload.get("rounded_value"),
+                "observation_time": payload.get("observation_time"),
+                "member_values": [float(value) for value in member_values],
+            }
+        )[:16],
+        16,
+    )
+
+
 def _market_analysis_from_event_snapshot(
     *,
     calibration_conn: sqlite3.Connection,
@@ -33190,6 +33227,7 @@ def _market_analysis_from_event_snapshot(
             payload["_edli_day0_q_mode"] = "remaining_day"
         else:
             members = raw_members
+        members = _day0_probability_content_members(members)
         if _day0_rd_members is None:
             payload["_edli_q_source"] = "platt"
         day0_extra_member_sigma = 0.0
@@ -33414,22 +33452,15 @@ def _market_analysis_from_event_snapshot(
             )
         except Exception:  # noqa: BLE001
             pass
-    analysis_rng_seed = None
-    if is_day0:
-        analysis_rng_seed = int(
-            stable_hash(
-                {
-                    "family_id": str(getattr(family, "family_id", "") or ""),
-                    "observed_extreme": payload.get("rounded_value"),
-                    "observation_time": payload.get("observation_time"),
-                    "remaining_models": payload.get("_edli_day0_remaining_model_names"),
-                    "remaining_capture_times": payload.get(
-                        "_edli_day0_remaining_capture_times_utc"
-                    ),
-                }
-            )[:16],
-            16,
+    analysis_rng_seed = (
+        _day0_analysis_rng_seed(
+            family=family,
+            payload=payload,
+            members=members,
         )
+        if is_day0
+        else None
+    )
     return MarketAnalysis(
         p_raw=np.asarray(p_raw, dtype=float),
         p_cal=np.asarray(p_cal, dtype=float),
@@ -34022,7 +34053,7 @@ def _day0_remaining_p_raw_vector(
     from src.config import ensemble_n_mc
     from src.signal.ensemble_signal import sigma_instrument_for_city
 
-    members = np.asarray(future_extremes, dtype=float).ravel()
+    members = _day0_probability_content_members(future_extremes)
     rounded = _optional_float(payload.get("rounded_value"))
     metric = str(
         payload.get("metric") or payload.get("temperature_metric") or ""

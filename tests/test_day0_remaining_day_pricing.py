@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-24
-# Lifecycle: created=2026-06-10; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Last reused or audited: 2026-07-27
+# Lifecycle: created=2026-06-10; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -195,6 +195,127 @@ def test_day0_high_signal_seed_is_prefix_stable_when_mc_count_changes():
         member_values=np.array([35.0, 36.0]),
         unit="C",
         precision=1.0,
+    )
+
+
+def test_day0_analysis_probability_content_is_stable_across_recapture_order(
+    monkeypatch,
+):
+    """Production point-q and samples depend on content, not recapture metadata."""
+    import src.engine.event_reactor_adapter as era
+
+    family = SimpleNamespace(
+        city="Paris",
+        metric="high",
+        target_date="2026-07-27",
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id="Paris|2026-07-27|high",
+    )
+    content = {
+        "metric": "high",
+        "rounded_value": 30,
+        "observation_time": "2026-07-27T01:00:00+00:00",
+        "_edli_day0_remaining_model_names": [
+            "ecmwf_ifs",
+            "icon_global",
+            "ukmo_global_deterministic_10km",
+        ],
+    }
+    first = {
+        **content,
+        "_edli_day0_remaining_capture_times_utc": [
+            "2026-07-27T01:50:06+00:00"
+        ],
+    }
+    recaptured = {
+        **content,
+        "_edli_day0_remaining_capture_times_utc": [
+            "2026-07-27T02:01:43+00:00"
+        ],
+    }
+    members = np.array([32.1, 31.8, 31.6])
+    changed_members = np.array([33.1, 31.8, 31.6])
+
+    bins = [
+        Bin(low=None, high=31, label="31C or below", unit="C"),
+        Bin(low=32, high=32, label="32C", unit="C"),
+        Bin(low=33, high=None, label="33C or above", unit="C"),
+    ]
+    family.bins = bins
+    family.candidates = [
+        SimpleNamespace(
+            condition_id=f"condition-{index}",
+            bin=bin_value,
+            yes_token_id=f"yes-{index}",
+            no_token_id=f"no-{index}",
+        )
+        for index, bin_value in enumerate(bins)
+    ]
+    native_costs = {
+        (f"condition-{index}", side): (
+            None,
+            EP(price, "ask", fee_deducted=True, currency="probability_units"),
+            price,
+            None,
+            None,
+        )
+        for index in range(len(bins))
+        for side, price in (("buy_yes", 0.5), ("buy_no", 0.5))
+    }
+    snapshot = {
+        "settlement_unit": "C",
+        "temperature_metric": "high",
+        "members_json": "[31.6, 31.8, 32.1]",
+        "members_precision": 1.0,
+        "source_id": "test",
+        "issue_time": "2026-07-27T00:00:00+00:00",
+        "dataset_id": "test_v1",
+        "data_version": "test_v1",
+    }
+    served = {"members": members}
+    monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: True)
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_day_members",
+        lambda **_kwargs: np.asarray(served["members"], dtype=float),
+    )
+
+    def _analysis(payload, member_values):
+        served["members"] = member_values
+        threaded_payload = dict(payload)
+        analysis = era._market_analysis_from_event_snapshot(
+            calibration_conn=sqlite3.connect(":memory:"),
+            snapshot=snapshot,
+            family=family,
+            native_costs=native_costs,
+            payload=threaded_payload,
+            decision_time=datetime(2026, 7, 27, 1, 5, tzinfo=UTC),
+        )
+        return (
+            analysis,
+            analysis.forecast_yes_probability_sample_matrix(64),
+            threaded_payload,
+        )
+
+    first_analysis, first_samples, first_payload = _analysis(first, members)
+    recaptured_analysis, recaptured_samples, recaptured_payload = _analysis(
+        recaptured,
+        members[::-1],
+    )
+    changed_analysis, changed_samples, changed_payload = _analysis(
+        first,
+        changed_members,
+    )
+
+    assert np.array_equal(first_analysis.p_posterior, recaptured_analysis.p_posterior)
+    assert np.array_equal(first_samples, recaptured_samples)
+    assert first_payload["_edli_spine_debiased_members_native"] == (
+        recaptured_payload["_edli_spine_debiased_members_native"]
+    ) == sorted(float(value) for value in members)
+    assert not np.array_equal(first_analysis.p_posterior, changed_analysis.p_posterior)
+    assert not np.array_equal(first_samples, changed_samples)
+    assert changed_payload["_edli_spine_debiased_members_native"] == sorted(
+        float(value) for value in changed_members
     )
 
 
