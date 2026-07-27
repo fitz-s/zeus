@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-26
+# Last reused/audited: 2026-07-27
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -17499,6 +17499,7 @@ def test_global_batch_stable_preflight_token_survives_later_unrelated_wake(
 
 def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     monkeypatch,
+    caplog,
 ):
     from src.engine.global_single_order_auction import (
         GlobalSingleOrderActuation,
@@ -17506,6 +17507,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     )
 
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    caplog.set_level("INFO", logger=global_batch_runtime.__name__)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
     event_b = _global_scope_event(city="Beta", source_run_id="run-b")
     scope = current_global_auction_scope_from_events(
@@ -17866,6 +17868,22 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         event_a.event_id,
         claimed_targets[0].event_id,
     }
+    winner_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if "global batch winner detail:" in record.getMessage()
+    ]
+    assert winner_logs
+    assert all(
+        "probability_basis=POSTERIOR_PREDICTIVE_MEAN" in message
+        and "expected_ev_usd=2.400000" in message
+        and "expected_dlog=0.012000000000" in message
+        and "expected_log_growth_per_hour=0.000500000000" in message
+        and "expected_capital_efficiency=0.003000000000" in message
+        and "robust_dlog=" not in message
+        and "ev_telemetry_usd=" not in message
+        for message in winner_logs
+    )
     assert world.in_transaction is False
     world.close()
 

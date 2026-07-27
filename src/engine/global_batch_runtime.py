@@ -2948,6 +2948,7 @@ def process_current_global_batch(
         side = str(getattr(candidate, "side", "") or "")
         if not family_key or not bin_id or side not in {"YES", "NO"}:
             return
+        expected_growth = getattr(decision, "expected_growth", None)
         witness = witnesses.get(family_key)
         q_mean = None
         if witness is not None:
@@ -2965,8 +2966,9 @@ def process_current_global_batch(
             "condition=%s token=%s "
             "q_mean=%s shares=%s cost_usd=%s fill_price=%s limit_price=%s "
             "max_spend_usd=%s win_probability_lcb=%s loss_probability_ucb=%s "
-            "ev_telemetry_usd=%.6f robust_dlog=%.12f "
-            "capital_efficiency=%.12f candidate=%s",
+            "probability_basis=%s expected_ev_usd=%.6f expected_dlog=%.12f "
+            "expected_log_growth_per_hour=%.12f "
+            "expected_capital_efficiency=%.12f candidate=%s",
             stage,
             family_key,
             bin_id,
@@ -2989,9 +2991,19 @@ def process_current_global_batch(
                 "loss_probability_ucb",
                 "unknown",
             ),
-            float(getattr(decision, "robust_ev_usd", 0.0) or 0.0),
-            float(getattr(decision, "robust_delta_log_wealth", 0.0) or 0.0),
-            float(getattr(decision, "capital_efficiency", 0.0) or 0.0),
+            getattr(expected_growth, "probability_basis", "unknown"),
+            float(getattr(expected_growth, "expected_ev_usd", 0.0) or 0.0),
+            float(
+                getattr(expected_growth, "expected_delta_log_wealth", 0.0) or 0.0
+            ),
+            float(
+                getattr(expected_growth, "expected_log_growth_per_hour", 0.0)
+                or 0.0
+            ),
+            float(
+                getattr(expected_growth, "expected_capital_efficiency", 0.0)
+                or 0.0
+            ),
             getattr(candidate, "candidate_id", "unknown"),
         )
 
