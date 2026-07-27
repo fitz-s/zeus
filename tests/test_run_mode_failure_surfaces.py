@@ -1747,7 +1747,13 @@ def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
         )
     _write(
         sd / "scheduler_jobs_health.json",
-        {"_run_mode": {"status": "OK", "last_run_at": cycle_time, "last_success_at": cycle_time}},
+        {
+            "edli_event_reactor": {
+                "status": "OK",
+                "last_run_at": cycle_time,
+                "last_success_at": cycle_time,
+            }
+        },
     )
     _write(
         sd / "status_summary.json",
@@ -1781,33 +1787,15 @@ def test_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
     """T1: run_mode FAILED makes composite DEGRADED even with healthy heartbeat."""
     sd = tmp_path / "state"
     sd.mkdir()
-
-    _write(
-        sd / "daemon-heartbeat.json",
-        {"alive": True, "timestamp": _now_iso(-30), "mode": "live"},
-    )
+    _setup_healthy_state(sd)
     _write(
         sd / "scheduler_jobs_health.json",
         {
-            "_run_mode": {
+            "edli_event_reactor": {
                 "status": "FAILED",
                 "last_run_at": _now_iso(-30),
                 "last_failure_reason": "ValueError: no open markets",
             }
-        },
-    )
-    _write(
-        sd / "status_summary.json",
-        {
-            "timestamp": _now_iso(-30),
-            "cycle": {
-                "mode": "opening_hunt",
-                "completed_at": _now_iso(-30),
-                "candidates": 0,
-                "entry_orders_submitted": 0,
-                "trades": 0,
-                "exits": 0,
-            },
         },
     )
 
@@ -3291,6 +3279,88 @@ def test_pending_exit_current_churn_yields_degraded(
     assert surface["pending_exit_churn_sample"][0]["position_id"] == "pos-churn"
     assert surface["pending_exit_churn_sample"][0]["exit_intent_count"] == 13
     assert "pending_exit_release_loop" in result["failing_surfaces"]
+
+
+def test_pending_exit_health_scopes_event_history_by_open_position(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    now = datetime.now(timezone.utc)
+    _write_pending_exit_release_loop_db(sd, now=now)
+    trade_db = sd / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    try:
+        conn.execute(
+            "CREATE INDEX idx_position_current_phase_quote "
+            "ON position_current(phase, chain_shares, position_id)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_position_events_position_type_sequence "
+            "ON position_events(position_id, event_type, sequence_no DESC)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    original_rows = live_health._sqlite_ro_rows
+    plans: dict[str, list[str]] = {}
+
+    def capture_plan(path: Path, sql: str, params: tuple[object, ...] = ()):
+        rows, error = original_rows(path, sql, params)
+        marker = next(
+            (
+                candidate
+                for candidate in (
+                    "recent_releases",
+                    "recent_reasserts",
+                    "latest_exit",
+                    "recent_churn",
+                )
+                if f"WITH {candidate} AS" in sql
+            ),
+            None,
+        )
+        if marker is not None:
+            ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                plans[marker] = [
+                    str(row[3])
+                    for row in ro.execute(
+                        "EXPLAIN QUERY PLAN " + sql,
+                        params,
+                    ).fetchall()
+                ]
+            finally:
+                ro.close()
+        return rows, error
+
+    monkeypatch.setattr(live_health, "_sqlite_ro_rows", capture_plan)
+
+    surface = live_health._pending_exit_release_loop_surface(
+        sd,
+        now,
+        main_daemon_surface={"attested": True, "issue": None},
+    )
+
+    assert surface["pending_exit_release_loop_count"] == 1
+    assert set(plans) == {
+        "recent_releases",
+        "recent_reasserts",
+        "latest_exit",
+        "recent_churn",
+    }
+    for plan in plans.values():
+        assert any(
+            "idx_position_events_position_type_sequence" in detail
+            and "position_id=?" in detail
+            for detail in plan
+        )
+        assert not any(
+            detail.startswith("SCAN position_events")
+            for detail in plan
+        )
 
 
 def test_monitor_probability_freshness_degrades_when_latest_active_monitor_stale(
@@ -4948,6 +5018,110 @@ def test_high_yes_edge_accepts_buy_yes_no_submit_evidence(
     assert surface["recent_buy_yes_no_trade_count"] == 0
 
 
+def test_high_yes_latest_posterior_uses_live_index_and_real_timestamp_order() -> None:
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(hours=1)).isoformat()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            q_json TEXT NOT NULL,
+            q_lcb_json TEXT,
+            runtime_layer TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_forecast_posteriors_runtime_layer_target "
+        "ON forecast_posteriors("
+        "runtime_layer, city, target_date, temperature_metric, computed_at)"
+    )
+    rows = (
+        (
+            1,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(minutes=40)).isoformat(),
+            '{"90F": 0.7}',
+            '{"90F": 0.6}',
+            "live",
+        ),
+        (
+            2,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(minutes=20)).isoformat(),
+            '{"90F": 0.8}',
+            '{"90F": 0.7}',
+            "live",
+        ),
+        (
+            3,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(minutes=10)).isoformat(),
+            '{"90F": 0.9}',
+            '{"90F": 0.8}',
+            None,
+        ),
+        (
+            4,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(minutes=30))
+            .astimezone(timezone(timedelta(hours=14)))
+            .isoformat(),
+            '{"90F": 0.95}',
+            '{"90F": 0.85}',
+            "live",
+        ),
+        (
+            5,
+            "Austin",
+            "2026-07-28",
+            "high",
+            "zzzz-not-a-timestamp",
+            '{"90F": 0.99}',
+            '{"90F": 0.95}',
+            "live",
+        ),
+    )
+    conn.executemany(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+
+    selected = conn.execute(
+        live_health._LATEST_LIVE_POSTERIORS_SQL,
+        (cutoff,),
+    ).fetchall()
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN " + live_health._LATEST_LIVE_POSTERIORS_SQL,
+        (cutoff,),
+    ).fetchall()
+
+    assert [row["posterior_id"] for row in selected] == [2]
+    assert any(
+        "idx_forecast_posteriors_runtime_layer_target" in str(row["detail"])
+        and "runtime_layer=?" in str(row["detail"])
+        for row in plan
+    )
+    assert not any(
+        str(row["detail"]).startswith("SCAN forecast_posteriors")
+        for row in plan
+    )
+
+
 def test_high_yes_no_submit_window_uses_indexed_decision_time() -> None:
     now = datetime.now(timezone.utc)
     conn = sqlite3.connect(":memory:")
@@ -4993,6 +5167,70 @@ def test_high_yes_no_submit_window_uses_indexed_decision_time() -> None:
         "idx_edli_no_submit_receipts_decision_time" in str(row["detail"])
         for row in plan
     )
+
+
+def test_high_yes_reason_groups_filter_recent_rows_before_grouping() -> None:
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(minutes=5)).isoformat()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            created_at TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            rejection_stage TEXT,
+            rejection_reason TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_no_trade_regret_created_at "
+        "ON no_trade_regret_events(created_at)"
+    )
+    conn.executemany(
+        "INSERT INTO no_trade_regret_events VALUES (?, 'buy_yes', 'score', ?)",
+        [
+            ((now - timedelta(days=2)).isoformat(), f"old:{i}")
+            for i in range(200)
+        ]
+        + [
+            ((now - timedelta(minutes=1)).isoformat(), "recent:candidate_id=one"),
+            ((now - timedelta(minutes=2)).isoformat(), "recent:candidate_id=two"),
+        ],
+    )
+
+    reason_rows = conn.execute(
+        live_health._RECENT_BUY_YES_TOP_REASONS_SQL,
+        (cutoff,),
+    ).fetchall()
+    class_rows = conn.execute(
+        live_health._RECENT_BUY_YES_TOP_REASON_CLASSES_SQL,
+        (cutoff,),
+    ).fetchall()
+    plans = [
+        conn.execute("EXPLAIN QUERY PLAN " + sql, (cutoff,)).fetchall()
+        for sql in (
+            live_health._RECENT_BUY_YES_TOP_REASONS_SQL,
+            live_health._RECENT_BUY_YES_TOP_REASON_CLASSES_SQL,
+        )
+    ]
+    conn.close()
+
+    assert sum(int(row["n"]) for row in reason_rows) == 2
+    assert [(row["rejection_reason_class"], int(row["n"])) for row in class_rows] == [
+        ("recent", 2)
+    ]
+    for plan in plans:
+        details = [str(row["detail"]) for row in plan]
+        assert any(
+            "idx_no_trade_regret_created_at" in detail and "created_at>?" in detail
+            for detail in details
+        )
+        assert not any(
+            detail.startswith("SCAN no_trade_regret_events")
+            for detail in details
+        )
 
 
 def test_high_yes_latest_auction_reads_primary_key_tail_without_temp_sort() -> None:

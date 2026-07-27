@@ -1,5 +1,6 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-07-27
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Authority basis: thepath/audit-realign live-lock + fail-open remediation
 #   (AGENTS.md iron rules #4 ONE risk authority, #5 kill "database is locked"
 #    CATEGORY via the canonical connection factory, #6 fail CONSERVATIVE under
@@ -237,7 +238,7 @@ def _seed_risk_row(conn: sqlite3.Connection, *, level: str, age_minutes: float,
         details["brier"] = brier
     conn.execute(
         "INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, "
-        "checked_at, force_exit_review) VALUES (?,?,NULL,NULL,?,?,0)",
+        "checked_at) VALUES (?,?,NULL,NULL,?,?)",
         (level, brier, json.dumps(details), checked_at),
     )
 
@@ -368,7 +369,7 @@ def test_get_current_level_surfaces_transient_lock_green_but_floors_other_degrad
     riskguard_module.init_risk_db(conn)
     conn.execute(
         "INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, "
-        "checked_at, force_exit_review) VALUES (?,NULL,NULL,NULL,?,?,0)",
+        "checked_at) VALUES (?,NULL,NULL,NULL,?,?)",
         ("GREEN", json.dumps(_green_lock_attestation_details()),
          datetime.now(timezone.utc).isoformat()),
     )
@@ -388,7 +389,7 @@ def test_get_current_level_surfaces_transient_lock_green_but_floors_other_degrad
     other["status"] = "metrics_degraded"
     conn2.execute(
         "INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, "
-        "checked_at, force_exit_review) VALUES (?,NULL,NULL,NULL,?,?,0)",
+        "checked_at) VALUES (?,NULL,NULL,NULL,?,?)",
         ("GREEN", json.dumps(other), datetime.now(timezone.utc).isoformat()),
     )
     conn2.commit()
@@ -413,7 +414,7 @@ def test_entry_gate_and_status_agree_on_degraded_row(tmp_path, monkeypatch):
     riskguard_module.init_risk_db(conn)
     conn.execute(
         "INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, "
-        "checked_at, force_exit_review) VALUES (?,NULL,NULL,NULL,?,?,0)",
+        "checked_at) VALUES (?,NULL,NULL,NULL,?,?)",
         ("GREEN", json.dumps(_green_lock_attestation_details()),
          datetime.now(timezone.utc).isoformat()),
     )
@@ -455,7 +456,7 @@ def test_red_reason_surfaced_in_authority(tmp_path, monkeypatch):
     riskguard_module.init_risk_db(conn)
     conn.execute(
         "INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, "
-        "checked_at, force_exit_review) VALUES (?,?,?,NULL,?,?,1)",
+        "checked_at) VALUES (?,?,?,NULL,?,?)",
         ("RED", 0.162, 0.789,
          json.dumps({"brier": 0.162, "accuracy": 0.789,
                      "daily_loss_level": "RED",

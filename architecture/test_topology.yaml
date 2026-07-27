@@ -28,6 +28,8 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_world_wal_checkpoint_starvation.py: {created: "2026-06-04", last_used: "2026-07-27", note: "SQLite WAL checkpoint-starvation mechanism and recovery: pinned reader blocks truncation; canonical PASSIVE helper exposes backlog; release plus TRUNCATE restores bounded WAL."}
+    tests/test_wal_busy_factory_fail_conservative.py: {created: "2026-06-08", last_used: "2026-07-27", note: "Canonical connection busy_timeout/WAL behavior and RiskGuard fail-conservative single-authority relationships under transient SQLite lock contention."}
     tests/test_gate_scope_drain_reset.py: {created: "2026-07-26", last_used: "2026-07-26", note: "INV-47/NC-24 antibody: site-anchors 4 named fail-closed gates (src/main.py entry readiness, src/data/day0_oracle_anomaly.py Day0 guard, src/engine/event_reactor_adapter.py posterior identity check, src/data/polymarket_request_governor.py circuit) and asserts each carries adjacent SCOPE/DRAIN/RESET declarations; a renamed/removed anchor fails loudly."}
     tests/test_repair_book_hash_transitions_corruption.py: {created: "2026-07-24", last_used: "2026-07-24", note: "Candidate-only book-hash transition tail repair: read-only fingerprint, surviving-snapshot blocker, readable-history preservation, and full index rebuild."}
     # DB first-principles audit (2026-07-20, PR #436) — authored + reviewed 2026-07-22.
@@ -812,6 +814,8 @@ test_trust_policy:
 categories:
   core_law_antibody:
     - tests/test_gate_scope_drain_reset.py
+    - tests/test_world_wal_checkpoint_starvation.py
+    - tests/test_wal_busy_factory_fail_conservative.py
     - tests/test_bayes_precision_fusion_download.py
     - tests/test_finite_evidence_probability_symmetry.py
     - tests/test_replacement_forecast_extras_coverage_gate.py

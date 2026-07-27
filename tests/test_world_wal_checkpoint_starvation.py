@@ -1,5 +1,5 @@
 # Created: 2026-06-04
-# Last reused or audited: 2026-06-04
+# Last reused or audited: 2026-07-27
 # Authority basis: docs/operations/HANDOFF_2026-06-04_live_restart_arm.md
 #   + critic-proven root: zeus-world.db WAL bloat = checkpoint-starvation by
 #     long-lived reader connections pinning the WAL floor (NOT I/O under the
@@ -8,7 +8,7 @@
 #     (checkpointed_frames < log_frames) and never truncates. Correction
 #     2026-07-21 (audit finding W5-2): PASSIVE's busy field is ALWAYS 0 — it
 #     is 1 only for a blocked RESTART/FULL/TRUNCATE checkpoint, never PASSIVE.
-# Lifecycle: created=2026-06-04; last_reviewed=2026-06-04; last_reused=never
+# Lifecycle: created=2026-06-04; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: RED→GREEN relationship test for the WAL checkpoint-starvation fix.
 #   Proves the MECHANISM (a reader that never ends its read transaction pins
 #   the WAL floor so TRUNCATE returns BUSY and the WAL stays large) AND the FIX

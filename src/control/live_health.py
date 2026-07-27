@@ -2273,6 +2273,22 @@ def _pending_exit_release_loop_surface(
               FROM position_events
              WHERE event_type = 'EXIT_RETRY_RELEASED'
                AND datetime(occurred_at) >= datetime(?)
+               AND position_id IN (
+                   SELECT position_id
+                     FROM position_current
+                    WHERE phase = 'pending_exit'
+                      AND order_status IN (
+                          'exit_intent',
+                          'retry_pending',
+                          'backoff_exhausted',
+                          'sell_pending',
+                          'sell_placed'
+                      )
+                      AND (
+                          COALESCE(CAST(chain_shares AS REAL), 0.0) > 0.0
+                          OR COALESCE(CAST(shares AS REAL), 0.0) > 0.0
+                      )
+               )
              GROUP BY position_id
             HAVING COUNT(*) >= 2
         ),
@@ -2381,6 +2397,16 @@ def _pending_exit_release_loop_surface(
                    ) AS latest_held_refresh_at
               FROM position_events
              WHERE datetime(occurred_at) >= datetime(?)
+               AND position_id IN (
+                   SELECT position_id
+                     FROM position_current
+                    WHERE phase IN ('active', 'day0_window')
+                      AND order_status IN ('filled', 'partial')
+                      AND (
+                          COALESCE(CAST(chain_shares AS REAL), 0.0) > 0.0
+                          OR COALESCE(CAST(shares AS REAL), 0.0) > 0.0
+                      )
+               )
              GROUP BY position_id
             HAVING reassert_exit_intent_count >= ?
         )
@@ -2456,6 +2482,16 @@ def _pending_exit_release_loop_surface(
                            'EXIT_RETRY_RELEASED'
                        )
                        AND datetime(occurred_at) >= datetime(?)
+                       AND position_id IN (
+                           SELECT position_id
+                             FROM position_current
+                            WHERE phase IN ('active', 'day0_window')
+                              AND order_status IN ('filled', 'partial')
+                              AND (
+                                  COALESCE(CAST(chain_shares AS REAL), 0.0) > 0.0
+                                  OR COALESCE(CAST(shares AS REAL), 0.0) > 0.0
+                              )
+                       )
                      GROUP BY position_id
                    ) le
                 ON le.position_id = e.position_id
@@ -2465,6 +2501,16 @@ def _pending_exit_release_loop_surface(
             SELECT position_id
               FROM position_events
              WHERE datetime(occurred_at) >= datetime(?)
+               AND position_id IN (
+                   SELECT position_id
+                     FROM position_current
+                    WHERE phase IN ('active', 'day0_window')
+                      AND order_status IN ('filled', 'partial')
+                      AND (
+                          COALESCE(CAST(chain_shares AS REAL), 0.0) > 0.0
+                          OR COALESCE(CAST(shares AS REAL), 0.0) > 0.0
+                      )
+               )
              GROUP BY position_id
             HAVING SUM(
                        CASE
@@ -2582,6 +2628,24 @@ def _pending_exit_release_loop_surface(
                    'EXIT_ORDER_REJECTED',
                    'EXIT_RETRY_RELEASED',
                    'MONITOR_REFRESHED'
+               )
+               AND position_id IN (
+                   SELECT position_id
+                     FROM position_current
+                    WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                      AND order_status IN (
+                          'filled',
+                          'partial',
+                          'exit_intent',
+                          'retry_pending',
+                          'backoff_exhausted',
+                          'sell_pending',
+                          'sell_placed'
+                      )
+                      AND (
+                          COALESCE(CAST(chain_shares AS REAL), 0.0) > 0.0
+                          OR COALESCE(CAST(shares AS REAL), 0.0) > 0.0
+                      )
                )
              GROUP BY position_id
             HAVING exit_intent_count >= ?
@@ -4456,6 +4520,34 @@ def _recent_buy_yes_entry_command_count(conn: object, *, cutoff: str) -> int | N
     return int(row["n"] if hasattr(row, "keys") else row[0])
 
 
+_LATEST_LIVE_POSTERIORS_SQL = """
+    SELECT posterior_id,
+           city,
+           target_date,
+           temperature_metric,
+           computed_at,
+           q_json,
+           q_lcb_json
+      FROM (
+            SELECT posterior_id,
+                   city,
+                   target_date,
+                   temperature_metric,
+                   computed_at,
+                   q_json,
+                   q_lcb_json,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY city, target_date, temperature_metric
+                       ORDER BY datetime(computed_at) DESC, posterior_id DESC
+                   ) AS rn
+              FROM forecast_posteriors
+             WHERE runtime_layer = 'live'
+               AND datetime(computed_at) >= datetime(?)
+           )
+     WHERE rn = 1
+"""
+
+
 def _load_high_yes_edges_python(
     *,
     forecast_db: Path,
@@ -4468,32 +4560,7 @@ def _load_high_yes_edges_python(
     forecast_conn = _connect_read_only(forecast_db)
     try:
         posterior_rows = forecast_conn.execute(
-            """
-            SELECT posterior_id,
-                   city,
-                   target_date,
-                   temperature_metric,
-                   computed_at,
-                   q_json,
-                   q_lcb_json
-              FROM (
-                    SELECT posterior_id,
-                           city,
-                           target_date,
-                           temperature_metric,
-                           computed_at,
-                           q_json,
-                           q_lcb_json,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY city, target_date, temperature_metric
-                               ORDER BY datetime(computed_at) DESC, posterior_id DESC
-                           ) AS rn
-                      FROM forecast_posteriors
-                     WHERE computed_at >= ?
-                       AND COALESCE(runtime_layer, 'live') = 'live'
-                   )
-             WHERE rn = 1
-            """,
+            _LATEST_LIVE_POSTERIORS_SQL,
             (cutoff,),
         ).fetchall()
         families = sorted(
@@ -4721,6 +4788,52 @@ def _forecast_snapshot_status_counts_for_edges(
     return counts
 
 
+_RECENT_BUY_YES_TOP_REASONS_SQL = """
+    SELECT rejection_stage,
+           rejection_reason,
+           COUNT(*) AS n,
+           MIN(created_at) AS first_seen_at,
+           MAX(created_at) AS latest_seen_at
+      FROM (
+          SELECT rejection_stage, rejection_reason, created_at
+            FROM no_trade_regret_events
+           WHERE direction = 'buy_yes'
+             AND created_at >= ?
+           LIMIT -1
+      ) AS recent
+     GROUP BY rejection_stage, rejection_reason
+     ORDER BY n DESC, latest_seen_at DESC
+     LIMIT 5
+"""
+
+
+_RECENT_BUY_YES_TOP_REASON_CLASSES_SQL = """
+    SELECT rejection_stage,
+           CASE
+               WHEN instr(rejection_reason, ':candidate_id=') > 0
+               THEN substr(
+                   rejection_reason,
+                   1,
+                   instr(rejection_reason, ':candidate_id=') - 1
+               )
+               ELSE rejection_reason
+           END AS rejection_reason_class,
+           COUNT(*) AS n,
+           MIN(created_at) AS first_seen_at,
+           MAX(created_at) AS latest_seen_at
+      FROM (
+          SELECT rejection_stage, rejection_reason, created_at
+            FROM no_trade_regret_events
+           WHERE direction = 'buy_yes'
+             AND created_at >= ?
+           LIMIT -1
+      ) AS recent
+     GROUP BY rejection_stage, rejection_reason_class
+     ORDER BY n DESC, latest_seen_at DESC
+     LIMIT 5
+"""
+
+
 def _recent_buy_yes_suppression_summary(conn: object, *, cutoff: str) -> dict[str, object]:
     """Summarize recent buy-YES audit artifacts for direction-balance diagnosis."""
 
@@ -4799,19 +4912,7 @@ def _recent_buy_yes_suppression_summary(conn: object, *, cutoff: str) -> dict[st
             }
             if reason_columns.issubset(columns):
                 reason_rows = conn.execute(
-                    """
-                    SELECT rejection_stage,
-                           rejection_reason,
-                           COUNT(*) AS n,
-                           MIN(created_at) AS first_seen_at,
-                           MAX(created_at) AS latest_seen_at
-                      FROM no_trade_regret_events
-                     WHERE direction = 'buy_yes'
-                       AND created_at >= ?
-                     GROUP BY rejection_stage, rejection_reason
-                     ORDER BY n DESC, latest_seen_at DESC
-                     LIMIT 5
-                    """,
+                    _RECENT_BUY_YES_TOP_REASONS_SQL,
                     (cutoff,),
                 ).fetchall()
                 detail["recent_buy_yes_no_trade_top_reasons"] = [
@@ -4825,27 +4926,7 @@ def _recent_buy_yes_suppression_summary(conn: object, *, cutoff: str) -> dict[st
                     for row in reason_rows
                 ]
                 reason_class_rows = conn.execute(
-                    """
-                    SELECT rejection_stage,
-                           CASE
-                               WHEN instr(rejection_reason, ':candidate_id=') > 0
-                               THEN substr(
-                                   rejection_reason,
-                                   1,
-                                   instr(rejection_reason, ':candidate_id=') - 1
-                               )
-                               ELSE rejection_reason
-                           END AS rejection_reason_class,
-                           COUNT(*) AS n,
-                           MIN(created_at) AS first_seen_at,
-                           MAX(created_at) AS latest_seen_at
-                      FROM no_trade_regret_events
-                     WHERE direction = 'buy_yes'
-                       AND created_at >= ?
-                     GROUP BY rejection_stage, rejection_reason_class
-                     ORDER BY n DESC, latest_seen_at DESC
-                     LIMIT 5
-                    """,
+                    _RECENT_BUY_YES_TOP_REASON_CLASSES_SQL,
                     (cutoff,),
                 ).fetchall()
                 detail["recent_buy_yes_no_trade_top_reason_classes"] = [
