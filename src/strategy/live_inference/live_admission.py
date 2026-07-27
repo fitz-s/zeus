@@ -17,6 +17,7 @@ from src.calibration.settlement_backward_coverage import (
     settlement_coverage_refutes_claim,
 )
 from src.decision_kernel.canonicalization import (
+    qkernel_current_state_rejection_reason,
     qkernel_global_current_state_rejection_reason,
     stable_hash,
 )
@@ -746,15 +747,23 @@ def replacement_no_bound_certificate_mismatch_reason(
             if not point_matches_served_parent
             else "qkernel_probability_authority"
         )
+    mean_action = (
+        economics.get("global_probability_functional")
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    if mean_action:
+        if (
+            economics.get("selection_guard_basis")
+            != "CURRENT_POSTERIOR_PREDICTIVE_MEAN"
+        ):
+            return "qkernel_current_state:selection_guard_basis"
+        current_state_reason = qkernel_current_state_rejection_reason(economics)
+        if current_state_reason is not None:
+            return f"qkernel_current_state:{current_state_reason}"
+    payoff_q_field = "payoff_q_action" if mean_action else "payoff_q_point"
     try:
         pre_q = float(economics["pre_qkernel_q_posterior"])
         pre_lcb = float(economics["pre_qkernel_q_lcb_5pct"])
-        payoff_q_field = (
-            "payoff_q_action"
-            if economics.get("global_probability_functional")
-            == "POSTERIOR_PREDICTIVE_MEAN"
-            else "payoff_q_point"
-        )
         payoff_q = float(economics[payoff_q_field])
         payoff_lcb = float(economics["payoff_q_lcb"])
     except (KeyError, TypeError, ValueError):
@@ -766,9 +775,9 @@ def replacement_no_bound_certificate_mismatch_reason(
     if not same(pre_lcb, no_lcb_served):
         return "qkernel_pre_lcb"
     # The replacement certificate binds the source-clock parent (`pre_q`).
-    # A sealed current-state witness may legitimately re-decide the action. Its
-    # declared action functional, not the source-clock parent point, must match
-    # the submitted direction.
+    # A sealed current-state witness may legitimately re-decide the action at a
+    # different point or predictive mean; its action q, not the parent scalar,
+    # must then match the submitted direction.
     if not same(payoff_q, q_direction):
         return "qkernel_payoff_q"
     if not same(payoff_lcb, q_lcb):

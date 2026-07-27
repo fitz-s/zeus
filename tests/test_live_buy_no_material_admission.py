@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-07; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-06-07; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: Prove material-bin BUY_NO admission uses native side uncertainty without weakening live gates.
 # Reuse: Re-audit replacement bound identity, receipt plumbing, and legacy-source behavior before relying on it.
 # Authority basis: PR_SPEC.md §2 FIX-4 (close the buy_no escape hatch; allow-list ⊆ carrier
@@ -314,6 +314,53 @@ def test_current_qkernel_point_redecision_preserves_source_clock_no_parent() -> 
         posterior_id=271828,
         condition_id="cond-wellington-high-24c",
     ) == "served_no_lcb_order"
+
+
+def test_current_qkernel_mean_redecision_binds_action_q_not_point_q() -> None:
+    economics = _sealed_global_current_buy_no_economics()
+    economics.update(
+        {
+            "q_lcb_authority": "qkernel_payoff_bound",
+            "probability_authority": "qkernel_payoff_direct_route",
+            "pre_qkernel_q_posterior": 0.65,
+            "pre_qkernel_q_lcb_5pct": 0.62,
+            "payoff_q_point": 0.71,
+            "payoff_q_action": 0.58,
+            "payoff_q_lcb": 0.56,
+            "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+            "selection_guard_basis": "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+        }
+    )
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+
+    def reason(current: dict[str, object]) -> str | None:
+        return replacement_no_bound_certificate_mismatch_reason(
+            _REPLACEMENT_NO_CERT,
+            expected=_REPLACEMENT_NO_EXPECTED,
+            q_direction=0.58,
+            q_lcb=0.56,
+            same_bin_yes_posterior=0.35,
+            qkernel_execution_economics=current,
+            probability_authority="replacement_0_1",
+            posterior_id=271828,
+            condition_id="cond-wellington-high-24c",
+        )
+
+    assert reason(economics) is None
+    changed_point = {**economics, "payoff_q_point": 0.69}
+    changed_point["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        changed_point
+    )
+    assert reason(changed_point) is None
+    changed_action = {**economics, "payoff_q_action": 0.57}
+    changed_action["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        changed_action
+    )
+    assert reason(changed_action) == "qkernel_payoff_q"
+    unsealed = {**economics, "current_state_identity_hash": "not-current"}
+    assert reason(unsealed) == "qkernel_current_state:current_state_identity_hash"
 
 
 def test_material_yes_buy_no_without_allowed_source_is_rejected_even_with_positive_edge() -> None:
