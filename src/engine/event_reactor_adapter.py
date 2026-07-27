@@ -30448,31 +30448,22 @@ def _prepare_current_global_probability_family(
                 }
             )
         else:
-            components = _replacement_global_probability_components(
-                bundle,
-                candidates=family.candidates,
-                bindings=bindings,
+            components = _day0_remaining_global_probability_components(
+                event,
+                forecast_conn=forecast_conn,
+                calibration_conn=day0_observation_conn,
+                family=family,
+                payload=payload,
+                decision_time=decision_time,
+                snapshot=day0_snapshot,
             )
-            if components is None:
-                raise ValueError(
-                    "GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_INVALID"
-                )
-            if not provisional_day0_observation:
-                samples, point_q, _source_clock_basis = components
-                components = (
-                    samples,
-                    point_q,
-                    _GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS,
-                )
-            probability_authority = (
-                "day0_conditioned_replacement_global_probability_v1"
-            )
+            probability_authority = "day0_remaining_day_global_probability_v1"
             payload.update(
                 {
                     "probability_authority": probability_authority,
-                    "q_source": "day0_conditioned_replacement",
-                    "_edli_q_source": "day0_conditioned_replacement",
-                    "_edli_day0_q_mode": "conditioned_replacement",
+                    "q_source": "day0_remaining_day",
+                    "_edli_q_source": "day0_remaining_day",
+                    "_edli_day0_q_mode": "remaining_day",
                 }
             )
     elif current_day0_payload is not None:
