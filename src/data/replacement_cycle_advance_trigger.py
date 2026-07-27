@@ -929,7 +929,7 @@ def enqueue_cycle_advance_reseeds(
                 target_date=target_date,
                 metric=metric,
                 target_cycle_iso=target_cycle_iso,
-                allow_missing_seed_file_reenqueue=bool(day0_payload),
+                allow_missing_seed_file_reenqueue=bool(day0_payload) or missing_posterior,
                 day0_observed_extreme_observation_time=day0_observation_time,
             ):
                 report["already_enqueued"] = int(report["already_enqueued"]) + 1
@@ -987,7 +987,7 @@ def enqueue_cycle_advance_reseeds(
                 reason=(
                     "MISSING_LIVE_POSTERIOR" if missing_posterior else None
                 ),
-                replace_existing_seed_file=bool(day0_payload),
+                replace_existing_seed_file=bool(day0_payload) or missing_posterior,
                 day0_observed_extreme_observation_time=day0_observation_time,
             )
             conn.commit()

@@ -759,6 +759,37 @@ def test_scoped_source_commit_enqueues_missing_live_posterior(
     assert marker["reason"] == "MISSING_LIVE_POSTERIOR"
     assert marker["seed_file"]
 
+    # A pending seed still suppresses duplicate source-commit work. Once the
+    # consumer moves that seed to processed/failed, a later source commit for
+    # the same scope/cycle must replace the marker and retry first materialization.
+    duplicate = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=raw_dir,
+        computed_at=datetime(2026, 7, 27, 16, 1, tzinfo=UTC),
+        limit=5,
+        scopes=(("Austin", "2026-07-28", "high"),),
+        manifests=(),
+        include_missing_posterior=True,
+    )
+    assert duplicate["seeds_enqueued"] == 0
+    assert duplicate["already_enqueued"] == 1
+
+    Path(marker["seed_file"]).unlink()
+    retry = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=raw_dir,
+        computed_at=datetime(2026, 7, 27, 16, 2, tzinfo=UTC),
+        limit=5,
+        scopes=(("Austin", "2026-07-28", "high"),),
+        manifests=(),
+        include_missing_posterior=True,
+    )
+    assert retry["first_materialization_seeds_enqueued"] == 1
+    assert retry["seeds_enqueued"] == 1
+    assert Path(marker["seed_file"]).exists()
+
 
 def test_held_marker_with_moved_seed_reheals_without_day0_optin(tmp_path) -> None:
     """LIVE FREEZE FIX (2026-06-21): a HELD position whose materialization seed was built then
