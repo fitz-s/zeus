@@ -196,6 +196,22 @@ def prefetched_monitor_orderbook(clob, token_id: str) -> dict | None:
     return book if isinstance(book, dict) and book else None
 
 
+def _remember_monitor_orderbook(clob, token_id: str, book: object) -> bool:
+    """Keep a successful singular refresh available for this monitor cycle."""
+
+    books = getattr(clob, "__dict__", {}).get(_MONITOR_PREFETCHED_ORDERBOOKS_ATTR)
+    token = str(token_id).strip()
+    if (
+        not isinstance(books, dict)
+        or not token
+        or not isinstance(book, dict)
+        or not book
+    ):
+        return False
+    books[token] = book
+    return True
+
+
 def monitor_orderbook_prefetch_attempted(clob, token_id: str) -> bool:
     attempted = getattr(clob, "__dict__", {}).get(
         _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR
@@ -2686,6 +2702,7 @@ def monitor_quote_refresh(
     try:
         if book is None:
             book = get_orderbook(tid) if callable(get_orderbook) else None
+            _remember_monitor_orderbook(clob, tid, book)
         if book is not None:
             from src.data.market_scanner import _top_book_level_decimal
 

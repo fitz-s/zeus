@@ -5486,6 +5486,7 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
         target_date="2026-07-14",
         temperature_metric="high",
         bin_label="90F",
+        state="active",
     )
     wealth = SimpleNamespace(
         native_holdings_micro=(("token-current", 12_500_000),),
@@ -5542,21 +5543,8 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
     monkeypatch.setattr(
         monitor_refresh,
         "_refresh_current_global_day0_probability",
-        lambda *_args, **_kwargs: (
-            0.5,
-            SimpleNamespace(
-                _day0_monitor_probability_receipt={
-                    "probability_witness_identity": "q-current",
-                    "probability_content_identity": content_identity,
-                    "q_version": "q-content-current",
-                    "source_truth_identity": "source-current",
-                    "band": {
-                        "alpha": 0.05,
-                        "basis": "current-band",
-                    },
-                }
-            ),
-            True,
+        lambda *_args, **_kwargs: pytest.fail(
+            "coverage must reuse the current monitor probability receipt"
         ),
     )
     captured = {}
@@ -5585,14 +5573,36 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
         current_coverage,
     )
 
+    orderbook_calls = []
+
+    def get_orderbook(token):
+        orderbook_calls.append(token)
+        if len(orderbook_calls) > 1:
+            pytest.fail("coverage must reuse the current monitor orderbook")
+        return {
+            "asset_id": token,
+            "bids": [{"price": "0.61", "size": "20"}],
+            "asks": [{"price": "0.63", "size": "20"}],
+        }
+
+    clob = SimpleNamespace(get_orderbook=get_orderbook)
+    assert monitor_refresh.install_monitor_orderbook_prefetch(clob, {})
+    quote = monitor_refresh.monitor_quote_refresh(None, clob, position)
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.61)
+    assert orderbook_calls == ["token-current"]
+    assert monitor_refresh.prefetched_monitor_orderbook(
+        clob,
+        "token-current",
+    ) == {
+        "asset_id": "token-current",
+        "bids": [{"price": "0.61", "size": "20"}],
+        "asks": [{"price": "0.63", "size": "20"}],
+    }
+
     result = cycle_runtime._current_monitor_global_holding_coverage(
         conn=object(),
-        clob=SimpleNamespace(
-            get_orderbook_snapshot=lambda token: {
-                "asset_id": token,
-                "bids": [{"price": "0.61", "size": "20"}],
-            }
-        ),
+        clob=clob,
         portfolio=portfolio,
         position=position,
         probability_content_identity=content_identity,

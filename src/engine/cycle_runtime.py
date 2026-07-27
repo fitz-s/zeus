@@ -5062,6 +5062,7 @@ def _current_monitor_global_holding_coverage(
         from src.engine.global_single_order_auction import (
             global_sell_book_witness_identity,
         )
+        from src.engine.monitor_refresh import prefetched_monitor_orderbook
         from src.events.candidate_binding import weather_family_id
         from src.state.collateral_ledger import (
             COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS,
@@ -5139,12 +5140,13 @@ def _current_monitor_global_holding_coverage(
                 checked_at_utc=book_checked,
             ):
                 return None
-            getter = getattr(clob, "get_orderbook_snapshot", None)
-            if not callable(getter):
-                getter = getattr(clob, "get_orderbook", None)
-            if not callable(getter):
-                return None
-            raw_book = getter(token_id)
+            # The monitor just refreshed this exact held token before asking
+            # whether the global auction still covers it. Re-fetching the CLOB
+            # here duplicates selection-time I/O inside the monitor completion
+            # critical path and can hold every later redecision behind one slow
+            # request. Reuse the cycle-scoped current book; submit preflight
+            # still re-fetches executable truth before any venue side effect.
+            raw_book = prefetched_monitor_orderbook(clob, token_id)
             if not isinstance(raw_book, Mapping):
                 return None
             raw_asset_id = str(
@@ -5173,24 +5175,12 @@ def _current_monitor_global_holding_coverage(
             )
 
         def current_probability_content_identity(_coverage) -> str | None:
-            from src.engine.monitor_refresh import (
-                _refresh_current_global_day0_probability,
-            )
-
-            current = _refresh_current_global_day0_probability(
-                position,
-                trade_conn=conn,
-                decision_time=current_time(),
-                family_cache=None,
-            )
-            if current is None:
-                return None
-            receipt = getattr(
-                current[1],
-                "_day0_monitor_probability_receipt",
-                None,
-            )
-            return _monitor_probability_content_identity(receipt) or None
+            # ``probability_content_identity`` came from the fresh
+            # refresh_position receipt immediately above this coverage check.
+            # A second provider/DB refresh adds latency but no newer
+            # selection-time fact. The global winner preflight remains the
+            # submit-time authority and independently revalidates q.
+            return probability_content_identity or None
 
         def current_holding_witness(_coverage) -> _CurrentHoldingWitness | None:
             current_wealth = current_portfolio_wealth_witness(
