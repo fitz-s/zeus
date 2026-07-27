@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-20
+# Last reused or audited: 2026-07-27
 # Authority basis: alpha-clock realignment plus adversarial review MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),
 #   #3-wiring (resting-order cancel), #4 (METAR plausibility bound), #5 (day0
@@ -104,11 +104,18 @@ def _tokyo():
 
 
 def _wellington():
-    # UNMEASURED city (no wu_metar_divergence.json entry) -> excluded from
-    # the METAR hard-fact lane entirely (2026-07-26 default-direction fix).
     return SimpleNamespace(
         name="Wellington", timezone="Pacific/Auckland", settlement_unit="C",
         wu_station="NZWN", settlement_source_type="wu_icao",
+    )
+
+
+def _ankara():
+    # Still unmeasured: absence of city-specific WU/METAR divergence evidence
+    # excludes this station from the fast hard-fact lane.
+    return SimpleNamespace(
+        name="Ankara", timezone="Europe/Istanbul", settlement_unit="C",
+        wu_station="LTAC", settlement_source_type="wu_icao",
     )
 
 
@@ -1097,23 +1104,36 @@ class TestSourceDiscipline:
         assert effective == pytest.approx(26.0)
         assert source == "same_station_fast_tail"
 
-    def test_metar_kill_at_unmeasured_city_is_excluded_not_default_margin(self, monkeypatch):
-        """2026-07-26 (Shenzhen class, day0 defect-6): an UNMEASURED city (no
-        wu_metar_divergence.json entry -- Wellington here) is no longer given
-        the conservative default margin and allowed to kill; it is excluded
-        from the METAR hard-fact lane entirely (R15: "METAR kills only at
-        settlement-faithful cities with the empirical-divergence margin" --
-        Wellington has neither). With no WU-side signal (autouse fixture)
-        and no METAR-driven source, effective_extreme stays None regardless
-        of the METAR memo value, so no verdict can fire off it."""
+    def test_recently_measured_wellington_uses_zero_margin_and_boundary_law(
+        self, monkeypatch,
+    ):
+        """Wellington's bounded empirical measurement authorizes same-station
+        METAR at zero margin for both the probability and hard-fact lanes."""
         _set_metar_memo(monkeypatch, 26)
         effective, source = settlement_grade_effective_extreme(
             city=_wellington(), target_date="2026-06-10", metric="high", now=NOW,
         )
-        assert effective is None and source == ""
+        assert effective == pytest.approx(26.0)
+        assert source == "same_station_fast_tail"
+        assert evaluate_hard_fact_exit(
+            position=_position(city="Wellington"),
+            city=_wellington(),
+            now=NOW,
+        ).action == "EXIT_DEAD_BIN"
+
+        _set_metar_memo(monkeypatch, 25)
+        assert evaluate_hard_fact_exit(
+            position=_position(city="Wellington"),
+            city=_wellington(),
+            now=NOW,
+        ) is None
+
+    def test_metar_kill_at_unmeasured_city_is_excluded_not_default_margin(self, monkeypatch):
+        """An unmeasured city remains excluded rather than consuming a guessed
+        margin; authorizing Wellington must not weaken this fail-closed law."""
         _set_metar_memo(monkeypatch, 27)
         effective, source = settlement_grade_effective_extreme(
-            city=_wellington(), target_date="2026-06-10", metric="high", now=NOW,
+            city=_ankara(), target_date="2026-06-10", metric="high", now=NOW,
         )
         assert effective is None and source == ""
 

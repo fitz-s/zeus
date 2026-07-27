@@ -351,7 +351,7 @@ test_trust_policy:
     tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-07-27", note: "Fast METAR publication persistence, Day0 hourly-vector fairness, and measured same-station eligibility. Held capital keeps critical-quota priority; Beijing, Guangzhou, and Wellington use bounded seven-day empirical zero-margin WU/METAR evidence instead of remaining excluded until the slower WU update."}
     tests/test_day0_obs_fastlane_optionbc.py: {created: "2026-06-12", last_used: "2026-07-24", note: "Day0 METAR/HKO source-clock scheduling, conditional HKO validator commit coupling, isolated executor lanes, bounded commit retry, commit-before-wake ordering, and exact-station monotone WU-context strengthening."}
     tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-07-16"}
-    tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
+    tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-07-27", note: "Hard-fact exit shares the measured per-city METAR margin with the fast probability lane. Wellington's bounded seven-day zero-margin measurement triggers a dead-bin exit at the absorbing boundary while an unmeasured Ankara remains excluded fail-closed."}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
     tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-07-24"}
     tests/test_day0_window.py: {created: "2026-04-01", last_used: "2026-07-24", note: "Causal remaining-window selection excludes an hourly grid point already observed at the exact boundary while retaining the terminal sub-hour fallback."}

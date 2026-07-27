@@ -1192,6 +1192,31 @@ class TestEmpiricalThresholds:
         assert source.station_id == station_id
         assert source.margin_units == pytest.approx(0.0)
 
+    def test_recent_measurements_match_city_contract_and_record_window(self):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        divergence = json.loads(
+            (root / "config" / "wu_metar_divergence.json").read_text()
+        )["cities"]
+        cities = {
+            row["name"]: row
+            for row in json.loads((root / "config" / "cities.json").read_text())["cities"]
+        }
+
+        for city_name in ("Beijing", "Guangzhou", "Wellington"):
+            measurement = divergence[city_name]
+            city = cities[city_name]
+            assert measurement["station_id"] == city["wu_station"]
+            assert measurement["unit"] == city["unit"]
+            assert (city.get("settlement_source_type") or "wu_icao") == "wu_icao"
+            assert measurement["matched_pairs"] >= 100
+            assert measurement["measurement_window_days"] == 7
+            assert measurement["measurement_window"] == [
+                "2026-07-20T07:30:13.105666+00:00",
+                "2026-07-27T07:30:13.105666+00:00",
+            ]
+
     def test_unmeasured_city_falls_back_to_conservative_default(self):
         from src.data.day0_oracle_anomaly import (
             DIVERGENCE_THRESHOLD,
