@@ -1023,10 +1023,32 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
     conn.commit()
 
     phase_transactions = []
+    gate_depth = 0
+    gate_owners = []
+
+    class _WorldWriteGate:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def __enter__(self):
+            nonlocal gate_depth
+            gate_depth += 1
+            gate_owners.append(self.owner)
+
+        def __exit__(self, exc_type, exc, tb):
+            nonlocal gate_depth
+            gate_depth -= 1
+
+    class _UserReader:
+        def poll(self, *, max_messages):
+            phase_transactions.append(("user_poll", conn.in_transaction, gate_depth))
+            return []
 
     class _Reader:
         def reconcile(self, pending):
-            phase_transactions.append(("external_reconcile", conn.in_transaction))
+            phase_transactions.append(
+                ("external_reconcile", conn.in_transaction, gate_depth)
+            )
             return {
                 "event_id": "event-1",
                 "final_intent_id": "intent-1",
@@ -1037,7 +1059,9 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
             }
 
     def _confirmed_phase(phase_conn, *, now):
-        phase_transactions.append(("confirmed_scan", phase_conn.in_transaction))
+        phase_transactions.append(
+            ("confirmed_scan", phase_conn.in_transaction, gate_depth)
+        )
         phase_conn.execute(
             "UPDATE edli_live_order_projection SET updated_at = updated_at WHERE aggregate_id = ?",
             ("event-1:intent-1",),
@@ -1045,7 +1069,9 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
         return 0
 
     def _rest_phase(phase_conn, *, now):
-        phase_transactions.append(("rest_scan", phase_conn.in_transaction))
+        phase_transactions.append(
+            ("rest_scan", phase_conn.in_transaction, gate_depth)
+        )
         return 0
 
     monkeypatch.setattr(
@@ -1060,7 +1086,13 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
             }
         },
     )
+    monkeypatch.setattr(main, "_edli_user_channel_reader", lambda _cfg: _UserReader())
     monkeypatch.setattr(main, "_edli_venue_reconcile_reader", lambda _cfg: _Reader())
+    monkeypatch.setattr(
+        main,
+        "_edli_price_channel_world_write_gate",
+        lambda *, owner: _WorldWriteGate(owner),
+    )
     monkeypatch.setattr(
         _state_db,
         "get_world_connection_with_trades_required",
@@ -1083,10 +1115,16 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
     main._edli_user_channel_reconcile_cycle()
 
     assert phase_transactions == [
-        ("external_reconcile", False),
-        ("confirmed_scan", False),
-        ("rest_scan", False),
+        ("user_poll", False, 0),
+        ("external_reconcile", False, 0),
+        ("confirmed_scan", False, 1),
+        ("rest_scan", False, 1),
     ]
+    assert gate_owners == [
+        "price_channel_user_inbox",
+        "price_channel_venue_reconcile",
+    ]
+    assert gate_depth == 0
     projection = LiveOrderAggregateLedger(_conn(db_path)).get_projection("event-1:intent-1")
     assert projection.current_state == "RECONCILED"
     assert projection.pending_reconcile is False

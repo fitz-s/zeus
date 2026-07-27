@@ -1491,88 +1491,120 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
         pending_user_channel_inbox_messages,
     )
 
+    # Fetch source evidence before opening or serialising the canonical writer.
+    # The current reader is file-backed, but this boundary must also remain safe
+    # if authenticated channel polling becomes network-backed.
+    user_channel_reader = _edli_user_channel_reader(edli_cfg)
+    user_messages = tuple(user_channel_reader.poll(max_messages=max_messages))
+
     conn = get_world_connection_with_trades_required(write_class="live")
+    _bound_price_channel_sqlite_wait(conn)
     try:
         ledger = LiveOrderAggregateLedger(conn)
-        user_channel_reader = _edli_user_channel_reader(edli_cfg)
-        for message in user_channel_reader.poll(max_messages=max_messages):
-            aggregate_id = _resolve_edli_user_channel_aggregate_id(conn, message)
-            message_hash = str(message.get("message_hash") or "").strip()
-            if not message_hash:
-                raise RuntimeError("EDLI_USER_CHANNEL_MESSAGE_HASH_REQUIRED")
-            occurred_at = _parse_edli_runtime_time(message, default=now)
-            enqueue_user_channel_inbox_message(
-                conn,
-                message=message,
-                aggregate_id=aggregate_id,
-                occurred_at=occurred_at,
-                received_at=now,
-            )
-
-        for inbox_row in pending_user_channel_inbox_messages(conn, limit=max_messages):
-            message_hash = str(_row_get(inbox_row, "message_hash"))
-            aggregate_id = str(_row_get(inbox_row, "aggregate_id"))
+        with _edli_price_channel_world_write_gate(
+            owner="price_channel_user_inbox"
+        ):
             try:
-                message = inbox_row_to_user_channel_message(inbox_row)
-                occurred_at = _parse_edli_runtime_time(
-                    {"occurred_at": _row_get(inbox_row, "occurred_at")},
-                    default=now,
-                )
-                _edli_user_channel_message_not_stale(conn, aggregate_id=aggregate_id, occurred_at=occurred_at)
-                if _edli_user_channel_message_seen(conn, aggregate_id=aggregate_id, message_hash=message_hash):
-                    mark_user_channel_inbox_status(
-                        conn,
-                        message_hash=message_hash,
-                        status=INBOX_DUPLICATE,
-                        processed_at=now,
+                for message in user_messages:
+                    aggregate_id = _resolve_edli_user_channel_aggregate_id(
+                        conn, message
                     )
-                    continue
-                append_user_channel_message(
-                    ledger,
-                    aggregate_id=aggregate_id,
-                    message=message,
-                    occurred_at=occurred_at,
-                )
-                mark_user_channel_inbox_status(
-                    conn,
-                    message_hash=message_hash,
-                    status=INBOX_PROCESSED,
-                    processed_at=now,
-                )
-                message_count += 1
-                # DEFECT-1 bridge (capital recoverability): a confirmed EDLI
-                # fill must materialise a canonical position_current row so
-                # chain-reconciliation / exit-lifecycle / harvester / redeem can
-                # see it. The actual cross-DB write happens AFTER this world-conn
-                # commit, on a trade-connection-with-world-attached (INV-37) —
-                # here we only record which aggregates received a trade message.
-                _message_kind = str(message.get("message_type") or message.get("type") or "").lower()
-                if _message_kind == "trade":
-                    _edli_fill_bridge_aggregate_ids.add(aggregate_id)
-            except RuntimeError as exc:
-                status = INBOX_STALE_REJECTED if "STALE" in str(exc) else INBOX_FAILED
-                mark_user_channel_inbox_status(
-                    conn,
-                    message_hash=message_hash,
-                    status=status,
-                    processed_at=now,
-                    error=str(exc),
-                )
-            except Exception as exc:
-                mark_user_channel_inbox_status(
-                    conn,
-                    message_hash=message_hash,
-                    status=INBOX_FAILED,
-                    processed_at=now,
-                    error=str(exc),
-                )
+                    message_hash = str(message.get("message_hash") or "").strip()
+                    if not message_hash:
+                        raise RuntimeError(
+                            "EDLI_USER_CHANNEL_MESSAGE_HASH_REQUIRED"
+                        )
+                    occurred_at = _parse_edli_runtime_time(message, default=now)
+                    enqueue_user_channel_inbox_message(
+                        conn,
+                        message=message,
+                        aggregate_id=aggregate_id,
+                        occurred_at=occurred_at,
+                        received_at=now,
+                    )
 
-        # User-channel events are already durable truth. Release the world WAL
-        # writer before reading external reconcile evidence or running the
-        # heavier authenticated-trade scans below.
-        conn.commit()
+                for inbox_row in pending_user_channel_inbox_messages(
+                    conn, limit=max_messages
+                ):
+                    message_hash = str(_row_get(inbox_row, "message_hash"))
+                    aggregate_id = str(_row_get(inbox_row, "aggregate_id"))
+                    try:
+                        message = inbox_row_to_user_channel_message(inbox_row)
+                        occurred_at = _parse_edli_runtime_time(
+                            {"occurred_at": _row_get(inbox_row, "occurred_at")},
+                            default=now,
+                        )
+                        _edli_user_channel_message_not_stale(
+                            conn,
+                            aggregate_id=aggregate_id,
+                            occurred_at=occurred_at,
+                        )
+                        if _edli_user_channel_message_seen(
+                            conn,
+                            aggregate_id=aggregate_id,
+                            message_hash=message_hash,
+                        ):
+                            mark_user_channel_inbox_status(
+                                conn,
+                                message_hash=message_hash,
+                                status=INBOX_DUPLICATE,
+                                processed_at=now,
+                            )
+                            continue
+                        append_user_channel_message(
+                            ledger,
+                            aggregate_id=aggregate_id,
+                            message=message,
+                            occurred_at=occurred_at,
+                        )
+                        mark_user_channel_inbox_status(
+                            conn,
+                            message_hash=message_hash,
+                            status=INBOX_PROCESSED,
+                            processed_at=now,
+                        )
+                        message_count += 1
+                        # DEFECT-1 bridge (capital recoverability): a confirmed
+                        # EDLI fill must materialise a canonical position_current
+                        # row. Record the work set here; the cross-DB bridge below
+                        # executes after the world commit.
+                        _message_kind = str(
+                            message.get("message_type")
+                            or message.get("type")
+                            or ""
+                        ).lower()
+                        if _message_kind == "trade":
+                            _edli_fill_bridge_aggregate_ids.add(aggregate_id)
+                    except RuntimeError as exc:
+                        status = (
+                            INBOX_STALE_REJECTED
+                            if "STALE" in str(exc)
+                            else INBOX_FAILED
+                        )
+                        mark_user_channel_inbox_status(
+                            conn,
+                            message_hash=message_hash,
+                            status=status,
+                            processed_at=now,
+                            error=str(exc),
+                        )
+                    except Exception as exc:
+                        mark_user_channel_inbox_status(
+                            conn,
+                            message_hash=message_hash,
+                            status=INBOX_FAILED,
+                            processed_at=now,
+                            error=str(exc),
+                        )
 
-        pending_rows = _edli_pending_reconcile_aggregates(conn, limit=pending_limit)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+
+        pending_rows = _edli_pending_reconcile_aggregates(
+            conn, limit=pending_limit
+        )
         reconcile_facts = []
         if pending_rows:
             try:
@@ -1598,57 +1630,78 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                     if fact:
                         reconcile_facts.append((pending, fact))
 
-        for pending, fact in reconcile_facts:
-            aggregate_id = str(_row_get(pending, "aggregate_id"))
-            current = conn.execute(
-                "SELECT pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
-                (aggregate_id,),
-            ).fetchone()
-            if current is None or not bool(_row_get(current, "pending_reconcile")):
-                continue
+        with _edli_price_channel_world_write_gate(
+            owner="price_channel_venue_reconcile"
+        ):
             try:
-                append_reconciled(
-                    ledger,
-                    aggregate_id=aggregate_id,
-                    event_id=str(fact.get("event_id") or _row_get(pending, "event_id")),
-                    final_intent_id=str(
-                        fact.get("final_intent_id") or _row_get(pending, "final_intent_id")
-                    ),
-                    source=str(fact.get("source") or "venue_reconcile"),
-                    pending_reconcile=_parse_edli_runtime_bool(
-                        fact.get("pending_reconcile"), default=False
-                    ),
-                    occurred_at=_parse_edli_runtime_time(fact, default=now),
-                    payload=(
-                        fact.get("payload")
-                        if isinstance(fact.get("payload"), dict)
-                        else None
-                    ),
-                )
-            except (
-                LiveOrderAggregateError,
-                LiveOrderReconcileError,
-                TypeError,
-                ValueError,
-            ) as exc:
-                logger.warning(
-                    "EDLI venue reconcile fact rejected aggregate=%s: %s",
-                    aggregate_id,
-                    exc,
-                )
-                continue
-            reconcile_count += 1
-        conn.commit()
+                for pending, fact in reconcile_facts:
+                    aggregate_id = str(_row_get(pending, "aggregate_id"))
+                    current = conn.execute(
+                        "SELECT pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+                        (aggregate_id,),
+                    ).fetchone()
+                    if current is None or not bool(
+                        _row_get(current, "pending_reconcile")
+                    ):
+                        continue
+                    try:
+                        append_reconciled(
+                            ledger,
+                            aggregate_id=aggregate_id,
+                            event_id=str(
+                                fact.get("event_id")
+                                or _row_get(pending, "event_id")
+                            ),
+                            final_intent_id=str(
+                                fact.get("final_intent_id")
+                                or _row_get(pending, "final_intent_id")
+                            ),
+                            source=str(
+                                fact.get("source") or "venue_reconcile"
+                            ),
+                            pending_reconcile=_parse_edli_runtime_bool(
+                                fact.get("pending_reconcile"), default=False
+                            ),
+                            occurred_at=_parse_edli_runtime_time(
+                                fact, default=now
+                            ),
+                            payload=(
+                                fact.get("payload")
+                                if isinstance(fact.get("payload"), dict)
+                                else None
+                            ),
+                        )
+                    except (
+                        LiveOrderAggregateError,
+                        LiveOrderReconcileError,
+                        TypeError,
+                        ValueError,
+                    ) as exc:
+                        logger.warning(
+                            "EDLI venue reconcile fact rejected aggregate=%s: %s",
+                            aggregate_id,
+                            exc,
+                        )
+                        continue
+                    reconcile_count += 1
+                conn.commit()
 
-        from src.events.edli_trade_fact_bridge import (
-            append_confirmed_trade_facts_to_edli,
-            append_rest_filled_orphan_trade_facts_to_edli,
-        )
+                from src.events.edli_trade_fact_bridge import (
+                    append_confirmed_trade_facts_to_edli,
+                    append_rest_filled_orphan_trade_facts_to_edli,
+                )
 
-        reconcile_count += append_confirmed_trade_facts_to_edli(conn, now=now)
-        conn.commit()
-        reconcile_count += append_rest_filled_orphan_trade_facts_to_edli(conn, now=now)
-        conn.commit()
+                reconcile_count += append_confirmed_trade_facts_to_edli(
+                    conn, now=now
+                )
+                conn.commit()
+                reconcile_count += append_rest_filled_orphan_trade_facts_to_edli(
+                    conn, now=now
+                )
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
     finally:
         conn.close()
 
