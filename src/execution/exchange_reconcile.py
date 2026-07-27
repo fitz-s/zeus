@@ -5231,13 +5231,26 @@ def _ensure_exit_fill_position_event(
     # returns None and realized_pnl_usd is booked NULL forever.
     from src.state.close_economics import compute_realized_pnl_usd
 
-    close_shares = _positive_decimal_or_none(current.get("shares")) or shares_dec
-    cost_basis = _positive_decimal_or_none(current.get("cost_basis_usd")) or Decimal("0")
+    current_shares = _positive_decimal_or_none(current.get("shares"))
+    current_cost_basis = _positive_decimal_or_none(current.get("cost_basis_usd"))
     entry_price_guard = _positive_decimal_or_none(current.get("entry_price"))
+    # The chain projection may already contain only the post-fill residual.
+    # Grade the venue fill itself, allocating the residual's preserved unit
+    # cost to the exact filled shares instead of treating dust as the sale.
+    if (
+        current_shares is not None
+        and current_cost_basis is not None
+        and current_cost_basis >= 0
+    ):
+        filled_cost_basis = current_cost_basis / current_shares * shares_dec
+    elif entry_price_guard is not None:
+        filled_cost_basis = entry_price_guard * shares_dec
+    else:
+        filled_cost_basis = Decimal("0")
     realized_pnl = compute_realized_pnl_usd(
-        shares=float(close_shares),
+        shares=float(shares_dec),
         exit_price=float(exit_price_dec),
-        cost_basis_usd=float(cost_basis),
+        cost_basis_usd=float(filled_cost_basis),
         entry_price=float(entry_price_guard) if entry_price_guard is not None else 0.0,
     )
     position = SimpleNamespace(

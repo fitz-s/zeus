@@ -16906,6 +16906,99 @@ class TestRecoveryResolutionTable:
             "terminal_exec_status": "filled",
         }
 
+    def test_exit_fill_books_filled_economics_after_chain_reduces_position_to_dust(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=28.81818, price=0.10)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 0.00818,
+                   chain_shares = 0.00818,
+                   cost_basis_usd = 0.000818,
+                   entry_price = 0.10,
+                   order_status = 'sell_pending_confirmation',
+                   updated_at = '2026-04-26T00:06:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=28.81,
+            price=0.12,
+            token_id="tok-001",
+        )
+        _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit-001",
+            state="MATCHED",
+            filled_size="28.81",
+            fill_price="0.12",
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            state="MATCHED",
+            matched_size="28.81",
+            remaining_size="0",
+        )
+        before = conn.execute(
+            """
+            SELECT shares, cost_basis_usd, entry_price
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(before) == {
+            "shares": pytest.approx(0.00818),
+            "cost_basis_usd": pytest.approx(0.000818),
+            "entry_price": pytest.approx(0.10),
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["completed_partial_order_facts"]["advanced"] == 1
+        current = conn.execute(
+            """
+            SELECT phase, realized_pnl_usd, exit_price
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "economically_closed",
+            "realized_pnl_usd": pytest.approx(0.58),
+            "exit_price": pytest.approx(0.12),
+        }
+        close_payload = json.loads(
+            conn.execute(
+                """
+                SELECT payload_json
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                   AND event_type = 'EXIT_ORDER_FILLED'
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """
+            ).fetchone()["payload_json"]
+        )
+        assert close_payload["pnl"] == pytest.approx(0.58)
+
     def test_partial_exit_uses_canonical_order_truth_over_later_weaker_fact(
         self,
         conn,

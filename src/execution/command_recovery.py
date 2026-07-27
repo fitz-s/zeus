@@ -8555,13 +8555,29 @@ def _append_exit_filled_projection(
     # same close-share count set as "shares" below.
     from src.state.close_economics import compute_realized_pnl_usd
 
-    close_shares = _positive_decimal_or_none(current.get("shares")) or filled_size
-    cost_basis = _decimal_or_none(current.get("cost_basis_usd")) or Decimal("0")
+    current_shares = _positive_decimal_or_none(current.get("shares"))
+    current_cost_basis = _decimal_or_none(current.get("cost_basis_usd"))
     entry_price_guard = _decimal_or_none(current.get("entry_price"))
+    # Chain reconciliation can observe the post-fill residual before command
+    # recovery projects the earlier venue fill.  In that ordering,
+    # position_current carries only dust shares and dust cost basis; those
+    # residual economics must not grade the completed fill.  The residual
+    # still preserves the position's unit cost, so allocate that unit cost to
+    # the exact filled shares.  Normal ordering is algebraically unchanged.
+    if (
+        current_shares is not None
+        and current_cost_basis is not None
+        and current_cost_basis >= 0
+    ):
+        filled_cost_basis = current_cost_basis / current_shares * filled_size
+    elif entry_price_guard is not None:
+        filled_cost_basis = entry_price_guard * filled_size
+    else:
+        filled_cost_basis = Decimal("0")
     realized_pnl = compute_realized_pnl_usd(
-        shares=float(close_shares),
+        shares=float(filled_size),
         exit_price=float(fill_price),
-        cost_basis_usd=float(cost_basis),
+        cost_basis_usd=float(filled_cost_basis),
         entry_price=float(entry_price_guard) if entry_price_guard is not None else 0.0,
     )
 
