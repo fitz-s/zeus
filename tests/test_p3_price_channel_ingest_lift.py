@@ -2208,18 +2208,68 @@ def test_position_fill_redecision_uses_latest_partial_fill_fact():
     assert rows[0]["trade_fact_id"] == 42
 
 
+def test_position_fill_without_causal_carrier_is_not_rebuilt_every_cycle(
+    monkeypatch,
+):
+    from src.events.price_channel_redecision_router import (
+        _edli_position_fill_redecision_events,
+    )
+    from src.events.triggers import forecast_snapshot_ready as trigger_module
+
+    class EmptyTrigger:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def build_committed_snapshot_events(self, **_kwargs):
+            return []
+
+    monkeypatch.setattr(
+        trigger_module,
+        "ForecastSnapshotReadyTrigger",
+        EmptyTrigger,
+    )
+    monkeypatch.setattr(
+        trigger_module,
+        "executable_forecast_live_eligible_reader",
+        lambda _conn: None,
+    )
+    world, trade, forecasts = _position_fill_redecision_test_dbs()
+
+    events, evaluated, event_facts = _edli_position_fill_redecision_events(
+        world,
+        trade,
+        forecasts,
+    )
+    assert events == []
+    assert evaluated == {41}
+    assert event_facts == set()
+
+    events, evaluated_again, event_facts_again = (
+        _edli_position_fill_redecision_events(
+            world,
+            trade,
+            forecasts,
+            seen_trade_fact_ids=evaluated,
+        )
+    )
+    assert events == []
+    assert evaluated_again == set()
+    assert event_facts_again == set()
+
+
 def test_position_fill_redecision_reads_before_world_write_and_degrades_health():
     from src.events import price_channel_redecision_router as router
     from src.ingest import price_channel_ingest as lane
 
     cycle_src = inspect.getsource(router._edli_position_fill_redecision_cycle)
     read_build = cycle_src.index(
-        "events, attempted_fact_ids = _edli_position_fill_redecision_events"
+        ") = _edli_position_fill_redecision_events"
     )
     world_write = cycle_src.index(
         "with _edli_price_channel_world_write_connection"
     )
     assert read_build < world_write
+    assert "(evaluated_fact_ids - event_fact_ids) | acknowledged_fact_ids" in cycle_src
 
     reconcile_src = inspect.getsource(lane._edli_user_channel_reconcile_cycle)
     assert '"scheduler_failed": bool(fill_redecision_error)' in reconcile_src

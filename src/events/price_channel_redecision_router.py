@@ -621,13 +621,16 @@ def _edli_position_fill_redecision_events(
     *,
     fill_rows: list[dict[str, str | int]] | None = None,
     seen_trade_fact_ids: set[int] | None = None,
-) -> tuple[list, set[int]]:
+) -> tuple[list, set[int], set[int]]:
     """Build deterministic family redecisions after confirmed fill projection.
 
     Each event is keyed by the canonical trade-fact ID and uses that fact's
     ingestion time as its causal decision boundary. Retrying the same fact
     therefore rebuilds the same event ID; ``INSERT OR IGNORE`` is the durable
-    acknowledgement, with no scan of the multi-million-row world event log.
+    acknowledgement, with no scan of the multi-million-row world event log. A
+    fact with no carrier available at that boundary is evaluated once per
+    process; a later forecast becomes its own normal source-clock wake rather
+    than being backdated into this fill event.
     """
 
     rows = (
@@ -636,11 +639,11 @@ def _edli_position_fill_redecision_events(
         else _edli_open_position_fill_rows(trade_conn)
     )
     if not rows:
-        return [], set()
+        return [], set(), set()
     seen = {int(value) for value in (seen_trade_fact_ids or set())}
     rows = [row for row in rows if int(row["trade_fact_id"]) not in seen]
     if not rows:
-        return [], set()
+        return [], set(), set()
 
     from src.events.event_writer import EventWriter
     from src.events.triggers.forecast_snapshot_ready import (
@@ -655,7 +658,8 @@ def _edli_position_fill_redecision_events(
         ),
     )
     out = []
-    attempted_fact_ids: set[int] = set()
+    evaluated_fact_ids: set[int] = set()
+    event_fact_ids: set[int] = set()
     for row in rows:
         family = (
             str(row["city"]),
@@ -666,8 +670,11 @@ def _edli_position_fill_redecision_events(
             decision_time = datetime.fromisoformat(
                 str(row["ingested_at"]).replace("Z", "+00:00")
             )
-        except Exception:
-            continue
+        except Exception as exc:
+            raise ValueError(
+                "position-fill trade fact has invalid ingested_at: "
+                f"{int(row['trade_fact_id'])}"
+            ) from exc
         if decision_time.tzinfo is None:
             decision_time = decision_time.replace(tzinfo=timezone.utc)
         decision_time = decision_time.astimezone(timezone.utc)
@@ -682,6 +689,7 @@ def _edli_position_fill_redecision_events(
             restrict_to_families={family},
             phase_filter_exempt_families={family},
         )
+        evaluated_fact_ids.add(int(row["trade_fact_id"]))
         for event in events:
             out.append(
                 _edli_redecision_event_with_position_fill_origin(
@@ -689,8 +697,8 @@ def _edli_position_fill_redecision_events(
                     fill_row=row,
                 )
             )
-            attempted_fact_ids.add(int(row["trade_fact_id"]))
-    return out, attempted_fact_ids
+            event_fact_ids.add(int(row["trade_fact_id"]))
+    return out, evaluated_fact_ids, event_fact_ids
 
 
 def _edli_write_position_fill_redecision_event_ids(
@@ -735,7 +743,11 @@ def _edli_emit_position_fill_redecisions(
 ) -> tuple[tuple[str, ...], set[int], set[int]]:
     rows = _edli_open_position_fill_rows(trade_conn)
     current_fact_ids = {int(row["trade_fact_id"]) for row in rows}
-    events, attempted_fact_ids = _edli_position_fill_redecision_events(
+    (
+        events,
+        _evaluated_fact_ids,
+        event_fact_ids,
+    ) = _edli_position_fill_redecision_events(
         world_conn,
         trade_conn,
         forecasts_conn,
@@ -747,7 +759,7 @@ def _edli_emit_position_fill_redecisions(
         world_conn,
         events,
     )
-    if not acknowledged_fact_ids.issubset(attempted_fact_ids):
+    if not acknowledged_fact_ids.issubset(event_fact_ids):
         raise RuntimeError("position-fill event acknowledged an unattempted trade fact")
     return emitted, acknowledged_fact_ids, current_fact_ids
 
@@ -782,7 +794,11 @@ def _edli_position_fill_redecision_cycle() -> int:
         )
         rows = _edli_open_position_fill_rows(trade_read)
         current_fact_ids = {int(row["trade_fact_id"]) for row in rows}
-        events, attempted_fact_ids = _edli_position_fill_redecision_events(
+        (
+            events,
+            evaluated_fact_ids,
+            event_fact_ids,
+        ) = _edli_position_fill_redecision_events(
             world_read,
             trade_read,
             forecasts_read,
@@ -801,7 +817,7 @@ def _edli_position_fill_redecision_cycle() -> int:
             world_write,
             events,
         )
-        if not acknowledged_fact_ids.issubset(attempted_fact_ids):
+        if not acknowledged_fact_ids.issubset(event_fact_ids):
             raise RuntimeError(
                 "position-fill event acknowledged an unattempted trade fact"
             )
@@ -810,8 +826,11 @@ def _edli_position_fill_redecision_cycle() -> int:
         _EDLI_POSITION_FILL_REDECISION_SEEN_FACT_IDS.intersection_update(
             current_fact_ids
         )
+        # No-carrier facts must not re-run forecast-heavy historical selection
+        # every minute. They are process-local only (restart re-audits them);
+        # facts that built an event advance solely after exact durable ack.
         _EDLI_POSITION_FILL_REDECISION_SEEN_FACT_IDS.update(
-            acknowledged_fact_ids
+            (evaluated_fact_ids - event_fact_ids) | acknowledged_fact_ids
         )
     if emitted_event_ids:
         from src.runtime.reactor_wake import publish_reactor_wake
