@@ -581,6 +581,10 @@ def _verify_day0_probability_payload_authority(
 # fails open, exactly like the rest of this Day0 verification cluster.
 _DAY0_BIN_LABEL_BELOW_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\s+or\s+(?:below|lower)", re.I)
 _DAY0_BIN_LABEL_ABOVE_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\s+or\s+(?:higher|above|more)", re.I)
+_DAY0_BIN_LABEL_RANGE_RE = re.compile(
+    r"(-?\d+\.?\d*)\s*[-–—]\s*(-?\d+\.?\d*)\s*°[FfCc]\b",
+    re.I,
+)
 _DAY0_BIN_LABEL_POINT_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\b")
 DAY0_IMPOSSIBLE_BIN_Q_TOLERANCE = 1e-9
 
@@ -600,6 +604,10 @@ def _day0_bin_label_native_bounds(label: object) -> tuple[float | None, float | 
     m = _DAY0_BIN_LABEL_ABOVE_RE.search(text)
     if m:
         return (float(m.group(1)), None)
+    m = _DAY0_BIN_LABEL_RANGE_RE.search(text)
+    if m:
+        low, high = float(m.group(1)), float(m.group(2))
+        return (low, high) if low <= high else None
     m = _DAY0_BIN_LABEL_POINT_RE.search(text)
     if m:
         value = float(m.group(1))

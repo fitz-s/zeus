@@ -1,5 +1,5 @@
 # Created: 2026-06-28
-# Last reused or audited: 2026-07-24
+# Last reused or audited: 2026-07-27
 # Authority basis: midstream belief-freeze incident 2026-06-28 — the served daily-HIGH
 #   belief (load_replacement_belief, the K1 single held-position belief authority) reads
 #   forecast_posteriors.q_json computed the DAY BEFORE the target day and applies NO
@@ -87,6 +87,42 @@ def _below_or_at(q: dict[str, float], threshold_label_value: int) -> float:
 
 
 class TestApplyObservedFloorHigh:
+    def test_fahrenheit_range_above_observed_high_remains_possible(self):
+        """Production regression: ``100-101°F`` is a range, not the point ``-101°F``."""
+        q = {
+            "Will the highest temperature in Dallas be 95°F or below on July 27?": 0.2,
+            "Will the highest temperature in Dallas be between 96-97°F on July 27?": 0.3,
+            "Will the highest temperature in Dallas be between 100-101°F on July 27?": 0.4,
+            "Will the highest temperature in Dallas be 102°F or higher on July 27?": 0.1,
+        }
+
+        floored = apply_observed_floor_to_q_vector(
+            q,
+            observed_extreme_native=94.0,
+            metric="high",
+            rounding_rule="wmo_half_up",
+        )
+
+        assert floored == q
+
+    def test_fahrenheit_range_below_observed_high_transports_to_containing_range(self):
+        q = {
+            "Will the highest temperature in Dallas be between 92-93°F on July 27?": 0.2,
+            "Will the highest temperature in Dallas be between 94-95°F on July 27?": 0.3,
+            "Will the highest temperature in Dallas be 96°F or higher on July 27?": 0.5,
+        }
+
+        floored = apply_observed_floor_to_q_vector(
+            q,
+            observed_extreme_native=94.0,
+            metric="high",
+            rounding_rule="wmo_half_up",
+        )
+
+        assert floored[next(k for k in q if "92-93°F" in k)] == 0.0
+        assert floored[next(k for k in q if "94-95°F" in k)] == pytest.approx(0.5)
+        assert floored[next(k for k in q if "higher" in k)] == pytest.approx(0.5)
+
     def test_beijing_observed_33_zeros_all_bins_below_33(self):
         """Observed running-high 33 makes every bin whose preimage upper <= 33-0.5
         impossible: 27-or-below..32 all go to 0.0."""

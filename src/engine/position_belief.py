@@ -410,6 +410,10 @@ def _predictive_mean_yes(
 
 _LABEL_BIN_BELOW_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\s+or\s+(?:below|lower)", re.I)
 _LABEL_BIN_ABOVE_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\s+or\s+(?:higher|above|more)", re.I)
+_LABEL_BIN_RANGE_RE = re.compile(
+    r"(-?\d+\.?\d*)\s*[-–—]\s*(-?\d+\.?\d*)\s*°[FfCc]\b",
+    re.I,
+)
 _LABEL_BIN_POINT_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\b")
 
 
@@ -433,6 +437,7 @@ def _bin_label_native_bounds(label: str) -> tuple[float | None, float | None] | 
     Returns ``(bin_low, bin_high)`` where ``None`` denotes an open shoulder:
       * ``"X°C or below"`` -> ``(None, X)``    (settles to a value rounding to <= X)
       * ``"X°C or higher"`` -> ``(X, None)``   (settles to a value rounding to >= X)
+      * ``"X-Y°F"`` -> ``(X, Y)``              (settles to either inclusive integer)
       * ``"X°C"`` (point bin) -> ``(X, X)``
     Returns ``None`` when the label matches none of the canonical shapes (fail-closed:
     an unparseable bin is left untouched by the floor). The shoulder forms are tested
@@ -445,6 +450,10 @@ def _bin_label_native_bounds(label: str) -> tuple[float | None, float | None] | 
     m = _LABEL_BIN_ABOVE_RE.search(text)
     if m:
         return (float(m.group(1)), None)
+    m = _LABEL_BIN_RANGE_RE.search(text)
+    if m:
+        low, high = float(m.group(1)), float(m.group(2))
+        return (low, high) if low <= high else None
     m = _LABEL_BIN_POINT_RE.search(text)
     if m:
         value = float(m.group(1))

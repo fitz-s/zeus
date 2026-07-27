@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-25; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-05-25; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: Prove actionable trade certificates bind every live probability and execution parent.
 # Reuse: Re-audit canonical parent identity and selected-leg probability closure before live use.
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
@@ -578,6 +578,34 @@ def test_actionable_day0_reproof_accepts_possible_bin():
     )
 
     verify_actionable_trade(action, parents)
+
+
+def test_actionable_day0_reproof_accepts_fahrenheit_range_above_observed_high():
+    """Production regression: Dallas 100-101°F must not be parsed as point -101°F."""
+    parents, action = _day0_impossible_buy_no_graph(
+        q_live=0.708,
+        bin_label=(
+            "Will the highest temperature in Dallas be between 100-101°F on July 27?"
+        ),
+        city="Dallas",
+        obs_extreme=94.0,
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_day0_reproof_rejects_fahrenheit_range_below_observed_high():
+    parents, action = _day0_impossible_buy_no_graph(
+        q_live=0.9,
+        bin_label=(
+            "Will the highest temperature in Dallas be between 92-93°F on July 27?"
+        ),
+        city="Dallas",
+        obs_extreme=94.0,
+    )
+
+    with pytest.raises(CertificateVerificationError, match="bin=\\[91.5,93.5\\)"):
+        verify_actionable_trade(action, parents)
 
 
 def test_actionable_day0_reproof_rejects_impossible_bin_nonzero_q():
