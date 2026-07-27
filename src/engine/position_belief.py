@@ -71,14 +71,6 @@ BELIEF_SOURCE_TABLE = "forecast_posteriors"
 SELECTED_METHOD_REPLACEMENT_POSTERIOR = "replacement_posterior"
 POSTERIOR_PREDICTIVE_MEAN = "POSTERIOR_PREDICTIVE_MEAN"
 
-_CURRENT_SAMPLE_BASES = frozenset(
-    {
-        "global_simplex_v1",
-        "global_simplex_current_finite_moment_evidence_v3",
-        "served_rho_mixed_simplex_v2",
-    }
-)
-
 _WS_RE = re.compile(r"\s+")
 
 
@@ -90,9 +82,9 @@ def _normalize_label(label: str) -> str:
 class ReplacementBelief:
     """One held-position belief read from the replacement posterior authority.
 
-    ``held_side_prob`` is the fixed-action posterior predictive mean used by
-    BUY/SELL/HOLD/CASH. ``q_yes_bin`` remains the central-scenario point carried
-    by ``q_json``; it is provenance, not an action objective.
+    ``held_side_prob`` is the fixed-action posterior predictive mean carried by
+    ``q_json`` and used by BUY/SELL/HOLD/CASH. Bootstrap samples remain
+    confidence evidence; their mean is not a second action probability.
     """
 
     held_side_prob: float
@@ -335,51 +327,6 @@ def _match_bin(q: Mapping[str, object], bin_label: str) -> tuple[str, float] | N
             except (TypeError, ValueError):
                 return None
     return None
-
-
-def _predictive_mean_yes(
-    provenance: Mapping[str, object],
-    *,
-    bin_key: str,
-) -> float | None:
-    """Return the current fixed-action YES mean, or fail closed.
-
-    The global auction accepts these same producer bases. A city-calibrated row
-    is actionable only when its samples are already the served rho-mixed
-    simplex; consuming the pre-mix draws would recreate a second probability
-    authority for held positions.
-    """
-    basis = str(provenance.get("q_bootstrap_samples_basis") or "").strip()
-    try:
-        city_rho = float(provenance.get("city_calibration_rho") or 0.0)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(city_rho):
-        return None
-    city_mix_applied = bool(
-        provenance.get("city_calibration_layer_applied") or city_rho > 0.0
-    )
-    if (
-        basis not in _CURRENT_SAMPLE_BASES
-        or (city_mix_applied and basis != "served_rho_mixed_simplex_v2")
-    ):
-        return None
-    samples_by_bin = provenance.get("q_bootstrap_samples_by_bin")
-    if not isinstance(samples_by_bin, Mapping):
-        return None
-    raw_samples = samples_by_bin.get(bin_key)
-    if not isinstance(raw_samples, (list, tuple)) or len(raw_samples) < 2:
-        return None
-    samples: list[float] = []
-    for raw in raw_samples:
-        try:
-            sample = float(raw)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(sample) or not 0.0 <= sample <= 1.0:
-            return None
-        samples.append(sample)
-    return math.fsum(samples) / len(samples)
 
 
 # ---------------------------------------------------------------------------
@@ -895,15 +842,7 @@ def load_replacement_belief(
     if raw_input_lag_reason:
         fresh = False
         freshness_basis = _raw_input_lag_basis(raw_input_lag_reason) or "replacement_raw_input_hwm"
-    if not isinstance(provenance, Mapping):
-        return None
-    q_yes_action = _predictive_mean_yes(provenance, bin_key=bin_key)
-    if (
-        q_yes_action is None
-        or not q_yes_lcb <= q_yes_action <= q_yes_ucb
-    ):
-        return None
-    held = q_yes_action if direction == "buy_yes" else 1.0 - q_yes_action
+    held = q_yes if direction == "buy_yes" else 1.0 - q_yes
     held_lcb = q_yes_lcb if direction == "buy_yes" else 1.0 - q_yes_ucb
     held_ucb = q_yes_ucb if direction == "buy_yes" else 1.0 - q_yes_lcb
     return ReplacementBelief(

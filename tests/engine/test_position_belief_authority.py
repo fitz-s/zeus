@@ -7,6 +7,8 @@
 #   2026-06-12 update: regime law U1/U2 + Denver incident (stale 0.79 masked as
 #   fresh while market 0.22) — replacement-authority positions must FAULT
 #   (BELIEF_AUTHORITY_FAULT) + reseed, never substitute the legacy ENS belief.
+#   2026-07-27 update: fixed-action held probability is the persisted q_json
+#   point; confidence-sample means must not create a second exit probability.
 """ANTIBODY: held-position belief comes from the SAME authority entry used.
 
 The disease: entry decisions read ``forecast_posteriors`` (replacement chain)
@@ -243,7 +245,7 @@ class TestLoadReplacementBelief:
         assert belief.held_side_lcb == pytest.approx(0.18)
         assert belief.held_side_ucb == pytest.approx(0.31)
 
-    def test_held_probability_uses_predictive_mean_not_central_point(
+    def test_held_probability_uses_persisted_point_not_confidence_sample_mean(
         self, forecasts_db
     ):
         _insert(
@@ -260,7 +262,7 @@ class TestLoadReplacementBelief:
 
         assert belief is not None
         assert belief.q_yes_bin == pytest.approx(0.1475)
-        assert belief.held_side_prob == pytest.approx(0.90)
+        assert belief.held_side_prob == pytest.approx(1.0 - 0.1475)
         assert belief.probability_functional == POSTERIOR_PREDICTIVE_MEAN
 
     @pytest.mark.parametrize(
@@ -270,7 +272,7 @@ class TestLoadReplacementBelief:
             ({BIN: [0.10, 0.20]}, "unknown_probability_world"),
         ],
     )
-    def test_missing_or_unrecognized_action_samples_fail_closed(
+    def test_confidence_samples_do_not_define_action_probability(
         self, forecasts_db, q_samples, q_samples_basis
     ):
         _insert(
@@ -284,7 +286,10 @@ class TestLoadReplacementBelief:
             q_samples_basis=q_samples_basis,
         )
 
-        assert _load(forecasts_db, direction="buy_no") is None
+        belief = _load(forecasts_db, direction="buy_no")
+
+        assert belief is not None
+        assert belief.held_side_prob == pytest.approx(0.85)
 
     def test_incoherent_current_evidence_bounds_fail_closed(self, forecasts_db):
         _insert(
