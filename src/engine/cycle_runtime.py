@@ -4318,6 +4318,7 @@ def _held_monitor_urgency_rank(pos) -> int:
 def _held_monitor_schedule_key(
     pos,
     *,
+    deadline_rescue_position_id: int | None,
     dead_bin_position_ids: frozenset[int],
     selected_urgent_position_ids: frozenset[int],
     selected_coverage_position_ids: frozenset[int],
@@ -4333,6 +4334,8 @@ def _held_monitor_schedule_key(
         position_id not in structural_win_position_ids
         and _position_held_token_id(pos) in network_book_tokens
     )
+    if position_id == deadline_rescue_position_id:
+        return -4, urgency
     if position_id in selected_urgent_position_ids:
         return (-3 if position_id in dead_bin_position_ids else -2), urgency
     if has_selected_urgent:
@@ -5616,6 +5619,15 @@ def execute_monitoring_phase(
         for pos in selected_coverage_positions
     ]
 
+    deadline_rescue_position_id = next(
+        (
+            id(pos)
+            for pos in selected_urgent_positions
+            if id(pos) in dead_bin_position_ids
+        ),
+        None,
+    )
+
     # Canonical lifecycle urgency is the first ordering key.  Within the
     # pending-exit and Day0 tranches, start the network batch before consuming
     # local work: otherwise a short monitor budget can starve an urgent held
@@ -5625,6 +5637,7 @@ def execute_monitoring_phase(
         monitor_positions,
         key=lambda pos: _held_monitor_schedule_key(
             pos,
+            deadline_rescue_position_id=deadline_rescue_position_id,
             dead_bin_position_ids=dead_bin_position_ids,
             selected_urgent_position_ids=selected_urgent_position_ids,
             selected_coverage_position_ids=selected_coverage_position_ids,
@@ -5651,14 +5664,6 @@ def execute_monitoring_phase(
     )
     summary["held_monitor_budget_reserved_positions"] = len(
         budget_reserved_position_ids
-    )
-    deadline_rescue_position_id = next(
-        (
-            id(pos)
-            for pos in selected_urgent_positions
-            if id(pos) in dead_bin_position_ids
-        ),
-        None,
     )
     summary["held_monitor_local_ready_positions"] = sum(
         1

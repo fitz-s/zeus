@@ -1140,6 +1140,89 @@ def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
     assert monitor_results[0].should_exit is True
 
 
+def test_monitoring_phase_orders_rotated_dead_bin_rescue_before_selected_peer(
+    monkeypatch,
+):
+    """The one deadline rescue is reachable even when another dead bin was earlier."""
+    from src.engine import cycle_runtime
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
+
+    dead_bins = [
+        _make_position(
+            trade_id=f"rescue-order-dead-bin-{index}",
+            city="Chicago",
+            target_date="2026-07-02",
+            token_id=f"rescue-order-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(3)
+    ]
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE",
+        {
+            "dead_bin": cycle_runtime._held_monitor_stable_position_key(
+                dead_bins[1]
+            )
+        },
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda **kwargs: HardFactVerdict(
+            action="EXIT_DEAD_BIN",
+            reason="durable extreme killed held YES",
+            metric="high",
+            rounded_extreme=36.0,
+            source="durable_observation_instants",
+        ),
+    )
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    monitor_results = []
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: monitor_results.append(result)},
+    )()
+    deps = _monitor_test_deps("test_monitor_dead_bin_rescue_order")
+    deps.cities_by_name = {
+        "Chicago": type("City", (), {"timezone": "America/Chicago"})()
+    }
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(*dead_bins),
+        artifact,
+        _monitor_test_tracker(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=0.0,
+    )
+
+    assert summary["held_monitor_dead_bin_deadline_rescue_position"] == (
+        "rescue-order-dead-bin-2"
+    )
+    assert summary["held_monitor_budget_bypass_scanned"] == 1
+    assert summary["held_monitor_positions_deferred"] == 2
+    assert [result.position_id for result in monitor_results] == [
+        "rescue-order-dead-bin-2"
+    ]
+
+
 def test_monitoring_phase_caps_and_rotates_dead_bin_deadline_rescue(monkeypatch):
     """Only one rotating, absorbing loss may bridge an exhausted deadline."""
     from src.engine import cycle_runtime
