@@ -18704,6 +18704,150 @@ class TestRecoveryResolutionTable:
         assert current["order_status"] == "sell_filled"
         assert Decimal(str(current["exit_price"])) == Decimal("0.61")
 
+    def test_filled_exit_command_repairs_missing_full_close_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A terminal command cannot strand its full-close position pending."""
+        from src.state.venue_command_repo import append_event, append_order_fact
+
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=8.25, price=0.56)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 8.25,
+                   chain_shares = 0,
+                   cost_basis_usd = 4.62,
+                   entry_price = 0.56,
+                   order_status = 'sell_pending_confirmation',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        sequence_no = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                source_module, env, payload_json
+            ) VALUES (
+                'pos-001:exit-intent', 'pos-001', 1, ?, 'EXIT_INTENT',
+                '2026-04-26T00:04:00Z', 'active', 'pending_exit',
+                'opening_inertia', 'tests.test_command_recovery', 'live', ?
+            )
+            """,
+            (
+                sequence_no,
+                json.dumps(
+                    {
+                        "exit_intent_close_position": True,
+                        "exit_intent_shares": 8.25,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=8.25,
+            price=0.95,
+            token_id="tok-001",
+        )
+        _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="0xexitfill",
+            state="MATCHED",
+            filled_size="8.25",
+            fill_price="0.95",
+            tx_hash="0xexitfill",
+        )
+        append_order_fact(
+            conn,
+            venue_order_id="ord-exit",
+            command_id="cmd-exit",
+            state="MATCHED",
+            remaining_size="0",
+            matched_size="8.25",
+            source="REST",
+            observed_at="2026-04-26T00:05:00Z",
+            venue_timestamp="2026-04-26T00:05:00Z",
+            raw_payload_hash="d" * 64,
+            raw_payload_json={
+                "submit_result": {
+                    "orderID": "ord-exit",
+                    "status": "matched",
+                    "side": "SELL",
+                    "makingAmount": "8.25",
+                    "takingAmount": "7.8375",
+                    "transactionsHashes": ["0xexitfill"],
+                }
+            },
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "venue_order_id": "ord-exit",
+                "filled_size": "8.25",
+                "fill_price": "0.95",
+                "trade_id": "0xexitfill",
+            },
+        )
+        assert _get_state(conn, "cmd-exit") == "FILLED"
+
+        from src.execution.command_recovery import (
+            reconcile_exit_lifecycle_alignment_repairs,
+        )
+
+        summary = reconcile_exit_lifecycle_alignment_repairs(conn)
+
+        assert summary == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, order_status, exit_price, realized_pnl_usd
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert current["phase"] == "economically_closed"
+        assert current["order_status"] == "sell_filled"
+        assert Decimal(str(current["exit_price"])) == Decimal("0.95")
+        assert Decimal(str(current["realized_pnl_usd"])) == Decimal("3.22")
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'EXIT_ORDER_FILLED'
+               AND command_id = 'cmd-exit'
+            """
+        ).fetchone()[0] == 1
+
+        second = reconcile_exit_lifecycle_alignment_repairs(conn)
+        assert second["scanned"] == 0
+
     def test_partial_matched_exit_order_fact_cannot_close_position(
         self,
         conn,

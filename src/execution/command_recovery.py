@@ -180,6 +180,7 @@ _EXIT_LIFECYCLE_REPAIR_COMMAND_STATES = frozenset({
     CommandState.ACKED.value,
     CommandState.POST_ACKED.value,
     CommandState.PARTIAL.value,
+    CommandState.FILLED.value,
 })
 _EXIT_LIVE_ORDER_FACT_STATES = frozenset({
     "LIVE",
@@ -10135,6 +10136,31 @@ def _exit_lifecycle_alignment_candidates(conn: sqlite3.Connection) -> list[dict]
          WHERE cmd.intent_kind = 'EXIT'
            AND COALESCE(cmd.venue_order_id, '') != ''
            AND cmd.state IN ({command_placeholders})
+           AND (
+                cmd.state != 'FILLED'
+                OR (
+                    pc.phase = 'pending_exit'
+                    AND UPPER(COALESCE(latest_order.state, '')) IN ('MATCHED', 'FILLED')
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM position_events filled_event
+                         WHERE filled_event.position_id = cmd.position_id
+                           AND filled_event.event_type = 'EXIT_ORDER_FILLED'
+                           AND filled_event.command_id = cmd.command_id
+                    )
+                    AND COALESCE(
+                        (
+                            SELECT json_extract(intent.payload_json, '$.exit_intent_close_position')
+                              FROM position_events intent
+                             WHERE intent.position_id = cmd.position_id
+                               AND intent.event_type = 'EXIT_INTENT'
+                             ORDER BY intent.sequence_no DESC
+                             LIMIT 1
+                        ),
+                        1
+                    ) != 0
+                )
+           )
            AND (
                 pc.phase != 'pending_exit'
                 OR UPPER(COALESCE(latest_order.state, '')) IN ('MATCHED', 'FILLED')
