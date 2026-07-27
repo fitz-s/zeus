@@ -21090,6 +21090,57 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 )
         return cancel_result or partial_result or obligation_result or terminal_result
 
+    def _entry_posterior_recovery_fast_pass():
+        """Restore decision-time q after capital-release work, before maintenance.
+
+        A broad live-tick budget is allowed to expire after the priority capital
+        release lane.  A filled position's immutable q is also money-path truth,
+        so first prove that repair work exists with a read connection, then give
+        only that bounded local write its own short deadline.
+        """
+
+        with open_tracked(
+            read_conn_factory,
+            label="recovery.edli_entry_posterior_projection_repair_fast:snapshot",
+        ) as conn:
+            if not _edli_entry_posterior_repair_candidates(conn):
+                return None
+        fast_deadline = time.monotonic() + max(live_tick_budget, 0.5)
+        fast_conn_factory = _recovery_apply_conn_factory(
+            conn_factory,
+            scope="live_tick",
+            deadline_monotonic=fast_deadline,
+        )
+        lane_summary: dict = {}
+        result = _run_recovery_pass_with_lock_policy(
+            "edli_entry_posterior_projection_repair_fast",
+            lambda: run_db_only_pass(
+                reconcile_edli_entry_posterior_projection_repairs,
+                conn_factory=fast_conn_factory,
+                label="recovery.edli_entry_posterior_projection_repair_fast",
+            ),
+            scope="live_tick",
+            summary=lane_summary,
+            deadline_monotonic=fast_deadline,
+        )
+        if lane_summary:
+            summary["edli_entry_posterior_projection_repair_fast_defer"] = dict(
+                lane_summary
+            )
+            for prefix in ("db_lock_deferred", "db_budget_deferred"):
+                if not lane_summary.get(prefix):
+                    continue
+                for key, value in lane_summary.items():
+                    if key.startswith(prefix):
+                        summary.setdefault(key, value)
+        if result is not None:
+            _accumulate(
+                summary,
+                "edli_entry_posterior_projection_repair_fast",
+                result,
+            )
+        return result
+
     if scope == "boot_fast":
         # Boot recovery must not perform account-wide or per-order venue reads.
         # Live evidence 2026-06-28 showed the pre-scheduler "boot_fast" path
@@ -21212,6 +21263,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "missing_filled_entry_execution_fact_repair",
             reconcile_missing_filled_entry_execution_fact_repairs,
             "missing_filled_entry_execution_fact_repair",
+        )
+        _boot_db_pass(
+            "edli_entry_posterior_projection_repair",
+            reconcile_edli_entry_posterior_projection_repairs,
+            "edli_entry_posterior_projection_repair",
         )
         _boot_db_pass(
             "completed_partial_order_facts",
@@ -21366,6 +21422,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
 
     if scope == "live_tick":
         _capital_recovery_fast_pass()
+        _entry_posterior_recovery_fast_pass()
         # An aggregate abandoned at ExecutionCommandCreated holds a RESERVED
         # live-cap row and blocks its whole weather family.  The venue-absence
         # reconciler already requires the full safe-replay grace and proves no

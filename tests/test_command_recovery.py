@@ -1068,6 +1068,10 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
         calls.append("missing_filled_entry_execution_fact_repair")
         return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
 
+    def _posterior_repair(_conn):
+        calls.append("edli_entry_posterior_projection_repair")
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
     def _slow_db_pass(conn):
         calls.append("completed_partial_order_facts")
         conn.execute(
@@ -1092,6 +1096,11 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
     )
     monkeypatch.setattr(
         command_recovery,
+        "reconcile_edli_entry_posterior_projection_repairs",
+        _posterior_repair,
+    )
+    monkeypatch.setattr(
+        command_recovery,
         "reconcile_completed_partial_order_facts",
         _slow_db_pass,
     )
@@ -1103,11 +1112,13 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
     assert summary["venue_snapshot_deferred"] is True
     assert summary["deferred_full_sweep"] is True
     assert summary["boot_fast_budget_exhausted"] is True
-    assert calls[:2] == [
+    assert calls[:3] == [
         "missing_filled_entry_execution_fact_repair",
+        "edli_entry_posterior_projection_repair",
         "completed_partial_order_facts",
     ]
     assert summary["missing_filled_entry_execution_fact_repair"]["advanced"] == 1
+    assert summary["edli_entry_posterior_projection_repair"]["advanced"] == 1
     assert "completed_partial_order_facts" in summary["boot_fast_deferred_passes"]
     assert summary["boot_fast_defer_reasons"]["completed_partial_order_facts"] == (
         "budget_exhausted_during_pass"
@@ -1350,6 +1361,140 @@ def test_live_tick_recovers_fill_provenance_before_maintenance_budget_defer(
     assert summary["db_budget_deferred_at"] == (
         "missing_filled_entry_execution_fact_repair"
     )
+
+
+def test_live_tick_recovers_entry_posterior_before_general_budget_defer(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+    now = [0.0]
+
+    def _conn_factory():
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _posterior_candidates(_conn):
+        return [{"position_id": "pos-current-q"}]
+
+    def _posterior_repair(_conn):
+        calls.append("edli_entry_posterior_projection_repair_fast")
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    def _abandoned(_conn, **_kwargs):
+        calls.append("abandoned_unsubmitted_ghosts")
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "_edli_entry_posterior_repair_candidates",
+        _posterior_candidates,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_edli_entry_posterior_projection_repairs",
+        _posterior_repair,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_abandoned_unsubmitted_ghosts",
+        _abandoned,
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-07-27T00:00:00+00:00",
+        scope="live_tick",
+    )
+
+    assert calls == [
+        "edli_entry_posterior_projection_repair_fast",
+        "abandoned_unsubmitted_ghosts",
+    ]
+    assert summary["edli_entry_posterior_projection_repair_fast"]["advanced"] == 1
+    assert summary["db_budget_deferred"] is True
+    assert summary["db_budget_deferred_at"] == "abandoned_unsubmitted_ghosts"
+
+
+def test_live_tick_current_q_fast_lane_survives_capital_lane_budget_defer(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+    now = [0.0]
+
+    def _conn_factory():
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _terminal_candidates(_conn):
+        return [{"command_id": "terminal", "venue_order_id": "ord-terminal"}]
+
+    def _terminal_interrupt(_conn, _client):
+        calls.append("terminal_point_recovery_fast")
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    def _posterior_candidates(_conn):
+        return [{"position_id": "pos-current-q"}]
+
+    def _posterior_repair(_conn):
+        calls.append("edli_entry_posterior_projection_repair_fast")
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_point_order_candidates",
+        _terminal_candidates,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_restart_preflight_terminal_point_orders",
+        _terminal_interrupt,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_edli_entry_posterior_repair_candidates",
+        _posterior_candidates,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_edli_entry_posterior_projection_repairs",
+        _posterior_repair,
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: MagicMock(),
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-07-27T00:00:00+00:00",
+        scope="live_tick",
+    )
+
+    assert calls == [
+        "terminal_point_recovery_fast",
+        "edli_entry_posterior_projection_repair_fast",
+    ]
+    assert summary["db_budget_deferred_at"] == "terminal_point_recovery_fast"
+    assert summary["edli_entry_posterior_projection_repair_fast"]["advanced"] == 1
 
 
 def test_live_tick_recovers_abandoned_ghost_before_general_budget_defer(
@@ -13520,6 +13665,81 @@ class TestRecoveryResolutionTable:
         assert current["edge_source"] == "center_buy"
         assert current["discovery_mode"] == "opening_hunt"
         assert current["decision_snapshot_id"] == "forecast-snap-old"
+
+    def test_edli_entry_posterior_projection_repair_uses_verified_world_certificate(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-world-current-q"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_no"
+        _insert(conn, decision_id=decision_id, token_id="tok-001-no")
+        _advance_to_acked(conn, venue_order_id="ord-edli-world-current-q")
+        certificate_hash = _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001-no",
+            q_live=0.88598,
+            direction="buy_no",
+        )
+        conn.execute("ATTACH DATABASE ':memory:' AS world")
+        conn.execute(
+            "CREATE TABLE world.decision_certificates AS "
+            "SELECT * FROM main.decision_certificates WHERE 0"
+        )
+        conn.execute(
+            "INSERT INTO world.decision_certificates "
+            "SELECT * FROM main.decision_certificates WHERE certificate_hash = ?",
+            (certificate_hash,),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric,
+                fill_authority
+            ) VALUES (
+                'pos-001', 'day0_window', 'condition-test', 'Karachi', 'Karachi',
+                '2026-05-17', 'Will the highest temperature in Karachi be 40C on May 17?',
+                'buy_no', 'C', 7.54, 13.0, 7.54, 0.58,
+                0.0, 'jit-presubmit-old', 'exchange_reconcile_fill_recovery',
+                'day0_nowcast_entry', 'day0_nowcast_entry', 'venue_fact_recovery',
+                'synced', 'tok-001', 'tok-001-no', 'condition-test',
+                'ord-edli-world-current-q', 'filled', '2026-07-27T00:15:00Z',
+                'high', 'venue_confirmed_full'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_edli_entry_posterior_projection_repairs,
+        )
+
+        summary = reconcile_edli_entry_posterior_projection_repairs(
+            conn,
+            client=mock_client,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT p_posterior, entry_method, strategy_key, edge_source,
+                   discovery_mode, decision_snapshot_id
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "p_posterior": pytest.approx(0.88598),
+            "entry_method": "qkernel_spine",
+            "strategy_key": "forecast_qkernel_entry",
+            "edge_source": "forecast_qkernel_entry",
+            "discovery_mode": "update_reaction",
+            "decision_snapshot_id": "forecast-snap-edli",
+        }
 
     def test_edli_entry_posterior_projection_repair_ignores_revoked_local_ghost(
         self,
