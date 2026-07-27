@@ -3885,7 +3885,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
     assert no.tolist() == pytest.approx([0.7] * 400)
 
     with pytest.raises(
-        ValueError, match="GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING"
+        ValueError, match="GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING"
     ):
         era._prepare_current_global_probability_family(
             event,
@@ -3896,7 +3896,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
             max_age=_dt.timedelta(seconds=30),
             allow_unobserved_day0_replacement=False,
         )
-    assert len(reads) == 1
+    assert len(reads) == 2
 
     current, _payload = era._current_global_actuation_prepared_family(
         event,
@@ -3944,7 +3944,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
     )
     reads_before = len(reads)
     with pytest.raises(
-        ValueError, match="GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING"
+        ValueError, match="GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING"
     ):
         era._prepare_current_global_probability_family(
             event,
@@ -3955,7 +3955,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
             max_age=_dt.timedelta(seconds=30),
             allow_unobserved_day0_replacement=True,
         )
-    assert len(reads) == reads_before
+    assert len(reads) == reads_before + 1
     observations.execute("DELETE FROM observation_instants")
     after_grace = decision_at + _dt.timedelta(
         hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS + 1
@@ -3982,9 +3982,9 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
     )
     assert held_after_grace_yes is not None
     assert held_after_grace_yes.tolist() == pytest.approx([0.3] * 400)
-    assert len(reads) == reads_before + 1
+    assert len(reads) == reads_before + 2
     with pytest.raises(
-        ValueError, match="GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING"
+        ValueError, match="GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING"
     ):
         era._prepare_current_global_probability_family(
             event,
@@ -3996,7 +3996,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
             allow_unobserved_day0_replacement=True,
             entry_authority=True,
         )
-    assert len(reads) == reads_before + 1
+    assert len(reads) == reads_before + 3
     bundle_result["value"] = SimpleNamespace(
         ok=False,
         bundle=None,
@@ -4019,7 +4019,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
     observations.close()
 
 
-def test_current_day0_global_probability_uses_remaining_day_point_and_source_clock_robust_cap(
+def test_current_day0_global_probability_uses_conditioned_replacement_simplex(
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
@@ -4122,6 +4122,14 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
                 {"bin_id": key, "lower_c": lower, "upper_c": upper}
                 for key, lower, upper in posterior_bins
             ],
+            "day0_conditioning": {
+                "active": True,
+                "metric": "high",
+                "source": "wu_icao_history",
+                "observation_time": "2026-07-11T17:00:00+00:00",
+                "observed_extreme_c": (69.0 - 32.0) * 5.0 / 9.0,
+                "unit": "F",
+            },
         },
         source_cycle_time="2026-07-11T00:00:00+00:00",
         source_available_at="2026-07-11T06:00:00+00:00",
@@ -4185,6 +4193,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
                 "target_date": "2026-07-11",
                 "metric": "high",
                 "rounded_value": rounded,
+                "posterior_id": kwargs["posterior_id"],
                 "probability_base_identity": base_identity,
             },
         }
@@ -4237,17 +4246,17 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
     witness = prepared.probability_witness
     binding = day0_payload["_edli_global_day0_binding"]
     assert witness.band_alpha == pytest.approx(0.05)
-    assert witness.band_basis == "current_coherent_day0_remaining_model_bootstrap_v3"
+    assert witness.band_basis == "current_coherent_settlement_simplex_v1"
     assert witness.yes_q_samples.shape == (400, 3)
     assert witness.posterior_identity_hash
     assert binding["probability_base_identity"]
-    assert "posterior_id" not in binding
-    assert remaining_day_calls == 1
-    assert day0_payload["q_source"] == "day0_remaining_day"
-    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
+    assert binding["posterior_id"] == 17
+    assert remaining_day_calls == 0
+    assert day0_payload["q_source"] == "day0_conditioned_replacement"
+    assert day0_payload["_edli_day0_q_mode"] == "conditioned_replacement"
     assert (
         day0_payload["probability_authority"]
-        == "day0_remaining_day_global_probability_v1"
+        == "day0_conditioned_replacement_global_probability_v1"
     )
     assert replacement_bound_reads == 1
     caps = {
@@ -4264,10 +4273,8 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
     assert caps[
         (witness.family_key, "c1", bin_by_condition["c1"], "NO")
     ] == pytest.approx(0.4)
-    assert witness.yes_point_q.tolist() == pytest.approx([0.0, 0.2, 0.8])
-    assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"] == (
-        "source-clock-posterior-17"
-    )
+    assert witness.yes_point_q.tolist() == pytest.approx([0.1, 0.6, 0.3])
+    assert "_edli_day0_source_clock_bound_posterior_identity" not in day0_payload
 
     capture_time["value"] = "2026-07-11T17:31:00+00:00"
     recaptured_payload: dict[str, object] = {}
@@ -4284,285 +4291,12 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
         witness.yes_q_samples,
         recaptured.probability_witness.yes_q_samples,
     )
-    assert witness.source_truth_identity != (
+    assert witness.source_truth_identity == (
         recaptured.probability_witness.source_truth_identity
     )
-    assert witness.probability_content_identity != (
+    assert witness.probability_content_identity == (
         recaptured.probability_witness.probability_content_identity
     )
-
-    observed_extreme["value"] = 71.0
-    joint_payload: dict[str, object] = {}
-    deterministic_event = _global_day0_scope_event(
-        city="Dallas",
-        source_run_id="run-dallas",
-    )
-    deterministic_cut = _dt.datetime(
-        2026, 7, 11, 18, 0, 0, 500000, tzinfo=_dt.timezone.utc
-    )
-    joint = era._prepare_current_global_probability_family(
-        deterministic_event,
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        observation_conn=observations,
-        decision_time=deterministic_cut,
-        max_age=_dt.timedelta(seconds=30),
-        day0_payload_out=joint_payload,
-    )
-
-    assert remaining_day_calls == 3
-    assert isinstance(
-        joint.probability_witness,
-        JointOutcomeProbabilityWitness,
-    )
-    assert joint.probability_witness.yes_q_samples[0].tolist() == pytest.approx(
-        [0.0, 0.2, 0.8]
-    )
-    from src.solve.solver import actionable_family_payoff_bindings
-
-    assert tuple(
-        binding.condition_id
-        for binding in actionable_family_payoff_bindings(
-            joint.probability_witness
-        )
-    ) == ("c0", "c1", "c2")
-    joint_caps = {
-        row[:4]: row[4]
-        for row in joint.candidate_payoff_q_lcb_caps
-    }
-    assert joint_caps[
-        (witness.family_key, "c0", bin_by_condition["c0"], "YES")
-    ] == pytest.approx(0.0)
-    assert joint_caps[
-        (witness.family_key, "c0", bin_by_condition["c0"], "NO")
-    ] == pytest.approx(1.0)
-    assert joint_payload["q_source"] == "day0_remaining_day"
-    current_authority = era.current_global_probability_authority(
-        forecast,
-        deterministic_event,
-        joint.probability_witness,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=1),
-    )
-    assert current_authority is not None
-    assert current_authority.witness_identity == (
-        joint.probability_witness.witness_identity
-    )
-
-    revalidated_joint, revalidated_joint_payload = (
-        era._current_global_actuation_prepared_family(
-            deterministic_event,
-            global_actuation=SimpleNamespace(
-                probability_witness=joint.probability_witness,
-                decision=SimpleNamespace(
-                    candidate=SimpleNamespace(condition_id="c0")
-                ),
-            ),
-            forecast_conn=forecast,
-            topology_conn=forecast,
-            observation_conn=observations,
-            decision_time=deterministic_cut + _dt.timedelta(milliseconds=2),
-        )
-    )
-    assert remaining_day_calls == 4
-    assert isinstance(
-        revalidated_joint.probability_witness,
-        JointOutcomeProbabilityWitness,
-    )
-    assert revalidated_joint_payload["q_source"] == "day0_remaining_day"
-    assert revalidated_joint.probability_witness.witness_identity == (
-        joint.probability_witness.witness_identity
-    )
-
-    preferred_joint_payload: dict[str, object] = {}
-    preferred_joint = era._prepare_current_global_probability_family(
-        deterministic_event,
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=3),
-        max_age=_dt.timedelta(seconds=30),
-        day0_payload_out=preferred_joint_payload,
-        allow_partial_deterministic=True,
-    )
-    assert remaining_day_calls == 5
-    assert isinstance(
-        preferred_joint.probability_witness,
-        JointOutcomeProbabilityWitness,
-    )
-    assert preferred_joint_payload["q_source"] == "day0_remaining_day"
-
-    def missing_remaining_day_components(*_args, **_kwargs):
-        nonlocal remaining_day_calls
-        remaining_day_calls += 1
-        raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
-
-    monkeypatch.setattr(
-        era,
-        "_day0_remaining_global_probability_components",
-        missing_remaining_day_components,
-    )
-    fallback_payload: dict[str, object] = {}
-    fallback = era._prepare_current_global_probability_family(
-        deterministic_event,
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=4),
-        max_age=_dt.timedelta(seconds=30),
-        day0_payload_out=fallback_payload,
-        allow_partial_deterministic=True,
-    )
-    assert remaining_day_calls == 6
-    assert isinstance(
-        fallback.probability_witness,
-        DeterministicBinPayoffWitness,
-    )
-    fallback_payoffs = dict(fallback.probability_witness.exact_yes_payoffs)
-    assert tuple(fallback_payoffs.values()) == (0,)
-    assert tuple(
-        binding.condition_id
-        for binding in actionable_family_payoff_bindings(
-            fallback.probability_witness
-        )
-    ) == ("c0",)
-    assert fallback_payload["q_source"] == "day0_deterministic_bin_payoff"
-    assert (
-        fallback_payload["_edli_day0_deterministic_scope_reason"]
-        == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
-    )
-    monkeypatch.setattr(
-        era,
-        "_day0_remaining_global_probability_components",
-        remaining_day_components,
-    )
-
-    selected_dead_payload: dict[str, object] = {}
-    selected_dead = era._prepare_current_global_probability_family(
-        deterministic_event,
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=5),
-        max_age=_dt.timedelta(seconds=30),
-        day0_payload_out=selected_dead_payload,
-        required_condition_id="c0",
-    )
-    assert remaining_day_calls == 6
-    assert isinstance(
-        selected_dead.probability_witness,
-        DeterministicBinPayoffWitness,
-    )
-    exact_payoffs = dict(selected_dead.probability_witness.exact_yes_payoffs)
-    exact_conditions = [
-        binding.condition_id
-        for binding in selected_dead.probability_witness.bindings
-        if binding.bin_id in exact_payoffs
-    ]
-    assert exact_conditions == ["c0"]
-    assert tuple(exact_payoffs.values()) == (0,)
-    assert dict(selected_dead.probability_witness.exact_yes_payoffs) == exact_payoffs
-    assert selected_dead_payload["_edli_day0_exact_yes_payoffs"] == exact_payoffs
-    assert selected_dead_payload["q_source"] == "day0_deterministic_bin_payoff"
-
-    revalidated, revalidated_payload = era._current_global_actuation_prepared_family(
-        deterministic_event,
-        global_actuation=SimpleNamespace(
-            probability_witness=selected_dead.probability_witness,
-            decision=SimpleNamespace(candidate=SimpleNamespace(condition_id="c0")),
-        ),
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=6),
-    )
-    assert remaining_day_calls == 6
-    assert isinstance(
-        revalidated.probability_witness,
-        DeterministicBinPayoffWitness,
-    )
-    assert revalidated_payload["_edli_day0_exact_yes_payoffs"] == exact_payoffs
-
-    held_unknown_payload: dict[str, object] = {}
-    held_unknown_cache_metadata: dict[str, str] = {}
-    held_unknown = era._prepare_current_global_probability_family(
-        deterministic_event,
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=7),
-        max_age=_dt.timedelta(seconds=30),
-        day0_payload_out=held_unknown_payload,
-        cache_metadata_out=held_unknown_cache_metadata,
-        required_condition_id="c1",
-    )
-    assert remaining_day_calls == 7
-    assert isinstance(
-        held_unknown.probability_witness,
-        JointOutcomeProbabilityWitness,
-    )
-    assert held_unknown.probability_witness.yes_q_samples[0].tolist() == pytest.approx(
-        [0.0, 0.2, 0.8]
-    )
-    assert json.loads(
-        held_unknown_cache_metadata["deterministic_condition_ids_json"]
-    ) == ["c0"]
-
-    def conflicting_remaining_day_components(*_args, **_kwargs):
-        matrix = np.asarray([[0.1, 0.1, 0.8]] * 400, dtype=float)
-        return (
-            matrix,
-            np.asarray([0.1, 0.1, 0.8], dtype=float),
-            "current_coherent_day0_remaining_model_bootstrap_v3",
-        )
-
-    monkeypatch.setattr(
-        era,
-        "_day0_remaining_global_probability_components",
-        conflicting_remaining_day_components,
-    )
-    with pytest.raises(
-        ValueError,
-        match="GLOBAL_DAY0_DETERMINISTIC_PAYOFF_CONFLICT",
-    ):
-        era._prepare_current_global_probability_family(
-            deterministic_event,
-            forecast_conn=forecast,
-            topology_conn=forecast,
-            observation_conn=observations,
-            decision_time=deterministic_cut + _dt.timedelta(milliseconds=8),
-            max_age=_dt.timedelta(seconds=30),
-            allow_partial_deterministic=False,
-        )
-    monkeypatch.setattr(
-        era,
-        "_day0_remaining_global_probability_components",
-        remaining_day_components,
-    )
-
-    observed_extreme["value"] = 72.0
-    exact_payload: dict[str, object] = {}
-    exact = era._prepare_current_global_probability_family(
-        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        observation_conn=observations,
-        decision_time=_dt.datetime(2026, 7, 11, 18, 0, 1, tzinfo=_dt.timezone.utc),
-        max_age=_dt.timedelta(seconds=30),
-        day0_payload_out=exact_payload,
-    )
-
-    assert remaining_day_calls == 7
-    assert exact.probability_witness.band_basis == (
-        "day0_absorbing_observation_exact_settlement_simplex_v1"
-    )
-    assert np.all(
-        exact.probability_witness.yes_q_samples
-        == np.asarray([0.0, 0.0, 1.0])
-    )
-    assert exact_payload["probability_authority"] == (
-        "day0_absorbing_observation_exact_global_probability_v1"
-    )
-    assert exact_payload["q_source"] == "day0_absorbing_exact"
 
     missing_observations = sqlite3.connect(":memory:")
     with pytest.raises(ValueError, match="GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE"):
@@ -4581,7 +4315,7 @@ def test_current_day0_global_probability_uses_remaining_day_point_and_source_clo
     forecast.close()
 
 
-def test_provisional_hko_held_probability_uses_remaining_day_without_entry_authority(
+def test_provisional_hko_held_probability_uses_conditioned_replacement_without_entry_authority(
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
@@ -4874,22 +4608,20 @@ def test_provisional_hko_held_probability_uses_remaining_day_without_entry_autho
     )
 
     witness = prepared.probability_witness
-    assert remaining_calls == 1
+    assert remaining_calls == 0
     assert replacement_calls == 1
     assert bundle_reads == 1
-    assert witness.yes_point_q.tolist() == pytest.approx([0.2, 0.5, 0.3])
-    assert witness.yes_q_samples[0].tolist() == pytest.approx([0.2, 0.5, 0.3])
-    assert witness.posterior_identity_hash != bundle.posterior_identity_hash
+    assert witness.yes_point_q.tolist() == pytest.approx([0.1, 0.1, 0.8])
+    assert witness.yes_q_samples[0].tolist() == pytest.approx([0.1, 0.1, 0.8])
+    assert witness.posterior_identity_hash == bundle.posterior_identity_hash
     assert prepared.candidate_payoff_q_lcb_caps == ()
     assert day0_payload["probability_authority"] == (
-        "day0_remaining_day_global_probability_v1"
+        "day0_conditioned_replacement_global_probability_v1"
     )
-    assert day0_payload["q_source"] == "day0_remaining_day"
-    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
-    assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"] == (
-        bundle.posterior_identity_hash
-    )
-    assert day0_payload["_edli_day0_source_clock_bound_identity"]
+    assert day0_payload["q_source"] == "day0_conditioned_replacement"
+    assert day0_payload["_edli_day0_q_mode"] == "conditioned_replacement"
+    assert "_edli_day0_source_clock_bound_posterior_identity" not in day0_payload
+    assert "_edli_day0_source_clock_bound_identity" not in day0_payload
     binding = day0_payload["_edli_global_day0_binding"]
     assert binding["evidence_finality"] == "PROVISIONAL_CURRENT_SNAPSHOT"
     assert "_edli_day0_exact_yes_payoffs" not in day0_payload
@@ -4909,28 +4641,6 @@ def test_provisional_hko_held_probability_uses_remaining_day_without_entry_autho
             entry_authority=True,
         )
 
-    def missing_remaining(*_args, **_kwargs):
-        raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
-
-    monkeypatch.setattr(
-        era,
-        "_day0_remaining_global_probability_components",
-        missing_remaining,
-    )
-    with pytest.raises(
-        ValueError,
-        match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
-    ):
-        era._prepare_current_global_probability_family(
-            event,
-            forecast_conn=forecast,
-            topology_conn=forecast,
-            observation_conn=observations,
-            decision_time=decision_at,
-            max_age=_dt.timedelta(seconds=30),
-            allow_provisional_day0_replacement=True,
-            entry_authority=False,
-        )
     assert replacement_calls == 1
 
     forecast.close()

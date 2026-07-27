@@ -28108,6 +28108,44 @@ def _assert_provisional_day0_replacement_bundle(
         raise ValueError("GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH")
 
 
+def _day0_replacement_conditioning(
+    replacement_bundle: object,
+    *,
+    provisional: bool,
+    metric: str,
+    unit: str,
+) -> Mapping[str, object]:
+    """Return the current observation conditioning carried by replacement q."""
+
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        raise ValueError("GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING")
+    key = "day0_provisional_observation" if provisional else "day0_conditioning"
+    conditioning = provenance.get(key)
+    if not isinstance(conditioning, Mapping) or conditioning.get("active") is not True:
+        raise ValueError("GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING")
+    expected_metric = str(metric or "").strip().lower()
+    expected_unit = str(unit or "").strip().upper()
+    conditioned_metric = (
+        str(conditioning.get("metric") or expected_metric).strip().lower()
+    )
+    conditioned_unit = (
+        str(conditioning.get("unit") or expected_unit).strip().upper()
+    )
+    if (
+        expected_metric not in {"high", "low"}
+        or conditioned_metric != expected_metric
+        or expected_unit not in {"C", "F"}
+        or conditioned_unit != expected_unit
+    ):
+        raise ValueError("GLOBAL_DAY0_REPLACEMENT_CONDITIONING_INVALID")
+    return {
+        **conditioning,
+        "metric": conditioned_metric,
+        "unit": conditioned_unit,
+    }
+
+
 def _day0_physical_frontier_supersedes_settlement(
     *,
     metric: str,
@@ -28923,6 +28961,14 @@ def _global_day0_execution_payload(
     if unit not in {"C", "F"} or fact_unit != unit:
         raise ValueError("GLOBAL_DAY0_CONDITIONING_UNIT_MISMATCH")
     if conditioning is not None:
+        conditioned_metric = (
+            str(conditioning.get("metric") or "").strip().lower()
+        )
+        family_metric = (
+            str(getattr(family, "metric", "") or "").strip().lower()
+        )
+        if conditioned_metric != family_metric:
+            raise ValueError("GLOBAL_DAY0_CONDITIONING_METRIC_MISMATCH")
         conditioned_at = utc(
             conditioning.get("observation_time"),
             reason="GLOBAL_DAY0_CONDITIONING_TIME_INVALID",
@@ -30084,8 +30130,7 @@ def _prepare_current_global_probability_family(
                             hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
                         )
                     )
-        local_today = decision_time.astimezone(ZoneInfo(str(city.timezone))).date()
-        if use_unobserved_day0_replacement or provisional_day0_observation:
+        if final_daily_observation is None:
             readiness = latest_replacement_readiness(
                 forecast_conn,
                 city=family.city,
@@ -30155,40 +30200,6 @@ def _prepare_current_global_probability_family(
                     "station_id": final_daily_observation.station_id,
                     "unit": final_daily_observation.unit,
                     "fetched_at": source_available_at,
-                }
-            )
-        else:
-            if local_target < local_today:
-                raise ValueError("POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
-            day0_snapshot = _forecast_snapshot_row_for_event(
-                forecast_conn,
-                event=event,
-                family=family,
-                allow_latest=True,
-                decision_time=decision_time,
-            )
-            if day0_snapshot is None:
-                raise ValueError("GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING")
-            day0_snapshot_id = str(day0_snapshot.get("snapshot_id") or "").strip()
-            if not day0_snapshot_id:
-                raise ValueError("GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_ID_MISSING")
-            source_cycle_raw = (
-                day0_snapshot.get("source_cycle_time")
-                or day0_snapshot.get("issue_time")
-            )
-            source_available_at = str(
-                day0_snapshot.get("source_available_at")
-                or day0_snapshot.get("available_at")
-                or ""
-            ).strip()
-            day0_base_identity = stable_hash(
-                {
-                    "snapshot_id": day0_snapshot_id,
-                    "source_cycle_time": source_cycle_raw,
-                    "source_available_at": source_available_at,
-                    "city": family.city,
-                    "target_date": str(family.target_date),
-                    "metric": family.metric,
                 }
             )
     else:
@@ -30270,13 +30281,20 @@ def _prepare_current_global_probability_family(
                 event,
                 family=family,
                 resolution=omega.resolution,
-                conditioning=None,
+                conditioning=(
+                    _day0_replacement_conditioning(
+                        bundle,
+                        provisional=provisional_day0_observation,
+                        metric=str(family.metric),
+                        unit=str(omega.resolution.measurement_unit),
+                    )
+                    if bundle is not None
+                    else None
+                ),
                 observation_conn=day0_observation_conn,
                 decision_time=decision_time,
                 posterior_id=(
-                    bundle.posterior_id
-                    if provisional_day0_observation and bundle is not None
-                    else None
+                    bundle.posterior_id if bundle is not None else None
                 ),
                 probability_base_identity=day0_base_identity,
             )
@@ -30330,27 +30348,45 @@ def _prepare_current_global_probability_family(
         probability_authority = (
             "final_daily_observation_exact_global_probability_v1"
         )
-    elif current_day0_payload is not None and provisional_day0_observation:
-        if bundle is None:
-            raise ValueError("GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING")
-        components = _day0_remaining_global_probability_components(
-            event,
-            forecast_conn=forecast_conn,
-            calibration_conn=day0_observation_conn,
+    elif current_day0_payload is not None and bundle is not None:
+        components = _day0_absorbing_exact_probability_components(
+            omega=omega,
             family=family,
             payload=payload,
-            decision_time=decision_time,
-            snapshot=day0_snapshot,
         )
-        probability_authority = "day0_remaining_day_global_probability_v1"
-        payload.update(
-            {
-                "probability_authority": probability_authority,
-                "q_source": "day0_remaining_day",
-                "_edli_q_source": "day0_remaining_day",
-                "_edli_day0_q_mode": "remaining_day",
-            }
-        )
+        if components is not None:
+            probability_authority = (
+                "day0_absorbing_observation_exact_global_probability_v1"
+            )
+            payload.update(
+                {
+                    "probability_authority": probability_authority,
+                    "q_source": "day0_absorbing_exact",
+                    "_edli_q_source": "day0_absorbing_exact",
+                    "_edli_day0_q_mode": "absorbing_exact",
+                }
+            )
+        else:
+            components = _replacement_global_probability_components(
+                bundle,
+                candidates=family.candidates,
+                bindings=bindings,
+            )
+            if components is None:
+                raise ValueError(
+                    "GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_INVALID"
+                )
+            probability_authority = (
+                "day0_conditioned_replacement_global_probability_v1"
+            )
+            payload.update(
+                {
+                    "probability_authority": probability_authority,
+                    "q_source": "day0_conditioned_replacement",
+                    "_edli_q_source": "day0_conditioned_replacement",
+                    "_edli_day0_q_mode": "conditioned_replacement",
+                }
+            )
     elif current_day0_payload is not None:
         components = _day0_absorbing_exact_probability_components(
             omega=omega,
@@ -35284,7 +35320,10 @@ def _apply_day0_mask_to_generated_probabilities(
     if rounded is None:
         raise ValueError("Day0 event missing rounded_value")
     metric = _nonnull(payload.get("metric") or payload.get("temperature_metric"))
-    is_remaining_day_q_source = str(payload.get("_edli_q_source") or "") == "day0_remaining_day"
+    is_remaining_day_q_source = str(payload.get("_edli_q_source") or "") in {
+        "day0_remaining_day",
+        "day0_conditioned_replacement",
+    }
     from src.events.day0_authority import (
         DAY0_ABSORBING_FINALITIES,
         day0_evidence_finality,
