@@ -2066,7 +2066,7 @@ def test_global_target_atomically_supersedes_only_older_pending_targets():
     assert states[unrelated.event_id] == ("pending", None)
 
 
-def test_global_target_uses_dedicated_target_index():
+def test_global_target_uses_dedicated_indexed_pointer():
     conn, store = _store()
     old = _day0_event("old-point-target")
     new = _forecast_event("new-point-target", target_date="2026-05-24")
@@ -2079,21 +2079,35 @@ def test_global_target_uses_dedicated_target_index():
     finally:
         conn.set_trace_callback(None)
 
-    target_reads = [
+    pointer_reads = [
         statement
         for statement in statements
-        if "SELECT p.event_id, e.source, e.received_at" in statement
+        if "FROM opportunity_event_processing pointer" in statement
     ]
-    assert target_reads
+    assert pointer_reads
     assert all(
-        "INDEXED BY idx_opportunity_event_processing_status" not in statement
-        for statement in target_reads
+        "INDEXED BY idx_opportunity_event_processing_status" in statement
+        for statement in pointer_reads
     )
-    assert any(
-        "INDEXED BY idx_opportunity_event_processing_global_winner_target"
-        in statement
-        for statement in target_reads
+    assert all(store._winner_pointer_consumer_name in statement for statement in pointer_reads)
+    plan = " ".join(
+        str(column)
+        for row in conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT pointer.event_id
+              FROM opportunity_event_processing pointer
+                   INDEXED BY idx_opportunity_event_processing_status
+             WHERE pointer.consumer_name = ?
+               AND pointer.processing_status = 'pending'
+             ORDER BY pointer.updated_at DESC
+             LIMIT 2
+            """,
+            (store._winner_pointer_consumer_name,),
+        )
+        for column in row
     )
+    assert "idx_opportunity_event_processing_status" in plan
     assert conn.execute(
         "SELECT processing_status, last_error "
         "FROM opportunity_event_processing WHERE event_id = ?",
@@ -2101,9 +2115,106 @@ def test_global_target_uses_dedicated_target_index():
     ).fetchone() == ("expired", "GLOBAL_WINNER_TARGET_SUPERSEDED")
     assert conn.execute(
         "SELECT processing_status, last_error "
-        "FROM opportunity_event_processing WHERE event_id = ?",
-        (new.event_id,),
+        "FROM opportunity_event_processing WHERE consumer_name = ? AND event_id = ?",
+        (store._winner_pointer_consumer_name, new.event_id),
     ).fetchone() == ("pending", "GLOBAL_WINNER_TARGETED_CLAIM")
+
+
+def test_global_target_pointer_survives_restart_and_newer_backlog():
+    import src.events.event_store as event_store
+
+    conn, store = _store()
+    target = _forecast_event("durable-pointer-target", target_date="2026-05-25")
+    assert store.prioritize_global_winner(target)
+    for index in range(600):
+        ordinary = _forecast_event(
+            f"newer-ordinary-{index}",
+            target_date="2026-05-25",
+        )
+        store.insert_or_ignore(ordinary)
+        conn.execute(
+            "UPDATE opportunity_event_processing SET updated_at = ? "
+            "WHERE consumer_name = ? AND event_id = ?",
+            (
+                (_DT_VENUE_OPEN + timedelta(seconds=index + 1)).isoformat(),
+                store.consumer_name,
+                ordinary.event_id,
+            ),
+        )
+    event_store._winner_hints.clear()
+
+    fetched = store.fetch_pending(
+        decision_time=(_DT_VENUE_OPEN + timedelta(seconds=1)).isoformat(),
+        limit=1,
+    )
+
+    assert [event.event_id for event in fetched] == [target.event_id]
+
+
+def test_global_target_pointer_supersedes_after_restart_and_backlog():
+    import src.events.event_store as event_store
+
+    conn, store = _store()
+    old = _forecast_event("restart-old-target", target_date="2026-05-24")
+    new = _day0_event("restart-new-target")
+    assert store.prioritize_global_winner(old)
+    for index in range(600):
+        store.insert_or_ignore(
+            _forecast_event(
+                f"restart-ordinary-{index}",
+                target_date="2026-05-24",
+            )
+        )
+    event_store._winner_hints.clear()
+
+    assert store.prioritize_global_winner(new)
+
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name = ? AND event_id = ?",
+        (store.consumer_name, old.event_id),
+    ).fetchone() == ("expired", "GLOBAL_WINNER_TARGET_SUPERSEDED")
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name = ? AND event_id = ?",
+        (store._winner_pointer_consumer_name, new.event_id),
+    ).fetchone() == ("pending", "GLOBAL_WINNER_TARGETED_CLAIM")
+
+
+def test_stale_winner_pointer_does_not_promote_ordinary_retry():
+    import src.events.event_store as event_store
+
+    conn, store = _store()
+    target = _forecast_event("stale-pointer-target", target_date="2026-05-25")
+    explicit = _forecast_event("explicit-target", target_date="2026-05-25")
+    assert store.prioritize_global_winner(target)
+    store.insert_or_ignore(explicit)
+    store.requeue_pending(target.event_id, last_error="RETRY_OTHER_REASON")
+    event_store._winner_hints.clear()
+
+    fetched = store.fetch_pending(
+        decision_time=(_DT_VENUE_OPEN + timedelta(seconds=1)).isoformat(),
+        limit=2,
+        targeted_event_ids=frozenset({explicit.event_id}),
+        targeted_only=True,
+    )
+
+    assert [event.event_id for event in fetched] == [explicit.event_id]
+    assert store._winner_hint() is None
+
+
+def test_positive_global_winner_hint_survives_long_auction(monkeypatch):
+    import src.events.event_store as event_store
+
+    clock = [0.0]
+    monkeypatch.setattr(event_store, "_monotonic", lambda: clock[0])
+    conn, store = _store()
+    target = _forecast_event("long-auction-target", target_date="2026-05-24")
+
+    assert store.prioritize_global_winner(target)
+    clock[0] = 10_000.0
+
+    assert store._winner_hint() == (target.event_id, target.received_at)
 
 
 def test_global_target_keeps_same_causal_fact_across_economic_epochs():
@@ -2506,6 +2617,88 @@ def test_boot_generation_requeues_only_prior_runtime_claims():
         "2026-05-24T18:10:00+00:00",
         None,
     )
+
+
+def test_boot_backfills_legacy_winner_pointer_before_backlog_claim():
+    import src.events.event_store as event_store
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    conn, store = _store()
+    old_source = _forecast_event("legacy-old-source", target_date="2026-05-25")
+    new_source = _forecast_event("legacy-new-source", target_date="2026-05-25")
+    old = _next_claim_carrier(
+        old_source,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="legacy-old-economics",
+        payload=json.loads(old_source.payload_json),
+    )
+    new = _next_claim_carrier(
+        new_source,
+        targeted_at=_DT_VENUE_OPEN + timedelta(seconds=1),
+        economic_identity="legacy-new-economics",
+        payload=json.loads(new_source.payload_json),
+    )
+    for target in (old, new):
+        store.insert_or_ignore(target)
+        conn.execute(
+            "UPDATE opportunity_event_processing SET last_error = ? "
+            "WHERE consumer_name = ? AND event_id = ?",
+            (GLOBAL_WINNER_TARGETED_CLAIM, store.consumer_name, target.event_id),
+        )
+    for index in range(600):
+        store.insert_or_ignore(
+            _forecast_event(
+                f"legacy-backlog-{index}",
+                target_date="2026-05-25",
+            )
+        )
+    event_store._winner_hints.clear()
+
+    assert (
+        store.requeue_processing_before_boot(
+            boot_at=(_DT_VENUE_OPEN + timedelta(seconds=2)).isoformat()
+        )
+        == 0
+    )
+
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name = ? AND event_id = ?",
+        (store.consumer_name, old.event_id),
+    ).fetchone() == ("expired", "GLOBAL_WINNER_TARGET_SUPERSEDED")
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name = ? AND event_id = ?",
+        (store._winner_pointer_consumer_name, new.event_id),
+    ).fetchone() == ("pending", GLOBAL_WINNER_TARGETED_CLAIM)
+    fetched = store.fetch_pending(
+        decision_time=(_DT_VENUE_OPEN + timedelta(seconds=3)).isoformat(),
+        limit=1,
+    )
+    assert [event.event_id for event in fetched] == [new.event_id]
+
+
+def test_boot_empty_winner_pointer_prevents_repeated_legacy_scan():
+    conn, store = _store()
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        assert store.requeue_processing_before_boot(boot_at=_DT_VENUE_OPEN.isoformat()) == 0
+        assert store.requeue_processing_before_boot(boot_at=_DT_VENUE_OPEN.isoformat()) == 0
+    finally:
+        conn.set_trace_callback(None)
+
+    legacy_scans = [
+        statement
+        for statement in statements
+        if "FROM opportunity_event_processing NOT INDEXED" in statement
+    ]
+    assert len(legacy_scans) == 1
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name = ?",
+        (store._winner_pointer_consumer_name,),
+    ).fetchone() == ("pending", "GLOBAL_WINNER_POINTER_BOOTSTRAPPED_EMPTY")
 
 
 def test_global_target_allows_only_current_batch_processing_lease():

@@ -37,17 +37,8 @@ CREATE INDEX IF NOT EXISTS idx_opportunity_event_processing_stale_claim
     WHERE claimed_at IS NOT NULL
 """
 
-CREATE_GLOBAL_WINNER_TARGET_INDEX_SQL = """
-CREATE INDEX IF NOT EXISTS idx_opportunity_event_processing_global_winner_target
-    ON opportunity_event_processing(consumer_name, updated_at, event_id)
-    WHERE processing_status = 'pending'
-      AND last_error = 'GLOBAL_WINNER_TARGETED_CLAIM'
-"""
-
-
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
     conn.execute(CREATE_STATUS_INDEX_SQL)
     conn.execute(CREATE_PENDING_RETRY_FLOOR_INDEX_SQL)
     conn.execute(CREATE_STALE_CLAIM_INDEX_SQL)
-    conn.execute(CREATE_GLOBAL_WINNER_TARGET_INDEX_SQL)

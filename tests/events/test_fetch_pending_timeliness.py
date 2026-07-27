@@ -226,18 +226,8 @@ def test_committed_wake_targeted_only_drains_durable_global_winner_first():
     )
     for event in (ordinary, committed, older_winner, newer_winner):
         store.insert_or_ignore(event)
-    conn.execute(
-        """
-        UPDATE opportunity_event_processing
-           SET last_error = 'GLOBAL_WINNER_TARGETED_CLAIM',
-               updated_at = CASE event_id
-               WHEN ? THEN '2026-06-05T12:59:00+00:00'
-               ELSE '2026-06-05T12:00:00+00:00'
-           END
-         WHERE event_id IN (?, ?)
-        """,
-        (older_winner.event_id, older_winner.event_id, newer_winner.event_id),
-    )
+    assert store.prioritize_global_winner(older_winner)
+    assert store.prioritize_global_winner(newer_winner)
 
     returned = store.fetch_pending(
         decision_time=_DECISION_TIME,
@@ -267,8 +257,9 @@ def test_committed_wake_targeted_only_drains_durable_global_winner_first():
         and "FROM opportunity_event_processing" in statement
     ]
     assert [event.event_id for event in returned] == [newer_winner.event_id]
-    assert len(queue_reads) == 1
-    assert "ORDER BY e.received_at" not in queue_reads[0]
+    assert len(queue_reads) == 2
+    assert "idx_opportunity_event_processing_status" in queue_reads[0]
+    assert "ORDER BY e.received_at" not in " ".join(queue_reads)
 
 
 def test_targeted_only_recovers_winner_after_processing_lease_stales(monkeypatch):
@@ -291,10 +282,7 @@ def test_targeted_only_recovers_winner_after_processing_lease_stales(monkeypatch
     )
     for event in (committed, winner):
         store.insert_or_ignore(event)
-    conn.execute(
-        "UPDATE opportunity_event_processing SET last_error = ? WHERE event_id = ?",
-        ("GLOBAL_WINNER_TARGETED_CLAIM", winner.event_id),
-    )
+    assert store.prioritize_global_winner(winner)
 
     first = store.fetch_pending(
         decision_time=_DECISION_TIME,
@@ -363,11 +351,7 @@ def test_targeted_only_negative_hint_expires_for_independent_writer(
         source="global_auction_winner_target:external-source:economics",
     )
     writer_store = EventStore(writer, processing_lease_seconds=10)
-    writer_store.insert_or_ignore(winner)
-    writer.execute(
-        "UPDATE opportunity_event_processing SET last_error = ? WHERE event_id = ?",
-        ("GLOBAL_WINNER_TARGETED_CLAIM", winner.event_id),
-    )
+    assert writer_store.prioritize_global_winner(winner)
     writer.commit()
 
     clock[0] = 0.5
@@ -377,7 +361,7 @@ def test_targeted_only_negative_hint_expires_for_independent_writer(
         targeted_event_ids=frozenset({committed.event_id}),
         targeted_only=True,
     )
-    assert [event.event_id for event in cached] == [committed.event_id]
+    assert [event.event_id for event in cached] == [winner.event_id]
 
     clock[0] = 2.0
     refreshed = store.fetch_pending(
@@ -420,10 +404,7 @@ def test_targeted_only_forgets_processed_positive_hint_for_independent_writer(
     )
     for event in (committed, old_winner):
         store.insert_or_ignore(event)
-    reader.execute(
-        "UPDATE opportunity_event_processing SET last_error = ? WHERE event_id = ?",
-        ("GLOBAL_WINNER_TARGETED_CLAIM", old_winner.event_id),
-    )
+    assert store.prioritize_global_winner(old_winner)
     reader.commit()
     initial = store.fetch_pending(
         decision_time=_DECISION_TIME,
@@ -447,11 +428,7 @@ def test_targeted_only_forgets_processed_positive_hint_for_independent_writer(
         (_DECISION_TIME, _DECISION_TIME, old_winner.event_id),
     )
     writer_store = EventStore(writer, processing_lease_seconds=10)
-    writer_store.insert_or_ignore(new_winner)
-    writer.execute(
-        "UPDATE opportunity_event_processing SET last_error = ? WHERE event_id = ?",
-        ("GLOBAL_WINNER_TARGETED_CLAIM", new_winner.event_id),
-    )
+    assert writer_store.prioritize_global_winner(new_winner)
     writer.commit()
 
     clock[0] = 0.5
@@ -461,7 +438,7 @@ def test_targeted_only_forgets_processed_positive_hint_for_independent_writer(
         targeted_event_ids=frozenset({committed.event_id}),
         targeted_only=True,
     )
-    assert [event.event_id for event in stale_hint_miss] == [committed.event_id]
+    assert [event.event_id for event in stale_hint_miss] == [new_winner.event_id]
     refreshed = store.fetch_pending(
         decision_time=_DECISION_TIME,
         limit=1,
@@ -473,7 +450,7 @@ def test_targeted_only_forgets_processed_positive_hint_for_independent_writer(
     reader.close()
 
 
-def test_committed_wake_targeted_only_uses_one_joined_queue_read():
+def test_committed_wake_targeted_only_uses_indexed_pointer_and_joined_queue_read():
     conn = _world_conn()
     store = EventStore(conn)
     committed = _event(
@@ -504,8 +481,9 @@ def test_committed_wake_targeted_only_uses_one_joined_queue_read():
         and "FROM opportunity_event_processing" in statement
     ]
     assert [event.event_id for event in returned] == [committed.event_id]
-    assert len(queue_reads) == 1
-    assert "JOIN opportunity_events" in queue_reads[0]
+    assert len(queue_reads) == 2
+    assert "idx_opportunity_event_processing_status" in queue_reads[0]
+    assert "JOIN opportunity_events" in queue_reads[1]
 
 
 def test_committed_wake_target_bypasses_bounded_oldest_scan():
