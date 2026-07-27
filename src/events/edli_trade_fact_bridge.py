@@ -267,19 +267,6 @@ def _consume_absorbed_confirmed_fills(
                       FROM {orders} fact
                    )
              WHERE rank = 1
-        ),
-        latest_entry_fill AS (
-            SELECT *
-              FROM (
-                    SELECT event.*,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY position_id
-                               ORDER BY sequence_no DESC
-                           ) AS rank
-                      FROM {position_events} event
-                     WHERE event_type = 'ENTRY_ORDER_FILLED'
-                   )
-             WHERE rank = 1
         )
         SELECT projection.aggregate_id, projection.event_id,
                projection.final_intent_id, usage.usage_id,
@@ -312,12 +299,19 @@ def _consume_absorbed_confirmed_fills(
            AND order_fact.venue_order_id = command.venue_order_id
           JOIN {positions} position
             ON position.position_id = command.position_id
-          JOIN latest_entry_fill entry_fill
-            ON entry_fill.position_id = command.position_id
-           AND (
-                entry_fill.command_id = command.command_id
-                OR entry_fill.order_id = command.venue_order_id
-           )
+          JOIN {position_events} entry_fill
+            ON entry_fill.event_id = (
+                SELECT candidate_fill.event_id
+                  FROM {position_events} candidate_fill
+                 WHERE candidate_fill.position_id = command.position_id
+                   AND candidate_fill.event_type = 'ENTRY_ORDER_FILLED'
+                   AND (
+                        candidate_fill.command_id = command.command_id
+                        OR candidate_fill.order_id = command.venue_order_id
+                   )
+                 ORDER BY candidate_fill.sequence_no DESC
+                 LIMIT 1
+            )
          WHERE projection.current_state = 'USER_TRADE_OBSERVED'
            AND command.intent_kind = 'ENTRY'
            AND command.side = 'BUY'
