@@ -4558,7 +4558,6 @@ def process_current_global_batch(
             if (
                 venue_delta == 1
                 and winner_receipt.submitted
-                and winner_receipt.proof_accepted is True
             )
             else None
         )

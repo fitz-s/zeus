@@ -18807,7 +18807,7 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
             True,
             winner.event_id,
             winner.causal_snapshot_id,
-            proof_accepted=True,
+            proof_accepted=False,
             side_effect_status="SUBMITTED",
         )
 
@@ -18837,6 +18837,7 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     assert result.venue_submit_count == 1
     assert result.winner_event_id == event.event_id
     assert result.receipts[event.event_id].submitted is True
+    assert result.receipts[event.event_id].proof_accepted is False
     assert result.receipts[duplicate.event_id].reason == (
         f"GLOBAL_DUPLICATE_FAMILY_CARRIER:{event.event_id}"
     )

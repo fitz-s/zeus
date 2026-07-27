@@ -34,12 +34,14 @@ from src.events.reactor import (
     ReactorResult,
     TERMINAL_MONEY_PATH_REASONS,
     TRANSIENT_MONEY_PATH_REASONS,
+    _EXECUTABLE_SNAPSHOT_RETRY,
     _edli_emit_day0_extreme_events,
     _process_pending_cancelled,
     _rank_forecast_wake_events,
     _is_transient_money_path_reason,
 )
 from src.state.db import init_schema, world_write_mutex
+from src.sizing.portfolio_reservation import PortfolioReservationLedger
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
 
@@ -5051,6 +5053,81 @@ def test_global_winner_finalize_commits_fresh_frontier_with_terminal_carrier():
     assert conn.in_transaction is False
 
 
+def test_global_winner_side_effect_advances_frontier_while_proof_retries():
+    conn, store = _store()
+    event = _multiwinner_events("frontier-side-effect", 1)[0]
+    store.insert_or_ignore(event)
+    assert store.claim(event.event_id, claimed_at=_DT_VENUE_OPEN.isoformat())
+    continuation = make_opportunity_event(
+        event_type=event.event_type,
+        entity_key=event.entity_key,
+        source=f"test_global_continuation:{event.event_id}",
+        observed_at=event.observed_at,
+        available_at=event.available_at,
+        received_at=_DT_VENUE_OPEN.isoformat(),
+        causal_snapshot_id=event.causal_snapshot_id,
+        payload=json.loads(event.payload_json),
+        priority=event.priority,
+        created_at=_DT_VENUE_OPEN.isoformat(),
+    )
+    reservation_ledger = PortfolioReservationLedger()
+    reservation_ledger.reserve(event.event_id, "Test City", 7.5)
+
+    def _submit(*_args):
+        return None
+
+    _submit.reservation_ledger = reservation_ledger
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda *_args: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    reactor._transient_requeue_reasons[event.event_id] = (
+        "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:"
+        "receipt_scalar_mismatch"
+    )
+    reactor._process_one_post_submit = (
+        lambda *_args, **_kwargs: _EXECUTABLE_SNAPSHOT_RETRY
+    )
+    result = ReactorResult()
+    finalized = reactor._finalize_deferred_event_unit(
+        event,
+        EventSubmissionReceipt(
+            submitted=True,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            proof_accepted=False,
+            side_effect_status="VENUE_SUBMIT_ACKED",
+            venue_call_started=True,
+            venue_ack_received=True,
+        ),
+        decision_time=_DT_VENUE_OPEN,
+        result=result,
+        continuation_event=continuation,
+    )
+
+    assert finalized is True
+    assert result.proof_accepted == 0
+    assert result.processed == 0
+    assert result.dead_lettered == 0
+    assert result.retried == 1
+    assert list(reservation_ledger) == [("Test City", 7.5)]
+    reservation_ledger.rollback(event.event_id)
+    assert list(reservation_ledger) == [("Test City", 7.5)]
+    assert _processing_status(conn, event.event_id) == "pending"
+    assert _processing_status(conn, continuation.event_id) == "pending"
+    assert (
+        store.processing_last_error(continuation.event_id)
+        == GLOBAL_WINNER_TARGETED_CLAIM
+    )
+    assert conn.in_transaction is False
+
+
 def test_global_winner_continuation_write_failure_rolls_back_window_b(monkeypatch):
     conn, store = _store()
     event = _multiwinner_events("frontier-write-failure", 1)[0]
@@ -5068,12 +5145,19 @@ def test_global_winner_continuation_write_failure_rolls_back_window_b(monkeypatc
         priority=event.priority,
         created_at=_DT_VENUE_OPEN.isoformat(),
     )
+    reservation_ledger = PortfolioReservationLedger()
+    reservation_ledger.reserve(event.event_id, "Test City", 7.5)
+
+    def _submit(*_args):
+        return None
+
+    _submit.reservation_ledger = reservation_ledger
     reactor = OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: True,
         executable_snapshot_gate=lambda _event, _decision_time: True,
         riskguard_gate=lambda _event: True,
-        final_intent_submit=lambda *_args: None,
+        final_intent_submit=_submit,
         reject=lambda *_args: None,
         config=ReactorConfig(),
         regret_ledger=NoTradeRegretLedger(store.conn),
@@ -5117,6 +5201,9 @@ def test_global_winner_continuation_write_failure_rolls_back_window_b(monkeypatc
     assert result.rejection_reasons == [
         "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"
     ]
+    assert list(reservation_ledger) == [("Test City", 7.5)]
+    reservation_ledger.rollback(event.event_id)
+    assert list(reservation_ledger) == [("Test City", 7.5)]
     assert _processing_status(conn, event.event_id) == "pending"
     assert (
         conn.execute(

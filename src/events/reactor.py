@@ -2138,6 +2138,11 @@ class OpportunityEventReactor:
                 )
             }
             rejection_reasons_before = len(result.rejection_reasons)
+            reservation_side_effect_observed = (
+                bool(submit_result.submitted)
+                or bool(submit_result.venue_call_started)
+            )
+            reservation_finalized = False
 
             def restore_result_counters() -> None:
                 for name, value in result_counters_before.items():
@@ -2159,7 +2164,13 @@ class OpportunityEventReactor:
                         result=result,
                     )
                     emitted = result.proof_accepted > accepted_before
-                    self._finalize_reservation(event, emitted=emitted)
+                    self._finalize_reservation(
+                        event,
+                        emitted=(
+                            emitted or reservation_side_effect_observed
+                        ),
+                    )
+                    reservation_finalized = True
                     self._finalize_disposition(
                         event,
                         disposition,
@@ -2168,9 +2179,9 @@ class OpportunityEventReactor:
                         proof_emitted=emitted,
                     )
                     if continuation_event is not None:
-                        if not emitted:
+                        if not bool(submit_result.submitted):
                             raise ValueError(
-                                "global winner continuation requires accepted submit proof"
+                                "global winner continuation requires observed venue side effect"
                             )
                         inserted = self._store.insert_or_ignore(
                             continuation_event
@@ -2212,8 +2223,12 @@ class OpportunityEventReactor:
                     with contextlib.suppress(Exception):
                         self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
                         self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
-                    with contextlib.suppress(Exception):
-                        self._finalize_reservation(event, emitted=False)
+                    if not reservation_finalized:
+                        with contextlib.suppress(Exception):
+                            self._finalize_reservation(
+                                event,
+                                emitted=reservation_side_effect_observed,
+                            )
                     with contextlib.suppress(Exception):
                         if getattr(self._store.conn, "in_transaction", False):
                             self._store.conn.rollback()
@@ -2235,8 +2250,12 @@ class OpportunityEventReactor:
                 with contextlib.suppress(Exception):
                     self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
-                with contextlib.suppress(Exception):
-                    self._finalize_reservation(event, emitted=False)
+                if not reservation_finalized:
+                    with contextlib.suppress(Exception):
+                        self._finalize_reservation(
+                            event,
+                            emitted=reservation_side_effect_observed,
+                        )
                 self._dead_letter_unknown(
                     event,
                     exc,
@@ -2256,11 +2275,14 @@ class OpportunityEventReactor:
         DECISION_CERTIFICATE / EXECUTOR_EXPRESSIBILITY (or requeued transiently)
         in the post-submit phase. This finalizes that provisional reserve:
 
-          - ``emitted=True``  (proof_accepted advanced): commit — the stake is
-            real same-cycle in-flight capital the NEXT event must net (INV-K7).
-          - ``emitted=False`` (rejected / retried / errored): rollback — the
-            stake never reached the venue this cycle, so it must NOT inflate
-            corr_committed_usd / raw_committed_usd for later candidates.
+          - ``emitted=True``  (proof accepted OR venue side effect observed):
+            commit — the stake is real same-cycle in-flight capital the NEXT
+            event must net (INV-K7). Venue reality outranks delayed certificate
+            persistence.
+          - ``emitted=False`` (no proof and provably no venue side effect):
+            rollback — the stake never reached the venue this cycle, so it must
+            NOT inflate corr_committed_usd / raw_committed_usd for later
+            candidates.
 
         The ledger is exposed by the adapter on the injected submit callable as
         ``reservation_ledger``. Absent it (legacy list-backed adapters / tests),

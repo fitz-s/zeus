@@ -18,14 +18,15 @@ later same-cycle candidate, compounding the budget exhaustion that zeroed them.
 THE STRUCTURAL DECISION (Fitz #1 — make the category impossible): the
 reservation is no longer "whatever passed Kelly"; it is "whatever the reactor
 COMMITTED (emitted)". A reservation is PROVISIONAL when made and becomes part of
-the committed in-flight book only when the reactor confirms the bet was emitted
-(``commit``); if the reactor rejects it anywhere downstream of Kelly the
-provisional reservation is removed (``rollback``).
+the committed in-flight book when either the decision proof is accepted or an
+irreversible venue side effect is observed (``commit``). A downstream proof
+retry cannot erase capital already submitted to the venue; only a rejection
+that provably preceded every venue call may remove it (``rollback``).
 
 LIFECYCLE (per event, events processed strictly sequentially by the reactor):
     reserve(event_id, city, stake)   # adapter, when Kelly+RiskGuard pass
     ... reactor post-submit phase ...
-    commit(event_id)                 # reactor, on VERIFIED + ledger insert
+    commit(event_id)                 # proof accepted OR venue side effect
       OR
     rollback(event_id)               # reactor, on ANY downstream rejection
 
@@ -82,9 +83,9 @@ class PortfolioReservationLedger:
     def commit(self, event_id: str) -> None:
         """Mark the reservation for ``event_id`` as COMMITTED (emitted).
 
-        Called by the reactor on the VERIFIED + ledger-insert success path. A
-        committed reservation is terminal — immune to a later ``rollback``.
-        No-op for an unknown event_id (defensive)."""
+        Called by the reactor after proof acceptance or an observed venue side
+        effect. A committed reservation is terminal — immune to a later
+        ``rollback``. No-op for an unknown event_id (defensive)."""
         key = str(event_id)
         entry = self._entries.get(key)
         if entry is None:
