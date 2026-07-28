@@ -17139,7 +17139,8 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
 
     held_failure_reason = (
         "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
-        "FamilyAuthorityUnavailable:POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"
+        "FamilyAuthorityUnavailable:"
+        "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
     )
     stored_kwargs.clear()
     global_batch_runtime.process_current_global_batch(
@@ -18720,6 +18721,14 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             ),
             True,
         ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
+            ),
+            True,
+        ),
     ),
 )
 def test_global_batch_excludes_typed_current_q_ineligible_family(
@@ -18831,6 +18840,10 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                 calls["ineligible_prepare"] += 1
                 if "database is locked" in ineligible_reason:
                     raise sqlite3.OperationalError("database is locked")
+                if "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason:
+                    raise ValueError(
+                        "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
+                    )
                 raise ValueError(
                     "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
                     "REPLACEMENT_RAW_INPUT_HWM:"
@@ -18844,6 +18857,14 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
             prepare_family,
         )
         prepare_event = captured["prepare_event"]
+        if "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason:
+            held_receipt = captured["prepare_held_event"](event_a, decision_at)
+            assert held_receipt.prepared_global_family is None
+            assert held_receipt.reason == (
+                "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
+            )
 
     def actuate(winner, chosen, _at):
         assert winner.event_id == event_b.event_id
@@ -18872,7 +18893,12 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
         current_time_provider=lambda: decision_at,
     )
 
-    assert calls["ineligible_prepare"] == 1
+    expected_prepare_calls = (
+        2
+        if "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
+        else 1
+    )
+    assert calls["ineligible_prepare"] == expected_prepare_calls
     assert result.venue_submit_count == 1
     assert result.winner_event_id == event_b.event_id
     assert result.receipts[event_b.event_id].submitted is True
