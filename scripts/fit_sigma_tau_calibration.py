@@ -137,8 +137,18 @@ def tau_bucket(lead_h: "pd.Series") -> "pd.Series":
     return pd.cut(lead_h, bins=TAU_EDGES, labels=TAU_LABELS, right=False)
 
 
+def _connect_ro(fcst_path: str) -> sqlite3.Connection:
+    """Accept EITHER a plain filesystem path OR an already-formed ``file:...`` URI. Wrapping an
+    already-formed URI a second time (``f"file:{fcst_path}?mode=ro"`` when ``fcst_path`` is itself
+    ``file:/path?mode=ro``) produces a malformed double-wrapped URI
+    (``file:file:/path?mode=ro?mode=ro``) and sqlite3 raises ``no such access mode: ro?mode=ro``."""
+    if fcst_path.startswith("file:"):
+        return sqlite3.connect(fcst_path, uri=True)
+    return sqlite3.connect(f"file:{fcst_path}?mode=ro", uri=True)
+
+
 def load(fcst_path: str, since: str) -> tuple["pd.DataFrame", "pd.DataFrame"]:
-    conn = sqlite3.connect(f"file:{fcst_path}?mode=ro", uri=True)
+    conn = _connect_ro(fcst_path)
     try:
         post = pd.read_sql_query(_POST_QUERY, conn, params=(since,))
         sett = pd.read_sql_query(_SETT_QUERY, conn)
@@ -363,6 +373,101 @@ def normal_logpdf(z, sigma):
     return -0.5 * np.log(2 * np.pi) - np.log(sigma) - (z ** 2) / (2 * sigma ** 2)
 
 
+def _censored_oos_delta(group: dict, holdout_sub: "pd.DataFrame") -> tuple[float, float, float, float, int]:
+    """Event-weighted OOS mean log-lik delta (fitted vs k=1) of an ALREADY-FITTED group against
+    holdout_sub, under BOTH the primary interval-censored likelihood and the Normal-density
+    cross-check. Returns (censored_delta, normal_delta, coverage_base, coverage_fit,
+    n_holdout_events). Shared by the CLI --validate report and the OOS acceptance gate below so
+    the two never compute the number two different ways."""
+    val = _add_event_weights(holdout_sub)
+    w = val["event_weight"].values
+    k_eff = _k_eff_row(group, val["taut"], val["city"]).values
+
+    ll_censored_base = _interval_censored_loglik_per_row(val["l"].values, val["u"].values, val["sig"].values)
+    ll_censored_fit = _interval_censored_loglik_per_row(val["l"].values, val["u"].values, k_eff * val["sig"].values)
+    ll_normal_base = normal_logpdf(val["z"].values, val["sig"].values)
+    ll_normal_fit = normal_logpdf(val["z"].values, k_eff * val["sig"].values)
+
+    def wmean(x):
+        return float(np.sum(w * x) / np.sum(w))
+
+    cov_base = float(np.sum(w * (val["z"].abs() <= val["sig"]).values) / np.sum(w))
+    cov_fit = float(np.sum(w * (val["z"].abs() <= (k_eff * val["sig"])).values) / np.sum(w))
+    censored_delta = wmean(ll_censored_fit) - wmean(ll_censored_base)
+    normal_delta = wmean(ll_normal_fit) - wmean(ll_normal_base)
+    n_holdout_events = int(val["event_key"].nunique())
+    return censored_delta, normal_delta, cov_base, cov_fit, n_holdout_events
+
+
+HOLDOUT_FRACTION = 0.25  # internal OOS-gate holdout: the chronologically LAST 25% of a group's
+                          # unique events, used only when the operator did not supply --validate.
+MIN_HOLDOUT_EVENTS = 10   # below this, the gate cannot be evaluated reliably -> refuse (fail-closed).
+
+
+def _split_holdout_by_event_date(sub: "pd.DataFrame", frac: float = HOLDOUT_FRACTION) -> tuple["pd.DataFrame", "pd.DataFrame"]:
+    """Split sub into (train, holdout): holdout = the chronologically LAST `frac` fraction of this
+    group's UNIQUE (city,target_date) events (ties broken by event_key for determinism); train =
+    the rest. This is the INTERNAL OOS-gate split used by the default (no --validate) production
+    fit -- see main()."""
+    events = sub[["event_key", "target_date"]].drop_duplicates().sort_values(["target_date", "event_key"])
+    n_events = len(events)
+    n_holdout = max(1, math.ceil(n_events * frac))
+    holdout_keys = set(events["event_key"].iloc[-n_holdout:])
+    is_holdout = sub["event_key"].isin(holdout_keys)
+    return sub[~is_holdout].copy(), sub[is_holdout].copy()
+
+
+def gate_group(train_sub: "pd.DataFrame", holdout_sub: "pd.DataFrame", *, gate_method: str) -> dict:
+    """Fit on train_sub, then require the PRIMARY (censored) event-weighted OOS mean log-lik delta
+    on holdout_sub to be strictly positive before shipping any k != 1.0 for this group -- the
+    fail-closed principle applied to the fit itself, not just to a missing/malformed artifact. A
+    group that already refused for insufficient TRAIN events, or that has too few HOLDOUT events to
+    gate reliably, or that fails the gate, is returned fitted=False with the exact reason recorded.
+    A group that PASSES is refit on the FULL (train+holdout) population before being returned, so
+    the shipped numbers use all available evidence once the correction has proven itself OOS."""
+    train_group = fit_group(train_sub)
+    if not train_group["fitted"]:
+        return train_group  # insufficient TRAIN events -- refusal reason already set by fit_group
+    n_holdout_events = holdout_sub["event_key"].nunique()
+    if n_holdout_events < MIN_HOLDOUT_EVENTS:
+        return {
+            "fitted": False,
+            "global_k": 1.0,
+            "global_k_normal_crosscheck": None,
+            "n": int(len(train_sub) + len(holdout_sub)),
+            "n_events": int(train_group["n_events"] + n_holdout_events),
+            "refusal_reason": f"INSUFFICIENT_HOLDOUT_EVENTS:{n_holdout_events}<{MIN_HOLDOUT_EVENTS}",
+            "buckets": {},
+            "cities": {},
+            "oos_gate": {"passed": False, "method": gate_method, "n_holdout_events": int(n_holdout_events)},
+        }
+    censored_delta, normal_delta, cov_base, cov_fit, n_holdout_events = _censored_oos_delta(train_group, holdout_sub)
+    if censored_delta <= 0.0:
+        full_sub = pd.concat([train_sub, holdout_sub], ignore_index=True)
+        return {
+            "fitted": False,
+            "global_k": 1.0,
+            "global_k_normal_crosscheck": None,
+            "n": int(len(full_sub)),
+            "n_events": int(full_sub["event_key"].nunique()),
+            "refusal_reason": f"OOS_GATE_FAILED:censored_delta={censored_delta:.5f}<=0",
+            "buckets": {},
+            "cities": {},
+            "oos_gate": {
+                "passed": False, "method": gate_method, "censored_delta": round(censored_delta, 6),
+                "normal_delta_crosscheck": round(normal_delta, 6), "n_holdout_events": int(n_holdout_events),
+            },
+        }
+    full_sub = pd.concat([train_sub, holdout_sub], ignore_index=True)
+    final_group = fit_group(full_sub)
+    final_group["oos_gate"] = {
+        "passed": True, "method": gate_method, "censored_delta": round(censored_delta, 6),
+        "normal_delta_crosscheck": round(normal_delta, 6), "n_holdout_events": int(n_holdout_events),
+        "coverage_68_3_base": round(cov_base, 4), "coverage_68_3_fitted": round(cov_fit, 4),
+    }
+    return final_group
+
+
 def validate(d: "pd.DataFrame", cutoff: str, *, tau_col: str, label: str) -> None:
     train_mask = d["target_date"] < cutoff
     val_mask = d["target_date"] >= cutoff
@@ -381,25 +486,13 @@ def validate(d: "pd.DataFrame", cutoff: str, *, tau_col: str, label: str) -> Non
             print(f"  {unit}/{metric}: SKIP (n_events_train={n_events_train}, n_events_val={n_events_val})")
             continue
         group = fit_group(train)
-        val = _add_event_weights(val)
-        w = val["event_weight"].values
-        k_eff = _k_eff_row(group, val["taut"], val["city"]).values
-
-        ll_censored_base = _interval_censored_loglik_per_row(val["l"].values, val["u"].values, val["sig"].values)
-        ll_censored_fit = _interval_censored_loglik_per_row(val["l"].values, val["u"].values, k_eff * val["sig"].values)
-        ll_normal_base = normal_logpdf(val["z"].values, val["sig"].values)
-        ll_normal_fit = normal_logpdf(val["z"].values, k_eff * val["sig"].values)
-
-        def wmean(x):
-            return float(np.sum(w * x) / np.sum(w))
-
-        cov_base = float(np.sum(w * (val["z"].abs() <= val["sig"]).values) / np.sum(w))
-        cov_fit = float(np.sum(w * (val["z"].abs() <= (k_eff * val["sig"])).values) / np.sum(w))
+        censored_delta, normal_delta, cov_base, cov_fit, _n_ho = _censored_oos_delta(group, val)
+        gate_verdict = "PASS" if censored_delta > 0.0 else "REJECT"
         print(
             f"  {unit}/{metric}: n_events_train={n_events_train} n_events_val={n_events_val} "
             f"global_k={group.get('global_k')} (normal_crosscheck={group.get('global_k_normal_crosscheck')})\n"
-            f"    censored  oos_mean_loglik k=1:{wmean(ll_censored_base):.5f} fitted:{wmean(ll_censored_fit):.5f} delta:{(wmean(ll_censored_fit) - wmean(ll_censored_base)):+.5f}\n"
-            f"    normal_xc oos_mean_loglik k=1:{wmean(ll_normal_base):.5f} fitted:{wmean(ll_normal_fit):.5f} delta:{(wmean(ll_normal_fit) - wmean(ll_normal_base)):+.5f}\n"
+            f"    censored  oos_mean_loglik delta:{censored_delta:+.5f}  GATE:{gate_verdict}\n"
+            f"    normal_xc oos_mean_loglik delta:{normal_delta:+.5f}\n"
             f"    coverage@68.3 (event-weighted) k=1:{cov_base:.4f} fitted:{cov_fit:.4f}"
         )
 
@@ -424,10 +517,28 @@ def main() -> int:
         if args.out is None:
             return 0
 
+    # OOS ACCEPTANCE GATE (2026-07-28, design-review correction): no group ships a k that has not
+    # proven a positive censored OOS mean log-lik delta -- the fail-closed principle applied to the
+    # fit itself, not just to a missing/malformed artifact. When --validate CUTOFF was ALSO
+    # supplied, the operator's own external cutoff governs the gate (train<cutoff, holdout>=cutoff)
+    # so the SAME split they inspected is what decides the shipped artifact. Otherwise the gate uses
+    # an INTERNAL holdout: the chronologically last HOLDOUT_FRACTION of each group's own events.
+    # Either way, a group that PASSES is refit on the FULL population (train+holdout) before being
+    # served -- the holdout only decides ship/no-ship, it does not permanently withhold data from
+    # the final numbers.
+    if args.validate is not None:
+        gate_method = f"external_validate_cutoff:{args.validate}"
+    else:
+        gate_method = f"internal_holdout_last_{int(HOLDOUT_FRACTION * 100)}pct_events_by_date"
     families: dict = {}
     for unit, metric in GROUPS:
         sub = d[(d["unit_family"] == unit) & (d["temperature_metric"] == metric)].copy()
-        families.setdefault(unit, {})[metric] = fit_group(sub)
+        if args.validate is not None:
+            train_sub = sub[sub["target_date"] < args.validate]
+            holdout_sub = sub[sub["target_date"] >= args.validate]
+        else:
+            train_sub, holdout_sub = _split_holdout_by_event_date(sub)
+        families.setdefault(unit, {})[metric] = gate_group(train_sub, holdout_sub, gate_method=gate_method)
 
     source_query_hash = hashlib.sha256((_POST_QUERY + _SETT_QUERY).encode("utf-8")).hexdigest()[:16]
     data_window = f"since={args.since}"
@@ -438,6 +549,7 @@ def main() -> int:
             "authority": "sigma_tau_calibration_v1_mle",
             "created": _dt.datetime.now(_dt.timezone.utc).isoformat(),
             "method": "tau_bucketed_interval_censored_mle_plus_city_variance_shrinkage_event_weighted",
+            "oos_acceptance_gate": gate_method,
             "tau_clock": "source_cycle_time (forecast issue; NOT computed_at/decision time -- 2026-07-28 correction)",
             "tau_buckets": {lab: [lo if math.isfinite(lo) else None, hi if math.isfinite(hi) else None]
                             for lab, lo, hi in zip(TAU_LABELS, TAU_EDGES, TAU_EDGES[1:])},

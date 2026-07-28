@@ -119,6 +119,40 @@ later revision; the bullets above already describe the corrected model)
   event-count threshold -- the per-city layer will start firing once the
   corpus accumulates ~30+ days per city -- and not a bug in this slice.
 
+### 2026-07-28 second design-review pass (operator ran `--validate` independently)
+
+The operator's own `--validate 2026-07-21` run found F/high's fitted `global_k=1.251` makes it
+WORSE out-of-sample: censored delta `-0.086`, Normal cross-check also negative `-0.079`, and the
+fitted coverage (`0.818`) overshoots nominal 0.683 -- correcting for C/high's real signal was
+bleeding into F/high, which does not have one (yet, on this data). Three required changes:
+
+5. **Per-group OOS acceptance gate.** No group may ship a `k != 1.0` that has not proven a
+   POSITIVE censored-likelihood OOS delta -- the fail-closed principle applied to the fit itself,
+   not just to a missing/malformed artifact. `scripts/fit_sigma_tau_calibration.py:gate_group()`:
+   fits on a train split, evaluates the SAME event-weighted interval-censored OOS delta the
+   `--validate` report already computes (factored into a shared `_censored_oos_delta()` helper so
+   the two never diverge), and REFUSES (`fitted=False`, `global_k=1.0`, `refusal_reason=
+   "OOS_GATE_FAILED:censored_delta=...<=0"`) any group whose delta is `<= 0`. When `--validate
+   CUTOFF` is supplied together with `--out`, the operator's own external cutoff split governs the
+   gate (so the exact split they inspected decides what ships); otherwise the DEFAULT production
+   fit (`--out` alone, no `--validate`) automatically splits each group's own events by date --
+   the chronologically LAST 25% as an internal holdout, `MIN_HOLDOUT_EVENTS=10` below which the
+   gate cannot be evaluated reliably and the group refuses. A group that PASSES is refit on the
+   FULL population (train+holdout) before shipping -- the holdout only decides ship/no-ship, it
+   does not permanently withhold data from the final numbers. Every group's `oos_gate` audit dict
+   (`passed`, `censored_delta`, `normal_delta_crosscheck`, `n_holdout_events`, `method`) is stamped
+   in the artifact regardless of verdict; `_meta.oos_acceptance_gate` records which split method
+   governed this run.
+6. **BUG FIX: `--fcst` rejected an already-formed `file:...?mode=ro` URI.** `load()` unconditionally
+   wrapped its argument in `f"file:{fcst_path}?mode=ro"`, so passing an ALREADY-WRAPPED URI produced
+   the double-wrapped `file:file:...?mode=ro?mode=ro`, which sqlite3 rejected with `no such access
+   mode: ro?mode=ro`. New `_connect_ro()` detects a `file:` prefix and uses the caller's URI as-is;
+   a plain filesystem path is wrapped exactly as before. Both forms verified against the live DB and
+   covered by a regression test.
+7. **Uncommitted worktree diff.** Checked at the time of the report request: `git status --short`
+   showed a clean working tree (nothing uncommitted). No action was needed by the time this was
+   raised; noted here for the record.
+
 ## Deliverables
 
 1. `scripts/fit_sigma_tau_calibration.py` -- walk-forward fitter, READ-ONLY on
@@ -175,53 +209,75 @@ tau-clock choice's effect; event counts (not row counts) gate fitting.
 ```
 [sigma-tau] validate cutoff=2026-07-21 clock=PRIMARY(issue-clock) n_train_rows=12221 n_val_rows=7700
   C/high: n_events_train=348 n_events_val=176 global_k=1.572637 (normal_crosscheck=1.147199)
-    censored  oos_mean_loglik k=1:-2.20511 fitted:-2.01144 delta:+0.19367
-    normal_xc oos_mean_loglik k=1:-2.60330 fitted:-2.07432 delta:+0.52897
+    censored  oos_mean_loglik delta:+0.19367  GATE:PASS
+    normal_xc oos_mean_loglik delta:+0.52897
     coverage@68.3 (event-weighted) k=1:0.5921 fitted:0.7694
   C/low: SKIP (n_events_train=50, n_events_val=28)
   F/high: n_events_train=92 n_events_val=64 global_k=1.251403 (normal_crosscheck=0.971015)
-    censored  oos_mean_loglik k=1:-2.09578 fitted:-2.18162 delta:-0.08584
-    normal_xc oos_mean_loglik k=1:-1.51260 fitted:-1.59130 delta:-0.07870
+    censored  oos_mean_loglik delta:-0.08584  GATE:REJECT
+    normal_xc oos_mean_loglik delta:-0.07870
     coverage@68.3 (event-weighted) k=1:0.7212 fitted:0.8184
   F/low: SKIP (n_events_train=17, n_events_val=11)
 [sigma-tau] validate cutoff=2026-07-21 clock=COMPARISON-ONLY(decision-clock) n_train_rows=12221 n_val_rows=7700
   C/high: n_events_train=348 n_events_val=176 global_k=1.572637 (normal_crosscheck=1.147199)
-    censored  oos_mean_loglik k=1:-2.20511 fitted:-2.00997 delta:+0.19514
-    normal_xc oos_mean_loglik k=1:-2.60330 fitted:-2.07241 delta:+0.53089
+    censored  oos_mean_loglik delta:+0.19514  GATE:PASS
+    normal_xc oos_mean_loglik delta:+0.53089
     coverage@68.3 (event-weighted) k=1:0.5921 fitted:0.7710
   C/low: SKIP (n_events_train=50, n_events_val=28)
   F/high: n_events_train=92 n_events_val=64 global_k=1.251403 (normal_crosscheck=0.971015)
-    censored  oos_mean_loglik k=1:-2.09578 fitted:-2.16560 delta:-0.06981
-    normal_xc oos_mean_loglik k=1:-1.51260 fitted:-1.57576 delta:-0.06317
+    censored  oos_mean_loglik delta:-0.06981  GATE:REJECT
+    normal_xc oos_mean_loglik delta:-0.06317
     coverage@68.3 (event-weighted) k=1:0.7212 fitted:0.8105
   F/low: SKIP (n_events_train=17, n_events_val=11)
 ```
+
+`--out` run WITH `--validate 2026-07-21` (the operator's cutoff governs the shipped gate,
+`_meta.oos_acceptance_gate = "external_validate_cutoff:2026-07-21"`):
+
+| group | fitted | global_k | oos_gate.passed | censored_delta | refusal_reason |
+|---|---|---|---|---|---|
+| C/high | **True** | 1.572620 | True | +0.193669 | -- |
+| C/low  | False | 1.0 | -- (never reached) | -- | `INSUFFICIENT_EVENTS:50<60` |
+| F/high | **False** | 1.0 | False | -0.085838 | `OOS_GATE_FAILED:censored_delta=-0.08584<=0` |
+| F/low  | False | 1.0 | -- (never reached) | -- | `INSUFFICIENT_EVENTS:17<60` |
+
+Default production `--out` run (no `--validate`; internal 25%-holdout gate,
+`_meta.oos_acceptance_gate = "internal_holdout_last_25pct_events_by_date"`, full corpus
+`n_final=19921`): C/high **PASSES** (`global_k=1.572620`, `censored_delta=+0.097068`,
+`n_holdout_events=131`); F/high **REFUSED** (`censored_delta=-0.033533`, `n_holdout_events=39`);
+C/low and F/low both refuse on `INSUFFICIENT_EVENTS` before the gate is even reached (58 and 21
+events respectively, `< MIN_GROUP_N=60` once 25% is withheld as holdout).
 
 Notes:
 - `n_events_train`/`n_events_val` collapsed dramatically versus the old row counts (e.g. C/high
   train was 9578 ROWS, now 348 unique EVENTS) -- confirming the recompute-multiplicity finding.
   `C/low` and `F/low` no longer clear `MIN_GROUP_N=60` EVENTS on this split (they did on raw rows)
-  and are honestly SKIPPED rather than reporting a noisy number; the FULL (non-split) production
-  fit below still licenses them (more total events than either half alone).
+  and are honestly SKIPPED rather than reporting a noisy number.
+- **F/high correctly refuses.** The operator's own run of `--validate` found F/high's raw fitted
+  `global_k=1.251` makes it WORSE OOS: negative censored delta, negative Normal cross-check, and
+  fitted coverage (0.818) overshoots nominal 0.683 -- overcorrecting, not calibrating. The gate
+  catches this automatically and ships it as `fitted=False, global_k=1.0` (neutral) instead, with
+  the failing delta recorded as the refusal reason. This was previously reported (in an earlier
+  version of this plan) as a "genuine OOS coverage improvement" alongside C/high -- that framing
+  was wrong; withdrawn here in favor of the gate's verdict.
 - **Clock choice's effect is small on THIS split**: the two clock blocks' deltas differ only in the
-  4th significant digit for C/high and F/high (e.g. +0.19367 vs +0.19514). This is expected -- most
-  individual posteriors are not near a bucket boundary, so the two clocks usually agree on which
-  bucket a row falls into; the correction's importance is in the WEIGHTING (not letting 247
-  same-cycle recomputes dominate a bucket's fit), which both clock choices now share equally via
-  event weighting. The corrected tau clock's real benefit is preventing "look-ahead": it is not
-  expected to produce a dramatically different NUMBER on a historical replay where recompute
-  clustering happens to be roughly clock-symmetric; it prevents a live drift where recompute
-  cadence itself (not new information) would move q.
-- C/high and F/high both show a genuine OOS coverage improvement (0.59->0.77, 0.72->0.82) even
-  where the censored log-lik delta is small or negative (F/high) -- the SHAPE of the correction
-  (wider tails via a widened k) still improves calibrated coverage even when the point log-lik
-  trade-off is closer to a wash.
+  4th significant digit for C/high and F/high (e.g. +0.19367 vs +0.19514), and the gate verdict
+  (PASS/REJECT) is identical under both clocks here. This is expected -- most individual posteriors
+  are not near a bucket boundary, so the two clocks usually agree on which bucket a row falls into;
+  the correction's importance is in the WEIGHTING (not letting 247 same-cycle recomputes dominate a
+  bucket's fit), which both clock choices now share equally via event weighting. The corrected tau
+  clock's real benefit is preventing "look-ahead": it is not expected to produce a dramatically
+  different NUMBER on a historical replay where recompute clustering happens to be roughly
+  clock-symmetric; it prevents a live drift where recompute cadence itself (not new information)
+  would move q.
 
 Full production fit (no cutoff, full corpus `n_final=19921` -- the corrected pipeline no longer
-drops any rows on the negative-lead check since `lead_issue_h` is never negative in this window):
-`global_k` (interval-censored PRIMARY / normal crosscheck): C/high 1.573/1.061, C/low 1.313/0.905,
-F/high 1.133/0.888, F/low REFUSED (only 28 unique events, `fitted=False`). See the two findings
-above (RAW-mu-forces-bias-into-k; city correction currently inert) for why the primary numbers run
+drops any rows on the negative-lead check since `lead_issue_h` is never negative in this window),
+POST-GATE shipped numbers: `global_k` (interval-censored PRIMARY / normal crosscheck): C/high
+1.573/1.061 (**shipped**, gate PASS); C/low REFUSED (insufficient events, both pre- and post-gate);
+F/high REFUSED (gate REJECT -- ships neutral 1.0, not its raw 1.133); F/low REFUSED (insufficient
+events). See the two findings above (RAW-mu-forces-bias-into-k; city correction currently inert)
+for why C/high's shipped primary number runs
 higher than the original evidence-basis summary and why zero cities appear in any group's
 `cities` map today.
 
@@ -290,3 +346,29 @@ higher than the original evidence-basis summary and why zero cities appear in an
   - Combined new+existing regression suite after the corrections: 29 new tests pass; same 10
     pre-existing (unrelated) failures as before, verified identical on the unmodified main
     checkout.
+- 2026-07-28 (third pass, same day): operator ran `--validate` independently and found F/high's
+  raw fit makes it OOS-worse; required a per-group acceptance gate (see "second design-review
+  pass" section above), the `--fcst` URI double-wrap bug fix, and confirmation of a clean
+  worktree.
+  - Implemented `gate_group()` / `_censored_oos_delta()` / `_split_holdout_by_event_date()` /
+    `_connect_ro()` in the fitter; wired `main()`'s `--out` path through the gate (external cutoff
+    when `--validate` is also given, else an internal 25%-holdout split); `validate()` now prints
+    a `GATE:PASS`/`GATE:REJECT` line per group using the SAME delta computation as the gate itself
+    (shared helper, cannot diverge).
+  - Debugging note: the first synthetic gate-acceptance test used the EXISTING deterministic
+    (exact alternating +d/-d) multi-series fixture and failed unpredictably -- a perfectly
+    deterministic residual pattern has no genuine sampling variability for a holdout split to
+    reward, and non-interleaved per-series date blocks put an entire different regime into the
+    holdout tail. Fixed by (a) interleaving the two Shanghai bucket series across one shared
+    calendar window (`day_offset`/`day_stride` in `_add_series`) so the existing lower-level
+    `fit_group()` unit tests keep a representative bucket mix, and (b) adding a SEPARATE, properly
+    randomized single-bucket fixture (`z ~ N(0, (true_k*sig)^2)`, fixed seed) specifically for
+    testing the gate's accept/reject behavior in isolation
+    (`test_oos_gate_accepts_a_genuine_correction`, `test_oos_gate_rejects_a_spurious_correction`).
+  - `git status --short` at the time of this pass was already clean (no uncommitted diff to
+    `scripts/fit_sigma_tau_calibration.py` or anything else) -- the prior commit had already
+    captured everything.
+  - Combined new+existing regression suite after the gate: 33 new tests pass (13 fitter + 17
+    loader + 3 serving-equivalence); same 5 pre-existing (unrelated) materializer-schema failures
+    as before, verified identical on the unmodified main checkout. `ruff check`, `py_compile`,
+    `git diff --check` all clean.
