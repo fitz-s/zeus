@@ -2672,6 +2672,57 @@ def test_day0_owner_directory_scan_failure_is_indeterminate_and_retains_marker(
     conn.close()
 
 
+def test_day0_owner_inflight_entry_stat_failure_is_indeterminate_and_retains_marker(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    db_path = _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    conn, payload, seed_file, _identity, cycle = _record_missing_day0_owner(
+        db_path,
+        cfg,
+        seed_name="owner.enqueue-entry-stat-error.json",
+    )
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    batch = Path(cfg["inflight_dir"]) / "claimed"
+    batch.mkdir(parents=True)
+    claimed = batch / seed_file.name
+    claimed.write_text(
+        json.dumps(
+            {
+                "computed_at": "2026-07-19T05:00:00+00:00",
+                "day0_enqueue_owner_witness": {
+                    "city": "Shanghai",
+                    "target_date": "2026-07-19",
+                    "metric": "high",
+                    "target_cycle_time": cycle,
+                    "seed_file": str(seed_file),
+                    "conditioning_identity": _identity,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_stat = Path.stat
+
+    def fail_claimed_batch_stat(path: Path, *args, **kwargs):
+        if path == batch:
+            raise PermissionError("entry stat denied")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_claimed_batch_stat)
+    assert _missing_day0_owner_is_retained(conn, payload=payload, cycle=cycle) is True
+    assert _fetch_enqueue_row(db_path)["seed_file"] == str(seed_file)
+    assert (
+        "DAY0_ENQUEUE_OWNER_REQUEST_INFLIGHT_ENTRY_FAILED:PermissionError"
+        in caplog.text
+    )
+    conn.close()
+
+
 def test_day0_owner_json_failure_is_indeterminate_and_retains_marker(
     tmp_path, monkeypatch, caplog
 ) -> None:

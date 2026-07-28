@@ -43,6 +43,7 @@ import logging
 import os
 import queue
 import sqlite3
+import stat
 import threading
 import time
 import uuid
@@ -630,13 +631,18 @@ def _day0_enqueue_owner_request_check(
             return pending
         for batch_path in batches:
             try:
-                is_dir = batch_path.is_dir()
+                entry_mode = batch_path.stat().st_mode
+            except FileNotFoundError:
+                # The consumer may finish and remove one claimed batch after
+                # the parent snapshot. Its exact request is absent from this
+                # scan; the mandatory second full scan below closes the race.
+                continue
             except OSError as exc:
                 return _Day0EnqueueOwnerRequestCheck(
                     _Day0EnqueueOwnerRequestState.INDETERMINATE,
                     f"DAY0_ENQUEUE_OWNER_REQUEST_INFLIGHT_ENTRY_FAILED:{type(exc).__name__}",
                 )
-            if not is_dir:
+            if not stat.S_ISDIR(entry_mode):
                 continue
             claimed = _request_check(
                 batch_path / Path(seed_file).name,
