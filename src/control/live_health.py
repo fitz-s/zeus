@@ -1238,6 +1238,8 @@ def _forecast_to_event_bridge_surface(
     identity_payload_lag_seconds: float | None = None
     identity_to_latest_lag_seconds: float | None = None
     family_latest_posterior_at: datetime | None = None
+    family_latest_source_basis_equivalent = False
+    source_basis_fields: tuple[str, ...] = ()
     if fsr_identity:
         posterior_columns, posterior_column_err = _sqlite_ro_table_columns(
             forecast_db,
@@ -1254,6 +1256,21 @@ def _forecast_to_event_bridge_surface(
             for scope_column in ("product_id", "source_id"):
                 if scope_column in posterior_columns:
                     identity_scope_select += f", {scope_column}"
+            source_basis_fields = tuple(
+                column
+                for column in (
+                    "source_cycle_time",
+                    "dependency_source_run_ids_json",
+                    "dependency_hash",
+                    "posterior_config_hash",
+                )
+                if column in posterior_columns
+            )
+            identity_basis_select = "".join(
+                f", {column}"
+                for column in source_basis_fields
+                if column != "source_cycle_time"
+            )
             predicates = ["runtime_layer = 'live'", "posterior_identity_hash = ?"]
             params: list[str] = [fsr_identity]
             fsr_city = str(fsr_payload.get("city") or "").strip()
@@ -1276,6 +1293,7 @@ def _forecast_to_event_bridge_surface(
                        source_available_at,
                        posterior_identity_hash
                        {identity_scope_select}
+                       {identity_basis_select}
                   FROM forecast_posteriors
                  WHERE {" AND ".join(predicates)}
                  ORDER BY datetime(computed_at) DESC
@@ -1333,10 +1351,14 @@ def _forecast_to_event_bridge_surface(
                             if "posterior_id" in posterior_columns
                             else "rowid DESC"
                         )
+                        family_basis_select = "".join(
+                            f", {column}" for column in source_basis_fields
+                        )
                         family_rows, family_err = _sqlite_ro_rows(
                             forecast_db,
                             f"""
                             SELECT computed_at
+                                   {family_basis_select}
                               FROM forecast_posteriors
                              WHERE {" AND ".join(family_predicates)}
                              ORDER BY COALESCE(source_cycle_time, '') DESC,
@@ -1353,12 +1375,31 @@ def _forecast_to_event_bridge_surface(
                                 "evaluated": True,
                             }
                         if family_rows:
+                            family_latest = family_rows[0]
                             parsed_family_latest = _parse_iso_utc(
-                                family_rows[0].get("computed_at")
+                                family_latest.get("computed_at")
                             )
                             if parsed_family_latest is not None:
                                 family_latest_posterior_at = parsed_family_latest
                                 latest_comparison_at = parsed_family_latest
+                            dependency_discriminators = tuple(
+                                field
+                                for field in source_basis_fields
+                                if field != "source_cycle_time"
+                                and str(identity_match.get(field) or "").strip()
+                            )
+                            family_latest_source_basis_equivalent = bool(
+                                "source_cycle_time" in source_basis_fields
+                                and dependency_discriminators
+                                and str(
+                                    identity_match.get("source_cycle_time") or ""
+                                ).strip()
+                                and all(
+                                    str(identity_match.get(field) or "")
+                                    == str(family_latest.get(field) or "")
+                                    for field in source_basis_fields
+                                )
+                            )
                     identity_to_latest_lag_seconds = (
                         latest_comparison_at - identity_computed_at
                     ).total_seconds()
@@ -1389,6 +1430,10 @@ def _forecast_to_event_bridge_surface(
             if family_latest_posterior_at is not None
             else None
         ),
+        "latest_fsr_family_source_basis_equivalent": (
+            family_latest_source_basis_equivalent
+        ),
+        "source_basis_fields": list(source_basis_fields),
         "event_queue": queue_detail,
         "max_lag_seconds": FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS,
     }
@@ -1428,6 +1473,13 @@ def _forecast_to_event_bridge_surface(
             identity_to_latest_lag_seconds is not None
             and identity_to_latest_lag_seconds > FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
         ):
+            if family_latest_source_basis_equivalent and active_carrier_progress:
+                return {
+                    "ok": True,
+                    "issue": None,
+                    "bridge_mode": "source_basis_equivalent_rematerialization",
+                    **detail,
+                }
             return {
                 "ok": False,
                 "issue": (
@@ -5842,6 +5894,18 @@ def _decision_trace_counts_for_events(
             ("SELECT 1 FROM decision_compile_failures WHERE event_id = ? LIMIT 1", lambda event_id: (event_id,)),
             ("SELECT 1 FROM no_trade_regret_events WHERE event_id = ? LIMIT 1", lambda event_id: (event_id,)),
             ("SELECT 1 FROM edli_no_submit_receipts WHERE event_id = ? LIMIT 1", lambda event_id: (event_id,)),
+            (
+                """
+                SELECT 1
+                  FROM opportunity_event_processing
+                 WHERE consumer_name = 'edli_reactor_v1:global_winner_v1'
+                   AND event_id = ?
+                   AND processing_status = 'expired'
+                   AND last_error = 'GLOBAL_WINNER_TARGET_SUPERSEDED'
+                 LIMIT 1
+                """,
+                lambda event_id: (event_id,),
+            ),
             (
                 """
                 SELECT 1

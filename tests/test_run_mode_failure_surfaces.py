@@ -2146,6 +2146,109 @@ def test_forecast_event_bridge_rejects_superseded_matching_posterior_identity(
     assert "forecast_event_bridge" in result["failing_surfaces"]
 
 
+def test_forecast_event_bridge_accepts_equivalent_source_basis_rematerialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    now = datetime.now(timezone.utc)
+    identity_hash = "posterior-identity-anchor"
+    old_posterior_at = (now - timedelta(minutes=20)).isoformat()
+    basis_json = json.dumps(
+        {
+            "baseline_b0": "baseline-1",
+            "openmeteo_ifs9_anchor": "anchor-1",
+            "current_ensemble_snapshot": 17,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=old_posterior_at,
+        fsr_created_at=(now - timedelta(minutes=16)).isoformat(),
+        posterior_identity_hash=identity_hash,
+        fsr_payload={
+            "city": "Madrid",
+            "target_date": "2026-07-09",
+            "metric": "high",
+            "source_run_id": identity_hash,
+            "snapshot_hash": identity_hash,
+            "cycle": "2026-07-08T06:00:00+00:00",
+            "available_at": old_posterior_at,
+            "captured_at": old_posterior_at,
+        },
+    )
+    forecast_conn = sqlite3.connect(sd / "zeus-forecasts.db")
+    try:
+        forecast_conn.execute(
+            "ALTER TABLE forecast_posteriors "
+            "ADD COLUMN dependency_source_run_ids_json TEXT"
+        )
+        forecast_conn.execute(
+            "UPDATE forecast_posteriors "
+            "SET dependency_source_run_ids_json = ?",
+            (basis_json,),
+        )
+        forecast_conn.execute(
+            "INSERT INTO forecast_posteriors ("
+            "computed_at, runtime_layer, posterior_identity_hash, city, "
+            "target_date, temperature_metric, source_cycle_time, "
+            "source_available_at, dependency_source_run_ids_json"
+            ") VALUES (?, 'live', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                (now - timedelta(minutes=2)).isoformat(),
+                "posterior-identity-rematerialized",
+                "Madrid",
+                "2026-07-09",
+                "high",
+                "2026-07-08T06:00:00+00:00",
+                (now - timedelta(minutes=3)).isoformat(),
+                basis_json,
+            ),
+        )
+        forecast_conn.commit()
+    finally:
+        forecast_conn.close()
+    world_conn = sqlite3.connect(sd / "zeus-world.db")
+    try:
+        world_conn.execute(
+            "CREATE TABLE opportunity_event_processing ("
+            "consumer_name TEXT, event_id TEXT, processing_status TEXT, "
+            "last_error TEXT, updated_at TEXT)"
+        )
+        world_conn.execute(
+            "INSERT INTO opportunity_event_processing VALUES "
+            "('edli_reactor_v1', 'fsr-1', 'pending', "
+            "'GLOBAL_WINNER_AWAITS_CLAIM', ?)",
+            ((now - timedelta(seconds=20)).isoformat(),),
+        )
+        world_conn.commit()
+    finally:
+        world_conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    bridge = result["surfaces"]["forecast_event_bridge"]
+    assert bridge["ok"] is True
+    assert bridge["bridge_mode"] == "source_basis_equivalent_rematerialization"
+    assert bridge["latest_fsr_family_source_basis_equivalent"] is True
+    assert "forecast_event_bridge" not in result["failing_surfaces"]
+
+
 def test_forecast_event_bridge_does_not_cross_supersede_unrelated_family(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4367,6 +4470,35 @@ def test_forecast_decision_trace_accepts_processed_fsr_with_no_submit_artifact(
     sd = tmp_path / "state"
     sd.mkdir()
     _write_forecast_trace_dbs(sd, with_no_submit=True)
+
+    trace = live_health._forecast_decision_trace_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+
+    assert trace["ok"] is True
+    assert trace["processed_event_count"] == 1
+    assert trace["traced_processed_event_count"] == 1
+
+
+def test_forecast_decision_trace_accepts_superseded_global_winner_pointer(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_forecast_trace_dbs(sd, with_no_submit=False)
+    world_conn = sqlite3.connect(sd / "zeus-world.db")
+    try:
+        world_conn.execute(
+            "INSERT INTO opportunity_event_processing VALUES "
+            "('edli_reactor_v1:global_winner_v1', 'fsr-trace-1', "
+            "'expired', ?, 'GLOBAL_WINNER_TARGET_SUPERSEDED')",
+            (_now_iso(-20),),
+        )
+        world_conn.commit()
+    finally:
+        world_conn.close()
 
     trace = live_health._forecast_decision_trace_surface(
         sd,
