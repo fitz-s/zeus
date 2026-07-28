@@ -4381,6 +4381,12 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     "REPLACEMENT_0_1_LIVE_INPUT_LAG",
     "REPLACEMENT_LIVE_INPUT_LAG",
     "FORECAST_AUTHORITY_MISSING",
+    # SCOPE: the exact city/date/metric family whose persisted conditioning
+    # predates a later authoritative observation correction. DRAIN: the
+    # settlement-print catch-up event seeds immediate family materialization.
+    # RESET: the recomputed posterior binds the corrected observation value and
+    # the next full decision no longer raises this reason.
+    "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH",
     # Read-boundary compatibility for queued/durable pre-cutover reasons.
     "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
     "REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED",
@@ -4866,6 +4872,7 @@ _POSTERIOR_STALENESS_REASON_BASES = frozenset(
         # above. Old rows still need the same single-family reseed cure.
         "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
         "REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED",
+        "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH",
         # The bundle reader emits this exact nested segment when a newer raw
         # input supersedes the served posterior.  Day0 source-clock binding may
         # wrap it in GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED, but the cure stays
@@ -7751,6 +7758,11 @@ def _edli_emit_day0_extreme_events(
                 if family_admission is not None
                 else None
             ),
+            scan_families=(
+                family_admission.admitted_families
+                if family_admission is not None
+                else ()
+            ),
         )
         authority_results, observation_results = _edli_scan_day0_with_lock_retry(
             trigger=trigger,
@@ -7825,6 +7837,22 @@ def _edli_scan_day0_with_lock_retry(
                 received_at=received_at,
                 limit=limit,
             )
+            settlement_print_scan = getattr(
+                trigger,
+                "scan_settlement_print_rows",
+                None,
+            )
+            remaining = max(0, limit - len(observation_results))
+            if remaining and callable(settlement_print_scan):
+                observation_results.extend(
+                    settlement_print_scan(
+                        observation_conn=world_conn,
+                        settlement_semantics=_edli_day0_settlement_semantics,
+                        decision_time=decision_time,
+                        received_at=received_at,
+                        limit=remaining,
+                    )
+                )
             return authority_results, observation_results
         except sqlite3.OperationalError as exc:
             if not _edli_is_sqlite_lock_error(exc) or attempt > len(retry_delays):

@@ -22,6 +22,7 @@ from src.events.triggers.day0_extreme_updated import (
     observation_instant_row_to_day0_observation,
 )
 from src.state.db import init_schema
+from src.state.schema.observation_prints_schema import append_print
 
 
 class FakeSettlementSemantics:
@@ -1447,6 +1448,82 @@ def test_scan_observation_instants_change_gate_suppresses_unchanged_extreme():
     )
     assert second == [], "unchanged extreme must not re-emit (firehose suppressed)"
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 2
+
+
+def test_scan_settlement_print_rows_emits_same_clock_value_correction_once():
+    """A WU correction can share the source clock with an older value.
+
+    The append-only ledger retains both values while observation_instants keeps
+    its first hour identity. Catch-up must publish the new absorbing extreme
+    exactly once so posterior materialization can drain the mismatch.
+    """
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    target_date = "2026-07-28"
+    trigger = Day0ExtremeUpdatedTrigger(
+        EventWriter(conn),
+        suppress_recent_no_value_refutations=True,
+        scan_families=(("Paris", target_date, "high"),),
+    )
+    semantics = FakeSettlementSemantics(27)
+    prior = trigger.emit_from_observation(
+        observation=_observation(
+            city="Paris",
+            target_date=target_date,
+            settlement_source="wu_icao_history",
+            station_id="LFPB",
+            observation_time="2026-07-28T04:00:00+00:00",
+            observation_available_at="2026-07-28T04:35:00+00:00",
+            raw_value=27.0,
+            high_so_far=27.0,
+            observation_context_id="prior-27",
+        ),
+        settlement_semantics=semantics,
+        decision_time=datetime(2026, 7, 28, 4, 40, tzinfo=timezone.utc),
+        received_at="2026-07-28T04:40:00+00:00",
+    )
+    assert prior is not None and prior.inserted
+    assert append_print(
+        conn,
+        city="Paris",
+        station_id="LFPB",
+        source_channel="wu_icao_history",
+        publish_ts_utc="2026-07-28T04:00:00+00:00",
+        value_native=28.0,
+        unit="C",
+        fetched_at_utc="2026-07-28T05:16:00+00:00",
+    )
+
+    corrected = trigger.scan_settlement_print_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(28),
+        decision_time=datetime(2026, 7, 28, 5, 20, tzinfo=timezone.utc),
+        received_at="2026-07-28T05:20:00+00:00",
+    )
+    repeated = trigger.scan_settlement_print_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(28),
+        decision_time=datetime(2026, 7, 28, 5, 21, tzinfo=timezone.utc),
+        received_at="2026-07-28T05:21:00+00:00",
+    )
+
+    assert len(corrected) == 1
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM opportunity_events WHERE event_id=?",
+            (corrected[0].event_id,),
+        ).fetchone()[0]
+    )
+    assert payload["high_so_far"] == pytest.approx(28.0)
+    assert payload["observation_time"] == "2026-07-28T04:00:00+00:00"
+    assert payload["observation_available_at"] == "2026-07-28T05:16:00+00:00"
+    assert repeated == []
+    assert conn.execute(
+        "SELECT COUNT(*) FROM opportunity_events "
+        "WHERE event_type='DAY0_EXTREME_UPDATED'"
+    ).fetchone()[0] == 2
 
 
 def test_scan_observation_instants_change_gate_emits_on_source_clock_advance():

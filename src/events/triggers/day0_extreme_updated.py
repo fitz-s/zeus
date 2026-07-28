@@ -134,6 +134,7 @@ class Day0ExtremeUpdatedTrigger:
         suppress_recent_no_value_refutations: bool = False,
         family_admission: Day0FamilyAdmission | None = None,
         scan_cities: Iterable[str] | None = None,
+        scan_families: Iterable[tuple[str, str, str]] | None = None,
     ) -> None:
         self._writer = writer
         self._suppress_recent_no_value_refutations = suppress_recent_no_value_refutations
@@ -143,6 +144,25 @@ class Day0ExtremeUpdatedTrigger:
             if scan_cities is None
             else tuple(
                 sorted({str(city).strip() for city in scan_cities if str(city).strip()})
+            )
+        )
+        self._scan_families = (
+            ()
+            if scan_families is None
+            else tuple(
+                sorted(
+                    {
+                        (
+                            str(city).strip(),
+                            str(target_date).strip(),
+                            str(metric).strip().lower(),
+                        )
+                        for city, target_date, metric in scan_families
+                        if str(city).strip()
+                        and str(target_date).strip()
+                        and str(metric).strip().lower() in {"high", "low"}
+                    }
+                )
             )
         )
 
@@ -495,6 +515,145 @@ class Day0ExtremeUpdatedTrigger:
             if row_emitted:
                 emitted_rows += 1
                 if emitted_rows >= emit_limit:
+                    break
+        return results
+
+    def scan_settlement_print_rows(
+        self,
+        *,
+        observation_conn: sqlite3.Connection,
+        settlement_semantics: Any,
+        decision_time: datetime,
+        received_at: str,
+        limit: int = 100,
+    ) -> list[EventWriteResult]:
+        """Emit settlement-ledger facts not yet represented by a Day0 event.
+
+        ``observation_prints`` preserves source corrections whose publication
+        clock is unchanged but whose value differs. ``observation_instants`` is
+        hour-identity keyed, so that correction can exist only in the ledger.
+        The canonical fact reducer returns a ledger source only while its
+        absorbing extreme or source clock is newer than both persisted instants
+        and durable Day0 events. Once this method writes the event, the same
+        reducer selects that event on the next scan and the bridge becomes a
+        no-op without a second watermark table.
+        """
+
+        if not self._scan_families:
+            return []
+        from src.data.replacement_forecast_current_target_plan import (
+            _latest_authorized_day0_fact,
+        )
+
+        results: list[EventWriteResult] = []
+        emit_limit = max(1, int(limit))
+        for city, target_date, metric in self._scan_families:
+            fact = _latest_authorized_day0_fact(
+                observation_conn,
+                city=city,
+                target_date=target_date,
+                temperature_metric=metric,
+                decision_time=decision_time,
+                require_settlement_channel=True,
+            )
+            source = str((fact or {}).get("source") or "")
+            if not source.startswith("observation_prints:"):
+                continue
+            observation_source = str(
+                (fact or {}).get("observation_source") or source.split(":", 1)[-1]
+            )
+            city_config = runtime_cities_by_name().get(city)
+            if city_config is None:
+                continue
+            station_id = str((fact or {}).get("station_id") or "").strip().upper()
+            expected_station = _expected_station_for_city(city_config)
+            unit = str((fact or {}).get("unit") or "").strip().upper()
+            expected_unit = str(
+                getattr(city_config, "settlement_unit", "") or ""
+            ).strip().upper()
+            observation_time = str((fact or {}).get("observation_time") or "")
+            available_at = str(
+                (fact or {}).get("observation_available_at") or ""
+            )
+            local_date_status, dst_status = _observation_local_date_status(
+                observation_time=observation_time,
+                city_timezone=str(getattr(city_config, "timezone", "") or ""),
+                target_date=target_date,
+            )
+            source_match = (
+                "MATCH"
+                if _source_matches_config(
+                    observation_source,
+                    str(getattr(city_config, "settlement_source_type", "") or ""),
+                )
+                else "MISMATCH"
+            )
+            station_match = (
+                "MATCH"
+                if _station_matches(station_id, expected_station)
+                else "MISMATCH"
+            )
+            rounding_status = (
+                "MATCH" if unit and unit == expected_unit else "MISMATCH"
+            )
+            authorized = (
+                source_match == "MATCH"
+                and station_match == "MATCH"
+                and rounding_status == "MATCH"
+            )
+            live = (
+                authorized
+                and local_date_status == "MATCH"
+                and dst_status == "UNAMBIGUOUS"
+                and bool(available_at)
+            )
+            if not live:
+                continue
+            value = float((fact or {})["observed_extreme_native"])
+            observation = {
+                "city": city,
+                "target_date": target_date,
+                "metric": metric,
+                "settlement_source": observation_source,
+                "station_id": station_id,
+                "observation_time": observation_time,
+                "observation_available_at": available_at,
+                "raw_value": value,
+                "high_so_far": value if metric == "high" else None,
+                "low_so_far": value if metric == "low" else None,
+                "source_match_status": source_match,
+                "local_date_status": local_date_status,
+                "station_match_status": station_match,
+                "dst_status": dst_status,
+                "metric_match_status": "MATCH",
+                "rounding_status": rounding_status,
+                "source_authorized_status": "AUTHORIZED",
+                "live_authority_status": "live",
+                "settlement_unit": unit,
+                "settlement_precision": 1.0,
+                "rounding_rule": SettlementSemantics.for_city(
+                    city_config
+                ).rounding_rule,
+                "observation_context_id": (
+                    "observation_prints:"
+                    f"{city}:{target_date}:{metric}:{observation_source}:"
+                    f"{station_id}:{observation_time}:{available_at}:{value}"
+                ),
+            }
+            semantics = (
+                settlement_semantics(observation)
+                if callable(settlement_semantics)
+                else settlement_semantics
+            )
+            result = self._write_observation_if_admitted(
+                observation=observation,
+                settlement_semantics=semantics,
+                decision_time=decision_time,
+                received_at=received_at,
+            )
+            if result is not None and result.inserted:
+                results.append(result)
+                if len(results) >= emit_limit:
                     break
         return results
 
