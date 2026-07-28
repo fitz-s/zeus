@@ -20518,6 +20518,335 @@ class TestRecoveryResolutionTable:
             },
         }
 
+    def test_filled_selected_exit_slice_releases_post_fill_chain_remainder(
+        self,
+        conn,
+    ):
+        """A filled slice must return its proven chain remainder to redecision."""
+        from src.execution.command_recovery import (
+            reconcile_pending_exit_terminal_order_releases,
+        )
+        from src.state.venue_command_repo import append_event
+
+        position_id = "pos-filled-exit-slice"
+        order_id = "ord-filled-exit-slice"
+        _insert(
+            conn,
+            command_id="cmd-old-filled-exit-slice",
+            position_id=position_id,
+            intent_kind="EXIT",
+            side="SELL",
+            size=4.0,
+            price=0.13,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-old-filled-exit-slice",
+            venue_order_id="ord-old-filled-exit-slice",
+        )
+        append_event(
+            conn,
+            command_id="cmd-old-filled-exit-slice",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={
+                "venue_order_id": "ord-old-filled-exit-slice",
+                "filled_size": "4",
+                "fill_price": "0.13",
+            },
+        )
+        _insert(
+            conn,
+            command_id="cmd-filled-exit-slice",
+            position_id=position_id,
+            intent_kind="EXIT",
+            side="SELL",
+            size=10.0,
+            price=0.14,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-filled-exit-slice",
+            venue_order_id=order_id,
+        )
+        append_event(
+            conn,
+            command_id="cmd-filled-exit-slice",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "venue_order_id": order_id,
+                "filled_size": "10",
+                "fill_price": "0.14",
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-filled-exit-slice",
+            order_id=order_id,
+            state="MATCHED",
+            matched_size="10",
+            remaining_size="0",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, city, target_date, bin_label, direction,
+                shares, chain_shares, chain_state, chain_seen_at, strategy_key,
+                condition_id, token_id, order_id, order_status, updated_at,
+                temperature_metric
+            ) VALUES (
+                ?, 'pending_exit', 'Chongqing', '2026-04-26', '35C', 'buy_yes',
+                21.0, 21.0, 'synced', '2026-04-26T00:06:00Z',
+                'forecast_qkernel_entry', 'cond-filled-exit-slice',
+                'tok-filled-exit-slice', ?, 'sell_pending_confirmation',
+                '2026-04-26T00:06:00Z', 'high'
+            )
+            """,
+            (position_id, order_id),
+        )
+
+        summary = reconcile_pending_exit_terminal_order_releases(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, shares, chain_shares, order_id, order_status
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "day0_window",
+            "shares": 21.0,
+            "chain_shares": 21.0,
+            "order_id": None,
+            "order_status": "filled",
+        }
+        event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, command_id, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert dict(event) | {"payload_json": payload} == {
+            "event_type": "EXIT_RETRY_RELEASED",
+            "phase_before": "pending_exit",
+            "phase_after": "day0_window",
+            "command_id": "cmd-filled-exit-slice",
+            "payload_json": {
+                "chain_seen_at": "2026-04-26T00:06:00Z",
+                "chain_state": "synced",
+                "command_size": 10.0,
+                "command_state": "FILLED",
+                "matched_size": "10",
+                "order_fact_id": payload["order_fact_id"],
+                "order_fact_state": "MATCHED",
+                "order_remaining_size": "0",
+                "proof_class": "post_fill_chain_confirmed_positive_remainder",
+                "reason": "terminal_partial_exit_remainder_returned_to_redecision",
+                "residual_shares": 21.0,
+            },
+        }
+
+    @pytest.mark.parametrize(
+        ("shares", "chain_shares", "chain_seen_at"),
+        (
+            (21.0, 21.0, "2026-04-26T00:04:00Z"),
+            (0.0, 0.0, "2026-04-26T00:06:00Z"),
+            (31.0, 21.0, "2026-04-26T00:06:00Z"),
+        ),
+    )
+    def test_filled_exit_does_not_reopen_without_exact_post_fill_chain_remainder(
+        self,
+        conn,
+        shares,
+        chain_shares,
+        chain_seen_at,
+    ):
+        from src.execution.command_recovery import (
+            reconcile_pending_exit_terminal_order_releases,
+        )
+        from src.state.venue_command_repo import append_event
+
+        position_id = "pos-unproven-filled-exit-remainder"
+        order_id = "ord-unproven-filled-exit-remainder"
+        _insert(
+            conn,
+            command_id="cmd-unproven-filled-exit-remainder",
+            position_id=position_id,
+            intent_kind="EXIT",
+            side="SELL",
+            size=10.0,
+            price=0.14,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-unproven-filled-exit-remainder",
+            venue_order_id=order_id,
+        )
+        append_event(
+            conn,
+            command_id="cmd-unproven-filled-exit-remainder",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "venue_order_id": order_id,
+                "filled_size": "10",
+                "fill_price": "0.14",
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-unproven-filled-exit-remainder",
+            order_id=order_id,
+            state="MATCHED",
+            matched_size="10",
+            remaining_size="0",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, city, target_date, bin_label, direction,
+                shares, chain_shares, chain_state, chain_seen_at, strategy_key,
+                condition_id, token_id, order_id, order_status, updated_at,
+                temperature_metric
+            ) VALUES (
+                ?, 'pending_exit', 'Chongqing', '2026-04-26', '35C', 'buy_yes',
+                ?, ?, 'synced', ?, 'forecast_qkernel_entry',
+                'cond-unproven-filled-exit-remainder',
+                'tok-unproven-filled-exit-remainder',
+                ?, 'sell_pending_confirmation', '2026-04-26T00:06:00Z', 'high'
+            )
+            """,
+            (position_id, shares, chain_shares, chain_seen_at, order_id),
+        )
+
+        summary = reconcile_pending_exit_terminal_order_releases(conn)
+
+        assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, order_id, order_status
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "order_id": order_id,
+            "order_status": "sell_pending_confirmation",
+        }
+
+    def test_cancelled_partial_exit_keeps_unproven_historical_filled_exit_blocker(
+        self,
+        conn,
+    ):
+        """The old cancel-release path cannot absorb another FILLED exit."""
+        from src.execution.command_recovery import (
+            reconcile_pending_exit_terminal_order_releases,
+        )
+        from src.state.venue_command_repo import append_event
+
+        position_id = "pos-cancelled-with-unproven-filled-exit"
+        current_order_id = "ord-current-cancelled-exit"
+        _insert(
+            conn,
+            command_id="cmd-historical-filled-exit",
+            position_id=position_id,
+            intent_kind="EXIT",
+            side="SELL",
+            size=10.0,
+            price=0.14,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-historical-filled-exit",
+            venue_order_id="ord-historical-filled-exit",
+        )
+        append_event(
+            conn,
+            command_id="cmd-historical-filled-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:05:30Z",
+            payload={
+                "venue_order_id": "ord-historical-filled-exit",
+                "filled_size": "10",
+                "fill_price": "0.14",
+            },
+        )
+        _insert(
+            conn,
+            command_id="cmd-current-cancelled-exit",
+            position_id=position_id,
+            intent_kind="EXIT",
+            side="SELL",
+            size=10.0,
+            price=0.13,
+        )
+        _advance_to_partial(
+            conn,
+            command_id="cmd-current-cancelled-exit",
+            venue_order_id=current_order_id,
+        )
+        append_event(
+            conn,
+            command_id="cmd-current-cancelled-exit",
+            event_type="EXPIRED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": current_order_id},
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-current-cancelled-exit",
+            order_id=current_order_id,
+            state="EXPIRED",
+            matched_size="4",
+            remaining_size="0",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, city, target_date, bin_label, direction,
+                shares, chain_shares, chain_state, chain_seen_at, strategy_key,
+                condition_id, token_id, order_id, order_status, updated_at,
+                temperature_metric
+            ) VALUES (
+                ?, 'pending_exit', 'Chongqing', '2026-04-26', '35C', 'buy_yes',
+                21.0, 21.0, 'synced', '2026-04-26T00:05:00Z',
+                'forecast_qkernel_entry',
+                'cond-cancelled-with-unproven-filled-exit',
+                'tok-cancelled-with-unproven-filled-exit',
+                ?, 'sell_pending_confirmation', '2026-04-26T00:06:00Z', 'high'
+            )
+            """,
+            (position_id, current_order_id),
+        )
+
+        summary = reconcile_pending_exit_terminal_order_releases(conn)
+
+        assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, order_id, order_status
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "order_id": current_order_id,
+            "order_status": "sell_pending_confirmation",
+        }
+
     def test_partial_remainder_stays_partial_while_order_is_still_open(
         self,
         conn,

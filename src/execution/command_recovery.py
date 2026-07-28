@@ -13313,7 +13313,9 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
 
     A terminal command is not a resting order.  Preserve the real residual
     exposure, but release ``pending_exit`` so the next monitor cycle decides
-    from a fresh book instead of polling the dead order forever.
+    from a fresh book instead of polling the dead order forever.  A fully
+    filled selected slice is released only after a newer synced chain snapshot
+    proves that positive residual exposure remains.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -13331,10 +13333,12 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                cmd.decision_id,
                cmd.snapshot_id,
                cmd.venue_order_id,
+               cmd.size AS command_size,
                cmd.state AS command_state,
                fact.fact_id AS order_fact_id,
                fact.state AS order_fact_state,
                fact.matched_size AS order_fact_matched_size,
+               fact.remaining_size AS order_fact_remaining_size,
                fact.observed_at AS order_fact_observed_at,
                {pc_select}
           FROM venue_commands cmd
@@ -13344,9 +13348,28 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
           JOIN position_current pc
             ON pc.position_id = cmd.position_id
          WHERE cmd.intent_kind = 'EXIT'
-           AND cmd.state IN ('CANCELLED', 'EXPIRED')
-           AND fact.state IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
+           AND (
+                (
+                    cmd.state IN ('CANCELLED', 'EXPIRED')
+                    AND fact.state IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+                )
+                OR (
+                    cmd.state = 'FILLED'
+                    AND fact.state = 'MATCHED'
+                    AND ABS(CAST(COALESCE(fact.remaining_size, '0') AS REAL))
+                        <= 0.000000001
+                    AND LOWER(COALESCE(pc.chain_state, '')) = 'synced'
+                    AND CAST(COALESCE(pc.chain_shares, '0') AS REAL) > 0.000000001
+                    AND ABS(
+                        CAST(COALESCE(pc.shares, '0') AS REAL)
+                        - CAST(COALESCE(pc.chain_shares, '0') AS REAL)
+                    ) <= 0.011
+                    AND COALESCE(pc.chain_seen_at, '') != ''
+                    AND datetime(pc.chain_seen_at) >= datetime(fact.observed_at)
+                    AND datetime(pc.chain_seen_at) >= datetime(cmd.updated_at)
+                )
+           )
            AND pc.phase = 'pending_exit'
            AND pc.order_status = 'sell_pending_confirmation'
            AND pc.order_id = cmd.venue_order_id
@@ -13358,6 +13381,11 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                    AND live.command_id != cmd.command_id
                    AND live.state NOT IN (
                         'CANCELLED', 'EXPIRED', 'REJECTED', 'SUBMIT_REJECTED'
+                   )
+                   AND (
+                        live.state != 'FILLED'
+                        OR cmd.state != 'FILLED'
+                        OR datetime(pc.chain_seen_at) < datetime(live.updated_at)
                    )
            )
          ORDER BY fact.observed_at, cmd.command_id
@@ -13428,12 +13456,20 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                 "payload_json": json.dumps(
                     {
                         "reason": "terminal_partial_exit_remainder_returned_to_redecision",
-                        "proof_class": "terminal_positive_exit_order_fact",
+                        "proof_class": (
+                            "post_fill_chain_confirmed_positive_remainder"
+                            if candidate.get("command_state") == "FILLED"
+                            else "terminal_positive_exit_order_fact"
+                        ),
                         "command_state": candidate.get("command_state"),
+                        "command_size": candidate.get("command_size"),
                         "order_fact_id": candidate.get("order_fact_id"),
                         "order_fact_state": candidate.get("order_fact_state"),
                         "matched_size": candidate.get("order_fact_matched_size"),
+                        "order_remaining_size": candidate.get("order_fact_remaining_size"),
                         "residual_shares": current.get("chain_shares") or current.get("shares"),
+                        "chain_state": current.get("chain_state"),
+                        "chain_seen_at": current.get("chain_seen_at"),
                     },
                     sort_keys=True,
                     default=str,
