@@ -70,6 +70,7 @@ _LOG = logging.getLogger(__name__)
 _SLOW_BATCH_STAGE_SECONDS = 2.0
 _SLOW_BATCH_TOTAL_SECONDS = 5.0
 _WEALTH_REAUCTION_MAX_ATTEMPTS = 2
+_PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS = 1
 
 
 @dataclass(frozen=True)
@@ -679,6 +680,7 @@ class GlobalWinnerPreflight:
             "STABLE",
             "CURVE_SUPERSEDED",
             "PROBABILITY_TIGHTENED",
+            "PROBABILITY_SUPERSEDED",
             "WEALTH_SUPERSEDED",
             "CANDIDATE_BLOCKED",
             "BLOCKED",
@@ -3583,6 +3585,7 @@ def process_current_global_batch(
     epoch_superseded: Callable[[], bool] | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
     restrict_to_family_keys: frozenset[str] | None = None,
+    _probability_supersession_reauction_count: int = 0,
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
@@ -3604,7 +3607,7 @@ def process_current_global_batch(
         tuple[str, str], OpportunityEvent
     ] = {}
     scoped_rejection_by_event: dict[str, str] = {}
-    release_selection_snapshot: Callable[[], None] = lambda: None
+    selection_snapshot_release: Callable[[], None] | None = None
     actuation_started = False
     prepared_loser_receipts: dict[str, EventSubmissionReceipt] = {}
     batch_started = time.monotonic()
@@ -3903,6 +3906,15 @@ def process_current_global_batch(
 
     deferred_claim_event: OpportunityEvent | None = None
 
+    def release_selection_snapshot() -> None:
+        """Detach and release exactly the snapshot generation owned by this cut."""
+
+        nonlocal selection_snapshot_release
+        release = selection_snapshot_release
+        selection_snapshot_release = None
+        if release is not None:
+            release()
+
     def reject(
         reason: str,
         *,
@@ -3942,11 +3954,13 @@ def process_current_global_batch(
         selection_connections = tuple(selection_snapshot_connections)
         if isinstance(world_conn, sqlite3.Connection):
             selection_connections = (*selection_connections, world_conn)
-        release_selection_snapshot = _begin_selection_read_snapshot(
+        selection_snapshot_release = _begin_selection_read_snapshot(
             selection_connections
         )
         release_schema = prime_frozen_schema_reads(selection_connections)
-        release_snapshot_only = release_selection_snapshot
+        release_snapshot_only = selection_snapshot_release
+        if release_snapshot_only is None:
+            raise RuntimeError("GLOBAL_SELECTION_SNAPSHOT_RELEASE_MISSING")
         released_schema = False
 
         def release_schema_snapshot() -> None:
@@ -3959,7 +3973,7 @@ def process_current_global_batch(
             finally:
                 release_snapshot_only()
 
-        release_selection_snapshot = release_schema_snapshot
+        selection_snapshot_release = release_schema_snapshot
         log_stage("selection_snapshot")
         if cancelled("selection_snapshot"):
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
@@ -4134,7 +4148,9 @@ def process_current_global_batch(
             ),
             decision_time=scope_at,
         )
-        release_read_snapshot = release_selection_snapshot
+        release_read_snapshot = selection_snapshot_release
+        if release_read_snapshot is None:
+            raise RuntimeError("GLOBAL_SELECTION_SNAPSHOT_RELEASE_MISSING")
         released_hwm = False
 
         def release_primed_snapshot() -> None:
@@ -4147,7 +4163,7 @@ def process_current_global_batch(
             finally:
                 release_read_snapshot()
 
-        release_selection_snapshot = release_primed_snapshot
+        selection_snapshot_release = release_primed_snapshot
         wealth_age = timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS))
 
         def capture_selection_wealth():
@@ -4976,6 +4992,65 @@ def process_current_global_batch(
                         "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
                         f"{preflight.reason or preflight.status}"
                     )
+                if preflight.status == "PROBABILITY_SUPERSEDED":
+                    if (
+                        _probability_supersession_reauction_count
+                        >= _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS
+                    ):
+                        return reject(
+                            "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:"
+                            f"{preflight.reason or preflight.status}"
+                        )
+                    # SCOPE: the old winner's q witness is invalid, and that
+                    # makes the frozen global objective incomparable. DRAIN:
+                    # one bounded recursive cut re-scans every family and
+                    # rebuilds q, book, wealth, BUY, SELL, HOLD, and CASH
+                    # before any venue call. RESET: only its fresh cut may
+                    # actuate; a second drift fails closed for the next wake.
+                    _LOG.warning(
+                        "global batch probability superseded; rebuilding full "
+                        "current-state auction: attempt=%d event=%s reason=%s",
+                        _probability_supersession_reauction_count + 1,
+                        winner_id,
+                        preflight.reason,
+                    )
+                    # Detach this cut's complete snapshot generation before the
+                    # child cut attempts BEGIN on the same SQLite connections.
+                    # The outer finally then sees no generation to roll back.
+                    release_selection_snapshot()
+                    return process_current_global_batch(
+                        event_tuple,
+                        decision_time=decision_time,
+                        world_conn=world_conn,
+                        forecast_conn=forecast_conn,
+                        trade_conn=trade_conn,
+                        payload_reader=payload_reader,
+                        prepare_event=prepare_event,
+                        prepare_held_event=prepare_held_event,
+                        actuate_winner=actuate_winner,
+                        preflight_winner=preflight_winner,
+                        actuate_preflighted_winner=actuate_preflighted_winner,
+                        stamp_receipt=stamp_receipt,
+                        venue_submit_count=venue_submit_count,
+                        current_execution=current_execution,
+                        current_time_provider=current_time_provider,
+                        portfolio_state_provider=portfolio_state_provider,
+                        current_book_epoch_provider=current_book_epoch_provider,
+                        selection_snapshot_connections=selection_snapshot_connections,
+                        current_capital_limit_resolver=current_capital_limit_resolver,
+                        candidate_policy_rejection_resolver=(
+                            candidate_policy_rejection_resolver
+                        ),
+                        buy_candidates_enabled=buy_candidates_enabled,
+                        fractional_kelly_multiplier=fractional_kelly_multiplier,
+                        claim_unpaged_winner=claim_unpaged_winner,
+                        epoch_superseded=epoch_superseded,
+                        selection_cancelled=selection_cancelled,
+                        restrict_to_family_keys=restrict_to_family_keys,
+                        _probability_supersession_reauction_count=(
+                            _probability_supersession_reauction_count + 1
+                        ),
+                    )
                 if preflight.status == "CANDIDATE_BLOCKED":
                     candidate = selected.decision.candidate
                     if candidate is None or winner_id is None:
@@ -5337,3 +5412,5 @@ def process_current_global_batch(
                 economic_cut_completed=False,
             )
         return reject(f"GLOBAL_AUCTION_FAILED:{type(exc).__name__}:{exc}")
+    finally:
+        release_selection_snapshot()

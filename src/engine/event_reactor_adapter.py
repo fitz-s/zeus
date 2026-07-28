@@ -11012,6 +11012,12 @@ def _global_preflight_candidate_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
+    if reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
+        # The selected q is stale, so neither this SELL nor any runner-up can
+        # inherit the old global objective. The batch runtime evicts the stale
+        # family cache before this classification and rebuilds one complete
+        # current q/book/wealth auction without venue I/O.
+        return "PROBABILITY_SUPERSEDED"
     if (
         reason.startswith("GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:")
         or reason

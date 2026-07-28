@@ -10617,6 +10617,11 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
             "BATCH_BLOCKED",
         ),
+        (
+            "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
+            "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED",
+            "PROBABILITY_SUPERSEDED",
+        ),
         ("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS", "BATCH_BLOCKED"),
         ("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE", "BATCH_BLOCKED"),
         (
@@ -20579,6 +20584,246 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
     assert result.winner_event_id == event.event_id
     assert result.venue_submit_count == 1
     assert result.receipts[event.event_id].submitted is True
+
+
+@pytest.mark.parametrize(
+    "second_probability_drift",
+    (False, True),
+    ids=("fresh-buy-submits", "second-drift-fails-closed"),
+)
+def test_global_batch_rebuilds_full_cut_after_stale_sell_probability(
+    monkeypatch, tmp_path, second_probability_drift
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    sell_event = _global_scope_event(city="Alpha", source_run_id="run-sell")
+    buy_event = _global_scope_event(city="Beta", source_run_id="run-buy")
+    scope = current_global_auction_scope_from_events(
+        (sell_event, buy_event), captured_at_utc=decision_at
+    )
+    sell_family, buy_family = scope.family_keys
+    prepared = {
+        event.event_id: SimpleNamespace(
+            probability_witness=SimpleNamespace(
+                family_key=family_key,
+                captured_at_utc=decision_at,
+                posterior_identity_hash=source_run_id,
+                witness_identity=f"q-{family_key}",
+            )
+        )
+        for event, family_key, source_run_id in (
+            (sell_event, sell_family, "run-sell"),
+            (buy_event, buy_family, "run-buy"),
+        )
+    }
+    stale_sell = SimpleNamespace(
+        candidate_id="stale-sell",
+        action="SELL",
+        family_key=sell_family,
+        bin_id="sell-bin",
+        side="NO",
+        token_id="sell-token",
+    )
+    current_buy = SimpleNamespace(
+        candidate_id="current-positive-buy",
+        action="BUY",
+        family_key=buy_family,
+        bin_id="buy-bin",
+        side="YES",
+        token_id="buy-token",
+    )
+    selections = iter(
+        (
+            SimpleNamespace(
+                decision=SimpleNamespace(candidate=stale_sell, no_trade_reason=None),
+                winner_event_id=sell_event.event_id,
+                actuation=SimpleNamespace(
+                    decision=SimpleNamespace(candidate=stale_sell),
+                    actuation_identity="stale-sell-actuation",
+                    wealth_witness_identity="wealth-1",
+                ),
+            ),
+            SimpleNamespace(
+                decision=SimpleNamespace(candidate=current_buy, no_trade_reason=None),
+                winner_event_id=buy_event.event_id,
+                actuation=SimpleNamespace(
+                    decision=SimpleNamespace(candidate=current_buy),
+                    actuation_identity="current-buy-actuation",
+                    wealth_witness_identity="wealth-1",
+                ),
+            ),
+        )
+    )
+    calls = {
+        "prepare": 0,
+        "books": 0,
+        "preflight": [],
+        "venue": [],
+        "snapshot_release": [],
+        "scope_scan": 0,
+    }
+    world_conn = sqlite3.connect(tmp_path / "world.db")
+    forecast_conn = sqlite3.connect(tmp_path / "forecasts.db")
+    trade_conn = sqlite3.connect(tmp_path / "trades.db")
+    snapshot_connections = (forecast_conn, trade_conn, world_conn)
+    for conn in snapshot_connections:
+        conn.execute("CREATE TABLE snapshot_marker (generation INTEGER)")
+        conn.commit()
+
+    original_begin_snapshot = global_batch_runtime._begin_selection_read_snapshot
+
+    def begin_snapshot(connections):
+        assert tuple(connections) == snapshot_connections
+        assert not any(conn.in_transaction for conn in snapshot_connections)
+        generation = len(calls["snapshot_release"]) + 1
+        release = original_begin_snapshot(connections)
+        calls["snapshot_release"].append(0)
+
+        def release_once():
+            calls["snapshot_release"][generation - 1] += 1
+            release()
+
+        return release_once
+
+    def scan_scope(**_):
+        calls["scope_scan"] += 1
+        assert all(conn.in_transaction for conn in snapshot_connections)
+        return scope
+
+    monkeypatch.setattr(
+        global_batch_runtime, "_begin_selection_read_snapshot", begin_snapshot
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", scan_scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "probe_inflight_buy_ambiguity", lambda _conn: False
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "_current_held_weather_families", lambda _conn: ()
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "_store_global_auction_receipt", lambda *_a, **_k: 1
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "_store_global_preflight_receipt", lambda *_a, **_k: 1
+    )
+    monkeypatch.setattr(
+        "src.state.portfolio.load_runtime_open_portfolio", lambda _conn: None
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-1",
+            economic_identity="wealth-economics-1",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        lambda *_args, **_kwargs: next(selections),
+    )
+
+    def prepare(event, _at):
+        calls["prepare"] += 1
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared[event.event_id],
+        )
+
+    def preflight(_event, actuation, _at, _authority):
+        candidate = actuation.decision.candidate
+        calls["preflight"].append(candidate.candidate_id)
+        if candidate is stale_sell:
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="PROBABILITY_SUPERSEDED",
+                reason=(
+                    "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
+                    "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"
+                ),
+            )
+        assert candidate is current_buy
+        if second_probability_drift:
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="PROBABILITY_SUPERSEDED",
+                reason=(
+                    "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
+                    "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"
+                ),
+            )
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="STABLE", binding_token="current-buy-binding"
+        )
+
+    def current_book(probabilities, _at):
+        calls["books"] += 1
+        return probabilities, _global_test_book(f"book-{calls['books']}", price="0.40")
+
+    def actuate(_event, actuation, _at, token, _authority):
+        candidate = actuation.decision.candidate
+        calls["venue"].append(candidate.candidate_id)
+        assert candidate is current_buy
+        assert token == "current-buy-binding"
+        return EventSubmissionReceipt(
+            True,
+            buy_event.event_id,
+            buy_event.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    try:
+        result = global_batch_runtime.process_current_global_batch(
+            (sell_event, buy_event),
+            decision_time=decision_at,
+            world_conn=world_conn,
+            forecast_conn=forecast_conn,
+            trade_conn=trade_conn,
+            payload_reader=lambda event: json.loads(event.payload_json),
+            prepare_event=prepare,
+            actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
+            preflight_winner=preflight,
+            actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+                actuate
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: len(calls["venue"]),
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            current_book_epoch_provider=current_book,
+            selection_snapshot_connections=(forecast_conn, trade_conn),
+        )
+    finally:
+        for conn in snapshot_connections:
+            assert not conn.in_transaction
+            conn.close()
+
+    assert calls["prepare"] == 4
+    assert calls["books"] == 2
+    assert calls["preflight"] == ["stale-sell", "current-positive-buy"]
+    assert calls["snapshot_release"] == [1, 1]
+    assert calls["scope_scan"] == 2
+    if second_probability_drift:
+        assert calls["venue"] == []
+        assert result.winner_event_id is None
+        assert result.venue_submit_count == 0
+        assert all(
+            receipt.reason.startswith("GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:")
+            for receipt in result.receipts.values()
+        )
+    else:
+        assert calls["venue"] == ["current-positive-buy"]
+        assert result.winner_event_id == buy_event.event_id
+        assert result.venue_submit_count == 1
+        assert result.receipts[buy_event.event_id].submitted is True
 
 
 @pytest.mark.parametrize(

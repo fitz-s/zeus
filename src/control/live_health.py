@@ -4448,6 +4448,15 @@ def _evaluate_high_yes_edge_missed_surface_python(
             status_counts.get("pending", 0) + status_counts.get("processing", 0)
         )
         edge["expired_fsr_count"] = status_counts.get("expired", 0)
+        edge["day0_pending_count"] = status_counts.get("day0_pending", 0)
+        edge["day0_processed_count"] = status_counts.get("day0_processed", 0)
+        edge["day0_expired_count"] = status_counts.get("day0_expired", 0)
+        edge["global_entry_suppressed_count"] = status_counts.get(
+            "global_entry_suppressed", 0
+        )
+        edge["global_preflight_batch_blocked_count"] = status_counts.get(
+            "global_preflight_batch_blocked", 0
+        )
 
     unresolved = [
         edge
@@ -4466,9 +4475,28 @@ def _evaluate_high_yes_edge_missed_surface_python(
         if int(edge.get("processed_fsr_count") or 0) == 0
         and int(edge.get("pending_fsr_count") or 0) == 0
         and int(edge.get("expired_fsr_count") or 0) == 0
+        and int(edge.get("day0_processed_count") or 0) == 0
+        and int(edge.get("day0_pending_count") or 0) == 0
+        and int(edge.get("day0_expired_count") or 0) == 0
     ]
     processed_without_action = [
-        edge for edge in unresolved if int(edge.get("processed_fsr_count") or 0) > 0
+        edge
+        for edge in unresolved
+        if int(edge.get("processed_fsr_count") or 0) > 0
+        or int(edge.get("day0_processed_count") or 0) > 0
+    ]
+    day0_pending = [
+        edge for edge in unresolved if int(edge.get("day0_pending_count") or 0) > 0
+    ]
+    global_entry_suppressed = [
+        edge
+        for edge in unresolved
+        if int(edge.get("global_entry_suppressed_count") or 0) > 0
+    ]
+    global_preflight_batch_blocked = [
+        edge
+        for edge in unresolved
+        if int(edge.get("global_preflight_batch_blocked_count") or 0) > 0
     ]
     missed = missing_fsr + processed_without_action
     very_high_count = sum(
@@ -4492,6 +4520,11 @@ def _evaluate_high_yes_edge_missed_surface_python(
         "missed_high_yes_edge_sample": missed[:HIGH_YES_EDGE_SAMPLE_LIMIT],
         "pending_fsr_high_yes_edge_count": len(pending_fsr),
         "pending_fsr_high_yes_edge_sample": pending_fsr[:HIGH_YES_EDGE_SAMPLE_LIMIT],
+        "day0_pending_high_yes_edge_count": len(day0_pending),
+        "global_entry_suppressed_high_yes_edge_count": len(global_entry_suppressed),
+        "global_preflight_batch_blocked_high_yes_edge_count": len(
+            global_preflight_batch_blocked
+        ),
         "missing_fsr_high_yes_edge_count": len(missing_fsr),
         "processed_without_action_high_yes_edge_count": len(processed_without_action),
         "global_auction_candidate_evidence": auction_candidate_evidence,
@@ -4516,6 +4549,30 @@ def _evaluate_high_yes_edge_missed_surface_python(
         }
     if detail["entries_paused"]:
         return {"ok": True, "issue": None, **detail}
+    if global_preflight_batch_blocked:
+        return {
+            "ok": False,
+            "issue": (
+                "HIGH_YES_EDGE_GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
+                f"n={len(global_preflight_batch_blocked)}"
+            ),
+            **detail,
+        }
+    if global_entry_suppressed:
+        return {
+            "ok": False,
+            "issue": (
+                "HIGH_YES_EDGE_GLOBAL_ENTRY_SUPPRESSED:"
+                f"n={len(global_entry_suppressed)}"
+            ),
+            **detail,
+        }
+    if day0_pending:
+        return {
+            "ok": False,
+            "issue": f"HIGH_YES_EDGE_DAY0_PENDING:n={len(day0_pending)}",
+            **detail,
+        }
     if missing_fsr:
         return {
             "ok": False,
@@ -4587,20 +4644,26 @@ def _recent_buy_yes_entry_command_count(conn: object, *, cutoff: str) -> int | N
 
 _LATEST_LIVE_POSTERIORS_SQL = """
     SELECT posterior_id,
+           source_id,
+           posterior_identity_hash,
            city,
            target_date,
            temperature_metric,
            computed_at,
            q_json,
-           q_lcb_json
+           q_lcb_json,
+           provenance_json
       FROM (
             SELECT posterior_id,
+                   source_id,
+                   posterior_identity_hash,
                    city,
                    target_date,
                    temperature_metric,
                    computed_at,
                    q_json,
                    q_lcb_json,
+                   provenance_json,
                    ROW_NUMBER() OVER (
                        PARTITION BY city, target_date, temperature_metric
                        ORDER BY datetime(computed_at) DESC, posterior_id DESC
@@ -4722,10 +4785,23 @@ def _load_high_yes_edges_python(
         try:
             q_values = json.loads(row["q_json"] or "{}")
             q_lcb_values = json.loads(row["q_lcb_json"] or "{}")
+            provenance = json.loads(row["provenance_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
             continue
-        if not isinstance(q_values, dict) or not isinstance(q_lcb_values, dict):
+        if (
+            not isinstance(q_values, dict)
+            or not isinstance(q_lcb_values, dict)
+            or not isinstance(provenance, dict)
+        ):
             continue
+        day0_provenance = provenance.get("day0_conditioning")
+        if not isinstance(day0_provenance, dict):
+            day0_provenance = provenance.get("day0_provisional_observation")
+        if (
+            not isinstance(day0_provenance, dict)
+            or day0_provenance.get("active") is not True
+        ):
+            day0_provenance = {}
         city = str(row["city"] or "")
         target_date = str(row["target_date"] or "")
         metric = str(row["temperature_metric"] or "")
@@ -4751,6 +4827,16 @@ def _load_high_yes_edges_python(
                     yes_q = None
                 edge = {
                     "posterior_id": row["posterior_id"],
+                    "posterior_identity_hash": str(
+                        row["posterior_identity_hash"] or ""
+                    ),
+                    "posterior_source_id": str(row["source_id"] or ""),
+                    "day0_observation_source": str(
+                        day0_provenance.get("source") or ""
+                    ),
+                    "day0_observation_identity": str(
+                        day0_provenance.get("observation_time") or ""
+                    ),
                     "city": city,
                     "target_date": target_date,
                     "temperature_metric": metric,
@@ -4798,13 +4884,32 @@ def _forecast_snapshot_status_counts_for_edges(
             str(edge.get("target_date") or ""),
             str(edge.get("temperature_metric") or ""),
             str(edge.get("computed_at") or ""),
-        )
+        ): {
+            "posterior_identity_hash": str(
+                edge.get("posterior_identity_hash") or ""
+            ),
+            "posterior_source_id": str(edge.get("posterior_source_id") or ""),
+            "day0_observation_source": str(
+                edge.get("day0_observation_source") or ""
+            ),
+            "day0_observation_identity": str(
+                edge.get("day0_observation_identity") or ""
+            ),
+        }
         for edge in edges
     }
-    available_times = sorted({key[3] for key in wanted if key[3]})
-    if not available_times:
+    latest_edge_time = max((key[3] for key in wanted if key[3]), default="")
+    cutoff_at = _parse_iso_utc(cutoff)
+    if not latest_edge_time or cutoff_at is None:
         return {}
-    placeholders = ",".join("?" for _ in available_times)
+    processing_columns = _connection_table_columns(
+        conn, "opportunity_event_processing"
+    )
+    last_error_select = (
+        "p.last_error"
+        if "last_error" in processing_columns
+        else "NULL AS last_error"
+    )
     try:
         rows = conn.execute(
             f"""
@@ -4813,7 +4918,8 @@ def _forecast_snapshot_status_counts_for_edges(
                    e.available_at,
                    e.created_at,
                    e.payload_json,
-                   p.processing_status
+                   p.processing_status,
+                   {last_error_select}
               FROM opportunity_events e
               LEFT JOIN opportunity_event_processing p
                 ON p.event_id = e.event_id
@@ -4823,9 +4929,10 @@ def _forecast_snapshot_status_counts_for_edges(
                        'EDLI_REDECISION_PENDING',
                        'DAY0_EXTREME_UPDATED'
                    )
-               AND e.available_at IN ({placeholders})
+               AND e.available_at <= ?
+               AND e.available_at >= ?
             """,
-            tuple(available_times),
+            (latest_edge_time, cutoff),
         ).fetchall()
     except Exception:  # noqa: BLE001 - optional trace detail must not mask the edge alarm
         return {}
@@ -4835,13 +4942,19 @@ def _forecast_snapshot_status_counts_for_edges(
             payload = json.loads(row["payload_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
             continue
-        key = (
+        family = (
             str(payload.get("city") or ""),
             str(payload.get("target_date") or ""),
             str(payload.get("metric") or ""),
-            str(payload.get("available_at") or row["available_at"] or ""),
         )
-        if key not in wanted:
+        event_type = str(row["event_type"] or "")
+        event_available_at = _parse_iso_utc(
+            payload.get("observation_available_at")
+            or payload.get("available_at")
+            or row["available_at"]
+            or ""
+        )
+        if event_available_at is None or event_available_at < cutoff_at:
             continue
         status = str(row["processing_status"] or "pending").lower()
         if status == "processed":
@@ -4852,8 +4965,74 @@ def _forecast_snapshot_status_counts_for_edges(
             bucket = "processing"
         else:
             bucket = "pending"
-        by_status = counts.setdefault(key, {})
-        by_status[bucket] = by_status.get(bucket, 0) + 1
+        reason = str(row["last_error"] or "")
+        for key, identity in wanted.items():
+            posterior_computed_at = _parse_iso_utc(key[3])
+            if (
+                key[:3] != family
+                or posterior_computed_at is None
+                or event_available_at > posterior_computed_at
+            ):
+                continue
+            if event_type == "DAY0_EXTREME_UPDATED":
+                expected_source = identity["day0_observation_source"]
+                expected_observation = _parse_iso_utc(
+                    identity["day0_observation_identity"]
+                )
+                event_source = str(
+                    payload.get("settlement_source")
+                    or payload.get("observation_source")
+                    or payload.get("source")
+                    or ""
+                )
+                event_observation = _parse_iso_utc(
+                    payload.get("observation_time") or ""
+                )
+                if (
+                    not expected_source
+                    or event_source != expected_source
+                    or expected_observation is None
+                    or event_observation != expected_observation
+                ):
+                    continue
+            else:
+                if (
+                    not identity["posterior_identity_hash"]
+                    or str(
+                        payload.get("source_run_id")
+                        or payload.get("posterior_identity_hash")
+                        or ""
+                    )
+                    != identity["posterior_identity_hash"]
+                    or str(payload.get("source_id") or "")
+                    != identity["posterior_source_id"]
+                ):
+                    continue
+            by_status = counts.setdefault(key, {})
+            if event_type == "DAY0_EXTREME_UPDATED" and bucket in {
+                "pending",
+                "processing",
+            }:
+                by_status["day0_pending"] = (
+                    by_status.get("day0_pending", 0) + 1
+                )
+            elif event_type == "DAY0_EXTREME_UPDATED":
+                by_status[f"day0_{bucket}"] = (
+                    by_status.get(f"day0_{bucket}", 0) + 1
+                )
+            elif event_type != "DAY0_EXTREME_UPDATED":
+                by_status[bucket] = by_status.get(bucket, 0) + 1
+            if "GLOBAL_PREFLIGHT_BATCH_BLOCKED" in reason:
+                by_status["global_preflight_batch_blocked"] = (
+                    by_status.get("global_preflight_batch_blocked", 0) + 1
+                )
+            if (
+                "GLOBAL_ENTRY_SUPPRESSED" in reason
+                or reason.startswith("LIVE_ENTRY_BLOCKED:")
+            ):
+                by_status["global_entry_suppressed"] = (
+                    by_status.get("global_entry_suppressed", 0) + 1
+                )
     return counts
 
 
@@ -5912,6 +6091,9 @@ def _high_yes_edge_schema_missing(
                 "runtime_layer",
                 "q_json",
                 "q_lcb_json",
+                "source_id",
+                "posterior_identity_hash",
+                "provenance_json",
             },
         ),
         "forecast.market_events": (

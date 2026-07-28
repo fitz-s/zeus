@@ -59,6 +59,179 @@ def _write(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload))
 
 
+def test_day0_edge_trace_matches_causal_observation_before_posterior_clock():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE opportunity_events (
+                event_id TEXT,
+                event_type TEXT,
+                available_at TEXT,
+                created_at TEXT,
+                payload_json TEXT
+            );
+            CREATE TABLE opportunity_event_processing (
+                event_id TEXT,
+                consumer_name TEXT,
+                processing_status TEXT,
+                last_error TEXT
+            );
+            """
+        )
+        family = {
+            "city": "Sao Paulo",
+            "target_date": "2026-07-28",
+            "metric": "high",
+        }
+        day0_identity = {
+            **family,
+            "settlement_source": "wu_icao_history",
+            "observation_time": "2026-07-28T17:00:00+00:00",
+            "observation_available_at": "2026-07-28T17:17:00+00:00",
+        }
+        posterior_identity = {
+            **family,
+            "source_id": "openmeteo_ecmwf_ifs9_bayes_fusion",
+            "source_run_id": "posterior-sao-high-171746",
+        }
+        rows = (
+            (
+                "day0-processed",
+                "DAY0_EXTREME_UPDATED",
+                "processed",
+                "",
+                day0_identity,
+                "2026-07-28T17:17:00+00:00",
+            ),
+            (
+                "day0-pending",
+                "DAY0_EXTREME_UPDATED",
+                "pending",
+                "",
+                day0_identity,
+                "2026-07-28T17:17:00+00:00",
+            ),
+            (
+                "entry-suppressed",
+                "FORECAST_SNAPSHOT_READY",
+                "processed",
+                "LIVE_ENTRY_BLOCKED:entry_readiness:operator",
+                posterior_identity,
+                "2026-07-28T17:17:00+00:00",
+            ),
+            (
+                "batch-blocked",
+                "FORECAST_SNAPSHOT_READY",
+                "processed",
+                "GLOBAL_PREFLIGHT_BATCH_BLOCKED:authority",
+                posterior_identity,
+                "2026-07-28T17:17:00+00:00",
+            ),
+            (
+                "historical-unconsumed",
+                "DAY0_EXTREME_UPDATED",
+                "pending",
+                "",
+                {
+                    **day0_identity,
+                    "observation_time": "2026-07-28T16:00:00+00:00",
+                },
+                "2026-07-28T17:16:00+00:00",
+            ),
+            (
+                "wrong-source",
+                "DAY0_EXTREME_UPDATED",
+                "pending",
+                "",
+                {**day0_identity, "settlement_source": "metar_fast"},
+                "2026-07-28T17:17:00+00:00",
+            ),
+            (
+                "wrong-observation-identity",
+                "DAY0_EXTREME_UPDATED",
+                "pending",
+                "",
+                {
+                    **day0_identity,
+                    "observation_time": "2026-07-28T17:00:01+00:00",
+                },
+                "2026-07-28T17:17:00+00:00",
+            ),
+            (
+                "wrong-posterior",
+                "FORECAST_SNAPSHOT_READY",
+                "processed",
+                "",
+                {**posterior_identity, "source_run_id": "other-posterior"},
+                "2026-07-28T17:17:00+00:00",
+            ),
+            (
+                "future-observation",
+                "DAY0_EXTREME_UPDATED",
+                "pending",
+                "",
+                {
+                    **day0_identity,
+                    "observation_available_at": "2026-07-28T17:18:00+00:00",
+                },
+                "2026-07-28T17:18:00+00:00",
+            ),
+            (
+                "before-cutoff",
+                "DAY0_EXTREME_UPDATED",
+                "pending",
+                "",
+                {
+                    **day0_identity,
+                    "observation_available_at": "2026-07-28T16:59:59+00:00",
+                },
+                "2026-07-28T16:59:59+00:00",
+            ),
+        )
+        for event_id, event_type, status, last_error, payload, available_at in rows:
+            conn.execute(
+                "INSERT INTO opportunity_events VALUES (?, ?, ?, ?, ?)",
+                (
+                    event_id,
+                    event_type,
+                    available_at,
+                    available_at,
+                    json.dumps(payload),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO opportunity_event_processing VALUES (?, ?, ?, ?)",
+                (event_id, "edli_reactor_v1", status, last_error),
+            )
+
+        edge = {
+            "city": "Sao Paulo",
+            "target_date": "2026-07-28",
+            "temperature_metric": "high",
+            "computed_at": "2026-07-28T17:17:46+00:00",
+            "posterior_identity_hash": "posterior-sao-high-171746",
+            "posterior_source_id": "openmeteo_ecmwf_ifs9_bayes_fusion",
+            "day0_observation_source": "wu_icao_history",
+            "day0_observation_identity": "2026-07-28T17:00:00+00:00",
+        }
+        counts = live_health._forecast_snapshot_status_counts_for_edges(
+            conn,
+            edges=[edge],
+            cutoff="2026-07-28T17:00:00+00:00",
+        )
+    finally:
+        conn.close()
+
+    status = counts[("Sao Paulo", "2026-07-28", "high", edge["computed_at"])]
+    assert status["processed"] == 2
+    assert status["day0_processed"] == 1
+    assert status["day0_pending"] == 1
+    assert status["global_entry_suppressed"] == 1
+    assert status["global_preflight_batch_blocked"] == 1
+
+
 def _write_forecast_event_bridge_dbs(
     sd: Path,
     *,
@@ -269,13 +442,28 @@ def _write_high_yes_edge_dbs(
     condition_id = "cond-high-yes-1"
     bin_label = "Will the lowest temperature in Paris be 17C on July 9?"
     computed_at = (now - timedelta(minutes=5)).isoformat()
+    observation_time = (now - timedelta(minutes=10)).replace(
+        second=0, microsecond=0
+    ).isoformat()
+    posterior_identity_hash = "posterior-high-yes-1"
+    posterior_source_id = "openmeteo_ecmwf_ifs9_bayes_fusion"
+    provenance_json = json.dumps(
+        {
+            "day0_conditioning": {
+                "active": True,
+                "source": "wu_icao_history",
+                "observation_time": observation_time,
+            }
+        }
+    )
     forecast_conn = sqlite3.connect(sd / "zeus-forecasts.db")
     try:
         forecast_conn.execute(
             "CREATE TABLE forecast_posteriors ("
             "posterior_id INTEGER, city TEXT, target_date TEXT, "
             "temperature_metric TEXT, computed_at TEXT, runtime_layer TEXT, "
-            "q_json TEXT, q_lcb_json TEXT)"
+            "q_json TEXT, q_lcb_json TEXT, source_id TEXT, "
+            "posterior_identity_hash TEXT, provenance_json TEXT)"
         )
         forecast_conn.execute(
             "CREATE TABLE market_events ("
@@ -283,7 +471,8 @@ def _write_high_yes_edge_dbs(
             "range_label TEXT, condition_id TEXT)"
         )
         forecast_conn.execute(
-            "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO forecast_posteriors VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 1,
                 "Paris",
@@ -293,6 +482,9 @@ def _write_high_yes_edge_dbs(
                 "live",
                 json.dumps({bin_label: 0.93}),
                 json.dumps({bin_label: 0.91}),
+                posterior_source_id,
+                posterior_identity_hash,
+                provenance_json,
             ),
         )
         forecast_conn.execute(
@@ -438,7 +630,8 @@ def _write_high_yes_edge_dbs(
     try:
         world_conn.execute(
             "CREATE TABLE opportunity_events ("
-            "event_id TEXT, event_type TEXT, payload_json TEXT, created_at TEXT)"
+            "event_id TEXT, event_type TEXT, payload_json TEXT, created_at TEXT, "
+            "available_at TEXT)"
         )
         world_conn.execute(
             "CREATE TABLE opportunity_event_processing ("
@@ -473,7 +666,8 @@ def _write_high_yes_edge_dbs(
                 ((now - timedelta(minutes=10)).isoformat(),),
             )
         world_conn.execute(
-            "INSERT INTO opportunity_events VALUES (?, 'FORECAST_SNAPSHOT_READY', ?, ?)",
+            "INSERT INTO opportunity_events VALUES "
+            "(?, 'FORECAST_SNAPSHOT_READY', ?, ?, ?)",
             (
                 "fsr-high-yes-1",
                 json.dumps(
@@ -485,6 +679,7 @@ def _write_high_yes_edge_dbs(
                     }
                 ),
                 (now - timedelta(minutes=4)).isoformat(),
+                computed_at,
             ),
         )
         world_conn.execute(
@@ -4566,12 +4761,17 @@ def test_high_yes_edge_recognizes_day0_posterior_redecision_carrier(
     sd.mkdir()
     _write_high_yes_edge_dbs(sd)
     forecast_conn = sqlite3.connect(sd / "zeus-forecasts.db")
-    computed_at = forecast_conn.execute(
-        "SELECT computed_at FROM forecast_posteriors WHERE posterior_id = 1"
-    ).fetchone()[0]
+    posterior = forecast_conn.execute(
+        "SELECT computed_at, provenance_json "
+        "FROM forecast_posteriors WHERE posterior_id = 1"
+    ).fetchone()
     forecast_conn.close()
+    computed_at = posterior[0]
+    day0_provenance = json.loads(posterior[1])["day0_conditioning"]
+    observation_available_at = (
+        datetime.fromisoformat(computed_at) - timedelta(seconds=46)
+    ).isoformat()
     world_conn = sqlite3.connect(sd / "zeus-world.db")
-    world_conn.execute("ALTER TABLE opportunity_events ADD COLUMN available_at TEXT")
     world_conn.execute(
         "INSERT INTO opportunity_events "
         "(event_id, event_type, payload_json, created_at, available_at) "
@@ -4582,11 +4782,13 @@ def test_high_yes_edge_recognizes_day0_posterior_redecision_carrier(
                     "city": "Paris",
                     "target_date": "2026-07-09",
                     "metric": "low",
-                    "available_at": computed_at,
+                    "settlement_source": day0_provenance["source"],
+                    "observation_time": day0_provenance["observation_time"],
+                    "observation_available_at": observation_available_at,
                 }
             ),
-            computed_at,
-            computed_at,
+            observation_available_at,
+            observation_available_at,
         ),
     )
     world_conn.execute(
@@ -5304,7 +5506,10 @@ def test_high_yes_latest_posterior_uses_live_index_and_real_timestamp_order() ->
             computed_at TEXT NOT NULL,
             q_json TEXT NOT NULL,
             q_lcb_json TEXT,
-            runtime_layer TEXT
+            runtime_layer TEXT,
+            source_id TEXT NOT NULL DEFAULT 'forecast-source',
+            posterior_identity_hash TEXT NOT NULL DEFAULT 'posterior-identity',
+            provenance_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
@@ -5368,7 +5573,10 @@ def test_high_yes_latest_posterior_uses_live_index_and_real_timestamp_order() ->
         ),
     )
     conn.executemany(
-        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO forecast_posteriors ("
+        "posterior_id, city, target_date, temperature_metric, computed_at, "
+        "q_json, q_lcb_json, runtime_layer"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
 
