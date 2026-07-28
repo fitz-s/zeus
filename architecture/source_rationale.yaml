@@ -824,6 +824,14 @@ files:
     zone: K1_governance
     authority_role: package_marker
     why: Marks control namespace.
+  src/control/live_health.py:
+    zone: K1_governance
+    authority_role: composite_live_evidence_reader
+    why: Reconstructs and validates current process, data, command, and global-auction receipt evidence without becoming a write or market-action authority; supports both historical self-contained candidate receipts and bounded one-hop semantic deltas while verifying content hashes and exact coverage.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/main.py
   src/control/control_plane.py:
     zone: K1_governance
     authority_role: control_write_surface
@@ -1798,7 +1806,7 @@ files:
   src/engine/global_batch_runtime.py:
     zone: K2_K3_coordination
     authority_role: current_global_single_order_runtime
-    why: Owns one complete current auction epoch from canonical runtime-open held-family enumeration and independent current-family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set. An unpaged claim callback returns the exact immutable carrier actually claimed, so causal-carrier reuse cannot bind actuation to a newly proposed but unclaimed economic ID.
+    why: Owns one complete current auction epoch from canonical runtime-open held-family enumeration and independent current-family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set. An unpaged claim callback returns the exact immutable carrier actually claimed, so causal-carrier reuse cannot bind actuation to a newly proposed but unclaimed economic ID. Recurring decision receipts retain complete causal hashes and bounded one-hop reconstruction while indexing duplicate rejection membership and field-delta encoding stable action slots to avoid rewriting unchanged candidate identity on every epoch.
     downstream:
     - src/engine/global_auction_universe.py
     - src/engine/global_single_order_auction.py
