@@ -48,7 +48,6 @@ from src.contracts.executable_market_snapshot import (
     canonicalize_fee_details,
     fee_details_from_gamma_fee_schedule,
 )
-from src.state.book_hash_transitions import write_transition as _write_book_hash_transition
 from src.state.snapshot_repo import insert_snapshot
 from src.types import Bin
 from src.types.market import BinTopologyError, validate_bin_topology
@@ -3321,7 +3320,13 @@ def capture_executable_market_snapshot(
     with persist_context as write_lease:
         try:
             insert_snapshot(conn, snapshot, capture_trigger=capture_trigger)
-            # PR 6 (2026-05-19): compute raw_orderbook_hash transition delta.
+            # Keep the bounded process-local delta used by current diagnostics,
+            # but do not append the same hash transition to a second table.
+            # The immutable snapshot journal already stores condition_id,
+            # captured_at, snapshot_id, and raw_orderbook_hash, so every change
+            # remains losslessly reconstructable with LAG(...) in capture order;
+            # captured_at provides the authoritative persisted interval.
+            # book_hash_transitions remains readable as legacy history.
             _current_hash = snapshot.raw_orderbook_hash
             _now_ts = time.time()
             _hash_delta_ms: Optional[int] = None
@@ -3329,22 +3334,7 @@ def capture_executable_market_snapshot(
             if _prior is not None:
                 _prior_hash, _prior_ts = _prior
                 if _current_hash != _prior_hash:
-                    # Clamp to 0: NTP/manual clock adjustments can produce negative
-                    # deltas; book_hash_transitions CHECK (delta_ms >= 0) would reject
-                    # a negative value causing snapshot capture to abort.
                     _hash_delta_ms = max(0, int((_now_ts - _prior_ts) * 1000))
-                    # INV-37: conn is the trade substrate connection held by the caller
-                    # (same conn as insert_snapshot above). SAVEPOINT in write_transition
-                    # provides within-connection atomicity for transition_seq assignment.
-                    _write_book_hash_transition(
-                        market_slug=snapshot.event_slug,
-                        prev_hash=_prior_hash,
-                        new_hash=_current_hash,
-                        observed_at=datetime.fromtimestamp(_now_ts, tz=timezone.utc).isoformat(),
-                        delta_ms=_hash_delta_ms,
-                        cycle_id=None,
-                        conn=conn,
-                    )
             if commit_after_persist:
                 commit_started = time.monotonic()
                 conn.commit()

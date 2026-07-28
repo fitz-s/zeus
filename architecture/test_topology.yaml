@@ -391,7 +391,7 @@ test_trust_policy:
     tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-07-28"}
     tests/test_audit_trade_db_growth.py: {created: "2026-07-28", last_used: "2026-07-28", note: "Read-only trade DB census uses schema metadata, rowid high-water marks, and bounded tail samples; never dbstat/full scan/mutation."}
     tests/test_load_platt_v2_data_version_filter.py: {created: "2026-04-30", last_used: "2026-04-30"}
-    tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-05-24"}
+    tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-07-28", note: "Market-source provenance plus executable snapshot persistence; immutable snapshot order reconstructs raw-book hash changes without duplicate book_hash_transitions appends."}
     tests/test_scanner_archived_filter.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_market_phase.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_market_phase_persistence.py: {created: "2026-05-04", last_used: "2026-05-04"}
@@ -3057,7 +3057,7 @@ test_metadata:
     profile: phase2_t1_book_hash_transitions_antibody
     blocks_commit: false
     asserted_invariants:
-      - INV-book-hash-transitions-completeness
+      - INV-book-hash-history-reconstructable
     source_under_test:
       - src/state/book_hash_transitions.py
       - src/data/market_scanner.py
@@ -3066,14 +3066,11 @@ test_metadata:
       - docs/operations/task_2026-05-20_strategy_vnext_phase2/T1_BOOK_HASH_TRANSITIONS_SCAFFOLD.md
       - docs/operations/task_2026-05-20_strategy_vnext_phase2/PHASE_2_ULTRAPLAN.md
     notes: >
-      Live-only antibody (skips in CI when trade DB absent). Asserts:
-      for every market with >1 distinct raw_orderbook_hash in the last 24h of
-      executable_market_snapshots, book_hash_transitions must carry (distinct_count - 1)
-      rows in the same window. Three :memory: roundtrip/noop/seq-increment tests
-      run in all environments. ISO-8601 cutoff computed in Python to avoid
-      datetime('now',...) vs ISO TEXT format mismatch in SQLite comparisons.
+      Immutable executable snapshot ordering reconstructs every distinct raw-book
+      hash transition without a duplicate append. Legacy transition
+      roundtrip/noop/seq-increment tests preserve historical reader/writer support.
     created: 2026-05-20
-    last_reused_or_audited: 2026-05-20
+    last_reused_or_audited: 2026-07-28
   tests/topology/test_operations_package_inventory.py:
     modules: [docs_system]
     category: topology_antibody

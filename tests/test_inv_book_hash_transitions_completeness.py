@@ -1,126 +1,83 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-20
-# Authority basis: 2026-05-20 live substrate repair; trade-owned executable snapshot substrate
-"""Antibody test: INV-book-hash-transitions-completeness
+# Last reused or audited: 2026-07-28
+# Authority basis: immutable executable snapshot evidence and DB growth reduction.
+"""Antibodies for reconstructable book-hash history and the legacy transition API.
 
-Invariant: every `raw_orderbook_hash` change observed in active
-`executable_market_snapshots` (trade DB) since T1_LAUNCH_AT has a
-corresponding `book_hash_transitions` row.
-
-Specifically: for each market in the last 24h of executable snapshots, count
-distinct `raw_orderbook_hash` values; the corresponding transitions count
-must equal distinct_count - 1 (the first hash has no prior state, so no
-transition row).
-
-Single trade-DB read path (no ATTACH); INV-37 trivially honored.
-backfill-aware: `cycle_id IS NULL` rows are backfill; live rows carry a
-cycle_id. Both satisfy the completeness invariant.
+The immutable ``executable_market_snapshots`` sequence already stores the
+condition, capture order, timestamp, and raw orderbook hash. A transition is a
+lossless derived view of adjacent snapshot rows; persisting it again is not an
+independent evidence source.
 """
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
-
-import pytest
-
-# T1_LAUNCH_AT: production-pass activation boundary. The antibody does not
-# scan pre-launch executable snapshots, where book_hash transition persistence
-# was not yet part of the live contract.
-T1_LAUNCH_AT = datetime(2026, 5, 20, tzinfo=timezone.utc)
-
-# 24h window for antibody check
-LOOKBACK_HOURS = 24
+from datetime import datetime
 
 
-def test_inv_book_hash_transitions_completeness() -> None:
-    """For every market with raw_orderbook_hash changes in the last 24h,
-    book_hash_transitions must carry (distinct_raw_hash_count - 1) rows.
-
-    Single trade-DB path; no ATTACH (INV-37 trivially honored).
-    backfill rows (cycle_id IS NULL) and live rows both satisfy the invariant.
-
-    Invariant check uses a direct read-only sqlite3 URI against the trade DB
-    so the live-only antibody can skip cleanly when the DB is absent. The table
-    must exist once init_schema_trade_only() or the operator migration has run.
-    """
-    from src.config import STATE_DIR
-
-    trade_db_path = STATE_DIR / "zeus_trades.db"
-    # Open trade DB directly (read-only URI). Skip if DB absent (CI / worktree
-    # environment without a live trade DB). This is a production-environment
-    # antibody only.
-    try:
-        conn = sqlite3.connect(f"file:{trade_db_path}?mode=ro", uri=True)
-    except sqlite3.OperationalError:
-        pytest.skip("trade DB not present in this environment — live-only antibody")
+def test_snapshot_history_reconstructs_hash_transitions() -> None:
+    """Adjacent immutable snapshots reproduce every real raw-book change."""
+    conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-
-    # Compute ISO-8601 cutoff in Python to avoid datetime('now',...) vs
-    # ISO-8601 TEXT format mismatch in SQLite lexicographic compare.
-    # Both market_price_history.recorded_at and book_hash_transitions.observed_at
-    # are written as ISO-8601 (e.g. "2026-05-20T12:34:56+00:00"). SQLite
-    # datetime('now', ...) returns "YYYY-MM-DD HH:MM:SS" which sorts differently.
-    _cutoff = max(
-        datetime.now(tz=timezone.utc) - timedelta(hours=LOOKBACK_HOURS),
-        T1_LAUNCH_AT,
-    )
-    _cutoff_iso = _cutoff.isoformat()
-
-    try:
-        # Count distinct raw_orderbook_hash values per market in last 24h.
-        # executable_market_snapshots.raw_orderbook_hash is TEXT NOT NULL.
-        # No such table means the live DB pre-dates this substrate; skip.
-        try:
-            hash_counts = conn.execute(
-                """
-                SELECT event_slug AS market_slug, COUNT(DISTINCT raw_orderbook_hash) AS distinct_count
-                FROM executable_market_snapshots
-                WHERE captured_at >= :cutoff
-                  AND raw_orderbook_hash IS NOT NULL
-                GROUP BY event_slug
-                HAVING COUNT(DISTINCT raw_orderbook_hash) > 1
-                """,
-                {"cutoff": _cutoff_iso},
-            ).fetchall()
-        except sqlite3.OperationalError:
-            pytest.skip("executable_market_snapshots not in live DB — substrate pre-dates antibody")
-
-        if not hash_counts:
-            pytest.skip(
-                f"no markets with >1 distinct raw_orderbook_hash in last {LOOKBACK_HOURS}h — "
-                "non-degenerate antibody check requires hash transitions"
-            )
-
-        # For each market, verify transitions count = distinct_count - 1.
-        # book_hash_transitions table must exist (production pass wires this).
-        missing: list[str] = []
-        for row in hash_counts:
-            market_slug = row["market_slug"]
-            expected = row["distinct_count"] - 1
-
-            transition_count = conn.execute(
-                """
-                SELECT COUNT(*) AS cnt
-                FROM book_hash_transitions
-                WHERE market_slug = ?
-                  AND observed_at >= ?
-                """,
-                (market_slug, _cutoff_iso),
-            ).fetchone()["cnt"]
-
-            if transition_count < expected:
-                missing.append(
-                    f"{market_slug}: expected>={expected} transitions, "
-                    f"got {transition_count}"
-                )
-
-        assert not missing, (
-            f"INV-book-hash-transitions-completeness FAILED for "
-            f"{len(missing)} markets:\n" + "\n".join(missing)
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            raw_orderbook_hash TEXT NOT NULL
         )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?)",
+        (
+            ("s1", "c1", "2026-07-28T08:00:00+00:00", "hash-a"),
+            ("s2", "c1", "2026-07-28T08:00:01+00:00", "hash-a"),
+            ("s3", "c1", "2026-07-28T08:00:02+00:00", "hash-b"),
+            ("s4", "c1", "2026-07-28T08:00:04+00:00", "hash-c"),
+            ("other", "c2", "2026-07-28T08:00:03+00:00", "hash-z"),
+        ),
+    )
 
-    finally:
-        conn.close()
+    transitions = conn.execute(
+        """
+        WITH ordered AS (
+            SELECT condition_id, captured_at, raw_orderbook_hash AS new_hash,
+                   LAG(raw_orderbook_hash) OVER (
+                       PARTITION BY condition_id
+                       ORDER BY captured_at, snapshot_id
+                   ) AS prev_hash,
+                   LAG(captured_at) OVER (
+                       PARTITION BY condition_id
+                       ORDER BY captured_at, snapshot_id
+                   ) AS prev_captured_at
+              FROM executable_market_snapshots
+        )
+        SELECT condition_id, prev_hash, new_hash, prev_captured_at, captured_at
+          FROM ordered
+         WHERE prev_hash IS NOT NULL AND prev_hash <> new_hash
+         ORDER BY condition_id, captured_at
+        """
+    ).fetchall()
+
+    assert [
+        (row["condition_id"], row["prev_hash"], row["new_hash"])
+        for row in transitions
+    ] == [
+        ("c1", "hash-a", "hash-b"),
+        ("c1", "hash-b", "hash-c"),
+    ]
+    assert [
+        int(
+            (
+                datetime.fromisoformat(row["captured_at"])
+                - datetime.fromisoformat(row["prev_captured_at"])
+            ).total_seconds()
+            * 1000
+        )
+        for row in transitions
+    ] == [1000, 2000]
+    conn.close()
 
 
 def test_write_read_roundtrip_integration() -> None:

@@ -2706,11 +2706,12 @@ tables:
     created_by: "db.py:init_schema_trade_only + src.state.schema.book_hash_transitions_schema.ensure_table"
     pk_col: "[market_slug, observed_at, transition_seq]"
     notes: >
-      Orderbook microstructure transition log co-located with active
-      executable_market_snapshots on trade DB. Records prev_hash→new_hash with
-      observed_at + transition_seq + delta_ms. Writer/reader in
-      src/state/book_hash_transitions.py; producer wired in market_scanner.py.
-      cycle_id=NULL for scanner-path rows; live cycle rows carry cycle_id.
+      Legacy orderbook microstructure transition log co-located with active
+      executable_market_snapshots on trade DB. Historical rows remain readable
+      through src/state/book_hash_transitions.py. The live scanner no longer
+      duplicates each raw hash change here: the immutable snapshot sequence
+      reconstructs prev_hash, new_hash, and the authoritative capture interval
+      without a second append/index write.
 
   - name: fact_revocations
     db: trade

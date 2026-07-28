@@ -1200,7 +1200,7 @@ files:
   src/data/market_scanner.py:
     zone: K2_runtime
     authority_role: market_discovery
-    why: Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh accepts a per-row persist context so CLOB/network work stays outside the unified trade write lease. Its direct market-events writer opens through the canonical shared cutover lease.
+    why: Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh accepts a per-row persist context so CLOB/network work stays outside the unified trade write lease. Raw book changes remain reconstructable from the immutable executable snapshot sequence; the scanner no longer duplicates each change into book_hash_transitions. Its direct market-events writer opens through the canonical shared cutover lease.
     write_routes:
     - runtime_trade_write_coordinator
     downstream:
@@ -2653,7 +2653,7 @@ files:
   src/state/book_hash_transitions.py:
     zone: K2_runtime
     authority_role: book_hash_transition_persistence
-    why: "Phase 2 T1 repaired 2026-05-20: orderbook microstructure transition log writer/reader for book_hash_transitions table co-located with active executable_market_snapshots on trade DB. INV-37 honored — writer takes *, conn (single-conn path; no internal open). ensure_table wired into db.py init_schema_trade_only; producer wired at market_scanner.py inside if _current_hash != _prior_hash block."
+    why: "Legacy orderbook microstructure transition writer/reader for book_hash_transitions on the trade DB. The table remains readable and the explicit writer remains available for historical tooling, but the live scanner stopped duplicating transitions on 2026-07-28 because the immutable executable_market_snapshots sequence already contains the condition, capture order, authoritative captured_at timestamp, and raw hash needed to reconstruct every change and capture interval."
     write_routes: []
     downstream:
     - src/state/db.py
