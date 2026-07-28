@@ -182,7 +182,7 @@ test_trust_policy:
     tests/events/test_event_writer_single_writer.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_market_event_coalescer.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_forecast_snapshot_ready.py: {created: "2026-05-24", last_used: "2026-07-16", note: "ForecastSnapshotReady replacement-carrier contracts, including bounded family restriction and exact current posterior raw-member coverage without per-family history scans."}
-    tests/events/test_day0_extreme_updated_trigger.py: {created: "2026-05-24", last_used: "2026-07-24"}
+    tests/events/test_day0_extreme_updated_trigger.py: {created: "2026-05-24", last_used: "2026-07-28", note: "Day0 event timestamp and authority contracts, including exact subsecond causal recheck after SQLite datetime prefilter so future-available rows defer without killing the reactor cycle and emit on the next eligible cut."}
     tests/strategy/live_inference/test_live_bin_inference.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
@@ -285,7 +285,7 @@ test_trust_policy:
     tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_lifecycle_terminal_predicate.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_monitor_refresh_ci_fallback.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_monitor_refresh_nowcast_wiring.py: {created: "2026-05-20", last_used: "2026-07-20", note: "Monitor Day0 persistence wiring plus exact-observation-version conditioned replacement exit fallback during transient remaining-day member gaps; the fallback band reaches exit economics without authorizing entry."}
+    tests/test_monitor_refresh_nowcast_wiring.py: {created: "2026-05-20", last_used: "2026-07-28", note: "Monitor Day0 persistence wiring plus exact-observation-version conditioned replacement exit fallback during transient remaining-day member gaps; one-shot visibility retry covers both posterior identity and observation-clock commit races, while the fallback band reaches exit economics without authorizing entry."}
     tests/test_position_metric_resolver.py: {created: "2026-04-26", last_used: "2026-04-26"}
     # Phase 2 T5: Position.market_slug JSON-only field antibodies (2026-05-20).
     tests/test_position_market_slug_persistence.py: {created: "2026-05-20", last_used: "2026-05-21"}

@@ -1,5 +1,6 @@
-# Created: 2026-07-17
-# Last reused or audited: 2026-07-17
+# Lifecycle: created=2026-07-17; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Lock the posterior-starvation alert's scope, visibility, and non-gating behavior.
+# Reuse: Run when live-health posterior freshness, city timezones, or alert wiring changes.
 # Authority basis: task instruction "P1 observability fix" (2026-07-17), incident
 #   2026-07-13/14 CONUS live-posterior blackout (30-37h dark, no operator signal).
 """Posterior-starvation alert antibody.
@@ -32,12 +33,30 @@ from src.control.live_health import (
     POSTERIOR_STALENESS_ALERT_HOURS_DEFAULT,
     _posterior_staleness_alert_hours,
     _posterior_starvation_surface,
+    _target_local_day_complete,
     compute_composite_live_health,
 )
 
 
 def _now_iso(now: datetime, offset_hours: float = 0.0) -> str:
     return (now + timedelta(hours=offset_hours)).isoformat()
+
+
+def test_target_local_day_complete_keeps_scope_visible_on_config_reload_failure(
+    monkeypatch,
+) -> None:
+    import src.config
+
+    def fail_reload():
+        raise OSError("transient config reload failure")
+
+    monkeypatch.setattr(src.config, "runtime_cities_by_name", fail_reload)
+
+    assert not _target_local_day_complete(
+        "Hong Kong",
+        "2026-07-27",
+        datetime(2026, 7, 28, 12, tzinfo=timezone.utc),
+    )
 
 
 def _write_market_events(

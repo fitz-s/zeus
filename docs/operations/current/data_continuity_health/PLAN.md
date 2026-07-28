@@ -62,8 +62,14 @@ RESET:
   settlement authority.
 - Make posterior-starvation use each configured city's local calendar instead
   of UTC date.
+- Defer a subsecond-future observation row to the next event-trigger scan
+  instead of failing the whole reactor cycle when SQLite's second-resolution
+  prefilter admits it.
+- Retry one observation/posterior clock visibility mismatch in the held
+  monitor before declaring probability unavailable.
 - Add behavioral antibodies for post-day provisional continuity, continued
-  entry rejection, and east-of-UTC completed-day exclusion.
+  entry rejection, east-of-UTC completed-day exclusion, exact subsecond causal
+  deferral, and observation-clock visibility recovery.
 
 ## Verification
 
@@ -88,7 +94,7 @@ RESET:
 ## Implementation evidence
 
 - Focused current-global Day0, monitor, and posterior-starvation suite:
-  389 passed; 27 pre-existing NumPy warnings.
+  424 passed; 27 pre-existing NumPy warnings.
 - Narrow continuity/entry-boundary suite: 17 passed.
 - Python compile and `git diff --check`: passed.
 - Structural no-override gates: 0 findings.

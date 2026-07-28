@@ -6169,14 +6169,10 @@ def _target_local_day_complete(
         timezone_name = str(getattr(city_obj, "timezone", "") or "")
         target = datetime.fromisoformat(str(target_date)).date()
         local_today = now.astimezone(ZoneInfo(timezone_name)).date()
-    except (
-        AttributeError,
-        TypeError,
-        ValueError,
-        ZoneInfoNotFoundError,
-    ):
+    except Exception:  # noqa: BLE001 - best-effort scope; health must remain observable.
         # Unknown identity stays visible. Health must not silently exclude a
-        # family whose local calendar cannot be proven.
+        # family whose local calendar cannot be proven, and a config reload
+        # failure must not crash the composite health pass.
         return False
     return target < local_today
 

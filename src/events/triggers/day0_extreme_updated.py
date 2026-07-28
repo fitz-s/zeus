@@ -415,6 +415,7 @@ class Day0ExtremeUpdatedTrigger:
         results: list[EventWriteResult] = []
         emitted_rows = 0
         emit_limit = max(1, int(limit))
+        decision_utc = decision_time.astimezone(UTC)
         # CHANGE-GATE (2026-06-15 firehose fix). The GROUP BY recomputes
         # MAX(imported_at) as observation_available_at on every scan, so an UNCHANGED
         # running extreme otherwise mints a NEW DAY0_EXTREME_UPDATED each cycle (the
@@ -441,6 +442,20 @@ class Day0ExtremeUpdatedTrigger:
                 try:
                     observation = observation_instant_row_to_day0_observation(row, metric=metric)
                 except ValueError:
+                    continue
+                try:
+                    observation_available_at = _parse_utc(
+                        str(observation.get("observation_available_at") or ""),
+                        "observation_available_at",
+                    )
+                except ValueError:
+                    continue
+                if observation_available_at > decision_utc:
+                    # SQLite datetime() compares at whole-second precision on
+                    # supported runtimes. A row committed microseconds after
+                    # this causal cut can therefore pass the SQL prefilter.
+                    # Defer it to the next scan instead of failing the entire
+                    # reactor cycle; no watermark advances on this branch.
                     continue
                 if normalize_day0_live_authority_status(observation.get("live_authority_status")) != "live":
                     continue

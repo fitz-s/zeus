@@ -1788,7 +1788,7 @@ files:
   src/engine/monitor_refresh.py:
     zone: K2_runtime
     authority_role: position_monitoring
-    why: Refreshes held position probabilities and exit signals using entry-parity math; current token identity reads use the compact latest-snapshot mirror rather than scanning the high-frequency append log.
+    why: Refreshes held position probabilities and exit signals using entry-parity math; current token identity reads use the compact latest-snapshot mirror rather than scanning the high-frequency append log. A bounded one-shot visibility retry covers both posterior identity commits and a newly committed observation clock that temporarily outruns its conditioned posterior, without caching or relabeling the failed cut as fresh.
     downstream:
     - src/engine/cycle_runtime.py
   src/engine/process_lock.py:
@@ -1872,6 +1872,12 @@ files:
     - src/engine/global_batch_runtime.py
     - src/events/no_submit_receipts.py
     - src/main.py
+  src/events/triggers/day0_extreme_updated.py:
+    zone: K2_runtime
+    authority_role: day0_observation_event_trigger
+    why: Emits causally timestamped Day0 extreme events from canonical observation authority. Scanner rows receive an exact Python timestamp recheck after the bounded SQL prefilter, so subsecond imports after the decision cut defer to the next scan instead of failing the full reactor cycle or crossing the availability boundary.
+    downstream:
+    - src/events/reactor.py
   src/events/triggers/market_channel_ingestor.py:
     zone: K2_runtime
     authority_role: market_channel_quote_projection

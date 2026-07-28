@@ -5,8 +5,12 @@ frontier: []
 in_scope:
 - docs/operations/current/data_continuity_health/**
 - src/engine/event_reactor_adapter.py
+- src/engine/monitor_refresh.py
+- src/events/triggers/day0_extreme_updated.py
 - src/control/live_health.py
 - tests/integration/test_w3_solve_seam_g3.py
+- tests/test_monitor_refresh_nowcast_wiring.py
+- tests/events/test_day0_extreme_updated_trigger.py
 - tests/test_posterior_starvation_alert.py
 - architecture/source_rationale.yaml
 - architecture/test_topology.yaml
@@ -29,5 +33,7 @@ live_side_effects_allowed: false
 supersedes: null
 tests:
 - tests/integration/test_w3_solve_seam_g3.py
+- tests/test_monitor_refresh_nowcast_wiring.py
+- tests/events/test_day0_extreme_updated_trigger.py
 - tests/test_posterior_starvation_alert.py
 closeout_required: true
