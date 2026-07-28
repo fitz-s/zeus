@@ -334,7 +334,7 @@ files:
   src/data/replacement_forecast_live_materialization_queue.py:
     zone: K2_runtime
     authority_role: replacement_live_materialization_queue
-    why: Live replacement forecast queue runner; drains live seed/request files into the materializer on the forecast DB using runtime_layer='live' semantics. Replaces retired blocked-materialization queue code so live production no longer imports a blocked-labeled implementation.
+    why: Live replacement forecast queue runner; drains live seed/request files into the materializer on the forecast DB using runtime_layer='live' semantics. Its request coalescing key includes the full Day0 conditioning identity (source, microsecond observation time, observed extreme, unit), so a same-cycle canonical observation correction cannot be discarded as a duplicate before posterior provenance records it. Replaces retired blocked-materialization queue code so live production no longer imports a blocked-labeled implementation.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - VENUS_CONTROL_ONLY
@@ -342,6 +342,17 @@ files:
     - src/data/replacement_forecast_production.py
     - scripts/materialize_replacement_forecast_live.py
     - tests/data/test_replacement_cycle_availability.py
+  src/data/replacement_cycle_advance_trigger.py:
+    zone: K2_runtime
+    authority_role: day0_conditioning_reseed_liveness
+    why: Persists cycle-advance markers and Day0 reseed work. A Day0 marker is completion evidence only when its durable full conditioning identity matches the latest canonical fact and either an identical seed remains in flight or the current live posterior provenance consumed that identity; legacy time-only markers are healed by a fresh reseed.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    - STALE_BELIEF_AUTHORITY
+    downstream:
+    - src/data/replacement_forecast_live_materialization_queue.py
+    - src/data/replacement_forecast_materializer.py
+    - src/engine/event_reactor_adapter.py
   src/data/day0_hourly_vectors.py:
     zone: K2_runtime
     authority_role: day0_remaining_window_forecast_vectors
