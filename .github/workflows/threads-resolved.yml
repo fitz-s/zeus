@@ -5,7 +5,7 @@ name: threads-resolved
 # Gate enforced at GitHub level — works for UI, CLI (gh pr merge), and API.
 #
 # Setup: add "threads-resolved" as a required status check in branch protection
-# (Settings → Branches → main → Require status checks → "threads-resolved").
+# (Settings → Branches → live → Require status checks → "threads-resolved").
 # After first PR run, search for "threads-resolved" in the branch protection UI.
 #
 # Owner: Fitz (Zeus CI infrastructure)
@@ -14,7 +14,7 @@ name: threads-resolved
 
 on:
   pull_request:
-    branches: [main]
+    branches: [live]
     types: [opened, synchronize, reopened, ready_for_review]
   pull_request_review:
     types: [submitted, dismissed]
