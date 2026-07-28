@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from src.data.day0_fast_obs import (
+    FAST_OBS_SOURCE_ID,
+    latest_fast_station_conditioning,
+)
 from src.data.day0_observation_reader import _OBSERVATION_FACT_TIME_SQL
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_input_hwm import (
@@ -1285,6 +1289,54 @@ def _day0_observation_lag_reason(
         decision_time=decision_time,
         require_settlement_channel=True,
     )
+    settlement_extreme_native = None
+    settlement_unit = None
+    if fact is not None:
+        try:
+            settlement_extreme_native = float(fact["observed_extreme_native"])
+            settlement_unit = str(fact["unit"])
+        except (KeyError, TypeError, ValueError):
+            return None
+    fast = latest_fast_station_conditioning(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=temperature_metric,
+        decision_time=decision_time,
+        settlement_extreme_native=settlement_extreme_native,
+        settlement_unit=settlement_unit,
+    )
+    if fast is not None:
+        try:
+            latest_at = datetime.fromisoformat(
+                fast.observation_time.replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+        if isinstance(conditioning, Mapping):
+            served_source = str(conditioning.get("source") or "")
+            try:
+                served_extreme_c = float(conditioning.get("observed_extreme_c"))
+            except (TypeError, ValueError):
+                served_extreme_c = float("nan")
+        else:
+            served_source = ""
+            served_extreme_c = float("nan")
+        if latest_at.tzinfo is None:
+            latest_at = latest_at.replace(tzinfo=timezone.utc)
+        latest_at = latest_at.astimezone(timezone.utc)
+        if (
+            served_source == FAST_OBS_SOURCE_ID
+            and abs(served_extreme_c - fast.observed_extreme_c) <= 1e-9
+            and served_at is not None
+            and latest_at <= served_at
+        ):
+            return None
+        return (
+            "basis=day0_fast_residual_hwm_lag:"
+            f"latest_observation_time={latest_at.isoformat()}:"
+            f"posterior_observation_time={served_at.isoformat() if served_at else 'missing'}"
+        )
     if fact is None:
         return None
     try:

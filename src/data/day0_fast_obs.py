@@ -254,6 +254,17 @@ class FastStationResidualLikelihood:
         }
 
 
+@dataclass(frozen=True)
+class FastStationConditioning:
+    """Qualified same-station fast evidence for one Day0 posterior."""
+
+    observed_extreme_c: float
+    observation_time: str
+    sample_count: int
+    unit: str
+    likelihood: FastStationResidualLikelihood
+
+
 def latest_fast_station_extreme_c(
     conn: sqlite3.Connection,
     *,
@@ -563,6 +574,83 @@ def build_fast_station_residual_likelihood(
         unknown_weight=unknown_weight,
         settlement_extreme_c=settlement_extreme,
         identity_hash=identity_hash,
+    )
+
+
+def latest_fast_station_conditioning(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    decision_time: datetime | str,
+    settlement_extreme_native: float | None,
+    settlement_unit: str | None,
+) -> FastStationConditioning | None:
+    """Return qualified fast evidence only when it advances settlement support.
+
+    Seed discovery and posterior coverage must use this same predicate. Missing
+    or thin residual evidence is inert, and a fast print that does not move the
+    running extreme beyond settlement-channel truth cannot replace that truth.
+    """
+
+    normalized_metric = str(metric or "").strip().lower()
+    if normalized_metric not in {"high", "low"}:
+        return None
+    settlement_extreme_c: float | None = None
+    if settlement_extreme_native is not None:
+        try:
+            settlement_value = float(settlement_extreme_native)
+        except (TypeError, ValueError):
+            return None
+        normalized_unit = str(settlement_unit or "").strip().upper()
+        if not math.isfinite(settlement_value) or normalized_unit not in {"C", "F"}:
+            return None
+        settlement_extreme_c = (
+            settlement_value
+            if normalized_unit == "C"
+            else (settlement_value - 32.0) * 5.0 / 9.0
+        )
+    fast = latest_fast_station_extreme_c(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=normalized_metric,
+        decision_time=decision_time,
+    )
+    if fast is None:
+        return None
+    observed_extreme_c, observation_time, sample_count, unit = fast
+    likelihood = build_fast_station_residual_likelihood(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=normalized_metric,
+        observed_source=FAST_OBS_SOURCE_ID,
+        observation_time=observation_time,
+        decision_time=decision_time,
+    )
+    if likelihood is None:
+        return None
+    supersedes = (
+        settlement_extreme_c is None
+        or (
+            normalized_metric == "high"
+            and observed_extreme_c > settlement_extreme_c + 1e-9
+        )
+        or (
+            normalized_metric == "low"
+            and observed_extreme_c < settlement_extreme_c - 1e-9
+        )
+    )
+    if not supersedes:
+        return None
+    return FastStationConditioning(
+        observed_extreme_c=float(observed_extreme_c),
+        observation_time=observation_time,
+        sample_count=sample_count,
+        unit=unit,
+        likelihood=likelihood,
     )
 
 

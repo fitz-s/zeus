@@ -47,6 +47,7 @@ from src.data.day0_fast_obs import (
     build_fast_station_residual_likelihood,
     fast_obs_source_for_city,
     fast_obs_to_day0_observation,
+    latest_fast_station_conditioning,
     latest_fast_station_extreme_c,
     parse_metar_api_payload,
     parse_noaa_metar_cycle_payload,
@@ -237,6 +238,31 @@ def test_fast_station_residual_likelihood_is_causal_station_local_and_thin_inert
     assert likelihood.residual_weights_c == ((0.0, 1.0 - expected_unknown),)
     assert likelihood.unknown_weight == expected_unknown
     assert likelihood.settlement_extreme_c == 14.0
+    conditioning = latest_fast_station_conditioning(
+        conn,
+        city="Residual City",
+        target_date="2026-07-27",
+        metric="high",
+        decision_time=decision_time,
+        settlement_extreme_native=14.0,
+        settlement_unit="C",
+    )
+    assert conditioning is not None
+    assert conditioning.observed_extreme_c == 31.0
+    assert conditioning.observation_time == post_peak_time.isoformat()
+    assert conditioning.likelihood.identity_hash == likelihood.identity_hash
+    assert (
+        latest_fast_station_conditioning(
+            conn,
+            city="Residual City",
+            target_date="2026-07-27",
+            metric="high",
+            decision_time=decision_time,
+            settlement_extreme_native=32.0,
+            settlement_unit="C",
+        )
+        is None
+    )
     assert (
         build_fast_station_residual_likelihood(
             conn,
@@ -263,6 +289,18 @@ def test_fast_station_residual_likelihood_is_causal_station_local_and_thin_inert
             observed_source=FAST_OBS_SOURCE_ID,
             observation_time=post_peak_time,
             decision_time=decision_time,
+        )
+        is None
+    )
+    assert (
+        latest_fast_station_conditioning(
+            conn,
+            city="Residual City",
+            target_date="2026-07-27",
+            metric="high",
+            decision_time=decision_time,
+            settlement_extreme_native=14.0,
+            settlement_unit="C",
         )
         is None
     )
@@ -463,6 +501,30 @@ def test_fast_residual_low_fahrenheit_requires_t_group(
     assert likelihood.matched_pairs == 20
     assert likelihood.residual_weights_c[0][0] == pytest.approx(0.0)
     assert likelihood.settlement_extreme_c == pytest.approx(20.0)
+    conditioning = latest_fast_station_conditioning(
+        conn,
+        city="Residual F City",
+        target_date="2026-07-27",
+        metric="low",
+        decision_time=decision_time,
+        settlement_extreme_native=68.0,
+        settlement_unit="F",
+    )
+    assert conditioning is not None
+    assert conditioning.observed_extreme_c == 10.0
+    assert conditioning.observation_time == post_trough_time.isoformat()
+    assert (
+        latest_fast_station_conditioning(
+            conn,
+            city="Residual F City",
+            target_date="2026-07-27",
+            metric="low",
+            decision_time=decision_time,
+            settlement_extreme_native=40.0,
+            settlement_unit="F",
+        )
+        is None
+    )
 
 
 @pytest.fixture(autouse=True)

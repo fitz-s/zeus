@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-21
+# Last reused or audited: 2026-07-27
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (#1 graceful-degradation:
 #   readiness expiring + no fresher cycle => re-materialize from newest persisted cycle) +
 #   tradeable-grade coverage antibody (a NULL-q_lcb / untradeable posterior must not satisfy the
@@ -19,6 +19,9 @@ unconstructible (Fitz: make the wrong state unrepresentable, not patch each inst
   2. FRESH-READINESS COVERAGE (graceful degradation) — an EXPIRED readiness row must NOT count
      as coverage, so a scope whose 3h TTL lapsed re-seeds from the newest persisted cycle
      instead of going dark. (Re-confirmed here as a regression pin alongside #1.)
+
+  3. EXACT DAY0 IDENTITY — source, metric, observed extreme, and observation
+     clock must all match. A timestamp-only match cannot mask corrected evidence.
 """
 
 from __future__ import annotations
@@ -324,6 +327,64 @@ def test_newer_day0_observation_seed_does_not_satisfy_coverage(tmp_path) -> None
         conn.commit()
         conn.close()
 
+        assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
+
+
+def test_day0_seed_coverage_requires_exact_conditioning_identity(tmp_path) -> None:
+    db_path = _db(tmp_path)
+    _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
+    _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
+    seed = {
+        **_seed(),
+        "computed_at": "2026-06-06T03:00:00+00:00",
+        "day0_observed_extreme_c": 31.0,
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-06-06T02:00:00+00:00",
+    }
+
+    def set_conditioning(provenance_key: str, **overrides) -> None:
+        conditioning = {
+            "active": True,
+            "metric": _METRIC,
+            "source": "aviationweather_metar",
+            "observed_extreme_c": 31.0,
+            "observation_time": "2026-06-06T02:00:00+00:00",
+            **overrides,
+        }
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE forecast_posteriors SET provenance_json = ?",
+            (
+                json.dumps(
+                    {
+                        "q_lcb_basis": "fused_center_bootstrap_p05",
+                        "bayes_precision_fusion": {
+                            "used_models": ["gfs_global"],
+                            "current_evidence_shape": {
+                                "semantics_revision": (
+                                    CURRENT_EVIDENCE_SEMANTICS_REVISION
+                                ),
+                            },
+                        },
+                        provenance_key: conditioning,
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    for provenance_key in ("day0_conditioning", "day0_provisional_observation"):
+        set_conditioning(provenance_key)
+        assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
+
+        set_conditioning(provenance_key, source="wu_icao_history")
+        assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
+
+        set_conditioning(provenance_key, observed_extreme_c=30.0)
+        assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
+
+        set_conditioning(provenance_key, metric="low")
         assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
 
 

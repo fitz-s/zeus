@@ -196,21 +196,17 @@ def test_seed_prefers_raw_fast_extreme_only_when_residual_likelihood_exists(
             "observation_source": "wu_icao_history",
         },
     )
-    monkeypatch.setattr(
-        fast_obs,
-        "latest_fast_station_extreme_c",
-        lambda *_args, **_kwargs: (
-            31.0,
-            "2026-07-27T03:04:27+00:00",
-            50,
-            "C",
-        ),
-    )
     evidence = SimpleNamespace(identity_hash="a" * 64)
     monkeypatch.setattr(
         fast_obs,
-        "build_fast_station_residual_likelihood",
-        lambda *_args, **_kwargs: evidence,
+        "latest_fast_station_conditioning",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            observed_extreme_c=31.0,
+            observation_time="2026-07-27T03:04:27+00:00",
+            sample_count=50,
+            unit="C",
+            likelihood=evidence,
+        ),
     )
 
     payload = _day0_observed_extreme_seed_payload(
@@ -230,7 +226,7 @@ def test_seed_prefers_raw_fast_extreme_only_when_residual_likelihood_exists(
 
     monkeypatch.setattr(
         fast_obs,
-        "build_fast_station_residual_likelihood",
+        "latest_fast_station_conditioning",
         lambda *_args, **_kwargs: None,
     )
     fallback = _day0_observed_extreme_seed_payload(

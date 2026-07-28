@@ -415,6 +415,35 @@ def _looks_like_seed(payload: dict[str, object]) -> bool:
     return required.issubset(payload)
 
 
+def _day0_seed_matches_conditioning(
+    seed: Mapping[str, object],
+    conditioning: Mapping[str, object],
+) -> bool:
+    """Return whether a posterior consumed the seed's exact Day0 evidence."""
+
+    seed_time = _parse_utc_iso(seed.get("day0_observed_extreme_observation_time"))
+    posterior_time = _parse_utc_iso(conditioning.get("observation_time"))
+    if seed_time is None or posterior_time != seed_time:
+        return False
+    seed_metric = str(seed.get("temperature_metric") or "").strip().lower()
+    posterior_metric = str(conditioning.get("metric") or "").strip().lower()
+    seed_source = str(seed.get("day0_observed_extreme_source") or "").strip()
+    posterior_source = str(conditioning.get("source") or "").strip()
+    if (
+        seed_metric not in {"high", "low"}
+        or posterior_metric != seed_metric
+        or not seed_source
+        or posterior_source != seed_source
+    ):
+        return False
+    try:
+        seed_extreme_c = float(seed["day0_observed_extreme_c"])
+        posterior_extreme_c = float(conditioning["observed_extreme_c"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return abs(seed_extreme_c - posterior_extreme_c) <= 1e-9
+
+
 def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, object]) -> bool:
     if forecast_db is None:
         return False
@@ -476,10 +505,7 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
             posterior_computed_at=posterior["computed_at"],
         ) is not None:
             return False
-        seed_observation_time = _parse_utc_iso(
-            seed.get("day0_observed_extreme_observation_time")
-        )
-        if seed_observation_time is not None:
+        if seed.get("day0_observed_extreme_observation_time") is not None:
             try:
                 posterior_provenance = json.loads(
                     str(posterior["provenance_json"] or "{}")
@@ -495,14 +521,9 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
                     and provisional.get("active") is True
                     else posterior_provenance.get("day0_conditioning")
                 )
-            posterior_observation_time = _parse_utc_iso(
-                conditioning.get("observation_time")
-                if isinstance(conditioning, dict)
-                else None
-            )
-            if (
-                posterior_observation_time is None
-                or posterior_observation_time < seed_observation_time
+            if not isinstance(conditioning, Mapping) or not _day0_seed_matches_conditioning(
+                seed,
+                conditioning,
             ):
                 return False
         readiness_columns = {

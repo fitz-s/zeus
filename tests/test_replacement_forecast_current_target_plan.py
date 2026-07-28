@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-24
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-20; last_reused=2026-07-20
+# Last reused/audited: 2026-07-27
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
 # Authority basis: Replacement forecast coverage must bind to the live baseline source_run, not stale city/date rows.
@@ -12,7 +12,9 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+import src.data.replacement_forecast_current_target_plan as current_target_plan
 from src.data.replacement_forecast_current_target_plan import (
     _day0_observation_lag_reason,
     _latest_authorized_day0_fact,
@@ -87,6 +89,123 @@ def test_day0_observation_hwm_invalidates_older_conditioning() -> None:
         )
         assert reason is not None
         assert reason.startswith("basis=day0_observation_hwm_lag")
+
+
+def test_day0_hwm_reseeds_qualified_fast_conditioning_by_exact_identity(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT,
+            target_date TEXT,
+            source TEXT,
+            station_id TEXT,
+            temp_unit TEXT,
+            imported_at TEXT,
+            local_timestamp TEXT,
+            utc_timestamp TEXT,
+            running_max REAL,
+            running_min REAL,
+            authority TEXT,
+            training_allowed INTEGER,
+            causality_status TEXT,
+            source_role TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "Beijing",
+            "2026-07-28",
+            "wu_icao_history",
+            "ZBAA",
+            "C",
+            "2026-07-27T23:01:00+00:00",
+            "2026-07-28T07:00:00+08:00",
+            "2026-07-27T23:00:00+00:00",
+            28.0,
+            22.0,
+            "VERIFIED",
+            1,
+            "OK",
+            "historical_hourly",
+        ),
+    )
+    qualified = SimpleNamespace(
+        observed_extreme_c=29.0,
+        observation_time="2026-07-27T23:30:00+00:00",
+        sample_count=203,
+        unit="C",
+    )
+    seen = {}
+
+    def fast_conditioning(*_args, **kwargs):
+        seen.update(kwargs)
+        return qualified
+
+    monkeypatch.setattr(
+        current_target_plan,
+        "latest_fast_station_conditioning",
+        fast_conditioning,
+    )
+    decision_time = datetime(2026, 7, 27, 23, 45, tzinfo=timezone.utc)
+    stale = {
+        "day0_conditioning": {
+            "source": "wu_icao_history",
+            "observed_extreme_c": 28.0,
+            "observation_time": "2026-07-27T23:00:00+00:00",
+        }
+    }
+
+    reason = _day0_observation_lag_reason(
+        conn,
+        city="Beijing",
+        target_date="2026-07-28",
+        temperature_metric="high",
+        decision_time=decision_time,
+        posterior_provenance_json=json.dumps(stale),
+    )
+
+    assert reason is not None
+    assert reason.startswith("basis=day0_fast_residual_hwm_lag")
+    assert seen["settlement_extreme_native"] == 28.0
+    assert seen["settlement_unit"] == "C"
+
+    current = {
+        "day0_provisional_observation": {
+            "active": True,
+            "source": "aviationweather_metar",
+            "observed_extreme_c": 29.0,
+            "observation_time": "2026-07-27T23:30:00+00:00",
+        }
+    }
+    assert _day0_observation_lag_reason(
+        conn,
+        city="Beijing",
+        target_date="2026-07-28",
+        temperature_metric="high",
+        decision_time=decision_time,
+        posterior_provenance_json=json.dumps(current),
+    ) is None
+
+    monkeypatch.setattr(
+        current_target_plan,
+        "latest_fast_station_conditioning",
+        lambda *_args, **_kwargs: None,
+    )
+    assert _day0_observation_lag_reason(
+        conn,
+        city="Beijing",
+        target_date="2026-07-28",
+        temperature_metric="high",
+        decision_time=decision_time,
+        posterior_provenance_json=json.dumps(stale),
+    ) is None
+    conn.close()
 
 
 def test_readiness_bound_posterior_ids_are_selected_in_one_batch() -> None:
