@@ -644,14 +644,34 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
         _mapping_has_positive_counter(no_trade_reasons)
         or _has_text_value(cycle, "top_no_trade_reason", "dominant_no_trade_reason")
     )
+    no_trade_disposition_complete = (
+        candidates > 0
+        and no_trades >= candidates
+        and no_trade_reason_proof
+    )
     entry_unavailable_reason = _entry_unavailable_reason(status_summary, cycle)
     entry_unavailable_proof = bool(entry_unavailable_reason)
     deterministic_rejection_observed = _mapping_has_positive_counter(deterministic_rejections)
     command_recovery = cycle.get("command_recovery")
     chain_sync = cycle.get("chain_sync")
+    if venue_acks > 0:
+        activity_state = "venue_ack_observed"
+    elif submit_attempts > 0 and deterministic_rejection_observed:
+        activity_state = "deterministic_submit_rejection"
+    elif final_intents > 0:
+        activity_state = "final_intent_built"
+    elif no_trade_disposition_complete:
+        activity_state = "proof_backed_abstention"
+    elif entry_unavailable_proof:
+        activity_state = "entry_unavailable"
+    elif candidates <= 0 and zero_candidate_has_proof:
+        activity_state = "proof_backed_empty_universe"
+    else:
+        activity_state = "progress_unproven"
     progress = {
         "mode": cycle.get("mode"),
         "last_successful_cycle_at": cycle.get("completed_at") or cycle.get("started_at"),
+        "activity_state": activity_state,
         "candidates": candidates,
         "candidate_evaluated": candidates > 0,
         "final_intents_built": final_intents,
@@ -662,6 +682,7 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
         "venue_ack_observed": venue_acks > 0,
         "no_trades": no_trades,
         "no_trade_reason_proof": no_trade_reason_proof,
+        "no_trade_disposition_complete": no_trade_disposition_complete,
         "entry_unavailable_proof": entry_unavailable_proof,
         "entry_unavailable_reason": entry_unavailable_reason,
         "zero_candidate_has_proof": zero_candidate_has_proof,
@@ -677,23 +698,15 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
             "issue": "ZERO_CANDIDATES_WITHOUT_SOURCE_OR_NO_MARKET_PROOF",
             "progress": progress,
         }
-    if candidates > 0 and final_intents <= 0 and not no_trade_reason_proof and not entry_unavailable_proof:
-        return {
-            "ok": False,
-            "issue": "CANDIDATES_WITHOUT_FINAL_INTENTS_OR_NO_TRADE_REASONS",
-            "progress": progress,
-        }
     if (
         candidates > 0
         and final_intents <= 0
-        and submit_attempts <= 0
-        and no_trades > 0
-        and no_trade_reason_proof
+        and not no_trade_disposition_complete
         and not entry_unavailable_proof
     ):
         return {
             "ok": False,
-            "issue": "CANDIDATES_ONLY_NO_TRADE_NO_CAPITAL_FLOW",
+            "issue": "CANDIDATES_WITHOUT_FINAL_INTENTS_OR_NO_TRADE_REASONS",
             "progress": progress,
         }
     if final_intents > 0 and submit_attempts <= 0:

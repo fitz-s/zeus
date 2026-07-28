@@ -5725,10 +5725,14 @@ def test_business_plane_candidates_without_final_intent_need_no_trade_reasons(tm
     )
 
 
-def test_business_plane_all_no_trade_reasons_still_degrades_without_capital_flow(tmp_path: Path) -> None:
+def test_business_plane_complete_no_trade_disposition_is_healthy_abstention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     sd = tmp_path / "state"
     sd.mkdir()
     _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
     _write(
         sd / "status_summary.json",
         {
@@ -5748,11 +5752,44 @@ def test_business_plane_all_no_trade_reasons_still_degrades_without_capital_flow
 
     result = compute_composite_live_health(state_dir=sd)
 
-    assert result["status"] == "DEGRADED"
-    assert result["surfaces"]["business_plane"]["issue"] == (
-        "CANDIDATES_ONLY_NO_TRADE_NO_CAPITAL_FLOW"
+    assert result["status"] == "HEALTHY"
+    business = result["surfaces"]["business_plane"]
+    assert business["issue"] is None
+    assert business["progress"]["activity_state"] == "proof_backed_abstention"
+    assert business["progress"]["no_trade_reason_proof"] is True
+    assert business["progress"]["no_trade_disposition_complete"] is True
+
+
+def test_business_plane_partial_no_trade_disposition_remains_degraded(tmp_path: Path) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "edli_event_reactor",
+                "completed_at": _now_iso(-30),
+                "candidates": 12,
+                "final_intents_built": 0,
+                "submit_attempts": 0,
+                "no_trades": 11,
+                "top_no_trade_reasons": {
+                    "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE": 11
+                },
+            },
+            "execution_capability": _healthy_execution_capability(),
+        },
     )
-    assert result["surfaces"]["business_plane"]["progress"]["no_trade_reason_proof"] is True
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    business = result["surfaces"]["business_plane"]
+    assert business["issue"] == "CANDIDATES_WITHOUT_FINAL_INTENTS_OR_NO_TRADE_REASONS"
+    assert business["progress"]["no_trade_reason_proof"] is True
+    assert business["progress"]["no_trade_disposition_complete"] is False
 
 
 def test_business_plane_candidates_blocked_by_entry_gate_have_explicit_proof(tmp_path: Path) -> None:
