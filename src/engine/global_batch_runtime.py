@@ -4229,29 +4229,32 @@ def process_current_global_batch(
             prepared_receipt = prepare_event(scope_event, scope_at)
             prepared = prepared_receipt.prepared_global_family
             if prepared is None:
-                if _current_probability_ineligible(prepared_receipt):
-                    failure_receipt = prepared_receipt
-                    if (
-                        prepare_held_event is not None
-                        and family_key in held_obligation_family_keys
-                    ):
-                        held_receipt = prepare_held_event(scope_event, scope_at)
-                        prepared = held_receipt.prepared_global_family
-                        if prepared is not None:
-                            held_only_family_keys.add(family_key)
-                            held_only_buy_disabled_reasons[family_key] = str(
-                                prepared_receipt.reason
-                                or "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED"
-                            )
-                        else:
-                            failure_receipt = held_receipt
-                    if prepared is None:
-                        reason = str(failure_receipt.reason)
-                        ineligible_by_family[family_key] = reason
-                        if family_key in claimed_by_family:
-                            ineligible_by_event[owner.event_id] = reason
-                        continue
-                else:
+                failure_receipt = prepared_receipt
+                held_prepare_attempted = bool(
+                    prepare_held_event is not None
+                    and family_key in held_obligation_family_keys
+                )
+                if held_prepare_attempted:
+                    held_receipt = prepare_held_event(scope_event, scope_at)
+                    prepared = held_receipt.prepared_global_family
+                    if prepared is not None:
+                        held_only_family_keys.add(family_key)
+                        held_only_buy_disabled_reasons[family_key] = str(
+                            prepared_receipt.reason
+                            or "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED"
+                        )
+                    else:
+                        failure_receipt = held_receipt
+                if prepared is None and (
+                    held_prepare_attempted
+                    or _current_probability_ineligible(prepared_receipt)
+                ):
+                    reason = str(failure_receipt.reason)
+                    ineligible_by_family[family_key] = reason
+                    if family_key in claimed_by_family:
+                        ineligible_by_event[owner.event_id] = reason
+                    continue
+                if prepared is None:
                     return reject(
                         "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
                         f"{family_key}:{prepared_receipt.reason or 'missing'}"

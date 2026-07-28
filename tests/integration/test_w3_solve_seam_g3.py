@@ -17548,8 +17548,26 @@ def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "entry_only_reason",
+    (
+        (
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+            "FamilyAuthorityUnavailable:test"
+        ),
+        (
+            "FDR_REJECTED:event_type=FORECAST_SNAPSHOT_READY:"
+            "attempted=22:selected_post_fdr=0:alpha=0.100000"
+        ),
+        (
+            "LIVE_ENTRY_BLOCKED:entry_readiness:"
+            "EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:1"
+        ),
+    ),
+)
 def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
     monkeypatch,
+    entry_only_reason,
 ):
     import src.data.replacement_input_hwm as replacement_hwm
 
@@ -17678,10 +17696,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             False,
             item.event_id,
             item.causal_snapshot_id,
-            reason=(
-                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-                "FamilyAuthorityUnavailable:test"
-            ),
+            reason=entry_only_reason,
         ),
         prepare_held_event=lambda item, _at: EventSubmissionReceipt(
             False,
@@ -17699,10 +17714,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
 
     assert selected_kwargs["buy_disabled_family_keys"] == frozenset({family_key})
     assert stored_kwargs["buy_disabled_reason_by_family"] == {
-        family_key: (
-            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-            "FamilyAuthorityUnavailable:test"
-        )
+        family_key: entry_only_reason
     }
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"
@@ -17726,10 +17738,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             False,
             item.event_id,
             item.causal_snapshot_id,
-            reason=(
-                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-                "FamilyAuthorityUnavailable:ENTRY_ONLY_REASON"
-            ),
+            reason=entry_only_reason,
         ),
         prepare_held_event=lambda item, _at: EventSubmissionReceipt(
             False,
