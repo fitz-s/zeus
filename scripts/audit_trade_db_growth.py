@@ -144,6 +144,16 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     }
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
+
 def _parse_time(value: object) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -370,43 +380,68 @@ def _probe_table(
 
 
 def _direct_snapshot_citations(conn: sqlite3.Connection) -> dict[str, object]:
-    """Bounded operational refs that are provably load-bearing today.
+    """Direct refs that resolve to the canonical executable snapshot domain.
 
     This is a minimum set, not deletion authority: certificate payloads can
     retain hashes or other causal bindings without a relational snapshot_id
-    column.
+    column. Snapshot-named columns from other identity domains are deliberately
+    excluded by joining every candidate reference to executable_market_snapshots.
     """
 
+    if not _table_exists(conn, "executable_market_snapshots"):
+        return {
+            "minimum_distinct_operational_snapshot_ids": 0,
+            "sources": {},
+            "scope": "canonical executable snapshot table absent",
+        }
     sources: list[tuple[str, str]] = []
     for table, column in (
         ("venue_commands", "snapshot_id"),
         ("position_current", "decision_snapshot_id"),
+        ("position_events", "snapshot_id"),
+        ("market_price_history", "snapshot_id"),
     ):
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-            (table,),
-        ).fetchone()
-        if exists is None or column not in _table_columns(conn, table):
+        if not _table_exists(conn, table) or column not in _table_columns(conn, table):
             continue
         sources.append((table, column))
     per_source: dict[str, dict[str, int]] = {}
     cited_ids: set[str] = set()
     for table, column in sources:
+        nonnull_rows = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*)
+                  FROM "{table}"
+                 WHERE "{column}" IS NOT NULL
+                   AND TRIM(CAST("{column}" AS TEXT)) != ''
+                """
+            ).fetchone()[0]
+        )
         rows = conn.execute(
-            f'SELECT "{column}" FROM "{table}" WHERE "{column}" IS NOT NULL'
+            f"""
+            SELECT TRIM(CAST(ref."{column}" AS TEXT))
+              FROM "{table}" AS ref
+              JOIN executable_market_snapshots AS snapshot
+                ON snapshot.snapshot_id = TRIM(CAST(ref."{column}" AS TEXT))
+             WHERE ref."{column}" IS NOT NULL
+               AND TRIM(CAST(ref."{column}" AS TEXT)) != ''
+            """
         ).fetchall()
         ids = [str(row[0]).strip() for row in rows if str(row[0] or "").strip()]
         cited_ids.update(ids)
         per_source[table] = {
+            "nonnull_rows": nonnull_rows,
             "cited_rows": len(ids),
             "distinct_snapshot_ids": len(set(ids)),
+            "noncanonical_or_legacy_rows": nonnull_rows - len(ids),
         }
     return {
         "minimum_distinct_operational_snapshot_ids": len(cited_ids),
         "sources": per_source,
         "scope": (
-            "minimum direct relational refs only; decision-certificate payload "
-            "bindings and offline evidence are not classified here"
+            "minimum direct relational refs that resolve to canonical "
+            "executable_market_snapshots; decision-certificate payload bindings "
+            "and offline evidence are not classified here"
         ),
     }
 
@@ -445,8 +480,8 @@ def audit(path: Path, *, tail_rows: int) -> dict[str, object]:
                 8,
             )
     return {
-        "schema_version": 4,
-        "method": "bounded_rowid_tail_v3",
+        "schema_version": 5,
+        "method": "bounded_rowid_tail_v4",
         "authority": "read_only_diagnostic_not_retention_authority",
         "audited_at": datetime.now(timezone.utc).isoformat(),
         "db_path": str(resolved),
