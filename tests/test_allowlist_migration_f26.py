@@ -3,7 +3,7 @@
 #          outcomes; catches two-truth drift between conftest residual and production allowlist.
 # Reuse: Inspect F26_CLEANUP_PROMOTED / F26_CLEANUP_DROPPED sets against actual
 #        db_writer_lock.SQLITE_CONNECT_ALLOWLIST before relying on test counts.
-# Authority basis: /Users/leofitz/.claude/jobs/9ea6f95c/findings/f26_allowlist_audit.md
+# Authority basis: ~/.claude/jobs/9ea6f95c/findings/f26_allowlist_audit.md
 #                  F26 follow-up brief: migrate 38 (actual 42) CURRENT_REUSABLE entries
 #                  F26 cleanup brief (2026-05-18): resolve 29 STALE_REWRITE + 1 QUARANTINED
 """F26 allowlist migration + cleanup antibody.

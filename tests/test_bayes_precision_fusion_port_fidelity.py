@@ -104,9 +104,8 @@ def test_port_matches_live_proof_engine_if_present() -> None:
     import importlib.util
     from pathlib import Path
 
-    proof = Path(
-        "/Users/leofitz/zeus/.omc/research/polyweather_eval/scripts/run_bayes_precision_fusion.py"
-    )
+    repo_root = Path(__file__).resolve().parents[1]
+    proof = repo_root / ".omc" / "research" / "polyweather_eval" / "scripts" / "run_bayes_precision_fusion.py"
     if not proof.exists():
         pytest.skip("offline proof engine not present in this checkout")
     spec = importlib.util.spec_from_file_location("bayes_precision_fusionproof_ref", proof)

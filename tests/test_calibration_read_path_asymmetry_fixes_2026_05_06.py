@@ -1,6 +1,6 @@
 # Created: 2026-05-06
 # Last reused/audited: 2026-05-06
-# Authority basis: /Users/leofitz/.claude/plans/golden-knitting-wand.md
+# Authority basis: ~/.claude/plans/golden-knitting-wand.md
 """Regression tests for 6 READ-path asymmetry fixes (cycle-stratified Platt).
 
 Covers:

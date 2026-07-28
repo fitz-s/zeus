@@ -1,6 +1,6 @@
 # Created: 2026-05-29
 # Last reused or audited: 2026-05-29
-# Authority basis: /Users/leofitz/.claude/jobs/9ea6f95c/OBS_V2_CONSOLIDATION_PLAN.md task 8
+# Authority basis: ~/.claude/jobs/9ea6f95c/OBS_V2_CONSOLIDATION_PLAN.md task 8
 #   (Fitz relationship test); replaces the now-obsolete dual-writer freshness
 #   antibody (tests/state/test_dual_writer_observation_instants_invariant.py) whose
 #   premise — TWO observation tables — the consolidation deliberately eliminates.
