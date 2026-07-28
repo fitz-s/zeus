@@ -8920,6 +8920,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
         shares=13.5,
         cost_basis_usd=9.99,
         entry_price=0.74,
+        decision_snapshot_id="snap-monitor-preserve-chain",
     )
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
@@ -8951,6 +8952,9 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     pos.last_monitor_market_price = 0.735
     pos.last_monitor_market_price_is_fresh = True
     pos.last_monitor_at = "2026-06-17T20:53:17+00:00"
+    # Simulate a stale in-memory Position loaded before a deterministic
+    # command-to-position evidence repair completed.
+    pos.decision_snapshot_id = ""
     monitor_events, monitor_projection = build_monitor_refreshed_canonical_write(
         pos,
         sequence_no=4,
@@ -8963,7 +8967,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
         """
         SELECT size_usd, shares, cost_basis_usd, chain_state, chain_shares,
                chain_cost_basis_usd, last_monitor_prob, last_monitor_edge,
-               last_monitor_market_price, updated_at
+               last_monitor_market_price, decision_snapshot_id, updated_at
           FROM position_current
          WHERE position_id = ?
         """,
@@ -8978,6 +8982,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     assert current["last_monitor_prob"] == pytest.approx(0.869)
     assert current["last_monitor_edge"] == pytest.approx(0.133)
     assert current["last_monitor_market_price"] == pytest.approx(0.735)
+    assert current["decision_snapshot_id"] == "snap-monitor-preserve-chain"
     assert current["updated_at"] == "2026-06-17T20:53:17+00:00"
     conn.close()
 
