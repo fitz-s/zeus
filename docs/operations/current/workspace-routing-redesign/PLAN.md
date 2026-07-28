@@ -224,11 +224,16 @@ The router prevents *recurrence*; it does not clean the existing pile. No item i
 
 ---
 
-## 9. Worktree explosion — distinct mechanism (R18)
+## 9. Worktree explosion — superseded lifecycle (R18)
 
-17,297 gitignored files; the router can't touch it (it's `EnterWorktree`/`git worktree add`, not Write). Reuse `scripts/worktree_doctor.py` + the two existing worktree hooks (no new mechanism):
-1. **Prune** — `worktree_doctor --prune`: STALE when ALL of [branch merged into origin/main OR session-branch gone] ∧ [working tree clean] ∧ [no live process cwd/handle inside] ∧ [older than threshold] → `git worktree remove`. **Never removes dirty or process-attached trees.** Run from the existing SessionStart sweep + manual `--prune` for the backlog.
-2. **Stop re-accumulation** — on `WorktreeRemove`/`post_merge_cleanup`, when a worktree's branch is merged + clean, **auto-`git worktree remove`** instead of printing a checklist. Clean-merged removal loses nothing; dirty/unmerged stay + get the advisory. Same help-not-block move as the router. Independent of route_write — shippable first.
+This 2026-06 proposal predates the Codex-managed worktree lifecycle and must
+not be implemented. Codex paths under `$CODEX_HOME/worktrees` are reclaimed by
+Codex after their completed clean owning worker archives its own thread; no
+repository hook or reaper raw-removes them. A hot-pick is proven by
+patch-equivalence to `live` (`git cherry live <branch>` has no `+` entries), not
+only by branch ancestry. Dirty, active, pinned, permanent, or open-PR worktrees
+remain outside automatic closeout. Current workflow: `AGENTS.md` §5 and
+`plans/live_branch_workflow_2026-07-20.md`.
 
 ---
 

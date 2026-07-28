@@ -46,22 +46,6 @@
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs session_start_visibility"}
         ]
       }
-    ],
-    "WorktreeCreate": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs worktree_create_advisor"}
-        ]
-      }
-    ],
-    "WorktreeRemove": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs worktree_remove_advisor"}
-        ]
-      }
     ]
   }
 }

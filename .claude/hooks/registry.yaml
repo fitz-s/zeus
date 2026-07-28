@@ -185,7 +185,10 @@ hooks:
     event: PostToolUse
     matcher: Bash
     intent: >
-      Soft cleanup checklist after `gh pr merge`.
+      After a successful PR merge or cherry-pick, direct the owning completed
+      Codex worker to archive its own thread after landing verification and
+      any open-PR monitoring. Codex owns snapshot/removal of its managed
+      worktree; the hook never calls `git worktree remove`.
     blocked_when: []
     severity: ADVISORY
     sunset_date: 2026-08-06

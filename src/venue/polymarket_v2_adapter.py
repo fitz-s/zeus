@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-28
 # Authority basis (2026-06-12): operator law 2026-06-10 ABSOLUTE — redeem submission
 #   FORBIDDEN. redeem() now raises REDEEM_SUBMISSION_FORBIDDEN unconditionally; the
 #   autonomous web3 broadcast body (eth_sendRawTransaction EOA path) was DELETED.
@@ -37,6 +37,8 @@ from decimal import Decimal, ROUND_FLOOR
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
+
+from py_clob_client_v2.exceptions import PolyApiException
 
 from src.contracts.execution_intent import ExecutionIntent
 from src.contracts.semantic_types import Direction
@@ -850,6 +852,14 @@ class PolymarketV2Adapter:
                     signed_order=signed_order,
                     signed_order_hash=signed_hash,
                 )
+            if post_started and _is_polymarket_order_manager_not_ready_425_error(exc):
+                return _rejected_submit_result(
+                    envelope,
+                    error_code="venue_order_manager_not_ready_425",
+                    error_message=str(exc),
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                )
             if post_started and _is_polymarket_invalid_safe_signature_error(exc):
                 logger.error(
                     "VENUE_ORDER_SIGNATURE_REJECTED: deterministic invalid Safe "
@@ -971,12 +981,10 @@ class PolymarketV2Adapter:
         live-authority first (no SDK contact on a placeholder envelope). A
         signing failure (create_order) for ANY envelope aborts the WHOLE
         call before any network contact -- no partial submission of an
-        unsigned order. If the post_orders() HTTP call itself raises AFTER
-        all orders are signed, this method does NOT catch it (mirrors
-        submit()'s _submit_once: the exception propagates so the caller can
-        record the AMBIGUOUS side effect -- signing succeeded, the network
-        outcome is unknown -- as SUBMIT_TIMEOUT_UNKNOWN, matching the
-        single-order executor.py:4697-4759 pattern).
+        unsigned order. Transport and non-definitive server exceptions after
+        signing still propagate so the caller records the ambiguous side
+        effect. The exact synchronous 425 order-manager-not-ready response is
+        the sole deterministic whole-batch rejection handled here.
         """
         if not envelopes:
             return []
@@ -1104,12 +1112,27 @@ class PolymarketV2Adapter:
                 for i, e in enumerate(envelopes)
             ]
 
-        # Deliberately NOT wrapped in try/except: a post-signing exception
-        # here is an AMBIGUOUS side effect (venue may have received the
-        # request). Propagate so the caller records SUBMIT_TIMEOUT_UNKNOWN
-        # for every command in this chunk, mirroring executor.py's
-        # single-order post-submit exception handling.
-        raw_response = client.post_orders(post_orders_args, post_only=batch_post_only, defer_exec=False)
+        try:
+            raw_response = client.post_orders(
+                post_orders_args,
+                post_only=batch_post_only,
+                defer_exec=False,
+            )
+        except Exception as exc:
+            if not _is_polymarket_order_manager_not_ready_425_error(exc):
+                # Transport errors and non-definitive server failures remain
+                # ambiguous because the venue may have accepted a prefix.
+                raise
+            return [
+                _rejected_submit_result(
+                    envelope,
+                    error_code="venue_order_manager_not_ready_425",
+                    error_message=str(exc),
+                    signed_order=signed_orders[i],
+                    signed_order_hash=signed_hashes[i],
+                )
+                for i, envelope in enumerate(envelopes)
+            ]
 
         mapped = map_batch_items(
             raw_response,
@@ -2866,6 +2889,19 @@ def _is_polymarket_geoblock_403_error(exc: BaseException) -> bool:
         "status_code=403" in text
         and "trading restricted in your region" in text
         and "geoblock" in text
+    )
+
+
+def _is_polymarket_order_manager_not_ready_425_error(
+    exc: BaseException,
+) -> bool:
+    """Recognize the venue's synchronous pre-order-manager rejection."""
+
+    return (
+        isinstance(exc, PolyApiException)
+        and exc.status_code == 425
+        and exc.error_msg
+        == {"error": "order manager not ready, please retry"}
     )
 
 

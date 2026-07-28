@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -154,6 +155,18 @@ class FakeGeoblockClient(FakeTwoStepClient):
             "restricted in your region, please refer to available regions - "
             "https://docs.polymarket.com/developers/CLOB/geoblock'}]"
         )
+
+
+class FakeOrderManagerNotReady425Client(FakeTwoStepClient):
+    def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
+        from py_clob_client_v2.exceptions import PolyApiException
+
+        self.calls.append(("post_order", order, order_type, post_only, defer_exec))
+        response = SimpleNamespace(
+            status_code=425,
+            json=lambda: {"error": "order manager not ready, please retry"},
+        )
+        raise PolyApiException(response)
 
 
 class FakeFokKilledClient(FakeTwoStepClient):
@@ -1811,6 +1824,128 @@ def test_post_order_exception_carries_deterministic_order_identity(tmp_path, mon
     assert any(call[0] == "post_order" for call in fake.calls)
 
 
+def test_order_manager_not_ready_425_is_deterministic_rejection(
+    tmp_path,
+    monkeypatch,
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeOrderManagerNotReady425Client()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(),
+        FakeSnapshot(),
+        order_type="FAK",
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_order_manager_not_ready_425"
+    assert result.envelope.error_code == "venue_order_manager_not_ready_425"
+    assert result.envelope.order_id is None
+    assert result.envelope.signed_order == fake.signed_order
+    assert any(call[0] == "post_order" for call in fake.calls)
+    from src.data.polymarket_client import _legacy_order_result_from_submit
+
+    legacy = _legacy_order_result_from_submit(result)
+    assert legacy["success"] is False
+    assert legacy["status"] == "rejected"
+    assert legacy["errorCode"] == "venue_order_manager_not_ready_425"
+
+
+def test_other_425_response_remains_ambiguous(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class Other425Client(FakeTwoStepClient):
+        def post_order(
+            self,
+            order,
+            order_type=None,
+            post_only=False,
+            defer_exec=False,
+        ):
+            self.calls.append(
+                ("post_order", order, order_type, post_only, defer_exec)
+            )
+            from py_clob_client_v2.exceptions import PolyApiException
+
+            response = SimpleNamespace(
+                status_code=425,
+                json=lambda: {"error": "request state unknown"},
+            )
+            raise PolyApiException(response)
+
+    fake = Other425Client()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(),
+        FakeSnapshot(),
+        order_type="FAK",
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    with pytest.raises(adapter_mod.AmbiguousSubmitError):
+        _submit(adapter, envelope)
+    from py_clob_client_v2.exceptions import PolyApiException
+
+    transport = PolyApiException(
+        error_msg={"error": "order manager not ready, please retry"}
+    )
+    assert transport.status_code is None
+    assert not adapter_mod._is_polymarket_order_manager_not_ready_425_error(
+        transport
+    )
+
+
+def test_runtime_error_cannot_impersonate_order_manager_425(
+    tmp_path,
+    monkeypatch,
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class Impostor425Client(FakeTwoStepClient):
+        def post_order(
+            self,
+            order,
+            order_type=None,
+            post_only=False,
+            defer_exec=False,
+        ):
+            self.calls.append(
+                ("post_order", order, order_type, post_only, defer_exec)
+            )
+            raise RuntimeError(
+                "PolyApiException[status_code=425, error_message={'error': "
+                "'order manager not ready, please retry'}]"
+            )
+
+    fake = Impostor425Client()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(),
+        FakeSnapshot(),
+        order_type="FAK",
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    with pytest.raises(adapter_mod.AmbiguousSubmitError):
+        _submit(adapter, envelope)
+
+
 def test_signed_identity_callback_runs_before_post(tmp_path, monkeypatch):
     import src.venue.polymarket_v2_adapter as adapter_mod
 
@@ -3289,6 +3424,18 @@ class FakePostOrdersExceptionClient(FakeBatchTwoStepClient):
         raise TimeoutError("post_orders timed out")
 
 
+class FakeBatchOrderManagerNotReady425Client(FakeBatchTwoStepClient):
+    def post_orders(self, args, post_only=False, defer_exec=False):
+        from py_clob_client_v2.exceptions import PolyApiException
+
+        self.calls.append(("post_orders", args, post_only, defer_exec))
+        response = SimpleNamespace(
+            status_code=425,
+            json=lambda: {"error": "order manager not ready, please retry"},
+        )
+        raise PolyApiException(response)
+
+
 class FakeCancelOrdersExceptionClient(FakeBatchTwoStepClient):
     def cancel_orders(self, order_ids):
         self.calls.append(("cancel_orders", order_ids))
@@ -3494,6 +3641,21 @@ class TestSubmitBatch:
             adapter.submit_batch(envelopes)
 
         assert any(c[0] == "post_orders" for c in fake.calls)
+
+    def test_order_manager_not_ready_425_rejects_entire_batch(self, tmp_path):
+        fake = FakeBatchOrderManagerNotReady425Client()
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 2)
+
+        results = adapter.submit_batch(envelopes)
+
+        assert [result.status for result in results] == ["rejected", "rejected"]
+        assert [result.error_code for result in results] == [
+            "venue_order_manager_not_ready_425",
+            "venue_order_manager_not_ready_425",
+        ]
+        assert all(result.envelope.order_id is None for result in results)
+        assert any(call[0] == "post_orders" for call in fake.calls)
 
 
 class TestCancelBatch:
