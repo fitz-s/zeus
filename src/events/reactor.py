@@ -1989,7 +1989,12 @@ class OpportunityEventReactor:
                 )
                 if not should_submit:
                     self._finalize_disposition(
-                        event, pre_disposition, decision_time=decision_time, result=result
+                        event,
+                        pre_disposition,
+                        decision_time=decision_time,
+                        result=result,
+                        claim_generation=claim_generation,
+                        claim_attempt_count=claim_attempt_count,
                     )
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                     self._commit_event_unit()
@@ -2091,6 +2096,8 @@ class OpportunityEventReactor:
                         decision_time=decision_time,
                         result=result,
                         proof_emitted=result.proof_accepted > _accepted_before,
+                        claim_generation=claim_generation,
+                        claim_attempt_count=claim_attempt_count,
                     )
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                     self._commit_event_unit()
@@ -2324,6 +2331,8 @@ class OpportunityEventReactor:
                         decision_time=decision_time,
                         result=result,
                         proof_emitted=emitted,
+                        claim_generation=claim_generation,
+                        claim_attempt_count=claim_attempt_count,
                     )
                     if continuation_event is not None:
                         if not bool(submit_result.submitted):
@@ -2910,6 +2919,8 @@ class OpportunityEventReactor:
         decision_time: datetime,
         result: ReactorResult,
         proof_emitted: bool = False,
+        claim_generation: str | None = None,
+        claim_attempt_count: int | None = None,
     ) -> None:
         """Apply the terminal/retry book-keeping for a window disposition.
 
@@ -2993,11 +3004,20 @@ class OpportunityEventReactor:
                     )
                     else last_reason
                 )
-                self._store.requeue_pending(
-                    event.event_id,
-                    not_before=retry_not_before,
-                    last_error=processing_error,
-                )
+                if claim_generation and claim_attempt_count is not None:
+                    self._store.requeue_claim_if_current(
+                        event.event_id,
+                        claimed_at=claim_generation,
+                        attempt_count=claim_attempt_count,
+                        not_before=retry_not_before,
+                        last_error=processing_error,
+                    )
+                else:
+                    self._store.requeue_pending(
+                        event.event_id,
+                        not_before=retry_not_before,
+                        last_error=processing_error,
+                    )
                 result.retried += 1
                 result.rejection_reasons.append(last_reason or "EXECUTABLE_SNAPSHOT_PENDING")
             return

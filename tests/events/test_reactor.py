@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-07-28
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -324,7 +324,7 @@ def test_global_batch_claim_tokens_drain_paged_and_unpaged_no_submit_losers(
     ).fetchall()
     assert [tuple(row) for row in drained_rows] == [
         ("pending", None, _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY),
-        ("pending", None, _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY),
+        ("pending", None, GLOBAL_WINNER_TARGETED_CLAIM),
     ]
     assert reactor._no_submit_claim_requeue_debt == {}
 
@@ -2888,9 +2888,10 @@ def test_global_batch_defers_target_when_claim_is_reclaimed_during_solve():
         (target.event_id,),
     ).fetchone() is None
     assert conn.execute(
-        "SELECT last_error FROM opportunity_event_processing WHERE event_id = ?",
+        "SELECT processing_status, claimed_at, last_error "
+        "FROM opportunity_event_processing WHERE event_id = ?",
         (claimed.event_id,),
-    ).fetchone()[0] == "SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_NO_CURRENT_WINNER"
+    ).fetchone() == ("processing", "2026-05-25T06:16:00+00:00", None)
 
 
 def test_global_target_keeps_claim_priority_after_transient_epoch():
@@ -3610,6 +3611,86 @@ def test_global_target_processing_lease_blocks_new_target_materialization():
         "SELECT 1 FROM opportunity_events WHERE event_id = ?",
         (new.event_id,),
     ).fetchone() is None
+
+
+def test_boot_recovers_targeted_claim_only_after_prior_owner_died():
+    conn, store = _store()
+    target = _forecast_event("boot-orphan-target", target_date="2026-05-25")
+    assert store.prioritize_global_winner(target)
+    assert store.claim(
+        target.event_id,
+        claimed_at="2026-05-24T18:00:00+00:00",
+    )
+    conn.execute(
+        "UPDATE opportunity_event_processing "
+        "SET processing_status='expired', processed_at=?, "
+        "last_error='GLOBAL_WINNER_TARGET_SUPERSEDED' "
+        "WHERE consumer_name=? AND event_id=?",
+        (
+            "2026-05-24T18:01:00+00:00",
+            store._winner_pointer_consumer_name,
+            target.event_id,
+        ),
+    )
+    conn.commit()
+
+    assert (
+        store.requeue_processing_before_boot(
+            boot_at="2026-05-24T18:05:00+00:00"
+        )
+        == 1
+    )
+
+    assert conn.execute(
+        "SELECT processing_status, claimed_at, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+        (store.consumer_name, target.event_id),
+    ).fetchone() == ("pending", None, GLOBAL_WINNER_TARGETED_CLAIM)
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+        (store._winner_pointer_consumer_name, target.event_id),
+    ).fetchone() == ("pending", GLOBAL_WINNER_TARGETED_CLAIM)
+    assert store.fetch_pending(
+        decision_time="2026-05-24T18:06:00+00:00",
+        limit=1,
+    )[0].event_id == target.event_id
+
+
+def test_late_targeted_requeue_cannot_replace_newer_winner_pointer():
+    conn, store = _store()
+    old = _forecast_event("late-old-target", target_date="2026-05-25")
+    new = _forecast_event("late-new-target", target_date="2026-05-25")
+    assert store.prioritize_global_winner(old)
+    claimed_at = "2026-05-24T18:00:00+00:00"
+    assert store.claim(old.event_id, claimed_at=claimed_at)
+    attempt_count = store.attempt_count(old.event_id)
+    conn.commit()
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert store.prioritize_global_winner(
+        new,
+        current_batch_claim_generations={old.event_id: claimed_at},
+    )
+    conn.commit()
+
+    assert store.requeue_claim_if_current(
+        old.event_id,
+        claimed_at=claimed_at,
+        attempt_count=attempt_count,
+        last_error=GLOBAL_WINNER_TARGETED_CLAIM,
+    )
+
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+        (store.consumer_name, old.event_id),
+    ).fetchone() == ("expired", "GLOBAL_WINNER_TARGET_SUPERSEDED")
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+        (store._winner_pointer_consumer_name, new.event_id),
+    ).fetchone() == ("pending", GLOBAL_WINNER_TARGETED_CLAIM)
 
 
 def test_boot_generation_requeues_only_prior_runtime_claims():
