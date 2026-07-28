@@ -1,0 +1,33 @@
+packet: current/trade_receipt_keyed_delta
+status: active
+owner: agent
+frontier: []
+in_scope:
+- docs/operations/current/trade_receipt_keyed_delta/**
+- src/engine/global_batch_runtime.py
+- src/control/live_health.py
+- tests/integration/test_w3_solve_seam_g3.py
+- tests/test_run_mode_failure_surfaces.py
+- architecture/source_rationale.yaml
+- architecture/test_topology.yaml
+allow_companions: []
+out_of_scope:
+- state/**
+- config/settings.json
+- docs/authority/**
+- src/state/**
+- src/execution/**
+- src/main.py
+- src/supervisor_api/**
+- migrations/**
+- .github/workflows/**
+- architecture/db_table_ownership.yaml
+- architecture/invariants.yaml
+- architecture/kernel_manifest.yaml
+- architecture/module_manifest.yaml
+live_side_effects_allowed: false
+supersedes: null
+tests:
+- tests/integration/test_w3_solve_seam_g3.py
+- tests/test_run_mode_failure_surfaces.py
+closeout_required: true

@@ -5522,81 +5522,11 @@ def _apply_global_auction_candidate_semantic_delta(
 ) -> dict[str, object]:
     """Rehydrate the engine's bounded one-hop candidate receipt delta."""
 
-    top_level = delta.get("top_level")
-    detailed = delta.get("detailed")
-    base_rows = base.get("detailed")
-    if (
-        not isinstance(top_level, Mapping)
-        or not isinstance(detailed, Mapping)
-        or not isinstance(base_rows, list)
-    ):
-        raise ValueError("DELTA_PAYLOAD_SHAPE")
-    key_fields = detailed.get("semantic_key_fields")
-    expected_key_fields = [
-        "action",
-        "family_key",
-        "bin_id",
-        "condition_id",
-        "side",
-        "token_id",
-        "position_id",
-    ]
-    if key_fields != expected_key_fields:
-        raise ValueError("DELTA_SEMANTIC_KEY_FIELDS")
+    from src.engine.global_batch_runtime import (
+        _apply_candidate_evaluations_delta,
+    )
 
-    replacements = top_level.get("replacements", {})
-    if not isinstance(replacements, Mapping):
-        raise ValueError("DELTA_PAYLOAD_SHAPE")
-    payload = {
-        key: value for key, value in base.items() if key != "detailed"
-    }
-    for key in top_level.get("removed_keys", ()):
-        payload.pop(str(key), None)
-    payload.update((str(key), value) for key, value in replacements.items())
-
-    def semantic_key(row: Mapping[str, object]) -> str:
-        return json.dumps(
-            [str(row.get(field) or "") for field in expected_key_fields],
-            separators=(",", ":"),
-        )
-
-    rows = {semantic_key(row): dict(row) for row in base_rows}
-    if len(rows) != len(base_rows):
-        raise ValueError("DELTA_SEMANTIC_KEY_DUPLICATE")
-    for key in detailed.get("removed_keys", ()):
-        rows.pop(str(key), None)
-    patches = detailed.get("patches", ())
-    if not isinstance(patches, list):
-        raise ValueError("DELTA_PAYLOAD_SHAPE")
-    for patch in patches:
-        if not isinstance(patch, Mapping):
-            raise ValueError("DELTA_PAYLOAD_SHAPE")
-        key = str(patch.get("key") or "")
-        if not key:
-            raise ValueError("DELTA_PAYLOAD_SHAPE")
-        inserted = patch.get("inserted_row")
-        if inserted is not None:
-            if not isinstance(inserted, Mapping) or key in rows:
-                raise ValueError("DELTA_PAYLOAD_SHAPE")
-            row = dict(inserted)
-        else:
-            if key not in rows:
-                raise ValueError("DELTA_PAYLOAD_SHAPE")
-            row = dict(rows[key])
-            for field in patch.get("removed_fields", ()):
-                row.pop(str(field), None)
-            row_replacements = patch.get("replacements", {})
-            if not isinstance(row_replacements, Mapping):
-                raise ValueError("DELTA_PAYLOAD_SHAPE")
-            row.update(
-                (str(field), value)
-                for field, value in row_replacements.items()
-            )
-        if semantic_key(row) != key:
-            raise ValueError("DELTA_SEMANTIC_KEY_CHANGED")
-        rows[key] = row
-    payload["detailed"] = [rows[key] for key in sorted(rows)]
-    return payload
+    return _apply_candidate_evaluations_delta(base, delta)
 
 
 def _current_global_auction_candidate_payload(
@@ -5615,6 +5545,7 @@ def _current_global_auction_candidate_payload(
         if delta_encoding not in {
             "zlib+base64+canonical-json-object-delta-v1",
             "zlib+base64+semantic-keyed-canonical-json-delta-v2",
+            "zlib+base64+semantic-keyed-canonical-json-delta-v3",
         }:
             raise ValueError("DELTA_ENCODING")
         base_row_id = int(summary["candidate_evaluations_base_decision_log_id"])

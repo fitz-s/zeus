@@ -1023,10 +1023,149 @@ def test_candidate_semantic_delta_does_not_rewrite_stable_action_slots():
     )
 
     assert reconstructed == current
+    assert semantic["candidate_evaluations_delta_encoding"] == (
+        "zlib+base64+semantic-keyed-canonical-json-delta-v3"
+    )
     assert len(semantic["candidate_evaluations_delta_zlib_b64"]) < len(
         legacy["candidate_evaluations_delta_zlib_b64"]
     )
     assert semantic["candidate_evaluations_delta_detailed_patch_count"] == 48
+
+
+def test_candidate_delta_keys_high_cardinality_indexes_instead_of_rewriting():
+    def candidate_row(index: int, candidate_id: str) -> list[str]:
+        return [
+            candidate_id,
+            f"family-{index // 20}",
+            f"bin-{index}",
+            f"condition-{index // 2}",
+            "YES" if index % 2 == 0 else "NO",
+            f"token-{index}",
+        ]
+
+    count = 1_024
+    base_index = [
+        candidate_row(
+            index,
+            hashlib.sha256(f"candidate:{index}".encode()).hexdigest(),
+        )
+        for index in range(count)
+    ]
+    current_index = [list(row) for row in base_index]
+    current_index[617][0] = hashlib.sha256(b"candidate:617:current").hexdigest()
+    base_masks = sorted(
+        [
+            (f"condition-{index}", 3)
+            for index in range(count // 2)
+        ]
+    )
+    current_masks = [
+        [condition_id, mask]
+        for condition_id, mask in base_masks
+    ]
+    current_masks[211][1] = 1
+    current_masks = sorted(
+        (str(condition_id), int(mask))
+        for condition_id, mask in current_masks
+    )
+    base = {
+        "rejected_groups": [],
+        "detailed": [],
+        "buy_condition_side_masks": base_masks,
+        "buy_candidate_index_fields": [
+            "candidate_id",
+            "family_key",
+            "bin_id",
+            "condition_id",
+            "side",
+            "token_id",
+        ],
+        "buy_candidate_index": sorted(base_index),
+    }
+    current = {
+        **base,
+        "buy_condition_side_masks": current_masks,
+        "buy_candidate_index": sorted(current_index),
+    }
+    expected_sha256 = hashlib.sha256(
+        global_batch_runtime._canonical_json_bytes(current)
+    ).hexdigest()
+
+    receipt = global_batch_runtime._candidate_evaluations_delta_receipt(
+        base=base,
+        current=current,
+        expected_sha256=expected_sha256,
+    )
+    delta_raw = zlib.decompress(
+        base64.b64decode(receipt["candidate_evaluations_delta_zlib_b64"])
+    )
+    delta = json.loads(delta_raw)
+
+    assert receipt["candidate_evaluations_delta_buy_index_patch_count"] == 1
+    assert (
+        receipt["candidate_evaluations_delta_condition_mask_patch_count"] == 1
+    )
+    assert global_batch_runtime._apply_candidate_evaluations_delta(
+        base,
+        delta,
+    ) == current
+    full_b64 = base64.b64encode(
+        zlib.compress(
+            global_batch_runtime._canonical_json_bytes(current),
+            level=9,
+        )
+    )
+    assert len(receipt["candidate_evaluations_delta_zlib_b64"]) * 2 < len(
+        full_b64
+    )
+
+    duplicate_patch = json.loads(delta_raw)
+    duplicate_patch["buy_candidate_index"]["patches"].append(
+        duplicate_patch["buy_candidate_index"]["patches"][0]
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
+    ):
+        global_batch_runtime._apply_candidate_evaluations_delta(
+            base,
+            duplicate_patch,
+        )
+
+    duplicate_mask_patch = json.loads(delta_raw)
+    duplicate_mask_patch["buy_condition_side_masks"]["patches"].append(
+        duplicate_mask_patch["buy_condition_side_masks"]["patches"][0]
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID",
+    ):
+        global_batch_runtime._apply_candidate_evaluations_delta(
+            base,
+            duplicate_mask_patch,
+        )
+
+    string_removed_masks = json.loads(delta_raw)
+    string_removed_masks["buy_condition_side_masks"]["removed_keys"] = "abc"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID",
+    ):
+        global_batch_runtime._apply_candidate_evaluations_delta(
+            base,
+            string_removed_masks,
+        )
+
+    string_removed_candidates = json.loads(delta_raw)
+    string_removed_candidates["buy_candidate_index"]["removed_keys"] = "abc"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
+    ):
+        global_batch_runtime._apply_candidate_evaluations_delta(
+            base,
+            string_removed_candidates,
+        )
 
 
 def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
@@ -1564,7 +1703,7 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
         )
     )
     assert delta_summary["candidate_evaluations_delta_encoding"] == (
-        "zlib+base64+semantic-keyed-canonical-json-delta-v2"
+        "zlib+base64+semantic-keyed-canonical-json-delta-v3"
     )
     reconstructed_candidates = (
         global_batch_runtime._apply_candidate_evaluations_delta(

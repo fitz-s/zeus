@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-27
+# Last reused or audited: 2026-07-28
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -5181,6 +5181,74 @@ def test_high_yes_edge_reconstructs_latest_global_auction_candidate_delta(
     assert orphan_surface["global_auction_candidate_evidence"][
         "issue"
     ] == "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:ValueError"
+
+
+def test_live_health_reconstructs_engine_candidate_keyed_delta_v3() -> None:
+    from src.engine import global_batch_runtime
+
+    fields = [
+        "candidate_id",
+        "family_key",
+        "bin_id",
+        "condition_id",
+        "side",
+        "token_id",
+    ]
+    base = {
+        "rejected_groups": [],
+        "detailed": [],
+        "buy_condition_side_masks": [
+            ["condition-a", 3],
+            ["condition-b", 3],
+        ],
+        "buy_candidate_index_fields": fields,
+        "buy_candidate_index": [
+            ["candidate-a", "family-a", "bin-a", "condition-a", "YES", "token-a"],
+            ["candidate-b", "family-b", "bin-b", "condition-b", "NO", "token-b"],
+        ],
+    }
+    current = {
+        **base,
+        "buy_condition_side_masks": [
+            ["condition-a", 1],
+            ["condition-b", 3],
+        ],
+        "buy_candidate_index": [
+            [
+                "candidate-a-current",
+                "family-a",
+                "bin-a",
+                "condition-a",
+                "YES",
+                "token-a",
+            ],
+            ["candidate-b", "family-b", "bin-b", "condition-b", "NO", "token-b"],
+        ],
+    }
+    receipt = global_batch_runtime._candidate_evaluations_delta_receipt(
+        base=base,
+        current=current,
+        expected_sha256=hashlib.sha256(
+            global_batch_runtime._canonical_json_bytes(current)
+        ).hexdigest(),
+    )
+    delta = json.loads(
+        zlib.decompress(
+            base64.b64decode(
+                receipt["candidate_evaluations_delta_zlib_b64"]
+            )
+        )
+    )
+
+    reconstructed = (
+        live_health._apply_global_auction_candidate_semantic_delta(
+            base,
+            delta,
+        )
+    )
+    assert global_batch_runtime._canonical_json_bytes(
+        reconstructed
+    ) == global_batch_runtime._canonical_json_bytes(current)
 
 
 def test_high_yes_edge_ignores_stale_executable_quote(

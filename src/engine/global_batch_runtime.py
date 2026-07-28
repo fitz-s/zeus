@@ -1085,6 +1085,83 @@ _CANDIDATE_SEMANTIC_KEY_FIELDS = (
     "token_id",
     "position_id",
 )
+_BUY_CANDIDATE_INDEX_KEY_FIELDS = (
+    "family_key",
+    "bin_id",
+    "condition_id",
+    "side",
+    "token_id",
+)
+
+
+def _buy_candidate_index_map(
+    rows: object,
+) -> dict[tuple[str, ...], str]:
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+    mapped: dict[tuple[str, ...], str] = {}
+    candidate_ids: set[str] = set()
+    for raw_row in rows:
+        if (
+            not isinstance(raw_row, Sequence)
+            or isinstance(raw_row, (str, bytes))
+            or len(raw_row) != 6
+        ):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        candidate_id = str(raw_row[0] or "")
+        key = tuple(str(value or "") for value in raw_row[1:])
+        if (
+            not candidate_id
+            or candidate_id in candidate_ids
+            or not all(key)
+            or key[3] not in {"YES", "NO"}
+            or key in mapped
+        ):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        candidate_ids.add(candidate_id)
+        mapped[key] = candidate_id
+    return mapped
+
+
+def _condition_side_mask_map(rows: object) -> dict[str, int]:
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID")
+    mapped: dict[str, int] = {}
+    for raw_row in rows:
+        if (
+            not isinstance(raw_row, Sequence)
+            or isinstance(raw_row, (str, bytes))
+            or len(raw_row) != 2
+        ):
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+            )
+        condition_id = str(raw_row[0] or "")
+        try:
+            mask = int(raw_row[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+            ) from exc
+        if not condition_id or mask not in {1, 2, 3} or condition_id in mapped:
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+            )
+        mapped[condition_id] = mask
+    return mapped
+
+
+def _delta_key(raw_key: object, *, size: int, error: str) -> tuple[str, ...]:
+    if (
+        not isinstance(raw_key, Sequence)
+        or isinstance(raw_key, (str, bytes))
+        or len(raw_key) != size
+    ):
+        raise ValueError(error)
+    key = tuple(str(value or "") for value in raw_key)
+    if not all(key):
+        raise ValueError(error)
+    return key
 
 
 def _candidate_semantic_key(row: Mapping[str, object]) -> str:
@@ -1115,14 +1192,127 @@ def _apply_candidate_evaluations_delta(
     detail_delta = delta.get("detailed")
     if not isinstance(top_level, Mapping) or not isinstance(detail_delta, Mapping):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    indexed_delta = delta.get("buy_candidate_index")
+    condition_delta = delta.get("buy_condition_side_masks")
+    indexed_v3 = indexed_delta is not None or condition_delta is not None
+    if indexed_v3 and (
+        not isinstance(indexed_delta, Mapping)
+        or not isinstance(condition_delta, Mapping)
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    excluded = {"detailed"}
+    if indexed_v3:
+        excluded.update(
+            {"buy_candidate_index", "buy_condition_side_masks"}
+        )
     result = _apply_json_object_delta(
-        {
-            key: value
-            for key, value in base.items()
-            if key != "detailed"
-        },
+        {key: value for key, value in base.items() if key not in excluded},
         top_level,
     )
+    if indexed_v3:
+        if indexed_delta.get("key_fields") != list(
+            _BUY_CANDIDATE_INDEX_KEY_FIELDS
+        ):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        buy_rows = _buy_candidate_index_map(base.get("buy_candidate_index"))
+        removed_buy_keys: set[tuple[str, ...]] = set()
+        removed_buy_values = indexed_delta.get("removed_keys", ())
+        if not isinstance(removed_buy_values, Sequence) or isinstance(
+            removed_buy_values,
+            (str, bytes),
+        ):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        for raw_key in removed_buy_values:
+            key = _delta_key(
+                raw_key,
+                size=5,
+                error="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
+            )
+            if key in removed_buy_keys:
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID"
+                )
+            removed_buy_keys.add(key)
+            buy_rows.pop(key, None)
+        patches = indexed_delta.get("patches", ())
+        if not isinstance(patches, Sequence) or isinstance(patches, (str, bytes)):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        patched_buy_keys: set[tuple[str, ...]] = set()
+        for patch in patches:
+            if not isinstance(patch, Mapping):
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID"
+                )
+            key = _delta_key(
+                patch.get("key"),
+                size=5,
+                error="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
+            )
+            candidate_id = str(patch.get("candidate_id") or "")
+            if not candidate_id or key in patched_buy_keys:
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID"
+                )
+            patched_buy_keys.add(key)
+            buy_rows[key] = candidate_id
+        reconstructed_buy_index = sorted(
+            [[candidate_id, *key] for key, candidate_id in buy_rows.items()]
+        )
+        _buy_candidate_index_map(reconstructed_buy_index)
+        result["buy_candidate_index"] = reconstructed_buy_index
+
+        condition_rows = _condition_side_mask_map(
+            base.get("buy_condition_side_masks")
+        )
+        removed_conditions: set[str] = set()
+        removed_condition_values = condition_delta.get("removed_keys", ())
+        if not isinstance(removed_condition_values, Sequence) or isinstance(
+            removed_condition_values,
+            (str, bytes),
+        ):
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+            )
+        for raw_condition_id in removed_condition_values:
+            condition_id = str(raw_condition_id or "")
+            if not condition_id or condition_id in removed_conditions:
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+                )
+            removed_conditions.add(condition_id)
+            condition_rows.pop(condition_id, None)
+        condition_patches = condition_delta.get("patches", ())
+        if not isinstance(condition_patches, Sequence) or isinstance(
+            condition_patches,
+            (str, bytes),
+        ):
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+            )
+        patched_conditions: set[str] = set()
+        for patch in condition_patches:
+            if not isinstance(patch, Mapping):
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+                )
+            condition_id = str(patch.get("condition_id") or "")
+            try:
+                mask = int(patch.get("side_mask"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+                ) from exc
+            if (
+                not condition_id
+                or mask not in {1, 2, 3}
+                or condition_id in patched_conditions
+            ):
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+                )
+            patched_conditions.add(condition_id)
+            condition_rows[condition_id] = mask
+        result["buy_condition_side_masks"] = sorted(condition_rows.items())
     base_rows = base.get("detailed")
     if not isinstance(base_rows, Sequence):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
@@ -1176,6 +1366,16 @@ def _candidate_evaluations_delta_receipt(
         raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
     base_details = _candidate_detail_map(base_rows)
     current_details = _candidate_detail_map(current_rows)
+    base_buy_index = _buy_candidate_index_map(base.get("buy_candidate_index"))
+    current_buy_index = _buy_candidate_index_map(
+        current.get("buy_candidate_index")
+    )
+    base_condition_masks = _condition_side_mask_map(
+        base.get("buy_condition_side_masks")
+    )
+    current_condition_masks = _condition_side_mask_map(
+        current.get("buy_condition_side_masks")
+    )
     patches: list[dict[str, object]] = []
     for key in sorted(current_details):
         row = current_details[key]
@@ -1197,11 +1397,18 @@ def _candidate_evaluations_delta_receipt(
                     "replacements": replacements,
                 }
             )
+    indexed_fields = {
+        "detailed",
+        "buy_candidate_index",
+        "buy_condition_side_masks",
+    }
     top_level_base = {
-        key: value for key, value in base.items() if key != "detailed"
+        key: value for key, value in base.items() if key not in indexed_fields
     }
     top_level_current = {
-        key: value for key, value in current.items() if key != "detailed"
+        key: value
+        for key, value in current.items()
+        if key not in indexed_fields
     }
     delta = {
         "top_level": {
@@ -1222,6 +1429,40 @@ def _candidate_evaluations_delta_receipt(
             ),
             "patches": patches,
         },
+        "buy_candidate_index": {
+            "key_fields": list(_BUY_CANDIDATE_INDEX_KEY_FIELDS),
+            "removed_keys": [
+                list(key)
+                for key in sorted(
+                    key for key in base_buy_index if key not in current_buy_index
+                )
+            ],
+            "patches": [
+                {
+                    "key": list(key),
+                    "candidate_id": current_buy_index[key],
+                }
+                for key in sorted(current_buy_index)
+                if key not in base_buy_index
+                or base_buy_index[key] != current_buy_index[key]
+            ],
+        },
+        "buy_condition_side_masks": {
+            "removed_keys": sorted(
+                key
+                for key in base_condition_masks
+                if key not in current_condition_masks
+            ),
+            "patches": [
+                {
+                    "condition_id": key,
+                    "side_mask": current_condition_masks[key],
+                }
+                for key in sorted(current_condition_masks)
+                if key not in base_condition_masks
+                or base_condition_masks[key] != current_condition_masks[key]
+            ],
+        },
     }
     reconstructed = _apply_candidate_evaluations_delta(base, delta)
     if hashlib.sha256(_canonical_json_bytes(reconstructed)).hexdigest() != str(
@@ -1231,7 +1472,7 @@ def _candidate_evaluations_delta_receipt(
     encoded = _canonical_json_bytes(delta)
     return {
         "candidate_evaluations_delta_encoding": (
-            "zlib+base64+semantic-keyed-canonical-json-delta-v2"
+            "zlib+base64+semantic-keyed-canonical-json-delta-v3"
         ),
         "candidate_evaluations_delta_sha256": hashlib.sha256(encoded).hexdigest(),
         "candidate_evaluations_delta_zlib_b64": base64.b64encode(
@@ -1247,6 +1488,18 @@ def _candidate_evaluations_delta_receipt(
             delta["detailed"]["removed_keys"]
         ),
         "candidate_evaluations_delta_detailed_patch_count": len(patches),
+        "candidate_evaluations_delta_buy_index_removed_count": len(
+            delta["buy_candidate_index"]["removed_keys"]
+        ),
+        "candidate_evaluations_delta_buy_index_patch_count": len(
+            delta["buy_candidate_index"]["patches"]
+        ),
+        "candidate_evaluations_delta_condition_mask_removed_count": len(
+            delta["buy_condition_side_masks"]["removed_keys"]
+        ),
+        "candidate_evaluations_delta_condition_mask_patch_count": len(
+            delta["buy_condition_side_masks"]["patches"]
+        ),
     }
 
 
