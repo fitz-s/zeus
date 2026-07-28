@@ -3169,6 +3169,8 @@ def process_current_global_batch(
     ] = {}
     scoped_rejection_by_event: dict[str, str] = {}
     release_selection_snapshot: Callable[[], None] = lambda: None
+    actuation_started = False
+    prepared_loser_receipts: dict[str, EventSubmissionReceipt] = {}
     batch_started = time.monotonic()
     stage_started = batch_started
 
@@ -3463,12 +3465,21 @@ def process_current_global_batch(
             claimed_target_by_scope_and_economics[target_key] = target
         return rebound(target)
 
+    deferred_claim_event: OpportunityEvent | None = None
+
     def reject(
         reason: str,
         *,
         next_claim_event: OpportunityEvent | None = None,
         economic_cut_completed: bool = False,
     ) -> GlobalBatchSubmitResult:
+        effective_next_claim = next_claim_event or deferred_claim_event
+        if (
+            next_claim_event is not None
+            and deferred_claim_event is not None
+            and next_claim_event.event_id != deferred_claim_event.event_id
+        ):
+            raise ValueError("GLOBAL_DEFERRED_CLAIM_IDENTITY_CONFLICT")
         release_selection_snapshot()
         return GlobalBatchSubmitResult(
             receipts={
@@ -3485,8 +3496,10 @@ def process_current_global_batch(
             },
             winner_event_id=None,
             venue_submit_count=0,
-            economic_cut_completed=economic_cut_completed,
-            next_claim_event=next_claim_event,
+            economic_cut_completed=(
+                economic_cut_completed and effective_next_claim is None
+            ),
+            next_claim_event=effective_next_claim,
         )
 
     try:
@@ -4224,18 +4237,10 @@ def process_current_global_batch(
             book_epoch_fence = book_epoch
             prepared_fence = prepared_by_event
             selected, winner, next_claim = bind_selected_winner(selected)
-            if winner is None:
-                if next_claim is None:
-                    return reject("GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING")
-                return reject(
-                    "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
-                    next_claim_event=next_claim,
-                )
             # Preflight has the opposite job from selection: re-read submit-time
             # probability truth and refute the immutable cut when a newer
             # posterior or Day0 observation landed during book/solve work. The
             # backing SQLite view released before the durable winner claim.
-            winner_id = winner.event_id
             attempt_book_epoch = book_epoch_fence
             auction_deadline = (
                 attempt_book_epoch.captured_at_utc + attempt_book_epoch.max_age
@@ -4248,6 +4253,139 @@ def process_current_global_batch(
                 tuple[str, str, str, str], float
             ] = dict(initial_payoff_q_lcb_by_candidate)
             wealth_reauction_count = 0
+            wealth_reauction_audit = None
+
+            def select_claimable_fallthrough() -> GlobalBatchSubmitResult | None:
+                nonlocal deferred_claim_event, selected, winner, winner_id
+                while True:
+                    fallthrough_epoch_identity = (
+                        _selection_epoch_identity_with_preflight_exclusions(
+                            selection_epoch_base_identity,
+                            excluded_by_family,
+                            excluded_by_candidate,
+                            payoff_q_lcb_by_candidate,
+                        )
+                        if (
+                            excluded_by_family
+                            or excluded_by_candidate
+                            or payoff_q_lcb_by_candidate
+                        )
+                        else selection_epoch_identity
+                    )
+                    selected = select_once(
+                        probabilities_fence,
+                        attempt_book_epoch,
+                        prepared_fence,
+                        attempt_selection_epoch_identity=(
+                            fallthrough_epoch_identity
+                        ),
+                        preflight_excluded_by_family=excluded_by_family,
+                        preflight_excluded_by_candidate=excluded_by_candidate,
+                        payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
+                        wealth_reauction_audit=wealth_reauction_audit,
+                    )
+                    log_stage(
+                        "select_preflight_fallthrough",
+                        families=len(prepared_by_event) - len(excluded_by_family),
+                    )
+                    if selected.decision.candidate is None:
+                        log_no_trade(
+                            "select_preflight_fallthrough",
+                            selected.decision,
+                        )
+                        exhaustion_reason = (
+                            _global_preflight_exhaustion_reason(
+                                selected.decision.no_trade_reason,
+                                excluded_by_family=excluded_by_family,
+                                excluded_by_candidate=excluded_by_candidate,
+                            )
+                        )
+                        return reject(
+                            exhaustion_reason,
+                            next_claim_event=deferred_claim_event,
+                            # A deferred claim proves the feasible action set was
+                            # incomplete, so this cut cannot terminalize as CASH.
+                            economic_cut_completed=(
+                                deferred_claim_event is None
+                                and exhaustion_reason.startswith(
+                                    (
+                                        "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL:",
+                                        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+                                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:",
+                                    )
+                                )
+                            ),
+                        )
+                    log_winner(
+                        "select_preflight_fallthrough",
+                        selected,
+                        probabilities_fence,
+                    )
+                    if selected.actuation is None:
+                        return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
+                    selected, winner, next_claim = bind_selected_winner(selected)
+                    if winner is not None:
+                        winner_id = winner.event_id
+                        return None
+                    if next_claim is None:
+                        return reject(
+                            "GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING"
+                        )
+                    candidate = selected.decision.candidate
+                    family_key = str(
+                        getattr(candidate, "family_key", "") or ""
+                    ).strip()
+                    if not family_key:
+                        return reject(
+                            "GLOBAL_REAUCTION_WINNER_FAMILY_MISSING"
+                        )
+                    claim_reason = (
+                        "GLOBAL_WINNER_CLAIM_UNAVAILABLE_THIS_EPOCH"
+                    )
+                    if family_key in excluded_by_family:
+                        return reject(
+                            "GLOBAL_REAUCTION_CLAIM_EXCLUSION_NO_PROGRESS"
+                        )
+                    if deferred_claim_event is None:
+                        deferred_claim_event = next_claim
+                    # SCOPE: only the selected family's causal carrier in this
+                    # immutable epoch. DRAIN: keep ranking the remaining
+                    # current q/book/wealth feasible set now, while preserving
+                    # the first (globally best) unclaimed carrier for the next
+                    # durable epoch. RESET: the exclusion map is epoch-local.
+                    excluded_by_family[family_key] = claim_reason
+                    preflight_ineligible_by_event[
+                        str(getattr(selected, "winner_event_id", "") or "")
+                    ] = claim_reason
+                    _LOG.info(
+                        "global batch claim-unavailable family excluded: "
+                        "family=%s event=%s reason=%s excluded=%d",
+                        family_key,
+                        getattr(selected, "winner_event_id", ""),
+                        claim_reason,
+                        len(excluded_by_family),
+                    )
+
+            if winner is None:
+                if next_claim is None:
+                    return reject("GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING")
+                initial_candidate = selected.decision.candidate
+                initial_family_key = str(
+                    getattr(initial_candidate, "family_key", "") or ""
+                ).strip()
+                if not initial_family_key:
+                    return reject("GLOBAL_REAUCTION_WINNER_FAMILY_MISSING")
+                deferred_claim_event = next_claim
+                excluded_by_family[initial_family_key] = (
+                    "GLOBAL_WINNER_CLAIM_UNAVAILABLE_THIS_EPOCH"
+                )
+                preflight_ineligible_by_event[
+                    str(getattr(selected, "winner_event_id", "") or "")
+                ] = "GLOBAL_WINNER_CLAIM_UNAVAILABLE_THIS_EPOCH"
+                fallthrough_result = select_claimable_fallthrough()
+                if fallthrough_result is not None:
+                    return fallthrough_result
+            winner_id = winner.event_id
             while True:
                 if cancelled("winner_preflight_start"):
                     return reject(
@@ -4568,112 +4706,9 @@ def process_current_global_batch(
                         reason,
                         len(excluded_by_family),
                     )
-                while True:
-                    fallthrough_epoch_identity = (
-                        _selection_epoch_identity_with_preflight_exclusions(
-                            selection_epoch_base_identity,
-                            excluded_by_family,
-                            excluded_by_candidate,
-                            payoff_q_lcb_by_candidate,
-                        )
-                        if (
-                            excluded_by_family
-                            or excluded_by_candidate
-                            or payoff_q_lcb_by_candidate
-                        )
-                        else selection_epoch_identity
-                    )
-                    selected = select_once(
-                        probabilities_fence,
-                        attempt_book_epoch,
-                        prepared_fence,
-                        attempt_selection_epoch_identity=(
-                            fallthrough_epoch_identity
-                        ),
-                        preflight_excluded_by_family=excluded_by_family,
-                        preflight_excluded_by_candidate=excluded_by_candidate,
-                        payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
-                        wealth_reauction_audit=wealth_reauction_audit,
-                    )
-                    log_stage(
-                        "select_preflight_fallthrough",
-                        families=len(prepared_by_event) - len(excluded_by_family),
-                    )
-                    if selected.decision.candidate is None:
-                        log_no_trade(
-                            "select_preflight_fallthrough",
-                            selected.decision,
-                        )
-                        exhaustion_reason = (
-                            _global_preflight_exhaustion_reason(
-                                selected.decision.no_trade_reason,
-                                excluded_by_family=excluded_by_family,
-                                excluded_by_candidate=excluded_by_candidate,
-                            )
-                        )
-                        return reject(
-                            exhaustion_reason,
-                            # SCOPE: only a fully reselected feasible set whose
-                            # current executable action set is empty.
-                            # DRAIN: retire this completion wake as a complete
-                            # HOLD/CASH cut instead of retrying the same blocked
-                            # winner every listener poll.
-                            # RESET: the recurring held monitor publishes a new
-                            # family completion request against fresh q/books.
-                            economic_cut_completed=exhaustion_reason.startswith(
-                                (
-                                    "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL:",
-                                    "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
-                                    "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:",
-                                )
-                            ),
-                        )
-                    log_winner(
-                        "select_preflight_fallthrough",
-                        selected,
-                        probabilities_fence,
-                    )
-                    if selected.actuation is None:
-                        return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
-                    selected, winner, next_claim = bind_selected_winner(selected)
-                    if winner is not None:
-                        winner_id = winner.event_id
-                        break
-                    if next_claim is None:
-                        return reject(
-                            "GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING"
-                        )
-                    candidate = selected.decision.candidate
-                    family_key = str(
-                        getattr(candidate, "family_key", "") or ""
-                    ).strip()
-                    if not family_key:
-                        return reject(
-                            "GLOBAL_REAUCTION_WINNER_FAMILY_MISSING"
-                        )
-                    claim_reason = (
-                        "GLOBAL_WINNER_CLAIM_UNAVAILABLE_THIS_EPOCH"
-                    )
-                    if family_key in excluded_by_family:
-                        return reject(
-                            "GLOBAL_REAUCTION_CLAIM_EXCLUSION_NO_PROGRESS"
-                        )
-                    # SCOPE: only the selected family's causal carrier in this
-                    # immutable epoch. DRAIN: keep ranking the remaining
-                    # current q/book/wealth feasible set now. RESET: the map is
-                    # epoch-local, so the next complete cut retries the family.
-                    excluded_by_family[family_key] = claim_reason
-                    preflight_ineligible_by_event[
-                        str(getattr(selected, "winner_event_id", "") or "")
-                    ] = claim_reason
-                    _LOG.info(
-                        "global batch claim-unavailable family excluded: "
-                        "family=%s event=%s reason=%s excluded=%d",
-                        family_key,
-                        getattr(selected, "winner_event_id", ""),
-                        claim_reason,
-                        len(excluded_by_family),
-                    )
+                fallthrough_result = select_claimable_fallthrough()
+                if fallthrough_result is not None:
+                    return fallthrough_result
             binding_token = preflight.binding_token
 
         actuation_at = current_time()
@@ -4706,36 +4741,12 @@ def process_current_global_batch(
             ),
             payload=payload_reader(continuation_scope_event),
         )
-        before_calls = venue_submit_count()
-        release_selection_snapshot()
-        _invalidate_global_holding_coverage()
-        winner_receipt = (
-            actuate_preflighted_winner.consume(
-                winner,
-                selected.actuation,
-                actuation_at,
-                binding_token,
-                preflight_authority,
-            )
-            if preflight_winner is not None
-            else actuate_winner(winner, selected.actuation, actuation_at)
-        )
-        venue_delta = venue_submit_count() - before_calls
-        if venue_delta not in {0, 1}:
-            raise RuntimeError("GLOBAL_ACTUATION_VENUE_COUNT_INVALID")
-        continuation_event = (
-            prepared_continuation_event
-            if (
-                venue_delta == 1
-                and winner_receipt.submitted
-            )
-            else None
-        )
-        receipts = {
+        # Finish every potentially fallible loser receipt before venue I/O.
+        # Once the winner call starts, a later exception must never rewrite an
+        # observed external side effect as a side-effect-free batch rejection.
+        prepared_loser_receipts = {
             event.event_id: (
-                winner_receipt
-                if event.event_id == winner_id
-                else stamp_receipt(
+                stamp_receipt(
                     EventSubmissionReceipt(
                         False,
                         event.event_id,
@@ -4811,7 +4822,36 @@ def process_current_global_batch(
                 )
             )
             for event in event_tuple
+            if event.event_id != winner_id
         }
+        before_calls = venue_submit_count()
+        release_selection_snapshot()
+        _invalidate_global_holding_coverage()
+        actuation_started = True
+        winner_receipt = (
+            actuate_preflighted_winner.consume(
+                winner,
+                selected.actuation,
+                actuation_at,
+                binding_token,
+                preflight_authority,
+            )
+            if preflight_winner is not None
+            else actuate_winner(winner, selected.actuation, actuation_at)
+        )
+        venue_delta = venue_submit_count() - before_calls
+        if venue_delta not in {0, 1}:
+            raise RuntimeError("GLOBAL_ACTUATION_VENUE_COUNT_INVALID")
+        continuation_event = (
+            prepared_continuation_event
+            if (
+                venue_delta == 1
+                and winner_receipt.submitted
+            )
+            else None
+        )
+        receipts = dict(prepared_loser_receipts)
+        receipts[winner_id] = winner_receipt
         return GlobalBatchSubmitResult(
             receipts=receipts,
             winner_event_id=winner_id,
@@ -4819,8 +4859,45 @@ def process_current_global_batch(
             economic_cut_completed=bool(
                 venue_delta == 1 and winner_receipt.submitted
             ),
+            # One durable frontier only. A successful submit's continuation
+            # immediately re-runs the complete global universe against fresh
+            # holdings/wealth/q/books, so it subsumes any unclaimed carrier
+            # discovered in the prior cut. Without a submit, preserve the
+            # highest-ranked deferred carrier explicitly.
+            next_claim_event=(
+                deferred_claim_event
+                if continuation_event is None and venue_delta == 0
+                else None
+            ),
             continuation_event=continuation_event,
         )
     except Exception as exc:  # noqa: BLE001 - one authority fault invalidates epoch
         _LOG.exception("global auction epoch failed closed")
+        if actuation_started:
+            # The durable command/outbox owns reconciliation once actuator I/O
+            # starts. Preserve an explicit unknown-side-effect winner, stop the
+            # multi-winner loop, and never requeue a deferred competitor until
+            # command recovery resolves the first order.
+            unknown_receipt = EventSubmissionReceipt(
+                submitted=False,
+                event_id=winner.event_id,
+                causal_snapshot_id=winner.causal_snapshot_id,
+                side_effect_status="POST_SUBMIT_UNKNOWN",
+                reason=(
+                    "POST_SUBMIT_UNKNOWN:GLOBAL_ACTUATION_EXCEPTION:"
+                    f"{type(exc).__name__}:{exc}"
+                ),
+                proof_accepted=False,
+                global_actuation=selected.actuation,
+                venue_call_started=True,
+                venue_ack_received=False,
+            )
+            receipts = dict(prepared_loser_receipts)
+            receipts[winner.event_id] = unknown_receipt
+            return GlobalBatchSubmitResult(
+                receipts=receipts,
+                winner_event_id=winner.event_id,
+                venue_submit_count=0,
+                economic_cut_completed=False,
+            )
         return reject(f"GLOBAL_AUCTION_FAILED:{type(exc).__name__}:{exc}")

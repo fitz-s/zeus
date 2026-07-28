@@ -908,10 +908,12 @@ class GlobalBatchSubmitResult:
             raise ValueError("global batch may start at most one venue submit")
         if self.winner_event_id is None and self.venue_submit_count != 0:
             raise ValueError("venue submit requires one selected winner")
-        if self.next_claim_event is not None and (
-            self.winner_event_id is not None
-            or self.venue_submit_count != 0
-            or self.next_claim_event.event_id in self.receipts
+        if (
+            self.next_claim_event is not None
+            and (
+                self.venue_submit_count != 0
+                or self.next_claim_event.event_id in self.receipts
+            )
         ):
             raise ValueError("next global claim must be unclaimed and side-effect free")
         if self.continuation_event is not None and (
@@ -1587,7 +1589,18 @@ class OpportunityEventReactor:
         # The losers are retryable projections; they must not delay durable
         # ownership of an external side effect.
         finalization_events = list(claimed)
-        if batch_result.venue_submit_count == 1:
+        winner_receipt = batch_result.receipts.get(
+            str(batch_result.winner_event_id or "")
+        )
+        winner_side_effect_possible = bool(
+            winner_receipt is not None
+            and (
+                winner_receipt.submitted
+                or winner_receipt.venue_call_started
+                or winner_receipt.side_effect_status != "NO_SUBMIT"
+            )
+        )
+        if winner_side_effect_possible:
             finalization_events.sort(
                 key=lambda event: event.event_id != batch_result.winner_event_id
             )

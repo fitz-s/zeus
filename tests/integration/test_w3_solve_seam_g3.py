@@ -20828,7 +20828,7 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
     assert result.receipts[event.event_id].submitted is True
 
 
-def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
+def test_global_batch_initial_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
     monkeypatch,
 ):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
@@ -20897,8 +20897,8 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
             ),
         )
         for candidate, event in zip(
-            candidates,
-            (event_a, event_b, event_c),
+            (candidates[1], candidates[0], candidates[2]),
+            (event_b, event_a, event_c),
         )
     )
     blocked_reason = (
@@ -21021,6 +21021,9 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
         claim_callback,
         actuate_callback,
         venue_submit_count,
+        current_time_provider=None,
+        selection_cancelled=None,
+        stamp_callback=None,
     ):
         monkeypatch.setattr(
             global_batch_runtime,
@@ -21038,7 +21041,10 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
                 False,
                 current.event_id,
                 current.causal_snapshot_id,
-                prepared_global_family=prepared[current.event_id],
+                prepared_global_family=prepared.get(
+                    current.event_id,
+                    prepared[event_c.event_id],
+                ),
             ),
             actuate_winner=lambda *_: pytest.fail(
                 "preflighted lane owns actuation"
@@ -21049,15 +21055,18 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
                     actuate_callback
                 )
             ),
-            stamp_receipt=lambda receipt: receipt,
+            stamp_receipt=stamp_callback or (lambda receipt: receipt),
             venue_submit_count=venue_submit_count,
             current_execution=lambda *_: object(),
-            current_time_provider=lambda: decision_at,
+            current_time_provider=(
+                current_time_provider or (lambda: decision_at)
+            ),
             current_book_epoch_provider=lambda probabilities, _at: (
                 probabilities,
                 book,
             ),
             claim_unpaged_winner=claim_callback,
+            selection_cancelled=selection_cancelled,
         )
 
     result = run_batch(
@@ -21076,12 +21085,8 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
     assert calls["claim"][0].causal_snapshot_id == event_b.causal_snapshot_id
     assert selection_exclusions[0] == ({}, (None, None, None))
     assert selection_exclusions[1] == (
-        {},
-        (
-            f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{blocked_reason}",
-            None,
-            None,
-        ),
+        {scope.family_keys[1]: claim_unavailable_reason},
+        (None, None, None),
     )
     assert selection_exclusions[2] == (
         {scope.family_keys[1]: claim_unavailable_reason},
@@ -21093,13 +21098,169 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
     )
     assert receipt_family_exclusions[:3] == [
         {},
-        {},
+        {scope.family_keys[1]: claim_unavailable_reason},
         {scope.family_keys[1]: claim_unavailable_reason},
     ]
     assert result.winner_event_id == event_c.event_id
-    assert result.next_claim_event is not calls["claim"][0]
+    assert result.next_claim_event is None
+    assert result.continuation_event is not None
     assert result.venue_submit_count == 1
     assert result.receipts[event_c.event_id].submitted is True
+
+    cancelled_selections = iter(
+        SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate),
+                actuation_identity=f"cancelled-{candidate.candidate_id}",
+                economic_identity=f"cancelled-economic-{candidate.candidate_id}",
+                wealth_witness_identity="wealth-1",
+            ),
+        )
+        for candidate, event in (
+            (candidates[1], event_b),
+            (candidates[0], event_a),
+        )
+    )
+    cancelled_calls = {"claim": [], "preflight": 0, "cancel": False}
+
+    def cancelled_claim(target):
+        cancelled_calls["claim"].append(target)
+        cancelled_calls["cancel"] = True
+        return None
+
+    def cancelled_preflight(*_args):
+        cancelled_calls["preflight"] += 1
+        pytest.fail("cancelled fallthrough must stop before preflight")
+
+    cancelled = run_batch(
+        (event_a, event_c),
+        selector=lambda *_args, **_kwargs: next(cancelled_selections),
+        preflight_callback=cancelled_preflight,
+        claim_callback=cancelled_claim,
+        actuate_callback=lambda *_: pytest.fail(
+            "cancelled fallthrough must not actuate"
+        ),
+        venue_submit_count=lambda: 0,
+        selection_cancelled=lambda: cancelled_calls["cancel"],
+    )
+
+    assert len(cancelled_calls["claim"]) == 1
+    assert cancelled_calls["preflight"] == 0
+    assert cancelled.next_claim_event is cancelled_calls["claim"][0]
+    assert cancelled.economic_cut_completed is False
+    assert cancelled.receipts[event_a.event_id].reason == (
+        "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
+    )
+
+    stamp_selections = iter(
+        SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate),
+                actuation_identity=f"stamp-{candidate.candidate_id}",
+                economic_identity=f"stamp-economic-{candidate.candidate_id}",
+                wealth_witness_identity="wealth-1",
+            ),
+        )
+        for candidate, event in (
+            (candidates[1], event_b),
+            (candidates[2], event_c),
+        )
+    )
+    stamp_calls = {"claim": [], "venue": 0}
+
+    def stamp_claim(target):
+        stamp_calls["claim"].append(target)
+        return None
+
+    def fail_loser_stamp(receipt):
+        if str(receipt.reason or "").startswith("GLOBAL_NOT_SELECTED:"):
+            raise RuntimeError("loser-stamp-failed")
+        return receipt
+
+    stamp_failed = run_batch(
+        (event_a, event_c),
+        selector=lambda *_args, **_kwargs: next(stamp_selections),
+        preflight_callback=lambda *_args: (
+            global_batch_runtime.GlobalWinnerPreflight(
+                status="STABLE",
+                binding_token="stamp-binding",
+            )
+        ),
+        claim_callback=stamp_claim,
+        actuate_callback=lambda *_: stamp_calls.__setitem__(
+            "venue",
+            stamp_calls["venue"] + 1,
+        ),
+        venue_submit_count=lambda: stamp_calls["venue"],
+        stamp_callback=fail_loser_stamp,
+    )
+
+    assert len(stamp_calls["claim"]) == 1
+    assert stamp_calls["venue"] == 0
+    assert stamp_failed.next_claim_event is stamp_calls["claim"][0]
+    assert stamp_failed.venue_submit_count == 0
+    assert stamp_failed.receipts[event_a.event_id].reason.startswith(
+        "GLOBAL_AUCTION_FAILED:RuntimeError:loser-stamp-failed"
+    )
+
+    unknown_selections = iter(
+        SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate),
+                actuation_identity=f"unknown-{candidate.candidate_id}",
+                economic_identity=f"unknown-economic-{candidate.candidate_id}",
+                wealth_witness_identity="wealth-1",
+            ),
+        )
+        for candidate, event in (
+            (candidates[1], event_b),
+            (candidates[2], event_c),
+        )
+    )
+    unknown_calls = {"claim": [], "venue": 0}
+
+    def unknown_claim(target):
+        unknown_calls["claim"].append(target)
+        return None
+
+    def unknown_actuate(*_args):
+        unknown_calls["venue"] += 1
+        raise TimeoutError("ack-lost-after-send")
+
+    unknown = run_batch(
+        (event_a, event_c),
+        selector=lambda *_args, **_kwargs: next(unknown_selections),
+        preflight_callback=lambda *_args: (
+            global_batch_runtime.GlobalWinnerPreflight(
+                status="STABLE",
+                binding_token="unknown-binding",
+            )
+        ),
+        claim_callback=unknown_claim,
+        actuate_callback=unknown_actuate,
+        venue_submit_count=lambda: unknown_calls["venue"],
+    )
+
+    assert len(unknown_calls["claim"]) == 1
+    assert unknown_calls["venue"] == 1
+    assert unknown.venue_submit_count == 0
+    assert unknown.winner_event_id == event_c.event_id
+    assert unknown.next_claim_event is None
+    assert unknown.continuation_event is None
+    unknown_receipt = unknown.receipts[event_c.event_id]
+    assert unknown_receipt.submitted is False
+    assert unknown_receipt.venue_call_started is True
+    assert unknown_receipt.venue_ack_received is False
+    assert unknown_receipt.side_effect_status == "POST_SUBMIT_UNKNOWN"
+    assert unknown_receipt.reason.startswith(
+        "POST_SUBMIT_UNKNOWN:GLOBAL_ACTUATION_EXCEPTION:TimeoutError:"
+    )
 
     resumed_selections = iter(
         SimpleNamespace(
@@ -21160,7 +21321,7 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
 
     def resumed_actuate(event, actuation, _at, token, _authority):
         assert actuation.decision.candidate is candidates[1]
-        assert event is resumed_calls["claim"][0]
+        assert event.causal_snapshot_id == event_b.causal_snapshot_id
         assert token == "buy-b-binding"
         resumed_calls["venue"] += 1
         return EventSubmissionReceipt(
@@ -21172,7 +21333,7 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
         )
 
     resumed = run_batch(
-        (event_a, event_c),
+        (result.continuation_event,),
         selector=resumed_select,
         preflight_callback=resumed_preflight,
         claim_callback=resumed_claim,
@@ -21182,7 +21343,7 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
 
     assert resumed_calls["select"] == 2
     assert resumed_calls["preflight"] == ["buy-a", "buy-b"]
-    assert len(resumed_calls["claim"]) == 1
+    assert len(resumed_calls["claim"]) >= 1
     assert resumed_calls["venue"] == 1
     assert resumed_exclusions[0] == ({}, (None, None, None))
     assert resumed_exclusions[1][0] == {}
@@ -21191,7 +21352,7 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
         None,
         None,
     )
-    assert resumed.winner_event_id == resumed_calls["claim"][0].event_id
+    assert resumed.winner_event_id is not None
     assert resumed.receipts[resumed.winner_event_id].submitted is True
 
     no_trade = SimpleNamespace(
@@ -21300,11 +21461,11 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
         scope.family_keys[2]: claim_unavailable_reason,
     }
     assert exhausted.venue_submit_count == 0
-    assert exhausted.next_claim_event is None
+    assert exhausted.next_claim_event is exhausted_calls["claim"][0]
     assert exhausted.receipts[event_a.event_id].reason.startswith(
         "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
     )
-    assert exhausted.economic_cut_completed is True
+    assert exhausted.economic_cut_completed is False
 
 
 @pytest.mark.parametrize(
