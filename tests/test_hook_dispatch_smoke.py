@@ -1,5 +1,5 @@
 # Created: 2026-05-06
-# Last reused or audited: 2026-05-06
+# Last reused or audited: 2026-07-28
 # Authority basis: PLAN §3 Phase 1 exit criteria + critic-opus ATTACK 4 §0.5
 #   docs/archive/2026-Q2/task_2026-05-06_hook_redesign/PLAN.md
 
@@ -27,6 +27,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = REPO_ROOT / ".claude" / "hooks" / "registry.yaml"
 DISPATCH_PATH = REPO_ROOT / ".claude" / "hooks" / "dispatch.py"
+CODEX_HOOKS_PATH = REPO_ROOT / ".codex" / "hooks.json"
+LIVE_WORKFLOW_PATH = REPO_ROOT / "docs" / "operations" / "current" / "plans" / "live_branch_workflow_2026-07-20.md"
 
 _REGISTRY_DATA = yaml.safe_load(REGISTRY_PATH.read_text())
 _HOOKS = _REGISTRY_DATA.get("hooks", [])
@@ -505,6 +507,39 @@ def test_post_merge_cleanup_gh_pr_merge_emits_advisory() -> None:
         assert "cleanup" in ctx.lower() or "worktree" in ctx.lower() or "merge" in ctx.lower()
 
 
+def test_post_merge_cleanup_cherry_pick_emits_codex_closeout() -> None:
+    """A successful hot-pick prompts only the owning worker to archive itself."""
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git cherry-pick deadbeef"},
+        "tool_response": {"exit_code": 0},
+        "session_id": "realistic-test",
+        "agent_id": "test-agent",
+    }
+    result = _run_dispatch("post_merge_cleanup", payload)
+    assert result.returncode == 0
+    parsed = json.loads(result.stdout)
+    context = parsed["hookSpecificOutput"]["additionalContext"]
+    assert "set_thread_archived" in context
+    assert "Do not archive the integration thread" in context
+
+
+def test_post_merge_cleanup_cherry_pick_abort_is_silent() -> None:
+    """Aborting a conflict is not a landing and must not trigger closeout."""
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git cherry-pick --abort"},
+        "tool_response": {"exit_code": 0},
+        "session_id": "realistic-test",
+        "agent_id": "test-agent",
+    }
+    result = _run_dispatch("post_merge_cleanup", payload)
+    assert result.returncode == 0
+    assert not result.stdout.strip()
+
+
 def test_post_merge_cleanup_non_merge_command_silent() -> None:
     """Non-merge PostToolUse emits nothing."""
     payload = {
@@ -523,6 +558,18 @@ def test_post_merge_cleanup_non_merge_command_silent() -> None:
         parsed = json.loads(stdout)
         ctx = parsed.get("hookSpecificOutput", {}).get("additionalContext")
         assert not ctx  # empty or absent
+
+
+def test_codex_hook_config_does_not_claim_worktree_lifecycle_events() -> None:
+    """Codex app owns managed-worktree lifecycle; its hooks cannot impersonate it."""
+    config = json.loads(CODEX_HOOKS_PATH.read_text())
+    event_names = set(config["hooks"])
+    assert not {"WorktreeCreate", "WorktreeRemove"} & event_names
+
+
+def test_live_workflow_has_no_main_tree_bypass() -> None:
+    """The two landing lanes cannot be bypassed through a documented env var."""
+    assert "MAINTREE_GIT_BYPASS" not in LIVE_WORKFLOW_PATH.read_text()
 
 
 def test_all_hook_ids_covered() -> None:

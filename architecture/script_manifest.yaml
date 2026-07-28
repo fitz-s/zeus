@@ -262,20 +262,18 @@ scripts:
     required_tests: [tests/test_backfill_completeness_guardrails.py]
     reason: "Imported by observation backfill scripts to write P2 4.4.B-lite completeness manifests and enforce fail thresholds."
   agent_worktree_merge.py:
-    class: utility
+    class: stale_deprecated
     module_owner: scripts
-    status: active
-    write_targets: [git_refs, worktree_files]
-    required_tests: [tests/test_cotenant_staging_guard.py]
+    status: deprecated
+    lifecycle: deprecated_fail_closed
+    fail_closed: true
+    canonical_command: DO_NOT_RUN
+    write_targets: [stdout]
+    required_tests: [tests/test_worktree_doctor.py]
     reason: >
-      Subagent merge-back helper (operator directive 2026-06-12). Run by a
-      subagent as its LAST step from INSIDE its own linked worktree; fast-
-      forwards the session branch (the branch checked out in the MAIN tree) to
-      the agent's committed HEAD, but ONLY for a pure conflict-free ff against a
-      clean main tree (daemon-equivalent to a normal commit). Refuses if run
-      from the main tree or on a dirty worktree; defers non-ff cases to the
-      orchestrator (MERGE_PENDING). Sets MAINTREE_GIT_BYPASS=1 for its single
-      sanctioned `git -C <main> merge --ff-only` call. No canonical DB writes.
+      Retained only to fail closed for old workers. It never mutates live or
+      removes worktrees; verified landing is hot-pick by the landing authority
+      or merged PR into live.
   antibody_scan.py: {class: read_only_evidence}
   apply_recommended_controls.py: {class: repair, apply_flag: explicit_import_only, target_db: state/control_plane.json}
   allocator_bankroll_sensitivity.py:
@@ -1014,7 +1012,7 @@ scripts:
   fit_anchor_representativeness_debias.py: {class: config_writer, dangerous_if_run: false, dry_run_default: false, apply_flag: implicit, target_db: state/anchor_representativeness_debias.json, read_targets: [state/zeus-forecasts.db], write_targets: [state/anchor_representativeness_debias.json], authority_scope: config_generation, reuse_when: "Regenerate the per-city anchor representativeness de-bias δ_city artifact (law-8 foundation fix) from the FULL previous_runs OpenMeteo IFS9 anchor history ⋈ VERIFIED settlement_outcomes. δ_city = EB-shrunk robust per-city median of (anchor_c − settlement_c), lead-pooled, with an activation guard (n>=n_min) + a do-no-harm walk-forward gate. Re-run as settled history grows so well-sampled cities reach full correction (λ→1) and newly-eligible cities cross n_min. Roots: cold_bias_metadata_root.md (per-city grid-cell-vs-station representativeness offset) + percity_corrected_oos.md (thin live-anchor overfit → fit on the deep previous_runs history).", do_not_use_when: "Do not wire/promote unless the artifact has per-family walk_forward.do_no_harm evidence plus an activation set and the live materializer explicitly consumes that artifact. The loader src/calibration/anchor_representativeness_debias.py is fail-soft + gate-checked; the artifact is gitignored generated state, not committed.", canonical_command: "python3 scripts/fit_anchor_representativeness_debias.py [--db PATH] [--out PATH] [--n-min N] [--metrics high low]", external_inputs: [], promotion_barrier: "Generated δ_city artifact is a config artifact only; live use requires the fitted artifact to be present in state/ and an explicit restart through the live preflight gate.", required_helpers: [], required_tests: [tests/test_anchor_representativeness_debias.py], unguarded_write_rationale: "Writes only the declared state/anchor_representativeness_debias.json config artifact; reads forecast-class raw_model_forecasts ⋈ settlement_outcomes read-only via file:...?mode=ro&immutable=1."}
   fit_sigma_shape_kernel.py: {class: config_writer, dangerous_if_run: false, dry_run_default: false, apply_flag: implicit, target_db: state/sigma_scale_fit.candidate.json, read_targets: [state/zeus-forecasts.db], write_targets: [state/sigma_scale_fit.candidate.json], authority_scope: config_generation, reuse_when: "GATE-2 sigma-shape refit: drop the uniform pedestal and fit an absolute sigma-floor (regime-aware, step units) by composite MLE on VERIFIED settled cells, replacing the over-flattening (1-w)Normal+wUniform live form. Writes a CANDIDATE artifact only.", do_not_use_when: "Do not overwrite the live state/sigma_scale_fit.json; do not promote without consumer wiring for floor_steps and forward after-cost fills (holdout shows the floor magnitude is non-stationary on 5 days).", canonical_command: "python3 scripts/fit_sigma_shape_kernel.py [--fcst PATH] [--out state/sigma_scale_fit.candidate.json] [--min-cells N]", external_inputs: [], promotion_barrier: "CANDIDATE artifact only; live promotion requires separate materializer wiring plus verified promotion evidence. Never writes the live artifact.", required_helpers: [scripts.fit_sigma_scale], required_tests: [tests/strategy/test_sigma_shape_ring_calibration.py], unguarded_write_rationale: "Writes only the declared CANDIDATE JSON config artifact; reads forecast-class settlement_outcomes read-only via mode=ro uri."}
   sigma_kernel_holdout_replay.py: {class: read_only_probe, dangerous_if_run: false, dry_run_default: true, apply_flag: none, target_db: none, read_targets: [state/zeus-forecasts.db], write_targets: [docs/evidence/settlement_guard/], authority_scope: read-only evidence, reuse_when: "Produce temporal-holdout + ring-loss-replay evidence comparing the live uniform sigma-shape vs the candidate regime-aware sigma-floor on held-out settled cells (leak-free).", do_not_use_when: "Do not treat the market-free NO win-rate proxy as a forward-fill license; it is the strongest pre-fill evidence, not a substitute for live fills.", canonical_command: "python3 scripts/sigma_kernel_holdout_replay.py [--fcst PATH] [--split YYYY-MM-DD] [--unit C|F] [--cost C] [--out PATH]", external_inputs: [], promotion_barrier: "Read-only evidence only; writes markdown evidence, never a DB or config artifact.", required_helpers: [scripts.fit_sigma_scale, scripts.fit_sigma_shape_kernel], required_tests: [tests/strategy/test_sigma_shape_ring_calibration.py], unguarded_write_rationale: "Reads forecast DB read-only via mode=ro uri; writes only markdown evidence under docs/evidence/."}
-  multiagent_integrator.py: {class: runtime_support, dangerous_if_run: true, dry_run_default: false, apply_flag: implicit, target_db: null, read_targets: [repo, git], write_targets: [repo, git_refs, .claude/worktrees], authority_scope: multiagent_worktree_integration, status: active, lifecycle: long_lived, delete_policy: retain_until_superseded, reuse_when: "Integrate reviewed frozen multi-agent worktree tips through a single-writer lock, throwaway candidate worktree, combined validation command, and final ff-only update of the main checkout.", do_not_use_when: "Do not run from an unreviewed or dirty main checkout; do not use to bypass live deploy gates, tests, code review, or operator process. It is a git integration utility, not a live daemon control.", canonical_command: "python3 scripts/multiagent_integrator.py --run RUN_ID --unit name:tip[:glob,glob] --test '<validation command>' [--main PATH]", external_inputs: [reviewed_tip_oids, validation_command], promotion_barrier: "Repo integration only; cannot authorize live restart, DB mutation, or venue action. Live trading still requires deploy_live restart gates and check_live_restart_preflight.", required_helpers: [git, launchd_not_used], required_tests: [], unguarded_write_rationale: "Mutates only git refs/worktrees for reviewed commits after caller-provided validation; never connects to Zeus DBs or venue APIs."}
+  multiagent_integrator.py: {class: stale_deprecated, dangerous_if_run: false, dry_run_default: true, apply_flag: none, target_db: null, read_targets: [], write_targets: [stdout], authority_scope: deprecated_fail_closed, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, external_inputs: [], promotion_barrier: "Retained only to refuse the old direct-fast-forward path. It cannot authorize a live landing.", required_helpers: [], required_tests: [tests/test_worktree_doctor.py], reason: "Former multi-agent helper directly fast-forwarded a caller-selected main checkout and force-removed staging worktrees. Retired: land verified commits only by hot-pick or merged PR into live."}
   rebuild_settlements.py:
     class: repair
     module_owner: scripts
@@ -1251,7 +1249,7 @@ scripts:
 
   worktree_doctor.py:
     # Created: 2026-05-07
-    # Last reused or audited: 2026-05-07
+    # Last reused or audited: 2026-07-28
     # Authority basis: Navigation Topology v2 PLAN §2.8; sunset 2027-05-07
     class: runtime_support
     lifecycle: long_lived
@@ -1263,9 +1261,10 @@ scripts:
       worktrees, branches, ahead/behind vs origin/main, dirty state, PR state,
       sentinels), advisory (cross-worktree visibility map for SessionStart),
       branch-keepup (ff/rebase/merge/close recommendation; NEVER auto-executes),
-      hygiene (workspace clutter list; NEVER deletes). Exit code 0 always.
-      Invoked by .claude/hooks/dispatch.py session_start_visibility hook at
-      session start and by worktree_create_advisor / worktree_remove_advisor hooks.
+      hygiene (workspace clutter list; NEVER deletes). Codex-managed paths are
+      directed to their owning completed worker's thread archive rather than a
+      raw worktree remove. Exit code 0 always. Invoked by
+      .claude/hooks/dispatch.py session_start_visibility hook at session start.
       Flag aliases: --status, --hygiene-audit, --cross-worktree-visibility.
     read_targets: [repo, .git/worktrees]
     write_targets: [stdout]
