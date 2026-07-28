@@ -24,7 +24,7 @@
 # explicitly out of scope for this q-calibration gate; we note that honestly.
 """Offline ARM validation harness for the rebuilt q-kernel spine.
 
-Run:  /Users/leofitz/zeus/.venv/bin/python scripts/qkernel_arm_replay.py
+Run:  .venv/bin/python scripts/qkernel_arm_replay.py
 Writes docs/rebuild/arm_replay_report.md and prints a structured summary.
 """
 from __future__ import annotations
@@ -52,7 +52,11 @@ from src.analysis.epoch import ANALYSIS_EPOCH_DATE
 from src.contracts.settlement_semantics import SettlementSemantics
 
 # --- live DBs: ALWAYS the main tree (worktree ships only stubs) -------------
-_LIVE_STATE = "/Users/leofitz/zeus/state"
+# ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
+_LIVE_STATE = os.path.join(
+    os.environ.get("ZEUS_MAIN_TREE") or os.path.join(os.path.expanduser("~"), "zeus"),
+    "state",
+)
 FORECASTS_DB = os.path.join(_LIVE_STATE, "zeus-forecasts.db")
 TRADES_DB = os.path.join(_LIVE_STATE, "zeus_trades.db")
 

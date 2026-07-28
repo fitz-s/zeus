@@ -1293,8 +1293,9 @@ def _nested_walk_forward_passed_for_rows(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Replay downloaded replacement forecasts against real executable snapshots")
     parser.add_argument("--eval-json", type=Path, required=True)
-    parser.add_argument("--forecast-db", type=Path, default=Path("/Users/leofitz/zeus/state/zeus-forecasts.db"))
-    parser.add_argument("--trade-db", type=Path, default=Path("/Users/leofitz/zeus/state/zeus_trades.db"))
+    _state_dir = Path(__file__).resolve().parents[1] / "state"
+    parser.add_argument("--forecast-db", type=Path, default=_state_dir / "zeus-forecasts.db")
+    parser.add_argument("--trade-db", type=Path, default=_state_dir / "zeus_trades.db")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--decision-cutoff-hour-utc", type=int, default=8)
     parser.add_argument("--assumed-source-lag-hours", type=float, default=1.0)

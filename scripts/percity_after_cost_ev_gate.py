@@ -46,7 +46,7 @@ GATE: PASS iff Delta_EV_city >= 0 for EVERY served city AND aggregate Delta_EV >
 A city with positive log-score capital but Delta_EV < 0 FAILS the money gate (would be excluded
 from serving) — the exact belt-and-suspenders this gate exists for.
 
-Run:  /Users/leofitz/zeus/.venv/bin/python /Users/leofitz/zeus/scripts/percity_after_cost_ev_gate.py
+Run:  .venv/bin/python scripts/percity_after_cost_ev_gate.py
 """
 from __future__ import annotations
 
@@ -69,7 +69,11 @@ if _ROOT not in sys.path:
 from src.contracts.settlement_semantics import SettlementSemantics
 
 # --- live DBs: ALWAYS the main tree, read-only ------------------------------
-_LIVE_STATE = "/Users/leofitz/zeus/state"
+# ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
+_LIVE_STATE = os.path.join(
+    os.environ.get("ZEUS_MAIN_TREE") or os.path.join(os.path.expanduser("~"), "zeus"),
+    "state",
+)
 FORECASTS_DB = os.path.join(_LIVE_STATE, "zeus-forecasts.db")
 TRADES_DB = os.path.join(_LIVE_STATE, "zeus_trades.db")
 WORLD_DB = os.path.join(_LIVE_STATE, "zeus-world.db")

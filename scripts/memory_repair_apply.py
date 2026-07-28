@@ -145,7 +145,7 @@ def main() -> None:
                     help="Specific memory_audit_*.md (default: latest by mtime)")
     ap.add_argument("--memory-dir", metavar="PATH",
                     help="MEMORY directory containing feedback_*.md (default: $ZEUS_MEMORY_DIR or "
-                         "~/.claude/projects/-Users-leofitz--openclaw-workspace-venus-zeus/memory)")
+                         "~/.claude/projects/-Users-<username>--openclaw-workspace-venus-zeus/memory)")
     args = ap.parse_args()
 
     global MEMORY_DIR, _BASE

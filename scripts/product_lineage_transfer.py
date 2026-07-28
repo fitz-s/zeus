@@ -25,7 +25,10 @@ CSV = os.environ.get(
     "ZEUS_PRODUCT_LINEAGE_TRANSFER_CSV",
     str(ROOT / "docs" / "operations" / "sd3_validation_evidence" / "ENS_RESIDUAL_EVIDENCE_12CITY_HIGH.csv"),
 )
-OUT = "/Users/leofitz/.claude/jobs/866db2ea/product_stratified_high.csv"
+OUT = os.environ.get(
+    "ZEUS_PRODUCT_LINEAGE_TRANSFER_OUT",
+    str(ROOT / "docs" / "operations" / "sd3_validation_evidence" / "product_stratified_high.csv"),
+)
 RNG = np.random.default_rng(20260528)
 
 

@@ -21,12 +21,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
 
-TRADES_DB = "/Users/leofitz/zeus/state/zeus_trades.db"
-OUT_DEFAULT = "/Users/leofitz/zeus/state/fee_reconciliation.json"
+# ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
+_MAIN_TREE = os.environ.get("ZEUS_MAIN_TREE") or os.path.join(os.path.expanduser("~"), "zeus")
+TRADES_DB = os.path.join(_MAIN_TREE, "state", "zeus_trades.db")
+OUT_DEFAULT = os.path.join(_MAIN_TREE, "state", "fee_reconciliation.json")
 
 
 def _scan_fee_fields(obj, path=""):
