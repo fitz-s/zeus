@@ -13104,6 +13104,106 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates
     ) is None
 
 
+def test_global_book_prefetch_invalidates_snapshot_depth_with_stale_tick():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            selected_outcome_token_id TEXT NOT NULL,
+            orderbook_depth_json TEXT NOT NULL,
+            min_tick_size TEXT NOT NULL,
+            min_order_size TEXT NOT NULL,
+            neg_risk INTEGER NOT NULL,
+            captured_at TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        CREATE INDEX idx_snapshot_latest_selected_token_captured
+            ON executable_market_snapshot_latest (
+                selected_outcome_token_id,
+                freshness_deadline DESC
+            );
+        CREATE TABLE execution_feasibility_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            depth_before_json TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_execution_feasibility_evidence_token_created
+            ON execution_feasibility_evidence(token_id, created_at DESC);
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots VALUES
+            ('snapshot-stale-tick', 'no-a', ?, '0.01', '5', 1,
+             '2026-07-28T08:06:24.863018+00:00')
+        """,
+        (
+            json.dumps(
+                {
+                    "asset_id": "no-a",
+                    "bids": [],
+                    "asks": [
+                        {"price": "0.001", "size": "466.05"},
+                        {"price": "0.01", "size": "16709.74"},
+                    ],
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshot_latest VALUES
+            ('condition-a', 'no-a', 'snapshot-stale-tick',
+             '2026-07-28T08:10:00+00:00')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence VALUES
+            ('channel-row', 'channel-event', 'condition-a', 'no-a',
+             '2026-07-28T08:06:24+00:00', 'old-grid-book', ?,
+             '2026-07-28T08:06:24.500000+00:00')
+        """,
+        (
+            json.dumps(
+                {
+                    "bids": [],
+                    "asks": [{"price": "0.01", "size": "100"}],
+                }
+            ),
+        ),
+    )
+
+    assert era._snapshot_projected_global_book_rows(
+        conn,
+        ("no-a",),
+        checked_at=_dt.datetime(
+            2026, 7, 28, 8, 6, 25, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
+    assert era._projected_global_book_rows(
+        conn,
+        ("no-a",),
+        checked_at=_dt.datetime(
+            2026, 7, 28, 8, 6, 25, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
+
+
 def test_global_book_prefetch_newer_bba_invalidates_older_depth():
     conn = sqlite3.connect(":memory:")
     conn.executescript(

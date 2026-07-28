@@ -1903,6 +1903,7 @@ def _snapshot_projected_global_book_rows(
     *,
     checked_at: datetime,
     max_age: timedelta,
+    tick_invalidated_tokens: set[str] | None = None,
 ) -> dict[str, tuple[Mapping[str, object], datetime, str]] | None:
     """Read usable fresh token books with their durable projection identity."""
 
@@ -1959,6 +1960,16 @@ def _snapshot_projected_global_book_rows(
                     not isinstance(book, Mapping)
                     or str(book.get("asset_id") or "").strip() != token_id
                 ):
+                    continue
+                if not _book_levels_align_to_tick(book, row[5]):
+                    # A token may cross onto a finer grid before the durable
+                    # market snapshot refreshes its metadata.  The depth is
+                    # current evidence, but the paired tick is not executable
+                    # authority; discard the projection so prefetch obtains a
+                    # current REST book with its own tick instead of poisoning
+                    # the complete global epoch or rounding away price truth.
+                    if tick_invalidated_tokens is not None:
+                        tick_invalidated_tokens.add(token_id)
                     continue
                 book = dict(book)
                 book.update(
@@ -2243,11 +2254,13 @@ def _projected_global_book_rows(
 ) -> dict[str, tuple[Mapping[str, object], datetime, str]] | None:
     """Merge fresh snapshot and market-channel depth projections."""
 
+    tick_invalidated_tokens: set[str] = set()
     rows = _snapshot_projected_global_book_rows(
         trade_conn,
         tokens,
         checked_at=checked_at,
         max_age=max_age,
+        tick_invalidated_tokens=tick_invalidated_tokens,
     ) or {}
     for token, channel_row in _latest_market_channel_book_rows(
         trade_conn,
@@ -2255,6 +2268,13 @@ def _projected_global_book_rows(
         checked_at=checked_at.astimezone(timezone.utc),
         max_age=max_age,
     ).items():
+        if token in tick_invalidated_tokens:
+            # A channel row carries the same persisted tick metadata as the
+            # invalid snapshot.  Even an apparently aligned older ladder
+            # cannot prove the current grid, so only current REST authority may
+            # return this token to the complete action set.
+            rows.pop(token, None)
+            continue
         channel_book, channel_at, channel_id = channel_row
         snapshot_row = rows.get(token)
         if snapshot_row is not None and snapshot_row[1] > channel_at:
