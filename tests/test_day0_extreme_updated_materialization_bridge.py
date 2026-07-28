@@ -1,5 +1,5 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-07-26
+# Last reused/audited: 2026-07-28
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
 #   book) + docs/evidence/upstream_physical_2026_07_17/day0_latency_chain_measurement.md (the
 #   measured bottleneck is the ~40-min SCHEDULED posterior recompute cadence, HOP 2b p50 39.9 min
@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import src.data.replacement_cycle_advance_trigger as cycle_advance
+import src.data.replacement_forecast_live_materialization_queue as materialization_queue
 import src.data.replacement_forecast_production as forecast_production
 import src.data.replacement_forecast_seed_discovery as seed_discovery
 from src.data.replacement_forecast_materializer import (
@@ -194,7 +195,7 @@ def _fetch_enqueue_row(db_path: Path) -> sqlite3.Row:
     check = sqlite3.connect(db_path)
     check.row_factory = sqlite3.Row
     row = check.execute(
-        "SELECT day0_observed_extreme_observation_time, seed_file "
+        "SELECT day0_observed_extreme_observation_time, day0_conditioning_identity_json, seed_file "
         "FROM cycle_advance_enqueues WHERE city='Shanghai' AND target_date='2026-07-19' "
         "AND metric='high'"
     ).fetchone()
@@ -326,6 +327,166 @@ def test_day0_extreme_bridge_advances_on_strictly_newer_observation_time(
 
     row = _fetch_enqueue_row(cfg["forecast_db"])
     assert row["day0_observed_extreme_observation_time"] == "2026-07-19T06:00:00+00:00"
+
+
+def test_day0_extreme_bridge_reseeds_for_every_conditioning_identity_change(
+    tmp_path, monkeypatch
+) -> None:
+    """A same-cycle Day0 marker suppresses only an identical posterior condition."""
+    _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    monkeypatch.setattr(
+        cycle_advance, "family_materializable_cycle", lambda *a, **k: (cycle, ())
+    )
+    payload = _day0_payload("2026-07-19T05:00:00.132000+00:00")
+    monkeypatch.setattr(
+        seed_discovery,
+        "_day0_observed_extreme_seed_payload",
+        lambda **_kwargs: dict(payload),
+    )
+    fake_build_seed, calls = _fake_build_seed_factory()
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", fake_build_seed)
+
+    variants = (
+        {"day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00"},
+        {"day0_observed_extreme_source": "wu_api+same_station_fast_tail"},
+        {"day0_observed_extreme_c": 21.25},
+        {"day0_observed_extreme_unit": "F"},
+    )
+    for offset, changed in enumerate(({}, *variants), start=1):
+        payload.update(changed)
+        report = cycle_advance._materialize_day0_extreme_updated_seed(
+            city="Shanghai",
+            target_date="2026-07-19",
+            metric="high",
+            computed_at=datetime(2026, 7, 19, 5, offset, tzinfo=UTC),
+            held_position=True,
+        )
+        assert report["enqueued"] is True
+
+    assert calls["count"] == 5
+    row = _fetch_enqueue_row(cfg["forecast_db"])
+    assert row["day0_observed_extreme_observation_time"] == (
+        "2026-07-19T05:00:00.900000+00:00"
+    )
+    assert json.loads(row["day0_conditioning_identity_json"]) == {
+        "observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "observed_extreme_c": 21.25,
+        "source": "wu_api+same_station_fast_tail",
+        "unit": "F",
+    }
+
+
+def test_day0_request_coalescing_keeps_distinct_conditioning_identities(tmp_path) -> None:
+    """The request drain cannot discard a fresh Day0 condition as a duplicate cycle."""
+    base = {
+        "city": "Shanghai",
+        "target_date": "2026-07-19",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-19T00:00:00+00:00",
+        "baseline_source_run_id": "baseline:0",
+        "openmeteo_source_run_id": "openmeteo:0",
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text(
+        json.dumps({**base, "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00"}),
+        encoding="utf-8",
+    )
+    second.write_text(
+        json.dumps({**base, "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00"}),
+        encoding="utf-8",
+    )
+
+    remaining, superseded = materialization_queue._coalesce_superseded_materialization_requests(
+        (first, second), processed_path=tmp_path / "processed"
+    )
+
+    assert set(remaining) == {first, second}
+    assert superseded == ()
+
+
+def test_day0_drained_marker_requires_matching_current_posterior(tmp_path) -> None:
+    """A consumed seed is not completion until current posterior provenance matches it."""
+    db_path = _prepare_forecast_db(tmp_path)
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC).isoformat()
+    identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    seed = tmp_path / "drained.seed.json"
+    seed.write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(seed),
+        **identity,
+    )
+    conn.commit()
+    seed.unlink()
+
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        **identity,
+    ) is False
+    conn.close()
+
+    _insert_live_posterior(
+        db_path,
+        cycle_iso=cycle,
+        computed_at="2026-07-19T05:01:00+00:00",
+    )
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ?",
+        (
+            json.dumps(
+                {
+                    "day0_conditioning": {
+                        "source": identity["day0_observed_extreme_source"],
+                        "observation_time": identity[
+                            "day0_observed_extreme_observation_time"
+                        ],
+                        "observed_extreme_c": identity["day0_observed_extreme_c"],
+                        "unit": identity["day0_observed_extreme_unit"],
+                    }
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        **identity,
+    ) is True
+    conn.close()
 
 
 def test_day0_extreme_bridge_reseeds_new_observation_on_consumed_model_cycle(

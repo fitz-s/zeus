@@ -60,6 +60,7 @@ UTC = timezone.utc
 
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
 _HELD_REHEAL_COOLDOWN = timedelta(minutes=30)
+_DAY0_CONDITIONING_IDENTITY_COLUMN = "day0_conditioning_identity_json"
 _DAY0_BRIDGE_STOP = object()
 _DAY0_BRIDGE_CONDITION = threading.Condition()
 _DAY0_BRIDGE_QUEUES: dict[bool, queue.Queue[object]] = {
@@ -170,16 +171,90 @@ def _parse_cycle(value: object) -> datetime | None:
 
 
 def normalize_observation_version(value: object) -> str | None:
-    """Canonicalize an observation-version timestamp to a fixed-width UTC ISO string
-    ``YYYY-MM-DDTHH:MM:SS+00:00`` so lexicographic comparison equals INSTANT comparison across
-    timezone offsets and ``Z``/``+00:00``/fractional-second spellings (consult REQ-20260623-184115
-    HIGH: raw-ISO string compare can churn on equal instants and SUPPRESS truly-newer offset
-    instants). Returns None when unparseable — callers treat that as "no recorded version" so a
-    pre-normalization marker heals to the normalized form on the next write."""
+    """Canonicalize an observation timestamp without discarding microsecond identity."""
     parsed = _parse_cycle(value)
     if parsed is None:
         return None
-    return parsed.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    return parsed.isoformat()
+
+
+def _day0_conditioning_identity(
+    *,
+    source: object | None,
+    observation_time: object | None,
+    observed_extreme_c: object | None,
+    unit: object | None,
+) -> str | None:
+    """Return the Day0 posterior-conditioning identity, or None when incomplete."""
+    normalized_time = normalize_observation_version(observation_time)
+    normalized_source = str(source or "").strip()
+    normalized_unit = str(unit or "").strip().upper()
+    if not normalized_time or not normalized_source or not normalized_unit:
+        return None
+    try:
+        normalized_extreme = round(float(observed_extreme_c), 9)
+    except (TypeError, ValueError):
+        return None
+    return json.dumps(
+        {
+            "observation_time": normalized_time,
+            "observed_extreme_c": normalized_extreme,
+            "source": normalized_source,
+            "unit": normalized_unit,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _ensure_day0_conditioning_identity_column(conn: sqlite3.Connection) -> None:
+    """Add the additive liveness column to pre-hotfix forecast DBs exactly once."""
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(cycle_advance_enqueues)")
+    }
+    if _DAY0_CONDITIONING_IDENTITY_COLUMN not in columns:
+        conn.execute(
+            "ALTER TABLE cycle_advance_enqueues "
+            f"ADD COLUMN {_DAY0_CONDITIONING_IDENTITY_COLUMN} TEXT"
+        )
+
+
+def _latest_posterior_matches_day0_conditioning(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    identity: str,
+) -> bool:
+    """Whether the current live posterior has consumed this exact Day0 evidence."""
+    try:
+        row = conn.execute(
+            """
+            SELECT provenance_json
+            FROM forecast_posteriors
+            WHERE city = ? AND target_date = ? AND temperature_metric = ?
+              AND runtime_layer = 'live'
+            ORDER BY computed_at DESC, posterior_id DESC
+            LIMIT 1
+            """,
+            (city, target_date, metric),
+        ).fetchone()
+        if row is None:
+            return False
+        raw = row["provenance_json"] if hasattr(row, "keys") else row[0]
+        provenance = json.loads(str(raw or "{}"))
+        conditioning = provenance.get("day0_conditioning")
+        if not isinstance(conditioning, dict):
+            return False
+        return _day0_conditioning_identity(
+            source=conditioning.get("source"),
+            observation_time=conditioning.get("observation_time"),
+            observed_extreme_c=conditioning.get("observed_extreme_c"),
+            unit=conditioning.get("unit"),
+        ) == identity
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return False
 
 
 def consumed_cycle_dt(value: str) -> datetime:
@@ -391,6 +466,9 @@ def _already_enqueued(
     target_cycle_iso: str,
     allow_missing_seed_file_reenqueue: bool = False,
     day0_observed_extreme_observation_time: str | None = None,
+    day0_observed_extreme_source: str | None = None,
+    day0_observed_extreme_c: float | None = None,
+    day0_observed_extreme_unit: str | None = None,
 ) -> bool:
     """True iff a real re-materialization seed already exists for this exact target cycle.
 
@@ -398,20 +476,22 @@ def _already_enqueued(
     Returning False for that row lets the next tick heal it when the same target cycle's artifact
     finally lands; ``_record_enqueue`` updates the marker in place under the UNIQUE bound.
 
-    OBSERVATION-VERSION RE-ENQUEUE (same-day exit-blindness fix 2026-06-23): for a held/day0
-    reseed, ``day0_observed_extreme_observation_time`` is the fresh observed running-max version.
-    The model cycle (``target_cycle_time``) does NOT advance intraday on the settlement day, so
-    keying idempotency on it alone freezes the day0-conditioned posterior while the observed
-    extreme climbs/plateaus (Toronto NO@24 -98.94% incident). When the supplied observation
-    version is strictly NEWER than (or the marker has no recorded) observation version, return
-    False so the fresh observation re-materializes the posterior — even though the model-cycle
-    seed still exists. Supplying no observation version (non-day0 / future-date reseed) preserves
-    the original model-cycle idempotency unchanged.
+    Day0 suppression requires the durable marker identity to match current
+    canonical evidence. Once its seed drains, the current posterior must name
+    that identity too; a completed marker alone is not completion evidence.
     """
+    incoming_identity = _day0_conditioning_identity(
+        source=day0_observed_extreme_source,
+        observation_time=day0_observed_extreme_observation_time,
+        observed_extreme_c=day0_observed_extreme_c,
+        unit=day0_observed_extreme_unit,
+    )
     try:
+        _ensure_day0_conditioning_identity_column(conn)
         row = conn.execute(
             """
-            SELECT seed_file, reason, held_position, day0_observed_extreme_observation_time, enqueued_at
+            SELECT seed_file, reason, held_position, day0_observed_extreme_observation_time,
+                   enqueued_at, day0_conditioning_identity_json
             FROM cycle_advance_enqueues
             WHERE city = ? AND target_date = ? AND metric = ? AND target_cycle_time = ?
             LIMIT 1
@@ -426,6 +506,21 @@ def _already_enqueued(
     reason = str((row["reason"] if hasattr(row, "keys") else row[1]) or "")
     if not seed_file and reason.startswith("CYCLE_LEG_ARTIFACT_MISSING:"):
         return False
+    if incoming_identity is not None:
+        recorded_identity = (
+            row["day0_conditioning_identity_json"] if hasattr(row, "keys") else row[5]
+        )
+        if recorded_identity != incoming_identity:
+            return False
+        if not seed_file or not Path(seed_file).exists():
+            return _latest_posterior_matches_day0_conditioning(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                identity=incoming_identity,
+            )
+        return True
     if day0_observed_extreme_observation_time is not None:
         incoming_version = normalize_observation_version(day0_observed_extreme_observation_time)
         recorded_version = normalize_observation_version(
@@ -509,6 +604,9 @@ def _record_enqueue(
     reason: str | None = None,
     replace_existing_seed_file: bool = False,
     day0_observed_extreme_observation_time: str | None = None,
+    day0_observed_extreme_source: str | None = None,
+    day0_observed_extreme_c: float | None = None,
+    day0_observed_extreme_unit: str | None = None,
 ) -> bool:
     """Write the idempotency marker. Returns True iff this call inserted the row (False = a
     concurrent/prior enqueue already recorded it, via the UNIQUE index INSERT OR IGNORE).
@@ -530,13 +628,21 @@ def _record_enqueue(
     day0_observed_extreme_observation_time = normalize_observation_version(
         day0_observed_extreme_observation_time
     )
+    day0_conditioning_identity = _day0_conditioning_identity(
+        source=day0_observed_extreme_source,
+        observation_time=day0_observed_extreme_observation_time,
+        observed_extreme_c=day0_observed_extreme_c,
+        unit=day0_observed_extreme_unit,
+    )
+    _ensure_day0_conditioning_identity_column(conn)
     before = conn.total_changes
     conn.execute(
         """
         INSERT OR IGNORE INTO cycle_advance_enqueues
             (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
-             held_position, seed_file, reason, day0_observed_extreme_observation_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             held_position, seed_file, reason, day0_observed_extreme_observation_time,
+             day0_conditioning_identity_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             datetime.now(tz=UTC).isoformat(),
@@ -549,6 +655,7 @@ def _record_enqueue(
             seed_file,
             reason,
             day0_observed_extreme_observation_time,
+            day0_conditioning_identity,
         ),
     )
     if conn.total_changes > before:
@@ -569,18 +676,28 @@ def _record_enqueue(
                        held_position = ?,
                        seed_file = ?,
                        reason = ?,
-                       day0_observed_extreme_observation_time = COALESCE(?, day0_observed_extreme_observation_time)
+                       day0_observed_extreme_observation_time = COALESCE(?, day0_observed_extreme_observation_time),
+                       day0_conditioning_identity_json = COALESCE(?, day0_conditioning_identity_json)
                  WHERE city = ?
                    AND target_date = ?
                    AND metric = ?
                    AND target_cycle_time = ?
-                   -- MONOTONE day0 version guard (consult REQ-20260623-184115 HIGH): an out-of-order
-                   -- OLDER observation-version writer must NOT regress the marker/seed after a newer
-                   -- one won. Non-day0 writers (version NULL) keep the held re-heal behaviour.
                    AND (
-                       ? IS NULL
-                       OR day0_observed_extreme_observation_time IS NULL
-                       OR ? > day0_observed_extreme_observation_time
+                       (
+                           ? IS NULL
+                           AND (
+                               ? IS NULL
+                               OR day0_observed_extreme_observation_time IS NULL
+                               OR ? > day0_observed_extreme_observation_time
+                           )
+                       )
+                       OR (
+                           ? IS NOT NULL
+                           AND (
+                               day0_conditioning_identity_json IS NULL
+                               OR ? <> day0_conditioning_identity_json
+                           )
+                       )
                    )
                 """,
                 (
@@ -590,12 +707,16 @@ def _record_enqueue(
                     seed_file,
                     reason,
                     day0_observed_extreme_observation_time,
+                    day0_conditioning_identity,
                     city,
                     target_date,
                     metric,
                     target_cycle_iso,
+                    day0_conditioning_identity,
                     day0_observed_extreme_observation_time,
                     day0_observed_extreme_observation_time,
+                    day0_conditioning_identity,
+                    day0_conditioning_identity,
                 ),
             )
             return conn.total_changes > update_before
@@ -607,7 +728,8 @@ def _record_enqueue(
                    held_position = ?,
                    seed_file = ?,
                    reason = ?,
-                   day0_observed_extreme_observation_time = COALESCE(?, day0_observed_extreme_observation_time)
+                   day0_observed_extreme_observation_time = COALESCE(?, day0_observed_extreme_observation_time),
+                   day0_conditioning_identity_json = COALESCE(?, day0_conditioning_identity_json)
              WHERE city = ?
                AND target_date = ?
                AND metric = ?
@@ -622,6 +744,7 @@ def _record_enqueue(
                 seed_file,
                 reason,
                 day0_observed_extreme_observation_time,
+                day0_conditioning_identity,
                 city,
                 target_date,
                 metric,
@@ -931,6 +1054,9 @@ def enqueue_cycle_advance_reseeds(
                 target_cycle_iso=target_cycle_iso,
                 allow_missing_seed_file_reenqueue=bool(day0_payload) or missing_posterior,
                 day0_observed_extreme_observation_time=day0_observation_time,
+                day0_observed_extreme_source=day0_payload.get("day0_observed_extreme_source"),
+                day0_observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
+                day0_observed_extreme_unit=day0_payload.get("day0_observed_extreme_unit"),
             ):
                 report["already_enqueued"] = int(report["already_enqueued"]) + 1
                 continue
@@ -989,6 +1115,9 @@ def enqueue_cycle_advance_reseeds(
                 ),
                 replace_existing_seed_file=bool(day0_payload) or missing_posterior,
                 day0_observed_extreme_observation_time=day0_observation_time,
+                day0_observed_extreme_source=day0_payload.get("day0_observed_extreme_source"),
+                day0_observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
+                day0_observed_extreme_unit=day0_payload.get("day0_observed_extreme_unit"),
             )
             conn.commit()
             if inserted:
@@ -1183,6 +1312,9 @@ def enqueue_single_family_cycle_advance_reseed(
                         day0_observed_extreme_observation_time=(
                             day0_observed_extreme_observation_time
                         ),
+                        day0_observed_extreme_source=day0_observed_extreme_source,
+                        day0_observed_extreme_c=day0_observed_extreme_c,
+                        day0_observed_extreme_unit=day0_observed_extreme_unit,
                     ):
                         report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
                         report["consumed_cycle"] = consumed_cycle_iso
@@ -1240,6 +1372,9 @@ def enqueue_single_family_cycle_advance_reseed(
                         day0_observed_extreme_observation_time=(
                             day0_observed_extreme_observation_time
                         ),
+                        day0_observed_extreme_source=day0_observed_extreme_source,
+                        day0_observed_extreme_c=day0_observed_extreme_c,
+                        day0_observed_extreme_unit=day0_observed_extreme_unit,
                     )
                     conn.commit()
                     report["enqueued"] = bool(inserted)
@@ -1270,6 +1405,9 @@ def enqueue_single_family_cycle_advance_reseed(
                 target_cycle_iso=target_cycle_iso,
                 allow_missing_seed_file_reenqueue=has_day0_evidence,
                 day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
+                day0_observed_extreme_source=day0_observed_extreme_source,
+                day0_observed_extreme_c=day0_observed_extreme_c,
+                day0_observed_extreme_unit=day0_observed_extreme_unit,
             ):
                 if held_position:
                     report["held_priority_promoted"] = _promote_existing_enqueue_to_held(
@@ -1324,6 +1462,9 @@ def enqueue_single_family_cycle_advance_reseed(
                 reason="MISSING_LIVE_POSTERIOR",
                 replace_existing_seed_file=has_day0_evidence,
                 day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
+                day0_observed_extreme_source=day0_observed_extreme_source,
+                day0_observed_extreme_c=day0_observed_extreme_c,
+                day0_observed_extreme_unit=day0_observed_extreme_unit,
             )
             conn.commit()
             report["enqueued"] = bool(inserted)
@@ -1351,6 +1492,9 @@ def enqueue_single_family_cycle_advance_reseed(
             target_cycle_iso=target_cycle_iso,
             allow_missing_seed_file_reenqueue=has_day0_evidence,
             day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
+            day0_observed_extreme_source=day0_observed_extreme_source,
+            day0_observed_extreme_c=day0_observed_extreme_c,
+            day0_observed_extreme_unit=day0_observed_extreme_unit,
         ):
             if held_position:
                 report["held_priority_promoted"] = _promote_existing_enqueue_to_held(
@@ -1404,6 +1548,9 @@ def enqueue_single_family_cycle_advance_reseed(
             seed_file=str(seed_file),
             replace_existing_seed_file=has_day0_evidence,
             day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
+            day0_observed_extreme_source=day0_observed_extreme_source,
+            day0_observed_extreme_c=day0_observed_extreme_c,
+            day0_observed_extreme_unit=day0_observed_extreme_unit,
         )
         conn.commit()
         report["enqueued"] = bool(inserted)

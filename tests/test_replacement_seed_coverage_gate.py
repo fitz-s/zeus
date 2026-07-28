@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-27
+# Last reused or audited: 2026-07-28
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (#1 graceful-degradation:
 #   readiness expiring + no fresher cycle => re-materialize from newest persisted cycle) +
 #   tradeable-grade coverage antibody (a NULL-q_lcb / untradeable posterior must not satisfy the
@@ -340,6 +340,7 @@ def test_day0_seed_coverage_requires_exact_conditioning_identity(tmp_path) -> No
         "day0_observed_extreme_c": 31.0,
         "day0_observed_extreme_source": "aviationweather_metar",
         "day0_observed_extreme_observation_time": "2026-06-06T02:00:00+00:00",
+        "day0_observed_extreme_unit": "C",
     }
 
     def set_conditioning(provenance_key: str, **overrides) -> None:
@@ -349,6 +350,7 @@ def test_day0_seed_coverage_requires_exact_conditioning_identity(tmp_path) -> No
             "source": "aviationweather_metar",
             "observed_extreme_c": 31.0,
             "observation_time": "2026-06-06T02:00:00+00:00",
+            "unit": "C",
             **overrides,
         }
         conn = sqlite3.connect(db_path)
@@ -385,6 +387,9 @@ def test_day0_seed_coverage_requires_exact_conditioning_identity(tmp_path) -> No
         assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
 
         set_conditioning(provenance_key, metric="low")
+        assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
+
+        set_conditioning(provenance_key, unit="F")
         assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
 
 
