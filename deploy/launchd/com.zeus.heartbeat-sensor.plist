@@ -8,17 +8,24 @@
   ARTIFACT ONLY. No secret EnvironmentVariables are present on the live
   plist for this job, so no wrapper-exec rewrite is needed.
 
-  NOTE (operator-machine-specific path, preserved as-is from the live
-  plist, not invented by this migration): ProgramArguments[1] and
-  WorkingDirectory point outside the zeus repo, at a companion tool
-  (~/.openclaw/workspace-venus/bin/heartbeat_sensor.py) that polls the
-  zeus daemon heartbeat JSON files under zeus/state/. This plist is
-  therefore only portable to a machine that also has that companion tool
-  checked out at the same relative path; if that assumption stops holding,
-  the operator should update ProgramArguments accordingly before install.
+  NOTE (companion-tool path, outside the zeus repo): ProgramArguments[1]
+  and WorkingDirectory point at a companion tool
+  (ZEUS_HOME_PLACEHOLDER/.openclaw/workspace-venus/bin/heartbeat_sensor.py)
+  that polls the zeus daemon heartbeat JSON files under zeus/state/. This
+  plist is therefore only portable to a machine that also has that
+  companion tool checked out at the same home-relative path; if that
+  assumption stops holding, the operator should update ProgramArguments
+  accordingly before install.
 
-  INSTALL (operator):
-    cp deploy/launchd/com.zeus.heartbeat-sensor.plist ~/Library/LaunchAgents/
+  ZEUS_REPO_PLACEHOLDER and ZEUS_HOME_PLACEHOLDER are substituted with the
+  repo's absolute path and $HOME respectively at install time (same
+  convention as bindings/zeus/launchd_plist.plist) — this file never names
+  an operator's machine.
+
+  INSTALL (operator, run from the repo root):
+    sed -e "s#ZEUS_REPO_PLACEHOLDER#$(pwd)#g" -e "s#ZEUS_HOME_PLACEHOLDER#$HOME#g" \
+      deploy/launchd/com.zeus.heartbeat-sensor.plist \
+      > ~/Library/LaunchAgents/com.zeus.heartbeat-sensor.plist
     launchctl bootout gui/$(id -u)/com.zeus.heartbeat-sensor 2>/dev/null || true
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.heartbeat-sensor.plist
 -->
@@ -27,20 +34,20 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
-		<string>/Users/leofitz/zeus/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
 		<key>PYTHONPATH</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 		<key>PYTHONSAFEPATH</key>
 		<string>1</string>
 		<key>ZEUS_PRIMARY_ROOT</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 	</dict>
 	<key>Label</key>
 	<string>com.zeus.heartbeat-sensor</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/leofitz/zeus/.venv/bin/python</string>
-		<string>/Users/leofitz/.openclaw/workspace-venus/bin/heartbeat_sensor.py</string>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin/python</string>
+		<string>ZEUS_HOME_PLACEHOLDER/.openclaw/workspace-venus/bin/heartbeat_sensor.py</string>
 		<string>--heartbeat-files</string>
 		<string>zeus/state/daemon-heartbeat.json,zeus/state/daemon-heartbeat-ingest.json,zeus/state/daemon-heartbeat-substrate-observer.json,zeus/state/daemon-heartbeat-price-channel-ingest.json,zeus/state/daemon-heartbeat-post-trade-capital.json</string>
 		<string>--stale-threshold-seconds</string>
@@ -49,9 +56,9 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/Users/leofitz/zeus/logs/heartbeat-sensor.err</string>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/heartbeat-sensor.err</string>
 	<key>StandardOutPath</key>
-	<string>/Users/leofitz/zeus/logs/heartbeat-sensor.log</string>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/heartbeat-sensor.log</string>
 	<key>StartCalendarInterval</key>
 	<array>
 		<dict>
@@ -64,6 +71,6 @@
 		</dict>
 	</array>
 	<key>WorkingDirectory</key>
-	<string>/Users/leofitz</string>
+	<string>ZEUS_HOME_PLACEHOLDER</string>
 </dict>
 </plist>

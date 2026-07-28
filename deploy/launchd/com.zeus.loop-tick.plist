@@ -16,8 +16,15 @@
   (~/.npm-global/bin). The engine is `codex exec` under an OS sandbox —
   see loop/tick.sh.
 
-  INSTALL (operator, after scripts/ops/loop_enable.sh preflight passes):
-    1. cp deploy/launchd/com.zeus.loop-tick.plist ~/Library/LaunchAgents/
+  ZEUS_REPO_PLACEHOLDER and ZEUS_HOME_PLACEHOLDER are substituted with the
+  repo's absolute path and $HOME respectively at install time (same
+  convention as bindings/zeus/launchd_plist.plist) — this file never names
+  an operator's machine.
+
+  INSTALL (operator, after scripts/ops/loop_enable.sh preflight passes;
+  run from the repo root):
+    1. sed -e "s#ZEUS_REPO_PLACEHOLDER#$(pwd)#g" -e "s#ZEUS_HOME_PLACEHOLDER#$HOME#g" \
+         deploy/launchd/com.zeus.loop-tick.plist > ~/Library/LaunchAgents/com.zeus.loop-tick.plist
     2. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.loop-tick.plist
 
   DISABLE: `touch <repo>/loop/HALT` (soft — daemon stays loaded, next fire
@@ -28,22 +35,22 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
-		<string>/Users/leofitz/zeus/.venv/bin:/Users/leofitz/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin:ZEUS_HOME_PLACEHOLDER/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
 		<key>PYTHONPATH</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 		<key>ZEUS_PRIMARY_ROOT</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 	</dict>
 	<key>Label</key>
 	<string>com.zeus.loop-tick</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/leofitz/zeus/loop/tick.sh</string>
+		<string>ZEUS_REPO_PLACEHOLDER/loop/tick.sh</string>
 	</array>
 	<key>StandardErrorPath</key>
-	<string>/Users/leofitz/zeus/loop/logs/launchd-tick.err</string>
+	<string>ZEUS_REPO_PLACEHOLDER/loop/logs/launchd-tick.err</string>
 	<key>StandardOutPath</key>
-	<string>/Users/leofitz/zeus/loop/logs/launchd-tick.log</string>
+	<string>ZEUS_REPO_PLACEHOLDER/loop/logs/launchd-tick.log</string>
 	<key>StartCalendarInterval</key>
 	<dict>
 		<key>Minute</key>
@@ -52,6 +59,6 @@
 	<key>ThrottleInterval</key>
 	<integer>60</integer>
 	<key>WorkingDirectory</key>
-	<string>/Users/leofitz/zeus</string>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
 </dict>
 </plist>

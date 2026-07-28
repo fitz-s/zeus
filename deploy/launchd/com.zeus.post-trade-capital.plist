@@ -16,8 +16,13 @@
   (com.zeus.live-trading) no longer schedules these jobs; it keeps ONLY the exit-monitoring
   / exit-SUBMIT phase (which posts real sell orders) — §8 Step 2.
 
-  INSTALL (operator, NOT performed by the refactor):
-    cp deploy/launchd/com.zeus.post-trade-capital.plist ~/Library/LaunchAgents/
+  ZEUS_REPO_PLACEHOLDER is substituted with the repo's absolute path at
+  install time (same convention as bindings/zeus/launchd_plist.plist) —
+  this file never names an operator's machine.
+
+  INSTALL (operator, NOT performed by the refactor; run from the repo root):
+    sed "s#ZEUS_REPO_PLACEHOLDER#$(pwd)#g" deploy/launchd/com.zeus.post-trade-capital.plist \
+      > ~/Library/LaunchAgents/com.zeus.post-trade-capital.plist
     launchctl load ~/Library/LaunchAgents/com.zeus.post-trade-capital.plist
 -->
 <plist version="1.0">
@@ -25,7 +30,7 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PYTHONPATH</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 		<key>PYTHONSAFEPATH</key>
 		<string>1</string>
 		<key>POLYMARKET_CLOB_V2_SIGNATURE_TYPE</key>
@@ -33,7 +38,7 @@
 		<key>ZEUS_CLOB_FACT_CACHE_TTL_SECONDS</key>
 		<string>0</string>
 		<key>ZEUS_PRIMARY_ROOT</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 	</dict>
 	<key>KeepAlive</key>
 	<true/>
@@ -41,19 +46,19 @@
 	<string>com.zeus.post-trade-capital</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/leofitz/zeus/.venv/bin/python</string>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin/python</string>
 		<string>-m</string>
 		<string>src.ingest.post_trade_capital_daemon</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/Users/leofitz/zeus/logs/zeus-post-trade-capital.err</string>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/zeus-post-trade-capital.err</string>
 	<key>StandardOutPath</key>
-	<string>/Users/leofitz/zeus/logs/zeus-post-trade-capital.log</string>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/zeus-post-trade-capital.log</string>
 	<key>ThrottleInterval</key>
 	<integer>30</integer>
 	<key>WorkingDirectory</key>
-	<string>/Users/leofitz/zeus</string>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
 </dict>
 </plist>

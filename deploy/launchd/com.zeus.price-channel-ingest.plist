@@ -30,10 +30,15 @@
   live market scanner; the EDLI runtime mode that gates the two cycles is read from settings
   (config/edli_v1) — no extra env beyond ZEUS_MODE=live is required for it here.
 
-  INSTALL (operator, NOT performed by the refactor):
+  ZEUS_REPO_PLACEHOLDER is substituted with the repo's absolute path at
+  install time (same convention as bindings/zeus/launchd_plist.plist) —
+  this file never names an operator's machine.
+
+  INSTALL (operator, NOT performed by the refactor; run from the repo root):
     # 1) substitute the three POLYMARKET_API_* REPLACE_ME values with the real L2 creds
     #    (same as com.zeus.live-trading), then:
-    cp deploy/launchd/com.zeus.price-channel-ingest.plist ~/Library/LaunchAgents/
+    sed "s#ZEUS_REPO_PLACEHOLDER#$(pwd)#g" deploy/launchd/com.zeus.price-channel-ingest.plist \
+      > ~/Library/LaunchAgents/com.zeus.price-channel-ingest.plist
     launchctl load ~/Library/LaunchAgents/com.zeus.price-channel-ingest.plist
 -->
 <plist version="1.0">
@@ -49,7 +54,7 @@
 		<key>POLYMARKET_CLOB_V2_SIGNATURE_TYPE</key>
 		<string>2</string>
 		<key>PYTHONPATH</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 		<key>PYTHONSAFEPATH</key>
 		<string>1</string>
 		<key>ZEUS_CLOB_FACT_CACHE_TTL_SECONDS</key>
@@ -57,7 +62,7 @@
 		<key>ZEUS_MODE</key>
 		<string>live</string>
 		<key>ZEUS_PRIMARY_ROOT</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 		<key>ZEUS_USER_CHANNEL_WS_AUTO_DERIVE</key>
 		<string>1</string>
 	</dict>
@@ -67,19 +72,19 @@
 	<string>com.zeus.price-channel-ingest</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/leofitz/zeus/.venv/bin/python</string>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin/python</string>
 		<string>-m</string>
 		<string>src.ingest.price_channel_daemon</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/Users/leofitz/zeus/logs/zeus-price-channel-ingest.err</string>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/zeus-price-channel-ingest.err</string>
 	<key>StandardOutPath</key>
-	<string>/Users/leofitz/zeus/logs/zeus-price-channel-ingest.log</string>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/zeus-price-channel-ingest.log</string>
 	<key>ThrottleInterval</key>
 	<integer>30</integer>
 	<key>WorkingDirectory</key>
-	<string>/Users/leofitz/zeus</string>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
 </dict>
 </plist>
