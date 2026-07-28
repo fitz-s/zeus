@@ -7009,7 +7009,7 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
             0,
             '{}',
             '{"executable_allowed":true}',
-            '{"asset_id":"yes-token-a","hash":"hash-yes-token-a"}',
+            '{"asset_id":"yes-token-a","hash":"hash-yes-token-a","bids":[{"price":"0.49","size":"10"}],"asks":[{"price":"0.51","size":"10"}]}',
             '2026-07-10T07:00:00+00:00',
             '2026-07-10T08:13:00+00:00'
         );
@@ -7165,6 +7165,8 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
         if projection_mode == "survives":
             expected_yes.update(
                 {
+                    "bids": [{"price": "0.49", "size": "10"}],
+                    "asks": [{"price": "0.51", "size": "10"}],
                     "tick_size": "0.01",
                     "min_order_size": "5",
                     "neg_risk": False,
