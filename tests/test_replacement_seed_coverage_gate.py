@@ -393,6 +393,68 @@ def test_day0_seed_coverage_requires_exact_conditioning_identity(tmp_path) -> No
         assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
 
 
+def test_day0_coverage_prefers_active_provisional_over_fallback_conditioning(tmp_path) -> None:
+    """Queue coverage uses the same active-provisional identity as drained-marker completion."""
+    db_path = _db(tmp_path)
+    _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
+    _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
+    seed = {
+        **_seed(),
+        "computed_at": "2026-06-06T03:00:00+00:00",
+        "day0_observed_extreme_c": 31.0,
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-06-06T02:00:00+00:00",
+        "day0_observed_extreme_unit": "C",
+    }
+    matching = {
+        "active": True,
+        "metric": _METRIC,
+        "source": "aviationweather_metar",
+        "observed_extreme_c": 31.0,
+        "observation_time": "2026-06-06T02:00:00+00:00",
+        "unit": "C",
+    }
+    stale = {
+        "metric": _METRIC,
+        "source": "stale_fallback",
+        "observed_extreme_c": 0.0,
+        "observation_time": "2026-06-06T01:00:00+00:00",
+        "unit": "F",
+    }
+
+    def set_provenance(*, provisional: dict[str, object], conditioning: dict[str, object]) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE forecast_posteriors SET provenance_json = ?",
+            (
+                json.dumps(
+                    {
+                        "q_lcb_basis": "fused_center_bootstrap_p05",
+                        "bayes_precision_fusion": {
+                            "used_models": ["gfs_global"],
+                            "current_evidence_shape": {
+                                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                            },
+                        },
+                        "day0_provisional_observation": provisional,
+                        "day0_conditioning": conditioning,
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    set_provenance(provisional=matching, conditioning=stale)
+    assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
+
+    set_provenance(provisional={**stale, "active": True}, conditioning=matching)
+    assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
+
+    set_provenance(provisional={**stale, "active": False}, conditioning=matching)
+    assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
+
+
 def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) -> None:
     db_path = _db(tmp_path)
     _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))

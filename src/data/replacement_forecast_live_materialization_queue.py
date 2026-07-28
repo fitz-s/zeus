@@ -454,32 +454,25 @@ def _day0_seed_matches_conditioning(
     conditioning: Mapping[str, object],
 ) -> bool:
     """Return whether a posterior consumed the seed's exact Day0 evidence."""
-
-    seed_time = _parse_utc_iso(seed.get("day0_observed_extreme_observation_time"))
-    posterior_time = _parse_utc_iso(conditioning.get("observation_time"))
-    if seed_time is None or posterior_time != seed_time:
-        return False
     seed_metric = str(seed.get("temperature_metric") or "").strip().lower()
     posterior_metric = str(conditioning.get("metric") or "").strip().lower()
-    seed_source = str(seed.get("day0_observed_extreme_source") or "").strip()
-    posterior_source = str(conditioning.get("source") or "").strip()
-    seed_unit = str(seed.get("day0_observed_extreme_unit") or "").strip().upper()
-    posterior_unit = str(conditioning.get("unit") or "").strip().upper()
-    if (
-        seed_metric not in {"high", "low"}
-        or posterior_metric != seed_metric
-        or not seed_source
-        or posterior_source != seed_source
-        or not seed_unit
-        or posterior_unit != seed_unit
-    ):
+    if seed_metric not in {"high", "low"} or posterior_metric != seed_metric:
         return False
-    try:
-        seed_extreme_c = float(seed["day0_observed_extreme_c"])
-        posterior_extreme_c = float(conditioning["observed_extreme_c"])
-    except (KeyError, TypeError, ValueError):
-        return False
-    return abs(seed_extreme_c - posterior_extreme_c) <= 1e-9
+    from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+        _day0_conditioning_identity,
+    )
+
+    return _day0_conditioning_identity(
+        source=seed.get("day0_observed_extreme_source"),
+        observation_time=seed.get("day0_observed_extreme_observation_time"),
+        observed_extreme_c=seed.get("day0_observed_extreme_c"),
+        unit=seed.get("day0_observed_extreme_unit"),
+    ) == _day0_conditioning_identity(
+        source=conditioning.get("source"),
+        observation_time=conditioning.get("observation_time"),
+        observed_extreme_c=conditioning.get("observed_extreme_c"),
+        unit=conditioning.get("unit"),
+    )
 
 
 def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, object]) -> bool:
@@ -552,12 +545,12 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
                 posterior_provenance = {}
             conditioning = None
             if isinstance(posterior_provenance, dict):
-                provisional = posterior_provenance.get("day0_provisional_observation")
-                conditioning = (
-                    provisional
-                    if isinstance(provisional, Mapping)
-                    and provisional.get("active") is True
-                    else posterior_provenance.get("day0_conditioning")
+                from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+                    _active_day0_provisional_or_conditioning,
+                )
+
+                conditioning = _active_day0_provisional_or_conditioning(
+                    posterior_provenance
                 )
             if not isinstance(conditioning, Mapping) or not _day0_seed_matches_conditioning(
                 seed,

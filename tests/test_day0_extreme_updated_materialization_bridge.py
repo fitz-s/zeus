@@ -491,8 +491,10 @@ def test_day0_request_coalescing_keeps_distinct_conditioning_identities(tmp_path
     assert superseded == ()
 
 
-def test_day0_drained_marker_requires_matching_current_posterior(tmp_path) -> None:
-    """A consumed seed is not completion until current posterior provenance matches it."""
+def test_day0_drained_marker_with_active_provisional_posterior_does_not_reenqueue(
+    tmp_path,
+) -> None:
+    """A drained marker completes when active provisional provenance consumed its identity."""
     db_path = _prepare_forecast_db(tmp_path)
     cycle = datetime(2026, 7, 19, 0, tzinfo=UTC).isoformat()
     identity = {
@@ -525,6 +527,7 @@ def test_day0_drained_marker_requires_matching_current_posterior(tmp_path) -> No
         target_date="2026-07-19",
         metric="high",
         target_cycle_iso=cycle,
+        as_of=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
         **identity,
     ) is False
     conn.close()
@@ -536,6 +539,75 @@ def test_day0_drained_marker_requires_matching_current_posterior(tmp_path) -> No
     )
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ?",
+        (
+            json.dumps(
+                {
+                    "day0_provisional_observation": {
+                        "active": True,
+                        "source": identity["day0_observed_extreme_source"],
+                        "observation_time": identity[
+                            "day0_observed_extreme_observation_time"
+                        ],
+                        "observed_extreme_c": identity["day0_observed_extreme_c"],
+                        "unit": identity["day0_observed_extreme_unit"],
+                    },
+                    "day0_conditioning": {
+                        "source": "stale_fallback",
+                        "observation_time": "2026-07-19T05:00:00+00:00",
+                        "observed_extreme_c": 0.0,
+                        "unit": "F",
+                    },
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        as_of=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
+        **identity,
+    ) is True
+    conn.close()
+
+
+def test_day0_drained_marker_rejects_future_posterior_as_of(tmp_path) -> None:
+    """A future-dated posterior cannot complete this bridge decision."""
+    db_path = _prepare_forecast_db(tmp_path)
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC).isoformat()
+    identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    seed = tmp_path / "drained.seed.json"
+    seed.write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(seed),
+        **identity,
+    )
+    conn.commit()
+    seed.unlink()
+    _insert_live_posterior(
+        db_path,
+        cycle_iso=cycle,
+        computed_at="2026-07-19T05:03:00+00:00",
+    )
     conn.execute(
         "UPDATE forecast_posteriors SET provenance_json = ?",
         (
@@ -560,8 +632,9 @@ def test_day0_drained_marker_requires_matching_current_posterior(tmp_path) -> No
         target_date="2026-07-19",
         metric="high",
         target_cycle_iso=cycle,
+        as_of=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
         **identity,
-    ) is True
+    ) is False
     conn.close()
 
 
