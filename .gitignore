@@ -276,3 +276,5 @@ evidence/topology_v_next_shadow/archive/*.jsonl.gz
 .local/
 .ai-bridge/
 .agents/skills.disabled/
+# Codex CLI local config — leaks operator-local absolute paths (untracked 2026-07-28)
+.codex/
