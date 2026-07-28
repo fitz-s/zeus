@@ -1166,18 +1166,16 @@ def _run_advisory_check_pre_merge_contamination(
 def _run_advisory_check_post_merge_cleanup(
     payload: dict[str, Any],
 ) -> str | None:
-    """Soft cleanup checklist after `gh pr merge`."""
+    """Codex-safe closeout reminder after a successful landing command."""
     import re as _re
 
     tool_input = payload.get("tool_input", {})
     command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
-    # Command-position anchor: bare `gh\s+pr\s+merge` matched `echo "gh pr merge"`
-    # and `--jq` strings (2026-06-13 audit). Still catches `a && gh pr merge`,
-    # `/usr/bin/gh pr merge`.
-    if not _re.search(
-        r"(?:^|[;&|]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:/\S*/)?gh\s+pr\s+merge(?:\s|$)",
-        command,
-    ):
+    command_position = r"(?:^|[;&|]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:/\S*/)?"
+    is_pr_merge = _re.search(command_position + r"gh\s+pr\s+merge(?:\s|$)", command)
+    is_cherry_pick = _re.search(command_position + r"git\s+cherry-pick(?:\s|$)", command)
+    is_cherry_pick_abort = _re.search(r"\bgit\s+cherry-pick\s+--(?:abort|quit|skip)(?:\s|$)", command)
+    if not is_pr_merge and (not is_cherry_pick or is_cherry_pick_abort):
         return None
 
     tool_response = payload.get("tool_response", {})
@@ -1185,32 +1183,14 @@ def _run_advisory_check_post_merge_cleanup(
     if exit_code != 0:
         return None
 
-    worktree_lines: list[str] = []
-    try:
-        wt = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
-        )
-        paths = [
-            line[len("worktree "):].strip()
-            for line in wt.stdout.splitlines()
-            if line.startswith("worktree ")
-        ]
-        for p in paths[1:]:
-            if "/tmp/" in p or "/T/" in p:
-                continue
-            worktree_lines.append(f"  worktree: {p}  ->  git worktree remove <path>")
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-
-    wt_section = "\n".join(worktree_lines) if worktree_lines else "  worktrees: only main"
     return (
-        "\n-- Post-merge cleanup (soft) --\n"
-        f"{wt_section}\n"
-        "  ops packet: delete by default (git = backup); git mv to docs/archives/\n"
-        "    only when packet holds evidence git log cannot summarize.\n"
-        "  context: /compact long sessions; rm .omc/state/agent-replay-*.jsonl\n"
-        "    when no recovery active.\n"
+        "\n-- Landing closeout (Codex-managed worktree) --\n"
+        "  Do not run `git worktree remove` on $CODEX_HOME/worktrees.\n"
+        "  The worker that owns the completed Codex worktree must, after its\n"
+        "  landing is verified and no open-PR monitoring remains, archive its own\n"
+        "  thread with `set_thread_archived`. Codex snapshots then reclaims it.\n"
+        "  Do not archive the integration thread unless it owns that completed\n"
+        "  worktree. Active, pinned, permanent, dirty, and open-PR work stay.\n"
         "------------------------------\n"
     )
 

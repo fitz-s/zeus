@@ -1,5 +1,5 @@
 # Created: 2026-05-16
-# Last reused or audited: 2026-05-16
+# Last reused or audited: 2026-07-28
 # Authority basis:
 #   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/TASK_CATALOG.yaml
 #   §stale_worktree_quarantine
@@ -15,8 +15,9 @@ enumerate(): shells out `git worktree list --porcelain`, parses output,
   skips forbidden worktrees (currently-checked-out branch, uncommitted
   changes, open-PR-branch).
 
-apply(): always dry_run_only (live_default: false). Returns mock diff
-  showing what `git worktree remove` would do.
+apply(): always dry_run_only (live_default: false). Codex-managed paths are
+  not archive candidates: their owner closes the Codex thread after verified
+  landing, so Codex can snapshot and reclaim the path.
 
 Verdict strings:
   STALE_ARCHIVE_CANDIDATE — idle worktree, safe to remove
@@ -24,6 +25,7 @@ Verdict strings:
   SKIP_UNCOMMITTED           — skip: has uncommitted changes
   SKIP_OPEN_PR               — skip: branch appears in open PR (gh unavail → warn)
   SKIP_ACTIVE                — skip: recent activity within ttl_days
+  SKIP_CODEX_LIFECYCLE_OWNER — skip: Codex owns snapshot-aware closeout
 """
 from __future__ import annotations
 
@@ -48,8 +50,13 @@ VERDICT_SKIP_UNCOMMITTED = "SKIP_UNCOMMITTED"
 VERDICT_SKIP_OPEN_PR = "SKIP_OPEN_PR"
 VERDICT_SKIP_ACTIVE = "SKIP_ACTIVE"
 VERDICT_SKIP_PR_CHECK_UNVERIFIED = "SKIP_PR_CHECK_UNVERIFIED"
+VERDICT_SKIP_CODEX_LIFECYCLE_OWNER = "SKIP_CODEX_LIFECYCLE_OWNER"
 
 DEFAULT_TTL_DAYS = 21
+CODEX_MANAGED_WORKTREE_ROOT = (
+    Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+    / "worktrees"
+).resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +116,24 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
                 path=p,
                 verdict=VERDICT_SKIP_CURRENT,
                 reason="Main worktree (canonical checkout); never archive.",
+                evidence=evidence,
+            ))
+            continue
+
+        # Codex owns its managed worktree snapshot and closeout lifecycle.
+        # Do not classify it as a generic removal candidate even when clean,
+        # stale, and without a PR: only its completed worker knows whether the
+        # corresponding chat is active, pinned, or still needed for monitoring.
+        if _is_codex_managed_worktree(p):
+            candidates.append(Candidate(
+                task_id=spec.task_id,
+                path=p,
+                verdict=VERDICT_SKIP_CODEX_LIFECYCLE_OWNER,
+                reason=(
+                    "Codex-managed worktree; its owning worker may archive its own "
+                    "thread with set_thread_archived only after verified landing and "
+                    "no remaining PR monitoring."
+                ),
                 evidence=evidence,
             ))
             continue
@@ -321,6 +346,14 @@ def _has_uncommitted_changes(worktree_path: Path) -> bool:
     return False
 
 
+def _is_codex_managed_worktree(worktree_path: Path) -> bool:
+    """Whether Codex, rather than repository cleanup, owns this path."""
+    try:
+        return worktree_path.resolve().is_relative_to(CODEX_MANAGED_WORKTREE_ROOT)
+    except (OSError, ValueError):
+        return False
+
+
 def _is_worktree_idle(
     worktree_path: Path,
     repo_root: Path,
@@ -442,6 +475,11 @@ def _mock_diff(decision: Any) -> tuple[str, ...]:
     if decision is None:
         return ("# dry-run: no worktree archive decisions to apply",)
     path_str = str(getattr(decision, "path", decision))
+    if _is_codex_managed_worktree(Path(path_str)):
+        return (
+            "# Codex-managed worktree: no repository removal proposal",
+            "# owning completed clean worker archives its own thread with set_thread_archived",
+        )
     branch = ""
     if hasattr(decision, "evidence") and isinstance(decision.evidence, dict):
         branch = str(decision.evidence.get("branch", ""))
