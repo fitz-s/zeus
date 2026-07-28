@@ -18272,7 +18272,7 @@ class TestRecoveryResolutionTable:
             "submit_status": "POST_SUBMIT_UNKNOWN",
             "reconciliation_followup_required": True,
             "side_effect_known": False,
-            "venue_call_started": True,
+            "venue_call_started": False,
         }
         conn.execute(
             """
@@ -18332,7 +18332,11 @@ class TestRecoveryResolutionTable:
         ]
         assert event_types == ["SubmitUnknown", "Reconciled", "CapTransitioned"]
 
-    def test_edli_gate_runtime_unknown_reconcile_releases_cap(self, conn, mock_client):
+    def test_edli_gate_runtime_post_submit_unknown_stays_fail_closed(
+        self,
+        conn,
+        mock_client,
+    ):
         from src.execution.command_recovery import reconcile_unresolved_commands
 
         execution_command_id = "edli_exec_cmd:event-gate:intent-gate:token-gate:token-gate:buy_no"
@@ -18400,30 +18404,25 @@ class TestRecoveryResolutionTable:
 
         summary = reconcile_unresolved_commands(conn, mock_client)
 
-        assert summary["edli_pre_venue_unknown_thresholds"]["advanced"] == 1
+        assert summary["edli_pre_venue_unknown_thresholds"]["advanced"] == 0
         projection = conn.execute(
             "SELECT current_state, pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
             (aggregate_id,),
         ).fetchone()
-        assert projection["current_state"] == "CAP_TRANSITIONED"
-        assert bool(projection["pending_reconcile"]) is False
+        assert projection["current_state"] == "PENDING_RECONCILE"
+        assert bool(projection["pending_reconcile"]) is True
         cap = conn.execute("SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-gate'").fetchone()
-        assert cap["reservation_status"] == "RELEASED"
-        reconciled_payload = json.loads(
-            conn.execute(
-                """
-                SELECT payload_json
-                FROM edli_live_order_events
-                WHERE aggregate_id = ? AND event_type = 'Reconciled'
-                ORDER BY event_sequence DESC LIMIT 1
-                """,
-                (aggregate_id,),
-            ).fetchone()["payload_json"]
-        )
-        assert reconciled_payload["proof_class"] == "pre_venue_gate_runtime_block_no_command_no_venue_order"
-        assert reconciled_payload["required_predicates"]["reason_code"] == reason_code
+        assert cap["reservation_status"] == "RESERVED"
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM edli_live_order_events
+            WHERE aggregate_id = ? AND event_type IN ('Reconciled', 'CapTransitioned')
+            """,
+            (aggregate_id,),
+        ).fetchone()[0] == 0
 
-    def test_edli_post_submit_unknown_without_command_releases_on_authenticated_absence(
+    def test_edli_post_submit_unknown_without_command_stays_on_snapshot_absence(
         self,
         conn,
         mock_client,
@@ -18512,15 +18511,16 @@ class TestRecoveryResolutionTable:
 
         summary = reconcile_unresolved_commands(conn, mock_client)
 
-        assert summary["edli_post_submit_unknown_absence"]["advanced"] == 1
+        assert summary["edli_post_submit_unknown_absence"]["advanced"] == 0
+        assert summary["edli_post_submit_unknown_absence"]["stayed"] == 1
         projection = conn.execute(
             "SELECT current_state, pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
             (aggregate_id,),
         ).fetchone()
-        assert projection["current_state"] == "CAP_TRANSITIONED"
-        assert bool(projection["pending_reconcile"]) is False
+        assert projection["current_state"] == "PENDING_RECONCILE"
+        assert bool(projection["pending_reconcile"]) is True
         cap = conn.execute("SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-2'").fetchone()
-        assert cap["reservation_status"] == "RELEASED"
+        assert cap["reservation_status"] == "RESERVED"
 
     def test_edli_post_submit_unknown_without_command_stays_when_venue_exposure_matches(
         self,
@@ -21872,7 +21872,11 @@ def _venue_read_unavailable_client(mock_client):
 class TestEdliAbsenceVenueCommandSync:
     """#123 / M2: sync EDLI authenticated-absence proof to venue_commands."""
 
-    def test_absence_proven_terminalizes_and_clears_governor_count(self, conn, mock_client):
+    def test_snapshot_absence_does_not_terminalize_or_clear_governor_count(
+        self,
+        conn,
+        mock_client,
+    ):
         from src.execution.command_recovery import reconcile_unresolved_commands
         from src.risk_allocator.governor import count_unknown_side_effects
 
@@ -21897,24 +21901,18 @@ class TestEdliAbsenceVenueCommandSync:
         _venue_read_unavailable_client(mock_client)
         summary = reconcile_unresolved_commands(conn, mock_client)
 
-        assert summary["venue_command_absence_sync"]["advanced"] == 1
+        assert summary["venue_command_absence_sync"]["advanced"] == 0
+        assert summary["venue_command_absence_sync"]["stayed"] == 1
         assert summary["venue_command_absence_sync"]["errors"] == 0
-        assert _get_state(conn, "cmd-absent") == "SUBMIT_REJECTED"
+        assert _get_state(conn, "cmd-absent") == "SUBMIT_UNKNOWN_SIDE_EFFECT"
         events = _get_events(conn, "cmd-absent")
-        terminal = events[-1]
-        assert terminal["event_type"] == "SUBMIT_REJECTED"
-        payload = json.loads(terminal["payload_json"])
-        assert payload["proof_class"] == "edli_authenticated_clob_absence"
-        assert payload["safe_replay_permitted"] is True
-        assert payload["edli_absence_proof"]["proof_hash"] == "9" * 64
-        assert payload["edli_absence_proof"]["venue_order_exists"] is False
-        assert payload["edli_absence_proof"]["venue_trade_exists"] is False
+        assert events[-1]["event_type"] == "SUBMIT_TIMEOUT_UNKNOWN"
 
-        # Post-condition: governor count drops to zero -> kill switch can clear.
+        # A point-in-time absence snapshot cannot authorize replay; the
+        # governor remains latched until a causal order/trade/submit fact lands.
         after_count, after_markets = count_unknown_side_effects(conn)
-        assert after_count == 0
-        assert after_markets == ()
-        # The terminal write must not call the venue (proof came from EDLI).
+        assert after_count == 1
+        assert after_markets
         mock_client.get_order.assert_not_called()
 
     def test_no_absence_proof_leaves_row_unchanged(self, conn, mock_client):

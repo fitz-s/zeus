@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-28
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
@@ -11,10 +11,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib
 import sqlite3
 import sys
+import time
 import types
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1531,6 +1533,197 @@ def test_get_trades_requests_all_pages_from_sdk(tmp_path):
     assert fake.calls == [("get_trades", {"only_first_page": False})]
     assert len(trades) == 1
     assert trades[0].raw["id"] == "trade-open"
+
+
+def test_account_truth_reads_time_and_each_account_surface_with_one_deadline(tmp_path, monkeypatch):
+    import httpx
+    import py_clob_client_v2.headers.headers as headers_mod
+    from py_clob_client_v2.constants import END_CURSOR
+
+    class FakeAccountClient:
+        host = "https://clob-v2.polymarket.com"
+        signer = object()
+        creds = object()
+
+    adapter, _ = _adapter(tmp_path, FakeAccountClient())
+    calls = []
+    header_paths = []
+    http_clients = []
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    def fake_async_client(**kwargs):
+        client = FakeAsyncClient()
+        http_clients.append((client, kwargs))
+        return client
+
+    monkeypatch.setattr(
+        headers_mod,
+        "create_level_2_headers",
+        lambda _signer, _creds, args, timestamp: (
+            header_paths.append(args.request_path) or {"x-time": str(timestamp)}
+        ),
+    )
+    monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
+
+    async def fake_get(_http, endpoint, *, headers, params, deadline_monotonic):
+        calls.append((endpoint, headers, params, deadline_monotonic))
+        if endpoint.endswith("/time"):
+            return 1_700_000_000
+        if endpoint.endswith("/data/orders"):
+            if len([call for call in calls if call[0].endswith("/data/orders")]) == 1:
+                return {
+                    "data": [{
+                        "orderID": "ord-account",
+                        "status": "LIVE",
+                        "original_size": "10000000",
+                        "size_matched": "0",
+                    }],
+                    "next_cursor": "orders-page-2",
+                }
+            return {
+                "data": [{
+                    "orderID": "ord-account-2",
+                    "status": "LIVE",
+                    "original_size": "10000000",
+                    "size_matched": "0",
+                }],
+                "next_cursor": END_CURSOR,
+            }
+        if endpoint.endswith("/data/trades"):
+            return {
+                "data": [{"id": "trade-account", "status": "MATCHED"}],
+                "next_cursor": END_CURSOR,
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(adapter, "_account_truth_json_get_async", fake_get)
+    deadline = time.monotonic() + 5.0
+    truth = adapter.get_account_truth(deadline_monotonic=deadline)
+
+    assert [endpoint.rsplit("/", 1)[-1] for endpoint, *_rest in calls] == [
+        "time",
+        "orders",
+        "orders",
+        "trades",
+    ]
+    assert all(call[-1] == deadline for call in calls)
+    assert header_paths == ["/data/orders", "/data/trades"]
+    assert len(http_clients) == 1
+    assert http_clients[0][1] == {"http2": False, "timeout": None}
+    assert [state.order_id for state in truth.open_orders] == ["ord-account", "ord-account-2"]
+    assert [trade.raw["id"] for trade in truth.trades] == ["trade-account"]
+
+
+def test_account_truth_deadline_and_page_limit_fail_closed_with_bounded_calls(tmp_path, monkeypatch):
+    from src.venue.polymarket_v2_adapter import IncompleteAccountTruthError
+
+    class FakeAccountClient:
+        host = "https://clob-v2.polymarket.com"
+
+    adapter, _ = _adapter(tmp_path, FakeAccountClient())
+    calls = []
+
+    async def forbidden_get(*_args, **_kwargs):
+        calls.append("network")
+        raise AssertionError("expired deadline must prevent every network call")
+
+    monkeypatch.setattr(adapter, "_account_truth_json_get_async", forbidden_get)
+    with pytest.raises(IncompleteAccountTruthError, match="INCOMPLETE_ACCOUNT_TRUTH"):
+        adapter.get_account_truth(deadline_monotonic=time.monotonic() - 0.01)
+    assert calls == []
+
+    async def fake_headers(*_args, **_kwargs):
+        return {}, 1_700_000_000
+
+    async def incomplete_page(*_args, **_kwargs):
+        calls.append("page")
+        return {"data": [], "next_cursor": "more-pages"}
+
+    monkeypatch.setattr(adapter, "_account_truth_headers_async", fake_headers)
+    monkeypatch.setattr(
+        adapter,
+        "_account_truth_json_get_async",
+        incomplete_page,
+    )
+    with pytest.raises(IncompleteAccountTruthError, match="bounded page limit"):
+        adapter.get_account_truth(
+            deadline_monotonic=time.monotonic() + 5.0,
+            max_pages=1,
+        )
+    assert calls == ["page"]
+
+
+def test_account_truth_transport_deadline_covers_combined_request_phases(tmp_path):
+    from src.venue.polymarket_v2_adapter import IncompleteAccountTruthError
+
+    adapter, _ = _adapter(tmp_path, object())
+
+    class SlowTransport:
+        async def get(self, *_args, **_kwargs):
+            # Simulate two independent transport phases; a per-phase timeout
+            # could admit both waits even though their aggregate exceeds budget.
+            await asyncio.sleep(0.008)
+            await asyncio.sleep(0.008)
+            raise AssertionError("combined phases should have been cancelled")
+
+    started = time.monotonic()
+    with pytest.raises(IncompleteAccountTruthError, match="deadline elapsed"):
+        asyncio.run(
+            adapter._account_truth_json_get_async(
+                SlowTransport(),
+                "https://clob-v2.polymarket.com/data/orders",
+                headers=None,
+                params=None,
+                deadline_monotonic=started + 0.010,
+            )
+        )
+    assert time.monotonic() - started < 0.10
+
+
+def test_account_truth_shared_deadline_interrupts_cross_phase_wait(tmp_path, monkeypatch):
+    from src.venue.polymarket_v2_adapter import IncompleteAccountTruthError
+    import py_clob_client_v2.headers.headers as headers_mod
+    from py_clob_client_v2.constants import END_CURSOR
+
+    class FakeAccountClient:
+        host = "https://clob-v2.polymarket.com"
+        signer = object()
+        creds = object()
+
+    adapter, _ = _adapter(tmp_path, FakeAccountClient())
+    calls = []
+    monkeypatch.setattr(
+        headers_mod,
+        "create_level_2_headers",
+        lambda _signer, _creds, _args, timestamp: {"x-time": str(timestamp)},
+    )
+
+    async def slow_request(_http, endpoint, **_kwargs):
+        surface = endpoint.rsplit("/", 1)[-1]
+        calls.append(surface)
+        if surface == "time":
+            return 1_700_000_000
+        if surface == "orders":
+            await asyncio.sleep(0.008)
+            return {"data": [], "next_cursor": END_CURSOR}
+        if surface == "trades":
+            await asyncio.sleep(0.05)
+            return {"data": [], "next_cursor": END_CURSOR}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(adapter, "_account_truth_json_get_async", slow_request)
+    started = time.monotonic()
+    with pytest.raises(IncompleteAccountTruthError, match="deadline elapsed"):
+        adapter.get_account_truth(deadline_monotonic=started + 0.025)
+
+    assert calls == ["time", "orders", "trades"]
+    assert time.monotonic() - started < 0.10
 
 
 def test_submit_limit_order_rejects_before_sdk_submit_when_fee_bps_missing(tmp_path):

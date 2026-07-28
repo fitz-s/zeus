@@ -1331,7 +1331,7 @@ files:
   src/venue/polymarket_v2_adapter.py:
     zone: K2_runtime
     authority_role: v2_venue_adapter
-    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects prices outside [0.05,0.95] before any SDK submit contact.
+    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects prices outside [0.05,0.95] before any SDK submit contact. Its account-truth read fully paginates orders then trades through one authenticated HTTP client, one server timestamp, endpoint-specific signatures, and one monotonic wall-clock deadline; incomplete transport or page truth never becomes an empty-account fact.
     downstream:
     - src/execution/executor.py
     - src/data/polymarket_client.py
@@ -1827,7 +1827,8 @@ files:
   src/events/event_store.py:
     zone: K2_runtime
     authority_role: edli_opportunity_event_processing_store
-    why: Owns immutable opportunity-event persistence and mutable consumer claim state, including causal-fact-stable global winner targeting and atomic supersession of obsolete cross-family targets so changing q/book/wealth epochs revalidate execution without starving the current global winner. Winner prioritization exposes the exact retained carrier event, not only a boolean, so the claim boundary uses the ID that was actually prioritized. Generic forecast-family pruning excludes the auction-owned targeted carrier; the next complete auction owns replacing it. Retry finalization is fenced by exact claimed_at plus attempt_count: a targeted claim whose pointer was superseded expires without rebinding the old pointer, while only a claim proven to predate process boot may be recovered and rebound after its owner is dead. A processed winner carrier may return to pending only for an explicitly refreshable maker/taker book race with no VenueSubmitAttempted evidence. A side-effect-free carrier terminalized by cross-family supersession, or by the retired generic-prune defect with no live-order event of any kind, gets a new immutable claim identity instead of illegally reviving the terminal row.
+    why: >-
+      Owns immutable opportunity-event persistence and mutable consumer claim state, including causal-fact-stable global winner targeting and atomic supersession of obsolete cross-family targets so changing q/book/wealth epochs revalidate execution without starving the current global winner. Winner prioritization exposes the exact retained carrier event, not only a boolean, so the claim boundary uses the ID that was actually prioritized. Generic forecast-family pruning excludes the auction-owned targeted carrier; the next complete auction owns replacing it. Retry finalization is fenced by exact claimed_at plus attempt_count: a targeted claim whose pointer was superseded expires without rebinding the old pointer, while only a claim proven to predate process boot may be recovered and rebound after its owner is dead. A processed winner carrier may return to pending only for an explicitly refreshable maker/taker book race with no VenueSubmitAttempted evidence. A side-effect-free carrier terminalized by cross-family supersession, or by the retired generic-prune defect with no live-order event of any kind, gets a new immutable claim identity instead of illegally reviving the terminal row.
     downstream:
     - src/events/reactor.py
     - src/engine/global_batch_runtime.py
@@ -1900,10 +1901,17 @@ files:
   src/execution/command_recovery.py:
     zone: K2_runtime
     authority_role: venue_command_recovery
-    why: Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Confirmed maker fills become execution facts while their ACKED remainder is still resting, even when the initial LIVE order fact still reports zero matched; maker cancel races likewise aggregate all canonical confirmed trade legs for one order. Authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill; deploy-time restart recovery runs that same point-order terminal proof before its read-only alignment gate, and the scheduled live tick prioritizes both already-canceled and cancel-unknown capital locks before broad maintenance can consume its DB budget. Boot invalid-entry authority recovery ranks canonical order facts only for zero-exposure pending ENTRY commands, so historical fact volume cannot delay scheduler and held-position monitor startup. B71 additionally detects one open position_id carrying authenticated FILLED ENTRY BUY commands for multiple native held tokens, then in one append-first transaction reconstructs token-typed projections, rehomes only child commands/facts with CAS, and fails closed to review on topology, certificate, lifecycle, attribution, or rehome ambiguity; it never submits a venue action.
+    why: >-
+      Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Confirmed maker fills become execution facts while their ACKED remainder is still resting, even when the initial LIVE order fact still reports zero matched; maker cancel races likewise aggregate all canonical confirmed trade legs for one order. Authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill; deploy-time restart recovery runs that same point-order terminal proof before its read-only alignment gate, and the scheduled live tick prioritizes both already-canceled and cancel-unknown capital locks before broad maintenance can consume its DB budget. A point-in-time account snapshot never clears a post-submit unknown by token-level absence: without a command/order/trade fact causally bound to the original submit, duplicate and cap authority stay fail-closed. Boot invalid-entry authority recovery ranks canonical order facts only for zero-exposure pending ENTRY commands, so historical fact volume cannot delay scheduler and held-position monitor startup. B71 additionally detects one open position_id carrying authenticated FILLED ENTRY BUY commands for multiple native held tokens, then in one append-first transaction reconstructs token-typed projections, rehomes only child commands/facts with CAS, and fails closed to review on topology, certificate, lifecycle, attribution, or rehome ambiguity; it never submits a venue action.
     downstream:
     - src/engine/cycle_runner.py
     - src/state/venue_command_repo.py
+  src/execution/venue_sync_contract.py:
+    zone: K2_runtime
+    authority_role: venue_recovery_snapshot_boundary
+    why: Separates command recovery into DB snapshot, connection-free venue I/O, and short apply phases. Account absence is authoritative only after one complete adapter-owned orders-plus-trades snapshot finishes inside its shared monotonic deadline; adapter failure, pagination ambiguity, or timeout aborts before any apply mutation.
+    downstream:
+    - src/execution/command_recovery.py
   src/execution/executor.py:
     zone: K2_runtime
     authority_role: live_order_executor

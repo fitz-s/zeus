@@ -20,6 +20,7 @@ two-step SDK order submission shapes.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import hashlib
 import json
@@ -68,6 +69,7 @@ logger = logging.getLogger(__name__)
 _DERIVED_API_CREDS_CACHE: dict[tuple[str, int, str, int, str], Any] = {}
 _ABSOLUTE_LIVE_PRICE_MIN = Decimal("0.05")
 _ABSOLUTE_LIVE_PRICE_MAX = Decimal("0.95")
+_ACCOUNT_TRUTH_MAX_PAGES = 100
 
 
 def _assert_absolute_live_price_before_sdk(price: Decimal | str | float) -> Decimal:
@@ -273,6 +275,14 @@ class TradeFact:
 
 
 @dataclass(frozen=True)
+class AccountTruth:
+    """One complete, authenticated account snapshot captured under one deadline."""
+
+    open_orders: tuple[OrderState, ...]
+    trades: tuple[TradeFact, ...]
+
+
+@dataclass(frozen=True)
 class PositionFact:
     raw: dict[str, Any]
 
@@ -326,6 +336,13 @@ class PolymarketV2AdapterProtocol(Protocol):
 
     def get_order(self, order_id: str) -> OrderState: ...
 
+    def get_account_truth(
+        self,
+        *,
+        deadline_monotonic: float,
+        max_pages: int = _ACCOUNT_TRUTH_MAX_PAGES,
+    ) -> AccountTruth: ...
+
     def get_open_orders(self, filter: OpenOrdersFilter | None = None) -> list[OrderState]: ...
 
     def get_trades(self, since: Optional[str] = None) -> list[TradeFact]: ...
@@ -370,6 +387,12 @@ class V2AdapterError(RuntimeError):
 
 class V2ReadUnavailable(V2AdapterError):
     """Raised when a read surface is unavailable and absence cannot be proven."""
+
+
+class IncompleteAccountTruthError(V2ReadUnavailable):
+    """Typed fail-closed account-read failure; empty data is never inferred."""
+
+    code = "INCOMPLETE_ACCOUNT_TRUTH"
 
 
 class PolymarketV2Adapter:
@@ -1177,6 +1200,290 @@ class PolymarketV2Adapter:
         raw_dict["status"] = outcome.status
         raw_dict["_venue_order_status"] = outcome.status
         return OrderState(order_id=outcome.order_id, status=outcome.status, raw=raw_dict)
+
+    @staticmethod
+    def _account_truth_deadline_remaining(deadline_monotonic: float) -> float:
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if remaining <= 0.0:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: account snapshot deadline elapsed"
+            )
+        return remaining
+
+    async def _account_truth_json_get_async(
+        self,
+        http: Any,
+        endpoint: str,
+        *,
+        headers: dict[str, str] | None,
+        params: dict[str, str] | None,
+        deadline_monotonic: float,
+    ) -> Any:
+        """Issue one request inside the snapshot's shared end-to-end deadline."""
+        remaining = self._account_truth_deadline_remaining(deadline_monotonic)
+        try:
+            # ``httpx.Timeout`` bounds phases independently.  ``asyncio.timeout``
+            # cancels the entire await (DNS/connect/TLS/read/pool) at this
+            # snapshot's remaining monotonic budget instead.
+            async with asyncio.timeout(remaining):
+                response = await http.get(endpoint, headers=headers, params=params)
+            if response.status_code != 200:
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: authenticated account read returned "
+                    f"HTTP {response.status_code}"
+                )
+            decoded = response.json()
+        except IncompleteAccountTruthError:
+            raise
+        except TimeoutError as exc:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: account snapshot deadline elapsed"
+            ) from exc
+        except Exception as exc:  # TLS, timeout, decode, and transport faults are unknown truth.
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: authenticated account read failed"
+            ) from exc
+        self._account_truth_deadline_remaining(deadline_monotonic)
+        return decoded
+
+    async def _account_truth_headers_async(
+        self,
+        http: Any,
+        client: Any,
+        *,
+        request_path: str,
+        deadline_monotonic: float,
+        timestamp: int | None = None,
+    ) -> tuple[dict[str, str], int]:
+        """Build endpoint-specific headers from one snapshot server timestamp."""
+        try:
+            from py_clob_client_v2.clob_types import RequestArgs
+            from py_clob_client_v2.endpoints import TIME
+            from py_clob_client_v2.headers.headers import create_level_2_headers
+        except Exception as exc:  # pragma: no cover - installed SDK import surface
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: SDK authentication helpers unavailable"
+            ) from exc
+
+        if timestamp is None:
+            host = str(getattr(client, "host", self.host)).rstrip("/")
+            clock = await self._account_truth_json_get_async(
+                http,
+                f"{host}{TIME}",
+                headers=None,
+                params=None,
+                deadline_monotonic=deadline_monotonic,
+            )
+            if isinstance(clock, bool):
+                raw_timestamp = None
+            elif isinstance(clock, (int, float)):
+                raw_timestamp = clock
+            elif isinstance(clock, dict):
+                raw_timestamp = clock.get("time") or clock.get("timestamp")
+            else:
+                raw_timestamp = None
+            try:
+                timestamp = int(raw_timestamp)
+            except (OverflowError, TypeError, ValueError) as exc:
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: /time response lacks a valid timestamp"
+                ) from exc
+        try:
+            return (
+                create_level_2_headers(
+                    client.signer,
+                    client.creds,
+                    RequestArgs(method="GET", request_path=request_path),
+                    timestamp=timestamp,
+                ),
+                timestamp,
+            )
+        except Exception as exc:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: could not sign authenticated account read"
+            ) from exc
+
+    async def _account_truth_pages_async(
+        self,
+        http: Any,
+        client: Any,
+        *,
+        request_path: str,
+        headers: dict[str, str],
+        deadline_monotonic: float,
+        max_pages: int,
+    ) -> list[dict[str, Any]]:
+        try:
+            from py_clob_client_v2.constants import END_CURSOR, INITIAL_CURSOR
+        except Exception as exc:  # pragma: no cover - installed SDK import surface
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: SDK pagination constants unavailable"
+            ) from exc
+
+        host = str(getattr(client, "host", self.host)).rstrip("/")
+        cursor = INITIAL_CURSOR
+        seen_cursors: set[str] = set()
+        rows: list[dict[str, Any]] = []
+        for _page in range(max_pages):
+            cursor_text = str(cursor)
+            if not cursor_text or cursor_text in seen_cursors:
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: pagination cursor repeated or missing"
+                )
+            seen_cursors.add(cursor_text)
+            payload = await self._account_truth_json_get_async(
+                http,
+                f"{host}{request_path}",
+                headers=headers,
+                params={"next_cursor": cursor_text},
+                deadline_monotonic=deadline_monotonic,
+            )
+            if not isinstance(payload, dict):
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: pagination page returned non-object payload"
+                )
+            page_rows = payload.get("data")
+            if not isinstance(page_rows, list) or not all(
+                isinstance(row, dict) for row in page_rows
+            ):
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: pagination page lacks a list of object rows"
+                )
+            rows.extend(dict(row) for row in page_rows)
+            next_cursor = payload.get("next_cursor")
+            if next_cursor == END_CURSOR:
+                return rows
+            if not isinstance(next_cursor, str) or not next_cursor:
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: pagination page lacks next_cursor"
+                )
+            cursor = next_cursor
+        raise IncompleteAccountTruthError(
+            "INCOMPLETE_ACCOUNT_TRUTH: pagination exceeded bounded page limit"
+        )
+
+    @staticmethod
+    def _open_order_states(raw_rows: list[dict[str, Any]]) -> list[OrderState]:
+        states: list[OrderState] = []
+        for item in raw_rows:
+            item_dict = _normalize_v2_amount_response(
+                dict(item),
+                endpoint="get_open_orders",
+            )
+            outcome = parse_order_status(item_dict, fallback_order_id="", endpoint="get_open_orders")
+            item_dict["_v2_wire_status"] = str(
+                item_dict.get("status") or item_dict.get("state") or ""
+            )
+            item_dict["status"] = outcome.status
+            item_dict["_venue_order_status"] = outcome.status
+            states.append(OrderState(order_id=outcome.order_id, status=outcome.status, raw=item_dict))
+        return states
+
+    @staticmethod
+    def _trade_facts(raw_rows: list[dict[str, Any]]) -> list[TradeFact]:
+        return [TradeFact(raw=dict(item)) for item in raw_rows]
+
+    async def _get_account_truth_async(
+        self,
+        *,
+        deadline_monotonic: float,
+        max_pages: int,
+    ) -> AccountTruth:
+        try:
+            import httpx
+            from py_clob_client_v2.endpoints import ORDERS, TRADES
+        except Exception as exc:  # pragma: no cover - installed SDK import surface
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: SDK account endpoints unavailable"
+            ) from exc
+
+        remaining = self._account_truth_deadline_remaining(deadline_monotonic)
+        client = self._sdk_client()
+        try:
+            # Keep one client for the entire account snapshot.  The outer timeout
+            # covers every phase and both surfaces; leaving the context closes all
+            # sockets after cancellation before the synchronous caller resumes.
+            async with httpx.AsyncClient(http2=False, timeout=None) as http:
+                async with asyncio.timeout(remaining):
+                    orders_headers, server_timestamp = (
+                        await self._account_truth_headers_async(
+                            http,
+                            client,
+                            request_path=ORDERS,
+                            deadline_monotonic=deadline_monotonic,
+                        )
+                    )
+                    trades_headers, _ = await self._account_truth_headers_async(
+                        http,
+                        client,
+                        request_path=TRADES,
+                        deadline_monotonic=deadline_monotonic,
+                        timestamp=server_timestamp,
+                    )
+                    open_orders = await self._account_truth_pages_async(
+                        http,
+                        client,
+                        request_path=ORDERS,
+                        headers=orders_headers,
+                        deadline_monotonic=deadline_monotonic,
+                        max_pages=max_pages,
+                    )
+                    trades = await self._account_truth_pages_async(
+                        http,
+                        client,
+                        request_path=TRADES,
+                        headers=trades_headers,
+                        deadline_monotonic=deadline_monotonic,
+                        max_pages=max_pages,
+                    )
+                    self._account_truth_deadline_remaining(deadline_monotonic)
+                    return AccountTruth(
+                        open_orders=tuple(self._open_order_states(open_orders)),
+                        trades=tuple(self._trade_facts(trades)),
+                    )
+        except IncompleteAccountTruthError:
+            raise
+        except TimeoutError as exc:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: account snapshot deadline elapsed"
+            ) from exc
+        except Exception as exc:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: authenticated account snapshot failed"
+            ) from exc
+
+    def get_account_truth(
+        self,
+        *,
+        deadline_monotonic: float,
+        max_pages: int = _ACCOUNT_TRUTH_MAX_PAGES,
+    ) -> AccountTruth:
+        """Read complete orders and trades under one wall-clock deadline.
+
+        SCOPE=trading account; DRAIN=the next cadence's complete snapshot;
+        RESET=a full orders+trades snapshot before its shared deadline.  Any
+        timeout, TLS failure, malformed page, repeated cursor, or page-limit
+        breach raises ``INCOMPLETE_ACCOUNT_TRUTH`` rather than returning a
+        partial list that a caller could mistake for absence.
+        """
+        _assert_no_world_mutex_held_for_io("venue.get_account_truth")
+        if max_pages <= 0:
+            raise ValueError("max_pages must be positive")
+        self._account_truth_deadline_remaining(deadline_monotonic)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: synchronous account read cannot nest in a running event loop"
+            )
+        return asyncio.run(
+            self._get_account_truth_async(
+                deadline_monotonic=deadline_monotonic,
+                max_pages=max_pages,
+            )
+        )
 
     def get_open_orders(self, filter: OpenOrdersFilter | None = None) -> list[OrderState]:
         _assert_no_world_mutex_held_for_io("venue.get_open_orders")
