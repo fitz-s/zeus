@@ -363,17 +363,24 @@ def test_selected_family_forecast_authority_loss_is_transient(caplog):
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
 
 
-def test_day0_observation_correction_mismatch_requeues_and_reseeds(caplog):
+@pytest.mark.parametrize(
+    "reason_base",
+    (
+        "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH",
+        "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH",
+    ),
+)
+def test_day0_observation_correction_mismatch_requeues_and_reseeds(
+    caplog,
+    reason_base,
+):
     reason = (
         "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
-        "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH"
+        f"{reason_base}"
     )
 
     with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
-        assert (
-            "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH"
-            in TRANSIENT_MONEY_PATH_REASONS
-        )
+        assert reason_base in TRANSIENT_MONEY_PATH_REASONS
         assert _is_transient_money_path_reason(reason) is True
         assert _is_posterior_staleness_reason(reason) is True
 

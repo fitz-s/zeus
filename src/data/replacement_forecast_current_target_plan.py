@@ -1128,8 +1128,7 @@ def _latest_authorized_day0_fact(
                 margin_by_channel: dict[str, float | None] = {}
                 best_value: float | None = None
                 best_channel = ""
-                best_publish_ts = ""
-                best_fetched_at = ""
+                latest_clock_by_channel: dict[str, tuple[str, str]] = {}
                 for print_row in print_rows:
                     channel = str(print_row["source_channel"])
                     print_unit = str(print_row["unit"] or "").strip().upper()
@@ -1183,16 +1182,24 @@ def _latest_authorized_day0_fact(
                         continue
                     publish_ts = str(print_row["publish_ts_utc"])
                     fetched_at = str(print_row["fetched_at_utc"])
+                    previous_clock = latest_clock_by_channel.get(channel)
+                    if previous_clock is None or (publish_ts, fetched_at) > previous_clock:
+                        latest_clock_by_channel[channel] = (publish_ts, fetched_at)
                     if best_value is None or (
                         (metric == "high" and value > best_value)
                         or (metric == "low" and value < best_value)
-                        or (value == best_value and publish_ts > best_publish_ts)
+                        or (
+                            value == best_value
+                            and publish_ts
+                            > latest_clock_by_channel.get(best_channel, ("", ""))[0]
+                        )
                     ):
                         best_value = value
                         best_channel = channel
-                        best_publish_ts = publish_ts
-                        best_fetched_at = fetched_at
                 if best_value is not None:
+                    best_publish_ts, best_fetched_at = latest_clock_by_channel[
+                        best_channel
+                    ]
                     facts.append(
                         {
                             "observed_extreme_native": best_value,
@@ -1244,7 +1251,25 @@ def _latest_authorized_day0_fact(
 
     best_extreme = (min if metric == "low" else max)(fact_extreme(fact) for fact in facts)
     candidates = [fact for fact in facts if fact_extreme(fact) == best_extreme]
-    return max(candidates, key=fact_time)
+    winner = max(candidates, key=fact_time)
+    winner_source = str(winner.get("observation_source") or "").strip().lower()
+    same_source_facts = [
+        fact
+        for fact in facts
+        if str(fact.get("observation_source") or "").strip().lower()
+        == winner_source
+    ]
+    frontier = max(same_source_facts, key=fact_time)
+    if fact_time(frontier) <= fact_time(winner):
+        return winner
+    # The value is the cumulative day-so-far extreme; its clock is the latest
+    # authorized sample from the same station channel, even when that sample
+    # lies inside the already-observed plateau. Keeping the time at the instant
+    # the extreme first occurred makes a current posterior look stale forever.
+    advanced = dict(winner)
+    advanced["observation_time"] = frontier["observation_time"]
+    advanced["observation_available_at"] = frontier["observation_available_at"]
+    return advanced
 
 
 def _day0_observation_lag_reason(

@@ -4382,11 +4382,12 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     "REPLACEMENT_LIVE_INPUT_LAG",
     "FORECAST_AUTHORITY_MISSING",
     # SCOPE: the exact city/date/metric family whose persisted conditioning
-    # predates a later authoritative observation correction. DRAIN: the
-    # settlement-print catch-up event seeds immediate family materialization.
+    # predates a later authoritative observation value or coverage clock.
+    # DRAIN: the settlement-print catch-up event seeds immediate family materialization.
     # RESET: the recomputed posterior binds the corrected observation value and
     # the next full decision no longer raises this reason.
     "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH",
+    "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH",
     # Read-boundary compatibility for queued/durable pre-cutover reasons.
     "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
     "REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED",
@@ -4873,6 +4874,7 @@ _POSTERIOR_STALENESS_REASON_BASES = frozenset(
         "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
         "REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED",
         "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH",
+        "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH",
         # The bundle reader emits this exact nested segment when a newer raw
         # input supersedes the served posterior.  Day0 source-clock binding may
         # wrap it in GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED, but the cure stays

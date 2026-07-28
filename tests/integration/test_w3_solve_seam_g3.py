@@ -3192,8 +3192,16 @@ def test_global_day0_actuation_rejects_conditioning_not_equal_to_current_state()
     conn.close()
 
 
+@pytest.mark.parametrize(
+    "conditioning_source",
+    (
+        "aviationweather_metar",
+        "wu_api+same_station_fast_tail",
+    ),
+)
 def test_global_day0_held_conditioning_uses_named_physical_frontier(
     monkeypatch,
+    conditioning_source,
 ):
     from src.data import replacement_forecast_current_target_plan as current_plan
 
@@ -3238,7 +3246,7 @@ def test_global_day0_held_conditioning_uses_named_physical_frontier(
             "observation_time": "2026-07-10T19:30:00+00:00",
             "observed_extreme_c": 28.0,
             "sample_count": 3,
-            "source": "aviationweather_metar",
+            "source": conditioning_source,
             "unit": "C",
         },
         observation_conn=conn,

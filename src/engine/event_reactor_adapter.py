@@ -28316,6 +28316,27 @@ def _validated_fast_residual_day0_conditioning(
     return conditioning
 
 
+def _conditioning_names_physical_frontier(
+    conditioning_source: str,
+    physical_source: str,
+) -> bool:
+    """Match a fused WU/fast-tail label to its same-station wire channel."""
+
+    conditioned = str(conditioning_source or "").strip().lower()
+    physical = str(physical_source or "").strip().lower()
+    if conditioned == physical:
+        return True
+    return (
+        conditioned == "wu_api+same_station_fast_tail"
+        and physical
+        in {
+            "aviationweather_metar",
+            "same_station_fast_tail",
+            "wu_api",
+        }
+    )
+
+
 def _fast_residual_day0_conditioning(
     replacement_bundle: object,
 ) -> Mapping[str, object] | None:
@@ -29329,7 +29350,10 @@ def _global_day0_execution_payload(
             if (
                 conditioning_source
                 and physical_fact is not None
-                and conditioning_source == physical_source
+                and _conditioning_names_physical_frontier(
+                    conditioning_source,
+                    physical_source,
+                )
             ):
                 conditioning_fact = physical_fact
             conditioning_at = utc(

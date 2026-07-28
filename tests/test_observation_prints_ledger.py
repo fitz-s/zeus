@@ -197,6 +197,57 @@ class TestParisTypeSpecimenThroughLedger:
         assert fact["observation_time"] == "2026-07-14T14:30:00+00:00"
         assert fact["observation_available_at"] == "2026-07-14T14:34:00+00:00"
 
+    @pytest.mark.parametrize(
+        ("metric", "extreme", "later_non_extreme"),
+        (
+            ("high", 35.0, 34.0),
+            ("low", 10.0, 11.0),
+        ),
+    )
+    def test_non_extreme_print_advances_cumulative_frontier_clock(
+        self,
+        metric,
+        extreme,
+        later_non_extreme,
+    ):
+        conn = _conn()
+        for published, fetched, value in (
+            (
+                "2026-07-14T14:30:00+00:00",
+                "2026-07-14T14:34:00+00:00",
+                extreme,
+            ),
+            (
+                "2026-07-14T15:00:00+00:00",
+                "2026-07-14T15:04:00+00:00",
+                later_non_extreme,
+            ),
+        ):
+            append_print(
+                conn,
+                city="Paris",
+                station_id="LFPB",
+                source_channel="aviationweather_metar",
+                publish_ts_utc=published,
+                value_native=value,
+                unit="C",
+                fetched_at_utc=fetched,
+                raw_report=f"METAR LFPB {value}/14",
+            )
+
+        fact = _latest_authorized_day0_fact(
+            conn,
+            city="Paris",
+            target_date="2026-07-14",
+            temperature_metric=metric,
+            decision_time=datetime(2026, 7, 14, 15, 10, tzinfo=UTC),
+        )
+
+        assert fact is not None
+        assert fact["observed_extreme_native"] == extreme
+        assert fact["observation_time"] == "2026-07-14T15:00:00+00:00"
+        assert fact["observation_available_at"] == "2026-07-14T15:04:00+00:00"
+
     def test_fahrenheit_fast_fact_uses_precise_t_group_value(self):
         conn = _conn()
         append_print(
