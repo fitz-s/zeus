@@ -2344,6 +2344,63 @@ def _harvester_truth_writer_tick():
     logger.info("harvester_truth_writer_tick: %s", result)
 
 
+_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES = frozenset(
+    {
+        "CURRENT_TARGET_SCOPED_DOWNLOAD_NO_TARGETS",
+        "CURRENT_TARGETS_ALREADY_COVERED",
+        "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+        "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+    }
+)
+_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_RETRYABLE_STATUSES = frozenset(
+    {
+        "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+        "CURRENT_TARGET_DOWNLOAD_INFLIGHT_SKIP",
+        "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+        "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
+        "CURRENT_TARGET_RAW_INPUTS_TRANSPORT_RETRYABLE",
+        "CYCLE_PROBE_UNRESOLVED_SKIP",
+    }
+)
+_REPLACEMENT_MAINTENANCE_EXTRAS_OK_STATUSES = frozenset(
+    {
+        "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",
+        "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+    }
+)
+_REPLACEMENT_MAINTENANCE_EXTRAS_RETRYABLE_STATUSES = frozenset(
+    {
+        "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
+        "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP",
+        "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
+        "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+    }
+)
+
+
+def _replacement_maintenance_lane_error(
+    lane: str,
+    report: object,
+    *,
+    ok_statuses: frozenset[str],
+    retryable_statuses: frozenset[str],
+) -> str | None:
+    """Classify one maintenance lane from an explicit, fail-closed status contract."""
+    if report is None:
+        return None
+    status = (
+        str(report.get("status") or "")
+        if isinstance(report, dict)
+        else ""
+    )
+    if status in ok_statuses:
+        return None
+    if status in retryable_statuses:
+        return f"{lane}:{status}"
+    return f"{lane}:UNRECOGNIZED_STATUS:{status or 'MISSING'}"
+
+
 @_scheduler_job("ingest_replacement_maintenance")
 def _replacement_maintenance_tick():
     """Repair unchanged replacement targets without blocking the source clock."""
@@ -2351,6 +2408,7 @@ def _replacement_maintenance_tick():
         bayes_precision_fusion_quota_cooldown_seconds,
     )
     from src.data.replacement_forecast_production import (  # noqa: PLC0415
+        _download_bayes_precision_fusion_extra_raw_inputs_if_needed,
         _download_replacement_forecast_current_targets_if_needed,
         _enqueue_cycle_advance_reseeds_if_needed,
         _enqueue_fusion_upgrade_reseeds_if_needed,
@@ -2359,39 +2417,59 @@ def _replacement_maintenance_tick():
 
     cfg = _replacement_forecast_live_materialization_queue_config()
     cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
-    if cooldown_seconds > 0:
-        _defer_replacement_maintenance(float(cooldown_seconds))
-        return {
-            "status": "REPLACEMENT_MAINTENANCE_QUOTA_COOLDOWN",
-            "cooldown_seconds": cooldown_seconds,
-        }
     if not _replacement_maintenance_due():
         return {"status": "REPLACEMENT_MAINTENANCE_NOT_DUE"}
 
     timeout_s = _replacement_current_target_poll_timeout_seconds(
         _replacement_availability_poll_seconds()
     )
-    try:
-        download_report = _download_replacement_forecast_current_targets_if_needed(
-            cfg,
-            max_wall_clock_seconds=timeout_s,
-        )
-    except TimeoutError as exc:
-        download_report = {
-            "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
-            "timeout_seconds": timeout_s,
-            "error": str(exc)[:240],
+    if cooldown_seconds > 0:
+        _defer_replacement_maintenance(float(cooldown_seconds))
+        download_report = None
+        extras_report = {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
+            "cooldown_seconds": cooldown_seconds,
         }
-    except Exception as exc:  # noqa: BLE001 - reseed catch-up remains independent
-        logger.warning(
-            "replacement maintenance current-target repair failed: %s",
-            exc,
-            exc_info=True,
-        )
-        download_report = {
-            "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
-            "error": f"{type(exc).__name__}: {str(exc)[:220]}",
-        }
+    else:
+        try:
+            download_report = _download_replacement_forecast_current_targets_if_needed(
+                cfg,
+                max_wall_clock_seconds=timeout_s,
+            )
+        except TimeoutError as exc:
+            download_report = {
+                "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+                "timeout_seconds": timeout_s,
+                "error": str(exc)[:240],
+            }
+        except Exception as exc:  # noqa: BLE001 - reseed catch-up remains independent
+            logger.warning(
+                "replacement maintenance current-target repair failed: %s",
+                exc,
+                exc_info=True,
+            )
+            download_report = {
+                "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+            }
+
+        try:
+            extras_report = (
+                _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+                    cfg,
+                    max_wall_clock_seconds=timeout_s,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - reseeds remain independent
+            logger.warning(
+                "replacement maintenance BPF-extra repair failed: %s",
+                exc,
+                exc_info=True,
+            )
+            extras_report = {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
+                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+            }
 
     report: dict[str, object] = {
         "status": "REPLACEMENT_MAINTENANCE_COMPLETED",
@@ -2399,17 +2477,35 @@ def _replacement_maintenance_tick():
             download_report
         ),
     }
-    maintenance_errors: list[str] = []
-    download_status = str(
-        download_report.get("status") or ""
-        if isinstance(download_report, dict)
-        else ""
-    )
-    if download_status in {
-        "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
-        "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
-    }:
-        maintenance_errors.append(f"current_target:{download_status}")
+    if extras_report is not None:
+        report["bayes_precision_fusion_extra_status"] = extras_report.get("status")
+        report["bayes_precision_fusion_extra_rows_written"] = extras_report.get(
+            "written_row_count"
+        )
+    if cooldown_seconds > 0:
+        report["cooldown_seconds"] = cooldown_seconds
+    maintenance_errors = [
+        error
+        for error in (
+            _replacement_maintenance_lane_error(
+                "current_target",
+                download_report,
+                ok_statuses=_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES,
+                retryable_statuses=(
+                    _REPLACEMENT_MAINTENANCE_CURRENT_TARGET_RETRYABLE_STATUSES
+                ),
+            ),
+            _replacement_maintenance_lane_error(
+                "bayes_precision_fusion_extra",
+                extras_report,
+                ok_statuses=_REPLACEMENT_MAINTENANCE_EXTRAS_OK_STATUSES,
+                retryable_statuses=(
+                    _REPLACEMENT_MAINTENANCE_EXTRAS_RETRYABLE_STATUSES
+                ),
+            ),
+        )
+        if error is not None
+    ]
     for prefix, reseed in (
         ("fusion_upgrade", _enqueue_fusion_upgrade_reseeds_if_needed),
         ("cycle_advance", _enqueue_cycle_advance_reseeds_if_needed),
@@ -2427,6 +2523,7 @@ def _replacement_maintenance_tick():
             report[f"{prefix}_seeds_enqueued"] = reseed_report.get("seeds_enqueued")
     if maintenance_errors:
         report["status"] = "REPLACEMENT_MAINTENANCE_PARTIAL"
+        report["retryable"] = True
         report["maintenance_errors"] = tuple(maintenance_errors)
     logger.info("replacement maintenance report: %s", report)
     return report
@@ -2849,15 +2946,38 @@ def _replacement_availability_poll_tick():
             report.get("source_commit_notifications_pending") or 0
         )
         if (
-            scoped_reseed_completed
-            or anchor_reseed_published
-            or pending_notifications > 0
-        ) and not notification_errors:
+            (scoped_reseed_completed or pending_notifications > 0)
+            and not notification_errors
+        ):
+            # A committed-source callback can only prove coverage for the scopes it
+            # received. It is not durable proof that every raw revision committed in
+            # this poll was in that callback, so retain one coalesced broad fusion
+            # catch-up. The trigger's durable transition marker makes the overlap
+            # idempotent per (scope, raw revision); do not duplicate the unrelated
+            # cycle-advance scan here.
+            broad_fusion_report: dict[str, object] = {}
+            _attach_reseed_reports(
+                broad_fusion_report,
+                include_cycle_advance=False,
+            )
+            for key in (
+                "fusion_upgrade_status",
+                "fusion_upgrade_seeds_enqueued",
+            ):
+                if key in broad_fusion_report:
+                    report[f"broad_{key}"] = broad_fusion_report[key]
             report["reseed_maintenance_status"] = (
                 "SOURCE_COMMIT_RESEEDS_DEFERRED"
                 if pending_notifications > 0
                 else "SOURCE_COMMIT_RESEEDS_PUBLISHED"
-                if scoped_reseed_completed
+            )
+        elif (
+            (anchor_reseed_published or pending_notifications > 0)
+            and not notification_errors
+        ):
+            report["reseed_maintenance_status"] = (
+                "SOURCE_COMMIT_RESEEDS_DEFERRED"
+                if pending_notifications > 0
                 else "SOURCE_ANCHOR_RESEEDS_PUBLISHED"
             )
         else:

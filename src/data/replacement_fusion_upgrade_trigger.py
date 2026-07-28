@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-07-28
 # Authority basis: Task #32 (operator 2026-06-11) — PARTIAL fusions never upgrade when late
 #   instruments publish. The materializer reads CURRENT values from the persisted single_runs
 #   capture (gem via previous_runs exception) at the OM9 anchor cycle; a provider whose
@@ -22,22 +22,27 @@ the latest posterior's provider set or exact CURRENT input revisions have been s
 seed-discovery / queue / plan coverage gates remain keyed on baseline_b0 + q_lcb (their job is
 freshness/tradeable-grade, not input revision detection).
 
-The enqueue (`enqueue_fusion_upgrade_reseeds`) writes a re-materialization seed via the EXISTING
-seed builder + write_seed into the SAME seed_dir the materialize cycle already drains — no new
-daemon, no parallel materialization path. Idempotency is a marker row in fusion_upgrade_enqueues
-UNIQUE on (city, target_date, metric, source_cycle_time, capturable_family_set): family growth
-uses the canonical family set as its transition key; exact input revisions suffix that key with
-the changed source raw-row ids. A scope is re-enqueued AT MOST ONCE per exact transition while a
-new raw row remains eligible to trigger one new materialization.
+The enqueue (`enqueue_fusion_upgrade_reseeds`) durably reserves the UNIQUE transition marker,
+writes via the EXISTING atomic write_seed into owner-private hidden staging, then durably
+finalizes ownership before an atomic hardlink publish into the SAME seed_dir the materialize
+cycle already drains — no new daemon or parallel materialization path. The marker is UNIQUE on
+(city, target_date, metric, source_cycle_time, capturable_family_set): family growth uses the
+canonical family set as its transition key; exact input revisions suffix that key with the
+changed source raw-row ids. A scope is re-enqueued AT MOST ONCE per exact transition while a new
+raw row remains eligible to trigger one new materialization.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import sqlite3
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
+from uuid import uuid4
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
 from src.data.replacement_forecast_readiness import SOURCE_ID
@@ -45,6 +50,17 @@ from src.data.replacement_forecast_readiness import SOURCE_ID
 _LOG = logging.getLogger("zeus.replacement_fusion_upgrade_trigger")
 
 UTC = timezone.utc
+_RESERVATION_PREFIX = "__fusion_upgrade_reservation__:"
+_PUBLISH_PENDING_PREFIX = "__fusion_upgrade_publish_pending__:"
+_RESERVATION_TTL = timedelta(minutes=5)
+
+
+@dataclass(frozen=True)
+class _SeedPublication:
+    owner: str
+    staging_file: Path
+    publish_temp: Path
+    seed_file: Path
 
 # THE single authority mapping model -> decorrelated provider family. Mirrors exactly the
 # materializer's per-provider check (replacement_forecast_materializer lines ~1012-1024): the
@@ -398,32 +414,281 @@ def scope_capture_offers_larger_provider_set(
     }
 
 
-def _already_enqueued(
+def _new_seed_publication(
+    seed_file: Path,
+    transition_keys: Sequence[str] = (),
+) -> _SeedPublication:
+    owner = uuid4().hex
+    transition_digest = hashlib.sha256(
+        "\n".join(sorted(set(transition_keys))).encode("utf-8")
+    ).hexdigest()
+    queue_file = seed_file.with_name(
+        f"{seed_file.stem}.transition-{transition_digest}{seed_file.suffix}"
+    ).absolute()
+    staging_file = (
+        queue_file.parent
+        / ".fusion_upgrade_staging"
+        / f"{queue_file.name}.{owner}.json"
+    )
+    publish_temp = queue_file.with_name(f".{queue_file.name}.{owner}.publish")
+    return _SeedPublication(
+        owner=owner,
+        staging_file=staging_file,
+        publish_temp=publish_temp,
+        seed_file=queue_file,
+    )
+
+
+def _publication_value(prefix: str, publication: _SeedPublication) -> str:
+    return prefix + json.dumps(
+        {
+            "owner": publication.owner,
+            "publish_temp": str(publication.publish_temp),
+            "seed_file": str(publication.seed_file),
+            "staging_file": str(publication.staging_file),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _parse_publication(
+    value: object,
+    *,
+    prefix: str,
+) -> _SeedPublication | None:
+    raw = str(value or "")
+    if not raw.startswith(prefix):
+        return None
+    try:
+        payload = json.loads(raw[len(prefix) :])
+        if not isinstance(payload, Mapping):
+            return None
+        owner = str(payload["owner"]).strip()
+        staging_file = Path(str(payload["staging_file"]))
+        publish_temp = Path(str(payload["publish_temp"]))
+        seed_file = Path(str(payload["seed_file"]))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not owner:
+        return None
+    return _SeedPublication(
+        owner=owner,
+        staging_file=staging_file,
+        publish_temp=publish_temp,
+        seed_file=seed_file,
+    )
+
+
+def _cleanup_private_publication(publication: _SeedPublication) -> None:
+    publication.publish_temp.unlink(missing_ok=True)
+    publication.staging_file.unlink(missing_ok=True)
+
+
+def _fsync_file(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_staged_seed(staging_file: Path) -> None:
+    """Make the private seed and its directory durable before SQLite references it."""
+    _fsync_file(staging_file)
+    _fsync_directory(staging_file.parent)
+
+
+def _fsync_publication_directories(publication: _SeedPublication) -> None:
+    """Make the atomic publish durable before SQLite advertises the public path."""
+    directories = {
+        publication.publish_temp.parent,
+        publication.seed_file.parent,
+    }
+    for directory in sorted(directories, key=str):
+        _fsync_directory(directory)
+
+
+def _publish_finalized_seed(publication: _SeedPublication) -> None:
+    """Publish a finalized private seed exactly once, even across a crash."""
+    publication.seed_file.parent.mkdir(parents=True, exist_ok=True)
+    if publication.seed_file.exists():
+        if publication.staging_file.exists() and os.path.samefile(
+            publication.staging_file,
+            publication.seed_file,
+        ):
+            _fsync_publication_directories(publication)
+            return
+        raise RuntimeError(
+            "fusion seed queue path is occupied by a different publication: "
+            f"{publication.seed_file}"
+        )
+    if publication.publish_temp.exists():
+        os.replace(publication.publish_temp, publication.seed_file)
+        _fsync_publication_directories(publication)
+        return
+    if not publication.staging_file.exists():
+        raise FileNotFoundError(
+            f"finalized fusion seed staging missing: {publication.staging_file}"
+        )
+    # A queue consumer moves, rather than unlinks, claimed seeds. The private
+    # staging hardlink therefore retains st_nlink > 1 after a successful publish
+    # even when the queue path has already disappeared. Do not republish it.
+    if publication.staging_file.stat().st_nlink > 1:
+        _fsync_publication_directories(publication)
+        return
+    try:
+        os.link(publication.staging_file, publication.publish_temp)
+    except FileExistsError:
+        pass
+    if publication.publish_temp.exists():
+        os.replace(publication.publish_temp, publication.seed_file)
+        _fsync_publication_directories(publication)
+        return
+    if publication.seed_file.exists() or publication.staging_file.stat().st_nlink > 1:
+        _fsync_publication_directories(publication)
+        return
+    raise RuntimeError(
+        f"fusion seed atomic publish lost both temp and queue path: {publication.seed_file}"
+    )
+
+
+def _complete_published_enqueues(
     conn: sqlite3.Connection,
     *,
     city: str,
     target_date: str,
     metric: str,
     source_cycle_iso: str,
-    transition_key: str,
-) -> bool:
-    """True iff this scope/cycle transition already has a durable enqueue marker."""
+    transition_keys: Sequence[str],
+    publish_pending: str,
+    seed_file: Path,
+) -> int:
     try:
-        row = conn.execute(
-            """
-            SELECT 1 FROM fusion_upgrade_enqueues
-            WHERE city = ? AND target_date = ? AND metric = ?
-              AND source_cycle_time = ? AND capturable_family_set = ?
-            LIMIT 1
-            """,
-            (city, target_date, metric, source_cycle_iso, transition_key),
-        ).fetchone()
+        for transition_key in transition_keys:
+            conn.execute(
+                """
+                UPDATE fusion_upgrade_enqueues
+                SET seed_file = ?
+                WHERE city = ? AND target_date = ? AND metric = ?
+                  AND source_cycle_time = ? AND capturable_family_set = ?
+                  AND seed_file = ?
+                """,
+                (
+                    str(seed_file),
+                    city,
+                    target_date,
+                    metric,
+                    source_cycle_iso,
+                    transition_key,
+                    publish_pending,
+                ),
+            )
+        rows = tuple(
+            conn.execute(
+                """
+                SELECT seed_file
+                FROM fusion_upgrade_enqueues
+                WHERE city = ? AND target_date = ? AND metric = ?
+                  AND source_cycle_time = ? AND capturable_family_set = ?
+                """,
+                (
+                    city,
+                    target_date,
+                    metric,
+                    source_cycle_iso,
+                    transition_key,
+                ),
+            ).fetchone()
+            for transition_key in transition_keys
+        )
+        if any(row is None or str(row["seed_file"]) != str(seed_file) for row in rows):
+            raise RuntimeError(
+                "fusion-upgrade published marker did not converge to the queue path"
+            )
+        conn.commit()
     except Exception:
-        return False
-    return row is not None
+        conn.rollback()
+        raise
+    return len(transition_keys)
 
 
-def _record_enqueue(
+def _recover_pending_publications(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    source_cycle_iso: str,
+) -> None:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT seed_file
+        FROM fusion_upgrade_enqueues
+        WHERE city = ? AND target_date = ? AND metric = ?
+          AND source_cycle_time = ?
+          AND seed_file LIKE ?
+        """,
+        (
+            city,
+            target_date,
+            metric,
+            source_cycle_iso,
+            f"{_PUBLISH_PENDING_PREFIX}%",
+        ),
+    ).fetchall()
+    for row in rows:
+        publish_pending = str(row["seed_file"])
+        publication = _parse_publication(
+            publish_pending,
+            prefix=_PUBLISH_PENDING_PREFIX,
+        )
+        if publication is None:
+            continue
+        _publish_finalized_seed(publication)
+        transition_rows = conn.execute(
+            """
+            SELECT capturable_family_set
+            FROM fusion_upgrade_enqueues
+            WHERE city = ? AND target_date = ? AND metric = ?
+              AND source_cycle_time = ? AND seed_file = ?
+            """,
+            (
+                city,
+                target_date,
+                metric,
+                source_cycle_iso,
+                publish_pending,
+            ),
+        ).fetchall()
+        transition_keys = tuple(
+            str(transition_row["capturable_family_set"])
+            for transition_row in transition_rows
+        )
+        if transition_keys:
+            _complete_published_enqueues(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                source_cycle_iso=source_cycle_iso,
+                transition_keys=transition_keys,
+                publish_pending=publish_pending,
+                seed_file=publication.seed_file,
+            )
+        _cleanup_private_publication(publication)
+
+
+def _reserve_enqueues(
     conn: sqlite3.Connection,
     *,
     city: str,
@@ -431,31 +696,233 @@ def _record_enqueue(
     metric: str,
     source_cycle_iso: str,
     served_family_key: str,
-    transition_key: str,
-    seed_file: str,
-) -> bool:
-    """Write the idempotency marker. Returns True iff this call inserted the row (False = a
-    concurrent/prior enqueue already recorded it, via the UNIQUE index INSERT OR IGNORE)."""
-    before = conn.total_changes
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO fusion_upgrade_enqueues
-            (enqueued_at, city, target_date, metric, source_cycle_time,
-             served_family_set, capturable_family_set, seed_file)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            datetime.now(tz=UTC).isoformat(),
-            city,
-            target_date,
-            metric,
-            source_cycle_iso,
-            served_family_key,
-            transition_key,
-            seed_file,
-        ),
+    transition_keys: Sequence[str],
+    publication: _SeedPublication,
+) -> tuple[str, tuple[str, ...]]:
+    """Durably claim all unresolved transition rows as one fenced ownership set."""
+    _recover_pending_publications(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        source_cycle_iso=source_cycle_iso,
     )
-    return conn.total_changes > before
+    reserved_at = datetime.now(tz=UTC)
+    stale_before = reserved_at - _RESERVATION_TTL
+    reservation = _publication_value(_RESERVATION_PREFIX, publication)
+    reserved: list[str] = []
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing: dict[str, sqlite3.Row | None] = {
+            transition_key: conn.execute(
+                """
+                SELECT enqueued_at, seed_file
+                FROM fusion_upgrade_enqueues
+                WHERE city = ? AND target_date = ? AND metric = ?
+                  AND source_cycle_time = ? AND capturable_family_set = ?
+                LIMIT 1
+                """,
+                (city, target_date, metric, source_cycle_iso, transition_key),
+            ).fetchone()
+            for transition_key in transition_keys
+        }
+        for row in existing.values():
+            if row is None:
+                continue
+            marker_value = str(row["seed_file"] or "")
+            if _parse_publication(
+                marker_value,
+                prefix=_PUBLISH_PENDING_PREFIX,
+            ) is not None:
+                conn.rollback()
+                return reservation, ()
+            if marker_value.startswith(_PUBLISH_PENDING_PREFIX):
+                conn.rollback()
+                return reservation, ()
+            foreign = _parse_publication(
+                marker_value,
+                prefix=_RESERVATION_PREFIX,
+            )
+            if marker_value.startswith(_RESERVATION_PREFIX) and foreign is None:
+                conn.rollback()
+                return reservation, ()
+            if foreign is None:
+                continue
+            try:
+                marker_time = datetime.fromisoformat(
+                    str(row["enqueued_at"])
+                ).astimezone(UTC)
+            except (TypeError, ValueError):
+                marker_time = datetime.min.replace(tzinfo=UTC)
+            # SCOPE: the complete unresolved transition set for this scope/cycle.
+            # DRAIN: the owner finalizes all keys before publishing one seed.
+            # RESET: only an expired reservation can be atomically fenced out.
+            if marker_time > stale_before:
+                conn.rollback()
+                return reservation, ()
+        for transition_key in transition_keys:
+            row = existing[transition_key]
+            if row is None:
+                inserted = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO fusion_upgrade_enqueues
+                        (enqueued_at, city, target_date, metric, source_cycle_time,
+                         served_family_set, capturable_family_set, seed_file)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        reserved_at.isoformat(),
+                        city,
+                        target_date,
+                        metric,
+                        source_cycle_iso,
+                        served_family_key,
+                        transition_key,
+                        reservation,
+                    ),
+                ).rowcount
+                if inserted:
+                    reserved.append(transition_key)
+                continue
+            marker_value = str(row["seed_file"] or "")
+            foreign = _parse_publication(
+                marker_value,
+                prefix=_RESERVATION_PREFIX,
+            )
+            if foreign is None:
+                continue
+            updated = conn.execute(
+                """
+                UPDATE fusion_upgrade_enqueues
+                SET enqueued_at = ?, served_family_set = ?, seed_file = ?
+                WHERE city = ? AND target_date = ? AND metric = ?
+                  AND source_cycle_time = ? AND capturable_family_set = ?
+                  AND seed_file = ?
+                """,
+                (
+                    reserved_at.isoformat(),
+                    served_family_key,
+                    reservation,
+                    city,
+                    target_date,
+                    metric,
+                    source_cycle_iso,
+                    transition_key,
+                    marker_value,
+                ),
+            ).rowcount
+            if updated:
+                reserved.append(transition_key)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return reservation, tuple(reserved)
+
+
+def _release_enqueue_reservations(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    source_cycle_iso: str,
+    transition_keys: Sequence[str],
+    reservation: str,
+) -> None:
+    try:
+        for transition_key in transition_keys:
+            conn.execute(
+                """
+                DELETE FROM fusion_upgrade_enqueues
+                WHERE city = ? AND target_date = ? AND metric = ?
+                  AND source_cycle_time = ? AND capturable_family_set = ?
+                  AND seed_file = ?
+                """,
+                (
+                    city,
+                    target_date,
+                    metric,
+                    source_cycle_iso,
+                    transition_key,
+                    reservation,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _finalize_enqueue_reservations(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    source_cycle_iso: str,
+    transition_keys: Sequence[str],
+    reservation: str,
+    publication: _SeedPublication,
+) -> str:
+    publish_pending = _publication_value(
+        _PUBLISH_PENDING_PREFIX,
+        publication,
+    )
+    finalized = 0
+    try:
+        for transition_key in transition_keys:
+            finalized += conn.execute(
+                """
+                UPDATE fusion_upgrade_enqueues
+                SET seed_file = ?
+                WHERE city = ? AND target_date = ? AND metric = ?
+                  AND source_cycle_time = ? AND capturable_family_set = ?
+                  AND seed_file = ?
+                """,
+                (
+                    publish_pending,
+                    city,
+                    target_date,
+                    metric,
+                    source_cycle_iso,
+                    transition_key,
+                    reservation,
+                ),
+            ).rowcount
+        if finalized != len(transition_keys):
+            raise RuntimeError(
+                "fusion-upgrade reservation ownership changed before finalize"
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return publish_pending
+
+
+def _publication_has_durable_marker_reference(
+    conn: sqlite3.Connection,
+    publication: _SeedPublication,
+) -> bool:
+    """Fail closed when SQLite may still rely on this publication's staging file."""
+    reservation = _publication_value(_RESERVATION_PREFIX, publication)
+    publish_pending = _publication_value(_PUBLISH_PENDING_PREFIX, publication)
+    try:
+        return (
+            conn.execute(
+                """
+                SELECT 1
+                FROM fusion_upgrade_enqueues
+                WHERE seed_file IN (?, ?)
+                LIMIT 1
+                """,
+                (reservation, publish_pending),
+            ).fetchone()
+            is not None
+        )
+    except Exception:
+        return True
 
 
 def enqueue_fusion_upgrade_reseeds(
@@ -649,25 +1116,49 @@ def enqueue_fusion_upgrade_reseeds(
                         verdict["changed_input_revisions"],  # type: ignore[arg-type]
                     )
                 )
-            if transition_keys and all(
-                _already_enqueued(
+            seed_file = seed_path / _seed_name(
+                {
+                    "city": city,
+                    "target_date": target_date,
+                    "temperature_metric": metric,
+                },
+                computed_at=now,
+            )
+            publication = _new_seed_publication(
+                seed_file,
+                transition_keys,
+            )
+            try:
+                reservation, reserved_keys = _reserve_enqueues(
                     conn,
                     city=city,
                     target_date=target_date,
                     metric=metric,
                     source_cycle_iso=source_cycle_iso,
-                    transition_key=transition_key,
+                    served_family_key=served_key,
+                    transition_keys=transition_keys,
+                    publication=publication,
                 )
-                for transition_key in transition_keys
-            ):
+            except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
+                report["reservation_failed"] = int(
+                    report.get("reservation_failed", 0)
+                ) + 1
+                _LOG.debug(
+                    "fusion-upgrade reservation failed for %s/%s/%s: %s",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
+            if not reserved_keys:
                 report["already_enqueued"] = int(report["already_enqueued"]) + 1
                 continue
             # Build the seed from the SAME manifests/coverage/bins the seed discovery uses, then
-            # write it into seed_dir so the existing materialize cycle drains it. A re-seed at the
-            # same cycle re-materializes the scope; the materializer re-reads the (now larger)
-            # persisted capture and produces a served=larger posterior.
+            # atomically write it into this owner's hidden staging path. Only a durable,
+            # all-transition ownership finalize may expose it to the existing queue.
             try:
-                seed_file = _build_and_write_upgrade_seed(
+                staging_file = _build_and_write_upgrade_seed(
                     conn,
                     city=city,
                     target_date=target_date,
@@ -675,6 +1166,7 @@ def enqueue_fusion_upgrade_reseeds(
                     manifests=manifests,
                     raw_dir=raw_dir,
                     seed_path=seed_path,
+                    seed_file=publication.staging_file,
                     computed_at=now,
                     build_seed=build_replacement_forecast_materialization_seed,
                     latest_baseline_coverage=latest_baseline_coverage_for_replacement_seed,
@@ -684,30 +1176,142 @@ def enqueue_fusion_upgrade_reseeds(
                     manifest_path_value=_manifest_path_value,
                     manifest_base_dir=_manifest_base_dir,
                     resolve_path=_resolve_path,
-                    seed_name=_seed_name,
                     expected_identity=expected_replacement_dependency_identity_by_role,
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
+                report["seed_build_failed"] = int(
+                    report.get("seed_build_failed", 0)
+                ) + 1
+                try:
+                    _release_enqueue_reservations(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        source_cycle_iso=source_cycle_iso,
+                        transition_keys=reserved_keys,
+                        reservation=reservation,
+                    )
+                except Exception as release_exc:  # noqa: BLE001
+                    report["reservation_release_failed"] = int(
+                        report.get("reservation_release_failed", 0)
+                    ) + 1
+                    _LOG.warning(
+                        "fusion-upgrade reservation release failed for %s/%s/%s: %s",
+                        city,
+                        target_date,
+                        metric,
+                        release_exc,
+                    )
+                _cleanup_private_publication(publication)
                 _LOG.debug("fusion-upgrade seed build failed for %s/%s/%s: %s", city, target_date, metric, exc)
                 continue
-            if seed_file is None:
+            if staging_file is None:
                 report["manifest_missing"] = int(report["manifest_missing"]) + 1
+                try:
+                    _release_enqueue_reservations(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        source_cycle_iso=source_cycle_iso,
+                        transition_keys=reserved_keys,
+                        reservation=reservation,
+                    )
+                except Exception as release_exc:  # noqa: BLE001
+                    report["reservation_release_failed"] = int(
+                        report.get("reservation_release_failed", 0)
+                    ) + 1
+                    _LOG.warning(
+                        "fusion-upgrade reservation release failed for %s/%s/%s: %s",
+                        city,
+                        target_date,
+                        metric,
+                        release_exc,
+                    )
+                _cleanup_private_publication(publication)
                 continue
-            inserted = False
-            for transition_key in transition_keys:
-                inserted = _record_enqueue(
+            try:
+                _fsync_staged_seed(staging_file)
+            except Exception as exc:  # noqa: BLE001 — reservation retains retry ownership
+                report["seed_staging_fsync_failed"] = int(
+                    report.get("seed_staging_fsync_failed", 0)
+                ) + 1
+                _LOG.warning(
+                    "fusion-upgrade staging durability failed for %s/%s/%s: %s",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
+            try:
+                publish_pending = _finalize_enqueue_reservations(
                     conn,
                     city=city,
                     target_date=target_date,
                     metric=metric,
                     source_cycle_iso=source_cycle_iso,
-                    served_family_key=served_key,
-                    transition_key=transition_key,
-                    seed_file=str(seed_file),
-                ) or inserted
-            if transition_keys:
-                conn.commit()
-            if inserted:
+                    transition_keys=reserved_keys,
+                    reservation=reservation,
+                    publication=publication,
+                )
+            except Exception as exc:  # noqa: BLE001 — a lost owner must never publish
+                report["reservation_finalize_failed"] = int(
+                    report.get("reservation_finalize_failed", 0)
+                ) + 1
+                if not _publication_has_durable_marker_reference(
+                    conn,
+                    publication,
+                ):
+                    _cleanup_private_publication(publication)
+                _LOG.warning(
+                    "fusion-upgrade reservation finalize failed for %s/%s/%s: %s",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
+            try:
+                _publish_finalized_seed(publication)
+            except Exception as exc:  # noqa: BLE001 — durable pending marker owns recovery
+                report["seed_publish_failed"] = int(
+                    report.get("seed_publish_failed", 0)
+                ) + 1
+                _LOG.warning(
+                    "fusion-upgrade seed publish failed for %s/%s/%s: %s",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
+            try:
+                completed = _complete_published_enqueues(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    source_cycle_iso=source_cycle_iso,
+                    transition_keys=reserved_keys,
+                    publish_pending=publish_pending,
+                    seed_file=publication.seed_file,
+                )
+            except Exception as exc:  # noqa: BLE001 — staging proves publish for retry
+                report["publish_marker_complete_failed"] = int(
+                    report.get("publish_marker_complete_failed", 0)
+                ) + 1
+                _LOG.warning(
+                    "fusion-upgrade published marker completion failed for %s/%s/%s: %s",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
+            _cleanup_private_publication(publication)
+            if completed:
                 enqueued += 1
                 report["seeds_enqueued"] = int(report["seeds_enqueued"]) + 1
                 report["enqueued"].append(  # type: ignore[union-attr]
@@ -720,7 +1324,7 @@ def enqueue_fusion_upgrade_reseeds(
                         "capturable_families": verdict["capturable_families"],
                         "new_families": verdict["new_families"],
                         "changed_input_sources": verdict["changed_input_sources"],
-                        "seed_file": str(seed_file),
+                        "seed_file": str(publication.seed_file),
                     }
                 )
             else:
@@ -739,6 +1343,7 @@ def _build_and_write_upgrade_seed(
     manifests,
     raw_dir: Path,
     seed_path: Path,
+    seed_file: Path,
     computed_at: datetime,
     build_seed,
     latest_baseline_coverage,
@@ -748,13 +1353,12 @@ def _build_and_write_upgrade_seed(
     manifest_path_value,
     manifest_base_dir,
     resolve_path,
-    seed_name,
     expected_identity,
 ) -> Path | None:
     """Build one re-materialization seed for a scope using the existing seed-builder pieces and
-    write it into seed_dir. Returns the seed Path, or None when the required manifests/context are
-    absent (the scope's raw inputs are not on disk — recorded as manifest_missing, retried next
-    tick once they land). Kept separate so the enqueue loop stays readable."""
+    atomically write it into private staging. Returns the staging Path, or None when the required
+    manifests/context are absent (the scope's raw inputs are not on disk — recorded as
+    manifest_missing, retried next tick once they land)."""
     expected = expected_identity(metric)
     from src.config import cities_by_name  # noqa: PLC0415
 
@@ -797,9 +1401,5 @@ def _build_and_write_upgrade_seed(
     # posterior records WHY it was produced (instrument-set expansion, not a fresh cycle).
     seed_payload: dict[str, object] = dict(seed_result.seed)
     seed_payload["upgrade_trigger"] = "instrument_set_expansion"
-    seed_file = seed_path / seed_name(
-        {"city": city, "target_date": target_date, "temperature_metric": metric},
-        computed_at=computed_at,
-    )
     write_seed(seed_file, seed_payload)
     return seed_file

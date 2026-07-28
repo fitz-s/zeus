@@ -8,6 +8,8 @@
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
 from __future__ import annotations
 
+import pytest
+
 
 def test_legacy_scheduler_mode_flags_deleted() -> None:
     """R3 (2026-07-08): the legacy hand-coded add_job() scheduler mode and its mode-selection
@@ -370,7 +372,7 @@ def test_replacement_discovery_runs_with_backlog_and_retries_pending_family(
 
 
 def test_replacement_availability_fast_poll_passes_changed_source_clock_report(monkeypatch) -> None:
-    """A detected public run change must drive the heavy path with the same probe report."""
+    """A scoped commit must run one broad catch-up without duplicating its markers."""
     import src.ingest_main as ingest_main
     import src.data.replacement_forecast_production as prod
     import src.data.source_clock_update_probe as source_clock_probe
@@ -404,9 +406,10 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         on_source_commit(
             "icon_global",
             {
-                "written_row_count": 1,
+                "written_row_count": 9,
                 "committed_families": (
-                    ("Munich", "2026-07-03", "high"),
+                    ("Seoul", "2026-07-03", "high"),
+                    ("Wellington", "2026-07-03", "high"),
                 ),
             },
         )
@@ -447,7 +450,7 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "available_cycle": "2026-07-02T12:00:00+00:00",
             "written_manifest_count": 1,
-            "written_manifests": ["/tmp/munich-high.manifest.json"],
+            "written_manifests": ["/tmp/seoul-high.manifest.json"],
             "coverage": {
                 "status": "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE",
                 "target_count": 2,
@@ -465,11 +468,26 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         _download_anchor,
     )
     fusion_calls: list[dict[str, object]] = []
+    raw_revision = "icon_global:2026-07-03T12:00:00Z"
+    all_changed_scopes = (
+        ("Seoul", "2026-07-03", "high"),
+        ("Wellington", "2026-07-03", "high"),
+        ("Paris", "2026-07-03", "high"),
+    )
+    markers: set[tuple[tuple[str, str, str], str]] = set()
 
     def _fusion_reseed(_cfg, **kwargs):
         call_order.append("fusion_reseed")
         fusion_calls.append(kwargs)
-        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1}
+        scopes = tuple(kwargs.get("scopes") or all_changed_scopes)
+        enqueued = [
+            scope for scope in scopes if (scope, raw_revision) not in markers
+        ]
+        markers.update((scope, raw_revision) for scope in enqueued)
+        return {
+            "status": "FUSION_UPGRADE_TRIGGER",
+            "seeds_enqueued": len(enqueued),
+        }
 
     monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", _fusion_reseed)
     cycle_calls: list[dict[str, object]] = []
@@ -492,25 +510,39 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert result["status"] == "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     assert result["source_clock_updated_sources"] == ["icon_global"]
     assert "current_target_download" not in result
-    assert result["fusion_upgrade_seeds_enqueued"] == 1
+    assert result["fusion_upgrade_seeds_enqueued"] == 2
+    assert result["broad_fusion_upgrade_seeds_enqueued"] == 1
     assert result["cycle_advance_seeds_enqueued"] == 2
     assert result["cycle_advance_detail"]["held_advances_detected"] == 1
     assert result["source_clock_cursor_advanced_sources"] == ("icon_global",)
     assert result["source_clock_cursor_deferred_sources"] == ()
     assert probe_kwargs == [{"advance_cursor": False}]
-    assert fusion_calls[0]["scopes"] == (("Munich", "2026-07-03", "high"),)
+    assert fusion_calls[0]["scopes"] == (
+        ("Seoul", "2026-07-03", "high"),
+        ("Wellington", "2026-07-03", "high"),
+    )
     assert fusion_calls[0]["changed_sources"] == ("icon_global",)
     assert fusion_calls[0]["manifest_snapshot"] is cycle_calls[0]["manifest_snapshot"]
     assert fusion_calls[0]["manifest_snapshot"]["manifest_paths"] == (
-        "/tmp/munich-high.manifest.json",
+        "/tmp/seoul-high.manifest.json",
     )
     assert anchor_calls == [
         {
             "max_wall_clock_seconds": 10.0,
-            "required_scopes": (("Munich", "2026-07-03", "high"),),
+            "required_scopes": (
+                ("Seoul", "2026-07-03", "high"),
+                ("Wellington", "2026-07-03", "high"),
+            ),
         }
     ]
-    assert cycle_calls[0]["scopes"] == (("Munich", "2026-07-03", "high"),)
+    assert cycle_calls[0]["scopes"] == (
+        ("Seoul", "2026-07-03", "high"),
+        ("Wellington", "2026-07-03", "high"),
+    )
+    assert fusion_calls[1] == {"changed_sources": None}
+    assert markers == {
+        (scope, raw_revision) for scope in all_changed_scopes
+    }
     assert call_order == [
         "probe",
         "scoped_download",
@@ -518,11 +550,407 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         "fusion_reseed",
         "cycle_reseed",
         "scoped_download_complete",
+        "fusion_reseed",
         "cursor",
     ]
     assert result["reseed_maintenance_status"] == (
         "SOURCE_COMMIT_RESEEDS_PUBLISHED"
     )
+
+
+def test_replacement_availability_pending_callback_runs_broad_fusion_catchup(
+    monkeypatch,
+) -> None:
+    """A callback that outlives the poll cannot suppress the one broad fusion catch-up."""
+    import threading
+
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.ingest_main as ingest_main
+
+    class _Changed:
+        updated_sources = ("icon_global",)
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_UPDATES_CHANGED",
+                "updated_sources": ["icon_global"],
+                "affected_cities": ["Seoul", "Wellington"],
+                "error": None,
+            }
+
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+    callback_errors: list[BaseException] = []
+    late_callback: threading.Thread | None = None
+
+    def _scoped_path(_cfg, *, on_source_commit=None, **_kwargs):
+        nonlocal late_callback
+        assert on_source_commit is not None
+
+        def _late_callback() -> None:
+            callback_started.set()
+            release_callback.wait(timeout=5)
+            try:
+                on_source_commit(
+                    "icon_global",
+                    {
+                        "written_row_count": 9,
+                        "committed_families": (
+                            ("Seoul", "2026-07-03", "high"),
+                            ("Wellington", "2026-07-03", "high"),
+                        ),
+                    },
+                )
+            except BaseException as exc:  # noqa: BLE001 - surfaced in the parent test
+                callback_errors.append(exc)
+
+        late_callback = threading.Thread(target=_late_callback, daemon=True)
+        late_callback.start()
+        assert callback_started.wait(timeout=2)
+        return {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "updated_sources": ["icon_global"],
+            "source_commit_notifications": 0,
+            "source_commit_notifications_pending": 1,
+            "source_commit_notification_errors": (),
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "probe_openmeteo_source_clock_updates",
+        lambda **_kwargs: _Changed(),
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "source_clock_scoped_download_cursor_sources",
+        lambda _report, **_kwargs: ("icon_global",),
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "advance_source_clock_cursor",
+        lambda _report, *, sources=None: tuple(sources or ()),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed",
+        _scoped_path,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+            "written_manifest_count": 1,
+            "written_manifests": ["/tmp/seoul-high.manifest.json"],
+        },
+    )
+    fusion_calls: list[dict[str, object]] = []
+    cycle_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg, **kwargs: fusion_calls.append(kwargs)
+        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 0},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg, **kwargs: cycle_calls.append(kwargs)
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 0},
+    )
+
+    try:
+        result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+        assert result["reseed_maintenance_status"] == (
+            "SOURCE_COMMIT_RESEEDS_DEFERRED"
+        )
+        assert result["source_clock_cursor_advanced_sources"] == ("icon_global",)
+        assert fusion_calls == [{"changed_sources": None}]
+        assert cycle_calls == []
+    finally:
+        release_callback.set()
+        if late_callback is not None:
+            late_callback.join(timeout=5)
+
+    assert late_callback is not None and not late_callback.is_alive()
+    assert callback_errors == []
+    assert len(fusion_calls) == 2
+    assert fusion_calls[1]["scopes"] == (
+        ("Seoul", "2026-07-03", "high"),
+        ("Wellington", "2026-07-03", "high"),
+    )
+    assert fusion_calls[1]["changed_sources"] == ("icon_global",)
+    assert len(cycle_calls) == 1
+
+
+def test_pending_callback_broad_trigger_persists_missed_revision_before_cursor(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """The real broad trigger durably queues a missed raw revision before cursor advance."""
+    import json
+    import sqlite3
+    import threading
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_production as prod
+    import src.data.replacement_fusion_upgrade_trigger as fusion_trigger
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.ingest_main as ingest_main
+    from src.data.replacement_forecast_readiness import SOURCE_ID
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+
+    db = tmp_path / "forecasts.db"
+    seed_dir = tmp_path / "seeds"
+    raw_dir = tmp_path / "raw"
+    carrier = "2026-07-28T06:00:00+00:00"
+    newer = "2026-07-28T12:00:00+00:00"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts
+            (model, city, target_date, metric, source_cycle_time, source_available_at,
+             captured_at, lead_days, forecast_value_c, endpoint)
+        VALUES ('icon_global', 'London', '2026-07-30', 'low', ?, ?, ?, 2, 18.0,
+                'single_runs')
+        """,
+        (carrier, carrier, carrier),
+    )
+    old_raw_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    provenance = {
+        "bayes_precision_fusion": {
+            "used_models": ["icon_global"],
+            "current_value_serving": {
+                "icon_global": {"raw_model_forecast_id": old_raw_id},
+            },
+            "source_clock_one_scheme": {
+                "configured_sources": ["icon_global"],
+            },
+        },
+    }
+    conn.execute(
+        """
+        INSERT INTO forecast_posteriors
+            (source_id, product_id, data_version, city, target_date,
+             temperature_metric, source_cycle_time, source_available_at,
+             computed_at, q_json, q_lcb_json, posterior_method,
+             dependency_source_run_ids_json, provenance_json,
+             runtime_layer, training_allowed)
+        VALUES (?, 'pid', 'dv', 'London', '2026-07-30', 'low', ?, ?, ?,
+                '{}', '{}', ?, '{}', ?, 'live', 0)
+        """,
+        (
+            SOURCE_ID,
+            carrier,
+            carrier,
+            "2026-07-28T10:00:00+00:00",
+            SOURCE_ID,
+            json.dumps(provenance),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts
+            (model, city, target_date, metric, source_cycle_time, source_available_at,
+             captured_at, lead_days, forecast_value_c, endpoint)
+        VALUES ('icon_global', 'London', '2026-07-30', 'low', ?, ?, ?, 2, 17.0,
+                'single_runs')
+        """,
+        (newer, newer, newer),
+    )
+    new_raw_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    conn.commit()
+    conn.close()
+
+    class _Changed:
+        updated_sources = ("icon_global",)
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_UPDATES_CHANGED",
+                "updated_sources": ["icon_global"],
+                "affected_cities": ["London", "Seoul"],
+                "error": None,
+            }
+
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+    callback_thread: threading.Thread | None = None
+
+    def _scoped_path(_cfg, *, on_source_commit=None, **_kwargs):
+        nonlocal callback_thread
+        assert on_source_commit is not None
+
+        def _late_callback() -> None:
+            callback_started.set()
+            release_callback.wait(timeout=5)
+            on_source_commit(
+                "icon_global",
+                {
+                    "written_row_count": 2,
+                    "committed_families": (
+                        ("Seoul", "2026-07-30", "low"),
+                    ),
+                },
+            )
+
+        callback_thread = threading.Thread(target=_late_callback, daemon=True)
+        callback_thread.start()
+        assert callback_started.wait(timeout=2)
+        return {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "source_commit_notifications": 0,
+            "source_commit_notifications_pending": 1,
+            "source_commit_notification_errors": (),
+        }
+
+    def _build_private(_conn, **build_kwargs):
+        stage = Path(build_kwargs["seed_file"])
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_text(
+            json.dumps(
+                {
+                    "scope": "London-low",
+                    "raw_revision": new_raw_id,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return stage
+
+    cursor_evidence: list[tuple[str, str]] = []
+
+    def _advance_cursor(_report, *, sources=None):
+        evidence_conn = sqlite3.connect(db)
+        marker = evidence_conn.execute(
+            """
+            SELECT capturable_family_set, seed_file
+            FROM fusion_upgrade_enqueues
+            WHERE city = 'London' AND target_date = '2026-07-30' AND metric = 'low'
+            """
+        ).fetchone()
+        evidence_conn.close()
+        assert marker is not None
+        assert f"|input_revision=icon_global:{new_raw_id}" in marker[0]
+        assert Path(marker[1]).is_file()
+        seed_payload = json.loads(Path(marker[1]).read_text(encoding="utf-8"))
+        assert seed_payload["raw_revision"] == new_raw_id
+        assert len(list(seed_dir.glob("*.json"))) == 1
+        cursor_evidence.append((marker[0], marker[1]))
+        return tuple(sources or ())
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {
+            "download_current_targets_enabled": True,
+            "forecast_db": db,
+            "seed_dir": seed_dir,
+            "raw_manifest_dir": raw_dir,
+            "seed_limit": 4,
+        },
+    )
+    monkeypatch.setattr(
+        prod,
+        "_prepared_reseed_manifests",
+        lambda *_args, **_kwargs: (
+            datetime(2026, 7, 28, 13, 0, tzinfo=timezone.utc),
+            (),
+        ),
+    )
+    monkeypatch.setattr(
+        target_plan,
+        "build_replacement_forecast_current_target_plan",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="READY",
+            reason_codes=(),
+            rows=(
+                SimpleNamespace(
+                    city="London",
+                    target_date="2026-07-30",
+                    temperature_metric="low",
+                    day0_observed_extreme_required=False,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        fusion_trigger,
+        "_build_and_write_upgrade_seed",
+        _build_private,
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "probe_openmeteo_source_clock_updates",
+        lambda **_kwargs: _Changed(),
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "source_clock_scoped_download_cursor_sources",
+        lambda _report, **_kwargs: ("icon_global",),
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "advance_source_clock_cursor",
+        _advance_cursor,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed",
+        _scoped_path,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+            "written_manifest_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "CYCLE_ADVANCE_TRIGGER",
+            "seeds_enqueued": 0,
+        },
+    )
+
+    try:
+        result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    finally:
+        release_callback.set()
+        if callback_thread is not None:
+            callback_thread.join(timeout=5)
+
+    assert result["reseed_maintenance_status"] == "SOURCE_COMMIT_RESEEDS_DEFERRED"
+    assert result["broad_fusion_upgrade_seeds_enqueued"] == 1
+    assert result["source_clock_cursor_advanced_sources"] == ("icon_global",)
+    assert len(cursor_evidence) == 1
+    assert callback_thread is not None and not callback_thread.is_alive()
 
 
 def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatch) -> None:
@@ -589,7 +1017,7 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
     monkeypatch.setattr(
         prod,
         "_enqueue_fusion_upgrade_reseeds_if_needed",
-        lambda _cfg: calls.append("anchor_fusion_reseed")
+        lambda _cfg, **_kwargs: calls.append("anchor_fusion_reseed")
         or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1},
     )
     monkeypatch.setattr(
@@ -768,7 +1196,7 @@ def test_replacement_availability_notification_error_keeps_global_reseed(
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
 
     assert result["source_commit_notification_errors"]
-    assert fusion_calls == [{}]
+    assert fusion_calls == [{"changed_sources": None}]
     assert cycle_calls == [{}]
     assert result.get("reseed_maintenance_status") != (
         "SOURCE_COMMIT_RESEEDS_PUBLISHED"
@@ -827,7 +1255,7 @@ def test_replacement_availability_cooldown_suppresses_repeated_reseed_scans(
     monkeypatch.setattr(
         prod,
         "_enqueue_fusion_upgrade_reseeds_if_needed",
-        lambda _cfg: calls.append("fusion_reseed")
+        lambda _cfg, **_kwargs: calls.append("fusion_reseed")
         or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 0},
     )
     monkeypatch.setattr(
@@ -862,9 +1290,11 @@ def test_replacement_availability_cooldown_suppresses_repeated_reseed_scans(
 
 
 def test_replacement_maintenance_tick_throttles_timeboxed_repair(monkeypatch) -> None:
-    """A timeboxed repair must stay off the fast source-clock lane and not repeat early."""
+    """A timeboxed repair remains retryable/unhealthy while independent reseeds run."""
     import src.ingest_main as ingest_main
     import src.data.replacement_forecast_production as prod
+    import src.observability.scheduler_health as scheduler_health
+
     monkeypatch.setenv(ingest_main.REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV, "1")
     monkeypatch.setattr(
         ingest_main,
@@ -892,24 +1322,278 @@ def test_replacement_maintenance_tick_throttles_timeboxed_repair(monkeypatch) ->
         "_download_replacement_forecast_current_targets_if_needed",
         _timeboxed,
     )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",
+        },
+    )
     monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", lambda cfg: None)
     monkeypatch.setattr(
         prod,
         "_enqueue_cycle_advance_reseeds_if_needed",
         lambda cfg: {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 3, "advances_detected": 0},
     )
+    health: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: health.append(
+            {"job_name": job_name, **kwargs}
+        ),
+    )
 
-    result = ingest_main._replacement_maintenance_tick.__wrapped__()
+    result = ingest_main._replacement_maintenance_tick()
 
-    assert result["status"] == "REPLACEMENT_MAINTENANCE_COMPLETED"
+    assert result["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
+    assert result["retryable"] is True
+    assert result["maintenance_errors"] == (
+        "current_target:CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
+    )
     assert result["current_target_download"]["status"] == "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
     assert result["current_target_download"]["timeboxed_incomplete"] is True
     assert result["current_target_download"]["unattempted_target_count"] == 2
     assert result["cycle_advance_seeds_enqueued"] == 3
+    assert health[-1] == {
+        "job_name": "ingest_replacement_maintenance",
+        "failed": True,
+        "reason": "replacement_maintenance_partial",
+    }
 
-    second = ingest_main._replacement_maintenance_tick.__wrapped__()
+    second = ingest_main._replacement_maintenance_tick()
     assert second["status"] == "REPLACEMENT_MAINTENANCE_NOT_DUE"
     assert calls == [1.0]
+
+
+def test_replacement_maintenance_quota_cooldown_is_partial_but_reseeds(
+    monkeypatch,
+) -> None:
+    """Global download cooldown defers transport, not independent durable reseed drains."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+    import src.observability.scheduler_health as scheduler_health
+
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 120,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+
+    def _unexpected_download(*_args, **_kwargs):
+        raise AssertionError("quota cooldown must defer download transport")
+
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        _unexpected_download,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        _unexpected_download,
+    )
+    reseeds: list[str] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg: reseeds.append("fusion")
+        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg: reseeds.append("cycle")
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 2},
+    )
+    health: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: health.append(
+            {"job_name": job_name, **kwargs}
+        ),
+    )
+
+    result = ingest_main._replacement_maintenance_tick()
+
+    assert result["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
+    assert result["retryable"] is True
+    assert result["cooldown_seconds"] == 120
+    assert result["maintenance_errors"] == (
+        "bayes_precision_fusion_extra:"
+        "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
+    )
+    assert result["fusion_upgrade_seeds_enqueued"] == 1
+    assert result["cycle_advance_seeds_enqueued"] == 2
+    assert reseeds == ["fusion", "cycle"]
+    assert health[-1] == {
+        "job_name": "ingest_replacement_maintenance",
+        "failed": True,
+        "reason": "replacement_maintenance_partial",
+    }
+
+
+def test_replacement_maintenance_repairs_full_extras_before_reseed(
+    monkeypatch,
+) -> None:
+    """The sole maintenance owner heals missing extras without a source-clock change."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        lambda *_args, **_kwargs: calls.append("current_targets")
+        or {"status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: calls.append("full_extras")
+        or {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "written_row_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg: calls.append("fusion_reseed")
+        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg: calls.append("cycle_reseed")
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 0},
+    )
+
+    result = ingest_main._replacement_maintenance_tick.__wrapped__()
+
+    assert calls == [
+        "current_targets",
+        "full_extras",
+        "fusion_reseed",
+        "cycle_reseed",
+    ]
+    assert result["bayes_precision_fusion_extra_status"] == (
+        "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    )
+    assert result["bayes_precision_fusion_extra_rows_written"] == 2
+    assert result["fusion_upgrade_seeds_enqueued"] == 1
+
+
+@pytest.mark.parametrize(
+    ("lane", "status"),
+    (
+        ("current_target", "CURRENT_TARGET_DOWNLOAD_TIMEOUT"),
+        ("current_target", "CURRENT_TARGET_DOWNLOAD_FAILSOFT"),
+        ("current_target", "CURRENT_TARGET_RAW_INPUTS_TRANSPORT_RETRYABLE"),
+        ("current_target", "CURRENT_TARGET_DOWNLOAD_INFLIGHT_SKIP"),
+        ("current_target", "CYCLE_PROBE_UNRESOLVED_SKIP"),
+        ("extras", "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED"),
+        ("extras", "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"),
+        ("extras", "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"),
+        ("extras", "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED"),
+        ("extras", "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"),
+    ),
+)
+def test_replacement_maintenance_retryable_status_contract_runs_reseeds(
+    monkeypatch,
+    lane,
+    status,
+) -> None:
+    """Known incomplete inner statuses are explicit PARTIAL, never healthy substring guesses."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    current_status = (
+        status if lane == "current_target" else "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"
+    )
+    extras_status = (
+        status if lane == "extras" else "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        lambda *_args, **_kwargs: {"status": current_status},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: {"status": extras_status},
+    )
+    reseeds: list[str] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg: reseeds.append("fusion")
+        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg: reseeds.append("cycle")
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 2},
+    )
+
+    result = ingest_main._replacement_maintenance_tick.__wrapped__()
+
+    expected_lane = (
+        "current_target" if lane == "current_target" else "bayes_precision_fusion_extra"
+    )
+    assert result["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
+    assert result["retryable"] is True
+    assert result["maintenance_errors"] == (f"{expected_lane}:{status}",)
+    assert result["fusion_upgrade_seeds_enqueued"] == 1
+    assert result["cycle_advance_seeds_enqueued"] == 2
+    assert reseeds == ["fusion", "cycle"]
+    assert ingest_main._classify_result(result) == (
+        True,
+        "replacement_maintenance_partial",
+    )
 
 
 def test_replacement_maintenance_isolates_reseed_failures(monkeypatch) -> None:
@@ -935,6 +1619,13 @@ def test_replacement_maintenance_isolates_reseed_failures(monkeypatch) -> None:
         prod,
         "_download_replacement_forecast_current_targets_if_needed",
         lambda *_args, **_kwargs: {"status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",
+        },
     )
     monkeypatch.setattr(
         prod,

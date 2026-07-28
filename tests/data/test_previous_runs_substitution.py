@@ -298,16 +298,17 @@ def test_queue_does_not_coverage_skip_an_upgrade_reseed(tmp_path, monkeypatch) -
     assert len(request_written) == 1
 
 
-def test_queue_suppresses_unchanged_blocked_seed_before_archive_growth(
+def test_queue_preserves_unchanged_blocked_seed_as_terminal_receipt(
     tmp_path, monkeypatch
 ) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
-    seed_dir = tmp_path / "seeds"
-    seed_dir.mkdir()
+    queue_root = tmp_path / "replacement_forecast_live"
+    seed_dir = queue_root / "seeds"
+    seed_dir.mkdir(parents=True)
     seed_path = seed_dir / "blocked.json"
     seed_path.write_text(json.dumps(_minimal_seed(upgrade=False)), encoding="utf-8")
-    marker = tmp_path / "blocked_attempts" / "scope.json"
+    marker = queue_root / "blocked_attempts" / "scope.json"
     marker.parent.mkdir()
     marker.write_text("{}", encoding="utf-8")
 
@@ -330,19 +331,114 @@ def test_queue_suppresses_unchanged_blocked_seed_before_archive_growth(
 
     processed, failed, reasons = queue_mod._prepare_seed_requests(
         seed_dir=seed_dir,
-        seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed",
-        request_dir=tmp_path / "requests",
+        seed_processed_dir=queue_root / "seed_processed",
+        seed_failed_dir=queue_root / "seed_failed",
+        request_dir=queue_root / "requests",
         forecast_db=tmp_path / "forecasts.db",
         limit=1,
     )
 
-    assert processed == [str(marker)]
+    assert len(processed) == 1
     assert failed == []
     assert queue_mod._UNCHANGED_BLOCKED_SEED_SKIP_REASON in reasons
     assert not seed_path.exists()
-    assert not (tmp_path / "requests" / seed_path.name).exists()
-    assert not (tmp_path / "seed_processed").exists()
+    assert not (queue_root / "requests" / seed_path.name).exists()
+    moved = Path(processed[0])
+    assert moved.parent == queue_root / "seed_processed"
+    assert moved.is_file()
+    receipt = json.loads(
+        moved.with_suffix(moved.suffix + ".receipt.json").read_text(encoding="utf-8")
+    )
+    assert receipt == {
+        "attempt_fingerprint": "same-fingerprint",
+        "blocked_attempt_marker": str(marker),
+        "reason_codes": [queue_mod._UNCHANGED_BLOCKED_SEED_SKIP_REASON],
+        "request_written": False,
+        "status": "SKIPPED_UNCHANGED_BLOCKED_INPUT",
+    }
+
+
+def test_move_request_durably_links_destination_before_source_removal(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    source_dir = tmp_path / "seeds"
+    destination_dir = tmp_path / "seed_processed"
+    source_dir.mkdir()
+    source = source_dir / "seed.json"
+    source.write_text('{"seed":1}\n', encoding="utf-8")
+    fsynced: list[Path] = []
+    monkeypatch.setattr(
+        queue_mod,
+        "_fsync_directory",
+        lambda path: fsynced.append(Path(path)),
+    )
+
+    moved = queue_mod._move_request(source, destination_dir)
+
+    assert fsynced == [destination_dir, source_dir]
+    assert not source.exists()
+    assert moved.is_file()
+    assert json.loads(moved.read_text(encoding="utf-8")) == {"seed": 1}
+
+
+def test_move_request_destination_fsync_failure_never_removes_source(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    source_dir = tmp_path / "seeds"
+    destination_dir = tmp_path / "seed_processed"
+    source_dir.mkdir()
+    source = source_dir / "seed.json"
+    source.write_text('{"seed":1}\n', encoding="utf-8")
+
+    def _fail_fsync(_path):
+        raise OSError("injected destination-directory fsync failure")
+
+    monkeypatch.setattr(queue_mod, "_fsync_directory", _fail_fsync)
+
+    with pytest.raises(OSError, match="destination-directory fsync failure"):
+        queue_mod._move_request(source, destination_dir)
+
+    receipts = list(destination_dir.glob("*.json"))
+    assert source.is_file()
+    assert len(receipts) == 1
+    assert source.samefile(receipts[0])
+
+
+def test_move_request_source_fsync_failure_keeps_durable_destination(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    source_dir = tmp_path / "seeds"
+    destination_dir = tmp_path / "seed_processed"
+    source_dir.mkdir()
+    source = source_dir / "seed.json"
+    source.write_text('{"seed":1}\n', encoding="utf-8")
+    fsync_calls = 0
+
+    def _fsync_directory(_path):
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 2:
+            raise OSError("injected source-directory fsync failure")
+
+    monkeypatch.setattr(queue_mod, "_fsync_directory", _fsync_directory)
+
+    with pytest.raises(OSError, match="source-directory fsync failure"):
+        queue_mod._move_request(source, destination_dir)
+
+    receipts = list(destination_dir.glob("*.json"))
+    assert fsync_calls == 2
+    assert not source.exists()
+    assert len(receipts) == 1
+    assert json.loads(receipts[0].read_text(encoding="utf-8")) == {"seed": 1}
 
 
 def test_queue_skips_seed_older_than_current_family_posterior(tmp_path, monkeypatch) -> None:

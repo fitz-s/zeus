@@ -304,12 +304,31 @@ def _receipt_name(path: Path) -> str:
     return f"{path.stem}.{stamp}.pid{os.getpid()}{path.suffix}"
 
 
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _move_request(path: Path, destination_dir: Path) -> Path:
     destination_dir.mkdir(parents=True, exist_ok=True)
-    target = destination_dir / _receipt_name(path)
-    while target.exists():
+    while True:
         target = destination_dir / _receipt_name(path)
-    os.replace(path, target)
+        try:
+            os.link(path, target)
+        except FileExistsError:
+            continue
+        break
+    # The destination receipt must be durable before the queue name disappears.
+    # A PUBLISH_PENDING owner may observe that disappearance and complete its
+    # SQLite marker immediately; hardlink-first makes every such observation
+    # imply a durable terminal receipt.
+    _fsync_directory(destination_dir)
+    path.unlink()
+    _fsync_directory(path.parent)
     return target
 
 
@@ -1759,9 +1778,24 @@ def _prepare_seed_requests(
                 forecast_db=forecast_db,
             )
             if unchanged and marker_path is not None:
-                _publish_latest_seed(seed_json, seed)
-                seed_json.unlink()
-                processed.append(str(marker_path))
+                # A fusion-upgrade publisher retains private staging until its
+                # enqueue marker is complete.  Moving this terminal seed keeps
+                # a durable hardlink witness even when latest/ already points
+                # at a newer cycle; unlinking the public queue path could leave
+                # staging at nlink=1 and make crash recovery republish it.
+                moved = _move_request(seed_json, processed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "SKIPPED_UNCHANGED_BLOCKED_INPUT",
+                        "reason_codes": [_UNCHANGED_BLOCKED_SEED_SKIP_REASON],
+                        "request_written": False,
+                        "attempt_fingerprint": _fingerprint,
+                        "blocked_attempt_marker": str(marker_path),
+                    },
+                )
+                _publish_latest_seed(moved, seed)
+                processed.append(str(moved))
                 reasons.append(_UNCHANGED_BLOCKED_SEED_SKIP_REASON)
                 actionable_count += 1
                 continue
