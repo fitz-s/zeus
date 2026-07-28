@@ -3171,6 +3171,78 @@ def test_global_day0_actuation_rejects_conditioning_not_equal_to_current_state()
     conn.close()
 
 
+def test_global_day0_held_conditioning_uses_named_physical_frontier(
+    monkeypatch,
+):
+    from src.data import replacement_forecast_current_target_plan as current_plan
+
+    conn, carrier = _stale_day0_carrier_and_current_observations()
+    settlement_fact = {
+        "observed_extreme_native": 27.0,
+        "observation_time": "2026-07-10T19:00:00+00:00",
+        "observation_available_at": "2026-07-10T19:05:00+00:00",
+        "sample_count": 2,
+        "observation_source": "wu_icao_history",
+        "station_id": "UUWW",
+        "unit": "C",
+    }
+    physical_fact = {
+        "observed_extreme_native": 28.0,
+        "observation_time": "2026-07-10T19:30:00+00:00",
+        "observation_available_at": "2026-07-10T19:35:00+00:00",
+        "sample_count": 3,
+        "observation_source": "aviationweather_metar",
+        "station_id": "UUWW",
+        "unit": "C",
+    }
+    monkeypatch.setattr(
+        current_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, require_settlement_channel=False, **_kwargs: (
+            settlement_fact if require_settlement_channel else physical_fact
+        ),
+    )
+
+    rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(
+            city="Moscow",
+            target_date="2026-07-10",
+            metric="high",
+        ),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+        conditioning={
+            "active": True,
+            "metric": "high",
+            "observation_time": "2026-07-10T19:30:00+00:00",
+            "observed_extreme_c": 28.0,
+            "sample_count": 3,
+            "source": "aviationweather_metar",
+            "unit": "C",
+        },
+        observation_conn=conn,
+        decision_time=_dt.datetime(
+            2026,
+            7,
+            10,
+            20,
+            0,
+            tzinfo=_dt.timezone.utc,
+        ),
+        posterior_id=29916,
+    )
+
+    assert rebound["settlement_source"] == "wu_icao_history"
+    assert rebound["observation_time"] == "2026-07-10T19:00:00+00:00"
+    assert rebound["_edli_day0_probability_boundary_native"] == pytest.approx(28.0)
+    binding = rebound["_edli_global_day0_binding"]
+    assert binding["observed_extreme_native"] == pytest.approx(27.0)
+    assert binding["statistical_physical_boundary"]["source"] == (
+        "aviationweather_metar"
+    )
+    conn.close()
+
+
 def test_global_day0_observation_unknown_source_type_fails_closed(monkeypatch):
     from src.data.replacement_forecast_current_target_plan import (
         _latest_authorized_day0_fact,

@@ -29312,14 +29312,46 @@ def _global_day0_execution_payload(
                     "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH"
                 )
         else:
-            if conditioned_at != observed_at:
+            # A held-position posterior may be statistically conditioned on the
+            # faster same-station physical frontier while deterministic payoff
+            # authority remains bound to the slower settlement channel. Validate
+            # each clock against the source it names; comparing the physical
+            # conditioning timestamp to the settlement timestamp made complete,
+            # current evidence look unavailable until the slower channel caught
+            # up.
+            conditioning_fact = fact
+            conditioning_source = str(
+                conditioning.get("source") or ""
+            ).strip().lower()
+            physical_source = str(
+                (physical_fact or {}).get("observation_source") or ""
+            ).strip().lower()
+            if (
+                conditioning_source
+                and physical_fact is not None
+                and conditioning_source == physical_source
+            ):
+                conditioning_fact = physical_fact
+            conditioning_at = utc(
+                conditioning_fact.get("observation_time"),
+                reason="GLOBAL_DAY0_CURRENT_OBSERVATION_TIME_INVALID",
+            )
+            if conditioned_at != conditioning_at:
                 raise ValueError(
                     "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
                 )
+            try:
+                conditioning_native = float(
+                    conditioning_fact["observed_extreme_native"]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "GLOBAL_DAY0_CONDITIONING_OBSERVATION_INVALID"
+                ) from exc
             observed_c = (
-                observed_native
+                conditioning_native
                 if unit == "C"
-                else (observed_native - 32.0) * 5.0 / 9.0
+                else (conditioning_native - 32.0) * 5.0 / 9.0
             )
             # Carrier source and row count are provenance, not state variables.
             # A supplied posterior may bind the same station-time extreme
