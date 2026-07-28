@@ -6399,14 +6399,11 @@ def event_bound_live_adapter_from_trade_conn(
         from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 
         try:
-            # Observation, readiness, and posterior are one forecasts-DB snapshot.
-            # The world connection remains calibration authority only.
             prepared = _prepare_current_global_probability_family(
                 event,
                 forecast_conn=forecast_conn,
                 topology_conn=topology_conn,
-                observation_conn=forecast_conn,
-                calibration_conn=calibration_conn,
+                observation_conn=calibration_conn,
                 decision_time=decision_time,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
                 cache_metadata_out=cache_metadata_out,
@@ -7405,14 +7402,11 @@ def event_bound_live_adapter_from_trade_conn(
                         return _prepared_global_event_receipt(event, cached)
                     probability_cache_stats["miss"] += 1
             try:
-                # Held redecision uses the same canonical observation/posterior
-                # snapshot; legacy world observation tables are not authority.
                 prepared = _prepare_current_global_probability_family(
                     event,
                     forecast_conn=forecast_conn,
                     topology_conn=topology_conn,
-                    observation_conn=forecast_conn,
-                    calibration_conn=calibration_conn,
+                    observation_conn=calibration_conn,
                     decision_time=at,
                     max_age=FRESHNESS_WINDOW_DEFAULT,
                     allow_unobserved_day0_replacement=not is_forecast_lane,
@@ -10552,7 +10546,7 @@ def _submit_current_global_sell(
                 global_actuation=global_actuation,
                 forecast_conn=forecast_conn,
                 topology_conn=topology_conn,
-                calibration_conn=calibration_conn,
+                observation_conn=calibration_conn,
                 decision_time=now,
             )
         )
@@ -12953,7 +12947,7 @@ def _current_global_actuation_prepared_family(
     global_actuation: object,
     forecast_conn: sqlite3.Connection,
     topology_conn: sqlite3.Connection,
-    calibration_conn: sqlite3.Connection,
+    observation_conn: sqlite3.Connection,
     decision_time: datetime,
 ):
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
@@ -12974,8 +12968,7 @@ def _current_global_actuation_prepared_family(
         event,
         forecast_conn=forecast_conn,
         topology_conn=topology_conn,
-        observation_conn=forecast_conn,
-        calibration_conn=calibration_conn,
+        observation_conn=observation_conn,
         decision_time=decision_time,
         max_age=FRESHNESS_WINDOW_DEFAULT,
         day0_payload_out=current_day0_payload,
@@ -13150,7 +13143,7 @@ def _build_event_bound_no_submit_receipt_core(
                 global_actuation=global_actuation,
                 forecast_conn=forecast_conn,
                 topology_conn=topology_conn,
-                calibration_conn=calibration_conn,
+                observation_conn=calibration_conn,
                 decision_time=decision_time,
             )
         except Exception as exc:  # noqa: BLE001 - current probability must fail closed
@@ -27951,7 +27944,7 @@ def _live_yes_probabilities(
                 family=family,
                 resolution=resolution,
                 conditioning=None,
-                observation_conn=conn,
+                observation_conn=calibration_conn,
                 decision_time=decision_time,
                 posterior_id=None,
                 probability_base_identity="provisional_replacement_pending",
@@ -27984,7 +27977,7 @@ def _live_yes_probabilities(
                 family=family,
                 resolution=resolution,
                 conditioning=None,
-                observation_conn=conn,
+                observation_conn=calibration_conn,
                 decision_time=decision_time,
                 posterior_id=posterior_id,
                 probability_base_identity=posterior_identity,
@@ -30339,7 +30332,6 @@ def _prepare_current_global_probability_family(
     forecast_conn: sqlite3.Connection,
     topology_conn: sqlite3.Connection,
     observation_conn: sqlite3.Connection | None = None,
-    calibration_conn: sqlite3.Connection | None = None,
     decision_time: datetime,
     max_age: timedelta,
     day0_payload_out: dict[str, object] | None = None,
@@ -30420,7 +30412,6 @@ def _prepare_current_global_probability_family(
     use_unobserved_day0_replacement = False
     current_day0_payload: dict[str, object] | None = None
     day0_observation_conn = observation_conn or forecast_conn
-    day0_calibration_conn = calibration_conn or day0_observation_conn
     day0_snapshot: Mapping[str, object] | None = None
     day0_base_identity = ""
     provisional_day0_observation = False
@@ -30895,7 +30886,7 @@ def _prepare_current_global_probability_family(
                 components = _day0_remaining_global_probability_components(
                     event,
                     forecast_conn=forecast_conn,
-                    calibration_conn=day0_calibration_conn,
+                    calibration_conn=day0_observation_conn,
                     family=family,
                     payload=payload,
                     decision_time=decision_time,
@@ -30957,7 +30948,7 @@ def _prepare_current_global_probability_family(
                     components = _day0_remaining_global_probability_components(
                         event,
                         forecast_conn=forecast_conn,
-                        calibration_conn=day0_calibration_conn,
+                        calibration_conn=day0_observation_conn,
                         family=family,
                         payload=payload,
                         decision_time=decision_time,
@@ -31145,7 +31136,7 @@ def _prepare_current_global_probability_family(
                 components = _day0_remaining_global_probability_components(
                     event,
                     forecast_conn=forecast_conn,
-                    calibration_conn=day0_calibration_conn,
+                    calibration_conn=day0_observation_conn,
                     family=family,
                     payload=payload,
                     decision_time=decision_time,

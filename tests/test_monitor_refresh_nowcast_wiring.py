@@ -431,8 +431,7 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
         assert event.event_id == "event-paris-day0"
         assert kwargs["forecast_conn"] is forecasts
         assert kwargs["topology_conn"] is forecasts
-        assert kwargs["observation_conn"] is forecasts
-        assert kwargs["calibration_conn"] is world
+        assert kwargs["observation_conn"] is world
         assert kwargs["required_condition_id"] == condition_id
         assert kwargs["allow_provisional_day0_replacement"] is True
         assert kwargs["entry_authority"] is False
