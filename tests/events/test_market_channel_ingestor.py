@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-07-28
 # Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract.
 from __future__ import annotations
 
@@ -2822,14 +2822,20 @@ def test_rest_seed_write_backpressure_keeps_committed_chunks_and_stops():
         def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
             return False
 
+    def commit() -> None:
+        commit_counts.append(
+            conn.execute(
+                "SELECT COUNT(*) FROM execution_feasibility_latest"
+            ).fetchone()[0]
+        )
+        conn.commit()
+
     service = MarketChannelOnlineService(ingestor, fetch_orderbook=fetch)
     written = service.seed_rest_books_in_chunks(
         token_ids=[f"token-{idx}" for idx in range(3)],
         received_at="2026-05-24T10:00:00+00:00",
         write_gate=FlakyWorldMutex(),
-        commit=lambda: commit_counts.append(
-            conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0]
-        ),
+        commit=commit,
         chunk_size=1,
     )
 
@@ -2842,6 +2848,124 @@ def test_rest_seed_write_backpressure_keeps_committed_chunks_and_stops():
         conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0]
         == 2
     )
+
+
+def test_rest_seed_sqlite_lock_rolls_back_chunk_and_same_book_retries():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=QuoteCache(),
+    )
+    book = {
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}],
+        "hash": "hash-token-1",
+    }
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda _token_id: dict(book),
+    )
+    attempts = 0
+
+    def locked_commit() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    assert service.seed_rest_books_in_chunks(
+        token_ids=["token-1"],
+        received_at="2026-07-28T10:00:00+00:00",
+        write_gate=nullcontext(),
+        commit=locked_commit,
+        chunk_size=1,
+    ) == 0
+    assert attempts == 1
+    assert service.rest_seed_backpressure_count == 1
+    assert service.rest_seed_backpressure_reason == "database is locked"
+    assert conn.in_transaction is False
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 0
+
+    assert service.seed_rest_books_in_chunks(
+        token_ids=["token-1"],
+        received_at="2026-07-28T10:00:00+00:00",
+        write_gate=nullcontext(),
+        commit=conn.commit,
+        chunk_size=1,
+    ) == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 2
+
+
+def test_rest_seed_lock_does_not_flush_rolled_back_event_with_later_chunk():
+    conn, writer = _conn_writer()
+    emitted_tokens: list[str] = []
+
+    def sink(events) -> None:  # noqa: ANN001
+        emitted_tokens.extend(
+            json.loads(event.payload_json)["token_id"] for event in events
+        )
+
+    tokens = {"token-1", "token-2"}
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=tokens,
+        token_metadata={token: _metadata(token)[token] for token in tokens},
+        quote_cache=QuoteCache(),
+        market_event_sink=sink,
+        market_event_sink_independently_coordinated=True,
+    )
+
+    def fetch(token_id: str) -> dict[str, object]:
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=fetch)
+
+    def locked_commit() -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    assert service.seed_rest_books_in_chunks(
+        token_ids=["token-1"],
+        received_at="2026-07-28T10:00:00+00:00",
+        write_gate=nullcontext(),
+        commit=locked_commit,
+        chunk_size=1,
+    ) == 0
+    assert emitted_tokens == []
+    assert ingestor._deferred_market_event_sink_events == []
+
+    assert service.seed_rest_books_in_chunks(
+        token_ids=["token-2"],
+        received_at="2026-07-28T10:00:01+00:00",
+        write_gate=nullcontext(),
+        commit=conn.commit,
+        chunk_size=1,
+    ) == 1
+    assert emitted_tokens == ["token-2"]
+
+    assert service.seed_rest_books_in_chunks(
+        token_ids=["token-1"],
+        received_at="2026-07-28T10:00:02+00:00",
+        write_gate=nullcontext(),
+        commit=conn.commit,
+        chunk_size=1,
+    ) == 1
+    assert emitted_tokens == ["token-2", "token-1"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 4
 
 
 def test_rest_seed_uses_batch_orderbook_fetch_when_available():
