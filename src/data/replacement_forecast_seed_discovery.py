@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -17,6 +18,7 @@ from src.contracts.replacement_pipeline_files import (
 from src.data.raw_forecast_artifact_manifest import (
     RawForecastArtifactManifest,
     UnregisteredRawForecastArtifactIdentityError,
+    UnsupportedRawForecastArtifactManifestFieldsError,
     read_manifest,
 )
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
@@ -36,6 +38,9 @@ from src.state.db import _connect_read_only, _zeus_trade_db_path, get_world_conn
 
 UTC = timezone.utc
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
+_RETIRED_MANIFEST_FIELD_SHA256 = (
+    "15849366080266e6a6b07a88b389786ca87691349b0c8aa5d946ca6809c195d9"
+)
 # Coverage authority anchor: seed discovery consumes
 # build_replacement_forecast_current_target_plan(), whose candidate rows are
 # filtered by tradeable_grade_coverage_sql. Keep this explicit import so this
@@ -294,6 +299,84 @@ def _manifest_base_dir(manifest: RawForecastArtifactManifest, *, fallback: Path)
     return Path(manifest_json).parent
 
 
+def _current_manifest_paths_from_db(
+    conn: sqlite3.Connection,
+    raw_manifest_dir: Path,
+    *,
+    source_run_ids: Sequence[str],
+    computed_at: datetime,
+) -> tuple[Path, ...]:
+    """Resolve the exact current manifest set from canonical artifact rows.
+
+    Live discovery already knows the source-run identities selected by the
+    current-target plan. Reconstructing their content-addressed manifest names
+    avoids rescanning the full immutable history on every minute tick. Any
+    incomplete index falls back to the strict inventory loader.
+    """
+
+    wanted = tuple(
+        sorted(
+            {
+                str(value).strip()
+                for value in source_run_ids
+                if str(value).strip()
+            }
+        )
+    )
+    if not wanted or "raw_forecast_artifacts" not in _table_names(conn):
+        return ()
+    required = {
+        "source_id",
+        "product_id",
+        "data_version",
+        "source_cycle_time",
+        "source_available_at",
+        "sha256",
+        "artifact_metadata_json",
+    }
+    if not required.issubset(_columns(conn, "raw_forecast_artifacts")):
+        return ()
+    placeholders = ",".join("?" for _ in wanted)
+    cutoff = (computed_at - timedelta(days=3)).isoformat()
+    rows = conn.execute(
+        f"""
+        SELECT source_id,
+               data_version,
+               source_cycle_time,
+               sha256,
+               json_extract(artifact_metadata_json, '$.source_run_id') AS source_run_id,
+               COALESCE(
+                   json_extract(artifact_metadata_json, '$.city'),
+                   'multi'
+               ) AS city
+          FROM raw_forecast_artifacts
+         WHERE source_id = 'openmeteo_ecmwf_ifs_9km'
+           AND product_id = 'openmeteo_ecmwf_ifs9_deterministic_anchor_v1'
+           AND datetime(source_cycle_time) >= datetime(?)
+           AND datetime(source_available_at) <= datetime(?)
+           AND json_extract(artifact_metadata_json, '$.source_run_id')
+               IN ({placeholders})
+        """,
+        (cutoff, computed_at.isoformat(), *wanted),
+    ).fetchall()
+    matched = {str(row["source_run_id"] or "").strip() for row in rows}
+    if matched != set(wanted):
+        return ()
+    paths = []
+    for row in rows:
+        cycle = _dt(row["source_cycle_time"], field_name="source_cycle_time")
+        city = str(row["city"] or "multi").replace("/", "_").replace(" ", "_")
+        path = raw_manifest_dir / (
+            f"{row['source_id']}.{row['data_version']}."
+            f"{cycle.strftime('%Y%m%dT%H%M%SZ')}."
+            f"{str(row['sha256'])[:12]}.{city}.manifest.json"
+        )
+        if not path.is_file():
+            return ()
+        paths.append(path)
+    return tuple(sorted(set(paths)))
+
+
 def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[RawForecastArtifactManifest, ...]:
     if not raw_manifest_dir.exists():
         return ()
@@ -340,6 +423,17 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
                     # products (for example AIFS). They are not current live inputs, but one
                     # historical file must not veto every current-family repair scan.
                     continue
+                except UnsupportedRawForecastArtifactManifestFieldsError as exc:
+                    # A pre-schema legacy inventory may carry the retired authority stamp.
+                    # It is not a current input and must not veto exact current-run repair.
+                    # Every other unknown field remains a hard schema failure.
+                    field_hashes = {
+                        hashlib.sha256(field.encode("utf-8")).hexdigest()
+                        for field in exc.fields
+                    }
+                    if field_hashes == {_RETIRED_MANIFEST_FIELD_SHA256}:
+                        continue
+                    raise
             current[path] = (signature, manifest)
         succeeded = True
     finally:
@@ -807,15 +901,6 @@ def discover_replacement_forecast_materialization_seeds(
     computed = _dt(computed_at or datetime.now(tz=UTC), field_name="computed_at")
     raw_dir = Path(raw_manifest_dir)
     seed_path = Path(seed_dir)
-    manifests = _load_manifests(raw_dir, computed_at=computed)
-    if not manifests:
-        return ReplacementForecastSeedDiscoveryReport(
-            status="NO_ELIGIBLE_TARGETS",
-            reason_codes=("REPLACEMENT_SEED_DISCOVERY_RAW_MANIFESTS_MISSING",),
-            discovered_count=0,
-            skipped_count=0,
-            failed_count=0,
-        )
 
     conn = _connect_read_only(Path(forecast_db))
     conn.row_factory = sqlite3.Row
@@ -889,6 +974,30 @@ def discover_replacement_forecast_materialization_seeds(
             return ReplacementForecastSeedDiscoveryReport(
                 status="NO_ELIGIBLE_TARGETS",
                 reason_codes=("REPLACEMENT_SEED_DISCOVERY_DB_TARGETS_MISSING",),
+                discovered_count=0,
+                skipped_count=0,
+                failed_count=0,
+            )
+        source_run_ids = tuple(
+            str(target.get("openmeteo_source_run_id") or "").strip()
+            for target in targets
+            if str(target.get("openmeteo_source_run_id") or "").strip()
+        )
+        current_paths = _current_manifest_paths_from_db(
+            conn,
+            raw_dir,
+            source_run_ids=source_run_ids,
+            computed_at=computed,
+        )
+        manifests = (
+            _load_manifest_files(current_paths, computed_at=computed)
+            if current_paths
+            else _load_manifests(raw_dir, computed_at=computed)
+        )
+        if not manifests:
+            return ReplacementForecastSeedDiscoveryReport(
+                status="NO_ELIGIBLE_TARGETS",
+                reason_codes=("REPLACEMENT_SEED_DISCOVERY_RAW_MANIFESTS_MISSING",),
                 discovered_count=0,
                 skipped_count=0,
                 failed_count=0,

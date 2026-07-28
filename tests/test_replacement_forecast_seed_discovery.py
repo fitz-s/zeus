@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-27
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Last reused/audited: 2026-07-28
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: Protect automatic replacement seed discovery from DB context plus raw manifests.
 # Reuse: Run before enabling daemon-side replacement shadow materialization discovery.
 # Authority basis: Simple switch must not depend on hand-authored seeds once raw inputs exist.
@@ -20,6 +20,7 @@ from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest,
 from src.data.replacement_forecast_readiness import SOURCE_ID as REPLACEMENT_SOURCE_ID
 from src.data.replacement_forecast_readiness import STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY
 from src.data.replacement_forecast_seed_discovery import (
+    _current_manifest_paths_from_db,
     _day0_observed_extreme_seed_payload,
     _load_manifest_files,
     _load_manifests,
@@ -573,6 +574,68 @@ def test_load_manifest_files_reads_only_producer_committed_paths(tmp_path: Path)
 
     assert len(manifests) == 1
     assert manifests[0].product_metadata["manifest_json"] == str(selected.resolve())
+
+
+def test_current_manifest_paths_from_db_avoids_historical_inventory_scan(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    staged = _write_manifest(
+        raw_dir,
+        name="selected",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        metadata={"city": "NYC"},
+    )
+    payload = json.loads(staged.read_text(encoding="utf-8"))
+    exact = raw_dir / (
+        f"{payload['source_id']}.{payload['data_version']}.20260606T000000Z."
+        f"{payload['sha256'][:12]}.NYC.manifest.json"
+    )
+    staged.rename(exact)
+    (raw_dir / "legacy.manifest.json").write_text(
+        '{"trade_authority_status":"BLOCKED"}',
+        encoding="utf-8",
+    )
+
+    conn = sqlite3.connect(tmp_path / "forecast.db")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            artifact_metadata_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO raw_forecast_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            payload["source_id"],
+            payload["product_id"],
+            payload["data_version"],
+            payload["source_cycle_time"],
+            payload["source_available_at"],
+            payload["sha256"],
+            json.dumps({"source_run_id": "selected-run", "city": "NYC"}),
+        ),
+    )
+
+    paths = _current_manifest_paths_from_db(
+        conn,
+        raw_dir,
+        source_run_ids=("selected-run",),
+        computed_at=datetime.fromisoformat("2026-06-06T04:00:00+00:00"),
+    )
+
+    assert paths == (exact,)
+    conn.close()
 
 
 def _init_db(path: Path) -> None:
