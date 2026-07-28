@@ -28,6 +28,7 @@ from src.data.replacement_forecast_seed_discovery import (
     _latest_manifest,
     _ordered_seed_targets,
     _seed_target_sort_key,
+    _target_has_pending_queue_work,
     discover_replacement_forecast_materialization_seeds,
 )
 import src.data.replacement_forecast_seed_discovery as seed_discovery
@@ -136,6 +137,38 @@ def test_single_slot_seed_target_order_preserves_future_priority() -> None:
     )
 
     assert _ordered_seed_targets((day0, future), {}, limit=1) == (future, day0)
+
+
+def test_seed_discovery_detects_only_same_family_pending_queue_work(
+    tmp_path: Path,
+) -> None:
+    seed_dir = tmp_path / "seeds"
+    request_dir = tmp_path / "requests"
+    inflight_dir = tmp_path / "inflight" / "claim"
+    for directory in (seed_dir, request_dir, inflight_dir):
+        directory.mkdir(parents=True)
+    target = {
+        "city": "San Francisco",
+        "target_date": "2026-07-30",
+        "temperature_metric": "high",
+    }
+    unrelated = seed_dir / "London.2026-07-30.high.20260728T120000Z.json"
+    unrelated.write_text("{}")
+    assert _target_has_pending_queue_work(seed_dir, target) is False
+
+    queued = request_dir / (
+        "San_Francisco.2026-07-30.high."
+        "20260728T120000Z.20260728T120001Z.pid1.json"
+    )
+    queued.write_text("{}")
+    assert _target_has_pending_queue_work(seed_dir, target) is True
+    queued.unlink()
+
+    inflight = inflight_dir / (
+        "San_Francisco.2026-07-30.high.20260728T120000Z.json"
+    )
+    inflight.write_text("{}")
+    assert _target_has_pending_queue_work(seed_dir, target) is True
 
 
 def test_hko_seed_preserves_provisional_provider_source(monkeypatch) -> None:
@@ -1366,6 +1399,7 @@ def test_seed_discovery_prioritizes_held_family_and_skips_unchanged_blocked_budg
     assert report.status == "DISCOVERED"
     seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
     assert seed["city"] == "Tokyo"
+    Path(report.written_seed_files[0]).unlink()
 
     monkeypatch.setattr(
         "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",

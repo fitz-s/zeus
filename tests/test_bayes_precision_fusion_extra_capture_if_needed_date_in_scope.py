@@ -43,7 +43,9 @@ import pytest
 import src.config as cfg
 import src.data.replacement_forecast_current_target_plan as plan_mod
 import src.data.bayes_precision_fusion_download as dl_mod
+import src.data.replacement_forecast_production as production
 import src.main as main_mod
+from src.data.bayes_precision_fusion_download import BayesPrecisionFusionDownloadTarget
 from src.data.replacement_forecast_current_target_plan import (
     ReplacementForecastCurrentTargetPlan,
     ReplacementForecastCurrentTargetPlanRow,
@@ -205,3 +207,69 @@ def test_target_date_iso_is_parseable_by_date_fromisoformat() -> None:
     # change makes target_date non-ISO, this fails loudly instead of being swallowed.
     td = (date.today() + timedelta(days=2)).isoformat()
     assert date.fromisoformat(td) == date.today() + timedelta(days=2)
+
+
+def test_timeboxed_extra_capture_rotates_past_attempted_city_date_groups(
+    monkeypatch,
+) -> None:
+    cycle = datetime(2026, 7, 28, 6, tzinfo=timezone.utc)
+    monkeypatch.setattr(production, "_BPF_EXTRA_ROTATION_CYCLE", None)
+    monkeypatch.setattr(production, "_BPF_EXTRA_ROTATION_CURSOR", 0)
+    targets = tuple(
+        BayesPrecisionFusionDownloadTarget(
+            city=city,
+            metric=metric,
+            target_date=target_date,
+            lead_days=1,
+            latitude=0.0,
+            longitude=0.0,
+            timezone_name="UTC",
+        )
+        for city, target_date, metric in (
+            ("Amsterdam", "2026-07-29", "high"),
+            ("Amsterdam", "2026-07-29", "low"),
+            ("London", "2026-07-30", "high"),
+            ("London", "2026-07-30", "low"),
+            ("Paris", "2026-07-30", "high"),
+        )
+    )
+
+    first, start, group_count = production._rotate_bpf_extra_targets(
+        targets,
+        cycle=cycle,
+    )
+    assert start == 0
+    assert group_count == 3
+    assert [target.city for target in first] == [
+        "Amsterdam",
+        "Amsterdam",
+        "London",
+        "London",
+        "Paris",
+    ]
+
+    production._advance_bpf_extra_rotation(
+        cycle=cycle,
+        start=start,
+        group_count=group_count,
+        attempted_group_count=2,
+    )
+    second, second_start, _ = production._rotate_bpf_extra_targets(
+        targets,
+        cycle=cycle,
+    )
+
+    assert second_start == 2
+    assert [target.city for target in second] == [
+        "Paris",
+        "Amsterdam",
+        "Amsterdam",
+        "London",
+        "London",
+    ]
+    reset, reset_start, _ = production._rotate_bpf_extra_targets(
+        targets,
+        cycle=cycle + timedelta(hours=6),
+    )
+    assert reset_start == 0
+    assert reset == targets

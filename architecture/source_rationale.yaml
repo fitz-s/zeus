@@ -406,7 +406,7 @@ files:
   src/data/replacement_forecast_seed_discovery.py:
     zone: K2_runtime
     authority_role: replacement_forecast_seed_discovery
-    why: Builds causal replacement materialization seeds from current raw forecast artifacts and Day0 facts. Live discovery resolves the exact content-addressed manifest set selected by the canonical current-target source-run identities instead of rescanning immutable history; an incomplete index falls back to strict inventory. A raw same-station fast extreme may supersede the slower WU seed value only when the seven-day station-local residual likelihood is qualified; thin or missing evidence preserves the settlement-channel seed byte-for-byte.
+    why: Builds causal replacement materialization seeds from current raw forecast artifacts and Day0 facts. Live discovery resolves the exact content-addressed manifest set selected by the canonical current-target source-run identities instead of rescanning immutable history; an incomplete index falls back to strict inventory. Queue deduplication is scoped to the exact city-date-metric family so unrelated pending work cannot starve discovery. A raw same-station fast extreme may supersede the slower WU seed value only when the seven-day station-local residual likelihood is qualified; thin or missing evidence preserves the settlement-channel seed byte-for-byte.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1304,7 +1304,7 @@ files:
   src/data/replacement_forecast_production.py:
     zone: K2_runtime
     authority_role: replacement_forecast_runtime_orchestrator
-    why: Orchestrates source-clock capture, current-target materialization, and commit notifications while leaving probability math, market truth, and order authority to their owning modules.
+    why: Orchestrates source-clock capture, current-target materialization, and commit notifications while leaving probability math, market truth, and order authority to their owning modules. Bounded extra-model passes rotate across city-date groups after each attempted prefix so an unavailable early provider scope cannot indefinitely starve later current targets.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1415,7 +1415,7 @@ files:
   src/ingest/forecast_live_daemon.py:
     zone: K2_runtime
     authority_role: forecast_live_daemon_entry
-    why: Dedicated OpenData live forecast producer daemon; schedules only ECMWF OpenData HIGH/LOW forecast ingest, heartbeat, and OpenData-only source-health refresh, sharing the OpenData lock with legacy ingest_main during rollout.
+    why: Dedicated OpenData live forecast producer daemon; schedules ECMWF OpenData HIGH/LOW ingest plus replacement source-clock recovery, heartbeat, and source-health refresh. Seed discovery continues behind unrelated queue backlog and rechecks revisions while an exact family remains pending, preventing a global queue-head starvation ratchet.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:

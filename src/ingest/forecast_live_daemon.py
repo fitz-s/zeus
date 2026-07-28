@@ -1221,11 +1221,6 @@ def _replacement_forecast_discovery_job() -> None:
     revision = _replacement_forecast_discovery_revision(cfg)
     if revision is not None and revision == _replacement_forecast_last_discovery_revision:
         return
-    if any(
-        _replacement_forecast_queue_pending(cfg, key)
-        for key in ("request_dir", "seed_dir")
-    ):
-        return
     discovery_limit = int(cfg["seed_discovery_limit"])
     report = discover_replacement_forecast_materialization_seeds(
         forecast_db=cfg["forecast_db"],
@@ -1233,7 +1228,15 @@ def _replacement_forecast_discovery_job() -> None:
         seed_dir=cfg["seed_dir"],
         limit=discovery_limit,
     )
-    if revision is not None and report.discovered_count < discovery_limit:
+    pending_family_skipped = (
+        "REPLACEMENT_SEED_DISCOVERY_TARGET_ALREADY_PENDING_SKIPPED"
+        in tuple(getattr(report, "reason_codes", ()))
+    )
+    if (
+        revision is not None
+        and report.discovered_count < discovery_limit
+        and not pending_family_skipped
+    ):
         _replacement_forecast_last_discovery_revision = revision
     if report.status != "NO_ELIGIBLE_TARGETS":
         logger.info("replacement forecast recovery discovery: %s", report.as_dict())

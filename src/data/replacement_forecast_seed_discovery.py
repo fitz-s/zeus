@@ -741,11 +741,43 @@ def _source_run_coverage_schema_ready(conn: sqlite3.Connection) -> bool:
 
 
 def _seed_name(target: Mapping[str, object], *, computed_at: datetime) -> str:
+    city = (
+        _reject_alias(str(target["city"]), field_name="city")
+        .replace("/", "_")
+        .replace(" ", "_")
+    )
+    target_date = _reject_alias(
+        str(target["target_date"]),
+        field_name="target_date",
+    )
+    metric = _reject_alias(
+        str(target["temperature_metric"]),
+        field_name="temperature_metric",
+    )
+    stamp = computed_at.strftime("%Y%m%dT%H%M%SZ")
+    return f"{city}.{target_date}.{metric}.{stamp}.json"
+
+
+def _target_has_pending_queue_work(
+    seed_dir: Path,
+    target: Mapping[str, object],
+) -> bool:
+    """True when this family already has work in a live queue stage."""
+
     city = _reject_alias(str(target["city"]), field_name="city").replace("/", "_").replace(" ", "_")
     target_date = _reject_alias(str(target["target_date"]), field_name="target_date")
     metric = _reject_alias(str(target["temperature_metric"]), field_name="temperature_metric")
-    stamp = computed_at.strftime("%Y%m%dT%H%M%SZ")
-    return f"{city}.{target_date}.{metric}.{stamp}.json"
+    prefix = f"{city}.{target_date}.{metric}."
+    queue_root = seed_dir.parent
+    patterns = (
+        (seed_dir, f"{prefix}*.json"),
+        (queue_root / "requests", f"{prefix}*.json"),
+        (queue_root / "inflight", f"*/{prefix}*.json"),
+    )
+    return any(
+        directory.exists() and next(directory.glob(pattern), None) is not None
+        for directory, pattern in patterns
+    )
 
 
 def held_position_family_priorities() -> dict[tuple[str, str, str], int]:
@@ -1013,6 +1045,11 @@ def discover_replacement_forecast_materialization_seeds(
             metric = str(target["temperature_metric"])
             openmeteo_source_run_id = str(target.get("openmeteo_source_run_id") or "").strip()
             target_key = f"{city}|{target_date}|{metric}"
+            if _target_has_pending_queue_work(seed_path, target):
+                reasons.append(
+                    "REPLACEMENT_SEED_DISCOVERY_TARGET_ALREADY_PENDING_SKIPPED"
+                )
+                continue
             day0_seed_payload: dict[str, object] = {}
             if bool(target.get("day0_observed_extreme_required")):
                 payload = _day0_observed_extreme_seed_payload(
