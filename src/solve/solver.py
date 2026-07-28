@@ -120,6 +120,25 @@ def _live_unit_price_in_band(value: Decimal) -> bool:
         and LIVE_ORDER_MIN_UNIT_PRICE <= value <= LIVE_ORDER_MAX_UNIT_PRICE
     )
 
+
+def _live_sell_limit_price(
+    deepest_bid: Decimal,
+    min_tick: Decimal,
+) -> Decimal | None:
+    """Return a legal SELL floor without discarding better executable bids."""
+
+    if (
+        not deepest_bid.is_finite()
+        or deepest_bid < LIVE_ORDER_MIN_UNIT_PRICE
+    ):
+        return None
+    capped = min(deepest_bid, LIVE_ORDER_MAX_UNIT_PRICE)
+    aligned = (
+        capped / min_tick
+    ).to_integral_value(rounding=ROUND_FLOOR) * min_tick
+    return aligned if aligned >= LIVE_ORDER_MIN_UNIT_PRICE else None
+
+
 # CVaR tail stability (consult REV-2 follow-up): a robust ΔU at alpha needs enough draws in
 # the alpha-tail to be meaningful. Below this the plan is STAMPED (metrics) so the promotion
 # evidence gate can down-weight it; a one-draw band is stamped point_belief. Not a hard reject.
@@ -5071,8 +5090,9 @@ def _score_global_single_order_sell(
     ] | None = None
     price_band_rejected = False
     for shares in sorted(venue_probes):
-        proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(shares)
-        if not _live_unit_price_in_band(limit_price):
+        proceeds, expected_fill_price, deepest_bid = curve.proceeds_for_shares(shares)
+        limit_price = _live_sell_limit_price(deepest_bid, curve.min_tick)
+        if limit_price is None:
             price_band_rejected = True
             continue
         loss_at_risk = shares - proceeds

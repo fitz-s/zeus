@@ -2151,9 +2151,9 @@ def test_global_single_order_sell_yes_no_label_mirror_is_exact():
 @pytest.mark.parametrize("side", ("YES", "NO"))
 @pytest.mark.parametrize(
     ("price", "held_q"),
-    (("0.004", 0.001), ("0.999", 0.20)),
+    (("0.004", 0.001),),
 )
-def test_global_single_order_sell_ranks_only_live_price_band_probes(
+def test_global_single_order_sell_rejects_bids_below_live_price_band(
     side, price, held_q
 ):
     sell = _global_sell_candidate(
@@ -2172,6 +2172,34 @@ def test_global_single_order_sell_ranks_only_live_price_band_probes(
         decision.rejection_reasons[sell.candidate_id]
         == "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
     )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_sell_caps_limit_but_keeps_favorable_fill(side):
+    sell = _global_sell_candidate(
+        candidate_id=f"sell-favorable-above-band-{side}",
+        family=f"sell-favorable-above-band-{side}-family",
+        side=side,
+        held_q=0.20,
+        bids=(("0.999", "10"),),
+        shares="10",
+    )
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is sell
+    assert decision.limit_price == Decimal("0.95")
+    assert decision.expected_fill_price_before_fee == Decimal("0.999")
+    assert decision.cash_proceeds_usd == Decimal("9.990")
+    assert decision.robust_delta_log_wealth > 0.0
+    assert decision.robust_ev_usd > 0.0
+
+
+def test_global_single_order_sell_cap_is_tick_aligned():
+    assert S._live_sell_limit_price(
+        Decimal("0.98"),
+        Decimal("0.02"),
+    ) == Decimal("0.94")
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))

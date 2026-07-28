@@ -23917,6 +23917,7 @@ def _adapter_sell_actuation(
     event,
     *,
     selected_shares="10",
+    bid_levels=(("0.60", "4"), ("0.50", "6")),
     probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
     exit_authority_status="not_applicable",
     exit_authority_reason="non_day0_family",
@@ -23927,9 +23928,9 @@ def _adapter_sell_actuation(
         side="YES",
         snapshot_id="selected-sell-book",
         book_hash="selected-sell-hash",
-        levels=(
-            BookLevel(price=Decimal("0.60"), size=Decimal("4")),
-            BookLevel(price=Decimal("0.50"), size=Decimal("6")),
+        levels=tuple(
+            BookLevel(price=Decimal(price), size=Decimal(size))
+            for price, size in bid_levels
         ),
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.01"),
@@ -23957,7 +23958,8 @@ def _adapter_sell_actuation(
         exit_authority_reason=exit_authority_reason,
     )
     selected = Decimal(selected_shares)
-    proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(selected)
+    proceeds, expected_fill_price, deepest_bid = curve.proceeds_for_shares(selected)
+    limit_price = min(deepest_bid, Decimal("0.95"))
     loss_at_risk = selected - proceeds
     robust_q = 0.70
     loss_after = Decimal("110") - selected + proceeds
@@ -24110,9 +24112,18 @@ def test_global_sell_jit_rejects_changed_day0_statistical_authority(monkeypatch)
     "probability_functional",
     ("LOWER_CVAR_PARAMETER_DRAWS", "POSTERIOR_PREDICTIVE_MEAN"),
 )
+@pytest.mark.parametrize(
+    ("bid_levels", "expected_limit"),
+    (
+        ((("0.60", "4"), ("0.50", "6")), 0.50),
+        ((("0.97", "10"),), 0.95),
+    ),
+)
 def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     monkeypatch,
     probability_functional,
+    bid_levels,
+    expected_limit,
 ):
     from src.data.polymarket_request_governor import RequestPriority
 
@@ -24120,6 +24131,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     actuation = _adapter_sell_actuation(
         event,
         selected_shares="6",
+        bid_levels=bid_levels,
         probability_functional=probability_functional,
     )
     position = SimpleNamespace(
@@ -24184,8 +24196,8 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                     "tick_size": "0.01",
                     "min_order_size": "5",
                     "bids": [
-                        {"price": "0.60", "size": "4"},
-                        {"price": "0.50", "size": "6"},
+                        {"price": price, "size": size}
+                        for price, size in bid_levels
                     ],
                 }
             }
@@ -24214,7 +24226,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         assert authority.actuation is actuation
         assert authority.jit_candidate.executable_sell_curve.book_hash
         intent = kwargs["exit_intent"]
-        assert intent.exact_limit_price == pytest.approx(0.50)
+        assert intent.exact_limit_price == pytest.approx(expected_limit)
         assert intent.shares == pytest.approx(6.0)
         assert intent.close_position is False
         assert intent.submit_order_type == "FAK"
