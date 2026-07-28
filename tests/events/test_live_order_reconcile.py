@@ -1116,6 +1116,11 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
         "get_trade_connection_with_world_required",
         _open_trade,
     )
+    monkeypatch.setattr(
+        main,
+        "_edli_durable_fill_bridge_work_exists_read_only",
+        lambda: True,
+    )
     monkeypatch.setattr(_trade_bridge, "append_confirmed_trade_facts_to_edli", _confirmed_phase)
     monkeypatch.setattr(
         _trade_bridge,
@@ -1144,6 +1149,75 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
     projection = LiveOrderAggregateLedger(_conn(db_path)).get_projection("event-1:intent-1")
     assert projection.current_state == "RECONCILED"
     assert projection.pending_reconcile is False
+
+    conn = _conn(db_path)
+    phase_transactions.clear()
+    gate_owners.clear()
+    monkeypatch.setattr(
+        main,
+        "_edli_durable_fill_bridge_work_exists_read_only",
+        lambda: False,
+    )
+
+    def _unexpected_trade_open(*args, **kwargs):
+        raise AssertionError("no-work steady state must not open the trade writer")
+
+    monkeypatch.setattr(
+        _state_db,
+        "get_trade_connection_with_world_required",
+        _unexpected_trade_open,
+    )
+
+    main._edli_user_channel_reconcile_cycle()
+
+    assert "price_channel_fill_bridge" not in gate_owners
+    assert gate_owners == [
+        "price_channel_user_inbox",
+        "price_channel_venue_reconcile",
+    ]
+
+
+def test_durable_fill_bridge_read_only_admission_detects_only_orphans():
+    from src.events.edli_position_bridge import edli_bridge_position_id
+    from src.ingest import price_channel_ingest as main
+
+    conn = _conn()
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY
+        );
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            decision_id TEXT,
+            position_id TEXT
+        );
+        """
+    )
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed(ledger)
+    append_user_trade_observed(
+        ledger,
+        aggregate_id="event-1:intent-1",
+        event_id="event-1",
+        final_intent_id="intent-1",
+        source="polymarket_user_channel",
+        trade_status="CONFIRMED",
+        venue_order_id="venue-1",
+        occurred_at=NOW,
+        payload={"raw_user_channel_message_hash": "trade-admission-1"},
+    )
+    conn.commit()
+
+    assert main._edli_durable_fill_bridge_work_exists(conn) is True
+
+    conn.execute(
+        "INSERT INTO position_current(position_id) VALUES (?)",
+        (edli_bridge_position_id("event-1:intent-1"),),
+    )
+    conn.commit()
+
+    assert main._edli_durable_fill_bridge_work_exists(conn) is False
 
 
 def _seed(ledger: LiveOrderAggregateLedger) -> None:

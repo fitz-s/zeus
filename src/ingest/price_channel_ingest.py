@@ -1061,6 +1061,107 @@ def _edli_pending_reconcile_aggregates(conn, *, limit: int) -> list:
     )
 
 
+def _edli_durable_fill_bridge_work_exists(conn) -> bool:
+    """Return whether a confirmed EDLI fill still lacks a canonical position.
+
+    This is the read-only admission check for the expensive cross-DB writer
+    below.  A healthy steady state has no orphaned fills, so it must not open a
+    write-capable three-DB connection and monopolise the trade writer merely to
+    rediscover that fact every minute.
+    """
+    from src.events.edli_position_bridge import (
+        _edli_events_table,
+        edli_bridge_position_id,
+        edli_bridge_position_id_legacy,
+    )
+
+    table = _edli_events_table(conn)
+    if table not in {"world.edli_live_order_events", "edli_live_order_events"}:
+        raise ValueError(f"unexpected EDLI events table: {table!r}")
+    aggregate_ids = tuple(
+        str(_row_get(row, "aggregate_id") or "")
+        for row in conn.execute(
+            f"""
+            SELECT DISTINCT aggregate_id
+              FROM {table}
+             WHERE event_type = 'UserTradeObserved'
+               AND json_extract(payload_json, '$.fill_authority_state')
+                   = 'FILL_CONFIRMED'
+             ORDER BY aggregate_id ASC
+            """
+        ).fetchall()
+        if str(_row_get(row, "aggregate_id") or "")
+    )
+    if not aggregate_ids:
+        return False
+
+    position_ids = {
+        str(_row_get(row, "position_id") or "")
+        for row in conn.execute("SELECT position_id FROM position_current").fetchall()
+        if str(_row_get(row, "position_id") or "")
+    }
+    command_position_by_aggregate = {
+        str(_row_get(row, "aggregate_id") or ""): str(
+            _row_get(row, "position_id") or ""
+        )
+        for row in conn.execute(
+            f"""
+            WITH command_events AS (
+                SELECT aggregate_id,
+                       json_extract(
+                           payload_json,
+                           '$.execution_command_id'
+                       ) AS execution_command_id
+                  FROM {table}
+                 WHERE event_type = 'ExecutionCommandCreated'
+                   AND json_extract(
+                           payload_json,
+                           '$.execution_command_id'
+                       ) IS NOT NULL
+            )
+            SELECT ce.aggregate_id, vc.position_id
+              FROM command_events ce
+              JOIN venue_commands vc
+                ON vc.command_id = ce.execution_command_id
+                OR vc.decision_id = ce.execution_command_id
+              JOIN position_current pc
+                ON pc.position_id = vc.position_id
+             WHERE vc.position_id IS NOT NULL
+               AND vc.position_id != ''
+            """
+        ).fetchall()
+        if str(_row_get(row, "aggregate_id") or "")
+        and str(_row_get(row, "position_id") or "")
+    }
+    return any(
+        edli_bridge_position_id(aggregate_id) not in position_ids
+        and edli_bridge_position_id_legacy(aggregate_id) not in position_ids
+        and command_position_by_aggregate.get(aggregate_id) not in position_ids
+        for aggregate_id in aggregate_ids
+    )
+
+
+def _edli_durable_fill_bridge_work_exists_read_only() -> bool:
+    """Probe bridge work without acquiring either canonical DB writer."""
+    from src.state.db import (
+        ZEUS_WORLD_DB_PATH,
+        get_trade_connection_read_only,
+    )
+
+    conn = get_trade_connection_read_only()
+    try:
+        attached = {
+            str(_row_get(row, "name") or "")
+            for row in conn.execute("PRAGMA database_list").fetchall()
+        }
+        if "world" not in attached:
+            world_uri = f"{ZEUS_WORLD_DB_PATH.resolve().as_uri()}?mode=ro"
+            conn.execute("ATTACH DATABASE ? AS world", (world_uri,))
+        return _edli_durable_fill_bridge_work_exists(conn)
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # THE DURABLE FILL BRIDGE SCAN — the persisted truth shared across the cutover
 # (moved verbatim from src/main.py). src.main's BOOT recovery imports THIS.
@@ -1715,15 +1816,15 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
     # (chain-reconciliation / exit / harvester / redeem) can see and recover the
     # position.
     #
-    # AUTHORITATIVE TRIGGER = the durable, idempotent scan
-    # (_edli_durable_fill_bridge_scan): it re-derives the work set from the
-    # persisted edli_live_order_events on EVERY cycle, so a confirmed fill orphaned
-    # by a daemon death / swallowed exception between the inbox PROCESSED commit
-    # and this bridge commit is healed on the next cycle regardless of process
-    # restarts. The transient `_edli_fill_bridge_aggregate_ids` set is kept ONLY
-    # as a fast in-cycle optimisation (bridges the just-processed fills with zero
-    # extra scan cost); it is NO LONGER the source of truth, so the orphan window
-    # is closed. Both run on the SAME bridge connection within the SAME commit.
+    # AUTHORITATIVE TRIGGER = persisted confirmed-fill truth. Every cycle first
+    # re-derives whether an orphan exists through a read-only admission query;
+    # only a positive or uncertain result enters the durable, idempotent writer
+    # scan. A confirmed fill orphaned by a daemon death / swallowed exception
+    # between the inbox PROCESSED commit and this bridge commit is therefore
+    # healed on the next cycle without taking the trade writer in the healthy
+    # no-work steady state. The transient `_edli_fill_bridge_aggregate_ids` set
+    # is kept ONLY as a fast in-cycle optimisation. Both repair paths run on the
+    # SAME bridge connection within the SAME commit.
     #
     # INV-37: runs on a trade connection with world ATTACHed — the bridge reads
     # world.edli_live_order_events and writes position_current / position_events on
@@ -1733,7 +1834,19 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
     # Fail-safe: a bridge error must not crash the scheduler job — log and retry
     # next cycle (the EDLI events persist; the next durable scan re-runs).
     bridged_positions = 0
-    if True:  # always run the durable scan; the fast set is an optimisation only
+    try:
+        durable_bridge_work_exists = bool(
+            _edli_fill_bridge_aggregate_ids
+        ) or _edli_durable_fill_bridge_work_exists_read_only()
+    except Exception as exc:  # noqa: BLE001 - uncertainty must preserve repair
+        durable_bridge_work_exists = True
+        logger.warning(
+            "EDLI durable fill-bridge read-only admission failed; "
+            "falling back to the canonical writer scan: %s",
+            exc,
+            exc_info=True,
+        )
+    if durable_bridge_work_exists:
         from src.events.edli_position_bridge import (
             materialize_position_current_from_edli_fill,
         )
