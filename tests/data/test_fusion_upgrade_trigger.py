@@ -689,6 +689,12 @@ def test_durable_publish_happens_before_sqlite_marker_transitions(
 ) -> None:
     """Staging durability precedes PENDING; queue durability precedes final marker."""
     db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    queue_root = state_dir / "replacement_forecast_live"
+    seed_dir = queue_root / "seeds"
+    kwargs["seed_dir"] = seed_dir
+    assert not queue_root.exists()
     monkeypatch.setattr(
         trigger,
         "scope_capture_offers_larger_provider_set",
@@ -709,11 +715,12 @@ def test_durable_publish_happens_before_sqlite_marker_transitions(
         "_fsync_file",
         lambda path: events.append(f"fsync_file:{Path(path).name}"),
     )
-    seed_dir = Path(kwargs["seed_dir"])
 
     def _fsync_directory(path):
         directory = Path(path)
-        if directory == seed_dir.parent:
+        if directory == state_dir:
+            event = "fsync_queue_root_parent_entry"
+        elif directory == queue_root:
             event = "fsync_seed_parent_entry"
         elif directory == seed_dir:
             event = (
@@ -751,6 +758,9 @@ def test_durable_publish_happens_before_sqlite_marker_transitions(
 
     assert report["seeds_enqueued"] == 1
     assert events.index("write_seed") < events.index("marker_finalize")
+    assert events.index("fsync_queue_root_parent_entry") < events.index(
+        "marker_finalize"
+    )
     assert events.index("fsync_seed_parent_entry") < events.index(
         "marker_finalize"
     )
@@ -759,6 +769,80 @@ def test_durable_publish_happens_before_sqlite_marker_transitions(
     )
     assert events.index("fsync_staging_dir") < events.index("marker_finalize")
     assert events.index("fsync_queue_dir") < events.index("marker_complete")
+
+
+def test_queue_root_parent_fsync_failure_never_finalizes_and_retries(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newly created queue root is not SQLite-visible before STATE_DIR fsync."""
+    db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    queue_root = state_dir / "replacement_forecast_live"
+    seed_dir = queue_root / "seeds"
+    kwargs["seed_dir"] = seed_dir
+    assert not queue_root.exists()
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: _revision_upgrade_verdict(),
+    )
+    monkeypatch.setattr(trigger, "_RESERVATION_TTL", timedelta(0))
+    builds = 0
+
+    def _build(_conn, **build_kwargs):
+        nonlocal builds
+        builds += 1
+        stage = Path(build_kwargs["seed_file"])
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_text("{}\n", encoding="utf-8")
+        return stage
+
+    real_fsync_directory = trigger._fsync_directory
+    state_dir_fsync_attempts = 0
+
+    def _fsync_directory(path):
+        nonlocal state_dir_fsync_attempts
+        directory = Path(path)
+        if directory == state_dir:
+            state_dir_fsync_attempts += 1
+            if state_dir_fsync_attempts == 1:
+                raise OSError("injected queue-root-parent fsync failure")
+        real_fsync_directory(directory)
+
+    finalize_calls = 0
+    real_finalize = trigger._finalize_enqueue_reservations
+
+    def _finalize(*args, **finalize_kwargs):
+        nonlocal finalize_calls
+        finalize_calls += 1
+        return real_finalize(*args, **finalize_kwargs)
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+    monkeypatch.setattr(trigger, "_fsync_directory", _fsync_directory)
+    monkeypatch.setattr(trigger, "_finalize_enqueue_reservations", _finalize)
+
+    failed = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+    conn = sqlite3.connect(db)
+    reservation = conn.execute(
+        "SELECT seed_file FROM fusion_upgrade_enqueues"
+    ).fetchone()[0]
+    conn.close()
+
+    assert failed["seed_staging_fsync_failed"] == 1
+    assert finalize_calls == 0
+    assert str(reservation).startswith(trigger._RESERVATION_PREFIX)
+    assert queue_root.is_dir()
+    assert list(seed_dir.glob("*.json")) == []
+
+    recovered = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert recovered["seeds_enqueued"] == 1
+    assert builds == 2
+    assert state_dir_fsync_attempts >= 2
+    assert finalize_calls == 1
+    assert len(list(seed_dir.glob("*.json"))) == 1
 
 
 def test_hidden_staging_parent_fsync_failure_never_finalizes_and_retries(

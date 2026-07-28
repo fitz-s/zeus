@@ -350,7 +350,7 @@ def _move_request(path: Path, destination_dir: Path) -> Path:
     )
     _ensure_directory_entry_durable(
         destination_dir,
-        durable_ancestor=common_ancestor,
+        durable_ancestor=common_ancestor.parent,
     )
     while True:
         target = destination_dir / _receipt_name(path)

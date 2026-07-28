@@ -531,13 +531,16 @@ def _ensure_directory_entry_durable(
         parent = child
 
 
-def _fsync_staged_seed(staging_file: Path) -> None:
+def _fsync_staged_seed(
+    staging_file: Path,
+    *,
+    durable_ancestor: Path,
+) -> None:
     """Make the private seed and its directory durable before SQLite references it."""
     staging_directory = staging_file.parent
-    seed_directory = staging_directory.parent
     _ensure_directory_entry_durable(
         staging_directory,
-        durable_ancestor=seed_directory.parent,
+        durable_ancestor=durable_ancestor,
     )
     _fsync_file(staging_file)
     _fsync_directory(staging_directory)
@@ -1018,6 +1021,13 @@ def enqueue_fusion_upgrade_reseeds(
     if not forecast_db.exists():
         report["status"] = "FUSION_UPGRADE_FORECAST_DB_MISSING"
         return report
+    # The configured layout is STATE_DIR / queue_root / seeds.  STATE_DIR must
+    # pre-exist so this poll can durably create every descendant before SQLite.
+    staging_durable_ancestor = seed_path.parent.parent.absolute()
+    if not staging_durable_ancestor.is_dir():
+        report["status"] = "FUSION_UPGRADE_STAGING_ANCESTOR_MISSING"
+        report["staging_durable_ancestor"] = str(staging_durable_ancestor)
+        return report
 
     if scopes is None:
         # Periodic catch-up retains the full current-target authority. Source-clock
@@ -1267,7 +1277,10 @@ def enqueue_fusion_upgrade_reseeds(
                 _cleanup_private_publication(publication)
                 continue
             try:
-                _fsync_staged_seed(staging_file)
+                _fsync_staged_seed(
+                    staging_file,
+                    durable_ancestor=staging_durable_ancestor,
+                )
             except Exception as exc:  # noqa: BLE001 — reservation retains retry ownership
                 report["seed_staging_fsync_failed"] = int(
                     report.get("seed_staging_fsync_failed", 0)
