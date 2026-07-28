@@ -22,6 +22,17 @@ class UnregisteredRawForecastArtifactIdentityError(ValueError):
     """The manifest names a product no longer in the live replacement registry."""
 
 
+class UnsupportedRawForecastArtifactManifestFieldsError(ValueError):
+    """The manifest carries top-level fields outside the current schema."""
+
+    def __init__(self, fields: set[str]) -> None:
+        self.fields = frozenset(fields)
+        super().__init__(
+            "raw forecast artifact manifest has unsupported fields: "
+            f"{sorted(self.fields)}"
+        )
+
+
 def _parse_utc(value: datetime | str, *, field_name: str) -> datetime:
     if isinstance(value, datetime):
         parsed = value
@@ -333,7 +344,7 @@ def read_manifest(path: Path | str) -> RawForecastArtifactManifest:
     known = {item.name for item in fields(RawForecastArtifactManifest)}
     unknown = set(raw) - known
     if unknown:
-        raise ValueError(f"raw forecast artifact manifest has unsupported fields: {sorted(unknown)}")
+        raise UnsupportedRawForecastArtifactManifestFieldsError(unknown)
     return RawForecastArtifactManifest(**raw)
 
 

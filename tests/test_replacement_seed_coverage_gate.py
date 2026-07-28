@@ -33,7 +33,11 @@ from datetime import datetime, timedelta, timezone
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
 )
-from src.data.replacement_forecast_live_materialization_queue import SOURCE_ID, _seed_already_covered
+from src.data.replacement_forecast_live_materialization_queue import (
+    SOURCE_ID,
+    _day0_seed_matches_conditioning,
+    _seed_already_covered,
+)
 from src.data.replacement_input_hwm import (
     _raw_artifact_cycle_for_frozen_request,
     _raw_artifact_cycles_for_frozen_target,
@@ -391,6 +395,109 @@ def test_day0_seed_coverage_requires_exact_conditioning_identity(tmp_path) -> No
 
         set_conditioning(provenance_key, unit="F")
         assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
+
+
+def test_day0_coverage_identity_never_matches_incomplete_evidence() -> None:
+    """Valid high/low metrics still require every Day0 identity field on both sides."""
+    field_pairs = (
+        ("day0_observed_extreme_source", "source"),
+        ("day0_observed_extreme_observation_time", "observation_time"),
+        ("day0_observed_extreme_c", "observed_extreme_c"),
+        ("day0_observed_extreme_unit", "unit"),
+    )
+    for metric in ("high", "low"):
+        seed = {
+            "temperature_metric": metric,
+            "day0_observed_extreme_source": "aviationweather_metar",
+            "day0_observed_extreme_observation_time": "2026-06-06T02:00:00+00:00",
+            "day0_observed_extreme_c": 31.0,
+            "day0_observed_extreme_unit": "C",
+        }
+        conditioning = {
+            "metric": metric,
+            "source": "aviationweather_metar",
+            "observation_time": "2026-06-06T02:00:00+00:00",
+            "observed_extreme_c": 31.0,
+            "unit": "C",
+        }
+        for seed_field, conditioning_field in field_pairs:
+            seed_missing = {key: value for key, value in seed.items() if key != seed_field}
+            conditioning_missing = dict(conditioning)
+            assert _day0_seed_matches_conditioning(seed_missing, conditioning_missing) is False
+
+            seed_missing = dict(seed)
+            conditioning_missing = {
+                key: value for key, value in conditioning.items() if key != conditioning_field
+            }
+            assert _day0_seed_matches_conditioning(seed_missing, conditioning_missing) is False
+
+            seed_missing = {key: value for key, value in seed.items() if key != seed_field}
+            conditioning_missing = {
+                key: value for key, value in conditioning.items() if key != conditioning_field
+            }
+            assert _day0_seed_matches_conditioning(seed_missing, conditioning_missing) is False
+
+
+def test_day0_coverage_prefers_active_provisional_over_fallback_conditioning(tmp_path) -> None:
+    """Queue coverage uses the same active-provisional identity as drained-marker completion."""
+    db_path = _db(tmp_path)
+    _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
+    _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
+    seed = {
+        **_seed(),
+        "computed_at": "2026-06-06T03:00:00+00:00",
+        "day0_observed_extreme_c": 31.0,
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-06-06T02:00:00+00:00",
+        "day0_observed_extreme_unit": "C",
+    }
+    matching = {
+        "active": True,
+        "metric": _METRIC,
+        "source": "aviationweather_metar",
+        "observed_extreme_c": 31.0,
+        "observation_time": "2026-06-06T02:00:00+00:00",
+        "unit": "C",
+    }
+    stale = {
+        "metric": _METRIC,
+        "source": "stale_fallback",
+        "observed_extreme_c": 0.0,
+        "observation_time": "2026-06-06T01:00:00+00:00",
+        "unit": "F",
+    }
+
+    def set_provenance(*, provisional: dict[str, object], conditioning: dict[str, object]) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE forecast_posteriors SET provenance_json = ?",
+            (
+                json.dumps(
+                    {
+                        "q_lcb_basis": "fused_center_bootstrap_p05",
+                        "bayes_precision_fusion": {
+                            "used_models": ["gfs_global"],
+                            "current_evidence_shape": {
+                                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                            },
+                        },
+                        "day0_provisional_observation": provisional,
+                        "day0_conditioning": conditioning,
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    set_provenance(provisional=matching, conditioning=stale)
+    assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
+
+    set_provenance(provisional={**stale, "active": True}, conditioning=matching)
+    assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
+
+    set_provenance(provisional={**stale, "active": False}, conditioning=matching)
+    assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
 
 
 def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) -> None:

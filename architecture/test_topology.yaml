@@ -66,7 +66,7 @@ test_trust_policy:
     tests/engine/test_position_belief_authority.py: {created: "2026-06-12", last_used: "2026-07-20", note: "Held-position belief reads the same replacement authority as entry, excludes future-computed rows at causal replay cuts, and refuses old current-evidence probability semantics."}
     tests/execution/test_venue_sync_contract.py: {created: "2026-06-11", last_used: "2026-07-28", note: "Three-phase command-recovery DB/venue synchronization antibodies, including default canonical WORLD+TRADE blocking flocks, live-tick opt-in nonblocking flock plus zero SQLite busy timeout, zero apply mutation when the authoritative account orders-plus-trades snapshot is incomplete, and restart-preflight forwarding of its separately bounded large-account truth deadline."}
     tests/test_finite_evidence_probability_symmetry.py: {created: "2026-07-11", last_used: "2026-07-27", note: "INV-06/INV-41 current-evidence probability antibody: source-clock YES/NO share one coherent simplex carrier widened by exact settlement-preimage member-hit Clopper-Pearson and distribution-free current-moment tail ambiguity limits; Day0 hard facts dominate, while same-station fast observations update point and joint bounds through a causal residual likelihood without becoming settlement certainty."}
-    tests/test_replacement_forecast_seed_discovery.py: {created: "2026-06-06", last_used: "2026-07-27", note: "Replacement seed discovery preserves causal source identity and promotes a raw same-station fast extreme only when a station-local residual likelihood exists; thin evidence remains byte-identical to settlement-channel seeding."}
+    tests/test_replacement_forecast_seed_discovery.py: {created: "2026-06-06", last_used: "2026-07-28", note: "Replacement seed discovery resolves the canonical current source-run manifest set without scanning historical inventory, preserves causal source identity, and promotes a raw same-station fast extreme only with qualified station-local residual evidence."}
     tests/test_live_buy_no_material_admission.py: {created: "2026-06-07", last_used: "2026-07-27", note: "Material-bin BUY/NO admission binds replacement source-clock parents and requires the sealed current-global native NO point/action to exactly complement the same-bin YES parent, while confidence samples remain separate."}
     tests/test_replacement_fused_q_shape.py: {created: "2026-06-09", last_used: "2026-07-23", note: "Probability authority antibody: absolute current ENS member-center disagreement cannot be recentered out while the same members remain absolute settlement-bin evidence; aligned evidence preserves the within-plus-between decomposition; YES/NO remain exact complements."}
     tests/test_replacement_seed_coverage_gate.py: {created: "2026-06-10", last_used: "2026-07-28", note: "Replacement input-HWM and seed coverage contracts, including exact Day0 source, metric, extreme, unit, and observation-clock identity plus product-cycle indexed frozen artifact selection."}
@@ -109,7 +109,7 @@ test_trust_policy:
     tests/data/test_source_run_arrived_event.py: {created: "2026-07-02", last_used: "2026-07-02", note: "Order-engine rebuild W0.3 antibody: probe_openmeteo_source_clock_updates emits exactly one SOURCE_RUN_ARRIVED opportunity event per newly-usable run when passed an EventWriter; replaying the probe over the SAME undelivered run (the real advance_cursor=False live shape) is idempotent (zero additional rows); omitting event_writer preserves prior no-emission behavior."}
     tests/execution/test_entry_economics_submit_gate.py: {created: "2026-07-01", last_used: "2026-07-27", note: "Entry economics submit antibody: robust and posterior-mean current-state proofs retain distinct truthful fields and exact payoff/cost identities."}
     tests/test_replacement_member_vote_smoothing_not_live_wired.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Live/experiment separation antibody: AIFS member-vote smoothing remains experiment-layer math and must not reappear as an edli live settings switch or materializer reader."}
-    tests/test_raw_forecast_artifact_manifest.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Manifest compatibility antibody: retired legacy_status top-level field is dropped during raw artifact manifest load while unknown authority aliases still fail closed."}
+    tests/test_raw_forecast_artifact_manifest.py: {created: "2026-06-18", last_used: "2026-07-28", note: "Manifest schema antibody: every unknown top-level field is rejected with typed evidence; inventory compatibility may skip only the exact retired authority stamp and never accepts it as current input."}
     tests/test_forecast_manifest_repin.py: {created: "2026-07-08", last_used: "2026-07-08", note: "Forecast posterior blackout antibody: a present artifact rewritten by benign trailing-newline serialization drift no longer leaves stale byte_size/sha manifest truth that aborts materialization; repin preserves metadata, missing artifacts still fail closed."}
     tests/test_repair_active_entry_q_versions.py: {created: "2026-07-09", last_used: "2026-07-09", note: "Active ENTRY q_version repair antibody: dry-run reconstructs missing active exposure q_version from existing FinalIntentCertificate evidence, apply writes only empty venue_commands.q_version cells, and ambiguous certificates refuse writes; no venue action or DB copy."}
     tests/test_repair_dust_exit_projection.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Dust pending-exit projection repair antibody: only existing canonical EXIT_CHAIN_DUST_STILL_HELD backoff evidence may mark position_current.order_status=backoff_exhausted; no venue action or share mutation."}
@@ -3671,11 +3671,12 @@ test_metadata:
     authority_docs:
       - docs/authority/replacement_final_form_2026_06_09.md
     notes: >
-      Automatic replacement seeding keeps settlement truth separate from
-      same-station fast evidence and requires a causal residual likelihood
-      before a raw fast extreme may reshape probability.
+      Automatic replacement seeding resolves exact canonical current-run
+      manifests without rescanning immutable history, keeps settlement truth
+      separate from same-station fast evidence, and requires a causal residual
+      likelihood before a raw fast extreme may reshape probability.
     created: 2026-06-06
-    last_reused_or_audited: 2026-07-27
+    last_reused_or_audited: 2026-07-28
 
   tests/test_bayes_precision_fusion_model_selection_gate.py:
     cohort: law_antibody

@@ -12,6 +12,7 @@ import pytest
 from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION, PRODUCT_ID, SOURCE_ID
 from src.data.raw_forecast_artifact_manifest import (
     RawForecastArtifactManifest,
+    UnsupportedRawForecastArtifactManifestFieldsError,
     read_manifest,
     write_manifest,
 )
@@ -41,8 +42,12 @@ def test_read_manifest_rejects_retired_trade_authority_status(tmp_path) -> None:
     payload["trade_authority_status"] = "BLOCKED"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="unsupported fields"):
+    with pytest.raises(
+        UnsupportedRawForecastArtifactManifestFieldsError,
+        match="unsupported fields",
+    ) as exc_info:
         read_manifest(path)
+    assert exc_info.value.fields == {"trade_authority_status"}
 
 
 def test_read_manifest_rejects_unknown_top_level_fields(tmp_path) -> None:
