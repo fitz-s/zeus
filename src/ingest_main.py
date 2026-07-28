@@ -54,6 +54,7 @@ REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_
 DAY0_METAR_POLL_SECONDS_ENV = "ZEUS_DAY0_METAR_POLL_SECONDS"
 DAY0_METAR_WRITE_BUDGET_MS_ENV = "ZEUS_DAY0_METAR_WRITE_BUDGET_MS"
 DAY0_HKO_POLL_SECONDS_ENV = "ZEUS_DAY0_HKO_POLL_SECONDS"
+HKO_DAILY_FINAL_POLL_SECONDS_ENV = "ZEUS_HKO_DAILY_FINAL_POLL_SECONDS"
 DAY0_METAR_COMMIT_RETRY_SECONDS = 0.25
 DAY0_METAR_COMMIT_RETRY_MAX_SECONDS = 5.0
 DAY0_METAR_COMMIT_RETRY_MAX_FAILURES = 6
@@ -123,6 +124,21 @@ def _day0_hko_poll_seconds() -> float:
             raw,
         )
         return 2.0
+
+
+def _hko_daily_final_poll_seconds() -> float:
+    raw = os.environ.get(HKO_DAILY_FINAL_POLL_SECONDS_ENV, "").strip()
+    if not raw:
+        return 300.0
+    try:
+        return max(60.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "invalid %s=%r; using 300s HKO final-daily cadence",
+            HKO_DAILY_FINAL_POLL_SECONDS_ENV,
+            raw,
+        )
+        return 300.0
 
 
 def _day0_metar_write_budget_seconds() -> float:
@@ -1307,6 +1323,74 @@ def _k2_daily_obs_tick():
         with get_forecasts_connection_with_world(write_class="bulk") as conn:
             result = daily_tick(conn, hko_accumulator_schema="world")
     logger.info("K2 daily_obs_tick: %s", result)
+
+
+@_scheduler_job("ingest_k2_hko_daily_final")
+def _k2_hko_daily_final_tick():
+    """Poll HKO's finalized prior-day extract independently of WU batching.
+
+    SCOPE: Hong Kong's prior completed local date only.
+    DRAIN: this dedicated source-clock job retries on its configured cadence
+    until the existing writer commits the source-correct VERIFIED row.
+    RESET: once present, the writer returns ``already_present`` before network
+    I/O; unrelated WU cities and the realtime HKO accumulator never block it.
+    """
+
+    from src.data.daily_obs_append import (
+        _fetch_hko_daily_extract_month,
+        append_hko_daily_extract_yesterday,
+        hko_daily_extract_target_date,
+        hko_daily_extract_yesterday_present,
+    )
+    from src.data.job_lock import acquire_lock
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_forecasts_connection_with_world,
+    )
+
+    now = datetime.now(timezone.utc)
+    with acquire_lock("hko_daily_final") as acquired:
+        if not acquired:
+            logger.info("ingest k2_hko_daily_final_tick skipped_lock_held")
+            return {"status": "SOURCE_CONTENDED"}
+        read_conn = get_forecasts_connection_read_only()
+        try:
+            if hko_daily_extract_yesterday_present(read_conn, now_utc=now):
+                return {
+                    "inserted": 0,
+                    "already_present": 1,
+                    "not_published": 0,
+                    "guard_rejected": 0,
+                    "fetch_errors": 0,
+                }
+        finally:
+            read_conn.close()
+        target_d = hko_daily_extract_target_date(now_utc=now)
+        prefetched = _fetch_hko_daily_extract_month(
+            target_d.year,
+            target_d.month,
+        )
+        try:
+            with get_forecasts_connection_with_world(
+                write_class="bulk",
+                blocking=False,
+            ) as conn:
+                result = append_hko_daily_extract_yesterday(
+                    conn,
+                    now_utc=now,
+                    rebuild_run_id=(
+                        "hko_daily_final_"
+                        f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                    ),
+                    prefetched=prefetched,
+                )
+        except BlockingIOError:
+            logger.info("ingest k2_hko_daily_final_tick skipped_writer_contended")
+            return {"status": "WRITE_CONTENDED"}
+    if result.get("fetch_errors") or result.get("guard_rejected"):
+        raise RuntimeError(f"HKO_DAILY_FINAL_POLL_FAILED:{result}")
+    logger.info("K2 hko_daily_final_tick: %s", result)
+    return result
 
 
 @_scheduler_job("ingest_k2_hourly_instants")
@@ -3243,9 +3327,16 @@ def _ingest_main_job_specs() -> list[tuple]:
     replacement_availability_poll_seconds = _replacement_availability_poll_seconds()
     day0_metar_poll_seconds = _day0_metar_poll_seconds()
     day0_hko_poll_seconds = _day0_hko_poll_seconds()
+    hko_daily_final_poll_seconds = _hko_daily_final_poll_seconds()
     specs: list[tuple] = [
         (_k2_daily_obs_tick, "cron", dict(minute=5, id="ingest_k2_daily_obs",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
+        (_k2_hko_daily_final_tick, "interval", dict(
+            seconds=hko_daily_final_poll_seconds,
+            id="ingest_k2_hko_daily_final", max_instances=1, coalesce=True,
+            misfire_grace_time=max(60, int(hko_daily_final_poll_seconds * 2)),
+            next_run_time=now,
+        )),
         (_k2_hourly_instants_tick, "cron", dict(minute=7, id="ingest_k2_hourly_instants",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
         (_k2_solar_daily_tick, "cron", dict(hour=0, minute=30, id="ingest_k2_solar_daily",

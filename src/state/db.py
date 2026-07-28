@@ -870,6 +870,7 @@ def checkpoint_wal(db_path: Path) -> tuple[int, int, int, int]:
 def get_forecasts_connection_with_world(
     *,
     write_class: WriteClass | str = "bulk",
+    blocking: bool = True,
 ):
     """Context manager: forecasts.db as MAIN with world.db ATTACHed.
 
@@ -886,7 +887,9 @@ def get_forecasts_connection_with_world(
 
     Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
     (``zeus-forecasts.db`` before ``zeus-world.db``) to prevent deadlocks
-    with other cross-DB writers (v4 §3.1.3 invariant).
+    with other cross-DB writers (v4 §3.1.3 invariant). Callers on a retrying
+    source clock may pass ``blocking=False`` and treat ``BlockingIOError`` as
+    local contention; the default preserves the historical blocking contract.
 
     Callers MUST use this as a context manager and MUST NOT close the
     connection themselves — the ``finally`` block handles it.
@@ -906,8 +909,8 @@ def get_forecasts_connection_with_world(
     ordered_paths = canonical_lock_order(
         [ZEUS_FORECASTS_DB_PATH, ZEUS_WORLD_DB_PATH]
     )
-    with db_writer_lock(ordered_paths[0], resolved):
-        with db_writer_lock(ordered_paths[1], resolved):
+    with db_writer_lock(ordered_paths[0], resolved, blocking=blocking):
+        with db_writer_lock(ordered_paths[1], resolved, blocking=blocking):
             conn = _connect(ZEUS_FORECASTS_DB_PATH, write_class=resolved)
             try:
                 attached = {
