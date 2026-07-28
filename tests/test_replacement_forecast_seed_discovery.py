@@ -185,16 +185,28 @@ def test_seed_prefers_raw_fast_extreme_only_when_residual_likelihood_exists(
         "get_world_connection_read_only",
         lambda: sqlite3.connect(":memory:"),
     )
+
+    def current_day0_fact(*_args, **kwargs):
+        if kwargs["require_settlement_channel"]:
+            return {
+                "observed_extreme_native": 29.0,
+                "observation_time": "2026-07-27T03:00:00+00:00",
+                "sample_count": 7,
+                "source": "observation_prints:wu_icao_history",
+                "observation_source": "wu_icao_history",
+            }
+        return {
+            "observed_extreme_native": 30.0,
+            "observation_time": "2026-07-27T03:08:00+00:00",
+            "sample_count": 51,
+            "source": "observation_prints:aviationweather_metar",
+            "observation_source": "aviationweather_metar",
+        }
+
     monkeypatch.setattr(
         seed_discovery,
         "_latest_authorized_day0_fact",
-        lambda *_args, **_kwargs: {
-            "observed_extreme_native": 29.0,
-            "observation_time": "2026-07-27T03:00:00+00:00",
-            "sample_count": 7,
-            "source": "observation_prints:wu_icao_history",
-            "observation_source": "wu_icao_history",
-        },
+        current_day0_fact,
     )
     evidence = SimpleNamespace(identity_hash="a" * 64)
     monkeypatch.setattr(
@@ -236,8 +248,11 @@ def test_seed_prefers_raw_fast_extreme_only_when_residual_likelihood_exists(
         computed_at=datetime(2026, 7, 27, 3, 13, tzinfo=timezone.utc),
     )
     assert fallback is not None
-    assert fallback["day0_observed_extreme_c"] == 29.0
-    assert fallback["day0_observed_extreme_source"] == "wu_icao_history"
+    assert fallback["day0_observed_extreme_c"] == 30.0
+    assert fallback["day0_observed_extreme_source"] == "aviationweather_metar"
+    assert fallback["day0_observed_extreme_observation_time"] == (
+        "2026-07-27T03:08:00+00:00"
+    )
 
 
 def test_day0_zero_observation_state_rejects_existing_unauthorized_rows(

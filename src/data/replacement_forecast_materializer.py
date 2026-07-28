@@ -531,9 +531,11 @@ def _request_with_day0_physical_frontier(
     same-cycle re-materialization may improve model evidence, but it must not
     reopen support that an earlier absorbing observation already removed.  The
     reducer mirrors the canonical Day0 fact shape: HIGH takes MAX, LOW takes
-    MIN, and a plateau advances its observation clock only from the source
-    that owns the winning extreme.  Rows materialized after this request's
-    clock are excluded, so this guard cannot introduce look-ahead.
+    MIN. When the current request proves the same frontier, its independently
+    reproducible source/clock replaces a historical carrier identity; otherwise
+    the source that owns the winning extreme keeps its latest clock. Rows
+    materialized after this request's clock are excluded, so this guard cannot
+    introduce look-ahead.
     """
     if metric not in {"high", "low"}:
         return request
@@ -562,7 +564,9 @@ def _request_with_day0_physical_frontier(
         target_local_date=date.fromisoformat(_date_text(request.target_date)),
     ).start_utc
 
-    candidates: list[tuple[float, datetime | None, str, int | None, str | None]] = []
+    candidates: list[
+        tuple[float, datetime | None, str, int | None, str | None, bool]
+    ] = []
     request_observed_extreme = _day0_observed_extreme_c(request)
     request_observed_at = _day0_observed_extreme_time(request)
     if request_observed_extreme is not None:
@@ -583,6 +587,7 @@ def _request_with_day0_physical_frontier(
                 str(request.day0_observed_extreme_source or ""),
                 request.day0_observed_extreme_sample_count,
                 request.day0_observed_extreme_unit,
+                True,
             )
         )
 
@@ -685,6 +690,7 @@ def _request_with_day0_physical_frontier(
                 source,
                 sample_count,
                 None if unit_raw is None else str(unit_raw),
+                False,
             )
         )
 
@@ -692,13 +698,18 @@ def _request_with_day0_physical_frontier(
         return request
     frontier = min(item[0] for item in candidates) if metric == "low" else max(item[0] for item in candidates)
     dominant = [item for item in candidates if item[0] == frontier]
+    current_dominant = [item for item in dominant if item[5]]
     winner = (
         max(
-            (item for item in dominant if item[1] is not None),
+            (
+                item
+                for item in (current_dominant or dominant)
+                if item[1] is not None
+            ),
             key=lambda item: item[1],
         )
-        if any(item[1] is not None for item in dominant)
-        else dominant[0]
+        if any(item[1] is not None for item in (current_dominant or dominant))
+        else (current_dominant or dominant)[0]
     )
     winner_source = winner[2]
     source_frontier = [

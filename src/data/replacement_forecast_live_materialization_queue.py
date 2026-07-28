@@ -295,6 +295,27 @@ def _move_request(path: Path, destination_dir: Path) -> Path:
     return target
 
 
+def _publish_latest_seed(seed_path: Path, seed: Mapping[str, object]) -> Path:
+    """Atomically retain one zero-copy current seed per forecast family."""
+
+    city = str(seed["city"]).replace(" ", "_")
+    target_date = str(seed["target_date"])
+    metric = str(seed["temperature_metric"]).strip().lower()
+    latest_dir = seed_path.parent.parent / "seeds_latest"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    latest_path = latest_dir / f"{city}.{target_date}.{metric}.json"
+    temporary = latest_dir / f".{_receipt_name(latest_path)}.tmp"
+    try:
+        os.link(seed_path, temporary)
+        os.replace(temporary, latest_path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return latest_path
+
+
 def _write_sidecar(path: Path, payload: dict[str, object]) -> None:
     path.with_suffix(path.suffix + ".receipt.json").write_text(
         json.dumps(payload, sort_keys=True, indent=2),
@@ -1421,6 +1442,7 @@ def _prepare_seed_requests(
                 forecast_db=forecast_db, seed=seed
             ):
                 moved = _move_request(seed_json, processed_path)
+                _publish_latest_seed(moved, seed)
                 _write_sidecar(
                     moved,
                     {
@@ -1435,6 +1457,7 @@ def _prepare_seed_requests(
                 forecast_db=forecast_db, seed=seed
             ):
                 moved = _move_request(seed_json, processed_path)
+                _publish_latest_seed(moved, seed)
                 _write_sidecar(
                     moved,
                     {
@@ -1465,6 +1488,7 @@ def _prepare_seed_requests(
                 forecast_db=forecast_db,
             )
             if unchanged and marker_path is not None:
+                _publish_latest_seed(seed_json, seed)
                 seed_json.unlink()
                 processed.append(str(marker_path))
                 reasons.append(_UNCHANGED_BLOCKED_SEED_SKIP_REASON)
@@ -1472,6 +1496,7 @@ def _prepare_seed_requests(
             request_path = request_dir / seed_json.name
             _write_request(request_path, dict(result.request))
             moved = _move_request(seed_json, processed_path)
+            _publish_latest_seed(moved, seed)
             _write_sidecar(
                 moved,
                 {

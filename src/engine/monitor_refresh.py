@@ -921,13 +921,13 @@ _HELD_BELIEF_PENDING_SEED_SCAN_LIMIT = 256
 
 
 def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):
-    """Return the freshest bounded pending seed for one held family, or None.
+    """Return the current durable seed or freshest bounded pending seed.
 
     This runs synchronously on the held-position monitor worker. Processed
     seed/request archive enumeration has no monitor-budget bound and can starve
-    every exit. Inspect only the live pending queue and cap directory entries.
-    A miss fails closed; the caller's asynchronous family reseed is the repair
-    lane.
+    every exit. Read the queue-published O(1) per-family hard-link cache first,
+    then inspect only the live pending queue with a bounded fallback. A miss
+    fails closed; the caller's asynchronous family reseed is the repair lane.
 
     The seed name is ``{city}.{target_date}.{metric}.{stamp}.json``; we pick the
     lexicographically-latest stamp (ISO-ordered) from the bounded pending slice.
@@ -954,6 +954,24 @@ def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):
     base = Path(str(seed_dir))
     if not base.exists():
         return None
+    latest_path = (
+        base.parent
+        / "seeds_latest"
+        / f"{city_seg}.{target_date}.{metric}.json"
+    )
+    if latest_path.is_file():
+        try:
+            payload = _json.loads(latest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and _seed_payload_covers_target_local_day(
+                seed_path=latest_path,
+                payload=payload,
+            )
+        ):
+            return latest_path, payload
     candidates: list[tuple[str, Path]] = []
     try:
         with _os.scandir(base) as entries:

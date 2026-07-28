@@ -178,7 +178,7 @@ def _day0_observed_extreme_seed_payload(
         return None
     try:
         world_conn.row_factory = sqlite3.Row
-        fact = _latest_authorized_day0_fact(
+        settlement_fact = _latest_authorized_day0_fact(
             world_conn,
             city=city,
             target_date=target_date,
@@ -188,10 +188,10 @@ def _day0_observed_extreme_seed_payload(
         )
         settlement_observed_c: float | None = None
         settlement_observed_native: float | None = None
-        if fact is not None:
+        if settlement_fact is not None:
             try:
                 settlement_observed_native = float(
-                    fact["observed_extreme_native"]
+                    settlement_fact["observed_extreme_native"]
                 )
                 settlement_observed_c = _temperature_native_to_c(
                     settlement_observed_native,
@@ -221,6 +221,14 @@ def _day0_observed_extreme_seed_payload(
                 "day0_observed_extreme_sample_count": fast.sample_count,
                 "day0_observed_extreme_unit": fast.unit,
             }
+        fact = _latest_authorized_day0_fact(
+            world_conn,
+            city=city,
+            target_date=target_date,
+            temperature_metric=metric_norm,
+            decision_time=computed_at,
+            require_settlement_channel=False,
+        )
         if fact is None:
             row = world_conn.execute(
                 """
@@ -239,7 +247,10 @@ def _day0_observed_extreme_seed_payload(
                 )
             }
         try:
-            observed_c = float(settlement_observed_c)
+            observed_c = _temperature_native_to_c(
+                float(fact["observed_extreme_native"]),
+                unit=unit,
+            )
             sample_count = int(fact.get("sample_count") or 0)
             observation_time = str(fact["observation_time"])
         except (KeyError, TypeError, ValueError):

@@ -964,6 +964,46 @@ def test_materializer_readonly_keeps_low_physical_frontier_on_same_cycle(monkeyp
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 2
 
 
+def test_materializer_equal_frontier_uses_current_request_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retired carrier cannot ratchet its source/clock into every later posterior."""
+
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    prior = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=31.0,
+        day0_observed_extreme_source="wu_api+same_station_fast_tail",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        day0_observed_extreme_sample_count=12,
+    )
+    assert materialize_replacement_forecast_live(conn, prior).ok is True
+
+    current = replace(
+        prior,
+        computed_at=_dt(18, 10),
+        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_observation_time=_dt(17, 50).isoformat(),
+        day0_observed_extreme_sample_count=10,
+    )
+    result = materialize_replacement_forecast_live(conn, current)
+
+    assert result.ok is True
+    provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (result.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    assert provenance["day0_conditioning"]["observed_extreme_c"] == 31.0
+    assert provenance["day0_conditioning"]["source"] == "wu_icao_history"
+    assert provenance["day0_conditioning"]["observation_time"] == _dt(
+        17, 50
+    ).isoformat()
+
+
 @pytest.mark.parametrize(
     ("metric", "baseline_data_version", "extreme"),
     [

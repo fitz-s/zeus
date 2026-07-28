@@ -1713,3 +1713,27 @@ def test_empty_materialization_queues_skip_cycle_priority_reads(
     assert report.status == "NO_REQUESTS"
     assert "REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_EMPTY" in report.reason_codes
     assert "REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY" in report.reason_codes
+
+
+def test_processed_seed_publishes_one_zero_copy_family_cache(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    processed = tmp_path / "seeds_processed"
+    processed.mkdir()
+    first = processed / "Seoul.2026-07-22.high.first.json"
+    second = processed / "Seoul.2026-07-22.high.second.json"
+    first.write_text('{"generation":1}', encoding="utf-8")
+    second.write_text('{"generation":2}', encoding="utf-8")
+    seed = {
+        "city": "Seoul",
+        "target_date": "2026-07-22",
+        "temperature_metric": "high",
+    }
+
+    latest = queue_mod._publish_latest_seed(first, seed)
+    assert latest.stat().st_ino == first.stat().st_ino
+
+    rotated = queue_mod._publish_latest_seed(second, seed)
+    assert rotated == latest
+    assert rotated.stat().st_ino == second.stat().st_ino
+    assert json.loads(rotated.read_text(encoding="utf-8")) == {"generation": 2}
