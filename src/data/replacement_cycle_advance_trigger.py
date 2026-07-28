@@ -522,12 +522,12 @@ def _day0_enqueue_owner_request_is_active(
     """Whether this exact Day0 enqueue owner still has a live queue request.
 
     SCOPE: one (city, target_date, metric, target_cycle, seed_file, conditioning identity)
-    witness.  DRAIN: the materialization queue moves a completed/failed request out of requests
-    or inflight, and reclaims an abandoned claim after its subprocess timeout plus grace.  RESET:
-    once no matching request remains within that same bounded window, the caller may remove the
-    vanished marker and enqueue a replacement owner.  This prevents a normal seed-to-request move
-    from turning a running materializer into a stale owner while keeping a crashed queue from
-    ratcheting the marker forever.
+    witness. DRAIN: the materialization queue moves a completed/failed request out of requests or
+    inflight, and reclaims an abandoned *claimed* request after its subprocess timeout plus grace.
+    RESET: once no matching pending request or non-expired claimed request remains, the caller may
+    remove the vanished marker and enqueue a replacement owner. A pending request has no execution
+    deadline: its exact witness owns the marker until the queue reaches a terminal move. This avoids
+    both the requests-to-inflight move race and a pending queue backlog becoming a false timeout.
     """
     try:
         from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
@@ -564,33 +564,46 @@ def _day0_enqueue_owner_request_is_active(
         "seed_file": seed_file,
         "conditioning_identity": identity,
     }
-    candidates = [request_path / Path(seed_file).name]
-    if inflight_path.exists():
-        candidates.extend(inflight_path.glob(f"*/{Path(seed_file).name}"))
-    for request_file in candidates:
-        try:
-            payload = json.loads(request_file.read_text(encoding="utf-8"))
-            if not isinstance(payload, Mapping):
-                continue
-            witness = payload.get("day0_enqueue_owner_witness")
-            if not isinstance(witness, Mapping) or {
-                key: witness.get(key) for key in expected_witness
-            } != expected_witness:
-                continue
-            started_at = _parse_cycle(payload.get("computed_at"))
-            claim_path = request_file.parent / "_claim.json"
-            if claim_path.exists():
+    def _scan() -> bool:
+        candidates: list[tuple[Path, bool]] = [(request_path / Path(seed_file).name, False)]
+        if inflight_path.exists():
+            candidates.extend(
+                (path, True) for path in inflight_path.glob(f"*/{Path(seed_file).name}")
+            )
+        for request_file, claimed in candidates:
+            try:
+                payload = json.loads(request_file.read_text(encoding="utf-8"))
+                if not isinstance(payload, Mapping):
+                    continue
+                witness = payload.get("day0_enqueue_owner_witness")
+                if not isinstance(witness, Mapping) or {
+                    key: witness.get(key) for key in expected_witness
+                } != expected_witness:
+                    continue
+                if not claimed:
+                    return True
+                claim_path = request_file.parent / "_claim.json"
+                if not claim_path.exists():
+                    return True
                 claim = json.loads(claim_path.read_text(encoding="utf-8"))
-                if isinstance(claim, Mapping):
-                    started_at = _parse_cycle(claim.get("claimed_at")) or started_at
-            if started_at is None:
-                started_at = datetime.fromtimestamp(request_file.stat().st_mtime, tz=UTC)
-            elapsed_s = (as_of.astimezone(UTC) - started_at).total_seconds()
-            if elapsed_s < timeout_s:
-                return True
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            continue
-    return False
+                claimed_at = (
+                    _parse_cycle(claim.get("claimed_at"))
+                    if isinstance(claim, Mapping)
+                    else None
+                )
+                if claimed_at is None:
+                    return True
+                elapsed_s = (as_of.astimezone(UTC) - claimed_at).total_seconds()
+                if elapsed_s < timeout_s:
+                    return True
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+        return False
+
+    # A consumer can move the request between the root/inflight snapshot and its read. Re-scan
+    # the exact owner after any miss before allowing marker withdrawal; no stale snapshot can
+    # therefore revoke a request that completed the normal atomic move meanwhile.
+    return _scan() or _scan()
 
 
 def _delete_missing_owned_cycle_advance_marker(

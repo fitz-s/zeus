@@ -2371,6 +2371,167 @@ def test_cycle_poll_keeps_inflight_day0_owner_until_timeout_then_reenqueues(
     assert Path(marker["seed_file"]).is_file()
 
 
+def test_day0_owner_rechecks_after_request_moves_to_inflight_between_snapshots(
+    tmp_path, monkeypatch
+) -> None:
+    """The second exact-owner scan closes the root-request to inflight move race."""
+    cfg = _queue_config(tmp_path)
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    cycle = "2026-07-19T00:00:00+00:00"
+    seed_file = Path(cfg["seed_dir"]) / "owner.enqueue-interleaving.json"
+    identity = cycle_advance._day0_conditioning_identity(
+        source="wu_icao_history",
+        observation_time="2026-07-19T05:00:00+00:00",
+        observed_extreme_c=21.0,
+        unit="C",
+    )
+    assert identity is not None
+    pending = Path(cfg["request_dir"]) / seed_file.name
+    pending.parent.mkdir()
+    pending.write_text(
+        json.dumps(
+            {
+                "computed_at": "2026-07-19T05:00:00+00:00",
+                "day0_enqueue_owner_witness": {
+                    "city": "Shanghai",
+                    "target_date": "2026-07-19",
+                    "metric": "high",
+                    "target_cycle_time": cycle,
+                    "seed_file": str(seed_file),
+                    "conditioning_identity": identity,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    claim_dir = Path(cfg["inflight_dir"]) / "interleaving-claim"
+    claim_dir.mkdir(parents=True)
+    (claim_dir / "_claim.json").write_text(
+        json.dumps({"claimed_at": "2026-07-19T05:00:00+00:00"}),
+        encoding="utf-8",
+    )
+
+    original_glob = Path.glob
+    scans = 0
+
+    def move_after_first_inflight_snapshot(path: Path, pattern: str):
+        nonlocal scans
+        if path == Path(cfg["inflight_dir"]) and pattern == f"*/{seed_file.name}":
+            scans += 1
+            if scans == 1:
+                pending.replace(claim_dir / seed_file.name)
+                return iter(())
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", move_after_first_inflight_snapshot)
+    assert cycle_advance._day0_enqueue_owner_request_is_active(
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        seed_file=str(seed_file),
+        identity=identity,
+        as_of=datetime(2026, 7, 19, 5, 0, 15, tzinfo=UTC),
+    ) is True
+    assert scans == 2
+
+
+def test_aged_pending_day0_owner_survives_until_terminal_request_move(
+    tmp_path, monkeypatch
+) -> None:
+    """An unclaimed request has no materializer timeout and releases only when terminal/missing."""
+    db_path = _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC).isoformat()
+    payload = _day0_payload("2026-07-19T05:00:00+00:00")
+    seed_file = Path(cfg["seed_dir"]) / "owner.enqueue-pending.json"
+    identity = cycle_advance._day0_conditioning_identity(
+        source=payload["day0_observed_extreme_source"],
+        observation_time=payload["day0_observed_extreme_observation_time"],
+        observed_extreme_c=payload["day0_observed_extreme_c"],
+        unit=payload["day0_observed_extreme_unit"],
+    )
+    assert identity is not None
+    conn = sqlite3.connect(db_path)
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=False,
+        seed_file=str(seed_file),
+        reason="MISSING_LIVE_POSTERIOR",
+        day0_observed_extreme_observation_time=payload[
+            "day0_observed_extreme_observation_time"
+        ],
+        day0_observed_extreme_source=payload["day0_observed_extreme_source"],
+        day0_observed_extreme_c=payload["day0_observed_extreme_c"],
+        day0_observed_extreme_unit=payload["day0_observed_extreme_unit"],
+    )
+    conn.commit()
+    pending = Path(cfg["request_dir"]) / seed_file.name
+    pending.parent.mkdir()
+    pending.write_text(
+        json.dumps(
+            {
+                "computed_at": "2026-07-19T00:00:00+00:00",
+                "day0_enqueue_owner_witness": {
+                    "city": "Shanghai",
+                    "target_date": "2026-07-19",
+                    "metric": "high",
+                    "target_cycle_time": cycle,
+                    "seed_file": str(seed_file),
+                    "conditioning_identity": identity,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    as_of = datetime(2026, 7, 19, 5, 4, 31, tzinfo=UTC)
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        as_of=as_of,
+        day0_observed_extreme_observation_time=payload[
+            "day0_observed_extreme_observation_time"
+        ],
+        day0_observed_extreme_source=payload["day0_observed_extreme_source"],
+        day0_observed_extreme_c=payload["day0_observed_extreme_c"],
+        day0_observed_extreme_unit=payload["day0_observed_extreme_unit"],
+    ) is True
+    pending.unlink()
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        as_of=as_of,
+        day0_observed_extreme_observation_time=payload[
+            "day0_observed_extreme_observation_time"
+        ],
+        day0_observed_extreme_source=payload["day0_observed_extreme_source"],
+        day0_observed_extreme_c=payload["day0_observed_extreme_c"],
+        day0_observed_extreme_unit=payload["day0_observed_extreme_unit"],
+    ) is False
+    conn.close()
+
+
 def test_day0_extreme_bridge_not_configured_is_failsoft(monkeypatch) -> None:
     monkeypatch.setattr(
         forecast_production,
