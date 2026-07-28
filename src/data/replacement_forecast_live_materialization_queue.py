@@ -462,16 +462,22 @@ def _day0_seed_matches_conditioning(
         _day0_conditioning_identity,
     )
 
-    return _day0_conditioning_identity(
+    seed_identity = _day0_conditioning_identity(
         source=seed.get("day0_observed_extreme_source"),
         observation_time=seed.get("day0_observed_extreme_observation_time"),
         observed_extreme_c=seed.get("day0_observed_extreme_c"),
         unit=seed.get("day0_observed_extreme_unit"),
-    ) == _day0_conditioning_identity(
+    )
+    conditioning_identity = _day0_conditioning_identity(
         source=conditioning.get("source"),
         observation_time=conditioning.get("observation_time"),
         observed_extreme_c=conditioning.get("observed_extreme_c"),
         unit=conditioning.get("unit"),
+    )
+    return (
+        seed_identity is not None
+        and conditioning_identity is not None
+        and seed_identity == conditioning_identity
     )
 
 
