@@ -1145,6 +1145,28 @@ def test_candidate_delta_keys_high_cardinality_indexes_instead_of_rewriting():
             duplicate_mask_patch,
         )
 
+    string_removed_masks = json.loads(delta_raw)
+    string_removed_masks["buy_condition_side_masks"]["removed_keys"] = "abc"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID",
+    ):
+        global_batch_runtime._apply_candidate_evaluations_delta(
+            base,
+            string_removed_masks,
+        )
+
+    string_removed_candidates = json.loads(delta_raw)
+    string_removed_candidates["buy_candidate_index"]["removed_keys"] = "abc"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
+    ):
+        global_batch_runtime._apply_candidate_evaluations_delta(
+            base,
+            string_removed_candidates,
+        )
+
 
 def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
     monkeypatch,

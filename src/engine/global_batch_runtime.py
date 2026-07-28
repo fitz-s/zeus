@@ -1216,7 +1216,13 @@ def _apply_candidate_evaluations_delta(
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
         buy_rows = _buy_candidate_index_map(base.get("buy_candidate_index"))
         removed_buy_keys: set[tuple[str, ...]] = set()
-        for raw_key in indexed_delta.get("removed_keys", ()):
+        removed_buy_values = indexed_delta.get("removed_keys", ())
+        if not isinstance(removed_buy_values, Sequence) or isinstance(
+            removed_buy_values,
+            (str, bytes),
+        ):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        for raw_key in removed_buy_values:
             key = _delta_key(
                 raw_key,
                 size=5,
@@ -1229,7 +1235,7 @@ def _apply_candidate_evaluations_delta(
             removed_buy_keys.add(key)
             buy_rows.pop(key, None)
         patches = indexed_delta.get("patches", ())
-        if not isinstance(patches, Sequence):
+        if not isinstance(patches, Sequence) or isinstance(patches, (str, bytes)):
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
         patched_buy_keys: set[tuple[str, ...]] = set()
         for patch in patches:
@@ -1259,7 +1265,15 @@ def _apply_candidate_evaluations_delta(
             base.get("buy_condition_side_masks")
         )
         removed_conditions: set[str] = set()
-        for raw_condition_id in condition_delta.get("removed_keys", ()):
+        removed_condition_values = condition_delta.get("removed_keys", ())
+        if not isinstance(removed_condition_values, Sequence) or isinstance(
+            removed_condition_values,
+            (str, bytes),
+        ):
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+            )
+        for raw_condition_id in removed_condition_values:
             condition_id = str(raw_condition_id or "")
             if not condition_id or condition_id in removed_conditions:
                 raise ValueError(
@@ -1268,7 +1282,10 @@ def _apply_candidate_evaluations_delta(
             removed_conditions.add(condition_id)
             condition_rows.pop(condition_id, None)
         condition_patches = condition_delta.get("patches", ())
-        if not isinstance(condition_patches, Sequence):
+        if not isinstance(condition_patches, Sequence) or isinstance(
+            condition_patches,
+            (str, bytes),
+        ):
             raise ValueError(
                 "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
             )
