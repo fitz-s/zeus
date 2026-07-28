@@ -905,6 +905,126 @@ def test_hko_daily_extract_poll_materializes_final_source_once(monkeypatch) -> N
     )
 
 
+def test_hko_daily_extract_poll_catches_up_recent_missing_dates_once(
+    monkeypatch,
+) -> None:
+    conn = _memdb()
+    calls = []
+    rows = {
+        (2026, 7, day): (28.0 + day / 10.0, 24.0 + day / 10.0)
+        for day in range(15, 22)
+    }
+
+    def fake_fetch(year, month):
+        calls.append((year, month))
+        return (
+            rows,
+            "https://www.hko.gov.hk/cis/dailyExtract/dailyExtract_202607.xml",
+            "sha256:" + "b" * 64,
+        )
+
+    monkeypatch.setattr(
+        daily_obs_append,
+        "_fetch_hko_daily_extract_month",
+        fake_fetch,
+    )
+    now = datetime(2026, 7, 21, 22, 0, tzinfo=timezone.utc)
+
+    first = daily_obs_append.append_hko_daily_extract_recent(
+        conn,
+        now_utc=now,
+        rebuild_run_id="recent-catchup-first",
+    )
+    second = daily_obs_append.append_hko_daily_extract_recent(
+        conn,
+        now_utc=now,
+        rebuild_run_id="recent-catchup-second",
+    )
+    written = conn.execute(
+        """
+        SELECT target_date
+          FROM observations
+         WHERE city='Hong Kong' AND source='hko_daily_api'
+         ORDER BY target_date
+        """
+    ).fetchall()
+
+    assert first == {
+        "inserted": 7,
+        "already_present": 0,
+        "not_published": 0,
+        "guard_rejected": 0,
+        "fetch_errors": 0,
+    }
+    assert second == {
+        "inserted": 0,
+        "already_present": 7,
+        "not_published": 0,
+        "guard_rejected": 0,
+        "fetch_errors": 0,
+    }
+    assert calls == [(2026, 7)]
+    assert [row["target_date"] for row in written] == [
+        f"2026-07-{day:02d}" for day in range(15, 22)
+    ]
+
+
+def test_hko_daily_extract_cross_month_failure_preserves_other_month(
+    monkeypatch,
+) -> None:
+    conn = _memdb()
+    monkeypatch.setattr(
+        daily_obs_append,
+        "_fetch_hko_daily_extract_month",
+        lambda *_args: pytest.fail("prefetch result must be consumed as supplied"),
+    )
+    result = daily_obs_append.append_hko_daily_extract_recent(
+        conn,
+        now_utc=datetime(2026, 8, 2, 0, 0, tzinfo=timezone.utc),
+        rebuild_run_id="cross-month-partial",
+        prefetched_by_month={
+            (2026, 8): (
+                {(2026, 8, 1): (29.5, 25.1)},
+                "https://www.hko.gov.hk/cis/dailyExtract/dailyExtract_202608.xml",
+                "sha256:" + "c" * 64,
+            )
+        },
+        prefetch_failures_by_month={
+            (2026, 7): "RuntimeError: simulated July outage"
+        },
+    )
+    written = conn.execute(
+        """
+        SELECT target_date
+          FROM observations
+         WHERE city='Hong Kong' AND source='hko_daily_api'
+        """
+    ).fetchall()
+    failed = conn.execute(
+        """
+        SELECT target_date, status, reason
+          FROM data_coverage
+         WHERE city='Hong Kong' AND data_source='hko_daily_api'
+           AND status='FAILED'
+         ORDER BY target_date
+        """
+    ).fetchall()
+
+    assert result == {
+        "inserted": 1,
+        "already_present": 0,
+        "not_published": 0,
+        "guard_rejected": 0,
+        "fetch_errors": 6,
+    }
+    assert [row["target_date"] for row in written] == ["2026-08-01"]
+    assert [row["target_date"] for row in failed] == [
+        f"2026-07-{day:02d}" for day in range(26, 32)
+    ]
+    assert {row["status"] for row in failed} == {"FAILED"}
+    assert {row["reason"] for row in failed} == {"NETWORK_ERROR"}
+
+
 # ---------------------------------------------------------------------------
 # R9 — State-machine upsert rules: no demotions of terminal states
 # ---------------------------------------------------------------------------

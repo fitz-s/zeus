@@ -147,11 +147,13 @@ def test_hko_final_daily_poll_has_own_lock_and_connection(monkeypatch) -> None:
         *,
         now_utc,
         rebuild_run_id,
-        prefetched,
+        prefetched_by_month,
+        prefetch_failures_by_month,
     ):
         calls.append(("append_conn", given_conn))
         calls.append(("rebuild_run_id", rebuild_run_id))
-        calls.append(("prefetched", prefetched))
+        calls.append(("prefetched_by_month", prefetched_by_month))
+        calls.append(("prefetch_failures_by_month", prefetch_failures_by_month))
         assert now_utc.tzinfo is not None
         return {
             "inserted": 0,
@@ -174,13 +176,11 @@ def test_hko_final_daily_poll_has_own_lock_and_connection(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         daily_obs,
-        "hko_daily_extract_yesterday_present",
-        lambda *_args, **_kwargs: calls.append(("present", False)) or False,
-    )
-    monkeypatch.setattr(
-        daily_obs,
-        "hko_daily_extract_target_date",
-        lambda **_kwargs: date(2026, 7, 28),
+        "hko_daily_extract_recent_missing_dates",
+        lambda *_args, **_kwargs: (
+            calls.append(("missing", (date(2026, 7, 28),)))
+            or (date(2026, 7, 28),)
+        ),
     )
     prefetched = ({(2026, 7, 28): (29.5, 25.1)}, "url", "sha256:x")
     monkeypatch.setattr(
@@ -190,7 +190,7 @@ def test_hko_final_daily_poll_has_own_lock_and_connection(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         daily_obs,
-        "append_hko_daily_extract_yesterday",
+        "append_hko_daily_extract_recent",
         fake_append,
     )
 
@@ -200,14 +200,15 @@ def test_hko_final_daily_poll_has_own_lock_and_connection(monkeypatch) -> None:
     assert calls[:7] == [
         ("lock", "hko_daily_final"),
         ("read_connection", True),
-        ("present", False),
+        ("missing", (date(2026, 7, 28),)),
         ("read_close", True),
         ("fetch", True),
         ("connection", ("bulk", False)),
         ("append_conn", conn),
     ]
     assert str(calls[7][1]).startswith("hko_daily_final_")
-    assert calls[8] == ("prefetched", prefetched)
+    assert calls[8] == ("prefetched_by_month", {(2026, 7): prefetched})
+    assert calls[9] == ("prefetch_failures_by_month", {})
 
 
 def test_hko_final_daily_poll_is_local_noop_after_publication(monkeypatch) -> None:
@@ -232,8 +233,8 @@ def test_hko_final_daily_poll_is_local_noop_after_publication(monkeypatch) -> No
     )
     monkeypatch.setattr(
         daily_obs,
-        "hko_daily_extract_yesterday_present",
-        lambda *_args, **_kwargs: True,
+        "hko_daily_extract_recent_missing_dates",
+        lambda *_args, **_kwargs: (),
     )
     monkeypatch.setattr(
         daily_obs,
@@ -248,7 +249,7 @@ def test_hko_final_daily_poll_is_local_noop_after_publication(monkeypatch) -> No
 
     result = im._k2_hko_daily_final_tick.__wrapped__()
 
-    assert result["already_present"] == 1
+    assert result["already_present"] == 7
 
 
 def test_hko_final_daily_poll_surfaces_source_or_write_failure(monkeypatch) -> None:
@@ -256,6 +257,8 @@ def test_hko_final_daily_poll_surfaces_source_or_write_failure(monkeypatch) -> N
     import src.data.job_lock as job_lock
     import src.ingest_main as im
     import src.state.db as state_db
+
+    calls = []
 
     @contextmanager
     def fake_lock(_name: str):
@@ -284,33 +287,62 @@ def test_hko_final_daily_poll_surfaces_source_or_write_failure(monkeypatch) -> N
     )
     monkeypatch.setattr(
         daily_obs,
-        "hko_daily_extract_yesterday_present",
-        lambda *_args, **_kwargs: False,
+        "hko_daily_extract_recent_missing_dates",
+        lambda *_args, **_kwargs: (
+            date(2026, 8, 1),
+            date(2026, 7, 31),
+        ),
     )
-    monkeypatch.setattr(
-        daily_obs,
-        "hko_daily_extract_target_date",
-        lambda **_kwargs: date(2026, 7, 28),
-    )
+
+    def fake_fetch(year, month):
+        calls.append(("fetch", (year, month)))
+        if month == 7:
+            raise RuntimeError("simulated July outage")
+        return ({(2026, 8, 1): (29.5, 25.1)}, "url", "sha256:x")
+
     monkeypatch.setattr(
         daily_obs,
         "_fetch_hko_daily_extract_month",
-        lambda *_args: ({}, "url", "sha256:x"),
+        fake_fetch,
     )
-    monkeypatch.setattr(
-        daily_obs,
-        "append_hko_daily_extract_yesterday",
-        lambda *_args, **_kwargs: {
-            "inserted": 0,
+
+    def fake_append(*_args, **kwargs):
+        calls.append(("prefetched", kwargs["prefetched_by_month"]))
+        calls.append(("failures", kwargs["prefetch_failures_by_month"]))
+        return {
+            "inserted": 1,
             "already_present": 0,
             "not_published": 0,
             "guard_rejected": 0,
             "fetch_errors": 1,
-        },
+        }
+
+    monkeypatch.setattr(
+        daily_obs,
+        "append_hko_daily_extract_recent",
+        fake_append,
     )
 
     with pytest.raises(RuntimeError, match="HKO_DAILY_FINAL_POLL_FAILED"):
         im._k2_hko_daily_final_tick.__wrapped__()
+    assert set(calls[:2]) == {
+        ("fetch", (2026, 7)),
+        ("fetch", (2026, 8)),
+    }
+    assert calls[2] == (
+        "prefetched",
+        {
+            (2026, 8): (
+                {(2026, 8, 1): (29.5, 25.1)},
+                "url",
+                "sha256:x",
+            )
+        },
+    )
+    assert calls[3] == (
+        "failures",
+        {(2026, 7): "RuntimeError: simulated July outage"},
+    )
 
 
 def test_hko_final_daily_poll_defers_without_waiting_on_writer(monkeypatch) -> None:
@@ -347,13 +379,8 @@ def test_hko_final_daily_poll_defers_without_waiting_on_writer(monkeypatch) -> N
     )
     monkeypatch.setattr(
         daily_obs,
-        "hko_daily_extract_yesterday_present",
-        lambda *_args, **_kwargs: False,
-    )
-    monkeypatch.setattr(
-        daily_obs,
-        "hko_daily_extract_target_date",
-        lambda **_kwargs: date(2026, 7, 28),
+        "hko_daily_extract_recent_missing_dates",
+        lambda *_args, **_kwargs: (date(2026, 7, 28),),
     )
     monkeypatch.setattr(
         daily_obs,

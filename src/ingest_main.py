@@ -1327,20 +1327,20 @@ def _k2_daily_obs_tick():
 
 @_scheduler_job("ingest_k2_hko_daily_final")
 def _k2_hko_daily_final_tick():
-    """Poll HKO's finalized prior-day extract independently of WU batching.
+    """Poll HKO final extracts and repair recent publication gaps.
 
-    SCOPE: Hong Kong's prior completed local date only.
+    SCOPE: Hong Kong's bounded recent completed-date window only.
     DRAIN: this dedicated source-clock job retries on its configured cadence
-    until the existing writer commits the source-correct VERIFIED row.
-    RESET: once present, the writer returns ``already_present`` before network
-    I/O; unrelated WU cities and the realtime HKO accumulator never block it.
+    until the existing writer commits every source-correct VERIFIED row.
+    RESET: each present date leaves the missing set before network I/O;
+    unrelated WU cities and the realtime HKO accumulator never block it.
     """
 
     from src.data.daily_obs_append import (
+        HKO_DAILY_EXTRACT_CATCHUP_DAYS,
         _fetch_hko_daily_extract_month,
-        append_hko_daily_extract_yesterday,
-        hko_daily_extract_target_date,
-        hko_daily_extract_yesterday_present,
+        append_hko_daily_extract_recent,
+        hko_daily_extract_recent_missing_dates,
     )
     from src.data.job_lock import acquire_lock
     from src.state.db import (
@@ -1355,34 +1355,48 @@ def _k2_hko_daily_final_tick():
             return {"status": "SOURCE_CONTENDED"}
         read_conn = get_forecasts_connection_read_only()
         try:
-            if hko_daily_extract_yesterday_present(read_conn, now_utc=now):
+            missing_dates = hko_daily_extract_recent_missing_dates(
+                read_conn,
+                now_utc=now,
+            )
+            if not missing_dates:
                 return {
                     "inserted": 0,
-                    "already_present": 1,
+                    "already_present": HKO_DAILY_EXTRACT_CATCHUP_DAYS,
                     "not_published": 0,
                     "guard_rejected": 0,
                     "fetch_errors": 0,
                 }
         finally:
             read_conn.close()
-        target_d = hko_daily_extract_target_date(now_utc=now)
-        prefetched = _fetch_hko_daily_extract_month(
-            target_d.year,
-            target_d.month,
-        )
+        missing_months = {
+            (target_d.year, target_d.month) for target_d in missing_dates
+        }
+        prefetched_by_month = {}
+        prefetch_failures_by_month = {}
+        for month_key in missing_months:
+            try:
+                prefetched_by_month[month_key] = (
+                    _fetch_hko_daily_extract_month(*month_key)
+                )
+            except Exception as exc:  # noqa: BLE001 - persist below under writer
+                prefetch_failures_by_month[month_key] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
         try:
             with get_forecasts_connection_with_world(
                 write_class="bulk",
                 blocking=False,
             ) as conn:
-                result = append_hko_daily_extract_yesterday(
+                result = append_hko_daily_extract_recent(
                     conn,
                     now_utc=now,
                     rebuild_run_id=(
                         "hko_daily_final_"
                         f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
                     ),
-                    prefetched=prefetched,
+                    prefetched_by_month=prefetched_by_month,
+                    prefetch_failures_by_month=prefetch_failures_by_month,
                 )
         except BlockingIOError:
             logger.info("ingest k2_hko_daily_final_tick skipped_writer_contended")
