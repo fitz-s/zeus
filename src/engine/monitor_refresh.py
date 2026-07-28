@@ -20,6 +20,7 @@ import sqlite3
 import copy
 import json
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -99,6 +100,14 @@ _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
     "_zeus_monitor_prefetch_attempted_tokens"
 )
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
+_DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS = 0.1
+_DAY0_MATERIALIZATION_VISIBILITY_REASONS = frozenset(
+    {
+        "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
+        "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
+        "GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING",
+    }
+)
 _WHALE_TOXICITY_PRICE_MARGIN = 0.05
 _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
@@ -146,6 +155,11 @@ class _CachedCurrentGlobalDay0FamilyError(RuntimeError):
 
 class _Day0UnobservedPrefixUnavailable(ObservationUnavailableError):
     """The target local day has no canonical observation yet."""
+
+
+def _is_day0_materialization_visibility_gap(exc: Exception) -> bool:
+    reason = str(exc)
+    return any(code in reason for code in _DAY0_MATERIALIZATION_VISIBILITY_REASONS)
 
 
 def install_monitor_orderbook_prefetch(
@@ -4792,6 +4806,33 @@ def _refresh_current_global_day0_probability(
             cached_snapshots=cached_snapshots,
         )
     except Exception as exc:
+        if _is_day0_materialization_visibility_gap(exc):
+            # SCOPE: this held city/date/metric only. DRAIN: the source-clock
+            # materializer commits the matching posterior/readiness certificate.
+            # RESET: one new read-only connection pair sees that commit; otherwise
+            # the existing fail-closed cache/reseed path remains authoritative.
+            _cnt_inc("monitor_day0_materialization_visibility_retry_total")
+            time.sleep(_DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS)
+            try:
+                snapshot = _build_current_global_day0_family_snapshot(
+                    position,
+                    trade_conn=trade_conn,
+                    decision_time=decision_time,
+                    cached_snapshots=cached_snapshots,
+                )
+            except Exception as retry_exc:
+                exc = retry_exc
+            else:
+                _cnt_inc(
+                    "monitor_day0_materialization_visibility_retry_recovered_total"
+                )
+                if family_cache is not None:
+                    family_cache.snapshots.setdefault(family_key, []).append(snapshot)
+                _cnt_inc("monitor_day0_family_snapshot_build_total")
+                return _materialize_current_global_day0_probability(
+                    position,
+                    snapshot,
+                )
         if (
             family_cache is not None
             and str(exc) != "GLOBAL_REQUIRED_CONDITION_BINDING_INVALID"
