@@ -220,13 +220,21 @@ def test_bayes_precision_fusion_uses_downloaded_artifact_cycle_when_probe_unreso
     )
     calls: list[dict] = []
 
-    def _fake_download(*, forecast_db, cycle, targets, release_lag_hours):
+    def _fake_download(
+        *,
+        forecast_db,
+        cycle,
+        targets,
+        release_lag_hours,
+        max_wall_clock_seconds,
+    ):
         calls.append(
             {
                 "forecast_db": forecast_db,
                 "cycle": cycle,
                 "targets": tuple(targets),
                 "release_lag_hours": release_lag_hours,
+                "max_wall_clock_seconds": max_wall_clock_seconds,
             }
         )
         return {
@@ -245,6 +253,7 @@ def test_bayes_precision_fusion_uses_downloaded_artifact_cycle_when_probe_unreso
     assert len(calls) == 1
     assert calls[0]["cycle"] == cycle
     assert calls[0]["targets"][0].city == "Amsterdam"
+    assert calls[0]["max_wall_clock_seconds"] == 45.0
 
 
 def test_anchor_probe_mirrors_the_bucket_rung(monkeypatch) -> None:

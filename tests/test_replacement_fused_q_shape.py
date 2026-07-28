@@ -16,6 +16,35 @@ from src.data.replacement_forecast_cycle_policy import (
 )
 
 
+def test_frozen_scheme_requires_two_current_provider_families() -> None:
+    weights = {"ecmwf_ifs": 0.3, "icon_eu": 0.7}
+
+    assert (
+        mod._current_provider_family_count(
+            configured_weights=weights,
+            values_c_by_source={"ecmwf_ifs": 28.0},
+        )
+        == 1
+    )
+    assert (
+        mod._current_provider_family_count(
+            configured_weights=weights,
+            values_c_by_source={"ecmwf_ifs": 28.0, "icon_eu": 29.0},
+        )
+        == 2
+    )
+
+
+def test_same_provider_aliases_do_not_satisfy_current_pair() -> None:
+    assert (
+        mod._current_provider_family_count(
+            configured_weights={"icon_global": 0.5, "icon_eu": 0.5},
+            values_c_by_source={"icon_global": 28.0, "icon_eu": 29.0},
+        )
+        == 1
+    )
+
+
 def test_current_ensemble_center_disagreement_stays_in_predictive_shape() -> None:
     """Absolute ENS levels cannot be recentered away from the served center."""
 

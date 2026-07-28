@@ -95,13 +95,21 @@ def _wire(monkeypatch, *, rows, forecast_db="zeus-forecasts.db"):
 
     calls: list[dict] = []
 
-    def _fake_download(*, forecast_db, cycle, targets, release_lag_hours):
+    def _fake_download(
+        *,
+        forecast_db,
+        cycle,
+        targets,
+        release_lag_hours,
+        max_wall_clock_seconds,
+    ):
         targets = list(targets)
         calls.append({
             "forecast_db": forecast_db,
             "cycle": cycle,
             "targets": targets,
             "release_lag_hours": release_lag_hours,
+            "max_wall_clock_seconds": max_wall_clock_seconds,
         })
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED", "written_row_count": len(targets)}
 

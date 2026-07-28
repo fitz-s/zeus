@@ -534,8 +534,12 @@ def _download_replacement_forecast_current_targets_if_needed(
     return result
 
 
-def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
-    """Download the multi-model inputs required by the live posterior."""
+def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+    cfg: dict[str, object],
+    *,
+    max_wall_clock_seconds: float | None = 45.0,
+) -> dict[str, object] | None:
+    """Download missing multi-model inputs within one bounded live-runtime slice."""
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
         return None
@@ -607,6 +611,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
             cycle=cycle,
             targets=targets,
             release_lag_hours=release_lag_hours,
+            max_wall_clock_seconds=max_wall_clock_seconds,
         )
         return result
     except Exception as exc:  # noqa: BLE001 - fail-soft: extras accrual never breaks the cycle

@@ -5123,6 +5123,51 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
         provenance=incomplete,
     ) is None
 
+    from src.strategy.live_inference import source_clock_vnext
+
+    monkeypatch.setattr(
+        source_clock_vnext,
+        "provider_family_for_source",
+        lambda source: source,
+    )
+    horizon_fallback = json.loads(json.dumps(source_clock))
+    horizon_fusion = horizon_fallback["bayes_precision_fusion"]
+    horizon_scheme = horizon_fusion["source_clock_one_scheme"]
+    horizon_scheme.update(
+        {
+            "configured_sources": ["a", "regional"],
+            "used_weights": {"a": 0.4, "b": 0.6},
+            "missing_sources": ["regional"],
+            "fallback_reason": "configured_current_provider_pair_unavailable",
+            "fallback_to": "current_precision_fusion",
+            "configured_current_provider_family_count": 1,
+            "current_evidence_shape": {"provider_count": 2},
+        }
+    )
+    assert era._posterior_bound_spine_inputs(
+        conn,
+        family=family,
+        decision_time=decision_time,
+        source_cycle_time="2026-07-13T06:00:00+00:00",
+        provenance=horizon_fallback,
+    ) == (
+        (33.0, 34.0),
+        "2026-07-13T06:00:00+00:00",
+        (0.4, 0.6),
+    )
+    present, fallback_certificate = era._source_clock_model_count_certificate(
+        horizon_fallback
+    )
+    assert present is True
+    assert fallback_certificate == certificate
+
+    monkeypatch.setattr(
+        source_clock_vnext,
+        "provider_family_for_source",
+        lambda _source: "same_family",
+    )
+    assert era._source_clock_model_count_certificate(horizon_fallback) == (True, None)
+
     conn.execute(
         """
         INSERT INTO raw_model_forecasts

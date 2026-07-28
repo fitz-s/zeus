@@ -923,6 +923,9 @@ def _source_clock_missing_configured_sources(
         from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
             scheme_for_city,
         )
+        from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+            provider_family_for_source,
+        )
 
         scheme = scheme_for_city(city, metric=metric)
         if scheme is None:
@@ -942,7 +945,24 @@ def _source_clock_missing_configured_sources(
         for model in served
     ):
         return ()
-    return tuple(source for source in scheme.final_sources if source not in served)
+    missing = tuple(source for source in scheme.final_sources if source not in served)
+    configured_families = {
+        provider_family_for_source(source)
+        for source in scheme.final_sources
+        if source in served
+    }
+    current_families = {
+        provider_family_for_source(source)
+        for source in served
+    }
+    # SCOPE: this request's exact city/date/metric/carrier-cycle raw watermark.
+    # DRAIN: arrival of a second independent current provider makes the full raw
+    # watermark relevant, allowing one materializer retry through the same queue.
+    # RESET: once the retry marker records that watermark, unchanged raw facts are
+    # suppressed again. Same-family alias churn never opens the retry path.
+    if len(configured_families) < 2 and len(current_families) >= 2:
+        return ()
+    return missing
 
 
 def _validate_request_payload(path: Path) -> tuple[bool, str, str]:

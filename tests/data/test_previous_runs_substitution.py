@@ -1524,7 +1524,7 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
     assert len(spawned) == 2
 
 
-def test_blocked_source_clock_request_ignores_unrelated_input_churn(
+def test_blocked_source_clock_request_retries_only_on_new_provider_family(
     tmp_path, monkeypatch
 ) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
@@ -1655,7 +1655,7 @@ def test_blocked_source_clock_request_ignores_unrelated_input_churn(
         conn.execute(
             """
             INSERT INTO raw_model_forecasts VALUES
-            (3, 'met_nordic', 'Helsinki', 'high', '2026-07-18',
+            (3, 'ukmo_global_deterministic_10km', 'Helsinki', 'high', '2026-07-18',
              '2026-07-16T12:00:00+00:00', '2026-07-16T16:03:00+00:00',
              '2026-07-16T16:03:00+00:00', 'single_runs', 25.5, 2)
             """
@@ -1675,6 +1675,30 @@ def test_blocked_source_clock_request_ignores_unrelated_input_churn(
         )
         assert third.status == "FAILED"
         assert len(spawned) == 2
+
+        conn.execute(
+            """
+            INSERT INTO raw_model_forecasts VALUES
+            (4, 'met_nordic', 'Helsinki', 'high', '2026-07-18',
+             '2026-07-16T12:00:00+00:00', '2026-07-16T16:05:00+00:00',
+             '2026-07-16T16:05:00+00:00', 'single_runs', 25.25, 2)
+            """
+        )
+        conn.commit()
+        request_path.write_text(
+            json.dumps({**request, "computed_at": "2026-07-16T16:06:00+00:00"}),
+            encoding="utf-8",
+        )
+        fourth = queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=processed_dir,
+            failed_dir=failed_dir,
+            forecast_db=db_path,
+            limit=1,
+            runner=_blocked_runner,
+        )
+        assert fourth.status == "FAILED"
+        assert len(spawned) == 3
     finally:
         conn.close()
         source_clock.load_city_one_schemes.cache_clear()

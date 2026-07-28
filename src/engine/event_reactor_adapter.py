@@ -21605,8 +21605,9 @@ def _source_clock_model_count_certificate(
     """Return the source-clock configured-source completeness certificate.
 
     Absence means the legacy posterior contract still requires three models.
-    Presence is fail-closed unless configured, used, and currently served sources
-    are the same complete set and the one-scheme walk-forward verdict is ready.
+    A frozen one-scheme route requires identical configured, used, and currently
+    served sets. A horizon fallback is separately typed and requires at least two
+    independent current provider families with identical used/weighted/served sets.
     """
     fusion = provenance.get("bayes_precision_fusion")
     if not isinstance(fusion, Mapping):
@@ -21643,6 +21644,60 @@ def _source_clock_model_count_certificate(
         observed = int(observed)
     except (TypeError, ValueError):
         return True, None
+    horizon_fallback = (
+        scheme.get("fallback_reason")
+        == "configured_current_provider_pair_unavailable"
+        and scheme.get("fallback_to") == "current_precision_fusion"
+    )
+    if horizon_fallback:
+        current_shape = scheme.get("current_evidence_shape")
+        try:
+            configured_family_count = int(
+                scheme.get("configured_current_provider_family_count")
+            )
+            shape_provider_count = int(
+                current_shape.get("provider_count")
+                if isinstance(current_shape, Mapping)
+                else 0
+            )
+            from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+                provider_family_for_source,
+            )
+
+            used_families = {
+                provider_family_for_source(source)
+                for source in used
+            }
+        except (TypeError, ValueError):
+            return True, None
+        if (
+            len(configured) < 2
+            or any(not value for value in configured)
+            or len(set(configured)) != len(configured)
+            or configured_family_count >= 2
+            or len(used) < 2
+            or any(not value for value in used)
+            or len(set(used)) != len(used)
+            or set(served) != set(used)
+            or set(weighted) != set(used)
+            or not set(missing).issubset(set(configured))
+            or len(used_families) < 2
+            or shape_provider_count < 2
+            or scheme.get("one_scheme_status") not in _SOURCE_CLOCK_READ_READY_STATUSES
+            or scheme.get("walkforward_pass") is not True
+        ):
+            return True, None
+        canonical = tuple(sorted(used))
+        return True, {
+            "posterior_model_count_basis": _SOURCE_CLOCK_MODEL_COUNT_BASIS,
+            "posterior_completeness_status": _SOURCE_CLOCK_READY_STATUS,
+            "posterior_configured_sources": canonical,
+            "posterior_served_sources": canonical,
+            "posterior_missing_sources": (),
+            "posterior_walkforward_pass": True,
+            "posterior_configured_model_count": len(canonical),
+            "posterior_served_model_count": len(canonical),
+        }
     if (
         len(configured) < 2
         or any(not value for value in configured)
