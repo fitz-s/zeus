@@ -502,10 +502,45 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _ensure_directory_entry_durable(
+    directory: Path,
+    *,
+    durable_ancestor: Path,
+) -> None:
+    directory = directory.absolute()
+    durable_ancestor = durable_ancestor.absolute()
+    try:
+        relative = directory.relative_to(durable_ancestor)
+    except ValueError as exc:
+        raise ValueError(
+            f"{directory} is outside durable ancestor {durable_ancestor}"
+        ) from exc
+    if not durable_ancestor.is_dir():
+        raise FileNotFoundError(
+            f"durable directory ancestor missing: {durable_ancestor}"
+        )
+    parent = durable_ancestor
+    for part in relative.parts:
+        child = parent / part
+        child.mkdir(exist_ok=True)
+        if not child.is_dir():
+            raise NotADirectoryError(child)
+        # Retry this even for an existing child: mkdir may have succeeded
+        # before a prior parent-directory fsync failed.
+        _fsync_directory(parent)
+        parent = child
+
+
 def _fsync_staged_seed(staging_file: Path) -> None:
     """Make the private seed and its directory durable before SQLite references it."""
+    staging_directory = staging_file.parent
+    seed_directory = staging_directory.parent
+    _ensure_directory_entry_durable(
+        staging_directory,
+        durable_ancestor=seed_directory.parent,
+    )
     _fsync_file(staging_file)
-    _fsync_directory(staging_file.parent)
+    _fsync_directory(staging_directory)
 
 
 def _fsync_publication_directories(publication: _SeedPublication) -> None:

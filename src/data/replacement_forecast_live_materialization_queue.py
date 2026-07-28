@@ -313,8 +313,45 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _ensure_directory_entry_durable(
+    directory: Path,
+    *,
+    durable_ancestor: Path,
+) -> None:
+    directory = directory.absolute()
+    durable_ancestor = durable_ancestor.absolute()
+    try:
+        relative = directory.relative_to(durable_ancestor)
+    except ValueError as exc:
+        raise ValueError(
+            f"{directory} is outside durable ancestor {durable_ancestor}"
+        ) from exc
+    if not durable_ancestor.is_dir():
+        raise FileNotFoundError(
+            f"durable directory ancestor missing: {durable_ancestor}"
+        )
+    parent = durable_ancestor
+    for part in relative.parts:
+        child = parent / part
+        child.mkdir(exist_ok=True)
+        if not child.is_dir():
+            raise NotADirectoryError(child)
+        # Repeat this even for an existing child: it repairs a prior attempt
+        # whose mkdir succeeded but parent fsync failed.
+        _fsync_directory(parent)
+        parent = child
+
+
 def _move_request(path: Path, destination_dir: Path) -> Path:
-    destination_dir.mkdir(parents=True, exist_ok=True)
+    source_dir = path.parent.absolute()
+    destination_dir = destination_dir.absolute()
+    common_ancestor = Path(
+        os.path.commonpath((source_dir, destination_dir))
+    )
+    _ensure_directory_entry_durable(
+        destination_dir,
+        durable_ancestor=common_ancestor,
+    )
     while True:
         target = destination_dir / _receipt_name(path)
         try:

@@ -709,14 +709,23 @@ def test_durable_publish_happens_before_sqlite_marker_transitions(
         "_fsync_file",
         lambda path: events.append(f"fsync_file:{Path(path).name}"),
     )
+    seed_dir = Path(kwargs["seed_dir"])
 
     def _fsync_directory(path):
         directory = Path(path)
-        events.append(
-            "fsync_staging_dir"
-            if directory.name == ".fusion_upgrade_staging"
-            else "fsync_queue_dir"
-        )
+        if directory == seed_dir.parent:
+            event = "fsync_seed_parent_entry"
+        elif directory == seed_dir:
+            event = (
+                "fsync_queue_dir"
+                if "marker_finalize" in events
+                else "fsync_staging_parent_entry"
+            )
+        elif directory.name == ".fusion_upgrade_staging":
+            event = "fsync_staging_dir"
+        else:
+            event = "fsync_queue_dir"
+        events.append(event)
 
     monkeypatch.setattr(trigger, "_fsync_directory", _fsync_directory)
     real_finalize = trigger._finalize_enqueue_reservations
@@ -742,8 +751,83 @@ def test_durable_publish_happens_before_sqlite_marker_transitions(
 
     assert report["seeds_enqueued"] == 1
     assert events.index("write_seed") < events.index("marker_finalize")
+    assert events.index("fsync_seed_parent_entry") < events.index(
+        "marker_finalize"
+    )
+    assert events.index("fsync_staging_parent_entry") < events.index(
+        "marker_finalize"
+    )
     assert events.index("fsync_staging_dir") < events.index("marker_finalize")
     assert events.index("fsync_queue_dir") < events.index("marker_complete")
+
+
+def test_hidden_staging_parent_fsync_failure_never_finalizes_and_retries(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A created staging dir is not SQLite-visible before its parent entry is durable."""
+    db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    seed_dir = Path(kwargs["seed_dir"])
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: _revision_upgrade_verdict(),
+    )
+    monkeypatch.setattr(trigger, "_RESERVATION_TTL", timedelta(0))
+    builds = 0
+
+    def _build(_conn, **build_kwargs):
+        nonlocal builds
+        builds += 1
+        stage = Path(build_kwargs["seed_file"])
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_text("{}\n", encoding="utf-8")
+        return stage
+
+    real_fsync_directory = trigger._fsync_directory
+    staging_parent_attempts = 0
+
+    def _fsync_directory(path):
+        nonlocal staging_parent_attempts
+        directory = Path(path)
+        if directory == seed_dir:
+            staging_parent_attempts += 1
+            if staging_parent_attempts == 1:
+                raise OSError("injected staging-parent fsync failure")
+        real_fsync_directory(directory)
+
+    finalize_calls = 0
+    real_finalize = trigger._finalize_enqueue_reservations
+
+    def _finalize(*args, **finalize_kwargs):
+        nonlocal finalize_calls
+        finalize_calls += 1
+        return real_finalize(*args, **finalize_kwargs)
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+    monkeypatch.setattr(trigger, "_fsync_directory", _fsync_directory)
+    monkeypatch.setattr(trigger, "_finalize_enqueue_reservations", _finalize)
+
+    failed = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+    conn = sqlite3.connect(db)
+    reservation = conn.execute(
+        "SELECT seed_file FROM fusion_upgrade_enqueues"
+    ).fetchone()[0]
+    conn.close()
+
+    assert failed["seed_staging_fsync_failed"] == 1
+    assert finalize_calls == 0
+    assert str(reservation).startswith(trigger._RESERVATION_PREFIX)
+    assert (seed_dir / ".fusion_upgrade_staging").is_dir()
+    assert list(seed_dir.glob("*.json")) == []
+
+    recovered = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert recovered["seeds_enqueued"] == 1
+    assert builds == 2
+    assert staging_parent_attempts >= 2
+    assert finalize_calls == 1
+    assert len(list(seed_dir.glob("*.json"))) == 1
 
 
 def test_staging_fsync_failure_leaves_reservation_for_retry(
@@ -854,9 +938,10 @@ def test_queue_directory_fsync_failure_keeps_pending_until_recovery(
         directory = Path(path)
         if directory == seed_dir:
             queue_fsync_attempts += 1
-            if queue_fsync_attempts == 1:
+            if queue_fsync_attempts == 2:
                 raise OSError("injected queue-directory fsync failure")
-            queue_fsync_successes += 1
+            if queue_fsync_attempts > 2:
+                queue_fsync_successes += 1
         real_fsync_directory(directory)
 
     complete_calls = 0
@@ -890,7 +975,7 @@ def test_queue_directory_fsync_failure_keeps_pending_until_recovery(
     assert recovered["already_enqueued"] == 1
     assert builds == 1
     assert complete_calls == 1
-    assert queue_fsync_attempts == 2
+    assert queue_fsync_attempts == 3
     visible = list(seed_dir.glob("*.json"))
     assert len(visible) == 1
     conn = sqlite3.connect(db)
@@ -1384,7 +1469,9 @@ def test_unchanged_blocked_consumer_receipt_fences_pending_marker_recovery(
     def _move_fsync(path):
         directory = Path(path)
         real_move_fsync(directory)
-        if directory == seed_processed_dir:
+        if directory == queue_root:
+            durability_events.append("processed_parent_entry_fsync")
+        elif directory == seed_processed_dir:
             durability_events.append("processed_dir_fsync")
         elif directory == seed_dir:
             durability_events.append("queue_dir_fsync")
@@ -1442,6 +1529,9 @@ def test_unchanged_blocked_consumer_receipt_fences_pending_marker_recovery(
     assert recovered["already_enqueued"] == 1
     assert builds == 1
     assert complete_attempts == 2
+    assert durability_events.index(
+        "processed_parent_entry_fsync"
+    ) < durability_events.index("processed_dir_fsync")
     assert durability_events.index("processed_dir_fsync") < durability_events.index(
         "final_marker_complete"
     )

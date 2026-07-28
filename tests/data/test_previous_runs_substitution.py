@@ -369,19 +369,68 @@ def test_move_request_durably_links_destination_before_source_removal(
     source_dir.mkdir()
     source = source_dir / "seed.json"
     source.write_text('{"seed":1}\n', encoding="utf-8")
-    fsynced: list[Path] = []
+    events: list[tuple[str, Path]] = []
     monkeypatch.setattr(
         queue_mod,
         "_fsync_directory",
-        lambda path: fsynced.append(Path(path)),
+        lambda path: events.append(("fsync", Path(path))),
     )
+    real_unlink = Path.unlink
+
+    def _unlink(path, *args, **kwargs):
+        if path == source:
+            events.append(("unlink", path))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _unlink)
 
     moved = queue_mod._move_request(source, destination_dir)
 
-    assert fsynced == [destination_dir, source_dir]
+    assert events == [
+        ("fsync", tmp_path),
+        ("fsync", destination_dir),
+        ("unlink", source),
+        ("fsync", source_dir),
+    ]
     assert not source.exists()
     assert moved.is_file()
     assert json.loads(moved.read_text(encoding="utf-8")) == {"seed": 1}
+
+
+def test_move_request_first_use_parent_fsync_failure_is_retryable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    source_dir = tmp_path / "seeds"
+    destination_dir = tmp_path / "seed_processed"
+    source_dir.mkdir()
+    source = source_dir / "seed.json"
+    source.write_text('{"seed":1}\n', encoding="utf-8")
+    parent_fsync_attempts = 0
+
+    def _fsync_directory(path):
+        nonlocal parent_fsync_attempts
+        if Path(path) == tmp_path:
+            parent_fsync_attempts += 1
+            if parent_fsync_attempts == 1:
+                raise OSError("injected destination-parent fsync failure")
+
+    monkeypatch.setattr(queue_mod, "_fsync_directory", _fsync_directory)
+
+    with pytest.raises(OSError, match="destination-parent fsync failure"):
+        queue_mod._move_request(source, destination_dir)
+
+    assert destination_dir.is_dir()
+    assert source.is_file()
+    assert list(destination_dir.iterdir()) == []
+
+    moved = queue_mod._move_request(source, destination_dir)
+
+    assert parent_fsync_attempts == 2
+    assert not source.exists()
+    assert moved.is_file()
 
 
 def test_move_request_destination_fsync_failure_never_removes_source(
@@ -396,8 +445,9 @@ def test_move_request_destination_fsync_failure_never_removes_source(
     source = source_dir / "seed.json"
     source.write_text('{"seed":1}\n', encoding="utf-8")
 
-    def _fail_fsync(_path):
-        raise OSError("injected destination-directory fsync failure")
+    def _fail_fsync(path):
+        if Path(path) == destination_dir:
+            raise OSError("injected destination-directory fsync failure")
 
     monkeypatch.setattr(queue_mod, "_fsync_directory", _fail_fsync)
 
@@ -421,12 +471,12 @@ def test_move_request_source_fsync_failure_keeps_durable_destination(
     source_dir.mkdir()
     source = source_dir / "seed.json"
     source.write_text('{"seed":1}\n', encoding="utf-8")
-    fsync_calls = 0
+    fsynced: list[Path] = []
 
-    def _fsync_directory(_path):
-        nonlocal fsync_calls
-        fsync_calls += 1
-        if fsync_calls == 2:
+    def _fsync_directory(path):
+        directory = Path(path)
+        fsynced.append(directory)
+        if directory == source_dir:
             raise OSError("injected source-directory fsync failure")
 
     monkeypatch.setattr(queue_mod, "_fsync_directory", _fsync_directory)
@@ -435,7 +485,7 @@ def test_move_request_source_fsync_failure_keeps_durable_destination(
         queue_mod._move_request(source, destination_dir)
 
     receipts = list(destination_dir.glob("*.json"))
-    assert fsync_calls == 2
+    assert fsynced == [tmp_path, destination_dir, source_dir]
     assert not source.exists()
     assert len(receipts) == 1
     assert json.loads(receipts[0].read_text(encoding="utf-8")) == {"seed": 1}
