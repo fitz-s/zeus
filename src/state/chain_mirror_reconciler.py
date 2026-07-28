@@ -1274,14 +1274,14 @@ def apply_size_correction_finding(
 
     fill_authority = str(current["fill_authority"] or "")
     owned_shares_before = float(current["shares"] or 0.0)
-    observation_only = finding.details.get("reason") == "chain_economics_observed"
+    is_chain_economics_observed = finding.details.get("reason") == "chain_economics_observed"
     if (
-        observation_only
+        is_chain_economics_observed
         and phase_before not in {"active", "day0_window", "pending_exit"}
     ):
         return False
     owned_reduction = (
-        not observation_only
+        not is_chain_economics_observed
         and fill_authority in FILL_GRADE_FILL_AUTHORITIES
         and owned_shares_before > 0.0
         and chain_size < owned_shares_before
@@ -1338,10 +1338,10 @@ def apply_size_correction_finding(
     )
     sequence_no = _next_sequence_no(conn, position_id)
     event_suffix = (
-        "chain_mirror_observed" if observation_only else "chain_mirror_size"
+        "chain_mirror_observed" if is_chain_economics_observed else "chain_mirror_size"
     )
     caused_by = (
-        "chain_economics_observed" if observation_only else "chain_mirror_reconciler"
+        "chain_economics_observed" if is_chain_economics_observed else "chain_mirror_reconciler"
     )
     event = {
         "event_id": f"{position_id}:{event_suffix}:{sequence_no}",
