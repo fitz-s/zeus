@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 from src.config import get_mode, state_path
 from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
@@ -4006,6 +4006,22 @@ def _runtime_state_for_canonical_monitor_phase(phase: str) -> str:
     return phase
 
 
+def _monitor_event_applied_validations(
+    monitor_event: Mapping[str, object],
+) -> list[object] | None:
+    validations = monitor_event.get("exit_decision_applied_validations")
+    if isinstance(validations, list):
+        return validations
+    monitor_validations = monitor_event.get("applied_validations")
+    indexes = monitor_event.get("exit_decision_validation_indexes")
+    if isinstance(monitor_validations, list) and isinstance(indexes, list):
+        try:
+            return [monitor_validations[int(index)] for index in indexes]
+        except (IndexError, TypeError, ValueError):
+            return monitor_validations
+    return monitor_validations if isinstance(monitor_validations, list) else None
+
+
 _PENDING_EXIT_ORDER_STATUSES = {
     "exit_intent",
     "sell_placed",
@@ -4061,9 +4077,7 @@ def _sync_position_from_canonical_monitor_row(pos, row) -> None:
             neg_edge_count = int(
                 monitor_event.get("exit_decision_neg_edge_count") or 0
             )
-            validations = monitor_event.get("exit_decision_applied_validations")
-            if not isinstance(validations, list):
-                validations = monitor_event.get("applied_validations")
+            validations = _monitor_event_applied_validations(monitor_event)
             if isinstance(validations, list):
                 pos.applied_validations = [
                     str(value) for value in validations if str(value).strip()

@@ -717,13 +717,28 @@ def build_monitor_refreshed_canonical_write(
                 ),
             }
         )
-        # The canonical monitor reader already falls back to
-        # ``applied_validations`` when this exit-specific override is absent.
-        # Do not persist the same often-large validation vector twice on every
-        # recurring HOLD event; retain the override only when it carries
-        # genuinely different decision evidence.
+        # Reuse the monitor validation vector by index when the exit decision
+        # selected a subset. This preserves the exit-specific order exactly
+        # without rewriting the same long validation strings every cycle.
         if exit_validations != payload_dict["applied_validations"]:
-            payload_dict["exit_decision_applied_validations"] = exit_validations
+            monitor_validations = payload_dict["applied_validations"]
+            monitor_positions = {
+                str(value): index
+                for index, value in enumerate(monitor_validations)
+            }
+            if (
+                len(monitor_positions) == len(monitor_validations)
+                and len(set(exit_validations)) == len(exit_validations)
+                and all(
+                    str(value) in monitor_positions
+                    for value in exit_validations
+                )
+            ):
+                payload_dict["exit_decision_validation_indexes"] = [
+                    monitor_positions[str(value)] for value in exit_validations
+                ]
+            else:
+                payload_dict["exit_decision_applied_validations"] = exit_validations
     else:
         payload_dict["exit_decision_available"] = False
     payload = json.dumps(payload_dict, default=str, sort_keys=True)

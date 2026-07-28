@@ -9540,6 +9540,53 @@ def test_monitor_refreshed_omits_duplicate_exit_validation_vector():
     assert "exit_decision_applied_validations" not in payload
 
 
+def test_monitor_refreshed_indexes_exit_validation_subset():
+    """Exit-specific validation order is preserved without duplicate strings."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="monitor-validation-index",
+        state="holding",
+        city="Chicago",
+        target_date="2026-07-28",
+        strategy_key="center_bin_buy",
+        bin_label="90-91°F",
+    )
+    pos.applied_validations = [
+        "replacement_posterior",
+        "fresh_market_price",
+        "ci_overlap_hold",
+    ]
+    pos.last_monitor_at = "2026-07-28T08:00:00+00:00"
+    exit_decision = ExitDecision(
+        False,
+        reason="CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        selected_method="replacement_posterior",
+        applied_validations=[
+            "ci_overlap_hold",
+            "replacement_posterior",
+        ],
+    )
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=2,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        exit_decision=exit_decision,
+    )
+
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["exit_decision_validation_indexes"] == [2, 0]
+    assert "exit_decision_applied_validations" not in payload
+    assert cycle_runtime._monitor_event_applied_validations(payload) == [
+        "ci_overlap_hold",
+        "replacement_posterior",
+    ]
+
+
 def test_monitor_refreshed_persists_day0_probability_receipt():
     """Day0 monitor events must carry enough input evidence to replay probability flips."""
     from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
