@@ -26,11 +26,14 @@ clock, and reactor.py's catch-up scan lane). It must:
 from __future__ import annotations
 
 import json
+import importlib
 import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Mapping
 
 import src.data.replacement_cycle_advance_trigger as cycle_advance
 import src.data.replacement_forecast_live_materialization_queue as materialization_queue
@@ -39,6 +42,7 @@ import src.data.replacement_forecast_seed_discovery as seed_discovery
 from src.data.replacement_forecast_materializer import (
     expected_replacement_dependency_identity_by_role,
 )
+import src.state.db as state_db
 from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 UTC = timezone.utc
@@ -133,7 +137,10 @@ def _fake_build_seed_factory():
 
     def _fake_build_seed(_conn_arg, **kwargs):
         calls["count"] += 1
-        path = Path(kwargs["seed_path"]) / f"Shanghai.seed.{calls['count']}.json"
+        path = Path(
+            kwargs.get("output_path")
+            or Path(kwargs["seed_path"]) / f"Shanghai.seed.{calls['count']}.json"
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(
@@ -208,6 +215,7 @@ def _insert_live_posterior(
     *,
     cycle_iso: str,
     computed_at: str,
+    source_id: str = cycle_advance.SOURCE_ID,
 ) -> None:
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -221,7 +229,7 @@ def _insert_live_posterior(
         VALUES (?, 'pid', 'dv', 'Shanghai', '2026-07-19', 'high', ?, ?, ?,
                 '{}', '{}', 'm', '{}', '{}', 'live', 0)
         """,
-        (cycle_advance.SOURCE_ID, cycle_iso, cycle_iso, computed_at),
+        (source_id, cycle_iso, cycle_iso, computed_at),
     )
     conn.commit()
     conn.close()
@@ -381,6 +389,1394 @@ def test_day0_extreme_bridge_reseeds_for_every_conditioning_identity_change(
         "source": "wu_api+same_station_fast_tail",
         "unit": "F",
     }
+    assert Path(row["seed_file"]).is_file()
+
+
+def test_day0_bridge_publishes_only_the_monotonic_cas_owner(tmp_path, monkeypatch) -> None:
+    """A late older bridge call cannot leave a queue-visible seed behind."""
+    _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    monkeypatch.setattr(
+        cycle_advance, "family_materializable_cycle", lambda *a, **k: (cycle, ())
+    )
+    payload = _day0_payload("2026-07-19T05:00:00.900000+00:00")
+    monkeypatch.setattr(
+        seed_discovery,
+        "_day0_observed_extreme_seed_payload",
+        lambda **_kwargs: dict(payload),
+    )
+    fake_build_seed, _calls = _fake_build_seed_factory()
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", fake_build_seed)
+
+    newer = cycle_advance._materialize_day0_extreme_updated_seed(
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        held_position=True,
+    )
+    newer_seed = Path(str(newer["seed_file"]))
+    assert newer["enqueued"] is True
+    assert newer_seed.is_file()
+
+    payload.update(
+        {
+            "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
+            "day0_observed_extreme_source": "late_alternate_source",
+            "day0_observed_extreme_c": 20.5,
+            "day0_observed_extreme_unit": "F",
+        }
+    )
+    older = cycle_advance._materialize_day0_extreme_updated_seed(
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
+        held_position=True,
+    )
+    assert older["enqueued"] is False
+    assert newer_seed.is_file()
+    assert tuple((Path(cfg["seed_dir"])).glob("*.json")) == (newer_seed,)
+    assert not tuple((Path(cfg["seed_dir"]) / ".cycle-advance-staging").glob("*.json"))
+    row = _fetch_enqueue_row(cfg["forecast_db"])
+    assert row["seed_file"] == str(newer_seed)
+    assert row["day0_observed_extreme_observation_time"] == (
+        "2026-07-19T05:00:00.900000+00:00"
+    )
+
+
+def test_cycle_advance_loser_never_deletes_the_winner_seed(tmp_path) -> None:
+    """Same-identity contention cleans only the loser's UUID-private staging path."""
+    db_path = _prepare_forecast_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    seed_dir = tmp_path / "seeds"
+    cycle = "2026-07-19T00:00:00+00:00"
+    identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    winner_stage, winner_seed = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "winner.json",
+    )
+    winner_stage.parent.mkdir(parents=True)
+    winner_stage.write_text("winner", encoding="utf-8")
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(winner_seed),
+        **identity,
+    ) is True
+    conn.commit()
+    assert cycle_advance._publish_staged_cycle_advance_seed_if_owned(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        staged_seed_file=winner_stage,
+        visible_seed_file=winner_seed,
+        identity=cycle_advance._day0_conditioning_identity(
+            source=identity["day0_observed_extreme_source"],
+            observation_time=identity["day0_observed_extreme_observation_time"],
+            observed_extreme_c=identity["day0_observed_extreme_c"],
+            unit=identity["day0_observed_extreme_unit"],
+        ),
+    ) is True
+
+    loser_stage, loser_seed = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "winner.json",
+    )
+    loser_stage.write_text("loser", encoding="utf-8")
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(loser_seed),
+        **identity,
+    ) is False
+    cycle_advance._discard_unpublished_cycle_advance_stage(loser_stage)
+    conn.close()
+    assert winner_seed.read_text(encoding="utf-8") == "winner"
+    assert not loser_stage.exists()
+    assert not loser_seed.exists()
+
+
+def test_cycle_advance_recovers_committed_staging_after_publish_crash(tmp_path) -> None:
+    """A committed owner can atomically publish its hidden seed on the next bridge check."""
+    db_path = _prepare_forecast_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    seed_dir = tmp_path / "seeds"
+    cycle = "2026-07-19T00:00:00+00:00"
+    identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    staged, visible = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "recovery.json",
+    )
+    staged.parent.mkdir(parents=True)
+    staged.write_text("recover", encoding="utf-8")
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(visible),
+        **identity,
+    ) is True
+    conn.commit()
+
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        **identity,
+    ) is True
+    conn.close()
+    assert visible.read_text(encoding="utf-8") == "recover"
+    assert not staged.exists()
+
+
+def test_cycle_advance_recovers_non_day0_committed_staging_after_publish_crash(tmp_path) -> None:
+    """The marker-owned non-Day0 stage is published before generic dedup suppresses it."""
+    db_path = _prepare_forecast_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    seed_dir = tmp_path / "seeds"
+    cycle = "2026-07-19T00:00:00+00:00"
+    staged, visible = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "non-day0-recovery.json",
+    )
+    staged.parent.mkdir(parents=True)
+    staged.write_text("recover-non-day0", encoding="utf-8")
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=False,
+        seed_file=str(visible),
+    ) is True
+    conn.commit()
+
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+    ) is True
+    conn.close()
+    assert visible.read_text(encoding="utf-8") == "recover-non-day0"
+    assert not staged.exists()
+    assert tuple(seed_dir.glob("*.json")) == (visible,)
+
+
+def test_cycle_advance_reclaims_missing_non_day0_owned_stage_without_posterior(
+    tmp_path, monkeypatch
+) -> None:
+    """A build that produced no artifact releases its exact marker before another writer runs."""
+    db_path = _prepare_forecast_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    seed_dir = tmp_path / "seeds"
+    cycle = "2026-07-19T00:00:00+00:00"
+    _staged, missing_visible = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "non-day0-missing.json",
+    )
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=False,
+        seed_file=str(missing_visible),
+    ) is True
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (datetime(2026, 7, 19, 0, tzinfo=UTC), ()),
+    )
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", lambda *_args, **_kwargs: None)
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=tmp_path / "raw",
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
+    )
+    assert report["status"] == "CYCLE_ADVANCE_MANIFEST_MISSING"
+
+    # The builder returned None after reclaim. The delete must have committed, rather than leave a
+    # null seed marker that blocks both this retry and unrelated writers.
+    check = sqlite3.connect(db_path)
+    row = check.execute(
+        "SELECT seed_file FROM cycle_advance_enqueues "
+        "WHERE city='Shanghai' AND target_date='2026-07-19' AND metric='high'"
+    ).fetchone()
+    check.close()
+    assert row is None
+
+    other = sqlite3.connect(db_path, timeout=0.1)
+    assert cycle_advance._record_enqueue(
+        other,
+        city="Austin",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=False,
+        seed_file=str(seed_dir / "other-scope.json"),
+    ) is True
+    other.commit()
+    other.close()
+
+    def _build_seed(_conn_arg, **kwargs):
+        path = Path(kwargs["output_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _build_seed)
+    retry = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=tmp_path / "raw",
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 3, tzinfo=UTC),
+    )
+    assert retry["enqueued"] is True
+    assert Path(str(retry["seed_file"])).is_file()
+
+
+def test_cycle_advance_keeps_missing_non_day0_owned_stage_when_posterior_covers(tmp_path) -> None:
+    """A missing owned seed is terminal only after a posterior consumed its cycle."""
+    db_path = _prepare_forecast_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    seed_dir = tmp_path / "seeds"
+    cycle = "2026-07-19T00:00:00+00:00"
+    _staged, missing_visible = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "non-day0-covered.json",
+    )
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=False,
+        seed_file=str(missing_visible),
+    ) is True
+    conn.commit()
+    conn.close()
+    _insert_live_posterior(
+        db_path,
+        cycle_iso=cycle,
+        computed_at="2026-07-19T05:02:00+00:00",
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        as_of=datetime(2026, 7, 19, 5, 3, tzinfo=UTC),
+    ) is True
+    row = conn.execute(
+        "SELECT seed_file FROM cycle_advance_enqueues "
+        "WHERE city='Shanghai' AND target_date='2026-07-19' AND metric='high'"
+    ).fetchone()
+    conn.close()
+    assert row["seed_file"] == str(missing_visible)
+
+
+def test_day0_missing_seed_requires_matching_identity_and_target_cycle_coverage(tmp_path) -> None:
+    """C1 posterior with the same Day0 identity must reclaim then republish C2."""
+    db_path = _prepare_forecast_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    seed_dir = tmp_path / "seeds"
+    c1 = "2026-07-19T00:00:00+00:00"
+    c2 = "2026-07-19T06:00:00+00:00"
+    identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    _stage, missing_visible = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "day0-c2.json",
+    )
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=c1,
+        target_cycle_iso=c2,
+        held_position=True,
+        seed_file=str(missing_visible),
+        **identity,
+    ) is True
+    conn.commit()
+    conn.close()
+    _insert_live_posterior(
+        db_path,
+        cycle_iso=c1,
+        computed_at="2026-07-19T05:01:00+00:00",
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ?",
+        (
+            json.dumps(
+                {
+                    "day0_conditioning": {
+                        "source": identity["day0_observed_extreme_source"],
+                        "observation_time": identity[
+                            "day0_observed_extreme_observation_time"
+                        ],
+                        "observed_extreme_c": identity["day0_observed_extreme_c"],
+                        "unit": identity["day0_observed_extreme_unit"],
+                    }
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=c2,
+        as_of=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
+        **identity,
+    ) is False
+    staged, visible = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "day0-c2-retry.json",
+    )
+    staged.parent.mkdir(parents=True)
+    staged.write_text("retry", encoding="utf-8")
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=c1,
+        target_cycle_iso=c2,
+        held_position=True,
+        seed_file=str(visible),
+        reason="DAY0_OBSERVATION_ADVANCED",
+        replace_existing_seed_file=True,
+        **identity,
+    ) is True
+    conn.commit()
+    assert cycle_advance._publish_staged_cycle_advance_seed_if_owned(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=c2,
+        staged_seed_file=staged,
+        visible_seed_file=visible,
+        identity=cycle_advance._day0_conditioning_identity(
+            source=identity["day0_observed_extreme_source"],
+            observation_time=identity["day0_observed_extreme_observation_time"],
+            observed_extreme_c=identity["day0_observed_extreme_c"],
+            unit=identity["day0_observed_extreme_unit"],
+        ),
+    ) is True
+    marker = conn.execute(
+        "SELECT target_cycle_time, seed_file FROM cycle_advance_enqueues "
+        "WHERE city='Shanghai' AND target_date='2026-07-19' AND metric='high'"
+    ).fetchone()
+    assert marker["target_cycle_time"] == c2
+    assert marker["seed_file"] == str(visible)
+    conn.close()
+    assert visible.read_text(encoding="utf-8") == "retry"
+
+
+def test_day0_missing_seed_rejects_same_identity_other_source_posterior(tmp_path) -> None:
+    """A same-cycle live posterior from another source cannot complete a replacement marker."""
+    db_path = _prepare_forecast_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    seed_dir = tmp_path / "seeds"
+    cycle = "2026-07-19T06:00:00+00:00"
+    identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    _stage, missing_visible = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "day0-other-source.json",
+    )
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(missing_visible),
+        **identity,
+    ) is True
+    conn.commit()
+    conn.close()
+    _insert_live_posterior(
+        db_path,
+        source_id="other_live_source",
+        cycle_iso=cycle,
+        computed_at="2026-07-19T05:01:00+00:00",
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ?",
+        (
+            json.dumps(
+                {
+                    "day0_conditioning": {
+                        "source": identity["day0_observed_extreme_source"],
+                        "observation_time": identity[
+                            "day0_observed_extreme_observation_time"
+                        ],
+                        "observed_extreme_c": identity["day0_observed_extreme_c"],
+                        "unit": identity["day0_observed_extreme_unit"],
+                    }
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        as_of=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
+        **identity,
+    ) is False
+    conn.close()
+
+
+def test_non_day0_missing_seed_rejects_future_posterior_as_of(tmp_path) -> None:
+    """A posterior computed after the enqueue decision cannot suppress reclaim."""
+    db_path = _prepare_forecast_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    seed_dir = tmp_path / "seeds"
+    cycle = "2026-07-19T00:00:00+00:00"
+    _stage, missing_visible = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "future-covered.json",
+    )
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=False,
+        seed_file=str(missing_visible),
+    ) is True
+    conn.commit()
+    conn.close()
+    _insert_live_posterior(
+        db_path,
+        cycle_iso=cycle,
+        computed_at="2026-07-19T06:00:00+00:00",
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        as_of=datetime(2026, 7, 19, 5, 0, tzinfo=UTC),
+    ) is False
+    assert conn.execute(
+        "SELECT 1 FROM cycle_advance_enqueues "
+        "WHERE city='Shanghai' AND target_date='2026-07-19' AND metric='high'"
+    ).fetchone() is None
+    conn.close()
+
+
+def test_queue_quarantines_preexisting_stale_day0_upgrade_seed(tmp_path, monkeypatch) -> None:
+    """Forward cleanup: an old root JSON cannot bypass coverage after marker correction."""
+    db_path = _prepare_forecast_db(tmp_path)
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    cycle = "2026-07-19T00:00:00+00:00"
+    winner = seed_dir / "winner.json"
+    winner.write_text("{}", encoding="utf-8")
+    newer_identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(winner),
+        **newer_identity,
+    ) is True
+    conn.commit()
+    conn.close()
+
+    stale = seed_dir / "stale.json"
+    stale.write_text(
+        json.dumps(
+            {
+                "city": "Shanghai",
+                "target_date": "2026-07-19",
+                "temperature_metric": "high",
+                "computed_at": "2026-07-19T05:02:00+00:00",
+                "source_cycle_time": cycle,
+                "baseline_source_run_id": "baseline:0",
+                "openmeteo_source_run_id": "openmeteo:0",
+                "openmeteo_payload_json": "payload.json",
+                "precision_metadata_json": "precision.json",
+                "bins": [{"bin_id": "warm"}],
+                "upgrade_trigger": "day0_observation_advanced",
+                "day0_observed_extreme_source": "late_alternate_source",
+                "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
+                "day0_observed_extreme_c": 20.5,
+                "day0_observed_extreme_unit": "F",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def unexpected_builder(*_args, **_kwargs):
+        raise AssertionError("stale Day0 seed reached request construction")
+
+    monkeypatch.setattr(
+        materialization_queue,
+        "build_replacement_forecast_materialization_request",
+        unexpected_builder,
+    )
+    processed, failed, _reasons = materialization_queue._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=tmp_path / "requests",
+        forecast_db=db_path,
+        limit=10,
+    )
+    assert not failed
+    assert len(processed) == 1
+    assert not tuple((tmp_path / "requests").glob("*.json"))
+    receipt = next((tmp_path / "seed_processed").glob("*.receipt.json"))
+    assert json.loads(receipt.read_text(encoding="utf-8"))["status"] == (
+        "SKIPPED_STALE_DAY0_ENQUEUE_OWNER"
+    )
+
+
+def test_queue_defers_current_day0_upgrade_seed_when_marker_read_is_transient(
+    tmp_path, monkeypatch
+) -> None:
+    """A marker-read outage defers a current seed; the next healthy pass drains it."""
+    db_path = _prepare_forecast_db(tmp_path)
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    cycle = "2026-07-19T00:00:00+00:00"
+    identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    seed = seed_dir / "current.json"
+    seed.write_text(
+        json.dumps(
+            {
+                "city": "Shanghai",
+                "target_date": "2026-07-19",
+                "temperature_metric": "high",
+                "computed_at": "2026-07-19T05:02:00+00:00",
+                "source_cycle_time": cycle,
+                "baseline_source_run_id": "baseline:0",
+                "openmeteo_source_run_id": "openmeteo:0",
+                "openmeteo_payload_json": "payload.json",
+                "precision_metadata_json": "precision.json",
+                "bins": [{"bin_id": "warm"}],
+                "upgrade_trigger": "day0_observation_advanced",
+                **identity,
+            }
+        ),
+        encoding="utf-8",
+    )
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(seed),
+        **identity,
+    ) is True
+    conn.commit()
+    conn.close()
+
+    def unexpected_builder(*_args, **_kwargs):
+        raise AssertionError("indeterminate marker read reached request construction")
+
+    monkeypatch.setattr(
+        materialization_queue,
+        "build_replacement_forecast_materialization_request",
+        unexpected_builder,
+    )
+    original_connect = state_db._connect
+    monkeypatch.setattr(
+        state_db,
+        "_connect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
+    )
+    processed, failed, reasons = materialization_queue._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=tmp_path / "requests",
+        forecast_db=db_path,
+        limit=10,
+    )
+    assert not processed
+    assert not failed
+    assert seed.is_file()
+    assert not tuple((tmp_path / "seed_processed").glob("*.json"))
+    assert not tuple((tmp_path / "seed_failed").glob("*.json"))
+    assert not tuple((tmp_path / "requests").glob("*.json"))
+    assert reasons == ["REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE"]
+
+    monkeypatch.setattr(state_db, "_connect", original_connect)
+    built: list[Mapping[str, object]] = []
+
+    def ready_builder(payload, **_kwargs):
+        built.append(payload)
+        return SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request={
+                "city": "Shanghai",
+                "target_date": "2026-07-19",
+                "temperature_metric": "high",
+                "source_cycle_time": cycle,
+            },
+        )
+
+    monkeypatch.setattr(
+        materialization_queue,
+        "build_replacement_forecast_materialization_request",
+        ready_builder,
+    )
+    processed, failed, _reasons = materialization_queue._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=tmp_path / "requests",
+        forecast_db=db_path,
+        limit=10,
+    )
+    assert len(processed) == 1
+    assert not failed
+    assert len(built) == 1
+    assert not seed.exists()
+    request_file = next((tmp_path / "requests").glob("*.json"))
+    request_payload = json.loads(request_file.read_text(encoding="utf-8"))
+    assert request_payload["day0_enqueue_owner_witness"] == {
+        "city": "Shanghai",
+        "target_date": "2026-07-19",
+        "metric": "high",
+        "target_cycle_time": cycle,
+        "seed_file": str(seed),
+        "conditioning_identity": cycle_advance._day0_conditioning_identity(
+            source=identity["day0_observed_extreme_source"],
+            observation_time=identity["day0_observed_extreme_observation_time"],
+            observed_extreme_c=identity["day0_observed_extreme_c"],
+            unit=identity["day0_observed_extreme_unit"],
+        ),
+    }
+
+
+def test_queue_revalidates_day0_owner_immediately_before_request_publish(
+    tmp_path, monkeypatch
+) -> None:
+    """A marker swap after the first check cannot publish the old owner's request."""
+    db_path = _prepare_forecast_db(tmp_path)
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    cycle = "2026-07-19T00:00:00+00:00"
+    owner_a = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    owner_b = {
+        "day0_observed_extreme_source": "wu_api_same_time_revision",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
+        "day0_observed_extreme_c": 21.25,
+        "day0_observed_extreme_unit": "C",
+    }
+    seed = seed_dir / "owner-a.json"
+    seed.write_text(
+        json.dumps(
+            {
+                "city": "Shanghai",
+                "target_date": "2026-07-19",
+                "temperature_metric": "high",
+                "computed_at": "2026-07-19T05:02:00+00:00",
+                "source_cycle_time": cycle,
+                "baseline_source_run_id": "baseline:0",
+                "openmeteo_source_run_id": "openmeteo:0",
+                "openmeteo_payload_json": "payload.json",
+                "precision_metadata_json": "precision.json",
+                "bins": [{"bin_id": "warm"}],
+                "upgrade_trigger": "day0_observation_advanced",
+                **owner_a,
+            }
+        ),
+        encoding="utf-8",
+    )
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(seed),
+        **owner_a,
+    ) is True
+    conn.commit()
+    conn.close()
+
+    def swap_owner_after_build(*_args, **_kwargs):
+        swap = sqlite3.connect(db_path)
+        swap.row_factory = sqlite3.Row
+        assert cycle_advance._record_enqueue(
+            swap,
+            city="Shanghai",
+            target_date="2026-07-19",
+            metric="high",
+            consumed_cycle_iso=cycle,
+            target_cycle_iso=cycle,
+            held_position=True,
+            seed_file=str(tmp_path / "owner-b.json"),
+            reason="DAY0_OBSERVATION_ADVANCED",
+            replace_existing_seed_file=True,
+            **owner_b,
+        ) is True
+        swap.commit()
+        swap.close()
+        return SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request={
+                "city": "Shanghai",
+                "target_date": "2026-07-19",
+                "temperature_metric": "high",
+                "source_cycle_time": cycle,
+            },
+        )
+
+    monkeypatch.setattr(
+        materialization_queue,
+        "build_replacement_forecast_materialization_request",
+        swap_owner_after_build,
+    )
+    processed, failed, _reasons = materialization_queue._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=tmp_path / "requests",
+        forecast_db=db_path,
+        limit=1,
+    )
+    assert len(processed) == 1
+    assert not failed
+    assert not tuple((tmp_path / "requests").glob("*.json"))
+    receipt = next((tmp_path / "seed_processed").glob("*.receipt.json"))
+    assert json.loads(receipt.read_text(encoding="utf-8"))["status"] == (
+        "SKIPPED_STALE_DAY0_ENQUEUE_OWNER"
+    )
+
+
+def test_queue_defers_legacy_null_day0_identity_without_stale_receipt(tmp_path, monkeypatch) -> None:
+    """A legacy marker with no persisted identity is not authoritative stale evidence."""
+    db_path = _prepare_forecast_db(tmp_path)
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    cycle = "2026-07-19T00:00:00+00:00"
+    identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    seed = seed_dir / "legacy-null.json"
+    seed.write_text(
+        json.dumps(
+            {
+                "city": "Shanghai",
+                "target_date": "2026-07-19",
+                "temperature_metric": "high",
+                "computed_at": "2026-07-19T05:02:00+00:00",
+                "source_cycle_time": cycle,
+                "baseline_source_run_id": "baseline:0",
+                "openmeteo_source_run_id": "openmeteo:0",
+                "openmeteo_payload_json": "payload.json",
+                "precision_metadata_json": "precision.json",
+                "bins": [{"bin_id": "warm"}],
+                "upgrade_trigger": "day0_observation_advanced",
+                **identity,
+            }
+        ),
+        encoding="utf-8",
+    )
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=False,
+        seed_file=str(seed),
+        **identity,
+    ) is True
+    conn.execute(
+        "UPDATE cycle_advance_enqueues SET day0_conditioning_identity_json = NULL"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        materialization_queue,
+        "build_replacement_forecast_materialization_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy indeterminate seed reached request construction")
+        ),
+    )
+    processed, failed, reasons = materialization_queue._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=tmp_path / "requests",
+        forecast_db=db_path,
+        limit=2,
+    )
+    assert not processed
+    assert not failed
+    assert seed.is_file()
+    assert not tuple((tmp_path / "seed_processed").glob("*.receipt.json"))
+    assert "REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE" in reasons
+    assert (tmp_path / ".replacement-day0-enqueue.cursor").read_text(encoding="utf-8").strip() == (
+        seed.name
+    )
+
+
+def test_queue_scans_past_indeterminate_day0_prefix_without_starving_current_seed(
+    tmp_path, monkeypatch
+) -> None:
+    """The actionable limit excludes deferred ownership inspections."""
+    db_path = _prepare_forecast_db(tmp_path)
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    cycle = "2026-07-19T00:00:00+00:00"
+    identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+
+    def write_seed(name: str, target_date: str) -> Path:
+        path = seed_dir / name
+        path.write_text(
+            json.dumps(
+                {
+                    "city": "Shanghai",
+                    "target_date": target_date,
+                    "temperature_metric": "high",
+                    "computed_at": "2026-07-19T05:02:00+00:00",
+                    "source_cycle_time": cycle,
+                    "baseline_source_run_id": "baseline:0",
+                    "openmeteo_source_run_id": "openmeteo:0",
+                    "openmeteo_payload_json": "payload.json",
+                    "precision_metadata_json": "precision.json",
+                    "bins": [{"bin_id": "warm"}],
+                    "upgrade_trigger": "day0_observation_advanced",
+                    **identity,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    indeterminate = (
+        write_seed("00.indeterminate.json", "2026-07-17"),
+        write_seed("01.indeterminate.json", "2026-07-18"),
+    )
+    current = write_seed("99.current.json", "2026-07-19")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=False,
+        seed_file=str(current),
+        **identity,
+    ) is True
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        materialization_queue, "_cycle_advance_seed_priority_map", lambda *_args: {}
+    )
+    built: list[Mapping[str, object]] = []
+
+    def ready_builder(payload, **_kwargs):
+        built.append(payload)
+        return SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request={
+                "city": str(payload["city"]),
+                "target_date": str(payload["target_date"]),
+                "temperature_metric": "high",
+                "source_cycle_time": cycle,
+            },
+        )
+
+    monkeypatch.setattr(
+        materialization_queue,
+        "build_replacement_forecast_materialization_request",
+        ready_builder,
+    )
+
+    processed, failed, reasons = materialization_queue._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=tmp_path / "requests",
+        forecast_db=db_path,
+        limit=len(indeterminate),
+    )
+    assert len(processed) == 1
+    assert not failed
+    assert len(built) == 1
+    assert not current.exists()
+    assert all(path.is_file() for path in indeterminate)
+    assert "REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE" in reasons
+
+    later_current = write_seed("99.current-next.json", "2026-07-20")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-20",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=False,
+        seed_file=str(later_current),
+        **identity,
+    ) is True
+    conn.commit()
+    conn.close()
+    processed, failed, reasons = materialization_queue._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=tmp_path / "requests",
+        forecast_db=db_path,
+        limit=len(indeterminate),
+    )
+    assert len(processed) == 1
+    assert not failed
+    assert len(built) == 2
+    assert not later_current.exists()
+    assert all(path.is_file() for path in indeterminate)
+    assert "REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE" in reasons
+
+
+def test_queue_rotates_bounded_indeterminate_inspections_across_reload(
+    tmp_path, monkeypatch
+) -> None:
+    """A large retained backlog has bounded DB reads yet cannot starve a tail owner."""
+    db_path = _prepare_forecast_db(tmp_path)
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    request_dir = tmp_path / "requests"
+    cycle = "2026-07-19T00:00:00+00:00"
+    identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+
+    def write_seed(name: str, target_date: str) -> Path:
+        path = seed_dir / name
+        path.write_text(
+            json.dumps(
+                {
+                    "city": "Shanghai",
+                    "target_date": target_date,
+                    "temperature_metric": "high",
+                    "computed_at": "2026-07-19T05:02:00+00:00",
+                    "source_cycle_time": cycle,
+                    "baseline_source_run_id": "baseline:0",
+                    "openmeteo_source_run_id": "openmeteo:0",
+                    "openmeteo_payload_json": "payload.json",
+                    "precision_metadata_json": "precision.json",
+                    "bins": [{"bin_id": "warm"}],
+                    "upgrade_trigger": "day0_observation_advanced",
+                    **identity,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    indeterminate = tuple(
+        write_seed(f"{index:03d}.indeterminate.json", "2026-07-17")
+        for index in range(100)
+    )
+    current = write_seed("999.current.json", "2026-07-19")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle,
+        target_cycle_iso=cycle,
+        held_position=False,
+        seed_file=str(current),
+        **identity,
+    ) is True
+    conn.commit()
+    conn.close()
+
+    priority_loads: list[Path] = []
+
+    def configure_queue() -> None:
+        original_priority_load = materialization_queue._load_request_payload_for_coalescing
+
+        def counting_priority_load(path: Path):
+            priority_loads.append(path)
+            return original_priority_load(path)
+
+        monkeypatch.setattr(
+            materialization_queue,
+            "_load_request_payload_for_coalescing",
+            counting_priority_load,
+        )
+        monkeypatch.setattr(
+            materialization_queue,
+            "build_replacement_forecast_materialization_request",
+            lambda payload, **_kwargs: SimpleNamespace(
+                ok=True,
+                status="READY",
+                reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+                request={
+                    "city": str(payload["city"]),
+                    "target_date": str(payload["target_date"]),
+                    "temperature_metric": "high",
+                    "source_cycle_time": cycle,
+                },
+            ),
+        )
+
+    configure_queue()
+    real_connect = state_db._connect
+    connect_calls: list[object] = []
+
+    def counting_connect(*args, **kwargs):
+        connect_calls.append((args, kwargs))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(state_db, "_connect", counting_connect)
+    real_connect_read_only = state_db._connect_read_only
+    read_only_calls: list[object] = []
+    priority_queries: list[str] = []
+
+    def counting_connect_read_only(*args, **kwargs):
+        read_only_calls.append((args, kwargs))
+        inner = real_connect_read_only(*args, **kwargs)
+
+        class CountingConnection:
+            def execute(self, sql, *execute_args, **execute_kwargs):
+                priority_queries.append(str(sql))
+                return inner.execute(sql, *execute_args, **execute_kwargs)
+
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+        return CountingConnection()
+
+    monkeypatch.setattr(state_db, "_connect_read_only", counting_connect_read_only)
+    limit = 2
+    inspection_cap = max(
+        limit * materialization_queue._DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER,
+        materialization_queue._DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS,
+    )
+    processed, failed, reasons = materialization_queue._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=db_path,
+        limit=limit,
+    )
+    assert not processed
+    assert not failed
+    assert len(connect_calls) <= inspection_cap
+    assert len(priority_loads) <= inspection_cap
+    assert len(read_only_calls) <= 1
+    assert len(priority_queries) <= inspection_cap
+    assert current.is_file()
+    assert all(path.is_file() for path in indeterminate)
+    assert "REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE" in reasons
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_LIMIT_REACHED" in reasons
+    cursor = tmp_path / ".replacement-day0-enqueue.cursor"
+    first_cursor = cursor.read_text(encoding="utf-8").strip()
+    assert first_cursor == "007.indeterminate.json"
+
+    importlib.reload(materialization_queue)
+    configure_queue()
+    processed, failed, _reasons = materialization_queue._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=db_path,
+        limit=limit,
+    )
+    assert not processed
+    assert not failed
+    assert cursor.read_text(encoding="utf-8").strip() == "015.indeterminate.json"
+
+    max_passes = (len(indeterminate) + 1 + inspection_cap - 1) // inspection_cap
+    for _ in range(max_passes - 2):
+        processed, failed, _reasons = materialization_queue._prepare_seed_requests(
+            seed_dir=seed_dir,
+            seed_processed_dir=tmp_path / "seed_processed",
+            seed_failed_dir=tmp_path / "seed_failed",
+            request_dir=request_dir,
+            forecast_db=db_path,
+            limit=limit,
+        )
+        assert not failed
+        if processed:
+            break
+    assert not current.exists()
+    assert all(path.is_file() for path in indeterminate)
+
+
+def test_day0_conditioning_marker_allows_same_time_revisions_but_never_regresses_time(
+    tmp_path,
+) -> None:
+    """A late older condition cannot replace a newer marker or its seed."""
+    db_path = _prepare_forecast_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cycle_iso = "2026-07-19T00:00:00+00:00"
+
+    def record(seed_name: str, **identity: object) -> bool:
+        seed_file = tmp_path / seed_name
+        seed_file.write_text("{}", encoding="utf-8")
+        return cycle_advance._record_enqueue(
+            conn,
+            city="Shanghai",
+            target_date="2026-07-19",
+            metric="high",
+            consumed_cycle_iso=cycle_iso,
+            target_cycle_iso=cycle_iso,
+            held_position=True,
+            seed_file=str(seed_file),
+            reason=None,
+            **identity,
+        )
+
+    newer = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    assert record("newer.json", **newer) is True
+
+    older = {
+        "day0_observed_extreme_source": "late_alternate_source",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
+        "day0_observed_extreme_c": 20.5,
+        "day0_observed_extreme_unit": "F",
+    }
+    assert record("older.json", **older) is False
+    row = conn.execute(
+        "SELECT day0_observed_extreme_observation_time, day0_conditioning_identity_json, seed_file "
+        "FROM cycle_advance_enqueues"
+    ).fetchone()
+    assert row["day0_observed_extreme_observation_time"] == newer[
+        "day0_observed_extreme_observation_time"
+    ]
+    assert row["seed_file"] == str(tmp_path / "newer.json")
+
+    same_time_revisions = (
+        {"day0_observed_extreme_source": "wu_api+same_station_fast_tail"},
+        {"day0_observed_extreme_c": 21.25},
+        {"day0_observed_extreme_unit": "F"},
+    )
+    current = newer
+    for index, revision in enumerate(same_time_revisions, start=1):
+        current = {**current, **revision}
+        assert record(f"same-time-{index}.json", **current) is True
+
+    row = conn.execute(
+        "SELECT day0_observed_extreme_observation_time, day0_conditioning_identity_json, seed_file "
+        "FROM cycle_advance_enqueues"
+    ).fetchone()
+    conn.close()
+    assert row["day0_observed_extreme_observation_time"] == newer[
+        "day0_observed_extreme_observation_time"
+    ]
+    assert json.loads(row["day0_conditioning_identity_json"]) == {
+        "observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "observed_extreme_c": 21.25,
+        "source": "wu_api+same_station_fast_tail",
+        "unit": "F",
+    }
+    assert row["seed_file"] == str(tmp_path / "same-time-3.json")
 
 
 def test_day0_conditioning_marker_allows_same_time_revisions_but_never_regresses_time(

@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -40,6 +41,23 @@ DEFAULT_MATERIALIZATION_MAX_WORKERS = 4
 MATERIALIZATION_INFLIGHT_DIR_NAME = "inflight"
 _CLAIM_METADATA_NAME = "_claim.json"
 _STALE_CLAIM_GRACE_SECONDS = 30.0
+_DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME = ".replacement-day0-enqueue.cursor"
+_DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER = 4
+_DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS = 8
+
+
+class _Day0EnqueueOwnership(str, Enum):
+    """Authoritative ownership state for a Day0 cycle-advance seed."""
+
+    CURRENT = "CURRENT"
+    STALE = "STALE"
+    INDETERMINATE = "INDETERMINATE"
+
+
+@dataclass(frozen=True)
+class _Day0EnqueueOwnershipCheck:
+    ownership: _Day0EnqueueOwnership
+    witness: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -479,6 +497,93 @@ def _day0_seed_matches_conditioning(
         and conditioning_identity is not None
         and seed_identity == conditioning_identity
     )
+
+
+def _upgrade_day0_seed_has_current_enqueue_ownership(
+    *,
+    forecast_db: Path | str | None,
+    seed_file: Path,
+    seed: Mapping[str, object],
+) -> _Day0EnqueueOwnershipCheck:
+    """Classify Day0 marker ownership without consuming a seed on read uncertainty."""
+    if not seed.get("upgrade_trigger") or seed.get("day0_observed_extreme_observation_time") is None:
+        return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.CURRENT)
+    from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+        _day0_conditioning_identity,
+    )
+
+    identity = _day0_conditioning_identity(
+        source=seed.get("day0_observed_extreme_source"),
+        observation_time=seed.get("day0_observed_extreme_observation_time"),
+        observed_extreme_c=seed.get("day0_observed_extreme_c"),
+        unit=seed.get("day0_observed_extreme_unit"),
+    )
+    if identity is None or forecast_db is None:
+        return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
+    db_path = Path(forecast_db)
+    if not db_path.exists():
+        return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
+    from src.state.db import _connect  # noqa: PLC0415
+
+    try:
+        conn = _connect(db_path, write_class="live")
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(cycle_advance_enqueues)").fetchall()
+            }
+            required = {
+                "city",
+                "target_date",
+                "metric",
+                "target_cycle_time",
+                "seed_file",
+                "day0_conditioning_identity_json",
+            }
+            if not required.issubset(columns):
+                return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
+            row = conn.execute(
+                """
+                SELECT seed_file, day0_conditioning_identity_json
+                FROM cycle_advance_enqueues
+                WHERE city = ?
+                  AND target_date = ?
+                  AND metric = ?
+                  AND target_cycle_time = ?
+                LIMIT 1
+                """,
+                (
+                    str(seed.get("city") or ""),
+                    str(seed.get("target_date") or ""),
+                    str(seed.get("temperature_metric") or ""),
+                    str(seed.get("source_cycle_time") or ""),
+                ),
+            ).fetchone()
+            if row is None:
+                return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
+            if str(row["seed_file"] or "") != str(seed_file):
+                return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.STALE)
+            recorded_identity = row["day0_conditioning_identity_json"]
+            if not isinstance(recorded_identity, str) or not recorded_identity.strip():
+                return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
+            if recorded_identity != identity:
+                return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.STALE)
+            return _Day0EnqueueOwnershipCheck(
+                _Day0EnqueueOwnership.CURRENT,
+                witness={
+                    "city": str(seed.get("city") or ""),
+                    "target_date": str(seed.get("target_date") or ""),
+                    "metric": str(seed.get("temperature_metric") or ""),
+                    "target_cycle_time": str(seed.get("source_cycle_time") or ""),
+                    "seed_file": str(seed_file),
+                    "conditioning_identity": identity,
+                },
+            )
+        finally:
+            conn.close()
+    except Exception:
+        return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
 
 
 def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, object]) -> bool:
@@ -1441,6 +1546,55 @@ def _new_claim_batch(inflight_path: Path, request_files: Sequence[Path]) -> Path
     return batch_path
 
 
+def _day0_enqueue_ownership_cursor_path(request_dir: Path) -> Path:
+    """Return the hidden, non-seed cursor co-located with queue state."""
+    return request_dir.parent / _DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME
+
+
+def _read_day0_enqueue_ownership_cursor(cursor_path: Path) -> str | None:
+    """Read a prior filename cursor; malformed sidecars safely restart the rotation."""
+    try:
+        value = cursor_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    return value if value and Path(value).name == value else None
+
+
+def _write_day0_enqueue_ownership_cursor(cursor_path: Path, filename: str) -> bool:
+    """Atomically persist the last inspected seed filename while the queue lock is held."""
+    temporary: Path | None = None
+    try:
+        cursor_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cursor_path.with_name(
+            f".{cursor_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        temporary.write_text(f"{filename}\n", encoding="utf-8")
+        os.replace(temporary, cursor_path)
+        return True
+    except OSError:
+        return False
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _rotate_seed_snapshot_after_cursor(seeds: Sequence[Path], cursor: str | None) -> tuple[Path, ...]:
+    """Visit each sorted snapshot seed at most once, beginning after the durable cursor."""
+    snapshot = tuple(seeds)
+    if not snapshot or cursor is None:
+        return snapshot
+    for index, path in enumerate(snapshot):
+        if path.name == cursor:
+            return snapshot[index + 1 :] + snapshot[: index + 1]
+    for index, path in enumerate(snapshot):
+        if path.name > cursor:
+            return snapshot[index:] + snapshot[:index]
+    return snapshot
+
+
 def _prepare_seed_requests(
     *,
     seed_dir: Path | str | None,
@@ -1458,13 +1612,6 @@ def _prepare_seed_requests(
     seed_files = tuple(path for path in seed_path.glob("*.json") if path.is_file())
     if not seed_files:
         return [], [], ["REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_EMPTY"]
-    priority = _cycle_advance_seed_priority_map(forecast_db, seed_files)
-    seeds = tuple(
-        sorted(
-            seed_files,
-            key=lambda path: _cycle_advance_file_sort_key(path, priority),
-        )
-    )
     if seed_processed_dir is None or seed_failed_dir is None:
         raise ValueError("seed_processed_dir and seed_failed_dir are required when seed_dir is set")
     processed_path = Path(seed_processed_dir)
@@ -1472,10 +1619,62 @@ def _prepare_seed_requests(
     processed: list[str] = []
     failed: list[str] = []
     reasons: list[str] = []
-    for seed_json in seeds[:limit]:
+    cursor_path = _day0_enqueue_ownership_cursor_path(request_dir)
+    raw_snapshot = tuple(sorted(seed_files, key=lambda path: path.name))
+    rotated_raw_snapshot = _rotate_seed_snapshot_after_cursor(
+        raw_snapshot,
+        _read_day0_enqueue_ownership_cursor(cursor_path),
+    )
+    # Cursor rotation and the inspection bound apply before JSON/DB priority work. The window's
+    # raw boundary advances even when priority/actionable work stops early, so retained entries
+    # make deterministic progress across passes without unbounded queue-lock I/O.
+    actionable_limit = max(int(limit), 0)
+    inspection_cap = max(
+        actionable_limit * _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER,
+        _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS,
+    )
+    raw_window = rotated_raw_snapshot[:inspection_cap]
+    priority = _cycle_advance_seed_priority_map(forecast_db, raw_window)
+    seeds = tuple(
+        sorted(
+            raw_window,
+            key=lambda path: _cycle_advance_file_sort_key(path, priority),
+        )
+    )
+    actionable_count = 0
+    inspected_count = 0
+    indeterminate_count = 0
+    for seed_json in seeds:
+        if actionable_count >= actionable_limit or inspected_count >= inspection_cap:
+            break
+        inspected_count += 1
         try:
             seed = _load_seed_json(seed_json)
             if not _looks_like_seed(seed):
+                continue
+            ownership_check = _upgrade_day0_seed_has_current_enqueue_ownership(
+                forecast_db=forecast_db,
+                seed_file=seed_json,
+                seed=seed,
+            )
+            ownership = ownership_check.ownership
+            if ownership is _Day0EnqueueOwnership.STALE:
+                moved = _move_request(seed_json, processed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "SKIPPED_STALE_DAY0_ENQUEUE_OWNER",
+                        "reason_codes": [
+                            "REPLACEMENT_MATERIALIZATION_STALE_DAY0_ENQUEUE_OWNER"
+                        ],
+                        "request_written": False,
+                    },
+                )
+                processed.append(str(moved))
+                actionable_count += 1
+                continue
+            if ownership is _Day0EnqueueOwnership.INDETERMINATE:
+                indeterminate_count += 1
                 continue
             # BOUNDARY CONTRACT (2026-06-10): the seed consumer half. _looks_like_seed
             # only discriminates "is this file a seed at all"; the full SEED schema is
@@ -1498,6 +1697,7 @@ def _prepare_seed_requests(
                     },
                 )
                 failed.append(str(moved))
+                actionable_count += 1
                 continue
             # UPGRADE RE-SEED BYPASS (Task #32, 2026-06-11): a seed written by the fusion-upgrade
             # trigger (upgrade_trigger="instrument_set_expansion") INTENTIONALLY re-materializes a
@@ -1520,6 +1720,7 @@ def _prepare_seed_requests(
                     },
                 )
                 processed.append(str(moved))
+                actionable_count += 1
                 continue
             if not seed.get("upgrade_trigger") and _seed_already_covered(
                 forecast_db=forecast_db, seed=seed
@@ -1535,6 +1736,7 @@ def _prepare_seed_requests(
                     },
                 )
                 processed.append(str(moved))
+                actionable_count += 1
                 continue
             result = build_replacement_forecast_materialization_request(seed, base_dir=seed_json.parent)
             if not result.ok or result.request is None:
@@ -1548,6 +1750,7 @@ def _prepare_seed_requests(
                     },
                 )
                 failed.append(str(moved))
+                actionable_count += 1
                 continue
             marker_path, _fingerprint, unchanged = _blocked_attempt_state(
                 marker_dir=request_dir.parent / "blocked_attempts",
@@ -1560,9 +1763,38 @@ def _prepare_seed_requests(
                 seed_json.unlink()
                 processed.append(str(marker_path))
                 reasons.append(_UNCHANGED_BLOCKED_SEED_SKIP_REASON)
+                actionable_count += 1
+                continue
+            ownership_check = _upgrade_day0_seed_has_current_enqueue_ownership(
+                forecast_db=forecast_db,
+                seed_file=seed_json,
+                seed=seed,
+            )
+            if ownership_check.ownership is _Day0EnqueueOwnership.STALE:
+                moved = _move_request(seed_json, processed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "SKIPPED_STALE_DAY0_ENQUEUE_OWNER",
+                        "reason_codes": [
+                            "REPLACEMENT_MATERIALIZATION_STALE_DAY0_ENQUEUE_OWNER"
+                        ],
+                        "request_written": False,
+                    },
+                )
+                processed.append(str(moved))
+                actionable_count += 1
+                continue
+            if ownership_check.ownership is _Day0EnqueueOwnership.INDETERMINATE:
+                indeterminate_count += 1
                 continue
             request_path = request_dir / seed_json.name
-            _write_request(request_path, dict(result.request))
+            request_payload = dict(result.request)
+            if ownership_check.witness is not None:
+                request_payload["day0_enqueue_owner_witness"] = dict(
+                    ownership_check.witness
+                )
+            _write_request(request_path, request_payload)
             moved = _move_request(seed_json, processed_path)
             _publish_latest_seed(moved, seed)
             _write_sidecar(
@@ -1574,6 +1806,7 @@ def _prepare_seed_requests(
                 },
             )
             processed.append(str(moved))
+            actionable_count += 1
         except Exception as exc:
             moved = _move_request(seed_json, failed_path)
             _write_sidecar(
@@ -1586,11 +1819,18 @@ def _prepare_seed_requests(
                 },
             )
             failed.append(str(moved))
+            actionable_count += 1
+    if raw_window and not _write_day0_enqueue_ownership_cursor(
+        cursor_path, raw_window[-1].name
+    ):
+        reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_CURSOR_WRITE_FAILED")
+    if indeterminate_count:
+        reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE")
     if processed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_PROCESSED")
     if failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_SEED_FAILED")
-    if max(len(seeds) - limit, 0):
+    if inspected_count < len(raw_window) or len(raw_window) < len(raw_snapshot):
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_LIMIT_REACHED")
     return processed, failed, reasons
 

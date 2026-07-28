@@ -26,9 +26,11 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
 )
 from src.data.replacement_forecast_materializer import (
     _BayesPrecisionFusionFusionOverride,
+    Day0EnqueueOwnershipWitness,
     REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
     REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,
     ReplacementForecastMaterializeRequest,
+    STALE_DAY0_ENQUEUE_OWNER,
     _QLCB_BASIS,
     _ensure_forecast_posteriors_runtime_layer,
     _ensure_replacement_identity_columns,
@@ -36,6 +38,7 @@ from src.data.replacement_forecast_materializer import (
     materialize_replacement_forecast_live,
 )
 import src.data.replacement_forecast_materializer as materializer_mod
+from src.data import replacement_cycle_advance_trigger as cycle_advance
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, STRATEGY_KEY
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import (
@@ -264,6 +267,157 @@ def _request(
         day0_observed_extreme_unit="C" if day0_observed_extreme_c is not None else None,
         day0_observation_state=day0_observation_state,
     )
+
+
+def _day0_owner_witness(
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    seed_file: Path,
+) -> Day0EnqueueOwnershipWitness:
+    identity = cycle_advance._day0_conditioning_identity(
+        source=request.day0_observed_extreme_source,
+        observation_time=request.day0_observed_extreme_observation_time,
+        observed_extreme_c=request.day0_observed_extreme_c,
+        unit=request.day0_observed_extreme_unit,
+    )
+    assert identity is not None
+    return Day0EnqueueOwnershipWitness(
+        city=request.city,
+        target_date=request.target_date.isoformat(),
+        metric=request.temperature_metric,
+        target_cycle_time=request.source_cycle_time.isoformat(),
+        seed_file=str(seed_file),
+        conditioning_identity=identity,
+    )
+
+
+def _record_day0_owner(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    witness: Day0EnqueueOwnershipWitness,
+) -> None:
+    assert cycle_advance._record_enqueue(
+        conn,
+        city=witness.city,
+        target_date=witness.target_date,
+        metric=witness.metric,
+        consumed_cycle_iso=witness.target_cycle_time,
+        target_cycle_iso=witness.target_cycle_time,
+        held_position=True,
+        seed_file=witness.seed_file,
+        day0_observed_extreme_source=request.day0_observed_extreme_source,
+        day0_observed_extreme_observation_time=(
+            request.day0_observed_extreme_observation_time
+        ),
+        day0_observed_extreme_c=request.day0_observed_extreme_c,
+        day0_observed_extreme_unit=request.day0_observed_extreme_unit,
+    ) is True
+    conn.commit()
+
+
+def _prepare_for_final_write(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+):
+    conn.execute("BEGIN")
+    prepared = materializer_mod.prepare_replacement_forecast_live(conn, request)
+    conn.rollback()
+    assert isinstance(
+        prepared, materializer_mod.PreparedReplacementForecastMaterialization
+    )
+    return prepared
+
+
+def test_day0_owner_witness_allows_current_owner_posterior_write(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unchanged Day0 owner survives final-write revalidation and writes a posterior."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    request = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=26.0,
+        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        day0_observed_extreme_sample_count=12,
+    )
+    witness = _day0_owner_witness(request, seed_file=tmp_path / "owner-a.json")
+    _record_day0_owner(conn, request, witness)
+    prepared = _prepare_for_final_write(
+        conn, replace(request, day0_enqueue_owner_witness=witness)
+    )
+
+    conn.execute("BEGIN IMMEDIATE")
+    result = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    conn.commit()
+
+    assert result.ok is True
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 1
+
+
+def test_day0_owner_witness_blocks_swapped_owner_before_posterior_insert(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A swap after read preparation blocks A, while the current B witness can write."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    owner_a = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=26.0,
+        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        day0_observed_extreme_sample_count=12,
+    )
+    witness_a = _day0_owner_witness(owner_a, seed_file=tmp_path / "owner-a.json")
+    _record_day0_owner(conn, owner_a, witness_a)
+    prepared_a = _prepare_for_final_write(
+        conn, replace(owner_a, day0_enqueue_owner_witness=witness_a)
+    )
+
+    owner_b = replace(
+        owner_a,
+        computed_at=_dt(18, 1),
+        day0_observed_extreme_c=26.25,
+        day0_observed_extreme_source="wu_api_same_time_revision",
+    )
+    witness_b = _day0_owner_witness(owner_b, seed_file=tmp_path / "owner-b.json")
+    assert cycle_advance._record_enqueue(
+        conn,
+        city=witness_b.city,
+        target_date=witness_b.target_date,
+        metric=witness_b.metric,
+        consumed_cycle_iso=witness_b.target_cycle_time,
+        target_cycle_iso=witness_b.target_cycle_time,
+        held_position=True,
+        seed_file=witness_b.seed_file,
+        reason="DAY0_OBSERVATION_ADVANCED",
+        replace_existing_seed_file=True,
+        day0_observed_extreme_source=owner_b.day0_observed_extreme_source,
+        day0_observed_extreme_observation_time=(
+            owner_b.day0_observed_extreme_observation_time
+        ),
+        day0_observed_extreme_c=owner_b.day0_observed_extreme_c,
+        day0_observed_extreme_unit=owner_b.day0_observed_extreme_unit,
+    ) is True
+    conn.commit()
+
+    conn.execute("BEGIN IMMEDIATE")
+    stale = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared_a)
+    conn.commit()
+    assert stale.status == "BLOCKED"
+    assert stale.reason_codes == (STALE_DAY0_ENQUEUE_OWNER,)
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+
+    prepared_b = _prepare_for_final_write(
+        conn, replace(owner_b, day0_enqueue_owner_witness=witness_b)
+    )
+    conn.execute("BEGIN IMMEDIATE")
+    current = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared_b)
+    conn.commit()
+    assert current.ok is True
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 1
 
 
 def test_materializer_blocks_non_live_posterior_before_execution_authority_table() -> None:

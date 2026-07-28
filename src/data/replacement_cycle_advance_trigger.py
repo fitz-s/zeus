@@ -40,10 +40,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -61,6 +63,7 @@ UTC = timezone.utc
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
 _HELD_REHEAL_COOLDOWN = timedelta(minutes=30)
 _DAY0_CONDITIONING_IDENTITY_COLUMN = "day0_conditioning_identity_json"
+_CYCLE_ADVANCE_STAGING_DIR = ".cycle-advance-staging"
 _DAY0_BRIDGE_STOP = object()
 _DAY0_BRIDGE_CONDITION = threading.Condition()
 _DAY0_BRIDGE_QUEUES: dict[bool, queue.Queue[object]] = {
@@ -232,6 +235,93 @@ def _ensure_day0_conditioning_identity_column(conn: sqlite3.Connection) -> None:
         )
 
 
+def _staged_cycle_advance_seed_paths(
+    *,
+    seed_path: Path,
+    city: str,
+    target_date: str,
+    metric: str,
+    computed_at: datetime,
+    seed_name,
+) -> tuple[Path, Path]:
+    """Allocate an owner-unique hidden stage and its queue-visible final path."""
+    base_name = seed_name(
+        {"city": city, "target_date": target_date, "temperature_metric": metric},
+        computed_at=computed_at,
+    )
+    base = Path(base_name)
+    owned_name = f"{base.stem}.enqueue-{uuid.uuid4().hex}{base.suffix}"
+    visible = seed_path / owned_name
+    return seed_path / _CYCLE_ADVANCE_STAGING_DIR / owned_name, visible
+
+
+def _publish_staged_cycle_advance_seed_if_owned(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    target_cycle_iso: str,
+    staged_seed_file: Path,
+    visible_seed_file: Path,
+    identity: str | None,
+) -> bool:
+    """Atomically expose only a seed still owned by its durable enqueue marker."""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT seed_file, day0_conditioning_identity_json
+            FROM cycle_advance_enqueues
+            WHERE city = ? AND target_date = ? AND metric = ? AND target_cycle_time = ?
+            LIMIT 1
+            """,
+            (city, target_date, metric, target_cycle_iso),
+        ).fetchone()
+        recorded_seed = (
+            None
+            if row is None
+            else (row["seed_file"] if hasattr(row, "keys") else row[0])
+        )
+        recorded_identity = (
+            None
+            if row is None
+            else (
+                row["day0_conditioning_identity_json"] if hasattr(row, "keys") else row[1]
+            )
+        )
+        if str(recorded_seed or "") != str(visible_seed_file) or (
+            identity is not None and recorded_identity != identity
+        ):
+            conn.rollback()
+            return False
+        if staged_seed_file.exists() and not visible_seed_file.exists():
+            visible_seed_file.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged_seed_file, visible_seed_file)
+        published = visible_seed_file.exists()
+        conn.commit()
+        return published
+    except Exception:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return False
+
+
+def _discard_unpublished_cycle_advance_stage(staged_seed_file: Path) -> None:
+    """Remove only this attempt's UUID-private, never-queue-visible staging file."""
+    if staged_seed_file.parent.name == _CYCLE_ADVANCE_STAGING_DIR:
+        staged_seed_file.unlink(missing_ok=True)
+
+
+def _marker_owned_cycle_advance_stage_path(seed_file: Path) -> Path | None:
+    """Return the private stage path only for UUID-owned staged enqueue outputs."""
+    if ".enqueue-" not in seed_file.stem:
+        return None
+    return seed_file.parent / _CYCLE_ADVANCE_STAGING_DIR / seed_file.name
+
+
 def _latest_posterior_matches_day0_conditioning(
     conn: sqlite3.Connection,
     *,
@@ -239,24 +329,28 @@ def _latest_posterior_matches_day0_conditioning(
     target_date: str,
     metric: str,
     identity: str,
+    target_cycle_iso: str,
     as_of: datetime | None,
 ) -> bool:
-    """Whether the current live posterior has consumed this exact Day0 evidence."""
+    """Whether the current live posterior consumed this Day0 evidence at this cycle."""
     if as_of is None:
+        return False
+    target_cycle = _parse_cycle(target_cycle_iso)
+    if target_cycle is None:
         return False
     as_of_iso = as_of.astimezone(UTC).isoformat()
     try:
         row = conn.execute(
             """
-            SELECT provenance_json
+            SELECT provenance_json, source_cycle_time
             FROM forecast_posteriors
-            WHERE city = ? AND target_date = ? AND temperature_metric = ?
+            WHERE source_id = ? AND city = ? AND target_date = ? AND temperature_metric = ?
               AND runtime_layer = 'live'
               AND computed_at <= ?
             ORDER BY computed_at DESC, posterior_id DESC
             LIMIT 1
             """,
-            (city, target_date, metric, as_of_iso),
+            (SOURCE_ID, city, target_date, metric, as_of_iso),
         ).fetchone()
         if row is None:
             return False
@@ -265,12 +359,20 @@ def _latest_posterior_matches_day0_conditioning(
         conditioning = _active_day0_provisional_or_conditioning(provenance)
         if conditioning is None:
             return False
-        return _day0_conditioning_identity(
-            source=conditioning.get("source"),
-            observation_time=conditioning.get("observation_time"),
-            observed_extreme_c=conditioning.get("observed_extreme_c"),
-            unit=conditioning.get("unit"),
-        ) == identity
+        consumed_cycle = _parse_cycle(
+            row["source_cycle_time"] if hasattr(row, "keys") else row[1]
+        )
+        return (
+            consumed_cycle is not None
+            and consumed_cycle >= target_cycle
+            and _day0_conditioning_identity(
+                source=conditioning.get("source"),
+                observation_time=conditioning.get("observation_time"),
+                observed_extreme_c=conditioning.get("observed_extreme_c"),
+                unit=conditioning.get("unit"),
+            )
+            == identity
+        )
     except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
         return False
 
@@ -360,26 +462,86 @@ def family_materializable_cycle(
 
 
 def _latest_posterior_consumed_cycle(
-    conn: sqlite3.Connection, *, city: str, target_date: str, metric: str
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    as_of: datetime | None = None,
 ) -> datetime | None:
     """The model cycle the LATEST posterior of this scope consumed (its source_cycle_time), or
     None when there is no posterior. Fail-soft: any read/parse error -> None."""
     try:
-        row = conn.execute(
-            """
+        query = """
             SELECT source_cycle_time
             FROM forecast_posteriors
             WHERE source_id = ? AND city = ? AND target_date = ? AND temperature_metric = ?
-            ORDER BY computed_at DESC
-            LIMIT 1
-            """,
-            (SOURCE_ID, city, target_date, metric),
-        ).fetchone()
+        """
+        params: list[object] = [SOURCE_ID, city, target_date, metric]
+        if as_of is not None:
+            query += " AND computed_at <= ?"
+            params.append(as_of.astimezone(UTC).isoformat())
+        query += " ORDER BY computed_at DESC LIMIT 1"
+        row = conn.execute(query, params).fetchone()
     except Exception:
         return None
     if row is None:
         return None
     return _parse_cycle(row[0] if not hasattr(row, "keys") else row["source_cycle_time"])
+
+
+def _latest_posterior_covers_target_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    target_cycle_iso: str,
+    as_of: datetime,
+) -> bool:
+    """True only when the latest live posterior consumed this marker cycle or a newer one."""
+    target_cycle = _parse_cycle(target_cycle_iso)
+    if target_cycle is None:
+        return False
+    consumed_cycle = _latest_posterior_consumed_cycle(
+        conn, city=city, target_date=target_date, metric=metric, as_of=as_of
+    )
+    return consumed_cycle is not None and consumed_cycle >= target_cycle
+
+
+def _delete_missing_owned_cycle_advance_marker(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    target_cycle_iso: str,
+    seed_file: str,
+) -> bool:
+    """Atomically delete only the vanished UUID owner's marker before a new build starts."""
+    try:
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            """
+            DELETE FROM cycle_advance_enqueues
+             WHERE city = ?
+               AND target_date = ?
+               AND metric = ?
+               AND target_cycle_time = ?
+               AND seed_file = ?
+            """,
+            (city, target_date, metric, target_cycle_iso, seed_file),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    except sqlite3.Error:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return False
 
 
 def scope_needs_cycle_advance(
@@ -505,6 +667,7 @@ def _already_enqueued(
         observed_extreme_c=day0_observed_extreme_c,
         unit=day0_observed_extreme_unit,
     )
+    decision_as_of = (as_of or datetime.now(tz=UTC)).astimezone(UTC)
     try:
         _ensure_day0_conditioning_identity_column(conn)
         row = conn.execute(
@@ -531,16 +694,46 @@ def _already_enqueued(
         )
         if recorded_identity != incoming_identity:
             return False
-        if not seed_file or not Path(seed_file).exists():
-            return _latest_posterior_matches_day0_conditioning(
+    visible_seed_file = Path(seed_file) if seed_file else None
+    owned_stage_file = (
+        None
+        if visible_seed_file is None
+        else _marker_owned_cycle_advance_stage_path(visible_seed_file)
+    )
+    if visible_seed_file is not None and not visible_seed_file.exists() and owned_stage_file is not None:
+        _publish_staged_cycle_advance_seed_if_owned(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            target_cycle_iso=target_cycle_iso,
+            staged_seed_file=owned_stage_file,
+            visible_seed_file=visible_seed_file,
+            identity=incoming_identity,
+        )
+    if incoming_identity is not None:
+        if visible_seed_file is not None and visible_seed_file.exists():
+            return True
+        if _latest_posterior_matches_day0_conditioning(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            identity=incoming_identity,
+            target_cycle_iso=target_cycle_iso,
+            as_of=decision_as_of,
+        ):
+            return True
+        if visible_seed_file is not None and owned_stage_file is not None:
+            _delete_missing_owned_cycle_advance_marker(
                 conn,
                 city=city,
                 target_date=target_date,
                 metric=metric,
-                identity=incoming_identity,
-                as_of=as_of,
+                target_cycle_iso=target_cycle_iso,
+                seed_file=seed_file,
             )
-        return True
+        return False
     if day0_observed_extreme_observation_time is not None:
         incoming_version = normalize_observation_version(day0_observed_extreme_observation_time)
         recorded_version = normalize_observation_version(
@@ -551,6 +744,27 @@ def _already_enqueued(
             recorded_version is None or incoming_version > recorded_version
         ):
             return False
+    if visible_seed_file is not None and visible_seed_file.exists():
+        return True
+    if visible_seed_file is not None and owned_stage_file is not None:
+        if _latest_posterior_covers_target_cycle(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            target_cycle_iso=target_cycle_iso,
+            as_of=decision_as_of,
+        ):
+            return True
+        _delete_missing_owned_cycle_advance_marker(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            target_cycle_iso=target_cycle_iso,
+            seed_file=seed_file,
+        )
+        return False
     # HELD-POSITION RE-HEAL (live freeze fix 2026-06-21): a held (money-at-risk) marker whose seed
     # was built then processed/moved out of the live queue but produced NO posterior — the
     # single_runs serving race materializes BLOCKED on REQUIREMENTS_NOT_MET — must NOT suppress
@@ -1047,6 +1261,7 @@ def enqueue_cycle_advance_reseeds(
                 if not _already_enqueued(
                     conn, city=city, target_date=target_date, metric=metric,
                     target_cycle_iso=target_cycle_iso,
+                    as_of=now,
                 ):
                     _record_enqueue(
                         conn, city=city, target_date=target_date, metric=metric,
@@ -1082,10 +1297,19 @@ def enqueue_cycle_advance_reseeds(
                 day0_observed_extreme_source=day0_payload.get("day0_observed_extreme_source"),
                 day0_observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
                 day0_observed_extreme_unit=day0_payload.get("day0_observed_extreme_unit"),
+                as_of=now,
             ):
                 report["already_enqueued"] = int(report["already_enqueued"]) + 1
                 continue
             try:
+                staged_seed_file, visible_seed_file = _staged_cycle_advance_seed_paths(
+                    seed_path=seed_path,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    computed_at=now,
+                    seed_name=_seed_name,
+                )
                 seed_file = _build_and_write_advance_seed(
                     conn,
                     city=city,
@@ -1118,6 +1342,8 @@ def enqueue_cycle_advance_reseeds(
                     ),
                     day0_observed_extreme_unit=day0_payload.get("day0_observed_extreme_unit"),
                     day0_observation_state=day0_payload.get("day0_observation_state"),
+                    output_path=staged_seed_file,
+                    cycle_advance_enqueue_owner=True,
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 report["seed_build_failed"] = int(report.get("seed_build_failed", 0)) + 1
@@ -1134,7 +1360,7 @@ def enqueue_cycle_advance_reseeds(
                 consumed_cycle_iso=consumed_cycle_iso,
                 target_cycle_iso=target_cycle_iso,
                 held_position=is_held,
-                seed_file=str(seed_file),
+                seed_file=str(visible_seed_file),
                 reason=(
                     "MISSING_LIVE_POSTERIOR" if missing_posterior else None
                 ),
@@ -1145,6 +1371,24 @@ def enqueue_cycle_advance_reseeds(
                 day0_observed_extreme_unit=day0_payload.get("day0_observed_extreme_unit"),
             )
             conn.commit()
+            if inserted:
+                _publish_staged_cycle_advance_seed_if_owned(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    target_cycle_iso=target_cycle_iso,
+                    staged_seed_file=staged_seed_file,
+                    visible_seed_file=visible_seed_file,
+                    identity=_day0_conditioning_identity(
+                        source=day0_payload.get("day0_observed_extreme_source"),
+                        observation_time=day0_observation_time,
+                        observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
+                        unit=day0_payload.get("day0_observed_extreme_unit"),
+                    ),
+                )
+            else:
+                _discard_unpublished_cycle_advance_stage(staged_seed_file)
             if inserted:
                 enqueued += 1
                 report["seeds_enqueued"] = int(report["seeds_enqueued"]) + 1
@@ -1164,7 +1408,7 @@ def enqueue_cycle_advance_reseeds(
                             None if missing_posterior else consumed_cycle_iso
                         ),
                         "target_cycle": target_cycle_iso,
-                        "seed_file": str(seed_file),
+                        "seed_file": str(visible_seed_file),
                     }
                 )
             else:
@@ -1291,7 +1535,12 @@ def enqueue_single_family_cycle_advance_reseed(
                 city, target_date, metric, target_cycle_iso, [src for _role, src in missing_legs],
             )
             if not _already_enqueued(
-                conn, city=city, target_date=target_date, metric=metric, target_cycle_iso=target_cycle_iso
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                target_cycle_iso=target_cycle_iso,
+                as_of=now,
             ):
                 _record_enqueue(
                     conn, city=city, target_date=target_date, metric=metric,
@@ -1346,6 +1595,14 @@ def enqueue_single_family_cycle_advance_reseed(
                         report["consumed_cycle"] = consumed_cycle_iso
                         report["target_cycle"] = target_cycle_iso
                         return report
+                    staged_seed_file, visible_seed_file = _staged_cycle_advance_seed_paths(
+                        seed_path=seed_path,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        computed_at=now,
+                        seed_name=_seed_name,
+                    )
                     seed_file = _build_and_write_advance_seed(
                         conn,
                         city=city,
@@ -1380,6 +1637,8 @@ def enqueue_single_family_cycle_advance_reseed(
                         ),
                         day0_observed_extreme_unit=day0_observed_extreme_unit,
                         day0_observation_state=day0_observation_state,
+                        output_path=staged_seed_file,
+                        cycle_advance_enqueue_owner=True,
                     )
                     if seed_file is None:
                         report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
@@ -1392,7 +1651,7 @@ def enqueue_single_family_cycle_advance_reseed(
                         consumed_cycle_iso=consumed_cycle_iso,
                         target_cycle_iso=target_cycle_iso,
                         held_position=held_position,
-                        seed_file=str(seed_file),
+                        seed_file=str(visible_seed_file),
                         reason="DAY0_OBSERVATION_ADVANCED",
                         replace_existing_seed_file=True,
                         day0_observed_extreme_observation_time=(
@@ -1403,13 +1662,31 @@ def enqueue_single_family_cycle_advance_reseed(
                         day0_observed_extreme_unit=day0_observed_extreme_unit,
                     )
                     conn.commit()
+                    if inserted:
+                        _publish_staged_cycle_advance_seed_if_owned(
+                            conn,
+                            city=city,
+                            target_date=target_date,
+                            metric=metric,
+                            target_cycle_iso=target_cycle_iso,
+                            staged_seed_file=staged_seed_file,
+                            visible_seed_file=visible_seed_file,
+                            identity=_day0_conditioning_identity(
+                                source=day0_observed_extreme_source,
+                                observation_time=day0_observed_extreme_observation_time,
+                                observed_extreme_c=day0_observed_extreme_c,
+                                unit=day0_observed_extreme_unit,
+                            ),
+                        )
+                    else:
+                        _discard_unpublished_cycle_advance_stage(staged_seed_file)
                     report["enqueued"] = bool(inserted)
                     report["status"] = (
                         "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
                         if inserted
                         else "CYCLE_ADVANCE_ALREADY_ENQUEUED"
                     )
-                    report["seed_file"] = str(seed_file)
+                    report["seed_file"] = str(visible_seed_file)
                     report["consumed_cycle"] = consumed_cycle_iso
                     report["target_cycle"] = target_cycle_iso
                     return report
@@ -1447,6 +1724,14 @@ def enqueue_single_family_cycle_advance_reseed(
                     conn.commit()
                 report["status"] = "CYCLE_ADVANCE_ALREADY_ENQUEUED"
                 return report
+            staged_seed_file, visible_seed_file = _staged_cycle_advance_seed_paths(
+                seed_path=seed_path,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                computed_at=now,
+                seed_name=_seed_name,
+            )
             seed_file = _build_and_write_advance_seed(
                 conn,
                 city=city,
@@ -1473,6 +1758,8 @@ def enqueue_single_family_cycle_advance_reseed(
                 day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
                 day0_observed_extreme_unit=day0_observed_extreme_unit,
                 day0_observation_state=day0_observation_state,
+                output_path=staged_seed_file,
+                cycle_advance_enqueue_owner=True,
             )
             if seed_file is None:
                 report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
@@ -1485,7 +1772,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 consumed_cycle_iso="NO_LIVE_POSTERIOR",
                 target_cycle_iso=target_cycle_iso,
                 held_position=held_position,
-                seed_file=str(seed_file),
+                seed_file=str(visible_seed_file),
                 reason="MISSING_LIVE_POSTERIOR",
                 replace_existing_seed_file=has_day0_evidence,
                 day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
@@ -1494,13 +1781,31 @@ def enqueue_single_family_cycle_advance_reseed(
                 day0_observed_extreme_unit=day0_observed_extreme_unit,
             )
             conn.commit()
+            if inserted:
+                _publish_staged_cycle_advance_seed_if_owned(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    target_cycle_iso=target_cycle_iso,
+                    staged_seed_file=staged_seed_file,
+                    visible_seed_file=visible_seed_file,
+                    identity=_day0_conditioning_identity(
+                        source=day0_observed_extreme_source,
+                        observation_time=day0_observed_extreme_observation_time,
+                        observed_extreme_c=day0_observed_extreme_c,
+                        unit=day0_observed_extreme_unit,
+                    ),
+                )
+            else:
+                _discard_unpublished_cycle_advance_stage(staged_seed_file)
             report["enqueued"] = bool(inserted)
             report["status"] = (
                 "CYCLE_ADVANCE_FIRST_MATERIALIZATION_ENQUEUED"
                 if inserted
                 else "CYCLE_ADVANCE_ALREADY_ENQUEUED"
             )
-            report["seed_file"] = str(seed_file)
+            report["seed_file"] = str(visible_seed_file)
             report["consumed_cycle"] = None
             report["target_cycle"] = target_cycle_iso
             return report
@@ -1535,6 +1840,14 @@ def enqueue_single_family_cycle_advance_reseed(
                 conn.commit()
             report["status"] = "CYCLE_ADVANCE_ALREADY_ENQUEUED"
             return report
+        staged_seed_file, visible_seed_file = _staged_cycle_advance_seed_paths(
+            seed_path=seed_path,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            computed_at=now,
+            seed_name=_seed_name,
+        )
         seed_file = _build_and_write_advance_seed(
             conn,
             city=city,
@@ -1561,6 +1874,8 @@ def enqueue_single_family_cycle_advance_reseed(
             day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
             day0_observed_extreme_unit=day0_observed_extreme_unit,
             day0_observation_state=day0_observation_state,
+            output_path=staged_seed_file,
+            cycle_advance_enqueue_owner=True,
         )
         if seed_file is None:
             report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
@@ -1573,7 +1888,7 @@ def enqueue_single_family_cycle_advance_reseed(
             consumed_cycle_iso=consumed_cycle_iso,
             target_cycle_iso=target_cycle_iso,
             held_position=held_position,
-            seed_file=str(seed_file),
+            seed_file=str(visible_seed_file),
             replace_existing_seed_file=has_day0_evidence,
             day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
             day0_observed_extreme_source=day0_observed_extreme_source,
@@ -1581,9 +1896,27 @@ def enqueue_single_family_cycle_advance_reseed(
             day0_observed_extreme_unit=day0_observed_extreme_unit,
         )
         conn.commit()
+        if inserted:
+            _publish_staged_cycle_advance_seed_if_owned(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                target_cycle_iso=target_cycle_iso,
+                staged_seed_file=staged_seed_file,
+                visible_seed_file=visible_seed_file,
+                identity=_day0_conditioning_identity(
+                    source=day0_observed_extreme_source,
+                    observation_time=day0_observed_extreme_observation_time,
+                    observed_extreme_c=day0_observed_extreme_c,
+                    unit=day0_observed_extreme_unit,
+                ),
+            )
+        else:
+            _discard_unpublished_cycle_advance_stage(staged_seed_file)
         report["enqueued"] = bool(inserted)
         report["status"] = "CYCLE_ADVANCE_ENQUEUED" if inserted else "CYCLE_ADVANCE_ALREADY_ENQUEUED"
-        report["seed_file"] = str(seed_file)
+        report["seed_file"] = str(visible_seed_file)
         report["consumed_cycle"] = consumed_cycle_iso
         report["target_cycle"] = target_cycle_iso
     except Exception as exc:  # noqa: BLE001 — fail-soft: never raise into the reactor cycle
@@ -1995,6 +2328,8 @@ def _build_and_write_advance_seed(
     day0_observed_extreme_sample_count: int | None = None,
     day0_observed_extreme_unit: str | None = None,
     day0_observation_state: str | None = None,
+    output_path: Path | None = None,
+    cycle_advance_enqueue_owner: bool = False,
 ) -> Path | None:
     """Build one re-materialization seed for a scope using the existing seed-builder pieces and
     write it into seed_dir. Returns the seed Path, or None when the required manifests/context are
@@ -2051,7 +2386,9 @@ def _build_and_write_advance_seed(
     # fresh first materialization. Threaded into provenance_json so the posterior records WHY.
     seed_payload: dict[str, object] = dict(seed_result.seed)
     seed_payload["upgrade_trigger"] = upgrade_trigger
-    seed_file = seed_path / seed_name(
+    if cycle_advance_enqueue_owner:
+        seed_payload["cycle_advance_enqueue_owner"] = True
+    seed_file = output_path or seed_path / seed_name(
         {"city": city, "target_date": target_date, "temperature_metric": metric},
         computed_at=computed_at,
     )

@@ -96,6 +96,47 @@ REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT = "PARTIAL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY = "STALE_HISTORY_ONLY"
 REPLACEMENT_CAPTURE_STATUS_DB_READ_ERROR = "DB_READ_ERROR"
 REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
+STALE_DAY0_ENQUEUE_OWNER = "STALE_DAY0_ENQUEUE_OWNER"
+
+
+@dataclass(frozen=True)
+class Day0EnqueueOwnershipWitness:
+    """Exact durable owner binding carried by a Day0 cycle-advance request."""
+
+    city: str
+    target_date: str
+    metric: str
+    target_cycle_time: str
+    seed_file: str
+    conditioning_identity: str
+
+
+def day0_enqueue_ownership_witness_from_payload(
+    payload: Mapping[str, object],
+) -> Day0EnqueueOwnershipWitness | None:
+    """Parse a complete owner witness; partial owner-tagged requests fail closed."""
+    raw = payload.get("day0_enqueue_owner_witness")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("day0_enqueue_owner_witness must be an object")
+    fields = (
+        "city",
+        "target_date",
+        "metric",
+        "target_cycle_time",
+        "seed_file",
+        "conditioning_identity",
+    )
+    values = {field: str(raw.get(field) or "").strip() for field in fields}
+    missing = [field for field in fields if not values[field]]
+    if missing:
+        raise ValueError(
+            "day0_enqueue_owner_witness missing " + ",".join(missing)
+        )
+    if values["metric"] not in {"high", "low"}:
+        raise ValueError("day0_enqueue_owner_witness metric must be high or low")
+    return Day0EnqueueOwnershipWitness(**values)
 
 
 @dataclass(frozen=True)
@@ -132,6 +173,7 @@ class ReplacementForecastMaterializeRequest:
     # materialization. Threaded verbatim into provenance_json so the re-materialized posterior
     # records WHY it was produced.
     upgrade_trigger: str | None = None
+    day0_enqueue_owner_witness: Day0EnqueueOwnershipWitness | None = None
 
 
 @dataclass(frozen=True)
@@ -5690,6 +5732,78 @@ def compute_replacement_posterior_readonly(
     return _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
 
 
+def _day0_enqueue_owner_witness_is_current(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> bool:
+    """Check the exact enqueue owner while the final posterior writer lock is held."""
+    witness = request.day0_enqueue_owner_witness
+    if witness is None:
+        return True
+    from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+        _day0_conditioning_identity,
+    )
+
+    request_identity = _day0_conditioning_identity(
+        source=request.day0_observed_extreme_source,
+        observation_time=request.day0_observed_extreme_observation_time,
+        observed_extreme_c=request.day0_observed_extreme_c,
+        unit=request.day0_observed_extreme_unit,
+    )
+    if (
+        request_identity is None
+        or witness.city != request.city
+        or witness.target_date != _date_text(request.target_date)
+        or witness.metric != metric
+        or witness.target_cycle_time
+        != _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
+        or witness.conditioning_identity != request_identity
+    ):
+        return False
+    try:
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(cycle_advance_enqueues)").fetchall()
+        }
+        required = {
+            "city",
+            "target_date",
+            "metric",
+            "target_cycle_time",
+            "seed_file",
+            "day0_conditioning_identity_json",
+        }
+        if not required.issubset(columns):
+            return False
+        row = conn.execute(
+            """
+            SELECT seed_file, day0_conditioning_identity_json
+            FROM cycle_advance_enqueues
+            WHERE city = ?
+              AND target_date = ?
+              AND metric = ?
+              AND target_cycle_time = ?
+            LIMIT 1
+            """,
+            (
+                witness.city,
+                witness.target_date,
+                witness.metric,
+                witness.target_cycle_time,
+            ),
+        ).fetchone()
+        return (
+            row is not None
+            and str(row["seed_file"] or "") == witness.seed_file
+            and str(row["day0_conditioning_identity_json"] or "")
+            == witness.conditioning_identity
+        )
+    except sqlite3.Error:
+        return False
+
+
 def write_prepared_replacement_forecast_live(
     conn: sqlite3.Connection,
     prepared: PreparedReplacementForecastMaterialization,
@@ -5721,6 +5835,19 @@ def write_prepared_replacement_forecast_live(
                 (REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,)
                 + _posterior_block_sub_reason_codes(posterior)
             ),
+            posterior_id=None,
+            anchor_id=anchor_id,
+            readiness_id=None,
+        )
+    if (
+        request.day0_enqueue_owner_witness is not None
+        and not _day0_enqueue_owner_witness_is_current(
+            conn, request, metric=metric
+        )
+    ):
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=(STALE_DAY0_ENQUEUE_OWNER,),
             posterior_id=None,
             anchor_id=anchor_id,
             readiness_id=None,
