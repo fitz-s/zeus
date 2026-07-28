@@ -2390,23 +2390,20 @@ def _edli_order_token_ids_by_feasibility_age(
         return []
     priority_index = {token: idx for idx, token in enumerate(tokens)}
     try:
-        has_table = trade_conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_feasibility_evidence'"
-        ).fetchone()
+        if not _edli_table_exists(trade_conn, "execution_feasibility_latest"):
+            return tokens
     except Exception:
-        return tokens
-    if not has_table:
         return tokens
     latest_by_token: dict[str, str | None] = {token: None for token in tokens}
 
-    def _created_by_token_from(table: str, subset: list[str]) -> dict[str, str]:
+    def _latest_created_by_token(subset: list[str]) -> dict[str, str]:
         if not subset:
             return {}
         placeholders = ",".join("?" for _ in subset)
         rows = trade_conn.execute(
             f"""
             SELECT token_id, MAX(created_at) AS created_at
-              FROM {table}
+              FROM execution_feasibility_latest
              WHERE token_id IN ({placeholders})
              GROUP BY token_id
             """,
@@ -2419,20 +2416,7 @@ def _edli_order_token_ids_by_feasibility_age(
         }
 
     try:
-        if _edli_table_exists(trade_conn, "execution_feasibility_latest"):
-            latest_by_token.update(
-                _created_by_token_from("execution_feasibility_latest", tokens)
-            )
-        missing_from_latest = [
-            token for token in tokens if latest_by_token.get(token) is None
-        ]
-        if missing_from_latest:
-            latest_by_token.update(
-                _created_by_token_from(
-                    "execution_feasibility_evidence",
-                    missing_from_latest,
-                )
-            )
+        latest_by_token.update(_latest_created_by_token(tokens))
     except Exception:
         return tokens
     return sorted(

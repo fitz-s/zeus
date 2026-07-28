@@ -391,14 +391,11 @@ def test_no_regression_order_runtime_keeps_boot_fill_bridge_recovery():
     )
 
 
-def test_no_regression_order_runtime_still_reads_feasibility_evidence():
-    """P1's pre-submit witness MUST keep reading execution_feasibility_evidence (the I2 read side).
+def test_no_regression_order_runtime_reads_current_feasibility_projection():
+    """P1's pre-submit witness reads the current feasibility projection.
 
-    A WS outage surfaces to P1 ONLY as stale/absent execution_feasibility_evidence rows —
-    so the order runtime must still consume that table (the DB-mediated seam), independent
-    of where the WS producer lives. The retained reader now lives with the
-    global auction adapter after price-channel redecision was decoupled from
-    ``src.main``.
+    A WS outage surfaces as stale/absent current rows. Append history must not
+    silently restore executable authority after current projection is lost.
     """
     from src.engine import event_reactor_adapter as adapter
 
@@ -407,9 +404,11 @@ def test_no_regression_order_runtime_still_reads_feasibility_evidence():
         "(_latest_market_channel_book_rows) — the DB-mediated I2 read side P1 keeps."
     )
     reader_src = inspect.getsource(adapter._latest_market_channel_book_rows)
-    assert "execution_feasibility_evidence" in reader_src, (
-        "the order runtime's pre-submit witness must still SELECT "
-        "execution_feasibility_evidence — the DB-mediated I2 read side P1 keeps."
+    assert "execution_feasibility_latest" in reader_src, (
+        "the order runtime's pre-submit witness must SELECT the current projection."
+    )
+    assert "execution_feasibility_evidence" not in reader_src, (
+        "append history cannot restore current book authority."
     )
 
 
@@ -2583,7 +2582,7 @@ def test_held_quote_refresh_orders_missing_and_oldest_feasibility_first():
     ensure_table(conn)
     conn.execute(
         """
-        INSERT INTO execution_feasibility_evidence (
+        INSERT INTO execution_feasibility_latest (
             evidence_id, event_id, condition_id, token_id, outcome_label,
             direction, quote_seen_at, created_at, schema_version
         ) VALUES
@@ -2670,6 +2669,45 @@ def test_feasibility_age_reads_latest_state_without_append_scan():
     ]
     assert ordered == ["stale-token", "newer-token"]
     assert append_reads == []
+
+
+def test_feasibility_age_ignores_append_history():
+    from src.ingest.price_channel_ingest import _edli_order_token_ids_by_feasibility_age
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    conn.executemany(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label,
+            direction, quote_seen_at, created_at, schema_version
+        ) VALUES (?, ?, 'cond', ?, 'YES', 'buy_yes', ?, ?, 1)
+        """,
+        [
+            (
+                "append-newer",
+                "event-newer",
+                "newer-token",
+                "2026-06-24T08:00:00+00:00",
+                "2026-06-24T08:00:00+00:00",
+            ),
+            (
+                "append-stale",
+                "event-stale",
+                "stale-token",
+                "2026-06-24T07:30:00+00:00",
+                "2026-06-24T07:30:00+00:00",
+            ),
+        ],
+    )
+
+    ordered = _edli_order_token_ids_by_feasibility_age(
+        conn,
+        ["newer-token", "missing-token", "stale-token"],
+    )
+
+    assert ordered == ["newer-token", "missing-token", "stale-token"]
 
 
 def test_rest_quote_refresh_reuses_only_current_generation_full_depth(monkeypatch):
@@ -2889,7 +2927,7 @@ def test_pre_submit_book_reader_prefers_latest_without_append_scan():
     assert append_reads == []
 
 
-def test_pre_submit_book_reader_falls_back_to_append_when_latest_side_missing():
+def test_pre_submit_book_reader_rejects_append_when_latest_side_missing():
     from src.events.reactor import _edli_latest_pre_submit_book_row
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table
 
@@ -2922,6 +2960,8 @@ def test_pre_submit_book_reader_falls_back_to_append_when_latest_side_missing():
         """
     )
 
+    traces: list[str] = []
+    conn.set_trace_callback(traces.append)
     row = _edli_latest_pre_submit_book_row(
         conn,
         token_id="tok-fallback",
@@ -2929,8 +2969,8 @@ def test_pre_submit_book_reader_falls_back_to_append_when_latest_side_missing():
         decision_time=datetime.fromisoformat("2026-06-24T08:00:01+00:00"),
     )
 
-    assert row is not None
-    assert row[1] == "hash-append"
+    assert row is None
+    assert all("FROM execution_feasibility_evidence" not in sql for sql in traces)
 
 
 def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):

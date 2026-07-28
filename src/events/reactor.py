@@ -9314,29 +9314,14 @@ def _edli_latest_pre_submit_book_row(
         LIMIT 1
         """
     try:
-        latest_row = book_evidence_conn.execute(
+        return book_evidence_conn.execute(
             latest_sql,
             (token_id, decision_time.isoformat()),
         ).fetchone()
     except sqlite3.OperationalError as exc:
         if "execution_feasibility_latest" not in str(exc):
             raise
-        latest_row = None
-    if latest_row is not None:
-        return latest_row
-    return book_evidence_conn.execute(
-        f"""
-        SELECT quote_seen_at, book_hash_before, best_bid_before, best_ask_before
-        FROM execution_feasibility_evidence
-        WHERE token_id = ?
-          AND quote_seen_at <= ?
-          {side_filter}
-          AND COALESCE(book_hash_before, '') != ''
-        ORDER BY quote_seen_at DESC
-        LIMIT 1
-        """,
-        (token_id, decision_time.isoformat()),
-    ).fetchone()
+        return None
 
 def _edli_heartbeat_authority_summary(order_type: str) -> dict[str, object]:
     from src.control.heartbeat_supervisor import summary as heartbeat_summary

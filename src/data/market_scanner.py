@@ -4748,7 +4748,7 @@ def _prefetch_selected_orderbooks_from_feasibility(
 ) -> dict[str, dict]:
     """Use fresh live price-channel book evidence when direct CLOB batch misses.
 
-    ``execution_feasibility_evidence`` is the trade-class live quote witness table
+    ``execution_feasibility_latest`` is the trade-class current quote projection
     written by the price-channel daemon. This path does not create a second price
     authority; it reuses the same CLOB-derived book rows already required by the
     submit witness, and the reconstructed book still passes snapshot identity and
@@ -4756,8 +4756,7 @@ def _prefetch_selected_orderbooks_from_feasibility(
     """
 
     latest_available = _table_exists(conn, "execution_feasibility_latest")
-    history_available = _table_exists(conn, "execution_feasibility_evidence")
-    if not latest_available and not history_available:
+    if not latest_available:
         return {}
     already = set(already_prefetched or set())
     max_age_seconds = _positive_float_env(
@@ -4787,42 +4786,23 @@ def _prefetch_selected_orderbooks_from_feasibility(
                 continue
             book = None
             try:
-                if latest_available:
-                    row = conn.execute(
-                        """
-                        SELECT token_id, direction, quote_seen_at, book_hash_before,
-                               best_bid_before, best_ask_before, depth_before_json
-                          FROM execution_feasibility_latest
-                         WHERE token_id = ?
-                         ORDER BY CASE
-                                      WHEN direction = ? AND COALESCE(depth_before_json, '') != '' THEN 0
-                                      WHEN COALESCE(depth_before_json, '') != '' THEN 1
-                                      ELSE 2
-                                  END,
-                                  quote_seen_at DESC, created_at DESC
-                         LIMIT 1
-                        """,
-                        (token_id, str(direction)),
-                    ).fetchone()
-                    book = _fresh_book_from_row(row, outcome=outcome)
-                if book is None and history_available:
-                    row = conn.execute(
-                        """
-                        SELECT token_id, direction, quote_seen_at, book_hash_before,
-                               best_bid_before, best_ask_before, depth_before_json
-                          FROM execution_feasibility_evidence
-                         WHERE token_id = ?
-                         ORDER BY CASE
-                                      WHEN direction = ? AND COALESCE(depth_before_json, '') != '' THEN 0
-                                      WHEN COALESCE(depth_before_json, '') != '' THEN 1
-                                      ELSE 2
-                                  END,
-                                  quote_seen_at DESC, created_at DESC
-                         LIMIT 1
-                        """,
-                        (token_id, str(direction)),
-                    ).fetchone()
-                    book = _fresh_book_from_row(row, outcome=outcome)
+                row = conn.execute(
+                    """
+                    SELECT token_id, direction, quote_seen_at, book_hash_before,
+                           best_bid_before, best_ask_before, depth_before_json
+                      FROM execution_feasibility_latest
+                     WHERE token_id = ?
+                     ORDER BY CASE
+                                  WHEN direction = ? AND COALESCE(depth_before_json, '') != '' THEN 0
+                                  WHEN COALESCE(depth_before_json, '') != '' THEN 1
+                                  ELSE 2
+                              END,
+                              quote_seen_at DESC, created_at DESC
+                     LIMIT 1
+                    """,
+                    (token_id, str(direction)),
+                ).fetchone()
+                book = _fresh_book_from_row(row, outcome=outcome)
             except Exception as exc:
                 if _is_sqlite_locked_error(exc):
                     logger.info(

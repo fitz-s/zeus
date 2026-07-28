@@ -13056,18 +13056,17 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates
                 selected_outcome_token_id,
                 freshness_deadline DESC
             );
-        CREATE TABLE execution_feasibility_evidence (
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
             evidence_id TEXT PRIMARY KEY,
             event_id TEXT NOT NULL,
             condition_id TEXT NOT NULL,
-            token_id TEXT NOT NULL,
             quote_seen_at TEXT NOT NULL,
             book_hash_before TEXT,
             depth_before_json TEXT,
             created_at TEXT NOT NULL
         );
-        CREATE INDEX idx_execution_feasibility_evidence_token_created
-            ON execution_feasibility_evidence(token_id, created_at DESC);
         """
     )
     conn.execute(
@@ -13099,20 +13098,22 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates
     }
     channel_rows = (
         (
+            "yes-a",
+            "buy_yes",
             "buy-row",
             "book-event",
             "condition-a",
-            "yes-a",
             "2026-07-17T00:12:11+00:00",
             "book-hash",
             json.dumps(channel_depth),
             "2026-07-17T00:12:11.100000+00:00",
         ),
         (
+            "yes-a",
+            "sell_yes",
             "sell-row",
             "book-event",
             "condition-a",
-            "yes-a",
             "2026-07-17T00:12:11+00:00",
             "book-hash",
             None,
@@ -13120,7 +13121,7 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates
         ),
     )
     conn.executemany(
-        "INSERT INTO execution_feasibility_evidence VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?)",
         channel_rows,
     )
 
@@ -13183,8 +13184,8 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates
     )
     conn.execute(
         """
-        INSERT INTO execution_feasibility_evidence VALUES
-            ('tick-row', 'tick-event', 'condition-b', 'yes-b',
+        INSERT INTO execution_feasibility_latest VALUES
+            ('yes-b', 'buy_yes', 'tick-row', 'tick-event', 'condition-b',
              '2026-07-17T00:12:11+00:00', 'tick-book-hash', ?,
              '2026-07-17T00:12:11.100000+00:00')
         """,
@@ -13233,18 +13234,17 @@ def test_global_book_prefetch_invalidates_snapshot_depth_with_stale_tick():
                 selected_outcome_token_id,
                 freshness_deadline DESC
             );
-        CREATE TABLE execution_feasibility_evidence (
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
             evidence_id TEXT PRIMARY KEY,
             event_id TEXT NOT NULL,
             condition_id TEXT NOT NULL,
-            token_id TEXT NOT NULL,
             quote_seen_at TEXT NOT NULL,
             book_hash_before TEXT,
             depth_before_json TEXT,
             created_at TEXT NOT NULL
         );
-        CREATE INDEX idx_execution_feasibility_evidence_token_created
-            ON execution_feasibility_evidence(token_id, created_at DESC);
         """
     )
     conn.execute(
@@ -13275,8 +13275,8 @@ def test_global_book_prefetch_invalidates_snapshot_depth_with_stale_tick():
     )
     conn.execute(
         """
-        INSERT INTO execution_feasibility_evidence VALUES
-            ('channel-row', 'channel-event', 'condition-a', 'no-a',
+        INSERT INTO execution_feasibility_latest VALUES
+            ('no-a', 'buy_no', 'channel-row', 'channel-event', 'condition-a',
              '2026-07-28T08:06:24+00:00', 'old-grid-book', ?,
              '2026-07-28T08:06:24.500000+00:00')
         """,
@@ -13333,18 +13333,17 @@ def test_global_book_prefetch_newer_bba_invalidates_older_depth():
                 selected_outcome_token_id,
                 freshness_deadline DESC
             );
-        CREATE TABLE execution_feasibility_evidence (
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
             evidence_id TEXT PRIMARY KEY,
             event_id TEXT NOT NULL,
             condition_id TEXT NOT NULL,
-            token_id TEXT NOT NULL,
             quote_seen_at TEXT NOT NULL,
             book_hash_before TEXT,
             depth_before_json TEXT,
             created_at TEXT NOT NULL
         );
-        CREATE INDEX idx_execution_feasibility_evidence_token_created
-            ON execution_feasibility_evidence(token_id, created_at DESC);
         """
     )
     old_depth = {
@@ -13369,10 +13368,10 @@ def test_global_book_prefetch_newer_bba_invalidates_older_depth():
     )
     conn.execute(
         """
-        INSERT INTO execution_feasibility_evidence VALUES
-            ('bba-row', 'bba-event', 'condition-a', 'yes-a',
-             '2026-07-17T00:12:11+00:00', 'new-hash', NULL,
-             '2026-07-17T00:12:11.100000+00:00')
+            INSERT INTO execution_feasibility_latest VALUES
+                ('yes-a', 'buy_yes', 'bba-row', 'bba-event', 'condition-a',
+                 '2026-07-17T00:12:11+00:00', 'new-hash', NULL,
+                 '2026-07-17T00:12:11.100000+00:00')
         """
     )
 
