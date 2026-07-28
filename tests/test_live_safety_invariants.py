@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-28
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -9495,6 +9495,44 @@ def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monke
         "ci_overlap_hold",
     ]
     conn.close()
+
+
+def test_monitor_refreshed_omits_duplicate_exit_validation_vector():
+    """Identical monitor/exit validation evidence is stored exactly once."""
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="monitor-validation-dedup",
+        state="holding",
+        city="Chicago",
+        target_date="2026-07-28",
+        strategy_key="center_bin_buy",
+        bin_label="90-91°F",
+    )
+    pos.applied_validations = [
+        "replacement_posterior",
+        "ci_overlap_hold",
+    ]
+    pos.last_monitor_at = "2026-07-28T08:00:00+00:00"
+    exit_decision = ExitDecision(
+        False,
+        reason="CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        selected_method="replacement_posterior",
+        applied_validations=list(pos.applied_validations),
+    )
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=2,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        exit_decision=exit_decision,
+    )
+
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["applied_validations"] == pos.applied_validations
+    assert "exit_decision_applied_validations" not in payload
 
 
 def test_monitor_refreshed_persists_day0_probability_receipt():

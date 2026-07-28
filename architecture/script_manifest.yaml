@@ -287,6 +287,15 @@ scripts:
     canonical_command: "python3 scripts/allocator_bankroll_sensitivity.py [--db PATH] [--cycles N] [--multiplier X] [--json]"
     required_tests: [tests/test_allocator_bankroll_sensitivity.py]
   audit_architecture_alignment.py: {class: read_only_evidence}
+  audit_trade_db_growth.py:
+    class: read_only_evidence
+    read_targets: [state/zeus_trades.db]
+    write_targets: [stdout]
+    canonical_command: "python3 scripts/audit_trade_db_growth.py [--db PATH] [--tail-rows N]"
+    reuse_when: "Measure current trade-DB row high-water marks and payload/category shape through bounded rowid-tail samples without loading dbstat or scanning full history."
+    do_not_use_when: "Never use tail estimates as deletion authority or whole-history byte truth; cited/immutable retention still requires writer-reader and decision-certificate proof."
+    promotion_barrier: "Read-only diagnostic output cannot authorize deletion, VACUUM, schema mutation, or retention changes."
+    required_tests: [tests/test_audit_trade_db_growth.py]
   audit_artifact_json_natural_key_coverage_2026_05_19.py:
     class: evidence_report_writer
     module_owner: engine

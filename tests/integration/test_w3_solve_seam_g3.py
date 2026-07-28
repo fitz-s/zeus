@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-07-28
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -1347,7 +1347,7 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
     ).fetchall()
     assert [row["mode"] for row in rows] == [
         "global_single_order_auction",
-        "global_single_order_auction_duplicate",
+        "global_single_order_auction_delta",
     ]
     full_summary = json.loads(rows[0]["artifact_json"])["summary"]
     duplicate_summary = json.loads(rows[1]["artifact_json"])["summary"]
@@ -1358,10 +1358,30 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
     assert duplicate_summary["payload_reference_receipt_hash"] == (
         full_summary["receipt_hash"]
     )
-    assert duplicate_summary["probability_manifest"][0] == [
+    assert "probability_manifest" not in duplicate_summary
+    context_delta = json.loads(
+        zlib.decompress(
+            base64.b64decode(
+                duplicate_summary["audit_context_delta_zlib_b64"]
+            )
+        )
+    )
+    base_context = json.loads(
+        zlib.decompress(
+            base64.b64decode(full_summary["audit_context_zlib_b64"])
+        )
+    )
+    reconstructed_context = global_batch_runtime._apply_json_object_delta(
+        base_context,
+        context_delta,
+    )
+    assert reconstructed_context["probability_manifest"][0] == [
         "family-0",
         "q-second-0",
     ]
+    assert hashlib.sha256(
+        global_batch_runtime._canonical_json_bytes(reconstructed_context)
+    ).hexdigest() == duplicate_summary["audit_context_sha256"]
     assert duplicate_summary["wealth_witness_identity"] == "wealth-second"
     for field in global_batch_runtime._GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS:
         assert field in full_summary

@@ -88,6 +88,7 @@ class _GlobalAuctionPayloadRef:
     repair: _GlobalAuctionComponentRef
     holding: _GlobalAuctionComponentRef
     book: _GlobalAuctionComponentRef
+    audit_context: _GlobalAuctionComponentRef
 
 
 @dataclass(frozen=True)
@@ -156,11 +157,18 @@ _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY: str | None = None
 _GLOBAL_HOLDING_COVERAGE_GENERATION = 0
 _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS = frozenset(
     {
+        "audit_context_zlib_b64",
         "book_native_side_states_zlib_b64",
         "buy_minimum_marketable_repairs_zlib_b64",
         "candidate_evaluations_zlib_b64",
         "holding_auction_coverage_zlib_b64",
     }
+)
+_GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS = (
+    "probability_manifest",
+    "buy_disabled_reason_by_family",
+    "excluded_by_family",
+    "excluded_by_candidate",
 )
 
 
@@ -1262,6 +1270,12 @@ def _stored_global_auction_payload_ref(
         return None
     components = (
         (
+            ref.audit_context,
+            "audit_context_zlib_b64",
+            "audit_context_encoding",
+            "audit_context_sha256",
+        ),
+        (
             ref.candidate,
             "candidate_evaluations_zlib_b64",
             "candidate_evaluation_encoding",
@@ -1945,6 +1959,22 @@ def _store_global_auction_receipt(
             minimum_repair_zlib
         ).decode("ascii"),
     }
+    audit_context = {
+        field: receipt[field]
+        for field in _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS
+    }
+    audit_context_json = _canonical_json_bytes(audit_context)
+    receipt.update(
+        {
+            "audit_context_encoding": "zlib+base64+canonical-json-object-v1",
+            "audit_context_sha256": hashlib.sha256(
+                audit_context_json
+            ).hexdigest(),
+            "audit_context_zlib_b64": base64.b64encode(
+                zlib.compress(audit_context_json, level=9)
+            ).decode("ascii"),
+        }
+    )
     encoded = json.dumps(
         receipt,
         default=str,
@@ -1986,6 +2016,60 @@ def _store_global_auction_receipt(
             reference_components: dict[str, dict[str, object]] = {}
             base_refs: dict[int, _GlobalAuctionComponentRef] = {}
             inline_fields: set[str] = set()
+            audit_context_exact_reference = False
+
+            audit_context_ref = payload_ref.audit_context
+            audit_context_identity = (
+                str(receipt["audit_context_encoding"]),
+                str(receipt["audit_context_sha256"]),
+            )
+            if audit_context_identity == (
+                audit_context_ref.encoding,
+                audit_context_ref.sha256,
+            ):
+                for field in _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS:
+                    compact_receipt.pop(field, None)
+                compact_receipt.update(
+                    {
+                        "audit_context_compacted": True,
+                        "audit_context_reference_decision_log_id": audit_context_ref.row_id,
+                        "audit_context_reference_mode": audit_context_ref.mode,
+                        "audit_context_reference_receipt_hash": audit_context_ref.receipt_hash,
+                        "audit_context_reference_sha256": audit_context_ref.sha256,
+                    }
+                )
+                base_refs[audit_context_ref.row_id] = audit_context_ref
+                audit_context_exact_reference = True
+            elif (
+                audit_context_identity[0] == audit_context_ref.encoding
+                and isinstance(audit_context_ref.payload, Mapping)
+            ):
+                audit_context_delta = _json_object_delta_receipt(
+                    prefix="audit_context",
+                    base=audit_context_ref.payload,
+                    current=audit_context,
+                    expected_sha256=audit_context_identity[1],
+                )
+                audit_context_delta_bytes = len(
+                    str(audit_context_delta["audit_context_delta_zlib_b64"])
+                )
+                audit_context_inline_bytes = len(
+                    _canonical_json_bytes(audit_context)
+                )
+                if audit_context_delta_bytes * 2 < audit_context_inline_bytes:
+                    for field in _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS:
+                        compact_receipt.pop(field, None)
+                    compact_receipt.update(audit_context_delta)
+                    compact_receipt.update(
+                        {
+                            "audit_context_compacted": True,
+                            "audit_context_base_decision_log_id": audit_context_ref.row_id,
+                            "audit_context_base_mode": audit_context_ref.mode,
+                            "audit_context_base_receipt_hash": audit_context_ref.receipt_hash,
+                            "audit_context_base_sha256": audit_context_ref.sha256,
+                        }
+                    )
+                    base_refs[audit_context_ref.row_id] = audit_context_ref
 
             candidate_field = "candidate_evaluations_zlib_b64"
             candidate_ref = payload_ref.candidate
@@ -2180,10 +2264,12 @@ def _store_global_auction_receipt(
             if compact_bytes < full_bytes:
                 exact_heavy_reference = set(reference_fields) == set(
                     _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS
+                    - {"audit_context_zlib_b64"}
                 )
                 mode = (
                     "global_single_order_auction_duplicate"
                     if exact_heavy_reference
+                    and audit_context_exact_reference
                     else "global_single_order_auction_delta"
                 )
                 row_id = store_artifact(
@@ -2251,6 +2337,11 @@ def _store_global_auction_receipt(
                             sha256=book_identity[1],
                             payload=current_book_rows,
                         ),
+                        # Audit-context deltas stay anchored to the last
+                        # self-contained full receipt. That bounds the
+                        # reconstruction chain to one hop and makes a restart
+                        # fall back to a fresh full anchor.
+                        audit_context=audit_context_ref,
                     )
                 )
                 _LOG.info(
@@ -2321,6 +2412,14 @@ def _store_global_auction_receipt(
                     encoding=str(receipt["book_native_side_encoding"]),
                     sha256=str(receipt["book_native_side_states_sha256"]),
                     payload=current_book_rows,
+                ),
+                audit_context=_GlobalAuctionComponentRef(
+                    row_id=row_id,
+                    mode=mode,
+                    receipt_hash=current_receipt_hash,
+                    encoding=str(receipt["audit_context_encoding"]),
+                    sha256=str(receipt["audit_context_sha256"]),
+                    payload=audit_context,
                 ),
             )
     if row_id is None:

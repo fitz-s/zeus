@@ -684,6 +684,9 @@ def build_monitor_refreshed_canonical_write(
     ):
         payload_dict["day0_monitor_probability_receipt"] = day0_probability_receipt
     if exit_decision is not None:
+        exit_validations = list(
+            getattr(exit_decision, "applied_validations", []) or []
+        )
         should_exit = (
             bool(final_should_exit)
             if final_should_exit is not None
@@ -709,14 +712,18 @@ def build_monitor_refreshed_canonical_write(
                 "exit_decision_selected_method": str(
                     getattr(exit_decision, "selected_method", "") or ""
                 ),
-                "exit_decision_applied_validations": list(
-                    getattr(exit_decision, "applied_validations", []) or []
-                ),
                 "exit_decision_neg_edge_count": _nullable(
                     getattr(position, "neg_edge_count", None)
                 ),
             }
         )
+        # The canonical monitor reader already falls back to
+        # ``applied_validations`` when this exit-specific override is absent.
+        # Do not persist the same often-large validation vector twice on every
+        # recurring HOLD event; retain the override only when it carries
+        # genuinely different decision evidence.
+        if exit_validations != payload_dict["applied_validations"]:
+            payload_dict["exit_decision_applied_validations"] = exit_validations
     else:
         payload_dict["exit_decision_available"] = False
     payload = json.dumps(payload_dict, default=str, sort_keys=True)
