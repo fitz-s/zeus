@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import subprocess
+import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -86,7 +88,7 @@ def _plan(rows: list[ReplacementForecastCurrentTargetPlanRow]) -> ReplacementFor
     )
 
 
-def _wire(monkeypatch, *, rows, forecast_db="zeus-forecasts.db"):
+def _wire(monkeypatch, *, rows, state_root: Path, forecast_db="zeus-forecasts.db"):
     """Enable the capture flag and inject the plan builder + downloader. Returns the
     list that records each ``download_bayes_precision_fusion_extra_raw_inputs`` call's kwargs."""
     monkeypatch.setitem(
@@ -116,7 +118,13 @@ def _wire(monkeypatch, *, rows, forecast_db="zeus-forecasts.db"):
             "release_lag_hours": release_lag_hours,
             "max_wall_clock_seconds": max_wall_clock_seconds,
         })
-        return {"status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED", "written_row_count": len(targets)}
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "written_row_count": len(targets),
+            "attempted_target_group_count": len(
+                {(target.city, target.target_date) for target in targets}
+            ),
+        }
 
     monkeypatch.setattr(dl_mod, "download_bayes_precision_fusion_extra_raw_inputs", _fake_download)
 
@@ -132,20 +140,24 @@ def _wire(monkeypatch, *, rows, forecast_db="zeus-forecasts.db"):
         production, "_probe_resolved_available_cycle", lambda: probed_cycle
     )
 
-    cfg_dict = {"forecast_db": forecast_db, "download_release_lag_hours": 14.0}
+    cfg_dict = {
+        "forecast_db": forecast_db,
+        "download_release_lag_hours": 14.0,
+        "bpf_extra_rotation_state_path": state_root / ".rotation.json",
+    }
     return cfg_dict, calls
 
 
 # ---------------------------------------------------------------------------------------
 # (1)+(2) normal uncovered target: no NameError, capture attempted, lead_days correct
 # ---------------------------------------------------------------------------------------
-def test_does_not_raise_nameerror_and_attempts_capture(monkeypatch) -> None:
+def test_does_not_raise_nameerror_and_attempts_capture(monkeypatch, tmp_path) -> None:
     # target_date 6 days after "today" -> lead_days must come out as 6 across the
     # date.fromisoformat boundary. Use a city present in cities_by_name.
     today = datetime.now(timezone.utc).date()
     target_date = (today + timedelta(days=6)).isoformat()
     rows = [_row(city="Amsterdam", target_date=target_date, covered=False)]
-    cfg_dict, calls = _wire(monkeypatch, rows=rows)
+    cfg_dict, calls = _wire(monkeypatch, rows=rows, state_root=tmp_path)
 
     report = main_mod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg_dict)
 
@@ -181,14 +193,14 @@ def test_does_not_raise_nameerror_and_attempts_capture(monkeypatch) -> None:
 # feeds ALL current targets; the downloader itself dedups per persisted
 # (model, city, target, metric, cycle, endpoint) row.
 # ---------------------------------------------------------------------------------------
-def test_covered_rows_still_reach_the_downloader(monkeypatch) -> None:
+def test_covered_rows_still_reach_the_downloader(monkeypatch, tmp_path) -> None:
     today = datetime.now(timezone.utc).date()
     td = (today + timedelta(days=3)).isoformat()
     rows = [
         _row(city="Amsterdam", target_date=td, covered=True),   # included (currency)
         _row(city="Ankara", target_date=td, covered=False),     # included
     ]
-    cfg_dict, calls = _wire(monkeypatch, rows=rows)
+    cfg_dict, calls = _wire(monkeypatch, rows=rows, state_root=tmp_path)
 
     report = main_mod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg_dict)
 
@@ -410,7 +422,12 @@ def test_rotation_cursor_atomic_write_fsyncs_before_and_after_replace(
         last_attempted_group=("Amsterdam", "2026-07-29"),
     )
 
-    temporary = state_path.parent / f".{state_path.name}.tmp"
+    temporary = events[1][1]
+    assert temporary.parent == state_path.parent
+    assert temporary.name.startswith(
+        f".{state_path.name}.pid{production.os.getpid()}."
+    )
+    assert temporary.name.endswith(".tmp")
     assert events == [
         ("fsync_directory", tmp_path, None),
         ("fsync_file", temporary, None),
@@ -455,11 +472,22 @@ def test_durable_rotation_does_not_starve_tail_groups_across_restarts(
     assert attempted[4:] == attempted[:4]
 
 
-@pytest.mark.parametrize("outcome", ("partial", "transport", "exception"))
-def test_partial_transport_and_exception_advance_one_durable_group(
+@pytest.mark.parametrize(
+    ("outcome", "receipt", "next_head", "write_status"),
+    (
+        ("zero_timebox", 0, "Amsterdam", "NO_PROGRESS"),
+        ("partial", 1, "London", "PERSISTED"),
+        ("transport", 2, "Paris", "PERSISTED"),
+        ("exception", 0, "Amsterdam", "NO_PROGRESS"),
+    ),
+)
+def test_rotation_advances_only_by_exact_downloader_progress_receipt(
     tmp_path,
     monkeypatch,
     outcome,
+    receipt,
+    next_head,
+    write_status,
 ) -> None:
     cycle = datetime(2026, 7, 28, 6, tzinfo=timezone.utc)
     rows = [
@@ -487,15 +515,17 @@ def test_partial_transport_and_exception_advance_one_durable_group(
         attempted_heads.append(kwargs["targets"][0].city)
         if outcome == "exception":
             raise RuntimeError("injected transport exception")
-        if outcome == "partial":
+        if outcome in {"zero_timebox", "partial"}:
             return {
                 "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
                 "timeboxed_incomplete": True,
-                "timebox_unattempted_target_groups": 2,
+                "timebox_unattempted_target_groups": 3 - receipt,
+                "attempted_target_group_count": receipt,
             }
         return {
             "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
             "transport_aborted_remaining_targets": True,
+            "attempted_target_group_count": receipt,
         }
 
     monkeypatch.setattr(
@@ -518,16 +548,165 @@ def test_partial_transport_and_exception_advance_one_durable_group(
 
     assert first is not None
     assert second is not None
-    assert first["target_rotation_attempted_group_count"] == 1
-    assert first["target_rotation_cursor_write_status"] == "PERSISTED"
-    assert attempted_heads == ["Amsterdam", "London"]
+    assert first["target_rotation_attempted_group_count"] == receipt
+    assert first["target_rotation_cursor_write_status"] == write_status
+    assert attempted_heads == ["Amsterdam", next_head]
+    if receipt == 0:
+        assert first["target_rotation_progress_receipt_status"] == (
+            "EXCEPTION_NO_RECEIPT" if outcome == "exception" else "EXACT"
+        )
+        assert not (
+            tmp_path
+            / "replacement_forecast_live"
+            / production._BPF_EXTRA_ROTATION_FILENAME
+        ).exists()
+    else:
+        assert first["target_rotation_progress_receipt_status"] == "EXACT"
     expected_status = (
         "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED"
         if outcome == "exception"
         else (
             "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
-            if outcome == "partial"
+            if outcome in {"zero_timebox", "partial"}
             else "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
         )
     )
     assert first["status"] == expected_status
+
+
+def test_overlapping_invocation_is_busy_and_cannot_download_or_advance(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cycle = datetime(2026, 7, 28, 6, tzinfo=timezone.utc)
+    rows = [
+        _row(city="Amsterdam", target_date="2026-07-30", covered=False),
+        _row(city="London", target_date="2026-07-30", covered=False),
+    ]
+    monkeypatch.setattr(
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        lambda _db: _plan(rows),
+    )
+    monkeypatch.setattr(
+        production,
+        "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda: cycle,
+    )
+    monkeypatch.setattr(
+        dl_mod,
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0.0,
+    )
+    cfg_dict = {
+        "forecast_db": tmp_path / "forecasts.db",
+        "seed_dir": tmp_path / "replacement_forecast_live" / "seeds",
+    }
+    calls = 0
+    overlap: dict[str, object] = {}
+
+    def _download(**kwargs):
+        nonlocal calls
+        calls += 1
+        overlap.update(
+            production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+                cfg_dict
+            )
+            or {}
+        )
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "attempted_target_group_count": 1,
+        }
+
+    monkeypatch.setattr(
+        dl_mod,
+        "download_bayes_precision_fusion_extra_raw_inputs",
+        _download,
+    )
+
+    report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg_dict
+    )
+
+    assert calls == 1
+    assert overlap["status"] == (
+        "BAYES_PRECISION_FUSION_EXTRA_ROTATION_BUSY_FAILSOFT_SKIPPED"
+    )
+    assert overlap["target_rotation_owner_status"] == "BUSY"
+    assert report["target_rotation_cursor_write_status"] == "PERSISTED"
+
+
+def test_cross_process_busy_owner_skips_download_and_cursor_write(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cycle = datetime(2026, 7, 28, 6, tzinfo=timezone.utc)
+    rows = [_row(city="Amsterdam", target_date="2026-07-30", covered=False)]
+    monkeypatch.setattr(
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        lambda _db: _plan(rows),
+    )
+    monkeypatch.setattr(
+        production,
+        "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda: cycle,
+    )
+    monkeypatch.setattr(
+        dl_mod,
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0.0,
+    )
+    state_path = tmp_path / "replacement_forecast_live" / ".rotation.json"
+    state_path.parent.mkdir()
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    script = (
+        "import fcntl, os, pathlib, sys\n"
+        "fd=os.open(pathlib.Path(sys.argv[1]), os.O_RDWR|os.O_CREAT, 0o600)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "print('LOCKED', flush=True)\n"
+        "sys.stdin.read(1)\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(lock_path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout is not None
+    assert child.stdout.readline().strip() == "LOCKED"
+    calls = 0
+
+    def _download(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("busy owner must prevent download")
+
+    monkeypatch.setattr(
+        dl_mod,
+        "download_bayes_precision_fusion_extra_raw_inputs",
+        _download,
+    )
+    try:
+        report = (
+            production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+                {
+                    "forecast_db": tmp_path / "forecasts.db",
+                    "bpf_extra_rotation_state_path": state_path,
+                }
+            )
+        )
+    finally:
+        assert child.stdin is not None
+        child.stdin.write("x")
+        child.stdin.flush()
+        child.wait(timeout=5)
+
+    assert calls == 0
+    assert report is not None
+    assert report["status"] == (
+        "BAYES_PRECISION_FUSION_EXTRA_ROTATION_BUSY_FAILSOFT_SKIPPED"
+    )
+    assert report["target_rotation_owner_status"] == "BUSY"
+    assert not state_path.exists()

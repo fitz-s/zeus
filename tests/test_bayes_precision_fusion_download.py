@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -100,7 +100,8 @@ def test_download_writes_single_and_previous_runs(tmp_path) -> None:
     assert n_single > 0, f"expected in-domain forward single_runs rows, got {n_single}"
     assert n_prev > 0, f"expected previous_runs fixed-lead rows, got {n_prev}"
     # forecast_value_c is degC; training_allowed=0 is pinned.
-    conn = sqlite3.connect(str(db)); conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM raw_model_forecasts LIMIT 1").fetchone()
     assert row["training_allowed"] == 0
     assert 15.0 <= row["forecast_value_c"] <= 25.0
@@ -152,6 +153,7 @@ def test_download_timebox_returns_incomplete_without_fetching_targets(tmp_path, 
     assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
     assert report["timeboxed_incomplete"] is True
     assert report["timebox_unattempted_target_groups"] == 2
+    assert report["attempted_target_group_count"] == 0
     assert report["written_row_count"] == 0
 
 
@@ -721,7 +723,8 @@ def test_download_prunes_old_rows(tmp_path) -> None:
            VALUES ('gfs_global','Paris','2025-11-01','high','x','y',?,1,20.0,'previous_runs')""",
         (old_iso,),
     )
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     assert _count(db) == 1
 
     report = download_bayes_precision_fusion_extra_raw_inputs(
@@ -928,8 +931,6 @@ def test_domain_gate_unavailable_global_is_loud_not_silent(tmp_path) -> None:
     from expected domain-exclusion absences.
     """
     from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
-    from src.forecast.model_selection import ANCHOR_MODEL
-
     db = _forecast_db(tmp_path)
 
     def _single(*, model, **k):
@@ -1050,8 +1051,53 @@ def test_batched_single_runs_transport_failure_is_retryable_not_empty_success(tm
     assert report["transport_errors"]
     assert "Open-Meteo quota exhausted" in report["transport_errors"][0]
     assert report["transport_aborted_remaining_targets"] is True
+    assert report["attempted_target_group_count"] == 1
     assert len(single_calls) == 1
     assert previous_calls == []
+
+
+def test_later_group_transport_abort_reports_exact_attempted_prefix(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A quota abort on group two durably receipts both attempted groups, not one/all."""
+    import src.data.bayes_precision_fusion_download as dl
+
+    db = _forecast_db(tmp_path)
+    calls: list[str] = []
+
+    def _single_batch(**kwargs):
+        city = "Paris" if float(kwargs["latitude"]) < 50.0 else "Berlin"
+        calls.append(city)
+        if city == "Berlin":
+            return {
+                dl._BATCH_TRANSPORT_ERROR_KEY: (
+                    "Open-Meteo quota exhausted after first group",
+                    None,
+                )
+            }
+        return {"ecmwf_ifs": (20.0, 10.0)}
+
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", _single_batch)
+    monkeypatch.setattr(
+        dl,
+        "_read_source_clock_single_runs_requests",
+        lambda **_kwargs: {},
+    )
+
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 9, 12, tzinfo=UTC),
+        targets=_two_city_targets(),
+        models=("ecmwf_ifs",),
+        include_previous_runs=False,
+        prune_after=False,
+    )
+
+    assert calls == ["Paris", "Berlin"]
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    assert report["transport_aborted_remaining_targets"] is True
+    assert report["attempted_target_group_count"] == 2
 
 
 def test_scoped_transport_gap_with_progress_is_downloaded_not_failed(tmp_path, monkeypatch) -> None:
@@ -1152,7 +1198,8 @@ def test_batched_single_runs_uses_source_clock_public_run(tmp_path, monkeypatch)
 
     assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     assert seen_runs == [public_run]
-    conn = sqlite3.connect(str(db)); conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT model, source_cycle_time, source_available_at FROM raw_model_forecasts"
         " WHERE endpoint='single_runs'"

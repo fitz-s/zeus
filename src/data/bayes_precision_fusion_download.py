@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-13
+# Last reused or audited: 2026-07-28
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
 #   raw_model_forecasts), §3 (causality: previous-runs fixed-lead; single-runs live capture;
 #   run_time != source_available_at), §5 (~6mo retention); §7 antibodies (C/F unit mix ->
@@ -1563,6 +1563,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     transport_errors: list[str] = []
     transport_outcomes: list[dict[str, object]] = []
     abort_transport = False
+    attempted_target_group_count = 0
     started_monotonic = time.monotonic()
     wall_clock_deadline = (
         started_monotonic + float(max_wall_clock_seconds)
@@ -1849,6 +1850,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             timeboxed = True
             timebox_unattempted_target_groups = len(target_groups) - group_index
             break
+        attempted_target_group_count = group_index + 1
         # All targets for the same (city, target_date) share lat/lon/timezone/lead_days.
         ref = city_targets[0]
         target_local_date = date.fromisoformat(target_date)
@@ -2260,6 +2262,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "transport_errors": tuple(transport_errors),
         "transport_outcomes": tuple(transport_outcomes),
         "transport_aborted_remaining_targets": abort_transport,
+        "attempted_target_group_count": attempted_target_group_count,
         "timeboxed_incomplete": timeboxed,
         "timebox_unattempted_target_groups": timebox_unattempted_target_groups,
         "timebox_unpersisted_row_count": timebox_unpersisted_row_count,
