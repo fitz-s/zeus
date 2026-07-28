@@ -383,6 +383,82 @@ def test_day0_extreme_bridge_reseeds_for_every_conditioning_identity_change(
     }
 
 
+def test_day0_conditioning_marker_allows_same_time_revisions_but_never_regresses_time(
+    tmp_path,
+) -> None:
+    """A late older condition cannot replace a newer marker or its seed."""
+    db_path = _prepare_forecast_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cycle_iso = "2026-07-19T00:00:00+00:00"
+
+    def record(seed_name: str, **identity: object) -> bool:
+        seed_file = tmp_path / seed_name
+        seed_file.write_text("{}", encoding="utf-8")
+        return cycle_advance._record_enqueue(
+            conn,
+            city="Shanghai",
+            target_date="2026-07-19",
+            metric="high",
+            consumed_cycle_iso=cycle_iso,
+            target_cycle_iso=cycle_iso,
+            held_position=True,
+            seed_file=str(seed_file),
+            reason=None,
+            **identity,
+        )
+
+    newer = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    assert record("newer.json", **newer) is True
+
+    older = {
+        "day0_observed_extreme_source": "late_alternate_source",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
+        "day0_observed_extreme_c": 20.5,
+        "day0_observed_extreme_unit": "F",
+    }
+    assert record("older.json", **older) is False
+    row = conn.execute(
+        "SELECT day0_observed_extreme_observation_time, day0_conditioning_identity_json, seed_file "
+        "FROM cycle_advance_enqueues"
+    ).fetchone()
+    assert row["day0_observed_extreme_observation_time"] == newer[
+        "day0_observed_extreme_observation_time"
+    ]
+    assert row["seed_file"] == str(tmp_path / "newer.json")
+
+    same_time_revisions = (
+        {"day0_observed_extreme_source": "wu_api+same_station_fast_tail"},
+        {"day0_observed_extreme_c": 21.25},
+        {"day0_observed_extreme_unit": "F"},
+    )
+    current = newer
+    for index, revision in enumerate(same_time_revisions, start=1):
+        current = {**current, **revision}
+        assert record(f"same-time-{index}.json", **current) is True
+
+    row = conn.execute(
+        "SELECT day0_observed_extreme_observation_time, day0_conditioning_identity_json, seed_file "
+        "FROM cycle_advance_enqueues"
+    ).fetchone()
+    conn.close()
+    assert row["day0_observed_extreme_observation_time"] == newer[
+        "day0_observed_extreme_observation_time"
+    ]
+    assert json.loads(row["day0_conditioning_identity_json"]) == {
+        "observation_time": "2026-07-19T05:00:00.900000+00:00",
+        "observed_extreme_c": 21.25,
+        "source": "wu_api+same_station_fast_tail",
+        "unit": "F",
+    }
+    assert row["seed_file"] == str(tmp_path / "same-time-3.json")
+
+
 def test_day0_request_coalescing_keeps_distinct_conditioning_identities(tmp_path) -> None:
     """The request drain cannot discard a fresh Day0 condition as a duplicate cycle."""
     base = {

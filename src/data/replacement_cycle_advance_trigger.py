@@ -694,6 +694,10 @@ def _record_enqueue(
                        OR (
                            ? IS NOT NULL
                            AND (
+                               day0_observed_extreme_observation_time IS NULL
+                               OR ? >= day0_observed_extreme_observation_time
+                           )
+                           AND (
                                day0_conditioning_identity_json IS NULL
                                OR ? <> day0_conditioning_identity_json
                            )
@@ -716,6 +720,7 @@ def _record_enqueue(
                     day0_observed_extreme_observation_time,
                     day0_observed_extreme_observation_time,
                     day0_conditioning_identity,
+                    day0_observed_extreme_observation_time,
                     day0_conditioning_identity,
                 ),
             )
