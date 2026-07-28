@@ -2702,11 +2702,12 @@ def _append_exit_order_fill_projection(
     fill_price: str,
     observed_at: str,
     event_type: str,
-) -> None:
+    raise_on_error: bool = False,
+) -> bool:
     if event_type != CommandEventType.FILL_CONFIRMED.value:
-        return
+        return False
     if str(command.get("intent_kind") or "").upper() != "EXIT":
-        return
+        return False
     try:
         from src.execution.exchange_reconcile import _ensure_exit_fill_position_event
 
@@ -2734,12 +2735,16 @@ def _append_exit_order_fill_projection(
                 str(command.get("position_id") or ""),
             ),
         )
+        return True
     except Exception:
         logger.exception(
             "recovery: exit fill projection failed for command %s order %s",
             command.get("command_id"),
             venue_order_id,
         )
+        if raise_on_error:
+            raise
+        return False
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -10821,7 +10826,7 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
         command_id = str(command.get("command_id") or "")
         venue_order_id = str(command.get("venue_order_id") or "")
         try:
-            already_canceled_outcome = _review_required_cancel_failed_already_canceled_entry_fill_recovery(
+            already_canceled_outcome = _review_required_cancel_failed_already_canceled_fill_recovery(
                 conn,
                 VenueCommand.from_row(command),
             )
@@ -12450,7 +12455,11 @@ def _terminal_point_order_candidates(conn: sqlite3.Connection) -> list[dict]:
     return [_dict_row(row) for row in rows]
 
 
-def _phase_after_terminal_exit_no_fill(command: Mapping[str, object], *, observed_at: str) -> str:
+def _phase_after_terminal_exit_no_fill(
+    command: Mapping[str, object],
+    *,
+    observed_at: str,
+) -> str | None:
     city = str(command.get("position_city") or "").strip()
     target_date = str(command.get("position_target_date") or "").strip()
     try:
@@ -12459,17 +12468,29 @@ def _phase_after_terminal_exit_no_fill(command: Mapping[str, object], *, observe
 
         city_cfg = runtime_cities_by_name().get(city)
         tz_name = str(getattr(city_cfg, "timezone", "") or "")
-        as_of = _parse_utc(observed_at)
+        if city_cfg is None or not tz_name:
+            return None
+        as_of = _parse_ts(observed_at)
+        if as_of is None:
+            return None
         day0_start = settlement_day_entry_utc(
             target_local_date=date.fromisoformat(target_date),
             city_timezone=tz_name,
         )
         return "day0_window" if as_of >= day0_start else "active"
-    except Exception:
-        return "day0_window"
+    except Exception as exc:
+        logger.warning(
+            "recovery: cannot derive post-terminal-no-fill phase city=%r "
+            "target_date=%r observed_at=%r: %s",
+            city,
+            target_date,
+            observed_at,
+            exc,
+        )
+        return None
 
 
-def _release_pending_exit_after_terminal_no_fill(
+def _release_exit_after_terminal_no_fill(
     conn: sqlite3.Connection,
     *,
     command: Mapping[str, object],
@@ -12486,76 +12507,87 @@ def _release_pending_exit_after_terminal_no_fill(
         return False
     current = conn.execute(
         """
-        SELECT phase, strategy_key
+        SELECT phase, strategy_key, order_id
           FROM position_current
          WHERE position_id = ?
          LIMIT 1
         """,
         (position_id,),
     ).fetchone()
-    if current is None or str(current[0] or "") != "pending_exit":
+    if current is None:
         return False
-    phase_after = _phase_after_terminal_exit_no_fill(command, observed_at=observed_at)
+    phase_before = str(current[0] or "")
+    if phase_before not in {"active", "day0_window", "pending_exit"}:
+        return False
+    phase_after = (
+        _phase_after_terminal_exit_no_fill(command, observed_at=observed_at)
+        if phase_before == "pending_exit"
+        else phase_before
+    )
+    if phase_after is None:
+        return False
     event_key = f"{position_id}:exit_terminal_no_fill:{command_id}"
     existing = conn.execute(
         "SELECT 1 FROM position_events WHERE idempotency_key = ? LIMIT 1",
         (event_key,),
     ).fetchone()
+    if existing is None:
+        seq = _latest_position_sequence(conn, position_id) + 1
+        payload = {
+            "reason": "exit_order_terminal_no_fill_released_pending_exit",
+            "proof_class": "exit_point_order_terminal_no_fill_plus_open_trade_absence",
+            "command_id": command_id,
+            "venue_order_id": venue_order_id,
+            "venue_command_state": command.get("state"),
+            "venue_order_fact_id": order_fact_id,
+            "phase_before": phase_before,
+            "phase_after": phase_after,
+            "terminal_order_fact": dict(terminal_payload),
+        }
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES (?, ?, 1, ?, 'EXIT_ORDER_VOIDED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_key,
+                position_id,
+                seq,
+                observed_at,
+                phase_before,
+                phase_after,
+                str(command.get("position_strategy_key") or current[1] or "opening_inertia"),
+                str(command.get("decision_id") or ""),
+                str(command.get("snapshot_id") or ""),
+                venue_order_id,
+                command_id,
+                f"venue_command:{command_id}",
+                event_key,
+                "TERMINAL_NO_FILL",
+                "src.execution.command_recovery",
+                json.dumps(payload, sort_keys=True, default=str),
+                _latest_position_env(conn, position_id),
+            ),
+        )
     conn.execute(
         """
         UPDATE position_current
            SET phase = ?,
-               order_id = NULL,
+               order_id = CASE
+                   WHEN lower(COALESCE(order_id, '')) = lower(?) THEN NULL
+                   ELSE order_id
+               END,
                order_status = 'filled',
                exit_reason = 'EXIT_ORDER_TERMINAL_NO_FILL_RELEASED',
                updated_at = ?
          WHERE position_id = ?
-           AND phase = 'pending_exit'
+           AND phase = ?
         """,
-        (phase_after, observed_at, position_id),
-    )
-    if existing is not None:
-        return True
-    seq = _latest_position_sequence(conn, position_id) + 1
-    payload = {
-        "reason": "exit_order_terminal_no_fill_released_pending_exit",
-        "proof_class": "exit_point_order_terminal_no_fill_plus_open_trade_absence",
-        "command_id": command_id,
-        "venue_order_id": venue_order_id,
-        "venue_command_state": command.get("state"),
-        "venue_order_fact_id": order_fact_id,
-        "phase_before": "pending_exit",
-        "phase_after": phase_after,
-        "terminal_order_fact": dict(terminal_payload),
-    }
-    conn.execute(
-        """
-        INSERT INTO position_events (
-            event_id, position_id, event_version, sequence_no, event_type,
-            occurred_at, phase_before, phase_after, strategy_key, decision_id,
-            snapshot_id, order_id, command_id, caused_by, idempotency_key,
-            venue_status, source_module, payload_json, env
-        ) VALUES (?, ?, 1, ?, 'EXIT_ORDER_VOIDED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            event_key,
-            position_id,
-            seq,
-            observed_at,
-            "pending_exit",
-            phase_after,
-            str(command.get("position_strategy_key") or current[1] or "opening_inertia"),
-            str(command.get("decision_id") or ""),
-            str(command.get("snapshot_id") or ""),
-            venue_order_id,
-            command_id,
-            f"venue_command:{command_id}",
-            event_key,
-            "TERMINAL_NO_FILL",
-            "src.execution.command_recovery",
-            json.dumps(payload, sort_keys=True, default=str),
-            _latest_position_env(conn, position_id),
-        ),
+        (phase_after, venue_order_id, observed_at, position_id, phase_before),
     )
     return True
 
@@ -12734,7 +12766,7 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
                         "proof_class": "exit_terminal_no_fill_recovery",
                     },
                 )
-                _release_pending_exit_after_terminal_no_fill(
+                _release_exit_after_terminal_no_fill(
                     conn,
                     command=row,
                     observed_at=observed_at,
@@ -17527,23 +17559,34 @@ def _review_required_no_venue_live_order_recovery(
     return "advanced"
 
 
-def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
+def _review_required_cancel_failed_already_canceled_fill_recovery(
     conn: sqlite3.Connection,
     cmd: VenueCommand,
 ) -> str:
-    """Clear a REVIEW_REQUIRED entry when cancel failed only because it already succeeded.
+    """Clear a REVIEW_REQUIRED command when cancel failed after venue finality.
 
-    This covers the post-live partial-fill race:
+    This covers the post-live partial/full-fill race:
       ACKED -> CANCEL_REQUESTED -> venue already canceled -> legacy parser wrote
       CANCEL_FAILED/REVIEW_REQUIRED, while a positive trade fact already proves
-      real exposure. The command should stop blocking redecision; the active
-      position remains the trade-fact matched size.
+      the exact venue side effect. ENTRY projects acquired exposure; EXIT
+      projects sale truth or keeps a partial sale pending until the remainder
+      is resolved.
     """
 
+    # SCOPE: only the exact bound ENTRY/BUY or EXIT/SELL command whose latest
+    # cancel result says the venue order is already canceled or matched.
+    # DRAIN: canonical positive trade facts bound to that command+order advance
+    # it to PARTIAL/FILLED; missing or contradictory truth stays REVIEW_REQUIRED.
+    # RESET: the command event transition removes REVIEW_REQUIRED once and the
+    # normal entry/exit projection lanes consume the durable fill facts.
+    intent_side = (cmd.intent_kind, str(cmd.side or "").upper())
     if (
         cmd.state != CommandState.REVIEW_REQUIRED
-        or cmd.intent_kind != IntentKind.ENTRY
-        or str(cmd.side or "").upper() != "BUY"
+        or intent_side
+        not in {
+            (IntentKind.ENTRY, "BUY"),
+            (IntentKind.EXIT, "SELL"),
+        }
         or not str(cmd.venue_order_id or "").strip()
     ):
         return "stayed"
@@ -17629,6 +17672,12 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
         if any(str(fact.get("source") or "").upper() == "REST" for fact in trade_facts)
         else "WS_USER"
     )
+    intent_name = str(cmd.intent_kind.value).lower()
+    event_type = (
+        CommandEventType.FILL_CONFIRMED.value
+        if complete
+        else CommandEventType.PARTIAL_FILL_OBSERVED.value
+    )
     payload = {
         "schema_version": 1,
         "reason": (
@@ -17688,13 +17737,15 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
         "source_proof": {
             "source_commit": "runtime",
             "source_function": "command_recovery._reconcile_row",
-            "source_reason": "cancel_failed_already_canceled_positive_entry_fill",
+            "source_reason": (
+                f"cancel_failed_already_canceled_positive_{intent_name}_fill"
+            ),
         },
         "reviewed_by": "command_recovery",
         "cleared_at": observed_at,
     }
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
-    sp_name = f"sp_already_cancelled_entry_fill_{safe_command_id}"
+    sp_name = f"sp_already_cancelled_{intent_name}_fill_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
         append_order_fact(
@@ -17713,23 +17764,31 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
         append_event(
             conn,
             command_id=cmd.command_id,
-            event_type=(
-                CommandEventType.FILL_CONFIRMED.value
-                if complete
-                else CommandEventType.PARTIAL_FILL_OBSERVED.value
-            ),
+            event_type=event_type,
             occurred_at=observed_at,
             payload=payload,
         )
-        _append_matched_order_fill_projection(
-            conn,
-            command={**command, "venue_order_id": venue_order_id},
-            venue_order_id=venue_order_id,
-            matched_size=filled_size,
-            fill_price=fill_price,
-            observed_at=observed_at,
-            order_fact_source=order_fact_source,
-        )
+        if cmd.intent_kind == IntentKind.ENTRY:
+            _append_matched_order_fill_projection(
+                conn,
+                command={**command, "venue_order_id": venue_order_id},
+                venue_order_id=venue_order_id,
+                matched_size=filled_size,
+                fill_price=fill_price,
+                observed_at=observed_at,
+                order_fact_source=order_fact_source,
+            )
+        else:
+            _append_exit_order_fill_projection(
+                conn,
+                command={**command, "venue_order_id": venue_order_id},
+                venue_order_id=venue_order_id,
+                matched_size=filled_size,
+                fill_price=fill_price,
+                observed_at=observed_at,
+                event_type=event_type,
+                raise_on_error=True,
+            )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
@@ -17747,17 +17806,27 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
     return "advanced"
 
 
-def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
+def _review_required_cancel_failed_already_canceled_no_fill_recovery(
     conn: sqlite3.Connection,
     cmd: VenueCommand,
     client,
 ) -> str:
-    """Expire a proven unfilled maker increment after an idempotent cancel race."""
+    """Expire a proven unfilled command after an idempotent cancel race."""
 
+    # SCOPE: only the exact bound ENTRY/BUY or EXIT/SELL command whose cancel
+    # response says already canceled/matched and whose authenticated account
+    # reads all prove zero exposure.
+    # DRAIN: terminal point-order zero fill + complete open-order/trade absence.
+    # RESET: EXPIRED releases the entry commitment or the held position back to
+    # continuous exit redecision; incomplete/ambiguous reads fail closed.
+    intent_side = (cmd.intent_kind, str(cmd.side or "").upper())
     if (
         cmd.state != CommandState.REVIEW_REQUIRED
-        or cmd.intent_kind != IntentKind.ENTRY
-        or str(cmd.side or "").upper() != "BUY"
+        or intent_side
+        not in {
+            (IntentKind.ENTRY, "BUY"),
+            (IntentKind.EXIT, "SELL"),
+        }
         or not str(cmd.venue_order_id or "").strip()
     ):
         return "stayed"
@@ -17785,9 +17854,32 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
             exc,
         )
         return "error"
-    if point_order is None or _extract_order_id(point_order) != venue_order_id:
+    if (
+        point_order is None
+        and getattr(client, "venue_reads_are_complete", False) is True
+    ):
+        point_order = {
+            "orderID": venue_order_id,
+            "status": "UNKNOWN",
+            "source_error": "complete_snapshot_point_order_absence",
+        }
+    point_order_no_live_record = _point_order_no_live_record(
+        point_order,
+        expected_order_id=venue_order_id,
+    )
+    point_order_absence_complete = (
+        getattr(client, "venue_reads_are_complete", False) is True
+    )
+    if (
+        point_order is None
+        or (
+            _extract_order_id(point_order) != venue_order_id
+            and not point_order_no_live_record
+        )
+    ):
         return "stayed"
     status = _order_status(point_order)
+    venue_resp_present_for_terminal_state = None
     fact_state = _terminal_fact_state_for_venue_status(
         status,
         venue_resp_present=True,
@@ -17807,12 +17899,31 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
         command,
         trades=trades,
     )
+    source_reason = "cancel_failed_already_canceled_point_order_terminal_no_fill"
+    fact_source_reason = source_reason
+    if (
+        point_order_no_live_record
+        and point_order_absence_complete
+        and not matching_open_orders
+        and not matching_trades
+        and _fill_trade_fact_count(conn, cmd.command_id) == 0
+    ):
+        no_fill_proven = True
+        fact_state = _terminal_fact_state_for_venue_status(
+            status,
+            venue_resp_present=False,
+        )
+        venue_resp_present_for_terminal_state = False
+        fact_source_reason = (
+            "cancel_failed_already_canceled_point_order_no_live_record_terminal_no_fill"
+        )
     if fact_state is None or not no_fill_proven or matching_open_orders or matching_trades:
         return "stayed"
 
     current = _dict_row(
         conn.execute(
-            "SELECT phase, shares, cost_basis_usd, order_id "
+            "SELECT phase, shares, cost_basis_usd, order_id, city, target_date, "
+            "strategy_key "
             "FROM position_current WHERE position_id = ? LIMIT 1",
             (str(command.get("position_id") or ""),),
         ).fetchone()
@@ -17829,18 +17940,25 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
         and cost_basis == 0
     )
     existing_position = (
-        phase in {"active", "day0_window", "pending_exit"}
+        cmd.intent_kind == IntentKind.ENTRY
+        and phase in {"active", "day0_window", "pending_exit"}
         and shares > 0
         and cost_basis > 0
         and str(current.get("order_id") or "") != venue_order_id
     )
-    if not (zero_pending or existing_position):
+    existing_exit = (
+        cmd.intent_kind == IntentKind.EXIT
+        and phase in {"active", "day0_window", "pending_exit"}
+        and shares > 0
+        and cost_basis >= 0
+    )
+    if not (zero_pending or existing_position or existing_exit):
         return "stayed"
 
     now = _now_iso()
-    source_reason = "cancel_failed_already_canceled_point_order_terminal_no_fill"
+    intent_name = str(cmd.intent_kind.value).lower()
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
-    sp_name = f"sp_already_cancelled_entry_no_fill_{safe_command_id}"
+    sp_name = f"sp_already_cancelled_{intent_name}_no_fill_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
         fact_id, fact_payload = _append_point_order_terminal_no_fill_fact(
@@ -17851,8 +17969,27 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
             point_order=point_order,
             matching_open_orders=matching_open_orders,
             matching_trades=matching_trades,
-            source_reason=source_reason,
+            source_reason=fact_source_reason,
+            venue_resp_present_for_terminal_state=venue_resp_present_for_terminal_state,
         )
+        if existing_exit:
+            released = _release_exit_after_terminal_no_fill(
+                conn,
+                command={
+                    **command,
+                    "position_city": current.get("city"),
+                    "position_target_date": current.get("target_date"),
+                    "position_strategy_key": current.get("strategy_key"),
+                },
+                observed_at=now,
+                order_fact_id=fact_id,
+                terminal_payload=fact_payload,
+            )
+            if not released:
+                raise RuntimeError(
+                    "exit terminal no-fill proof did not release redecision "
+                    f"for command {cmd.command_id}"
+                )
         payload = {
             "schema_version": 1,
             "reason": "review_cleared_no_venue_exposure",
@@ -17866,12 +18003,22 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
                 "cancel_failed_already_canceled": True,
                 "venue_order_id_present": True,
                 "venue_order_id_matches_point_read": True,
+                "point_order_no_live_record": point_order_no_live_record,
+                "point_order_absence_complete": point_order_absence_complete,
                 "point_order_terminal_no_fill": True,
                 "point_order_matched_size_zero": True,
                 "no_trade_facts": True,
                 "no_matching_open_orders": True,
                 "no_matching_trades": True,
                 "position_projection_not_bound_to_command": True,
+                **(
+                    {}
+                    if cmd.intent_kind == IntentKind.ENTRY
+                    else {
+                        "position_retains_positive_shares": True,
+                        "position_phase_allows_exit_redecision": True,
+                    }
+                ),
             },
             "terminal_order_fact_id": fact_id,
             "terminal_order_fact": fact_payload,
@@ -17903,7 +18050,7 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
             "source_proof": {
                 "source_commit": "runtime",
                 "source_function": "command_recovery._reconcile_row",
-                "source_reason": source_reason,
+                "source_reason": fact_source_reason,
             },
             "reviewed_by": "command_recovery",
             "cleared_at": now,
@@ -19217,10 +19364,10 @@ def _reconcile_row(
         state = cmd.state
 
         if state == CommandState.REVIEW_REQUIRED:
-            outcome = _review_required_cancel_failed_already_canceled_entry_fill_recovery(conn, cmd)
+            outcome = _review_required_cancel_failed_already_canceled_fill_recovery(conn, cmd)
             if outcome != "stayed":
                 return outcome
-            outcome = _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
+            outcome = _review_required_cancel_failed_already_canceled_no_fill_recovery(
                 conn,
                 cmd,
                 client,

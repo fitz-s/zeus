@@ -12018,6 +12018,547 @@ class TestRecoveryResolutionTable:
         }
 
     @pytest.mark.parametrize(
+        ("phase_before", "phase_after", "point_order_kind"),
+        (
+            ("day0_window", "day0_window", "terminal"),
+            ("pending_exit", "active", "terminal"),
+            ("day0_window", "day0_window", "complete_absence"),
+        ),
+    )
+    def test_already_canceled_zero_fill_exit_releases_continuous_redecision(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+        phase_before,
+        phase_after,
+        point_order_kind,
+    ):
+        """An ambiguous EXIT submit proven unfilled must not strand the holding."""
+        _insert(
+            conn,
+            command_id="cmd-entry",
+            position_id="pos-001",
+            size=17.0,
+            price=0.43,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-entry",
+            venue_order_id="ord-entry",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            command_id="cmd-entry",
+            order_id="ord-entry",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = ?,
+                   shares = 17.0,
+                   cost_basis_usd = 7.31,
+                   size_usd = 7.31,
+                   entry_price = 0.43,
+                   chain_state = 'synced',
+                   chain_shares = 17.0,
+                   order_id = 'ord-exit-425',
+                   order_status = 'filled',
+                   exit_reason = 'GLOBAL_CAPITAL_OPTIMAL_SELL [ACTIVE_EXIT_SELL_IN_FLIGHT]'
+             WHERE position_id = 'pos-001'
+            """,
+            (phase_before,),
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=17.0,
+            price=0.46,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _advance_to_submitting(
+            conn,
+            command_id="cmd-exit",
+            venue_order_id="ord-exit-425",
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="SUBMIT_TIMEOUT_UNKNOWN",
+            occurred_at="2026-04-26T00:02:00Z",
+            payload={
+                "venue_order_id": "ord-exit-425",
+                "reason": "post_submit_exception_possible_side_effect",
+                "exception_message": "425 order manager not ready, please retry",
+            },
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-exit-425"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-exit-425",
+                "reason": "order can't be found - already canceled or matched",
+                "cancel_outcome": {
+                    "orderID": "ord-exit-425",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": (
+                        "order can't be found - already canceled or matched"
+                    ),
+                },
+            },
+        )
+        if point_order_kind == "complete_absence":
+            mock_client.get_order.return_value = None
+            object.__setattr__(mock_client, "venue_reads_are_complete", True)
+        else:
+            mock_client.get_order.return_value = {
+                "orderID": "ord-exit-425",
+                "status": "CANCELED",
+                "original_size": "17",
+                "size_matched": "0",
+            }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution import command_recovery
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
+        )
+        summary = command_recovery.reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] >= 1
+        assert _get_state(conn, "cmd-exit") == "EXPIRED"
+        event = _get_events(conn, "cmd-exit")[-1]
+        assert event["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == "cancel_failed_already_canceled_terminal_no_fill"
+        if point_order_kind == "complete_absence":
+            expected_source_reason = (
+                "cancel_failed_already_canceled_point_order_no_live_record_terminal_no_fill"
+            )
+            assert payload["source_proof"]["source_reason"] == expected_source_reason
+            assert payload["terminal_order_fact"]["source_reason"] == expected_source_reason
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, order_id, order_status, exit_reason
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": phase_after,
+            "shares": 17.0,
+            "cost_basis_usd": 7.31,
+            "order_id": None,
+            "order_status": "filled",
+            "exit_reason": "EXIT_ORDER_TERMINAL_NO_FILL_RELEASED",
+        }
+        lifecycle = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, command_id, venue_status
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(lifecycle) == {
+            "event_type": "EXIT_ORDER_VOIDED",
+            "phase_before": phase_before,
+            "phase_after": phase_after,
+            "command_id": "cmd-exit",
+            "venue_status": "TERMINAL_NO_FILL",
+        }
+
+    @pytest.mark.parametrize("projection_raises", (False, True))
+    def test_already_canceled_full_exit_fill_projects_economic_close(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+        projection_raises,
+    ):
+        """A confirmed EXIT fill must win over an already-canceled response."""
+        _insert(
+            conn,
+            command_id="cmd-entry",
+            position_id="pos-001",
+            size=6.0,
+            price=0.31,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-entry",
+            venue_order_id="ord-entry",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            command_id="cmd-entry",
+            order_id="ord-entry",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 6.0,
+                   cost_basis_usd = 1.86,
+                   size_usd = 1.86,
+                   entry_price = 0.31,
+                   chain_state = 'synced',
+                   chain_shares = 6.0,
+                   order_status = 'sell_pending_confirmation'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _seed_full_exit_intent(conn, position_id="pos-001", shares=6.0)
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=6.0,
+            price=0.46,
+            created_at="2026-04-26T00:04:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit",
+            venue_order_id="ord-exit-filled",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit-filled",
+            trade_id="trade-exit-filled",
+            state="CONFIRMED",
+            filled_size="6",
+            fill_price="0.46",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-exit-filled"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-exit-filled",
+                "reason": "order can't be found - already canceled or matched",
+                "cancel_outcome": {
+                    "orderID": "ord-exit-filled",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": (
+                        "order can't be found - already canceled or matched"
+                    ),
+                },
+            },
+        )
+
+        if projection_raises:
+            from src.execution import exchange_reconcile
+
+            monkeypatch.setattr(
+                exchange_reconcile,
+                "_ensure_exit_fill_position_event",
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    RuntimeError("forced exit projection failure")
+                ),
+            )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        if projection_raises:
+            assert summary["errors"] >= 1
+            assert _get_state(conn, "cmd-exit") == "REVIEW_REQUIRED"
+            assert _get_events(conn, "cmd-exit")[-1]["event_type"] == "CANCEL_FAILED"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM venue_order_facts "
+                "WHERE command_id = 'cmd-exit'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
+            ).fetchone()["phase"] == "pending_exit"
+            return
+
+        assert summary["advanced"] >= 1
+        assert _get_state(conn, "cmd-exit") == "FILLED"
+        assert _get_events(conn, "cmd-exit")[-1]["event_type"] == "FILL_CONFIRMED"
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, order_status, exit_price,
+                   realized_pnl_usd
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert current["phase"] == "economically_closed"
+        assert current["shares"] == pytest.approx(6.0)
+        assert current["cost_basis_usd"] == pytest.approx(1.86)
+        assert current["order_status"] == "sell_filled"
+        assert current["exit_price"] == pytest.approx(0.46)
+        assert current["realized_pnl_usd"] == pytest.approx(0.90)
+
+    def test_already_canceled_partial_exit_advances_without_economic_close(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A terminal partial SELL leaves only its proven residual unresolved."""
+        _insert(
+            conn,
+            command_id="cmd-entry",
+            position_id="pos-001",
+            size=6.0,
+            price=0.31,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-entry",
+            venue_order_id="ord-entry",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            command_id="cmd-entry",
+            order_id="ord-entry",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 6.0,
+                   cost_basis_usd = 1.86,
+                   size_usd = 1.86,
+                   entry_price = 0.31,
+                   chain_state = 'synced',
+                   chain_shares = 6.0,
+                   order_status = 'sell_pending_confirmation'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _seed_full_exit_intent(conn, position_id="pos-001", shares=6.0)
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=6.0,
+            price=0.46,
+            created_at="2026-04-26T00:04:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit",
+            venue_order_id="ord-exit-partial",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit-partial",
+            trade_id="trade-exit-partial",
+            state="CONFIRMED",
+            filled_size="2",
+            fill_price="0.46",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-exit-partial"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-exit-partial",
+                "reason": "order can't be found - already canceled or matched",
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] >= 1
+        assert _get_state(conn, "cmd-exit") == "PARTIAL"
+        event = _get_events(conn, "cmd-exit")[-1]
+        assert event["event_type"] == "PARTIAL_FILL_OBSERVED"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == "terminal_partial_order_fact"
+        fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-exit'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(fact) == {
+            "state": "PARTIALLY_MATCHED",
+            "matched_size": "2",
+            "remaining_size": "0",
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, order_status, exit_price
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "shares": 6.0,
+            "cost_basis_usd": 1.86,
+            "order_status": "sell_pending_confirmation",
+            "exit_price": None,
+        }
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'EXIT_ORDER_FILLED'
+            """
+        ).fetchone()[0] == 0
+
+    def test_already_canceled_exit_ambiguous_point_read_stays_review_required(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Incomplete authenticated truth must not clear an EXIT review boundary."""
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=4.0,
+            price=0.42,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit",
+            venue_order_id="ord-exit-ambiguous",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-exit-ambiguous"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-exit-ambiguous",
+                "reason": "order can't be found - already canceled or matched",
+            },
+        )
+        mock_client.get_order.side_effect = RuntimeError("point read unavailable")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["errors"] >= 1
+        assert _get_state(conn, "cmd-exit") == "REVIEW_REQUIRED"
+        assert _get_events(conn, "cmd-exit")[-1]["event_type"] == "CANCEL_FAILED"
+
+    def test_already_canceled_exit_unknown_point_without_complete_read_stays_review_required(
+        self,
+        conn,
+        mock_client,
+    ):
+        """UNKNOWN without authenticated completeness cannot prove venue absence."""
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=4.0,
+            price=0.42,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit",
+            venue_order_id="ord-exit-unknown",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-exit-unknown"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-exit-unknown",
+                "reason": "order can't be found - already canceled or matched",
+            },
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "ord-exit-unknown",
+            "status": "UNKNOWN",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-exit") == "REVIEW_REQUIRED"
+        assert _get_events(conn, "cmd-exit")[-1]["event_type"] == "CANCEL_FAILED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-exit'"
+        ).fetchone()[0] == 0
+
+    @pytest.mark.parametrize(
         ("event_type", "reason"),
         (
             (

@@ -1776,9 +1776,12 @@ def _validate_terminal_partial_command_correction_payload(
     venue_order_id = str(payload.get("venue_order_id") or "")
     if command is None:
         raise ValueError("terminal partial command correction command is missing")
+    intent_side = (
+        str(command["intent_kind"] or "").upper(),
+        str(command["side"] or "").upper(),
+    )
     if (
-        str(command["intent_kind"] or "").upper() != "ENTRY"
-        or str(command["side"] or "").upper() != "BUY"
+        intent_side not in {("ENTRY", "BUY"), ("EXIT", "SELL")}
         or str(command["venue_order_id"] or "") != venue_order_id
     ):
         raise ValueError("terminal partial command correction command identity does not match")
@@ -2454,7 +2457,10 @@ def _validate_review_cancel_unknown_no_fill_payload(
         if not str(source.get(key) or "").strip():
             raise ValueError(f"cancel-unknown no-fill source_proof missing {key}")
     supported_source_reasons = (
-        {"cancel_failed_already_canceled_point_order_terminal_no_fill"}
+        {
+            "cancel_failed_already_canceled_point_order_terminal_no_fill",
+            "cancel_failed_already_canceled_point_order_no_live_record_terminal_no_fill",
+        }
         if already_canceled
         else {
             "cancel_unknown_point_order_terminal_no_fill",
