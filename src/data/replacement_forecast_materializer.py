@@ -1382,6 +1382,139 @@ def _replacement_city_candidate_lookup(unit: str, city: str | None) -> dict | No
         return None
 
 
+# Created: 2026-07-28
+# Authority basis: docs/operations/current/sigma_tau_calibration/PLAN.md. OOS walk-forward bakeoff
+#   (calib_curves/bakeoff.py) selected per-(unit_family, metric) FITTED k(tau) times per-city
+#   variance shrinkage as the best legal sigma correction for the CURRENT-EVIDENCE (Day0) shape --
+#   the ONLY site this governs is the `_current_shape is not None` branch below, which previously
+#   hardcoded (1.0, 0.0, 0.0) (see "Historical k/w/floors would change a decision-time-only shape").
+#   This is a SEPARATE calibration surface from state/sigma_scale_fit.json (the HISTORICAL-path
+#   artifact _replacement_sigma_scale_lookup/_effective_unit_sigma_scale read above); that machinery
+#   is untouched. scripts/fit_sigma_tau_calibration.py is this artifact's ONLY writer.
+_SIGMA_TAU_BUCKET_EDGES: tuple[float, ...] = (0.0, 6.0, 12.0, 24.0, 36.0, 48.0, 72.0, math.inf)
+_SIGMA_TAU_BUCKET_LABELS: tuple[str, ...] = (
+    "[0,6)", "[6,12)", "[12,24)", "[24,36)", "[36,48)", "[48,72)", "[72,inf)",
+)
+
+
+def _lead_target_h(target_date: "date | str", computed_at: "datetime | str") -> float:
+    """Hours from ``computed_at`` to the END of ``target_date`` UTC (target_date+1 day 00:00 UTC).
+
+    This is the tau used by the sigma-tau calibration fit (matches
+    calib_curves/fit_inputs.py's ``lead_target_h``), NOT the settlement-availability lead used
+    elsewhere in this module (e.g. ``_lead_hours`` in fit_sigma_scale.py measures lag to
+    target_date START, a different clock for a different, HISTORICAL-path artifact).
+    """
+    target = date.fromisoformat(_date_text(target_date))
+    target_end = datetime(target.year, target.month, target.day, tzinfo=UTC) + timedelta(days=1)
+    computed = _to_utc(computed_at, field_name="computed_at")
+    return (target_end - computed).total_seconds() / 3600.0
+
+
+def _sigma_tau_bucket_label(lead_target_h: float) -> str | None:
+    """Bucket label for the fitted artifact's ``buckets`` key, or None if unbucketable.
+
+    A negative or non-finite lead has no trading-lead meaning (mirrors the fitter's drop of
+    lead_target_h<0 rows) and returns None, which the lookup below treats as INERT.
+    """
+    if not math.isfinite(lead_target_h) or lead_target_h < 0.0:
+        return None
+    for lo, hi, label in zip(
+        _SIGMA_TAU_BUCKET_EDGES, _SIGMA_TAU_BUCKET_EDGES[1:], _SIGMA_TAU_BUCKET_LABELS
+    ):
+        if lo <= lead_target_h < hi:
+            return label
+    return None
+
+
+def _sigma_tau_calibration_lookup(
+    unit: str, metric: str, tau_bucket: str | None, city: str | None
+) -> tuple[float, float, float, str | None]:
+    """CURRENT-EVIDENCE lead-time sigma calibration: FITTED k(tau) x per-city variance shrinkage.
+
+    Reads ``state/sigma_tau_calibration.json`` (written ONLY by
+    ``scripts/fit_sigma_tau_calibration.py``) and returns ``(k, w, floor_steps, artifact_hash)``
+    for the given settlement unit family ('C'/'F'), metric ('high'/'low'), tau bucket label, and
+    city. ``w`` and ``floor_steps`` are ALWAYS ``0.0`` -- this is a k-only artifact for the
+    decision-time-only current-evidence shape (the uniform-mixture/absolute-floor terms belong to
+    the separate historical-path sigma_scale_fit.json surface and are out of scope here).
+
+    FAIL-CLOSED TO TODAY -- returns exactly ``(1.0, 0.0, 0.0, None)`` (byte-identical to the prior
+    hardcoded neutral tuple), never raises, when:
+      - ``tau_bucket`` is None (unbucketable lead, e.g. negative/non-finite);
+      - the artifact file is absent, unreadable, or malformed JSON;
+      - the ``(unit, metric)`` group is absent or its ``fitted`` flag is False (the fitter REFUSED
+        the whole group for insufficient rows -- no math support, no correction, per operator law);
+      - the group's ``global_k`` is missing/non-finite/non-positive (a bucket that is itself
+        unfitted has nothing valid to inherit);
+      - the resolved bucket entry is unfitted (inherits ``global_k``) but that inherited value is
+        also invalid;
+      - the final ``k_eff`` is non-finite or non-positive.
+    A city with no entry, or a non-finite/non-positive ``c_shrunk``, contributes exactly ``c=1.0``
+    (no per-city adjustment) -- fail-soft at the per-city layer without invalidating the group k.
+    The 4th element is the artifact's identity hash (sha256 of its raw bytes) whenever the file was
+    successfully read and parsed, REGARDLESS of whether k ended up firing -- full audit trail even
+    on an inert outcome. None when the file could not be read/parsed at all.
+    """
+    if tau_bucket is None:
+        return 1.0, 0.0, 0.0, None
+    try:
+        import os  # noqa: PLC0415
+
+        from src.config import runtime_state_path  # noqa: PLC0415
+
+        path = str(runtime_state_path("sigma_tau_calibration.json"))
+        if not os.path.exists(path):
+            return 1.0, 0.0, 0.0, None
+        with open(path, "rb") as fh_bytes:
+            raw_bytes = fh_bytes.read()
+        artifact_hash = hashlib.sha256(raw_bytes).hexdigest()
+        artifact = json.loads(raw_bytes.decode("utf-8"))
+        fam = (artifact.get("families") or {}).get(str(unit).upper())
+        if not isinstance(fam, dict):
+            return 1.0, 0.0, 0.0, artifact_hash
+        group = fam.get(str(metric).lower())
+        if not isinstance(group, dict) or not group.get("fitted"):
+            return 1.0, 0.0, 0.0, artifact_hash
+        global_k = group.get("global_k")
+        if not (isinstance(global_k, (int, float)) and math.isfinite(global_k) and global_k > 0.0):
+            return 1.0, 0.0, 0.0, artifact_hash
+        buckets = group.get("buckets") or {}
+        bucket_entry = buckets.get(tau_bucket)
+        if isinstance(bucket_entry, dict) and bucket_entry.get("fitted"):
+            k_bucket = bucket_entry.get("k")
+        else:
+            k_bucket = global_k
+        if not (isinstance(k_bucket, (int, float)) and math.isfinite(k_bucket) and k_bucket > 0.0):
+            return 1.0, 0.0, 0.0, artifact_hash
+        c_shrunk = 1.0
+        if city:
+            cities = group.get("cities") or {}
+            city_entry = cities.get(str(city))
+            if isinstance(city_entry, dict):
+                c_value = city_entry.get("c_shrunk")
+                if isinstance(c_value, (int, float)) and math.isfinite(c_value) and c_value > 0.0:
+                    c_shrunk = float(c_value)
+        k_eff = float(k_bucket) * c_shrunk
+        if not (math.isfinite(k_eff) and k_eff > 0.0):
+            return 1.0, 0.0, 0.0, artifact_hash
+        return k_eff, 0.0, 0.0, artifact_hash
+    except Exception:
+        return 1.0, 0.0, 0.0, None
+
+
+def _effective_sigma_tau_scale(
+    unit: str, metric: str, tau_bucket: str | None, city: str | None
+) -> tuple[float, float, float, str | None]:
+    """The (k, w, floor_steps, artifact_hash) the current-evidence build applies.
+
+    Pure delegate to ``_sigma_tau_calibration_lookup`` -- the fitted artifact's per-group ``fitted``
+    flag is the sole licensing authority, exactly as ``_effective_unit_sigma_scale`` delegates for
+    the historical path. No unit/metric/bucket allow-list here.
+    """
+    return _sigma_tau_calibration_lookup(unit, metric, tau_bucket, city)
+
+
 def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequest") -> str:
     """Return the settlement unit ('C' or 'F') for the city, derived from the request bins.
 
@@ -4154,6 +4287,11 @@ def _compute_posterior_payload(
     # C3 calibration surface 2026-06-12 — FITTED σ_pred scale provenance. None when scaling is not
     # applied (artifact missing / family unfitted / k=1.0); float applied value when scaling fires.
     sigma_scale_k_applied: float | None = None
+    # Sigma-tau calibration (2026-07-28) — identity of the state/sigma_tau_calibration.json artifact
+    # actually read on the CURRENT-EVIDENCE path. None when non-current-evidence (that path never
+    # reads this artifact) or when the artifact could not be read/parsed at all; the sha256 hash
+    # whenever it WAS read, regardless of whether k ended up firing (full audit trail either way).
+    sigma_tau_artifact_hash: str | None = None
     # FITTED uniform-mixture weight provenance. None when no mixture applied (artifact missing /
     # family unfitted / w=0.0); float applied w when the mixture fires. Both come from the SAME
     # state/sigma_scale_fit.json family entry (MLE-fitted, operator law 2026-06-12).
@@ -4301,9 +4439,24 @@ def _compute_posterior_payload(
             # (1.0,0.0,0.0) inert from the lookup), so NO hardcoded settlement-unit allow-list here.
             _city_unit = _city_settlement_unit_from_bins(request)
             if _current_shape is not None:
-                # Historical k/w/floors would change a decision-time-only shape
-                # into a second probability regime. They are exactly neutral here.
-                _k, _uniform_w, _floor_steps = 1.0, 0.0, 0.0
+                # SIGMA-TAU CALIBRATION (2026-07-28): the historical sigma_scale_fit.json k/w/floor
+                # would change a decision-time-only shape into a second probability regime, so that
+                # artifact stays exactly neutral here (unchanged). In its place, a SEPARATE artifact
+                # (state/sigma_tau_calibration.json, docs/operations/current/sigma_tau_calibration/
+                # PLAN.md) supplies a FITTED, lead-time-indexed k(tau) x per-city variance
+                # shrinkage for THIS shape only -- w and floor_steps remain exactly 0.0 (k-only).
+                # FAIL-CLOSED TO TODAY: artifact absent/malformed/unfitted -> exactly (1.0, 0.0, 0.0),
+                # byte-identical to the prior hardcoded neutral tuple.
+                _sigma_tau_lead_h = _lead_target_h(request.target_date, request.computed_at)
+                _sigma_tau_bucket = _sigma_tau_bucket_label(_sigma_tau_lead_h)
+                (
+                    _k,
+                    _uniform_w,
+                    _floor_steps,
+                    sigma_tau_artifact_hash,
+                ) = _effective_sigma_tau_scale(
+                    _city_unit, metric, _sigma_tau_bucket, request.city
+                )
             else:
                 _k, _uniform_w, _floor_steps = _effective_unit_sigma_scale(
                     _city_unit
@@ -4669,6 +4822,7 @@ def _compute_posterior_payload(
             sigma_scale_k_applied = None
             uniform_mixture_w_applied = None
             sigma_floor_steps_applied = None
+            sigma_tau_artifact_hash = None
             city_calibration_layer_applied = False
             city_calibration_rho = None
             city_score_capital = None
@@ -4895,6 +5049,11 @@ def _compute_posterior_payload(
         # when inert (live artifact has no floor_steps key, or the floor did not bind); the applied
         # floor_steps when σ_core was lifted to floor_steps·step. Same artifact family entry as k/w.
         "sigma_floor_steps_applied": sigma_floor_steps_applied,
+        # Sigma-tau calibration (2026-07-28) — identity of the state/sigma_tau_calibration.json
+        # artifact read on the CURRENT-EVIDENCE path (None on the historical path, or if the
+        # artifact could not be read at all). Authority:
+        # docs/operations/current/sigma_tau_calibration/PLAN.md
+        "sigma_tau_artifact_hash": sigma_tau_artifact_hash,
         # Catch-all exemption (2026-06-10): open-ended bins whose floored mass was capped at the
         # un-floored predictive-sigma mass (the floor may only flatten, never inflate a catch-all).
         "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),
