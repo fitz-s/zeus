@@ -18173,7 +18173,11 @@ def _review_required_matched_submit_trade_fact_recovery(
         ).fetchone()
     )
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte() + """
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ", "
+        + _economic_trade_fact_cte()
+        + """
         SELECT trade_fact_id,
                trade_id,
                venue_order_id,
@@ -18184,7 +18188,7 @@ def _review_required_matched_submit_trade_fact_recovery(
                observed_at,
                venue_timestamp,
                tx_hash
-          FROM canonical_trade_fact
+          FROM economic_trade_fact
          WHERE command_id = ?
            AND venue_order_id = ?
            AND state = 'CONFIRMED'

@@ -6086,7 +6086,7 @@ class TestRecoveryResolutionTable:
         from src.execution.command_recovery import (
             reconcile_review_required_matched_submit_trade_facts,
         )
-        from src.state.venue_command_repo import append_event
+        from src.state.venue_command_repo import append_event, append_trade_fact
 
         command_id = "cmd-durable-matched-submit"
         order_id = "ord-durable-matched-submit"
@@ -6111,13 +6111,32 @@ class TestRecoveryResolutionTable:
             occurred_at="2026-04-26T00:01:00Z",
             payload={"reason": "matched_submit_missing_trade_id"},
         )
-        _append_confirmed_trade_fact(
+        source_fact_id = _append_confirmed_trade_fact(
             conn,
             command_id=command_id,
             order_id=order_id,
             trade_id="trade-durable-matched-submit",
             filled_size="31.9",
             fill_price="0.73",
+        )
+        append_trade_fact(
+            conn,
+            trade_id="edli:trade-durable-matched-submit",
+            venue_order_id=order_id,
+            command_id=command_id,
+            state="CONFIRMED",
+            filled_size="31.9",
+            fill_price="0.73",
+            source="WS_USER",
+            observed_at="2026-04-26T00:06:01Z",
+            venue_timestamp=None,
+            raw_payload_hash="e" * 64,
+            raw_payload_json={
+                "source_module": "src.events.edli_position_bridge",
+                "raw_fill_payload": {
+                    "source_trade_fact_id": source_fact_id,
+                },
+            },
         )
 
         summary = reconcile_review_required_matched_submit_trade_facts(conn)
