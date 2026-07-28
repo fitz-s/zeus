@@ -21675,6 +21675,17 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _capital_recovery_fast_pass()
         _entry_posterior_recovery_fast_pass()
 
+    # A confirmed trade already persisted for a REVIEW_REQUIRED submit is the
+    # narrowest unresolved capital truth: it resolves known exposure and releases
+    # the allocator's systemic-unknown latch without venue I/O. Run it before the
+    # broader authenticated-entry projection scan; that scan can consume the
+    # whole live-tick DB budget on historical rows.
+    _db_pass(
+        "review_required_matched_submit_trade_fact",
+        reconcile_review_required_matched_submit_trade_facts,
+        "review_required_matched_submit_trade_fact",
+    )
+
     # Confirmed fills are current exposure truth. They outrank absence proofs:
     # if the bounded live-tick DB budget expires, an abandoned command may keep
     # one family reserved for another minute, but a filled command must not stay
@@ -21691,16 +21702,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_terminal_order_facts,
             "terminal_order_facts",
         )
-
-    # A confirmed trade already persisted for a REVIEW_REQUIRED submit is the
-    # narrowest capital truth: it resolves unknown exposure and can release the
-    # allocator's global reduce-only posture without venue I/O.  Run it before
-    # broad partial-order maintenance so the live-tick budget cannot starve it.
-    _db_pass(
-        "review_required_matched_submit_trade_fact",
-        reconcile_review_required_matched_submit_trade_facts,
-        "review_required_matched_submit_trade_fact",
-    )
 
     if scope == "live_tick":
         # An aggregate abandoned at ExecutionCommandCreated holds a RESERVED

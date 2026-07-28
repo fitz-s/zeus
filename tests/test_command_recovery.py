@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-07-28
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -830,7 +830,11 @@ def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatc
     def _fail_capture(*args, **kwargs):
         raise AssertionError("boot_fast must not call capture_venue_read_snapshot")
 
-    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _conn_factory,
+    )
     monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
 
     client = MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"])
@@ -1587,13 +1591,66 @@ def test_live_tick_recovers_confirmed_fill_before_abandoned_ghost_budget_defer(
     )
 
     assert calls == [
-        "authenticated_entry_trade_fact",
         "review_required_matched_submit_trade_fact",
+        "authenticated_entry_trade_fact",
         "abandoned_unsubmitted_ghosts",
     ]
     assert summary["review_required_matched_submit_trade_fact"]["advanced"] == 1
     assert summary["db_budget_deferred"] is True
     assert summary["db_budget_deferred_at"] == "abandoned_unsubmitted_ghosts"
+
+
+def test_live_tick_review_fill_survives_authenticated_scan_budget_exhaustion(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+    now = [0.0]
+
+    def _conn_factory():
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _matched_review(_conn):
+        calls.append("review_required_matched_submit_trade_fact")
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    def _authenticated(_conn):
+        calls.append("authenticated_entry_trade_fact")
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_review_required_matched_submit_trade_facts",
+        _matched_review,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_authenticated_entry_trade_facts",
+        _authenticated,
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-07-28T10:00:00+00:00",
+        scope="live_tick",
+    )
+
+    assert calls == [
+        "review_required_matched_submit_trade_fact",
+        "authenticated_entry_trade_fact",
+    ]
+    assert summary["review_required_matched_submit_trade_fact"]["advanced"] == 1
+    assert summary["db_budget_deferred"] is True
+    assert summary["db_budget_deferred_at"] == "authenticated_entry_trade_fact"
 
 
 def test_live_tick_recovers_confirmed_review_fill_before_maintenance_budget_defer(
@@ -1802,7 +1859,9 @@ def test_live_tick_first_apply_contention_skips_remaining_sweep(monkeypatch):
 
     assert apply_attempts == [{"blocking": False, "busy_timeout_ms": 0}]
     assert summary["db_lock_deferred"] is True
-    assert summary["db_lock_deferred_at"] == "authenticated_entry_trade_fact"
+    assert summary["db_lock_deferred_at"] == (
+        "review_required_matched_submit_trade_fact"
+    )
     assert summary["db_lock_deferred_count"] == 1
     assert summary["deferred_full_sweep"] is True
     assert summary["scope"] == "live_tick"
