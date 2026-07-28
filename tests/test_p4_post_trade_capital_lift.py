@@ -1106,7 +1106,7 @@ def test_collateral_cold_tls_budget_exceeds_observed_handshake(monkeypatch):
     from src.execution import post_trade_capital
 
     monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS", raising=False)
-    assert post_trade_capital._post_trade_collateral_timeout_seconds() == 6.0
+    assert post_trade_capital._post_trade_collateral_timeout_seconds() == 20.0
 
     monkeypatch.setenv("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS", "invalid")
-    assert post_trade_capital._post_trade_collateral_timeout_seconds() == 6.0
+    assert post_trade_capital._post_trade_collateral_timeout_seconds() == 20.0

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import json
 import sqlite3
 import sys
 import time
@@ -957,6 +958,136 @@ def test_pusd_collateral_payload_can_skip_clob_update_and_use_chain_allowance(tm
     assert payload["pusd_allowance_source"] == "chain_erc20_allowance"
     assert [call[0] for call in fake.calls] == ["get_balance_allowance"]
     assert len(rpc_calls) == 2
+
+
+def test_chain_pusd_collateral_payload_batches_balance_and_both_allowances(
+    monkeypatch,
+    tmp_path,
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    observed = {}
+
+    def batch_call(url, calls, *, timeout_seconds):
+        observed.update(url=url, calls=calls, timeout_seconds=timeout_seconds)
+        return [
+            f"0x{123:064x}",
+            f"0x{((2**256) - 1):064x}",
+            f"0x{((2**256) - 2):064x}",
+        ]
+
+    monkeypatch.setattr(adapter_mod, "_json_rpc_batch_call", batch_call)
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        polygon_rpc_url="https://rpc.test",
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: pytest.fail("chain batch must not create a CLOB client"),
+        network_timeout_seconds=17,
+    )
+
+    payload = adapter.get_chain_pusd_collateral_payload()
+
+    assert payload["pusd_balance_micro"] == 123
+    assert payload["pusd_allowance_micro"] == (2**256) - 2
+    assert payload["authority_tier"] == "CHAIN"
+    assert payload["pusd_balance_source"] == "CHAIN"
+    assert payload["pusd_allowance_source"] == "chain_erc20_batch"
+    assert observed["url"] == "https://rpc.test"
+    assert observed["timeout_seconds"] == 17
+    assert len(observed["calls"]) == 3
+    assert {method for method, _params in observed["calls"]} == {"eth_call"}
+
+
+def test_json_rpc_batch_rejects_partial_chain_truth(monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                [{"jsonrpc": "2.0", "id": 1, "result": f"0x{1:064x}"}]
+            ).encode()
+
+    monkeypatch.setattr(adapter_mod.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response())
+
+    with pytest.raises(adapter_mod.V2AdapterError, match="batch incomplete"):
+        adapter_mod._json_rpc_batch_call(
+            "https://rpc.test",
+            [
+                ("eth_call", [{"to": "0x1"}, "latest"]),
+                ("eth_call", [{"to": "0x2"}, "latest"]),
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"jsonrpc": "2.0", "id": True, "result": "0x1"},
+        {"jsonrpc": "2.0", "id": 1, "result": None},
+        {"jsonrpc": "2.0", "id": 1, "result": ""},
+        {"jsonrpc": "2.0", "id": 1, "result": "0xwat0"},
+        {"id": 1, "result": "0x1"},
+    ],
+)
+def test_json_rpc_batch_rejects_invalid_identity_or_quantity(monkeypatch, item):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps([item]).encode()
+
+    monkeypatch.setattr(adapter_mod.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response())
+
+    with pytest.raises(adapter_mod.V2AdapterError):
+        adapter_mod._json_rpc_batch_call(
+            "https://rpc.test",
+            [("eth_call", [{"to": "0x1"}, "latest"])],
+        )
+
+
+@pytest.mark.parametrize("value", [None, "", "0xwat0", "0x00"])
+def test_chain_pusd_collateral_payload_rejects_invalid_batch_quantity(
+    monkeypatch,
+    tmp_path,
+    value,
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "_json_rpc_batch_call",
+        lambda *_args, **_kwargs: [value, "0x1", "0x1"],
+    )
+    adapter = PolymarketV2Adapter(
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        polygon_rpc_url="https://rpc.test",
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+    )
+
+    with pytest.raises(
+        adapter_mod.V2AdapterError,
+        match="invalid hex data|expected 32-byte uint256",
+    ):
+        adapter.get_chain_pusd_collateral_payload()
 
 
 def test_collateral_payload_rederives_once_when_runtime_l2_creds_are_stale(tmp_path):
