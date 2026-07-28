@@ -83,7 +83,8 @@ def test_audit_uses_bounded_rowid_tail_without_mutating_db(tmp_path):
 
     report = audit(db_path, tail_rows=10)
 
-    assert report["method"] == "bounded_rowid_tail_v1"
+    assert report["schema_version"] == 3
+    assert report["method"] == "bounded_rowid_tail_v2"
     assert report["freelist_count"] == 0
     decision = report["tables"]["decision_log"]
     assert decision["rowid_high_watermark"] == 30
@@ -104,6 +105,14 @@ def test_audit_uses_bounded_rowid_tail_without_mutating_db(tmp_path):
         "DISCOVERY_SWEEP": 5,
         "PRIORITY_MARKER": 5,
     }
+    snapshot_dedup = snapshots["sample_payload_content_addressability"]
+    assert snapshot_dedup["content_addresses"] == 1
+    assert snapshot_dedup["repeated_rows"] == 9
+    assert snapshot_dedup["repeated_row_fraction"] == 0.9
+    assert snapshot_dedup["content_addressed_savings_bytes"] > 0
+    decision_dedup = decision["sample_payload_content_addressability"]
+    assert decision_dedup["content_addresses"] == 10
+    assert decision_dedup["repeated_rows"] == 0
     retention = report["snapshot_retention_evidence"]
     assert retention["minimum_distinct_operational_snapshot_ids"] == 3
     assert retention["sources"]["venue_commands"] == {

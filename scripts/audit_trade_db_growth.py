@@ -13,6 +13,7 @@ evidence only; it never deletes, vacuums, checkpoints, or authorizes retention.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sqlite3
 import sys
@@ -193,6 +194,51 @@ def _probe_table(
         )
         for row in rows
     ]
+    payload_dedup: dict[str, int | float] | None = None
+    if spec.payload_columns:
+        unique_payload_bytes: dict[str, int] = {}
+        for row, payload_length in zip(rows, payload_lengths, strict=True):
+            if payload_length <= 0:
+                continue
+            digest = hashlib.sha256()
+            for column in spec.payload_columns:
+                value = row[column]
+                if value is None:
+                    digest.update(b"\xff")
+                    continue
+                encoded = str(value).encode("utf-8")
+                digest.update(len(encoded).to_bytes(8, "big"))
+                digest.update(encoded)
+            unique_payload_bytes.setdefault(digest.hexdigest(), payload_length)
+        nonempty_payload_rows = sum(length > 0 for length in payload_lengths)
+        total_payload_bytes = sum(payload_lengths)
+        unique_bytes = sum(unique_payload_bytes.values())
+        repeated_rows = nonempty_payload_rows - len(unique_payload_bytes)
+        savings_bytes = total_payload_bytes - unique_bytes
+        payload_dedup = {
+            "nonempty_payload_rows": nonempty_payload_rows,
+            "empty_payload_rows": len(rows) - nonempty_payload_rows,
+            "content_addresses": len(unique_payload_bytes),
+            "repeated_rows": repeated_rows,
+            "repeated_row_fraction": (
+                round(repeated_rows / nonempty_payload_rows, 4)
+                if nonempty_payload_rows
+                else 0.0
+            ),
+            "payload_bytes": total_payload_bytes,
+            "content_addressed_payload_bytes": unique_bytes,
+            "content_addressed_savings_bytes": savings_bytes,
+            "content_addressed_savings_fraction": (
+                round(savings_bytes / total_payload_bytes, 4)
+                if total_payload_bytes
+                else 0.0
+            ),
+            "scope": (
+                "exact SHA-256 identity over selected payload columns in the "
+                "bounded tail; excludes row identity, timestamps, indexes, "
+                "reference-map overhead, and semantic-but-not-byte-identical rows"
+            ),
+        }
     payload_column_stats: dict[str, dict[str, int | float]] = {}
     for column in spec.payload_columns:
         lengths = [
@@ -218,7 +264,7 @@ def _probe_table(
             categories[category] = categories.get(category, 0) + 1
             category_payload_lengths.setdefault(category, []).append(payload_length)
     times = [str(row[spec.time_column]) for row in rows if row[spec.time_column]]
-    return {
+    result: dict[str, object] = {
         "present": True,
         "rowid_high_watermark": int(high_watermark),
         "sample_rows": len(rows),
@@ -249,6 +295,9 @@ def _probe_table(
         "retention_class": spec.retention_class,
         "rationale": spec.rationale,
     }
+    if payload_dedup is not None:
+        result["sample_payload_content_addressability"] = payload_dedup
+    return result
 
 
 def _direct_snapshot_citations(conn: sqlite3.Connection) -> dict[str, object]:
@@ -327,8 +376,8 @@ def audit(path: Path, *, tail_rows: int) -> dict[str, object]:
                 8,
             )
     return {
-        "schema_version": 2,
-        "method": "bounded_rowid_tail_v1",
+        "schema_version": 3,
+        "method": "bounded_rowid_tail_v2",
         "authority": "read_only_diagnostic_not_retention_authority",
         "audited_at": datetime.now(timezone.utc).isoformat(),
         "db_path": str(resolved),
@@ -346,6 +395,10 @@ def audit(path: Path, *, tail_rows: int) -> dict[str, object]:
             "tail samples estimate current write shape, not whole-history size",
             "no dbstat, whole-table count, vacuum, checkpoint, or mutation is run",
             "direct snapshot refs are a lower bound and never authorize deletion",
+            (
+                "content-addressed savings cover exact selected payload bytes in "
+                "the tail, not deletable rows or whole-history file bytes"
+            ),
         ],
     }
 
