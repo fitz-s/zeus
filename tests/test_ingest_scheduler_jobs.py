@@ -104,10 +104,18 @@ def test_hko_final_daily_poll_is_independent_and_bounded(monkeypatch) -> None:
     assert trigger == "interval"
     assert kwargs["seconds"] == 300.0
     assert kwargs["id"] == "ingest_k2_hko_daily_final"
-    assert kwargs["max_instances"] == 1
-    assert kwargs["coalesce"] is True
-    assert kwargs["misfire_grace_time"] == 600
     assert kwargs["next_run_time"] is not None
+
+    from src.data.scheduler_adapter import build_job_specs
+
+    registry_spec = {
+        spec.job_id: spec
+        for spec in build_job_specs(owner_daemon="ingest_main")
+    }["ingest_k2_hko_daily_final"]
+    assert registry_spec.max_instances == 1
+    assert registry_spec.coalesce is True
+    assert registry_spec.misfire_grace_time == 600
+    assert registry_spec.executor_class == "hko_final_source_clock_db"
 
 
 def test_hko_final_daily_poll_has_own_lock_and_connection(monkeypatch) -> None:

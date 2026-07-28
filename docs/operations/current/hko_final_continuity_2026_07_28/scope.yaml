@@ -6,9 +6,11 @@ in_scope:
 - docs/operations/current/hko_final_continuity_2026_07_28/**
 - src/ingest_main.py
 - src/data/source_job_registry.py
+- src/data/scheduler_adapter.py
 - src/data/daily_obs_append.py
 - src/state/db.py
 - tests/test_ingest_scheduler_jobs.py
+- tests/test_scheduler_adapter.py
 - tests/test_source_job_registry.py
 - tests/test_k2_live_ingestion_relationships.py
 - tests/state/test_daily_obs_cross_db_atomicity.py
@@ -34,6 +36,7 @@ live_side_effects_allowed: false
 supersedes: null
 tests:
 - tests/test_ingest_scheduler_jobs.py
+- tests/test_scheduler_adapter.py
 - tests/test_source_job_registry.py
 - tests/test_step4_wu_daily_dedup.py
 - tests/state/test_daily_obs_cross_db_atomicity.py

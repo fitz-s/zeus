@@ -48,6 +48,8 @@ Explicit non-goals:
 ## Deliverables
 
 - Independent `ingest_k2_hko_daily_final` scheduler job.
+- Dedicated single-worker `hko_final_source_clock_db` executor lane, separate
+  from both WU/METAR work and the two-second HKO realtime poll.
 - Backward-compatible non-blocking admission option on the sanctioned
   forecasts+world connection helper so a poll never waits behind an unrelated
   writer; the existing default remains blocking.
@@ -86,6 +88,9 @@ Explicit non-goals:
 - Planning-lock with this plan and all changed paths: passed.
 - Self-review caught and removed the initial network-under-cross-DB-lock shape;
   final flow is read-only check, unlocked fetch, non-blocking short commit.
+- PR review exposed that the first registry row had no executable scheduler
+  lane. The repaired runtime builder now routes final-daily polling to its own
+  lane; focused scheduler/lock antibodies passed (6 passed).
 - Broader legacy test files retain unrelated pre-existing failures: missing
   local `apscheduler`, removed calibration-auto-promote symbols, five stale
   `src.main` scheduler classifications, and repo-wide test-topology drift.

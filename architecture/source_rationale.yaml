@@ -1137,6 +1137,9 @@ files:
       no deploy/launchd plist ever set them). build_registry_scheduler() is now the sole,
       unconditional daemon-wiring path for src.ingest_main and src.ingest.forecast_live_daemon —
       DAEMON_WIRED, not a dormant planner.
+      HKO finalized Daily Extract polling has its own single-worker
+      hko_final_source_clock_db lane, separate from both METAR/WU observation batching and the
+      two-second HKO realtime poll, so either source's latency cannot suppress final authority.
     hazards: []
     downstream:
     - src/ingest_main.py
