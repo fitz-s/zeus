@@ -309,23 +309,31 @@ hooks:
       ritual_signal_emitted: true
     owner_module: .claude/hooks/citation_grep_gate.py
 
-  - id: no_edge_rule1_guard
+  - id: unsupported_edge_claim_guard
     event: Stop
     matcher: "*"
     intent: >
-      RULE 1 enforcement (operator directive 2026-06-14). BLOCK + redirect when
-      the final assistant message concludes "no edge" / "market efficient" /
-      "honest no-edge". RULE 1 (inviolable): a no-edge verdict is presumed OUR
-      DEFECT until settlement proves otherwise; tradeable alpha is ASSUMED to
-      exist. The guard re-drives the agent (exit 2 -> stderr fed back) to
-      root-cause the suppression and attack OTHER approaches rather than
-      stopping on a no-edge conclusion. Loop-safe: when stop_hook_active it
-      degrades to a non-blocking reminder. Bypass: ZEUS_NO_EDGE_GUARD_OFF=1
-      (operator deliberate override only).
+      Fixed 2026-07-28, replaces no_edge_rule1_guard. The predecessor blocked
+      the CONCLUSION "no edge" / "market efficient" via a ~35-phrase blocklist
+      (two languages) — directly contradicting loop/LEDGER.yaml's own rule
+      that "'insufficient evidence' is a legitimate, required conclusion", and
+      running one layer above the selection calibrator / FDR control to
+      cancel them out. On 2026-07-28 it fired on a session's own summary of
+      the plan to fix it, proving the trigger was lexical, not structural.
+      This guard inverts what gets challenged: it fires on a POSITIVE
+      tradeable-edge / deploy-or-scale-up claim asserted WITHOUT a settled-
+      sample count, an interval/bound, or a settlement-graded evidence
+      reference — or with a stated sample count below this codebase's own
+      floor (MIN_SETTLED_N=30, matching loop/LEDGER.yaml min_n and
+      src/decision/selection_calibrator.py MIN_N). It never blocks a null
+      result, and is exempt on messages that merely discuss edges/guards/this
+      mechanism (2026-07-28 incident is the regression case). Loop-safe: when
+      stop_hook_active it degrades to a non-blocking reminder. Bypass:
+      ZEUS_EDGE_CLAIM_GUARD_OFF=1 (operator deliberate override only).
     blocked_when:
-      - final_message_concludes_no_edge
+      - final_message_asserts_unsupported_positive_edge_claim
     severity: ADVISORY
-    bypass_env: ZEUS_NO_EDGE_GUARD_OFF
+    bypass_env: ZEUS_EDGE_CLAIM_GUARD_OFF
     sunset_date: 2026-12-14
     telemetry:
       ritual_signal_emitted: true

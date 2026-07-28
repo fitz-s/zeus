@@ -76,8 +76,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py no_edge_rule1_guard",
-            "description": "RULE 1 guard (operator 2026-06-14): block + redirect when the final message concludes 'no edge'/'market efficient' \u2014 no-edge is OUR defect; root-cause the suppression, find other approaches. Bypass ZEUS_NO_EDGE_GUARD_OFF=1."
+            "command": "python3 .claude/hooks/dispatch.py unsupported_edge_claim_guard",
+            "description": "Edge-claim guard (fixed 2026-07-28, replaces no_edge_rule1_guard): block + challenge when the final message concludes tradeable edge or a deploy/scale-up decision without a settled-sample count, an interval, or settlement-graded evidence \u2014 a null result is never blocked, only an unsupported positive one. Bypass ZEUS_EDGE_CLAIM_GUARD_OFF=1."
           }
         ]
       }
