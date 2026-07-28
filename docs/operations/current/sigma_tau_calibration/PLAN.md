@@ -28,47 +28,123 @@ already governs the HISTORICAL (non-Day0) path and stays untouched.
 ## Model (M2, evidence basis -- not re-derived here)
 
 Per `(unit_family in {C,F}, metric in {high,low})` group:
-- `z = settled_c - mu`, tau buckets `[0,6),[6,12),[12,24),[24,36),[36,48),
-  [48,72),[72,inf)`.
-- `k(tau) = sqrt(mean((z/sig)^2))` per bucket, Normal MLE. Bucket `n<60` =>
-  UNFITTED, inherits the family/metric-global pooled `k` (train-only,
-  never validation rows). Whole group `n<60` total => group refused,
-  `k=1.0` everywhere (fail-closed, same law as `fit_sigma_scale.py`
-  `MIN_CELLS`).
-- Per-city variance correction, cities with `n>=30` (pooled across tau
-  within the group): `c_raw = sqrt(mean((z/(k(tau)*sig))^2))`, shrunk
-  `c_shrunk^2 = (n_c*c_raw^2 + n0) / (n_c + n0)`, `n0=100` (shrinks toward 1,
-  never toward 0 -- unlike bakeoff.py's log-shrink, this is the mission's
-  explicit form and is what ships).
+- `tau = lead_issue_h` = hours from the posterior's ISSUE clock
+  (`forecast_posteriors.source_cycle_time`, top-level DB column) to the END of
+  `target_date` UTC. Buckets `[0,6),[6,12),[12,24),[24,36),[36,48),[48,72),
+  [72,inf)`.
+- `event_weight = 1/n_e` per `(city, target_date)` settlement event (`n_e` =
+  that event's row count within the group being fit) -- multiple posteriors
+  of one event are correlated (same outcome) and must not multiply-count.
+- `k(tau) = argmax_k` of the event-weighted interval-censored bin likelihood
+  `sum(w * log[Phi((U-mu)/(k*sig)) - Phi((L-mu)/(k*sig))])` over the settled
+  integer's actual bin `[v-0.5, v+0.5)` (native units, F converted to Celsius
+  edges) -- a 1-D bounded MLE (`scipy.optimize.minimize_scalar`), PRIMARY.
+  Bucket `n_events<60` => UNFITTED, inherits the group-global pooled `k`
+  (train-only). Whole group `n_events<60` => group refused, `k=1.0`
+  everywhere (fail-closed, same law as `fit_sigma_scale.py` `MIN_CELLS`, now
+  counted in unique events).
+- Per-city variance correction, cities with `n_events>=30` (pooled across tau
+  within the group): `c_raw` fit by the SAME interval-censored MLE with
+  `sigma = k(tau)*c*sig` (k already fixed), shrunk
+  `c_shrunk^2 = (n_e*c_raw^2 + n0) / (n_e + n0)`, `n0=100` (shrinks toward 1).
 - Served `k_eff(unit, metric, tau, city) = k(tau) * c_shrunk(city)`; `w` and
   `floor_steps` stay exactly `0.0` (k-only artifact for this path; the
   uniform-mixture/absolute-floor terms are a DIFFERENT calibration surface
   and are out of scope here).
+- A closed-form event-weighted spread-skill ratio (`std(z,ddof=1)/sqrt(mean(sig^2))`,
+  the METHOD's original form before the 2026-07-28 design-review correction
+  below) is retained as a REPORTED cross-check column (`k_normal_crosscheck`
+  / `c_raw_normal_crosscheck`) but is never served.
 
 `center`/`mu` is never touched (RAW law). No gates, no caps.
+
+### 2026-07-28 design-review corrections (applied same day, before any artifact
+was ever placed under `state/` -- these supersede the first cut above, not a
+later revision; the bullets above already describe the corrected model)
+
+1. **Tau clock.** The first cut indexed tau on `computed_at` (decision time).
+   Live evidence: Hong Kong 2026-07-20 HIGH has 247 distinct `computed_at`
+   values collapsing to just 4 distinct `source_cycle_time` values on the SAME
+   day -- posteriors recompute far more often than the underlying forecast is
+   reissued. A `computed_at`-anchored tau shrinks on every wall-clock
+   recompute with no new information, a look-ahead-adjacent defect. Verified
+   which candidate field is reliably populated:
+   `forecast_posteriors.source_cycle_time` (top-level DB column) is 100%
+   populated; `$.bayes_precision_fusion.current_evidence_shape.source_cycle_time`
+   is ~96.5% populated and, on inspection, is frequently STALE relative to the
+   top-level column (the current-evidence ENS shape is legitimately reused
+   across cycles) -- using it would train/serve on a different clock than the
+   one actually available and reliable at the site. The materializer's
+   serving-side lookup was changed to `request.source_cycle_time`
+   (`_lead_target_h`'s `computed_at` parameter renamed to `issue_time`); the
+   fitter trains on the same top-level column. The old `computed_at`-anchored
+   tau survives ONLY as a `--validate`-only comparison column
+   (`lead_decision_h` / `taut_decision`), never used for fitting or serving.
+2. **Event weighting.** Multiple posteriors for one `(city, target_date,
+   metric)` settlement event share the same eventual outcome and are not
+   independent draws. `MIN_BUCKET_N` / `MIN_GROUP_N` / `MIN_CITY_N` (still 60 /
+   60 / 30) are now compared against the number of UNIQUE EVENTS touching the
+   cell, not raw rows; both counts are reported (`n` / `n_events`).
+3. **Likelihood.** Replaced the closed-form spread-skill ratio as PRIMARY with
+   interval-censored MLE over the settled integer's actual bin -- this fits
+   the traded quantity directly. The spread-skill ratio is retained as a
+   reported cross-check, not served.
+4. **Data fence.** `current_evidence_shape`'s `within`/`between`/`delta`
+   component fields are only 100% populated for `computed_at >=
+   2026-07-15T22:32:31Z` (86.6% before). This fitter never reads those
+   component fields (only `anchor_value_c`/`predictive_sigma_c`, always
+   populated), so no fence is applied to the query; the boundary is recorded
+   in `_meta.components_fence_reference_ts` /
+   `components_fence_applied=False` for audit, so a future editor who adds a
+   component-field read is forced to confront the boundary.
+
+**Two findings surfaced by these corrections, not defects:**
+- **RAW-mu forces bias into k.** `z` has a non-zero mean (~+0.36C for C/high,
+  i.e. `mu` is systematically a bit low relative to settlement) -- an
+  existing, documented, UNTOUCHED fact (`center`/`mu` RAW law). The
+  interval-censored likelihood assumes a ZERO-mean Gaussian centered exactly
+  at `mu` (it has no bias term to fit, by design), so it can only explain a
+  real mean offset by INFLATING k. This is why the primary (censored) k for
+  C/high (~1.57 pooled) is substantially higher than the bias-corrected
+  `k_normal_crosscheck` (~1.06, which explicitly subtracts the empirical mean
+  before estimating spread). Both numbers are individually correct for what
+  they measure; the primary number is larger because it is honestly paying
+  for a bias it is not allowed to correct directly.
+- **City correction is currently inert.** With `MIN_CITY_N` now counted in
+  unique events and the live corpus spanning only ~17 days
+  (2026-07-11..2026-07-27), NO city can yet reach 30 distinct settlement
+  days, so every city's `c_shrunk` in the current production artifact is the
+  neutral `1.0` (zero cities are eligible in ANY of the four groups). This is
+  a natural, self-correcting consequence of switching from a row-count to an
+  event-count threshold -- the per-city layer will start firing once the
+  corpus accumulates ~30+ days per city -- and not a bug in this slice.
 
 ## Deliverables
 
 1. `scripts/fit_sigma_tau_calibration.py` -- walk-forward fitter, READ-ONLY on
    `state/zeus-forecasts.db` (`mode=ro`), writes the artifact to a path given
    on the command line (operator places it; never a default under `state/`).
-   `--validate CUTOFF` prints the OOS mean-log-lik ladder (`k=1` vs fitted)
-   and coverage@68.3 per family/metric, fit strictly before cutoff / validated
-   strictly at/after it.
+   `--validate CUTOFF` prints the event-weighted OOS mean-log-lik ladder
+   (`k=1` vs fitted, both the primary interval-censored likelihood and the
+   Normal-density cross-check) and coverage@68.3 per family/metric, fit
+   strictly before cutoff / validated strictly at/after it -- run once on the
+   issue clock (PRIMARY) and once on the decision clock (COMPARISON ONLY).
 2. `src/data/replacement_forecast_materializer.py` -- new
    `_sigma_tau_calibration_lookup` / `_effective_sigma_tau_scale` cache
    functions (same fail-soft shape as `_replacement_sigma_scale_lookup` /
-   `_effective_unit_sigma_scale`), a `_lead_target_h` / `_tau_bucket_label`
-   pair for the tau computation, and the current-shape site now calls the new
-   lookup keyed by `(unit_family, metric, tau_bucket, city)` instead of the
-   hardcoded tuple. FAIL-CLOSED TO TODAY: artifact absent / unparseable /
-   family+metric group unfitted / bucket unfitted with no valid group global
-   `k` => exactly `(1.0, 0.0, 0.0)`, never raises. The historical
-   (`_current_shape is None`) branch is untouched -- still
-   `_effective_unit_sigma_scale`. Provenance gets `sigma_tau_artifact_hash`
-   (identity of the artifact file actually read) alongside the existing
-   `sigma_scale_k_applied` stamp (which fires only when the applied k != 1.0
-   -- unchanged trigger, now also covers the tau path's k).
+   `_effective_unit_sigma_scale`), a `_lead_target_h` / `_sigma_tau_bucket_label`
+   pair for the tau computation (keyed on `request.source_cycle_time`, the
+   forecast ISSUE clock -- NOT `request.computed_at`, decision time), and the
+   current-shape site now calls the new lookup keyed by `(unit_family, metric,
+   tau_bucket, city)` instead of the hardcoded tuple. FAIL-CLOSED TO TODAY:
+   artifact absent / unparseable / family+metric group unfitted / bucket
+   unfitted with no valid group global `k` => exactly `(1.0, 0.0, 0.0)`, never
+   raises. The historical (`_current_shape is None`) branch is untouched --
+   still `_effective_unit_sigma_scale`. Provenance gets
+   `sigma_tau_artifact_hash` (identity of the artifact file actually read)
+   alongside the existing `sigma_scale_k_applied` stamp (which fires only when
+   the applied k != 1.0 -- unchanged trigger, now also covers the tau path's
+   k).
 3. Tests: loader unit tests (absent/malformed/fitted/unfitted-bucket
    inherits-global/city-shrinkage), a serving-equivalence test proving the
    historical path is byte-identical and the current-shape path with no
@@ -89,24 +165,65 @@ Per `(unit_family in {C,F}, metric in {high,low})` group:
   with the clearest evidence-basis signal).
 - `git diff --check`, `py_compile`.
 
-### `--validate 2026-07-21` results (live DB, read-only, 2026-07-28)
+### `--validate 2026-07-21` results (live DB, read-only, 2026-07-28, POST-CORRECTION fitter)
+
+Superseded: the pre-correction numbers previously here were fit on `computed_at`-anchored tau with
+row counts and the closed-form spread-skill k; kept below in git history, not reproduced here since
+the corrected run is what actually ships. Both clocks are now reported side by side to show the
+tau-clock choice's effect; event counts (not row counts) gate fitting.
 
 ```
-n_train=12220  n_val=7556
-C/high: n_train=9578 n_val=5122 global_k=1.205819 oos_mean_loglik k=1:-2.46040 fitted:-2.27363 delta:+0.18676  coverage@68.3 k=1:0.5920 fitted:0.5935
-C/low:  n_train=1180 n_val=848  global_k=0.877829 oos_mean_loglik k=1:-1.69417 fitted:-1.89301 delta:-0.19884  coverage@68.3 k=1:0.5542 fitted:0.5248
-F/high: n_train=1244 n_val=1359 global_k=0.971954 oos_mean_loglik k=1:-1.54162 fitted:-1.54996 delta:-0.00834  coverage@68.3 k=1:0.7116 fitted:0.6600
-F/low:  n_train=218  n_val=227  global_k=1.028415 oos_mean_loglik k=1:-1.98954 fitted:-1.77861 delta:+0.21093  coverage@68.3 k=1:0.3612 fitted:0.4097
+[sigma-tau] validate cutoff=2026-07-21 clock=PRIMARY(issue-clock) n_train_rows=12221 n_val_rows=7700
+  C/high: n_events_train=348 n_events_val=176 global_k=1.572637 (normal_crosscheck=1.147199)
+    censored  oos_mean_loglik k=1:-2.20511 fitted:-2.01144 delta:+0.19367
+    normal_xc oos_mean_loglik k=1:-2.60330 fitted:-2.07432 delta:+0.52897
+    coverage@68.3 (event-weighted) k=1:0.5921 fitted:0.7694
+  C/low: SKIP (n_events_train=50, n_events_val=28)
+  F/high: n_events_train=92 n_events_val=64 global_k=1.251403 (normal_crosscheck=0.971015)
+    censored  oos_mean_loglik k=1:-2.09578 fitted:-2.18162 delta:-0.08584
+    normal_xc oos_mean_loglik k=1:-1.51260 fitted:-1.59130 delta:-0.07870
+    coverage@68.3 (event-weighted) k=1:0.7212 fitted:0.8184
+  F/low: SKIP (n_events_train=17, n_events_val=11)
+[sigma-tau] validate cutoff=2026-07-21 clock=COMPARISON-ONLY(decision-clock) n_train_rows=12221 n_val_rows=7700
+  C/high: n_events_train=348 n_events_val=176 global_k=1.572637 (normal_crosscheck=1.147199)
+    censored  oos_mean_loglik k=1:-2.20511 fitted:-2.00997 delta:+0.19514
+    normal_xc oos_mean_loglik k=1:-2.60330 fitted:-2.07241 delta:+0.53089
+    coverage@68.3 (event-weighted) k=1:0.5921 fitted:0.7710
+  C/low: SKIP (n_events_train=50, n_events_val=28)
+  F/high: n_events_train=92 n_events_val=64 global_k=1.251403 (normal_crosscheck=0.971015)
+    censored  oos_mean_loglik k=1:-2.09578 fitted:-2.16560 delta:-0.06981
+    normal_xc oos_mean_loglik k=1:-1.51260 fitted:-1.57576 delta:-0.06317
+    coverage@68.3 (event-weighted) k=1:0.7212 fitted:0.8105
+  F/low: SKIP (n_events_train=17, n_events_val=11)
 ```
 
-C/high (the group with by far the most data and the clearest evidence-basis signal) improves OOS
-mean log-lik by +0.187 nats. F/low also improves (+0.211, small n, noisy). C/low and F/high are
-flat-to-slightly-negative on THIS particular walk-forward split -- both are exactly the "wide CIs"
-low-sample groups the evidence basis already flagged, not a defect in the fitter; they still pass
-`MIN_GROUP_N=60` so they are licensed (`fitted=True`), just noisier. Full production fit (no
-cutoff, `since=2026-07-11..2026-07-27`, `n_final=19776`): global_k C/high=1.082, C/low=0.969,
-F/high=0.856, F/low=0.907 -- matches the cited evidence ranges (C/high~1.07-1.18, F/high~0.80-0.97
-shrink, C/low & F/low~1) to within normal walk-forward-split noise.
+Notes:
+- `n_events_train`/`n_events_val` collapsed dramatically versus the old row counts (e.g. C/high
+  train was 9578 ROWS, now 348 unique EVENTS) -- confirming the recompute-multiplicity finding.
+  `C/low` and `F/low` no longer clear `MIN_GROUP_N=60` EVENTS on this split (they did on raw rows)
+  and are honestly SKIPPED rather than reporting a noisy number; the FULL (non-split) production
+  fit below still licenses them (more total events than either half alone).
+- **Clock choice's effect is small on THIS split**: the two clock blocks' deltas differ only in the
+  4th significant digit for C/high and F/high (e.g. +0.19367 vs +0.19514). This is expected -- most
+  individual posteriors are not near a bucket boundary, so the two clocks usually agree on which
+  bucket a row falls into; the correction's importance is in the WEIGHTING (not letting 247
+  same-cycle recomputes dominate a bucket's fit), which both clock choices now share equally via
+  event weighting. The corrected tau clock's real benefit is preventing "look-ahead": it is not
+  expected to produce a dramatically different NUMBER on a historical replay where recompute
+  clustering happens to be roughly clock-symmetric; it prevents a live drift where recompute
+  cadence itself (not new information) would move q.
+- C/high and F/high both show a genuine OOS coverage improvement (0.59->0.77, 0.72->0.82) even
+  where the censored log-lik delta is small or negative (F/high) -- the SHAPE of the correction
+  (wider tails via a widened k) still improves calibrated coverage even when the point log-lik
+  trade-off is closer to a wash.
+
+Full production fit (no cutoff, full corpus `n_final=19921` -- the corrected pipeline no longer
+drops any rows on the negative-lead check since `lead_issue_h` is never negative in this window):
+`global_k` (interval-censored PRIMARY / normal crosscheck): C/high 1.573/1.061, C/low 1.313/0.905,
+F/high 1.133/0.888, F/low REFUSED (only 28 unique events, `fitted=False`). See the two findings
+above (RAW-mu-forces-bias-into-k; city correction currently inert) for why the primary numbers run
+higher than the original evidence-basis summary and why zero cities appear in any group's
+`cities` map today.
 
 ## Work record
 
@@ -145,3 +262,31 @@ shrink, C/low & F/low~1) to within normal walk-forward-split noise.
   at the same base commit (5 schema-migration tests expecting a `trade_authority_status` column
   that is already present in the base schema, plus 5 unrelated AST/source-scan antibodies).
 - `--validate 2026-07-21` against the live DB: see Acceptance section below for numbers.
+- 2026-07-28 (later same day): design-review corrections 1-4 applied (tau clock -> issue time;
+  event weighting; interval-censored primary likelihood; data-fence documentation). Full fitter
+  rewrite (`scripts/fit_sigma_tau_calibration.py`); ONE-LINE serving-site change
+  (`request.computed_at` -> `request.source_cycle_time` at the single `_lead_target_h(...)` call
+  site) plus a parameter rename (`_lead_target_h(target_date, computed_at)` ->
+  `_lead_target_h(target_date, issue_time)`) for clarity -- everything else in the materializer
+  (the loader function, the fail-closed contract, the provenance stamp sites) is UNCHANGED, per the
+  "architecture unchanged" instruction, since the artifact's served shape (a scalar k per bucket,
+  a scalar c per city) did not change, only how those scalars are fitted.
+  - Fixed a real bug caught by the rewrite: `validate()` originally used `df.rename(columns=
+    {tau_col: "taut"})` to switch between the issue-clock and decision-clock bucket columns, which
+    creates a DUPLICATE "taut" column (both source columns exist on every row from `prep()`) and
+    crashes pandas with `cannot reindex on an axis with duplicate labels`. Fixed by direct
+    assignment (`train["taut"] = train[tau_col]`) instead of rename.
+  - Fixed a lint issue (ruff E741, ambiguous single-letter `l`) in three function signatures by
+    renaming `l`/`u` bin-edge parameters to `lo`/`hi`.
+  - Rewrote `tests/test_fit_sigma_tau_calibration_fitter.py`'s synthetic fixture to add a
+    `recomputes_per_event` mechanism (201 same-source_cycle_time, different-computed_at posteriors
+    for one event, hourly-spaced so hourly dedup does not collapse them) directly proving the
+    tau-clock correction's core claim (all 201 land in ONE bucket) and the event-weighting
+    correction's core claim (their combined weight is exactly 1, not 201). Updated two
+    serving-equivalence test requests whose hand-picked `source_cycle_time` values needed to
+    (a) avoid landing exactly on the `[36,48)`/`[48,72)` bucket boundary (48.0h, since bucketing
+    switched from `computed_at` to `source_cycle_time`) and (b) satisfy the OpenMeteo anchor's
+    00/06/12/18 UTC cycle-hour validation, which the original arbitrary hour choice did not.
+  - Combined new+existing regression suite after the corrections: 29 new tests pass; same 10
+    pre-existing (unrelated) failures as before, verified identical on the unmodified main
+    checkout.

@@ -79,9 +79,10 @@ def _provenance(conn) -> dict:
 
 
 def _fitted_artifact_for_default_request() -> dict:
-    """A fitted artifact keyed to EXACTLY the (unit, metric, bucket, city) the default
-    ``_request()`` resolves to: city=Shanghai (unit 'C'), metric 'high', target_date=2026-06-07,
-    computed_at=2026-06-06T04:00Z -> lead_target_h=44.0h -> bucket [36,48)."""
+    """A fitted artifact keyed to EXACTLY the (unit, metric, bucket, city) the test's request
+    resolves to: city=Shanghai (unit 'C'), metric 'high', target_date=2026-06-07,
+    source_cycle_time=2026-06-06T06:00Z (the tau clock -- NOT computed_at; must be a valid
+    00/06/12/18 UTC ECMWF cycle) -> lead_target_h=42.0h -> bucket [36,48)."""
     return {
         "_meta": {"authority": "sigma_tau_calibration_v1_mle"},
         "families": {
@@ -141,7 +142,7 @@ def test_current_evidence_path_no_artifact_is_neutral(monkeypatch: pytest.Monkey
     _install_current_evidence_fusion(monkeypatch)
 
     result = materialize_replacement_forecast_live(
-        conn, _request(source_cycle_time=_dt(0), computed_at=_dt(4), expires_at=_dt(6))
+        conn, _request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12))
     )
     assert result.ok is True
     prov = _provenance(conn)
@@ -164,7 +165,7 @@ def test_current_evidence_path_applies_fitted_artifact(monkeypatch: pytest.Monke
     conn = _conn()
     _install_current_evidence_fusion(monkeypatch)
     result = materialize_replacement_forecast_live(
-        conn, _request(source_cycle_time=_dt(0), computed_at=_dt(4), expires_at=_dt(6))
+        conn, _request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12))
     )
     assert result.ok is True
     prov = _provenance(conn)

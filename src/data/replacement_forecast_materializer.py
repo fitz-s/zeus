@@ -1397,18 +1397,26 @@ _SIGMA_TAU_BUCKET_LABELS: tuple[str, ...] = (
 )
 
 
-def _lead_target_h(target_date: "date | str", computed_at: "datetime | str") -> float:
-    """Hours from ``computed_at`` to the END of ``target_date`` UTC (target_date+1 day 00:00 UTC).
+def _lead_target_h(target_date: "date | str", issue_time: "datetime | str") -> float:
+    """Hours from ``issue_time`` to the END of ``target_date`` UTC (target_date+1 day 00:00 UTC).
 
-    This is the tau used by the sigma-tau calibration fit (matches
-    calib_curves/fit_inputs.py's ``lead_target_h``), NOT the settlement-availability lead used
-    elsewhere in this module (e.g. ``_lead_hours`` in fit_sigma_scale.py measures lag to
-    target_date START, a different clock for a different, HISTORICAL-path artifact).
+    This is the tau used by the sigma-tau calibration fit and serving lookup. The caller MUST pass
+    the forecast ISSUE clock (``request.source_cycle_time``), NOT decision time
+    (``request.computed_at``) -- 2026-07-28 design-review correction: a single source_cycle_time is
+    reused across many recomputes (live evidence: Hong Kong 2026-07-20 HIGH had 247 distinct
+    computed_at values collapse to just 4 distinct source_cycle_time values), so a
+    computed_at-anchored tau would shrink on every wall-clock recompute with no new provider issue
+    -- a look-ahead-adjacent defect. ``scripts/fit_sigma_tau_calibration.py`` trains on the same
+    clock (the top-level ``forecast_posteriors.source_cycle_time`` column).
+
+    This is NOT the settlement-availability lead used elsewhere in this module (e.g.
+    ``_lead_hours`` in fit_sigma_scale.py measures lag to target_date START, a different clock for
+    a different, HISTORICAL-path artifact).
     """
     target = date.fromisoformat(_date_text(target_date))
     target_end = datetime(target.year, target.month, target.day, tzinfo=UTC) + timedelta(days=1)
-    computed = _to_utc(computed_at, field_name="computed_at")
-    return (target_end - computed).total_seconds() / 3600.0
+    issue = _to_utc(issue_time, field_name="issue_time")
+    return (target_end - issue).total_seconds() / 3600.0
 
 
 def _sigma_tau_bucket_label(lead_target_h: float) -> str | None:
@@ -4447,7 +4455,14 @@ def _compute_posterior_payload(
                 # shrinkage for THIS shape only -- w and floor_steps remain exactly 0.0 (k-only).
                 # FAIL-CLOSED TO TODAY: artifact absent/malformed/unfitted -> exactly (1.0, 0.0, 0.0),
                 # byte-identical to the prior hardcoded neutral tuple.
-                _sigma_tau_lead_h = _lead_target_h(request.target_date, request.computed_at)
+                # DESIGN-REVIEW CORRECTION (2026-07-28): tau is indexed by the forecast ISSUE clock
+                # (request.source_cycle_time), NOT decision time (request.computed_at). A single
+                # source_cycle_time is reused across many recomputes (live evidence: Hong Kong
+                # 2026-07-20 HIGH had 247 distinct computed_at values collapse to just 4 distinct
+                # source_cycle_time values) -- a computed_at-anchored tau would shrink on every
+                # wall-clock recompute with NO new provider issue, a look-ahead-adjacent defect. The
+                # fitter (scripts/fit_sigma_tau_calibration.py) trains on the SAME clock.
+                _sigma_tau_lead_h = _lead_target_h(request.target_date, request.source_cycle_time)
                 _sigma_tau_bucket = _sigma_tau_bucket_label(_sigma_tau_lead_h)
                 (
                     _k,
