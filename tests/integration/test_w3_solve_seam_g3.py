@@ -5469,9 +5469,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         assert kwargs["topology_conn"].execute(
             "SELECT marker FROM market_events"
         ).fetchone()[0] == "current-topology"
-        assert kwargs["observation_conn"].execute(
-            "SELECT marker FROM opportunity_events"
-        ).fetchone()[0] == "authorized-day0"
+        assert kwargs["observation_conn"] is forecast
+        assert kwargs["calibration_conn"] is world
         return SimpleNamespace(
             probability_witness=SimpleNamespace(
                 family_key="family-dallas",
@@ -5574,7 +5573,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert len(prepared_with) == 2
     assert all(kwargs["forecast_conn"] is forecast for kwargs in prepared_with)
     assert all(kwargs["topology_conn"] is topology for kwargs in prepared_with)
-    assert all(kwargs["observation_conn"] is world for kwargs in prepared_with)
+    assert all(kwargs["observation_conn"] is forecast for kwargs in prepared_with)
+    assert all(kwargs["calibration_conn"] is world for kwargs in prepared_with)
     assert all(
         kwargs["allow_partial_deterministic"] is True
         for kwargs in prepared_with
@@ -6165,7 +6165,8 @@ def test_live_adapter_keeps_held_forecast_q_outside_entry_phase_gate(
         {
             "forecast_conn": forecast,
             "topology_conn": topology,
-            "observation_conn": world,
+            "observation_conn": forecast,
+            "calibration_conn": world,
             "decision_time": settlement_day,
             "max_age": FRESHNESS_WINDOW_DEFAULT,
             "allow_unobserved_day0_replacement": False,

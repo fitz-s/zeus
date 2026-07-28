@@ -4605,7 +4605,7 @@ def _build_current_global_day0_family_snapshot(
             (str(position.city), str(position.target_date), metric),
         ).fetchone()
         if row is None:
-            if not _target_day_has_canonical_observation(world, position):
+            if not _target_day_has_canonical_observation(forecasts, position):
                 raise _Day0UnobservedPrefixUnavailable(
                     "current global Day0 family event unavailable: "
                     "zero target-date canonical observations"
@@ -4624,14 +4624,17 @@ def _build_current_global_day0_family_snapshot(
         city = cities_by_name.get(str(position.city))
         unobserved_prefix = bool(
             city is not None
-            and not _target_day_has_canonical_observation(world, position)
+            and not _target_day_has_canonical_observation(forecasts, position)
         )
         try:
+            # Bind the physical frontier and its posterior through one canonical
+            # forecasts snapshot; world remains event/calibration authority only.
             prepared = _prepare_current_global_probability_family(
                 event,
                 forecast_conn=forecasts,
                 topology_conn=forecasts,
-                observation_conn=world,
+                observation_conn=forecasts,
+                calibration_conn=world,
                 decision_time=now,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
                 day0_payload_out=day0_payload,
@@ -4644,7 +4647,7 @@ def _build_current_global_day0_family_snapshot(
         except ValueError as exc:
             if (
                 str(exc) == "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING"
-                and not _target_day_has_canonical_observation(world, position)
+                and not _target_day_has_canonical_observation(forecasts, position)
             ):
                 raise _Day0UnobservedPrefixUnavailable(
                     "current global Day0 probability unavailable: "
