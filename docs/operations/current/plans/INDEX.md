@@ -6,6 +6,7 @@ Plans under `docs/operations/current/plans/`. Rewritten 2026-07-07 against disk 
 |------|--------|---------|
 | [`hourly_capital_gains_improvement_loop.md`](hourly_capital_gains_improvement_loop.md) | ACTIVE | Forward journal — the single work-state surface. Read this first. |
 | [`live_branch_workflow_2026-07-20.md`](live_branch_workflow_2026-07-20.md) | ACTIVE | `live` branch; worktree → cherry-pick/PR → live; branch hygiene. Promote binding clauses to AGENTS §5 at operator discretion. |
+| [`codex_worktree_lifecycle_repair_2026-07-28.md`](codex_worktree_lifecycle_repair_2026-07-28.md) | EXECUTING | Codex-managed worktree closeout: app-owned snapshot/remove, worker-owned thread archive, and a two-worktree completed retention cap. |
 | [`single_live_semantics_2026-07-22.md`](single_live_semantics_2026-07-22.md) | EXECUTING | Remove dormant parallel-live semantics from runtime, schemas, automation, and active authority; install a blocking relapse gate. |
 | [`single_live_semantics_gpt56_pro_review_request_2026-07-23.md`](single_live_semantics_gpt56_pro_review_request_2026-07-23.md) | READY | Exact-head adversarial review request for over-deletion, residual alternate-live semantics, migration safety, and capital drag. |
 | [`upstream_data_physical_2026-07-17.md`](upstream_data_physical_2026-07-17.md) | EXECUTING | Upstream forecast-layer体检:3 live bugs fixed (low-ENS quarantine, ENS age bound, degF postmortem hardening), consult verdict folded, D2-D6 design queue open |

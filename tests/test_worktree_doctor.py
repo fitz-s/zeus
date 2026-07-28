@@ -1,5 +1,5 @@
 # Created: 2026-05-07
-# Last reused or audited: 2026-05-07
+# Last reused or audited: 2026-07-28
 # Authority basis: Navigation Topology v2 PLAN §3 Phase 3 exit criteria; sunset 2027-05-07
 
 """
@@ -28,6 +28,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "worktree_doctor.py"
+RETIRED_INTEGRATORS = (
+    REPO_ROOT / "scripts" / "agent_worktree_merge.py",
+    REPO_ROOT / "scripts" / "multiagent_integrator.py",
+)
 
 # ---------------------------------------------------------------------------
 # Module-level import of worktree_doctor for fixture-based tests (F8)
@@ -333,6 +337,96 @@ def test_hygiene_clutter_entries_have_severity() -> None:
         assert entry["severity"] == "advisory", (
             f"clutter severity must be 'advisory'; got {entry['severity']!r}"
         )
+
+
+def test_codex_managed_stale_worktree_requires_owner_archive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex paths are never advised to use raw git worktree removal."""
+    monkeypatch.setattr(_wt_mod, "CODEX_MANAGED_WORKTREE_ROOT", Path("/fake/worktrees"))
+    with (
+        patch.object(_wt_mod, "_git", side_effect=_fake_git),
+        patch.object(_wt_mod, "_gh", side_effect=_fake_gh),
+    ):
+        clutter = _wt_mod._collect_clutter()
+
+    codex_entry = next(entry for entry in clutter if entry["path"] == "/fake/worktrees/zeus-cleanup-debt")
+    assert "set_thread_archived" in codex_entry["advisory"]
+    assert "git worktree remove" not in codex_entry["advisory"]
+
+
+def test_hot_pick_patch_equivalence_counts_as_absorbed() -> None:
+    """A cherry-picked patch is landed even when its original commit is not an ancestor."""
+    def fake_git(*args: str, cwd: Path = REPO_ROOT) -> str:  # noqa: ARG001
+        if args[:3] == ("rev-parse", "--verify", "--quiet"):
+            return "aabbccdd\n"
+        if args[:2] == ("cherry", "live"):
+            return "- 11223344\n"
+        return ""
+
+    with (
+        patch.object(_wt_mod, "_git", side_effect=fake_git),
+        patch.object(_wt_mod, "_git_output_if_succeeded", return_value="- 11223344\n"),
+    ):
+        assert _wt_mod._branch_is_absorbed_by_live("fix/hot-pick")
+
+
+def test_unlanded_patch_is_not_absorbed() -> None:
+    """A branch with any git-cherry '+' entry must remain protected."""
+    def fake_git(*args: str, cwd: Path = REPO_ROOT) -> str:  # noqa: ARG001
+        if args[:3] == ("rev-parse", "--verify", "--quiet"):
+            return "aabbccdd\n"
+        if args[:2] == ("cherry", "live"):
+            return "+ 11223344\n"
+        return ""
+
+    with (
+        patch.object(_wt_mod, "_git", side_effect=fake_git),
+        patch.object(_wt_mod, "_git_output_if_succeeded", return_value="+ 11223344\n"),
+    ):
+        assert not _wt_mod._branch_is_absorbed_by_live("fix/not-landed")
+
+
+def test_patch_equivalence_fails_closed_when_git_cherry_errors() -> None:
+    """Empty output caused by a git failure is not proof that a patch landed."""
+    def fake_git(*args: str, cwd: Path = REPO_ROOT) -> str:  # noqa: ARG001
+        if args[:3] == ("rev-parse", "--verify", "--quiet"):
+            return "aabbccdd\n"
+        return ""
+
+    with (
+        patch.object(_wt_mod, "_git", side_effect=fake_git),
+        patch.object(_wt_mod, "_git_output_if_succeeded", return_value=None),
+    ):
+        assert not _wt_mod._branch_is_absorbed_by_live("fix/unknown")
+
+
+def test_empty_successful_git_cherry_output_means_ancestor_absorbed() -> None:
+    """A clean ancestry path validly produces no git-cherry lines."""
+    def fake_git(*args: str, cwd: Path = REPO_ROOT) -> str:  # noqa: ARG001
+        if args[:3] == ("rev-parse", "--verify", "--quiet"):
+            return "aabbccdd\n"
+        return ""
+
+    with (
+        patch.object(_wt_mod, "_git", side_effect=fake_git),
+        patch.object(_wt_mod, "_git_output_if_succeeded", return_value=""),
+    ):
+        assert _wt_mod._branch_is_absorbed_by_live("fix/ancestor")
+
+
+@pytest.mark.parametrize("script", RETIRED_INTEGRATORS)
+def test_live_mutating_integrators_fail_closed(script: Path) -> None:
+    """Legacy helpers cannot directly advance live or delete a worktree."""
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "REFUSED" in result.stderr
+    source = script.read_text()
+    assert "merge --ff-only" not in source
+    assert "worktree remove" not in source
 
 
 # ---------------------------------------------------------------------------

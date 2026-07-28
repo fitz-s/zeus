@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Collection, Literal, Optional
+from typing import Collection, Literal, Mapping, Optional
 
 from src.config import (
     STATE_DIR,
@@ -260,6 +260,7 @@ class ExitContext:
     chain_is_fresh: Optional[bool] = None
     divergence_score: float = 0.0
     market_velocity_1h: float = 0.0
+    probability_receipt: Optional[Mapping[str, object]] = None
 
     # T6.4-phase2 (2026-04-24): portfolio context for correlation-crowding
     # cost computation in HoldValue.compute_with_exit_costs. Threaded by

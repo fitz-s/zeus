@@ -1860,7 +1860,7 @@ def assert_schema_epoch_not_mixed(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 43  # 2026-07-11 T2b (docs/rebuild/quarantine_excision_2026-07-11.md §T2b): settlements.authority + observations.authority CHECK literal QUARANTINED -> DISPUTED. Prior: 42 = position_current chain_avg_price/chain_cost_basis_usd (F1).
+SCHEMA_VERSION = 44  # 2026-07-28: registered compact discovery snapshot journal; full executable evidence remains unchanged. Prior: 43 = T2b settlement/observation authority literal repair.
 
 
 # ---------------------------------------------------------------------------
@@ -13872,6 +13872,7 @@ def transition_phase(
     error: str,
     source_module: str = "src.execution.exit_lifecycle",
     extra_payload: dict | None = None,
+    decision_id: str | None = None,
 ) -> bool:
     """Re-export shim — delegates to src.state.canonical_write.transition_phase.
 
@@ -13887,6 +13888,7 @@ def transition_phase(
         error=error,
         source_module=source_module,
         extra_payload=extra_payload,
+        decision_id=decision_id,
     )
 
 

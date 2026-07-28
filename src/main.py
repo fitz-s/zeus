@@ -5808,6 +5808,7 @@ def _edli_build_forecast_snapshot_events(
     suppress_recent_no_value_refutations: bool = False,
     budget_seconds: float | None = None,
     restrict_to_families: set[tuple[str, str, str]] | None = None,
+    phase_filter_exempt_families: set[tuple[str, str, str]] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[Any]:
     """Build FSR events without mutating world DB.
@@ -5854,6 +5855,7 @@ def _edli_build_forecast_snapshot_events(
             already_pending_keys=already_pending_keys,
             suppress_recent_no_value_refutations=suppress_recent_no_value_refutations,
             restrict_to_families=restrict_to_families,
+            phase_filter_exempt_families=phase_filter_exempt_families,
         )
     except sqlite3.OperationalError as exc:
         if "interrupted" in str(exc).lower():

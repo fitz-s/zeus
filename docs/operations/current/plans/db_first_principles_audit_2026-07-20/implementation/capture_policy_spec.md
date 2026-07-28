@@ -92,6 +92,25 @@ Everything else (EDLI-warm outcomes not priority, not near-threshold, not keyfra
 >   taxonomy proof is obtained off the hot path by an audit query:
 >   `SELECT capture_trigger, COUNT(*) FROM executable_market_snapshots GROUP BY 1`.
 
+> **VALUE-TIER IMPLEMENTATION (staged 2026-07-28).**
+> The registered `executable_market_snapshot_compact` journal and writer routing
+> now implement the next operator-fenced increment:
+> - first-seen discovery and every configurable 20th discovery capture remain a
+>   full `KEYFRAME`;
+> - priority, JIT submit, explicit near-threshold full triggers, and callers that
+>   omit a trigger remain full;
+> - ordinary `DISCOVERY_SWEEP` writes only compact scalar/hash/top-5 evidence;
+> - the full latest mirror is not updated by compact rows, so no command,
+>   recovery, held-position, submit, or existing money-path reader can mistake a
+>   compact row for executable truth;
+> - write failure does not advance the keyframe counter and is propagated
+>   fail-closed.
+>
+> The scanner still has no model probability or actionable-edge input, so it
+> cannot truthfully originate `NEAR_THRESHOLD_MATCH`; that trigger remains a
+> full-eligible API value for a future evaluator-owned producer. No synthetic
+> threshold classification was added.
+
 ## 3. Compact-form schema
 
 ```sql

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# Created: 2026-07-28
-# Last reused/audited: 2026-07-28
+# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Quantify bounded trade-DB growth and evidence redundancy without mutation.
+# Reuse: Inspect TABLE_PROBES and retention limits before using output for planning.
 # Authority basis: operator-directed trade DB growth and decision-evidence audit.
 """Bounded, read-only trade DB growth census.
 
@@ -13,6 +14,7 @@ evidence only; it never deletes, vacuums, checkpoints, or authorizes retention.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sqlite3
 import sys
@@ -28,6 +30,7 @@ if str(ROOT) not in sys.path:
 from src.state.db import _connect_read_only  # noqa: E402
 
 DEFAULT_DB = ROOT / "state" / "zeus_trades.db"
+CURRENT_RATE_MAX_NEWEST_AGE_SECONDS = 86_400.0
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,16 @@ TABLE_PROBES: Final[dict[str, TableProbe]] = {
         rationale=(
             "JIT/cited snapshots are immutable money evidence; broad recurring "
             "captures should move to a bounded current projection plus keyframes."
+        ),
+    ),
+    "executable_market_snapshot_compact": TableProbe(
+        time_column="captured_at",
+        payload_columns=("top_k_bids_json", "top_k_asks_json"),
+        category_column="capture_trigger",
+        retention_class="discovery_scalar_hash_time_series",
+        rationale=(
+            "Compact rows are not executable truth; measure their growth against "
+            "full keyframes before selecting an epoch/rotation horizon."
         ),
     ),
     "book_hash_transitions": TableProbe(
@@ -131,6 +144,19 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     }
 
 
+def _parse_time(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _probe_table(
     conn: sqlite3.Connection,
     *,
@@ -183,6 +209,51 @@ def _probe_table(
         )
         for row in rows
     ]
+    payload_dedup: dict[str, int | float] | None = None
+    if spec.payload_columns:
+        unique_payload_bytes: dict[str, int] = {}
+        for row, payload_length in zip(rows, payload_lengths, strict=True):
+            if payload_length <= 0:
+                continue
+            digest = hashlib.sha256()
+            for column in spec.payload_columns:
+                value = row[column]
+                if value is None:
+                    digest.update(b"\xff")
+                    continue
+                encoded = str(value).encode("utf-8")
+                digest.update(len(encoded).to_bytes(8, "big"))
+                digest.update(encoded)
+            unique_payload_bytes.setdefault(digest.hexdigest(), payload_length)
+        nonempty_payload_rows = sum(length > 0 for length in payload_lengths)
+        total_payload_bytes = sum(payload_lengths)
+        unique_bytes = sum(unique_payload_bytes.values())
+        repeated_rows = nonempty_payload_rows - len(unique_payload_bytes)
+        savings_bytes = total_payload_bytes - unique_bytes
+        payload_dedup = {
+            "nonempty_payload_rows": nonempty_payload_rows,
+            "empty_payload_rows": len(rows) - nonempty_payload_rows,
+            "content_addresses": len(unique_payload_bytes),
+            "repeated_rows": repeated_rows,
+            "repeated_row_fraction": (
+                round(repeated_rows / nonempty_payload_rows, 4)
+                if nonempty_payload_rows
+                else 0.0
+            ),
+            "payload_bytes": total_payload_bytes,
+            "content_addressed_payload_bytes": unique_bytes,
+            "content_addressed_savings_bytes": savings_bytes,
+            "content_addressed_savings_fraction": (
+                round(savings_bytes / total_payload_bytes, 4)
+                if total_payload_bytes
+                else 0.0
+            ),
+            "scope": (
+                "exact SHA-256 identity over selected payload columns in the "
+                "bounded tail; excludes row identity, timestamps, indexes, "
+                "reference-map overhead, and semantic-but-not-byte-identical rows"
+            ),
+        }
     payload_column_stats: dict[str, dict[str, int | float]] = {}
     for column in spec.payload_columns:
         lengths = [
@@ -208,7 +279,39 @@ def _probe_table(
             categories[category] = categories.get(category, 0) + 1
             category_payload_lengths.setdefault(category, []).append(payload_length)
     times = [str(row[spec.time_column]) for row in rows if row[spec.time_column]]
-    return {
+    parsed_times = [
+        parsed
+        for row in rows
+        if (parsed := _parse_time(row[spec.time_column])) is not None
+    ]
+    time_span_seconds = (
+        (max(parsed_times) - min(parsed_times)).total_seconds()
+        if len(parsed_times) > 1
+        else 0.0
+    )
+    newest_age_seconds = (
+        max(
+            0.0,
+            (datetime.now(timezone.utc) - max(parsed_times)).total_seconds(),
+        )
+        if parsed_times
+        else None
+    )
+    rate_is_current = (
+        newest_age_seconds is not None
+        and newest_age_seconds <= CURRENT_RATE_MAX_NEWEST_AGE_SECONDS
+    )
+    estimated_rows_per_day = (
+        (len(parsed_times) - 1) * 86_400.0 / time_span_seconds
+        if time_span_seconds > 0.0 and rate_is_current
+        else None
+    )
+    payload_mean = (
+        sum(payload_lengths) / len(payload_lengths)
+        if payload_lengths
+        else 0.0
+    )
+    result: dict[str, object] = {
         "present": True,
         "rowid_high_watermark": int(high_watermark),
         "sample_rows": len(rows),
@@ -216,9 +319,7 @@ def _probe_table(
         "sample_oldest_at": min(times) if times else None,
         "sample_newest_at": max(times) if times else None,
         "sample_payload_mean_bytes": (
-            round(sum(payload_lengths) / len(payload_lengths), 1)
-            if payload_lengths
-            else 0
+            round(payload_mean, 1) if payload_lengths else 0
         ),
         "sample_payload_max_bytes": max(payload_lengths, default=0),
         "sample_payload_columns": payload_column_stats,
@@ -238,6 +339,75 @@ def _probe_table(
         },
         "retention_class": spec.retention_class,
         "rationale": spec.rationale,
+        "sample_time_span_seconds": round(time_span_seconds, 3),
+        "sample_newest_age_seconds": (
+            round(newest_age_seconds, 3)
+            if newest_age_seconds is not None
+            else None
+        ),
+        "estimated_rate_status": (
+            "current_tail_extrapolation"
+            if rate_is_current
+            else "stale_or_unparseable_tail_no_current_rate"
+        ),
+        "estimated_rows_per_day_from_tail": (
+            round(estimated_rows_per_day, 1)
+            if estimated_rows_per_day is not None
+            else None
+        ),
+        "estimated_selected_payload_bytes_per_day": (
+            round(estimated_rows_per_day * payload_mean)
+            if estimated_rows_per_day is not None
+            else None
+        ),
+        "rowid_high_watermark_selected_payload_projection_bytes": round(
+            int(high_watermark) * payload_mean
+        ),
+    }
+    if payload_dedup is not None:
+        result["sample_payload_content_addressability"] = payload_dedup
+    return result
+
+
+def _direct_snapshot_citations(conn: sqlite3.Connection) -> dict[str, object]:
+    """Bounded operational refs that are provably load-bearing today.
+
+    This is a minimum set, not deletion authority: certificate payloads can
+    retain hashes or other causal bindings without a relational snapshot_id
+    column.
+    """
+
+    sources: list[tuple[str, str]] = []
+    for table, column in (
+        ("venue_commands", "snapshot_id"),
+        ("position_current", "decision_snapshot_id"),
+    ):
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if exists is None or column not in _table_columns(conn, table):
+            continue
+        sources.append((table, column))
+    per_source: dict[str, dict[str, int]] = {}
+    cited_ids: set[str] = set()
+    for table, column in sources:
+        rows = conn.execute(
+            f'SELECT "{column}" FROM "{table}" WHERE "{column}" IS NOT NULL'
+        ).fetchall()
+        ids = [str(row[0]).strip() for row in rows if str(row[0] or "").strip()]
+        cited_ids.update(ids)
+        per_source[table] = {
+            "cited_rows": len(ids),
+            "distinct_snapshot_ids": len(set(ids)),
+        }
+    return {
+        "minimum_distinct_operational_snapshot_ids": len(cited_ids),
+        "sources": per_source,
+        "scope": (
+            "minimum direct relational refs only; decision-certificate payload "
+            "bindings and offline evidence are not classified here"
+        ),
     }
 
 
@@ -258,9 +428,25 @@ def audit(path: Path, *, tail_rows: int) -> dict[str, object]:
             )
             for table, spec in TABLE_PROBES.items()
         }
+        direct_snapshot_citations = _direct_snapshot_citations(conn)
+        snapshot_high_watermark = (
+            tables.get("executable_market_snapshots", {}).get(
+                "rowid_high_watermark"
+            )
+        )
+        direct_count = int(
+            direct_snapshot_citations[
+                "minimum_distinct_operational_snapshot_ids"
+            ]
+        )
+        if isinstance(snapshot_high_watermark, int) and snapshot_high_watermark > 0:
+            direct_snapshot_citations["minimum_direct_ref_fraction_of_rowid_high_watermark"] = round(
+                direct_count / snapshot_high_watermark,
+                8,
+            )
     return {
-        "schema_version": 1,
-        "method": "bounded_rowid_tail_v1",
+        "schema_version": 4,
+        "method": "bounded_rowid_tail_v3",
         "authority": "read_only_diagnostic_not_retention_authority",
         "audited_at": datetime.now(timezone.utc).isoformat(),
         "db_path": str(resolved),
@@ -272,10 +458,28 @@ def audit(path: Path, *, tail_rows: int) -> dict[str, object]:
         "freelist_bytes": page_size * freelist_count,
         "tail_rows": tail_rows,
         "tables": tables,
+        "snapshot_retention_evidence": direct_snapshot_citations,
         "method_limits": [
             "rowid high-water marks are upper bounds when rows were deleted",
             "tail samples estimate current write shape, not whole-history size",
+            (
+                "per-day rates extrapolate the sampled timestamp span and can "
+                "overstate bursty writers or understate quiet intervals"
+            ),
+            (
+                "per-day rates are suppressed when the newest sampled row is "
+                "older than 24 hours"
+            ),
+            (
+                "rowid-HWM payload projections multiply current tail means by "
+                "an upper-bound row identity and are not table-size measurements"
+            ),
             "no dbstat, whole-table count, vacuum, checkpoint, or mutation is run",
+            "direct snapshot refs are a lower bound and never authorize deletion",
+            (
+                "content-addressed savings cover exact selected payload bytes in "
+                "the tail, not deletable rows or whole-history file bytes"
+            ),
         ],
     }
 

@@ -1,5 +1,5 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-18; last_reused=2026-06-18
-# Purpose: Protect raw manifest schema compatibility without letting retired authority fields execute.
+# Lifecycle: created=2026-06-18; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Reject raw manifest schema aliases so retired authority fields cannot execute.
 # Reuse: pytest tests/test_raw_forecast_artifact_manifest.py
 # Authority basis: replacement live/experiment separation incident 2026-06-18.
 
@@ -34,17 +34,15 @@ def _manifest(tmp_path):
     )
 
 
-def test_read_manifest_drops_retired_trade_authority_status(tmp_path) -> None:
+def test_read_manifest_rejects_retired_trade_authority_status(tmp_path) -> None:
     path = tmp_path / "manifest.json"
     write_manifest(_manifest(tmp_path), path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["trade_authority_status"] = "BLOCKED"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    loaded = read_manifest(path)
-
-    assert loaded.source_id == SOURCE_ID
-    assert "trade_authority_status" not in loaded.to_dict()
+    with pytest.raises(ValueError, match="unsupported fields"):
+        read_manifest(path)
 
 
 def test_read_manifest_rejects_unknown_top_level_fields(tmp_path) -> None:

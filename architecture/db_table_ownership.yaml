@@ -2658,6 +2658,33 @@ tables:
       substrate connection. P0-2 live release proof adds tradeability_status_json
       under SCHEMA_VERSION 19 for scanner/snapshot/submit tradeability alignment.
 
+  - name: executable_market_snapshot_compact
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema_trade_only
+    pk_col: compact_id
+    required_columns:
+      - {name: compact_id, type: TEXT, nullable: true}
+      - {name: condition_id, type: TEXT, nullable: false}
+      - {name: selected_outcome_token_id, type: TEXT, nullable: false}
+      - {name: captured_at, type: TEXT, nullable: false}
+      - {name: raw_orderbook_hash, type: TEXT, nullable: false}
+      - {name: orderbook_top_bid, type: TEXT, nullable: true}
+      - {name: orderbook_top_ask, type: TEXT, nullable: true}
+      - {name: depth_at_best_ask, type: INTEGER, nullable: false}
+      - {name: spread_usd, type: TEXT, nullable: true}
+      - {name: top_k_bids_json, type: TEXT, nullable: false}
+      - {name: top_k_asks_json, type: TEXT, nullable: false}
+      - {name: prev_hash, type: TEXT, nullable: true}
+      - {name: hash_delta_ms, type: INTEGER, nullable: true}
+      - {name: capture_trigger, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >-
+      Append-only discovery scalar/hash time-series. It is never executable
+      snapshot, command, recovery, held-position, or submit authority. Priority,
+      JIT, and periodic keyframe captures remain in executable_market_snapshots.
+
   - name: executable_market_snapshot_latest
     db: trade
     schema_class: trade_class

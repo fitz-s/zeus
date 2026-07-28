@@ -589,7 +589,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 18
+    assert summary["schema_version"] == 19
     assert summary["wealth_reauction"] == {
         "attempt": 1,
         "previous_wealth_economic_identity": "wealth-economics-old",
@@ -754,7 +754,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["candidate_evaluations_sha256"]
     )
     assert summary["candidate_evaluation_encoding"] == (
-        "zlib+base64+canonical-json-v11"
+        "zlib+base64+canonical-json-v12"
     )
     assert summary["sell_point_counterfactual_count"] == 1
     assert summary["sell_point_counterfactual_positive_count"] == 1
@@ -897,17 +897,20 @@ def test_compact_buy_rejection_group_requires_complete_economic_frontier():
             row("worse", -0.002, -0.02),
             row("nearest-cash", -0.001, -0.03),
         ),
+        buy_candidate_positions={"worse": 0, "nearest-cash": 1},
     )
 
     assert complete["frontier_complete"] is True
     assert complete["economics_candidate_count"] == 2
-    assert complete["frontier"]["candidate_id"] == "nearest-cash"
+    assert complete["frontier"]["candidate_index"] == 1
+    assert complete["candidate_indexes"] == [0, 1]
 
     incomplete = global_batch_runtime._compact_buy_rejection_group(
         action="BUY",
         side="NO",
         reason="DEPTH_INFEASIBLE",
         rows=(row("measured", -0.001, -0.01), {"candidate_id": "missing"}),
+        buy_candidate_positions={"measured": 0, "missing": 1},
     )
 
     assert incomplete["frontier_complete"] is False
@@ -942,11 +945,88 @@ def test_compact_buy_rejection_group_ranks_posterior_mean_frontier():
         side="YES",
         reason="NON_POSITIVE_EXPECTED_OBJECTIVE",
         rows=rows,
+        buy_candidate_positions={"worse": 0, "nearest-cash": 1},
     )
 
     assert compact["frontier_complete"] is True
-    assert compact["frontier"]["candidate_id"] == "nearest-cash"
+    assert compact["frontier"]["candidate_index"] == 1
     assert "_frontier_growth" not in compact["frontier"]["economics"]
+
+
+def test_candidate_semantic_delta_does_not_rewrite_stable_action_slots():
+    def payload(epoch: str) -> dict[str, object]:
+        detailed = [
+            {
+                "candidate_id": hashlib.sha256(
+                    f"{epoch}:{index}".encode()
+                ).hexdigest(),
+                "action": "SELL",
+                "family_key": f"family-{index}",
+                "bin_id": f"bin-{index}",
+                "condition_id": f"condition-{index}",
+                "side": "YES",
+                "token_id": f"token-{index}",
+                "position_id": f"position-{index}",
+                "status": "REJECTED",
+                "stable_probability_evidence": {
+                    f"field-{field}": hashlib.sha256(
+                        f"stable:{index}:{field}".encode()
+                    ).hexdigest()
+                    for field in range(8)
+                },
+                "sell_action_authority_identity": hashlib.sha256(
+                    f"authority:{epoch}:{index}".encode()
+                ).hexdigest(),
+                "sell_point_counterfactual": {
+                    "book_identity": hashlib.sha256(
+                        f"book:{epoch}:{index}".encode()
+                    ).hexdigest(),
+                    "status": "NON_POSITIVE",
+                },
+            }
+            for index in range(48)
+        ]
+        detailed.sort(key=global_batch_runtime._candidate_semantic_key)
+        return {
+            "rejected_groups": [],
+            "detailed": detailed,
+            "buy_condition_side_masks": [],
+            "buy_candidate_index_fields": [],
+            "buy_candidate_index": [],
+        }
+
+    base = payload("base")
+    current = payload("current")
+    expected_sha256 = hashlib.sha256(
+        global_batch_runtime._canonical_json_bytes(current)
+    ).hexdigest()
+
+    semantic = global_batch_runtime._candidate_evaluations_delta_receipt(
+        base=base,
+        current=current,
+        expected_sha256=expected_sha256,
+    )
+    legacy = global_batch_runtime._json_object_delta_receipt(
+        prefix="candidate_evaluations",
+        base=base,
+        current=current,
+        expected_sha256=expected_sha256,
+    )
+    semantic_raw = zlib.decompress(
+        base64.b64decode(
+            semantic["candidate_evaluations_delta_zlib_b64"]
+        )
+    )
+    reconstructed = global_batch_runtime._apply_candidate_evaluations_delta(
+        base,
+        json.loads(semantic_raw),
+    )
+
+    assert reconstructed == current
+    assert len(semantic["candidate_evaluations_delta_zlib_b64"]) < len(
+        legacy["candidate_evaluations_delta_zlib_b64"]
+    )
+    assert semantic["candidate_evaluations_delta_detailed_patch_count"] == 48
 
 
 def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
@@ -1351,6 +1431,23 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
     ]
     full_summary = json.loads(rows[0]["artifact_json"])["summary"]
     duplicate_summary = json.loads(rows[1]["artifact_json"])["summary"]
+    full_candidate_payload = json.loads(
+        zlib.decompress(
+            base64.b64decode(full_summary["candidate_evaluations_zlib_b64"])
+        )
+    )
+    rejection_indexes = [
+        index
+        for group in full_candidate_payload["rejected_groups"]
+        for index in group["candidate_indexes"]
+    ]
+    assert sorted(rejection_indexes) == list(
+        range(len(full_candidate_payload["buy_candidate_index"]))
+    )
+    assert all(
+        "candidate_ids" not in group
+        for group in full_candidate_payload["rejected_groups"]
+    )
     assert full_row_id == rows[0]["id"]
     assert duplicate_row_id == rows[1]["id"]
     assert duplicate_summary["payload_compacted"] is True
@@ -1466,9 +1563,14 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
             base64.b64decode(full_summary["candidate_evaluations_zlib_b64"])
         )
     )
-    reconstructed_candidates = global_batch_runtime._apply_json_object_delta(
+    assert delta_summary["candidate_evaluations_delta_encoding"] == (
+        "zlib+base64+semantic-keyed-canonical-json-delta-v2"
+    )
+    reconstructed_candidates = (
+        global_batch_runtime._apply_candidate_evaluations_delta(
         base_candidates,
         candidate_delta,
+        )
     )
     assert hashlib.sha256(
         global_batch_runtime._canonical_json_bytes(reconstructed_candidates)
@@ -6907,7 +7009,7 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
             0,
             '{}',
             '{"executable_allowed":true}',
-            '{"asset_id":"yes-token-a","hash":"hash-yes-token-a"}',
+            '{"asset_id":"yes-token-a","hash":"hash-yes-token-a","bids":[{"price":"0.49","size":"10"}],"asks":[{"price":"0.51","size":"10"}]}',
             '2026-07-10T07:00:00+00:00',
             '2026-07-10T08:13:00+00:00'
         );
@@ -7063,6 +7165,8 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
         if projection_mode == "survives":
             expected_yes.update(
                 {
+                    "bids": [{"price": "0.49", "size": "10"}],
+                    "asks": [{"price": "0.51", "size": "10"}],
                     "tick_size": "0.01",
                     "min_order_size": "5",
                     "neg_risk": False,
@@ -7562,7 +7666,7 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
             (row_id,),
         ).fetchone()[0]
     )["summary"]
-    assert stored["schema_version"] == 18
+    assert stored["schema_version"] == 19
     probabilities = {
         "family": SimpleNamespace(
             family_key="family",

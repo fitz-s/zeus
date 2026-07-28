@@ -4818,7 +4818,11 @@ def _forecast_snapshot_status_counts_for_edges(
               LEFT JOIN opportunity_event_processing p
                 ON p.event_id = e.event_id
                AND p.consumer_name = 'edli_reactor_v1'
-             WHERE e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
+             WHERE e.event_type IN (
+                       'FORECAST_SNAPSHOT_READY',
+                       'EDLI_REDECISION_PENDING',
+                       'DAY0_EXTREME_UPDATED'
+                   )
                AND e.available_at IN ({placeholders})
             """,
             tuple(available_times),
@@ -5512,6 +5516,89 @@ def _global_auction_holding_authority_matches(
     )
 
 
+def _apply_global_auction_candidate_semantic_delta(
+    base: Mapping[str, object],
+    delta: Mapping[str, object],
+) -> dict[str, object]:
+    """Rehydrate the engine's bounded one-hop candidate receipt delta."""
+
+    top_level = delta.get("top_level")
+    detailed = delta.get("detailed")
+    base_rows = base.get("detailed")
+    if (
+        not isinstance(top_level, Mapping)
+        or not isinstance(detailed, Mapping)
+        or not isinstance(base_rows, list)
+    ):
+        raise ValueError("DELTA_PAYLOAD_SHAPE")
+    key_fields = detailed.get("semantic_key_fields")
+    expected_key_fields = [
+        "action",
+        "family_key",
+        "bin_id",
+        "condition_id",
+        "side",
+        "token_id",
+        "position_id",
+    ]
+    if key_fields != expected_key_fields:
+        raise ValueError("DELTA_SEMANTIC_KEY_FIELDS")
+
+    replacements = top_level.get("replacements", {})
+    if not isinstance(replacements, Mapping):
+        raise ValueError("DELTA_PAYLOAD_SHAPE")
+    payload = {
+        key: value for key, value in base.items() if key != "detailed"
+    }
+    for key in top_level.get("removed_keys", ()):
+        payload.pop(str(key), None)
+    payload.update((str(key), value) for key, value in replacements.items())
+
+    def semantic_key(row: Mapping[str, object]) -> str:
+        return json.dumps(
+            [str(row.get(field) or "") for field in expected_key_fields],
+            separators=(",", ":"),
+        )
+
+    rows = {semantic_key(row): dict(row) for row in base_rows}
+    if len(rows) != len(base_rows):
+        raise ValueError("DELTA_SEMANTIC_KEY_DUPLICATE")
+    for key in detailed.get("removed_keys", ()):
+        rows.pop(str(key), None)
+    patches = detailed.get("patches", ())
+    if not isinstance(patches, list):
+        raise ValueError("DELTA_PAYLOAD_SHAPE")
+    for patch in patches:
+        if not isinstance(patch, Mapping):
+            raise ValueError("DELTA_PAYLOAD_SHAPE")
+        key = str(patch.get("key") or "")
+        if not key:
+            raise ValueError("DELTA_PAYLOAD_SHAPE")
+        inserted = patch.get("inserted_row")
+        if inserted is not None:
+            if not isinstance(inserted, Mapping) or key in rows:
+                raise ValueError("DELTA_PAYLOAD_SHAPE")
+            row = dict(inserted)
+        else:
+            if key not in rows:
+                raise ValueError("DELTA_PAYLOAD_SHAPE")
+            row = dict(rows[key])
+            for field in patch.get("removed_fields", ()):
+                row.pop(str(field), None)
+            row_replacements = patch.get("replacements", {})
+            if not isinstance(row_replacements, Mapping):
+                raise ValueError("DELTA_PAYLOAD_SHAPE")
+            row.update(
+                (str(field), value)
+                for field, value in row_replacements.items()
+            )
+        if semantic_key(row) != key:
+            raise ValueError("DELTA_SEMANTIC_KEY_CHANGED")
+        rows[key] = row
+    payload["detailed"] = [rows[key] for key in sorted(rows)]
+    return payload
+
+
 def _current_global_auction_candidate_payload(
     conn: object,
     summary: Mapping[str, object],
@@ -5522,9 +5609,13 @@ def _current_global_auction_candidate_payload(
 
     delta_field = "candidate_evaluations_delta_zlib_b64"
     if delta_field in summary:
-        if summary.get("candidate_evaluations_delta_encoding") != (
-            "zlib+base64+canonical-json-object-delta-v1"
-        ):
+        delta_encoding = str(
+            summary.get("candidate_evaluations_delta_encoding") or ""
+        )
+        if delta_encoding not in {
+            "zlib+base64+canonical-json-object-delta-v1",
+            "zlib+base64+semantic-keyed-canonical-json-delta-v2",
+        }:
             raise ValueError("DELTA_ENCODING")
         base_row_id = int(summary["candidate_evaluations_base_decision_log_id"])
         base_receipt_hash = str(
@@ -5563,13 +5654,21 @@ def _current_global_auction_candidate_payload(
         ):
             raise ValueError("DELTA_HASH_MISMATCH")
         delta = json.loads(delta_raw)
-        replacements = delta.get("replacements", {})
-        if not isinstance(replacements, dict):
-            raise ValueError("DELTA_PAYLOAD_SHAPE")
-        payload = dict(base)
-        for key in delta.get("removed_keys", ()):
-            payload.pop(str(key), None)
-        payload.update((str(key), value) for key, value in replacements.items())
+        if delta_encoding == "zlib+base64+canonical-json-object-delta-v1":
+            replacements = delta.get("replacements", {})
+            if not isinstance(replacements, dict):
+                raise ValueError("DELTA_PAYLOAD_SHAPE")
+            payload = dict(base)
+            for key in delta.get("removed_keys", ()):
+                payload.pop(str(key), None)
+            payload.update(
+                (str(key), value) for key, value in replacements.items()
+            )
+        else:
+            payload = _apply_global_auction_candidate_semantic_delta(
+                base,
+                delta,
+            )
         raw = json.dumps(
             payload,
             sort_keys=True,
@@ -5666,11 +5765,21 @@ def _latest_global_auction_candidate_counts(
             "zlib+base64+canonical-json-v9",
             "zlib+base64+canonical-json-v10",
             "zlib+base64+canonical-json-v11",
+            "zlib+base64+canonical-json-v12",
         }:
             return invalid("ENCODING")
         holding_payload = None
-        if candidate_encoding == "zlib+base64+canonical-json-v11":
-            if schema_version not in {17, 18}:
+        current_candidate_encodings = {
+            "zlib+base64+canonical-json-v11",
+            "zlib+base64+canonical-json-v12",
+        }
+        if candidate_encoding in current_candidate_encodings:
+            expected_schema_versions = (
+                {17, 18}
+                if candidate_encoding == "zlib+base64+canonical-json-v11"
+                else {19}
+            )
+            if schema_version not in expected_schema_versions:
                 return invalid("SCHEMA_VERSION_CONTRACT")
             if summary.get("holding_auction_coverage_encoding") != (
                 "zlib+base64+canonical-json-v2"
@@ -5687,7 +5796,7 @@ def _latest_global_auction_candidate_counts(
     yes: dict[str, int] = {}
     no: dict[str, int] = {}
     covered = 0
-    if candidate_encoding == "zlib+base64+canonical-json-v11" and (
+    if candidate_encoding in current_candidate_encodings and (
         holding_payload is None
         or not _global_auction_holding_authority_matches(
             payload,
@@ -5697,13 +5806,61 @@ def _latest_global_auction_candidate_counts(
     ):
         return invalid("HOLDING_AUTHORITY_PAYLOAD")
     try:
+        rejected_indexes: set[int] = set()
+        buy_candidate_ids: tuple[str, ...] = ()
+        if candidate_encoding == "zlib+base64+canonical-json-v12":
+            buy_index = payload["buy_candidate_index"]
+            if not isinstance(buy_index, list) or any(
+                not isinstance(row, list) or len(row) != 6
+                for row in buy_index
+            ):
+                return invalid("BUY_CANDIDATE_INDEX_INVALID")
+            buy_candidate_ids = tuple(str(row[0] or "") for row in buy_index)
+            if (
+                not all(buy_candidate_ids)
+                or len(buy_candidate_ids) != len(set(buy_candidate_ids))
+            ):
+                return invalid("BUY_CANDIDATE_INDEX_INVALID")
+        buy_candidate_count = len(buy_candidate_ids)
         for group in payload["rejected_groups"]:
-            candidate_ids = group["candidate_ids"]
-            covered += len(candidate_ids)
+            if candidate_encoding == "zlib+base64+canonical-json-v12":
+                candidate_indexes = [
+                    int(value) for value in group["candidate_indexes"]
+                ]
+                if (
+                    len(candidate_indexes) != len(set(candidate_indexes))
+                    or any(
+                        value < 0 or value >= buy_candidate_count
+                        for value in candidate_indexes
+                    )
+                    or rejected_indexes.intersection(candidate_indexes)
+                ):
+                    return invalid("REJECTION_INDEX_INVALID")
+                rejected_indexes.update(candidate_indexes)
+                covered += len(candidate_indexes)
+                frontier = group.get("frontier")
+                if frontier is not None and (
+                    not isinstance(frontier, dict)
+                    or int(frontier["candidate_index"])
+                    not in candidate_indexes
+                ):
+                    return invalid("REJECTION_FRONTIER_INDEX_INVALID")
+            else:
+                candidate_ids = group["candidate_ids"]
+                covered += len(candidate_ids)
+        detailed_buy_ids: set[str] = set()
         for evaluation in payload["detailed"]:
             covered += 1
             if (
-                candidate_encoding == "zlib+base64+canonical-json-v11"
+                candidate_encoding == "zlib+base64+canonical-json-v12"
+                and evaluation.get("action") == "BUY"
+            ):
+                candidate_id = str(evaluation.get("candidate_id") or "")
+                if not candidate_id or candidate_id in detailed_buy_ids:
+                    return invalid("DETAILED_BUY_ID_INVALID")
+                detailed_buy_ids.add(candidate_id)
+            if (
+                candidate_encoding in current_candidate_encodings
                 and evaluation.get("action") == "SELL"
             ):
                 functional = evaluation.get("sell_probability_functional")
@@ -5756,6 +5913,16 @@ def _latest_global_auction_candidate_counts(
                     )
                 ):
                     return invalid("SELL_EXPECTED_AUTHORITY")
+        if candidate_encoding == "zlib+base64+canonical-json-v12":
+            rejected_ids = {
+                buy_candidate_ids[index] for index in rejected_indexes
+            }
+            if (
+                rejected_ids.intersection(detailed_buy_ids)
+                or rejected_ids.union(detailed_buy_ids)
+                != set(buy_candidate_ids)
+            ):
+                return invalid("BUY_CANDIDATE_PARTITION_INVALID")
         seen_conditions: set[str] = set()
         for condition_id, raw_mask in payload["buy_condition_side_masks"]:
             condition_id = str(condition_id or "")

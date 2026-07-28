@@ -1076,6 +1076,180 @@ def _apply_json_object_delta(
     return result
 
 
+_CANDIDATE_SEMANTIC_KEY_FIELDS = (
+    "action",
+    "family_key",
+    "bin_id",
+    "condition_id",
+    "side",
+    "token_id",
+    "position_id",
+)
+
+
+def _candidate_semantic_key(row: Mapping[str, object]) -> str:
+    """Identify one action slot without its per-epoch causal certificate."""
+
+    return json.dumps(
+        [str(row.get(field) or "") for field in _CANDIDATE_SEMANTIC_KEY_FIELDS],
+        separators=(",", ":"),
+    )
+
+
+def _candidate_detail_map(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, object]]:
+    mapped = {_candidate_semantic_key(row): dict(row) for row in rows}
+    if len(mapped) != len(rows):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_SEMANTIC_KEY_DUPLICATE")
+    return mapped
+
+
+def _apply_candidate_evaluations_delta(
+    base: Mapping[str, object],
+    delta: Mapping[str, object],
+) -> dict[str, object]:
+    """Reconstruct one complete candidate cut from a one-hop semantic delta."""
+
+    top_level = delta.get("top_level")
+    detail_delta = delta.get("detailed")
+    if not isinstance(top_level, Mapping) or not isinstance(detail_delta, Mapping):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    result = _apply_json_object_delta(
+        {
+            key: value
+            for key, value in base.items()
+            if key != "detailed"
+        },
+        top_level,
+    )
+    base_rows = base.get("detailed")
+    if not isinstance(base_rows, Sequence):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    rows = _candidate_detail_map(base_rows)
+    for key in detail_delta.get("removed_keys", ()):
+        rows.pop(str(key), None)
+    patches = detail_delta.get("patches", ())
+    if not isinstance(patches, Sequence):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    for patch in patches:
+        if not isinstance(patch, Mapping):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+        key = str(patch.get("key") or "")
+        if not key:
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+        inserted = patch.get("inserted_row")
+        if inserted is not None:
+            if not isinstance(inserted, Mapping) or key in rows:
+                raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+            row = dict(inserted)
+        else:
+            if key not in rows:
+                raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+            row = dict(rows[key])
+            for field in patch.get("removed_fields", ()):
+                row.pop(str(field), None)
+            replacements = patch.get("replacements", {})
+            if not isinstance(replacements, Mapping):
+                raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+            row.update(
+                (str(field), value) for field, value in replacements.items()
+            )
+        if _candidate_semantic_key(row) != key:
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_SEMANTIC_KEY_CHANGED")
+        rows[key] = row
+    result["detailed"] = [rows[key] for key in sorted(rows)]
+    return result
+
+
+def _candidate_evaluations_delta_receipt(
+    *,
+    base: Mapping[str, object],
+    current: Mapping[str, object],
+    expected_sha256: str,
+) -> dict[str, object]:
+    base_rows = base.get("detailed")
+    current_rows = current.get("detailed")
+    if not isinstance(base_rows, Sequence) or not isinstance(
+        current_rows, Sequence
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    base_details = _candidate_detail_map(base_rows)
+    current_details = _candidate_detail_map(current_rows)
+    patches: list[dict[str, object]] = []
+    for key in sorted(current_details):
+        row = current_details[key]
+        if key not in base_details:
+            patches.append({"key": key, "inserted_row": row})
+            continue
+        old = base_details[key]
+        replacements = {
+            field: row[field]
+            for field in sorted(row)
+            if field not in old or old[field] != row[field]
+        }
+        removed_fields = sorted(field for field in old if field not in row)
+        if replacements or removed_fields:
+            patches.append(
+                {
+                    "key": key,
+                    "removed_fields": removed_fields,
+                    "replacements": replacements,
+                }
+            )
+    top_level_base = {
+        key: value for key, value in base.items() if key != "detailed"
+    }
+    top_level_current = {
+        key: value for key, value in current.items() if key != "detailed"
+    }
+    delta = {
+        "top_level": {
+            "removed_keys": sorted(
+                key for key in top_level_base if key not in top_level_current
+            ),
+            "replacements": {
+                key: top_level_current[key]
+                for key in sorted(top_level_current)
+                if key not in top_level_base
+                or top_level_base[key] != top_level_current[key]
+            },
+        },
+        "detailed": {
+            "semantic_key_fields": list(_CANDIDATE_SEMANTIC_KEY_FIELDS),
+            "removed_keys": sorted(
+                key for key in base_details if key not in current_details
+            ),
+            "patches": patches,
+        },
+    }
+    reconstructed = _apply_candidate_evaluations_delta(base, delta)
+    if hashlib.sha256(_canonical_json_bytes(reconstructed)).hexdigest() != str(
+        expected_sha256
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_HASH_MISMATCH")
+    encoded = _canonical_json_bytes(delta)
+    return {
+        "candidate_evaluations_delta_encoding": (
+            "zlib+base64+semantic-keyed-canonical-json-delta-v2"
+        ),
+        "candidate_evaluations_delta_sha256": hashlib.sha256(encoded).hexdigest(),
+        "candidate_evaluations_delta_zlib_b64": base64.b64encode(
+            zlib.compress(encoded, level=9)
+        ).decode("ascii"),
+        "candidate_evaluations_delta_removed_key_count": len(
+            delta["top_level"]["removed_keys"]
+        ),
+        "candidate_evaluations_delta_replacement_count": len(
+            delta["top_level"]["replacements"]
+        ),
+        "candidate_evaluations_delta_detailed_removed_count": len(
+            delta["detailed"]["removed_keys"]
+        ),
+        "candidate_evaluations_delta_detailed_patch_count": len(patches),
+    }
+
+
 def _json_object_delta_receipt(
     *,
     prefix: str,
@@ -1360,10 +1534,20 @@ def _compact_buy_rejection_group(
     side: str,
     reason: str,
     rows: Sequence[Mapping[str, object]],
+    buy_candidate_positions: Mapping[str, int],
 ) -> dict[str, object]:
     """Persist a truthful best rejected BUY frontier without widening admission."""
 
     candidate_ids = [str(row.get("candidate_id") or "") for row in rows]
+    try:
+        candidate_indexes = sorted(
+            int(buy_candidate_positions[candidate_id])
+            for candidate_id in candidate_ids
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "GLOBAL_AUCTION_RECEIPT_REJECTION_INDEX_MISSING"
+        ) from exc
     economic_rows: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
     for row in rows:
         economics = row.get("buy_rejection_economics")
@@ -1427,18 +1611,16 @@ def _compact_buy_rejection_group(
             if not str(key).startswith("_frontier_")
         }
         frontier = {
-            "candidate_id": str(row.get("candidate_id") or ""),
-            "family_key": str(row.get("family_key") or ""),
-            "bin_id": str(row.get("bin_id") or ""),
-            "condition_id": str(row.get("condition_id") or ""),
-            "token_id": str(row.get("token_id") or ""),
+            "candidate_index": int(
+                buy_candidate_positions[str(row.get("candidate_id") or "")]
+            ),
             "economics": economics,
         }
     return {
         "action": action,
         "side": side,
         "reason": reason,
-        "candidate_ids": candidate_ids,
+        "candidate_indexes": candidate_indexes,
         "economics_candidate_count": len(economic_rows),
         "frontier_complete": frontier_complete,
         "frontier": frontier,
@@ -1750,6 +1932,7 @@ def _store_global_auction_receipt(
         excluded_by_family=excluded_by_family or {},
         required=book_capture_complete,
     )
+    detailed_rows.sort(key=_candidate_semantic_key)
     compact_evaluations = {
         "rejected_groups": [
             _compact_buy_rejection_group(
@@ -1757,6 +1940,7 @@ def _store_global_auction_receipt(
                 side=side,
                 reason=reason,
                 rows=rows,
+                buy_candidate_positions=buy_candidate_positions,
             )
             for (action, side, reason), rows in sorted(
                 rejection_groups.items()
@@ -1825,7 +2009,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 18,
+        "schema_version": 19,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -1937,7 +2121,7 @@ def _store_global_auction_receipt(
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v11",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v12",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),
@@ -2093,8 +2277,7 @@ def _store_global_auction_receipt(
                 candidate_ref.payload,
                 Mapping,
             ):
-                candidate_delta = _json_object_delta_receipt(
-                    prefix="candidate_evaluations",
+                candidate_delta = _candidate_evaluations_delta_receipt(
                     base=candidate_ref.payload,
                     current=compact_evaluations,
                     expected_sha256=candidate_identity[1],

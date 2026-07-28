@@ -15,6 +15,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -1099,6 +1100,32 @@ def _is_invalid_heartbeat_id_error(exc: Exception | str) -> bool:
     return "Invalid Heartbeat ID" in str(exc)
 
 
+def _heartbeat_id_hint_from_invalid_error(exc: Exception | str) -> str:
+    """Extract the server-provided canonical id from an invalid-id response."""
+
+    if not _is_invalid_heartbeat_id_error(exc):
+        return ""
+    current: BaseException | None = exc if isinstance(exc, BaseException) else None
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        error_msg = getattr(current, "error_msg", None)
+        if isinstance(error_msg, dict):
+            hint = str(error_msg.get("heartbeat_id") or "").strip()
+            if hint:
+                return hint
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        current = cause if isinstance(cause, BaseException) else context
+        if not isinstance(current, BaseException):
+            current = None
+    match = re.search(
+        r"""['"]heartbeat_id['"]\s*:\s*['"]([^'"]+)['"]""",
+        str(exc),
+    )
+    return match.group(1).strip() if match else ""
+
+
 def _describe_heartbeat_exception(exc: Exception | str) -> str:
     """Return a sanitized, cause-aware heartbeat error for operator status.
 
@@ -1364,8 +1391,9 @@ class HeartbeatSupervisor:
         #     POST {heartbeat_id:""}              -> {heartbeat_id:"A"}
         #     POST {heartbeat_id:"A"}             -> {heartbeat_id:"B"}    # rotates
         #     POST {heartbeat_id:"<bogus>"}       -> 400 Invalid Heartbeat ID
-        # On any 4xx we restart the chain with "" rather than minting a UUID
-        # (the previous bug — a fresh UUID never matches the server record).
+        # An Invalid Heartbeat ID response carries the server's current
+        # canonical id. Retry that id; only a response without a usable hint
+        # falls back to the empty bootstrap id.
         self._heartbeat_id: str = str(initial_heartbeat_id or "")
         self._health = HeartbeatHealth.STARTING
         self._last_success_at: Optional[datetime] = None
@@ -1402,7 +1430,7 @@ class HeartbeatSupervisor:
         comment in __init__. Each successful post returns the next canonical
         `heartbeat_id` which we capture for the following tick. Transient
         failures keep that id so existing resting orders stay tied to the same
-        lease chain; explicit Invalid Heartbeat ID alone restarts from `""`.
+        lease chain; explicit Invalid Heartbeat ID supplies the current id.
         A generic network failure is ambiguous: the venue might have processed
         the POST without returning the rotated token. Sending an empty-chain
         POST in that same tick can therefore create a second lease chain and
@@ -1419,22 +1447,25 @@ class HeartbeatSupervisor:
                 self._heartbeat_id = await self._post_heartbeat_once(self._heartbeat_id)
                 self.record_success()
             except Exception as exc:  # fail closed, surface through status
-                # Polymarket echoes the rejected heartbeat_id in the 400 body.
-                # Treating that value as a fresh hint can pin the lease owner to
-                # a known-bad token until a later timeout resets the chain, which
-                # is long enough for the venue to cancel resting GTC/GTD orders.
                 if _is_invalid_heartbeat_id_error(exc):
                     self.record_failure(exc)
+                    recovery_id = _heartbeat_id_hint_from_invalid_error(exc)
                     try:
-                        self._heartbeat_id = await self._post_heartbeat_once("")
+                        self._heartbeat_id = await self._post_heartbeat_once(
+                            recovery_id
+                        )
                         self.record_success()
                         return self.status()
                     except Exception as retry_exc:
                         self._reset_transport_after_failure(retry_exc)
-                        exc = RuntimeError(
-                            f"Invalid Heartbeat ID; empty-chain recovery failed: {retry_exc}"
+                        recovery_mode = (
+                            "server-hint" if recovery_id else "empty-chain"
                         )
-                    self._heartbeat_id = ""  # invalid chain cannot protect resting orders
+                        exc = RuntimeError(
+                            "Invalid Heartbeat ID; "
+                            f"{recovery_mode} recovery failed: {retry_exc}"
+                        )
+                    self._heartbeat_id = recovery_id
                     self.record_failure(exc)
                 else:
                     self.record_failure(exc)

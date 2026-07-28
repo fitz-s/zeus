@@ -824,6 +824,14 @@ files:
     zone: K1_governance
     authority_role: package_marker
     why: Marks control namespace.
+  src/control/live_health.py:
+    zone: K1_governance
+    authority_role: composite_live_evidence_reader
+    why: Reconstructs and validates current process, data, command, and global-auction receipt evidence without becoming a write or market-action authority; supports both historical self-contained candidate receipts and bounded one-hop semantic deltas while verifying content hashes and exact coverage.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/main.py
   src/control/control_plane.py:
     zone: K1_governance
     authority_role: control_write_surface
@@ -1200,7 +1208,7 @@ files:
   src/data/market_scanner.py:
     zone: K2_runtime
     authority_role: market_discovery
-    why: Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh accepts a per-row persist context so CLOB/network work stays outside the unified trade write lease. Raw book changes remain reconstructable from the immutable executable snapshot sequence; the scanner no longer duplicates each change into book_hash_transitions. Its direct market-events writer opens through the canonical shared cutover lease.
+    why: Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh accepts a per-row persist context so CLOB/network work stays outside the unified trade write lease. JIT, priority, first-seen, and periodic keyframe books persist as full executable evidence; ordinary broad discovery persists only scalar/hash/top-K compact evidence and can never authorize submit or recovery. Raw full-book changes remain reconstructable from immutable keyframes while compact rows carry their own prev-hash interval lineage; the scanner no longer duplicates each change into book_hash_transitions. Its direct market-events writer opens through the canonical shared cutover lease.
     write_routes:
     - runtime_trade_write_coordinator
     downstream:
@@ -1331,7 +1339,7 @@ files:
   src/venue/polymarket_v2_adapter.py:
     zone: K2_runtime
     authority_role: v2_venue_adapter
-    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects prices outside [0.05,0.95] before any SDK submit contact. Its account-truth read fully paginates orders then trades through one authenticated HTTP client, one server timestamp, endpoint-specific signatures, and one monotonic wall-clock deadline; incomplete transport or page truth never becomes an empty-account fact.
+    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects prices outside [0.05,0.95] before any SDK submit contact. Its account-truth read fully paginates orders then trades through one authenticated HTTP client, one server timestamp, endpoint-specific signatures, and one monotonic wall-clock deadline; incomplete transport or page truth never becomes an empty-account fact. A synchronous CLOB 425 `order manager not ready, please retry` response is a deterministic whole-request rejection for both single and batch submission, while transport failures and unrecognized post-sign exceptions remain ambiguous.
     downstream:
     - src/execution/executor.py
     - src/data/polymarket_client.py
@@ -1699,7 +1707,7 @@ files:
   src/engine/cycle_runtime.py:
     zone: K2_runtime
     authority_role: runtime_helper
-    why: Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority. R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge as exit evaluation. A positive-budget held-position cycle yields after two persisted monitors, or once its deadline expires after any progress, so one slow tail cannot indefinitely block entry redecision; zero-budget fair-lane rotation remains intact.
+    why: Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority. R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge as exit evaluation, including lossless reconstruction of exit-specific validation subsets indexed into the event's canonical monitor validation vector. A positive-budget held-position cycle yields after two persisted monitors, or once its deadline expires after any progress, so one slow tail cannot indefinitely block entry redecision; zero-budget fair-lane rotation remains intact.
   src/engine/discovery_mode.py:
     zone: K2_runtime
     authority_role: mode_enum
@@ -1745,7 +1753,7 @@ files:
   src/engine/lifecycle_events.py:
     zone: K2_runtime
     authority_role: lifecycle_event_builder
-    why: Builds canonical event/projection payloads; must not bypass lifecycle manager.
+    why: Builds canonical event/projection payloads; must not bypass lifecycle manager. Recurring monitor events store exit-specific validation subsets as ordered indexes into their canonical validation vector when possible, retaining exact evidence without duplicating long strings.
     write_routes:
     - canonical_position_write
     downstream:
@@ -1798,7 +1806,7 @@ files:
   src/engine/global_batch_runtime.py:
     zone: K2_K3_coordination
     authority_role: current_global_single_order_runtime
-    why: Owns one complete current auction epoch from canonical runtime-open held-family enumeration and independent current-family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set. An unpaged claim callback returns the exact immutable carrier actually claimed, so causal-carrier reuse cannot bind actuation to a newly proposed but unclaimed economic ID.
+    why: Owns one complete current auction epoch from canonical runtime-open held-family enumeration and independent current-family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set. An unpaged claim callback returns the exact immutable carrier actually claimed, so causal-carrier reuse cannot bind actuation to a newly proposed but unclaimed economic ID. Recurring decision receipts retain complete causal hashes and bounded one-hop reconstruction while indexing duplicate rejection membership and field-delta encoding stable action slots to avoid rewriting unchanged candidate identity on every epoch.
     downstream:
     - src/engine/global_auction_universe.py
     - src/engine/global_single_order_auction.py
@@ -1902,7 +1910,7 @@ files:
     zone: K2_runtime
     authority_role: venue_command_recovery
     why: >-
-      Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Confirmed maker fills become execution facts while their ACKED remainder is still resting, even when the initial LIVE order fact still reports zero matched; maker cancel races likewise aggregate all canonical confirmed trade legs for one order. Authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill; deploy-time restart recovery runs that same point-order terminal proof before its read-only alignment gate, and the scheduled live tick prioritizes both already-canceled and cancel-unknown capital locks before broad maintenance can consume its DB budget. A point-in-time account snapshot never clears a post-submit unknown by token-level absence: without a command/order/trade fact causally bound to the original submit, duplicate and cap authority stay fail-closed. Boot invalid-entry authority recovery ranks canonical order facts only for zero-exposure pending ENTRY commands, so historical fact volume cannot delay scheduler and held-position monitor startup. B71 additionally detects one open position_id carrying authenticated FILLED ENTRY BUY commands for multiple native held tokens, then in one append-first transaction reconstructs token-typed projections, rehomes only child commands/facts with CAS, and fails closed to review on topology, certificate, lifecycle, attribution, or rehome ambiguity; it never submits a venue action.
+      Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Confirmed maker fills become execution facts while their ACKED remainder is still resting, even when the initial LIVE order fact still reports zero matched; maker cancel races likewise aggregate all canonical confirmed trade legs for one order. Authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill; deploy-time restart recovery runs that same point-order terminal proof before its read-only alignment gate and gives complete account pagination a separately bounded large-account deadline, while the scheduled live tick retains its short cadence budget. A point-in-time account snapshot never clears a post-submit unknown by token-level absence: without a command/order/trade fact causally bound to the original submit, duplicate and cap authority stay fail-closed. Boot invalid-entry authority recovery ranks canonical order facts only for zero-exposure pending ENTRY commands, so historical fact volume cannot delay scheduler and held-position monitor startup. B71 additionally detects one open position_id carrying authenticated FILLED ENTRY BUY commands for multiple native held tokens, then in one append-first transaction reconstructs token-typed projections, rehomes only child commands/facts with CAS, and fails closed to review on topology, certificate, lifecycle, attribution, or rehome ambiguity; it never submits a venue action.
     downstream:
     - src/engine/cycle_runner.py
     - src/state/venue_command_repo.py
@@ -2478,7 +2486,7 @@ files:
   src/state/snapshot_repo.py:
     zone: K2_runtime
     authority_role: executable_market_snapshot_journal
-    why: R3 U1 append-only executable market snapshot persistence and lookup surface; snapshots are immutable evidence for venue_commands. Also maintains executable_market_snapshot_latest as a compact trade-DB read model so hot refresh-priority paths do not scan the high-frequency append log. Market-channel tick/lifecycle changes append executable_market_snapshot_invalidations instead of mutating historical snapshot rows; live readers and submit gates reject invalidated rows until newer snapshot evidence exists.
+    why: R3 U1 append-only executable market snapshot persistence and lookup surface; full snapshots are immutable evidence for venue_commands. A separate append-only executable_market_snapshot_compact table stores discovery-only scalar/hash/top-K time-series and is never executable, command, recovery, held-position, or submit authority. The repo also maintains executable_market_snapshot_latest as a bounded full-evidence read model so hot refresh-priority paths do not scan the append log. Market-channel tick/lifecycle changes append executable_market_snapshot_invalidations instead of mutating historical snapshot rows; live readers and submit gates reject invalidated rows until newer full snapshot evidence exists.
     downstream:
     - src/state/venue_command_repo.py
     - src/execution/executor.py

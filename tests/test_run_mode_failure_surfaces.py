@@ -325,18 +325,37 @@ def _write_high_yes_edge_dbs(
             "id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT, timestamp TEXT)"
         )
         if with_global_auction_candidate:
+            v12 = global_auction_encoding == (
+                "zlib+base64+canonical-json-v12"
+            )
+            rejection_identity = (
+                {"candidate_indexes": [0]}
+                if v12
+                else {"candidate_ids": ["candidate-high-yes-1"]}
+            )
             evaluation_payload = {
                 "rejected_groups": [
                     {
                         "action": "BUY",
                         "side": "YES",
                         "reason": "ENTRY_ACTION_PAUSED:external:operator",
-                        "candidate_ids": ["candidate-high-yes-1"],
+                        **rejection_identity,
                     }
                 ],
                 "detailed": [],
                 "buy_condition_side_masks": [[condition_id, 1]],
             }
+            if v12:
+                evaluation_payload["buy_candidate_index"] = [
+                    [
+                        "candidate-high-yes-1",
+                        "family-high-yes-1",
+                        bin_label,
+                        condition_id,
+                        "YES",
+                        "token-high-yes-1",
+                    ]
+                ]
             evaluation_json = json.dumps(
                 evaluation_payload,
                 sort_keys=True,
@@ -345,11 +364,12 @@ def _write_high_yes_edge_dbs(
             v11 = global_auction_encoding == (
                 "zlib+base64+canonical-json-v11"
             )
+            current_encoding = v11 or v12
             holding_json = b"[]"
             decision_at = (now - timedelta(minutes=1)).isoformat()
             artifact = {
                 "summary": {
-                    "schema_version": 18 if v11 else 5,
+                    "schema_version": 19 if v12 else (18 if v11 else 5),
                     "decision_at_utc": decision_at,
                     "candidate_coverage_complete": True,
                     "candidate_condition_index_complete": True,
@@ -358,10 +378,10 @@ def _write_high_yes_edge_dbs(
                     "candidate_evaluation_encoding": global_auction_encoding,
                     "holding_auction_coverage_encoding": (
                         "zlib+base64+canonical-json-v2"
-                        if v11
+                        if current_encoding
                         else "zlib+base64+canonical-json-v1"
                     ),
-                    "held_position_coverage_complete": v11,
+                    "held_position_coverage_complete": current_encoding,
                     "held_position_expected_count": 0,
                     "held_position_evaluated_count": 0,
                     "held_position_excluded_count": 0,
@@ -4539,6 +4559,56 @@ def test_high_yes_edge_degrades_without_yes_action_or_rejection_trace(
     assert surface["missed_high_yes_edge_sample"][0]["condition_id"] == "cond-high-yes-1"
 
 
+def test_high_yes_edge_recognizes_day0_posterior_redecision_carrier(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd)
+    forecast_conn = sqlite3.connect(sd / "zeus-forecasts.db")
+    computed_at = forecast_conn.execute(
+        "SELECT computed_at FROM forecast_posteriors WHERE posterior_id = 1"
+    ).fetchone()[0]
+    forecast_conn.close()
+    world_conn = sqlite3.connect(sd / "zeus-world.db")
+    world_conn.execute("ALTER TABLE opportunity_events ADD COLUMN available_at TEXT")
+    world_conn.execute(
+        "INSERT INTO opportunity_events "
+        "(event_id, event_type, payload_json, created_at, available_at) "
+        "VALUES ('day0-posterior-1', 'DAY0_EXTREME_UPDATED', ?, ?, ?)",
+        (
+            json.dumps(
+                {
+                    "city": "Paris",
+                    "target_date": "2026-07-09",
+                    "metric": "low",
+                    "available_at": computed_at,
+                }
+            ),
+            computed_at,
+            computed_at,
+        ),
+    )
+    world_conn.execute(
+        "INSERT INTO opportunity_event_processing VALUES "
+        "('day0-posterior-1', 'edli_reactor_v1', 'processed')"
+    )
+    world_conn.commit()
+    world_conn.close()
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+
+    assert surface["issue"] == (
+        "HIGH_YES_EDGE_PROCESSED_WITHOUT_ACTIONABLE_YES:n=1"
+    )
+    assert surface["missing_fsr_high_yes_edge_count"] == 0
+    assert surface["processed_without_action_high_yes_edge_count"] == 1
+
+
 def test_high_yes_edge_accepts_canonical_global_entry_pause(
     tmp_path: Path,
 ) -> None:
@@ -4572,6 +4642,7 @@ def test_high_yes_edge_accepts_canonical_global_entry_pause(
         "zlib+base64+canonical-json-v9",
         "zlib+base64+canonical-json-v10",
         "zlib+base64+canonical-json-v11",
+        "zlib+base64+canonical-json-v12",
     ),
 )
 def test_high_yes_edge_accepts_current_global_auction_candidate(

@@ -522,9 +522,10 @@ capabilities:
       Create a new git worktree with a per-worktree YAML sentinel declaring
       intent / agent / mode / base / created_at. The sentinel is read by
       SessionStart for cross-worktree visibility and by post-merge cleanup
-      for ownership lookup. Creating a worktree is a structural git op;
-      WORKING reversibility class because the worktree can be removed by
-      `git worktree remove` without external state mutation.
+      for ownership lookup. Creating a repository-owned worktree is a
+      structural git op; Codex-managed paths are instead snapshot-reclaimed by
+      Codex when their completed worker archives its own thread, never by a
+      repository raw-removal hook.
     relationships:
       protects_invariants: []
       blocked_when: []
@@ -572,19 +573,20 @@ capabilities:
   - id: worktree_post_merge_cleanup
     owner_module: scripts/worktree_doctor.py
     intent: >
-      ADVISORY checklist after `gh pr merge`: branch close recommendation,
-      worktree close recommendation, backup/draft sweep recommendation.
-      NEVER auto-deletes (per feedback_commit_per_phase_or_lose_everything.md).
-      Composes with .claude/hooks/registry.yaml::post_merge_cleanup hook;
-      this capability owns the entry-point script; the hook owns the
-      runtime trigger.
+      ADVISORY landing-closeout reminder after a successful PR merge or
+      cherry-pick. The completed Codex worker archives its own thread only
+      after landing verification and any open-PR monitoring; Codex snapshots
+      and removes its managed worktree. NEVER auto-deletes or raw-removes a
+      Codex-managed worktree. Composes with
+      .claude/hooks/registry.yaml::post_merge_cleanup hook; this capability
+      owns the entry-point script and the hook owns the runtime trigger.
     relationships:
       protects_invariants: []
       blocked_when: []
     hard_kernel_paths:
       - scripts/worktree_doctor.py
     original_intent:
-      intent_test: "task is a successful gh pr merge OR explicit cleanup audit"
+      intent_test: "task is a successful gh pr merge, cherry-pick, or explicit cleanup audit"
       does_not_fit: log_and_advisory
       scope_keywords: [cleanup, post_merge, archive, sweep, backup]
       out_of_scope_keywords: [auto-delete, force-remove]

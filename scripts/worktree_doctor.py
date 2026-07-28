@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-05-07
-# Last reused or audited: 2026-05-07
+# Last reused or audited: 2026-07-28
 # Authority basis: Navigation Topology v2 PLAN §2.6-§2.8; sunset 2027-05-07
 
 """ADVISORY-only worktree lifecycle helper.
@@ -41,6 +41,10 @@ except ImportError:
         return decorator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+CODEX_MANAGED_WORKTREE_ROOT = (
+    Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+    / "worktrees"
+).resolve()
 
 SENTINEL_FILENAME = "zeus_worktree.yaml"
 
@@ -62,6 +66,21 @@ def _git(*args: str, cwd: Path = REPO_ROOT) -> str:
         return result.stdout
     except (subprocess.TimeoutExpired, OSError):
         return ""
+
+
+def _git_output_if_succeeded(*args: str, cwd: Path = REPO_ROOT) -> str | None:
+    """Return stdout only when one git invocation completed successfully."""
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.stdout if result.returncode == 0 else None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
 
 
 def _gh(*args: str) -> str:
@@ -104,6 +123,14 @@ def _parse_worktree_list(porcelain: str) -> list[dict[str, Any]]:
     if current:
         worktrees.append(current)
     return worktrees
+
+
+def _is_codex_managed_worktree(path: str) -> bool:
+    """Whether ``path`` is owned by Codex's snapshot-aware worktree lifecycle."""
+    try:
+        return Path(path).resolve().is_relative_to(CODEX_MANAGED_WORKTREE_ROOT)
+    except (OSError, ValueError):
+        return False
 
 
 def _read_sentinel(worktree_path: str) -> dict[str, Any] | None:
@@ -220,6 +247,29 @@ def _last_commit_ts(branch: str) -> str:
     return _git("log", "-1", "--format=%ct", branch).strip()
 
 
+def _branch_is_absorbed_by_live(branch: str) -> bool:
+    """Whether every branch patch is already present in ``live``.
+
+    ``git cherry live <branch>`` emits ``+`` only for patches that live does
+    not contain. This recognizes both a merged branch and a branch whose
+    commits reached live through hot-pick, without treating ancestry as the
+    only proof of landing.
+    """
+    if not branch:
+        return False
+    if not _git("rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}").strip():
+        return False
+    if not _git("rev-parse", "--verify", "--quiet", "live^{commit}").strip():
+        return False
+    cherry_output = _git_output_if_succeeded("cherry", "live", branch)
+    if cherry_output is None:
+        return False
+    return not any(
+        line.startswith("+")
+        for line in cherry_output.splitlines()
+    )
+
+
 # ---------------------------------------------------------------------------
 # Subcommand: status
 # ---------------------------------------------------------------------------
@@ -264,6 +314,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
         dirty = _dirty_state(wt_path) if wt_path else False
         sentinel = _read_sentinel(wt_path)
         pr = _pr_state_for_branch(branch, pr_list)
+        absorbed_by_live = _branch_is_absorbed_by_live(branch)
 
         result_wts.append({
             "path": wt_path,
@@ -275,6 +326,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
             "dirty": dirty,
             "last_commit_ts": _last_commit_ts(branch) if branch else "",
             "pr_state": pr,
+            "absorbed_by_live": absorbed_by_live,
             "sentinel": sentinel,
             "severity": "advisory",
         })
@@ -432,7 +484,8 @@ def _collect_clutter() -> list[dict[str, Any]]:
                 "advisory": "stale agent replay log; safe to delete if no recovery in progress",
             })
 
-    # Stale worktrees: >7d no commits + no open PR
+    # Completed or stale clean worktrees without an open PR. A hot-pick makes
+    # the source branch patch-equivalent to live without making it an ancestor.
     porcelain = _git("worktree", "list", "--porcelain")
     worktrees = _parse_worktree_list(porcelain)
     pr_list = _fetch_pr_list()
@@ -443,14 +496,30 @@ def _collect_clutter() -> list[dict[str, Any]]:
             try:
                 age_days = (time.time() - float(ts)) / 86400
                 has_pr = bool(_pr_state_for_branch(branch, pr_list))
-                if age_days > 7 and not has_pr:
+                dirty = _dirty_state(wt.get("path", ""))
+                absorbed_by_live = _branch_is_absorbed_by_live(branch)
+                if (age_days > 7 or absorbed_by_live) and not has_pr and not dirty:
+                    path = wt.get("path", "")
+                    advisory = (
+                        "Codex-managed worktree: its branch is patch-equivalent to live; only "
+                        "its owning completed clean worker may archive its own thread with "
+                        "set_thread_archived; never raw-remove it"
+                        if _is_codex_managed_worktree(path) and absorbed_by_live
+                        else "Codex-managed worktree: only its owning completed clean worker may "
+                        "archive its own thread with set_thread_archived; never raw-remove it"
+                        if _is_codex_managed_worktree(path)
+                        else "worktree branch is patch-equivalent to live; archive or remove only "
+                        "after verifying the owner and branch policy"
+                        if absorbed_by_live
+                        else "stale worktree (>7d no commits, no open PR); consider `git worktree remove` after verifying"
+                    )
                     clutter.append({
-                        "path": wt.get("path", ""),
+                        "path": path,
                         "type": "worktree",
                         "age_days": round(age_days, 1),
                         "branch": branch,
                         "severity": "advisory",
-                        "advisory": "stale worktree (>7d no commits, no open PR); consider `git worktree remove` after verifying",
+                        "advisory": advisory,
                     })
             except (ValueError, TypeError):
                 pass
@@ -490,12 +559,13 @@ def cmd_hygiene(_args: argparse.Namespace) -> int:
 
 @capability("worktree_post_merge_cleanup", lease=False)
 def cmd_post_merge_cleanup(_args: argparse.Namespace) -> int:
-    """Post-merge advisory checklist. NEVER deletes.
+    """Post-landing advisory checklist. NEVER deletes.
 
     worktree_post_merge_cleanup capability owner.
-    Emits the same clutter advisory as workspace_hygiene_audit, scoped to
-    post-merge context: branch close recommendation, worktree close
-    recommendation, backup/draft sweep recommendation.
+    Emits the same clutter advisory as workspace_hygiene_audit. For a
+    Codex-managed path, the owning completed clean worker archives its own
+    thread; Codex snapshots and reclaims the path. This script never bypasses
+    that lifecycle with a raw worktree removal.
     Composes with .claude/hooks/registry.yaml::post_merge_cleanup hook.
     """
     clutter = _collect_clutter()
@@ -503,7 +573,7 @@ def cmd_post_merge_cleanup(_args: argparse.Namespace) -> int:
         "clutter": clutter,
         "count": len(clutter),
         "context": "post_merge_cleanup",
-        "action": "advisory_only_never_auto_delete",
+        "action": "advisory_only_never_auto_delete_or_raw_remove_codex_managed",
         "severity": "advisory",
     }, indent=2))
     return 0

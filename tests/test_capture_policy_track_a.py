@@ -1,17 +1,15 @@
-# Lifecycle: created=2026-07-21; last_reviewed=2026-07-22; last_reused=never
-# Purpose: prove capture-policy Track A is additive (nullable capture_trigger column + stamping) — no compact table, no CHECK, registry-clean.
+# Lifecycle: created=2026-07-21; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: prove capture-policy value tiers, registered compact schema, and full-evidence isolation.
 # Reuse: run on any change to snapshot_repo capture_trigger plumbing or init_snapshot_schema.
 # Authority basis: docs/operations/current/plans/db_first_principles_audit_2026-07-20/implementation/capture_policy_spec.md
-"""capture_policy_spec.md Track A antibodies.
+"""capture_policy_spec.md value-tier antibodies.
 
-Track A is additive-only: ``init_snapshot_schema`` adds a single nullable,
-UNCONSTRAINED ``capture_trigger`` column to ``executable_market_snapshots`` and
-every writer stamps a fixed taxonomy constant. This increment has NO compact
-table and NO hot-path hydration check (both were removed after the PR review):
+The full journal keeps priority/JIT/keyframe executable evidence. Ordinary
+discovery goes to a registered compact append journal that no existing money
+path reader queries. The full table's capture_trigger remains unconstrained at
+the SQLite layer to avoid an O(rows) boot migration, with value tiers enforced
+at the write API.
 
-* the compact table was unregistered in ``db_table_ownership.yaml`` — a fresh
-  init created it, and the boot-time ``assert_db_matches_registry`` would then
-  abort the daemon with ``extra_on_disk=executable_market_snapshot_compact``;
 * a CHECK-constrained ``ADD COLUMN`` forces SQLite (>=3.37) to full-scan every
   existing row (~0.9s / 3M rows measured; O(rows) with cold I/O on the ~43GB
   live trade table), whereas a plain nullable ``ADD COLUMN`` is O(1);
@@ -21,11 +19,12 @@ table and NO hot-path hydration check (both were removed after the PR review):
 The taxonomy is an application invariant enforced at write; its distribution is
 measured off the hot path by an audit query
 (``SELECT capture_trigger, COUNT(*) FROM executable_market_snapshots GROUP BY 1``).
-These tests are fixture-only (in-memory sqlite) and never touch a live DB.
+These tests are fixture-only (in-memory SQLite) and never touch a live DB.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -38,6 +37,7 @@ from src.state.db import init_schema, init_schema_trade_only
 from src.state.snapshot_repo import (
     get_snapshot,
     init_snapshot_schema,
+    insert_compact_snapshot,
     insert_snapshot,
 )
 from src.state.table_registry import DBIdentity, assert_db_matches_registry
@@ -161,7 +161,6 @@ def test_capture_trigger_column_unconstrained_but_api_validates(conn):
         "NEAR_THRESHOLD_MATCH",
         "KEYFRAME",
         "JIT_SUBMIT",
-        "DISCOVERY_SWEEP",
     ],
 )
 def test_insert_snapshot_stamps_capture_trigger(conn, trigger):
@@ -186,20 +185,17 @@ def test_insert_snapshot_capture_trigger_defaults_null(conn):
 def test_get_snapshot_hydrates_row_with_capture_trigger(conn):
     """The read/hydration path returns a snapshot unaffected by the column: no
     hot-path check remains, so a stamped row hydrates like any other."""
-    insert_snapshot(conn, _snapshot(snapshot_id="snap-read"), capture_trigger="DISCOVERY_SWEEP")
+    insert_snapshot(conn, _snapshot(snapshot_id="snap-read"), capture_trigger="KEYFRAME")
     loaded = get_snapshot(conn, "snap-read")
     assert loaded is not None
     assert loaded.snapshot_id == "snap-read"
 
 
-# --- (c) BLOCKER-1 regression: no unregistered table; boot registry passes ---
+# --- (c) compact value tier and boot registry --------------------------------
 
 
 def test_fresh_world_init_matches_registry_no_compact_table():
-    """Track A must not create an ownership-unregistered table. A fresh WORLD
-    init followed by the boot-time registry assertion must PASS, and the
-    (removed) compact table must be absent. Before the PR-review fix this
-    aborted the daemon at boot (extra_on_disk=executable_market_snapshot_compact)."""
+    """The discovery-only table belongs to TRADE and must stay absent on WORLD."""
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     try:
@@ -216,8 +212,8 @@ def test_fresh_world_init_matches_registry_no_compact_table():
         c.close()
 
 
-def test_fresh_trade_init_matches_registry_no_compact_table():
-    """Same guard for the TRADE DB — the live snapshot table's real home."""
+def test_fresh_trade_init_matches_registry_with_compact_table():
+    """TRADE init creates the registered compact journal and still boots clean."""
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     try:
@@ -227,8 +223,48 @@ def test_fresh_trade_init_matches_registry_no_compact_table():
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
                 "AND name='executable_market_snapshot_compact'"
             ).fetchone()
-            is None
+            is not None
         )
         assert_db_matches_registry(c, DBIdentity.TRADE)  # must not raise
     finally:
         c.close()
+
+
+def test_discovery_cannot_enter_full_executable_journal(conn):
+    with pytest.raises(ValueError, match="full-eligible"):
+        insert_snapshot(
+            conn,
+            _snapshot(snapshot_id="snap-discovery-full"),
+            capture_trigger="DISCOVERY_SWEEP",
+        )
+
+
+def test_compact_snapshot_preserves_scalar_hash_and_top_k_without_full_body(conn):
+    compact_id = insert_compact_snapshot(
+        conn,
+        _snapshot(snapshot_id="snap-compact"),
+        capture_trigger="DISCOVERY_SWEEP",
+        prev_hash="d" * 64,
+        hash_delta_ms=250,
+    )
+    row = conn.execute(
+        "SELECT * FROM executable_market_snapshot_compact WHERE compact_id = ?",
+        (compact_id,),
+    ).fetchone()
+
+    assert row["condition_id"] == "condition-1"
+    assert row["selected_outcome_token_id"] == "yes-token"
+    assert row["raw_orderbook_hash"] == HASH_C
+    assert json.loads(row["top_k_bids_json"]) == [["0.49", "100"]]
+    assert json.loads(row["top_k_asks_json"]) == [["0.51", "100"]]
+    assert row["prev_hash"] == "d" * 64
+    assert row["hash_delta_ms"] == 250
+    assert "orderbook_depth_json" not in {
+        column[1]
+        for column in conn.execute(
+            "PRAGMA table_info(executable_market_snapshot_compact)"
+        ).fetchall()
+    }
+    assert conn.execute(
+        "SELECT 1 FROM executable_market_snapshots WHERE snapshot_id = 'snap-compact'"
+    ).fetchone() is None

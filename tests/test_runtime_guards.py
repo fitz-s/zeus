@@ -1,5 +1,5 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-04-28; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Created: 2026-04-28
 # Last reused/audited: 2026-07-24
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
@@ -13792,6 +13792,10 @@ def test_build_exit_intent_carries_boundary_fields():
         position_state="day0_window",
         day0_active=True,
         exit_reason="forward edge failed",
+        probability_receipt={
+            "posterior_id": "posterior-9",
+            "evidence_content_hash": "a" * 64,
+        },
     )
 
     intent = exit_lifecycle_module.build_exit_intent(pos, ctx)
@@ -13809,6 +13813,12 @@ def test_build_exit_intent_carries_boundary_fields():
     assert intent.hours_to_settlement == pytest.approx(2.0)
     assert intent.position_state == "day0_window"
     assert intent.day0_active is True
+    assert intent.probability_receipt == {
+        "posterior_id": "posterior-9",
+        "evidence_content_hash": "a" * 64,
+    }
+    assert intent.decision_id.startswith(f"exit:{pos.trade_id}:")
+    assert exit_lifecycle_module.build_exit_intent(pos, ctx).decision_id == intent.decision_id
 
 
 def test_sell_result_without_order_id_is_rejected_not_trade_id_fallback():

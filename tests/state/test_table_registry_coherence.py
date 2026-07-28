@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused or audited: 2026-05-18
+# Last reused or audited: 2026-07-28
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.1, §1.2, §3 (REV 4)
 #   Antibodies A1, A2 (subset as A4), A8 per PLAN §3
 #   INV-37 enforcement per architecture/invariants.yaml::INV-37
@@ -71,6 +71,7 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     "execution_fact",
     "execution_feasibility_evidence",
     "execution_feasibility_latest",
+    "executable_market_snapshot_compact",
     "executable_market_snapshot_invalidations",
     "executable_market_snapshot_latest",
     "executable_market_snapshots",
