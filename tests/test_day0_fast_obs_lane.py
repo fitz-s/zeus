@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-27
-# Lifecycle: created=2026-06-10; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Last reused/audited: 2026-07-28
+# Lifecycle: created=2026-06-10; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -1765,6 +1765,7 @@ class TestEmpiricalThresholds:
             ("Guangzhou", "ZGGG"),
             ("Wellington", "NZWN"),
             ("Ankara", "LTAC"),
+            ("Karachi", "OPKC"),
         ),
     )
     def test_recent_loss_cities_use_measured_zero_margin_fast_lane(
@@ -1814,6 +1815,10 @@ class TestEmpiricalThresholds:
             "2026-07-20T07:42:38.732852+00:00",
             "2026-07-27T07:42:38.732852+00:00",
         ]
+        expected_windows["Karachi"] = [
+            "2026-07-21T09:55:56.854853+00:00",
+            "2026-07-28T09:55:56.854853+00:00",
+        ]
         for city_name, expected_window in expected_windows.items():
             measurement = divergence[city_name]
             city = cities[city_name]
@@ -1823,6 +1828,21 @@ class TestEmpiricalThresholds:
             assert measurement["matched_pairs"] >= 100
             assert measurement["measurement_window_days"] == 7
             assert measurement["measurement_window"] == expected_window
+
+        karachi = divergence["Karachi"]
+        assert karachi["matched_pairs"] == 202
+        assert karachi["p95_abs_rounded_delta"] == 0.0
+        assert karachi["p99_abs_rounded_delta"] == 0.0
+        assert karachi["max_abs_rounded_delta"] == 0.0
+        assert karachi["disagree_rate_ge_1unit"] == 0.0
+        assert karachi["empirical_threshold"] == 1.0
+        assert karachi["threshold_provenance"] == "empirical"
+        assert karachi["settlement_faithful"] is True
+        assert karachi["station_id"] == "OPKC"
+        assert karachi["unit"] == "C"
+        assert datetime.fromisoformat(karachi["measurement_generated_at"]) > (
+            datetime.fromisoformat(karachi["measurement_window"][1])
+        )
 
     def test_unmeasured_city_falls_back_to_conservative_default(self):
         from src.data.day0_oracle_anomaly import (
@@ -2033,7 +2053,7 @@ class TestMetarMarginAbsorption:
         assert city_metar_settlement_faithful("Shenzhen", path=path) is False
         assert metar_margin_units_for_city("Shenzhen", "C", path=path) is None
 
-    def test_all_26_measured_cities_have_expected_margin(self):
+    def test_all_27_measured_cities_have_expected_margin(self):
         """Regression: the (b) default-direction fix changes behavior for
         UNMEASURED cities only. Every already-measured city in the real
         config/wu_metar_divergence.json (no path override) must keep its
@@ -2050,7 +2070,7 @@ class TestMetarMarginAbsorption:
             f_cities | {
                 "London", "Paris", "Amsterdam", "Milan", "Munich", "Madrid",
                 "Tokyo", "Singapore", "Taipei", "Toronto", "Beijing",
-                "Guangzhou", "Wellington", "Ankara",
+                "Guangzhou", "Wellington", "Ankara", "Karachi",
             }
         )}
         expected_margin["Seoul"] = 2.0
