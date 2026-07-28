@@ -90,6 +90,7 @@ _cycle_lock = threading.Lock()
 _held_position_monitor_active = threading.Event()
 _held_position_monitor_claim = threading.Lock()
 _held_position_monitor_handoff_pending = threading.Event()
+_periodic_held_position_monitor_handoff_pending = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
 _held_position_monitor_bootstrap_check_lock = threading.Lock()
 _held_position_monitor_bootstrap_last_check = 0.0
@@ -285,6 +286,11 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     if job_name not in _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS:
         return False
 
+    # SCOPE: all monitor kinds may defer reactor admission before it owns the
+    # active lock. Only the separate typed periodic signal may cancel an
+    # in-flight global auction. DRAIN: the claimed monitor gets the handoff or
+    # its bounded wait expires. RESET: _exit_monitor_cycle's finally block
+    # clears both the generic and periodic handoff events on every return path.
     if (
         job_name in _HELD_POSITION_MONITOR_DEFER_JOBS
         and _held_position_monitor_handoff_pending.is_set()
@@ -3849,7 +3855,9 @@ def _edli_event_reactor_cycle(
         producer_wake_event_ids=producer_wake_event_ids,
         producer_wake_families=producer_wake_families,
         urgent_day0_pending=_unowned_day0_urgent_wake_pending,
-        held_position_monitor_pending=_held_position_monitor_handoff_pending.is_set,
+        held_position_monitor_pending=(
+            _periodic_held_position_monitor_handoff_pending.is_set
+        ),
     )
 
 
@@ -6588,6 +6596,8 @@ def _exit_monitor_cycle(
     # Claim exit priority before waiting. New reactor ticks defer only through
     # the handoff; monitor network work does not stop unrelated decisions.
     _held_position_monitor_handoff_pending.set()
+    if not urgent_fact:
+        _periodic_held_position_monitor_handoff_pending.set()
     _held_position_monitor_active.set()
     try:
         handoff_timeout = (
@@ -6667,6 +6677,7 @@ def _exit_monitor_cycle(
     finally:
         if not urgent_fact:
             _day0_held_monitor_preempt_requested.clear()
+            _periodic_held_position_monitor_handoff_pending.clear()
         _held_position_monitor_handoff_pending.clear()
         _held_position_monitor_active.clear()
         _held_position_monitor_claim.release()

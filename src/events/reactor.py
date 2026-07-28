@@ -858,6 +858,8 @@ class ReactorResult:
     proof_accepted: int = 0
     dead_lettered: int = 0
     retried: int = 0
+    # Exact epoch outcome, never inferred from aggregate rejection/retry counts.
+    global_auction_completed_non_cancelled: int = 0
     # VISIBILITY (2026-06-11 claim-storm incident): claim() lock bounces were
     # silently folded into ``retried`` — a 0/250 storm cycle was indistinguishable
     # from 250 honest snapshot-pending retries (reasons=[]). Counted separately so
@@ -961,6 +963,10 @@ class GlobalEpochOutcome:
     ``claimed_event_ids`` is the set of events this epoch actually claimed (a
     subset of the scanned events) — see ``attempted``.
 
+    ``auction_completed_non_cancelled`` is true only after the opaque global
+    adapter returned a valid receipt partition without a selection-cancelled
+    outcome. Pre-submit event rejection and batch exceptions remain false.
+
     BLOCKER FIX (2026-07-19 external review,
     ~/cgc-answers/2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md,
     reactor.py:967-981,1216-1279,1313-1482): the multi-winner loop must
@@ -976,6 +982,7 @@ class GlobalEpochOutcome:
     finalized: bool
     claimed_event_ids: frozenset[str]
     continuation_event_ids: frozenset[str] = frozenset()
+    auction_completed_non_cancelled: bool = False
 
 
 @dataclass(frozen=True)
@@ -1268,6 +1275,8 @@ class OpportunityEventReactor:
                         ),
                         cancelled=cycle_cancelled,
                     )
+                    if epoch.auction_completed_non_cancelled:
+                        result.global_auction_completed_non_cancelled += 1
                     epochs_run += 1
                     if remaining is not None:
                         # A continuation is control work created by a charged
@@ -1449,6 +1458,7 @@ class OpportunityEventReactor:
                 submitted=False,
                 finalized=False,
                 claimed_event_ids=frozenset(),
+                auction_completed_non_cancelled=False,
             )
 
         process_batch = getattr(self._submit, "process_global_batch")
@@ -1543,6 +1553,7 @@ class OpportunityEventReactor:
                 submitted=False,
                 finalized=False,
                 claimed_event_ids=frozenset(event.event_id for event in claimed),
+                auction_completed_non_cancelled=False,
             )
 
         # A real venue call creates a must-settle result. Persist that winner
@@ -1623,6 +1634,10 @@ class OpportunityEventReactor:
                 frozenset({batch_result.continuation_event.event_id})
                 if winner_finalized and batch_result.continuation_event is not None
                 else frozenset()
+            ),
+            auction_completed_non_cancelled=not any(
+                "GLOBAL_SELECTION_CANCELLED" in str(receipt.reason or "")
+                for receipt in batch_result.receipts.values()
             ),
         )
 
@@ -5942,6 +5957,69 @@ def _reactor_wake_cancellation_probe(
     return _cancelled
 
 
+_GLOBAL_AUCTION_MONITOR_COMPLETION_DUE = threading.Event()
+
+
+def _global_auction_monitor_cancellation_probe(
+    monitor_pending: Callable[[], bool] | None,
+) -> tuple[bool, Callable[[], bool]]:
+    """Allow one periodic-monitor preemption, then reserve auction completion."""
+
+    completion_due_at_start = _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    cancelled_this_cycle = False
+    if completion_due_at_start:
+        logging.getLogger("zeus.events.reactor").info(
+            "global auction completion reserved after periodic-monitor preemption"
+        )
+
+    def _cancelled() -> bool:
+        nonlocal cancelled_this_cycle
+
+        if cancelled_this_cycle:
+            return True
+        if completion_due_at_start or monitor_pending is None:
+            return False
+        try:
+            pending = bool(monitor_pending())
+        except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
+            return False
+        if not pending:
+            return False
+        # SCOPE: cancel this in-flight global selection once so the claimed
+        # held monitor gets the reactor handoff. DRAIN: the next reactor cycle
+        # ignores ordinary monitor pressure until one global auction finishes.
+        # RESET: _settle_global_auction_monitor_fairness clears the debt only
+        # after a non-cancelled auction result; Day0 cancellation keeps it due.
+        _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+        cancelled_this_cycle = True
+        logging.getLogger("zeus.events.reactor").info(
+            "global auction yielded once to periodic held monitor; completion debt armed"
+        )
+        return True
+
+    return completion_due_at_start, _cancelled
+
+
+def _settle_global_auction_monitor_fairness(
+    *, completion_due_at_start: bool, result: object
+) -> None:
+    """Clear a prior monitor preemption only after useful auction completion."""
+
+    if not completion_due_at_start:
+        return
+    reasons = tuple(getattr(result, "rejection_reasons", ()) or ())
+    if any("GLOBAL_SELECTION_CANCELLED" in str(reason) for reason in reasons):
+        return
+    completed = int(
+        getattr(result, "global_auction_completed_non_cancelled", 0) or 0
+    )
+    if completed > 0:
+        _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+        logging.getLogger("zeus.events.reactor").info(
+            "global auction completion debt cleared after non-cancelled result"
+        )
+
+
 def run_edli_event_reactor_cycle(
     *,
     active_lock,
@@ -5974,10 +6052,12 @@ def run_edli_event_reactor_cycle(
     newly committed observation. Lower-priority producer batches consult it
     only between durable event units; the Day0 batch itself is never cancelled.
 
-    ``held_position_monitor_pending`` lets the current global selection yield
-    at its existing cancellation boundaries after the monitor claims priority.
-    No venue side effect is interrupted; the next reactor cycle re-decides from
-    fresh probability, book, position, and capital truth.
+    ``held_position_monitor_pending`` is the typed periodic-monitor handoff
+    signal. It may cancel one in-flight auction; that cancellation reserves the
+    next global auction against further periodic-monitor cancellation until it
+    completes, so neither lane can starve the other. Urgent forecast and Day0
+    monitors do not consume this fairness token. Newly committed Day0 facts
+    retain their independent urgent cancellation path inside the live adapter.
     """
     import logging as _logging
     from src.main import (
@@ -6561,6 +6641,12 @@ def run_edli_event_reactor_cycle(
             if _live_entry_block_reason is None
             else None
         )
+        (
+            _monitor_completion_due_at_start,
+            _monitor_selection_cancelled,
+        ) = _global_auction_monitor_cancellation_probe(
+            held_position_monitor_pending
+        )
         submit_adapter = event_bound_live_adapter_from_trade_conn(
             trade_conn,
             live_cap_conn=conn,
@@ -6591,7 +6677,7 @@ def run_edli_event_reactor_cycle(
             auction_capital_authority=_auction_capital_authority,
             producer_wake_ids=producer_wake_ids,
             producer_wake_published_at=producer_wake_published_at,
-            selection_cancelled=held_position_monitor_pending,
+            selection_cancelled=_monitor_selection_cancelled,
         )
 
         reactor = OpportunityEventReactor(
@@ -6637,6 +6723,10 @@ def run_edli_event_reactor_cycle(
                 urgent_wake_pending=_urgent_wake_pending,
                 urgent_day0_pending=urgent_day0_pending,
             ),
+        )
+        _settle_global_auction_monitor_fairness(
+            completion_due_at_start=_monitor_completion_due_at_start,
+            result=_rr,
         )
         _log_stage("process_pending")
         # Canonical event/finalization truth must commit before the derived status

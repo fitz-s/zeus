@@ -1541,7 +1541,9 @@ def test_producer_fast_path_skips_metar_ledger_recovery_sync():
     assert "sync_from_ledger" in recovery_sync
 
 
-def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
+def test_main_reactor_injects_day0_and_monitor_preemption_signals(
+    monkeypatch,
+):
     import src.events.reactor as reactor_module
     import src.main as main
     from src.runtime import reactor_wake
@@ -1576,7 +1578,10 @@ def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
         assert captured["urgent_day0_pending"]() is False
         assert captured["held_position_monitor_pending"]() is False
         main._held_position_monitor_handoff_pending.set()
+        assert captured["held_position_monitor_pending"]() is False
+        main._periodic_held_position_monitor_handoff_pending.set()
         assert captured["held_position_monitor_pending"]() is True
+        main._periodic_held_position_monitor_handoff_pending.clear()
         main._held_position_monitor_handoff_pending.clear()
         main._day0_urgent_wake_pending.set()
         assert captured["urgent_day0_pending"]() is True
@@ -1585,9 +1590,153 @@ def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
         urgent_identity[0] = "wake-new"
         assert captured["urgent_day0_pending"]() is True
     finally:
+        main._periodic_held_position_monitor_handoff_pending.clear()
         main._held_position_monitor_handoff_pending.clear()
         main._day0_urgent_wake_pending.clear()
         main._day0_exit_monitor_attempts.clear()
+
+
+def test_monitor_preempts_once_then_next_auction_must_complete():
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    pending = [True]
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        due_at_start, first_probe = (
+            reactor._global_auction_monitor_cancellation_probe(
+                lambda: pending[0]
+            )
+        )
+        assert due_at_start is False
+        assert first_probe() is True
+        assert first_probe() is True
+
+        due_at_start, completion_probe = (
+            reactor._global_auction_monitor_cancellation_probe(
+                lambda: pending[0]
+            )
+        )
+        assert due_at_start is True
+        assert completion_probe() is False
+        reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=due_at_start,
+            result=SimpleNamespace(
+                processed=1,
+                proof_accepted=1,
+                rejected=0,
+                retried=0,
+                global_auction_completed_non_cancelled=1,
+                rejection_reasons=[],
+            ),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is False
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_day0_cancellation_does_not_discharge_monitor_fairness_debt():
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(
+                processed=0,
+                proof_accepted=0,
+                rejected=1,
+                retried=1,
+                global_auction_completed_non_cancelled=0,
+                rejection_reasons=[
+                    "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
+                ],
+            ),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_pre_submit_rejection_cannot_discharge_monitor_fairness_debt():
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(
+                processed=0,
+                proof_accepted=0,
+                rejected=4,
+                retried=2,
+                global_auction_completed_non_cancelled=0,
+                rejection_reasons=["EXECUTABLE_SNAPSHOT_STALE"],
+            ),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_monitor_handoff_defers_reactor_admission_only():
+    import src.main as main
+
+    was_pending = main._held_position_monitor_handoff_pending.is_set()
+    was_bootstrap_complete = main._held_position_monitor_bootstrap_complete.is_set()
+    try:
+        main._held_position_monitor_handoff_pending.set()
+        main._held_position_monitor_bootstrap_complete.set()
+        assert main._defer_for_held_position_monitor("edli_event_reactor") is True
+    finally:
+        main._held_position_monitor_handoff_pending.clear()
+        main._held_position_monitor_bootstrap_complete.clear()
+        if was_pending:
+            main._held_position_monitor_handoff_pending.set()
+        if was_bootstrap_complete:
+            main._held_position_monitor_bootstrap_complete.set()
+
+
+@pytest.mark.parametrize(
+    ("monitor_kwargs", "periodic_pending"),
+    (
+        ({}, True),
+        ({"urgent_forecast": True}, False),
+        ({"urgent_day0": True}, False),
+    ),
+)
+def test_only_periodic_monitor_arms_global_auction_fairness(
+    monkeypatch, monitor_kwargs, periodic_pending
+):
+    import src.main as main
+
+    observed = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout):
+            observed.append(
+                (
+                    timeout,
+                    main._held_position_monitor_handoff_pending.is_set(),
+                    main._periodic_held_position_monitor_handoff_pending.is_set(),
+                )
+            )
+            return False
+
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
+    main._held_position_monitor_handoff_pending.clear()
+    main._periodic_held_position_monitor_handoff_pending.clear()
+
+    assert main._exit_monitor_cycle(**monitor_kwargs) is False
+    assert observed[0][1:] == (True, periodic_pending)
+    assert main._held_position_monitor_handoff_pending.is_set() is False
+    assert main._periodic_held_position_monitor_handoff_pending.is_set() is False
 
 
 @pytest.mark.parametrize(
@@ -1630,7 +1779,37 @@ def test_global_batch_completed_economic_no_trade_consumes_current_epoch(verdict
 
     assert result.retried == 0
     assert result.rejected == 2
+    assert result.global_auction_completed_non_cancelled == 1
     assert all(_processing_status(conn, event.event_id) == "processed" for event in events)
+
+
+def test_cancelled_global_batch_is_not_a_fairness_completion():
+    conn, store = _store()
+    event = _forecast_event("global-cancelled", target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    reactor = _global_batch_probe_reactor(store, {})
+
+    def _batch(events, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        return GlobalBatchSubmitResult(
+            receipts={
+                item.event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=item.event_id,
+                    causal_snapshot_id=item.causal_snapshot_id,
+                    reason="GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED",
+                    proof_accepted=False,
+                )
+                for item in events
+            },
+            winner_event_id=None,
+            venue_submit_count=0,
+        )
+
+    reactor._submit.process_global_batch = _batch
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert result.global_auction_completed_non_cancelled == 0
 
 
 def test_global_batch_targeted_wake_claims_only_committed_event():
