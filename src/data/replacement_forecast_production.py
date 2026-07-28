@@ -49,6 +49,62 @@ _CURRENT_TARGET_DOWNLOAD_LOCK = Lock()
 _CURRENT_TARGET_BUCKET_POOL_LOCK = Lock()
 _CURRENT_TARGET_BUCKET_POOL: object | None = None
 _CURRENT_TARGET_BUCKET_POOL_CYCLE: datetime | None = None
+_BPF_EXTRA_ROTATION_LOCK = Lock()
+_BPF_EXTRA_ROTATION_CYCLE: str | None = None
+_BPF_EXTRA_ROTATION_CURSOR = 0
+
+
+def _rotate_bpf_extra_targets(
+    targets: Sequence[object],
+    *,
+    cycle: datetime,
+) -> tuple[tuple[object, ...], int, int]:
+    """Start each bounded extras pass after the groups attempted last time."""
+
+    grouped: dict[tuple[str, str], list[object]] = {}
+    for target in targets:
+        key = (
+            str(getattr(target, "city")),
+            str(getattr(target, "target_date")),
+        )
+        grouped.setdefault(key, []).append(target)
+    keys = tuple(grouped)
+    if not keys:
+        return (), 0, 0
+
+    cycle_key = cycle.astimezone(timezone.utc).isoformat()
+    global _BPF_EXTRA_ROTATION_CYCLE, _BPF_EXTRA_ROTATION_CURSOR
+    with _BPF_EXTRA_ROTATION_LOCK:
+        if _BPF_EXTRA_ROTATION_CYCLE != cycle_key:
+            _BPF_EXTRA_ROTATION_CYCLE = cycle_key
+            _BPF_EXTRA_ROTATION_CURSOR = 0
+        start = _BPF_EXTRA_ROTATION_CURSOR % len(keys)
+
+    rotated_keys = keys[start:] + keys[:start]
+    return (
+        tuple(target for key in rotated_keys for target in grouped[key]),
+        start,
+        len(keys),
+    )
+
+
+def _advance_bpf_extra_rotation(
+    *,
+    cycle: datetime,
+    start: int,
+    group_count: int,
+    attempted_group_count: int,
+) -> None:
+    if group_count <= 0:
+        return
+    cycle_key = cycle.astimezone(timezone.utc).isoformat()
+    global _BPF_EXTRA_ROTATION_CYCLE, _BPF_EXTRA_ROTATION_CURSOR
+    with _BPF_EXTRA_ROTATION_LOCK:
+        if _BPF_EXTRA_ROTATION_CYCLE != cycle_key:
+            _BPF_EXTRA_ROTATION_CYCLE = cycle_key
+        _BPF_EXTRA_ROTATION_CURSOR = (
+            int(start) + max(1, int(attempted_group_count))
+        ) % int(group_count)
 
 
 def _close_current_target_bucket_pool(cycle: datetime | None = None) -> None:
@@ -606,13 +662,44 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             ))
         if not targets:
             return {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
-        result = download_bayes_precision_fusion_extra_raw_inputs(
-            forecast_db=Path(str(forecast_db)),
-            cycle=cycle,
-            targets=targets,
-            release_lag_hours=release_lag_hours,
-            max_wall_clock_seconds=max_wall_clock_seconds,
+        rotated_targets, rotation_start, rotation_group_count = (
+            _rotate_bpf_extra_targets(targets, cycle=cycle)
         )
+        try:
+            result = download_bayes_precision_fusion_extra_raw_inputs(
+                forecast_db=Path(str(forecast_db)),
+                cycle=cycle,
+                targets=rotated_targets,
+                release_lag_hours=release_lag_hours,
+                max_wall_clock_seconds=max_wall_clock_seconds,
+            )
+        except Exception:
+            _advance_bpf_extra_rotation(
+                cycle=cycle,
+                start=rotation_start,
+                group_count=rotation_group_count,
+                attempted_group_count=1,
+            )
+            raise
+        unattempted = max(
+            0,
+            int(result.get("timebox_unattempted_target_groups") or 0),
+        )
+        if bool(result.get("timeboxed_incomplete")):
+            attempted = max(rotation_group_count - unattempted, 1)
+        elif bool(result.get("transport_aborted_remaining_targets")):
+            attempted = 1
+        else:
+            attempted = rotation_group_count
+        _advance_bpf_extra_rotation(
+            cycle=cycle,
+            start=rotation_start,
+            group_count=rotation_group_count,
+            attempted_group_count=attempted,
+        )
+        result["target_rotation_start"] = rotation_start
+        result["target_rotation_group_count"] = rotation_group_count
+        result["target_rotation_attempted_group_count"] = attempted
         return result
     except Exception as exc:  # noqa: BLE001 - fail-soft: extras accrual never breaks the cycle
         logger.warning("BAYES_PRECISION_FUSION extra-model capture skipped (fail-soft): %s", exc)

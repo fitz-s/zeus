@@ -741,11 +741,55 @@ def _source_run_coverage_schema_ready(conn: sqlite3.Connection) -> bool:
 
 
 def _seed_name(target: Mapping[str, object], *, computed_at: datetime) -> str:
-    city = _reject_alias(str(target["city"]), field_name="city").replace("/", "_").replace(" ", "_")
-    target_date = _reject_alias(str(target["target_date"]), field_name="target_date")
-    metric = _reject_alias(str(target["temperature_metric"]), field_name="temperature_metric")
+    city = (
+        _reject_alias(str(target["city"]), field_name="city")
+        .replace("/", "_")
+        .replace(" ", "_")
+    )
+    target_date = _reject_alias(
+        str(target["target_date"]),
+        field_name="target_date",
+    )
+    metric = _reject_alias(
+        str(target["temperature_metric"]),
+        field_name="temperature_metric",
+    )
     stamp = computed_at.strftime("%Y%m%dT%H%M%SZ")
     return f"{city}.{target_date}.{metric}.{stamp}.json"
+
+
+def _target_has_pending_queue_work(
+    seed_dir: Path,
+    target: Mapping[str, object],
+    *,
+    request_dir: Path | None = None,
+    inflight_dir: Path | None = None,
+) -> bool:
+    """True when this family already has work in a live queue stage."""
+
+    city = (
+        _reject_alias(str(target["city"]), field_name="city")
+        .replace("/", "_")
+        .replace(" ", "_")
+    )
+    target_date = _reject_alias(
+        str(target["target_date"]),
+        field_name="target_date",
+    )
+    metric = _reject_alias(
+        str(target["temperature_metric"]),
+        field_name="temperature_metric",
+    )
+    prefix = f"{city}.{target_date}.{metric}."
+    patterns = [(seed_dir, f"{prefix}*.json")]
+    if request_dir is not None:
+        patterns.append((request_dir, f"{prefix}*.json"))
+    if inflight_dir is not None:
+        patterns.append((inflight_dir, f"*/{prefix}*.json"))
+    return any(
+        directory.exists() and next(directory.glob(pattern), None) is not None
+        for directory, pattern in patterns
+    )
 
 
 def held_position_family_priorities() -> dict[tuple[str, str, str], int]:
@@ -891,6 +935,8 @@ def discover_replacement_forecast_materialization_seeds(
     forecast_db: Path | str,
     raw_manifest_dir: Path | str,
     seed_dir: Path | str,
+    request_dir: Path | str | None = None,
+    inflight_dir: Path | str | None = None,
     computed_at: datetime | str | None = None,
     limit: int = 10,
 ) -> ReplacementForecastSeedDiscoveryReport:
@@ -901,6 +947,8 @@ def discover_replacement_forecast_materialization_seeds(
     computed = _dt(computed_at or datetime.now(tz=UTC), field_name="computed_at")
     raw_dir = Path(raw_manifest_dir)
     seed_path = Path(seed_dir)
+    request_path = None if request_dir is None else Path(request_dir)
+    inflight_path = None if inflight_dir is None else Path(inflight_dir)
 
     conn = _connect_read_only(Path(forecast_db))
     conn.row_factory = sqlite3.Row
@@ -1013,6 +1061,16 @@ def discover_replacement_forecast_materialization_seeds(
             metric = str(target["temperature_metric"])
             openmeteo_source_run_id = str(target.get("openmeteo_source_run_id") or "").strip()
             target_key = f"{city}|{target_date}|{metric}"
+            if _target_has_pending_queue_work(
+                seed_path,
+                target,
+                request_dir=request_path,
+                inflight_dir=inflight_path,
+            ):
+                reasons.append(
+                    "REPLACEMENT_SEED_DISCOVERY_TARGET_ALREADY_PENDING_SKIPPED"
+                )
+                continue
             day0_seed_payload: dict[str, object] = {}
             if bool(target.get("day0_observed_extreme_required")):
                 payload = _day0_observed_extreme_seed_payload(

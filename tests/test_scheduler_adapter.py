@@ -263,6 +263,7 @@ def test_replacement_discovery_is_not_limited_by_poll_claim_size(
         "raw_manifest_dir": tmp_path / "raw",
         "seed_dir": tmp_path / "seeds",
         "request_dir": tmp_path / "requests",
+        "inflight_dir": tmp_path / "claims",
         "seed_discovery_limit": 80,
         "poll_batch_limit": 8,
     }
@@ -300,6 +301,8 @@ def test_replacement_discovery_is_not_limited_by_poll_claim_size(
             "forecast_db": cfg["forecast_db"],
             "raw_manifest_dir": cfg["raw_manifest_dir"],
             "seed_dir": cfg["seed_dir"],
+            "request_dir": cfg["request_dir"],
+            "inflight_dir": cfg["inflight_dir"],
             "limit": 80,
         }
     ]
@@ -309,6 +312,61 @@ def test_replacement_discovery_is_not_limited_by_poll_claim_size(
     daemon._replacement_forecast_discovery_job.__wrapped__()
 
     assert daemon._replacement_forecast_last_discovery_revision == ("revision",)
+
+
+def test_replacement_discovery_runs_with_backlog_and_retries_pending_family(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.data.replacement_forecast_seed_discovery as discovery
+    import src.ingest.forecast_live_daemon as daemon
+
+    cfg = {
+        "forecast_db": tmp_path / "forecast.db",
+        "raw_manifest_dir": tmp_path / "raw",
+        "seed_dir": tmp_path / "seeds",
+        "request_dir": tmp_path / "requests",
+        "inflight_dir": tmp_path / "claims",
+        "seed_discovery_limit": 10,
+    }
+    cfg["request_dir"].mkdir()
+    (cfg["request_dir"] / "unrelated.json").write_text("{}")
+    calls: list[dict[str, object]] = []
+
+    class _Report:
+        status = "NO_ELIGIBLE_TARGETS"
+        discovered_count = 0
+        reason_codes = (
+            "REPLACEMENT_SEED_DISCOVERY_TARGET_ALREADY_PENDING_SKIPPED",
+        )
+
+        @staticmethod
+        def as_dict() -> dict[str, object]:
+            return {}
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_discovery_revision",
+        lambda _cfg: ("revision",),
+    )
+    monkeypatch.setattr(
+        discovery,
+        "discover_replacement_forecast_materialization_seeds",
+        lambda **kwargs: calls.append(kwargs) or _Report(),
+    )
+    monkeypatch.setattr(daemon, "_replacement_forecast_last_discovery_revision", None)
+
+    daemon._replacement_forecast_discovery_job.__wrapped__()
+
+    assert len(calls) == 1
+    assert calls[0]["request_dir"] == cfg["request_dir"]
+    assert calls[0]["inflight_dir"] == cfg["inflight_dir"]
+    assert daemon._replacement_forecast_last_discovery_revision is None
 
 
 def test_replacement_availability_fast_poll_passes_changed_source_clock_report(monkeypatch) -> None:
