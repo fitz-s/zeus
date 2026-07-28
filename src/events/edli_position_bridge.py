@@ -1189,7 +1189,7 @@ def _venue_command_row_for_execution_command_id(
     try:
         return conn.execute(
             """
-            SELECT command_id, position_id, created_at
+            SELECT command_id, position_id, created_at, snapshot_id
               FROM venue_commands
              WHERE command_id = ?
                 OR decision_id = ?
@@ -1229,12 +1229,11 @@ def sync_venue_command_position_link_for_edli_fill(
     position_id: str | None = None,
     now: datetime | None = None,
 ) -> bool:
-    """Relink an EDLI filled command to its canonical position_current row.
+    """Converge an EDLI command and decision evidence on its canonical position.
 
-    This does not create positions and does not overwrite a command that already
-    points at another existing position. It only cures the EDLI bridge split
-    where the command journal kept its pre-bridge short ``position_id`` after
-    the confirmed fill was projected under the deterministic EDLI position id.
+    This does not create positions or guess evidence. It cures the EDLI bridge
+    split across command.position_id, command-gated snapshot, and the permanent
+    command attribution while refusing to overwrite a different real position.
     """
 
     if not aggregate_id:
@@ -1256,9 +1255,7 @@ def sync_venue_command_position_link_for_edli_fill(
     if not canonical_position_id:
         return False
     current_position_id = str(_row_value(command_row, "position_id", 1) or "")
-    if current_position_id == canonical_position_id:
-        return False
-    if current_position_id:
+    if current_position_id and current_position_id != canonical_position_id:
         current_exists = conn.execute(
             "SELECT 1 FROM position_current WHERE position_id = ? LIMIT 1",
             (current_position_id,),
@@ -1884,6 +1881,16 @@ def materialize_position_current_from_edli_fill(
     if _cmd_row is not None:
         _created_at = _row_value(_cmd_row, "created_at", 2)
         _cmd_created_at = str(_created_at) if _created_at else None
+        # The command row is the submit-boundary authority for executable
+        # market truth: insert_command persisted this snapshot only after the
+        # snapshot/envelope gates passed. PreSubmitRevalidated historically
+        # omitted the field on some EDLI aggregates, so using only that event
+        # silently opened positions without a decision snapshot.
+        _command_snapshot_id = str(
+            _row_value(_cmd_row, "snapshot_id", 3) or ""
+        ).strip()
+        if _command_snapshot_id:
+            identity["decision_snapshot_id"] = _command_snapshot_id
 
     # LX-T4/round-2-delta BLOCKER: land the permanent canonical fact BEFORE
     # any position_current write below, on every call (first materialisation
