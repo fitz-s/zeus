@@ -4514,8 +4514,19 @@ def process_current_global_batch(
                         )
                         return reject(
                             exhaustion_reason,
+                            # SCOPE: only a fully reselected feasible set whose
+                            # current executable action set is empty.
+                            # DRAIN: retire this completion wake as a complete
+                            # HOLD/CASH cut instead of retrying the same blocked
+                            # winner every listener poll.
+                            # RESET: the recurring held monitor publishes a new
+                            # family completion request against fresh q/books.
                             economic_cut_completed=exhaustion_reason.startswith(
-                                "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL:"
+                                (
+                                    "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL:",
+                                    "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+                                    "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:",
+                                )
                             ),
                         )
                     log_winner(

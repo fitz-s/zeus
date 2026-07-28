@@ -21184,6 +21184,7 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
     assert exhausted.receipts[event_a.event_id].reason.startswith(
         "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
     )
+    assert exhausted.economic_cut_completed is True
 
 
 @pytest.mark.parametrize(
