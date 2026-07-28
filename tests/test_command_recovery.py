@@ -4877,10 +4877,12 @@ class TestRecoveryResolutionTable:
             "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
         )
 
+    @pytest.mark.parametrize("deterministic_order_id", [None, "0xdeterministic-exit"])
     def test_restart_preflight_recovers_no_venue_exit_into_retry_projection(
         self,
         tmp_path,
         monkeypatch,
+        deterministic_order_id,
     ):
         from src.execution import command_recovery, venue_sync_contract
         from src.state.db import init_schema, init_schema_trade_only
@@ -4924,7 +4926,32 @@ class TestRecoveryResolutionTable:
             price=0.58,
             created_at="2026-06-29T05:08:33+00:00",
         )
-        _advance_to_submitting(seed, command_id="cmd-exit", venue_order_id=None)
+        _advance_to_submitting(
+            seed,
+            command_id="cmd-exit",
+            venue_order_id=deterministic_order_id,
+        )
+        if deterministic_order_id is not None:
+            from src.state.venue_command_repo import append_event
+
+            append_event(
+                seed,
+                command_id="cmd-exit",
+                event_type="SUBMIT_TIMEOUT_UNKNOWN",
+                occurred_at="2026-06-29T05:08:34+00:00",
+                payload={"reason": "post_submit_exception_possible_side_effect"},
+            )
+            append_event(
+                seed,
+                command_id="cmd-exit",
+                event_type="SUBMIT_REJECTED",
+                occurred_at="2026-06-29T05:25:34+00:00",
+                payload={
+                    "reason": "safe_replay_permitted_no_order_found",
+                    "safe_replay_permitted": True,
+                    "lookup_method": "venue_order_id",
+                },
+            )
         _insert(
             seed,
             command_id="cmd-review-old",
@@ -4969,6 +4996,7 @@ class TestRecoveryResolutionTable:
         )
         client.get_open_orders.return_value = []
         client.get_trades.return_value = []
+        client.get_order.return_value = None
 
         summary = command_recovery.reconcile_unresolved_commands(
             client=client,
@@ -4998,7 +5026,7 @@ class TestRecoveryResolutionTable:
 
         assert summary["scope"] == "restart_preflight"
         assert summary["restart_preflight_narrow"] is True
-        assert summary["scanned"] == 1
+        assert summary["scanned"] == (0 if deterministic_order_id else 1)
         assert summary["terminal_point_orders"] == {
             "scanned": 0,
             "advanced": 0,
@@ -5017,7 +5045,9 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
-        assert command_state == "REJECTED"
+        assert command_state == (
+            "SUBMIT_REJECTED" if deterministic_order_id else "REJECTED"
+        )
         assert dict(current) == {
             "phase": "pending_exit",
             "order_status": "retry_pending",

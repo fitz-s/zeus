@@ -20754,6 +20754,7 @@ def _restart_no_venue_exit_retry_candidates(conn: sqlite3.Connection) -> list[di
     if not (
         _table_exists(conn, "venue_commands")
         and _table_exists(conn, "venue_command_events")
+        and _table_exists(conn, "venue_order_facts")
         and _table_exists(conn, "venue_trade_facts")
         and _table_exists(conn, "position_current")
     ):
@@ -20782,7 +20783,24 @@ def _restart_no_venue_exit_retry_candidates(conn: sqlite3.Connection) -> list[di
                AND evt.event_type = 'SUBMIT_REJECTED'
              WHERE cmd.intent_kind = 'EXIT'
                AND cmd.state IN ('REJECTED', 'SUBMIT_REJECTED')
-               AND COALESCE(cmd.venue_order_id, '') = ''
+               AND (
+                    COALESCE(cmd.venue_order_id, '') = ''
+                    OR (
+                        COALESCE(cmd.venue_order_id, '') != ''
+                        AND json_extract(
+                            evt.payload_json, '$.reason'
+                        ) = 'safe_replay_permitted_no_order_found'
+                        AND json_extract(
+                            evt.payload_json, '$.safe_replay_permitted'
+                        ) = 1
+                        AND NOT EXISTS (
+                            SELECT 1
+                              FROM venue_order_facts order_fact
+                             WHERE order_fact.command_id = cmd.command_id
+                                OR order_fact.venue_order_id = cmd.venue_order_id
+                        )
+                    )
+               )
                AND NOT EXISTS (
                    SELECT 1
                      FROM venue_trade_facts tf
