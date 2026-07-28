@@ -21880,6 +21880,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "exit_pending_projections",
         )
         _db_pass(
+            "pending_exit_terminal_order_releases",
+            reconcile_pending_exit_terminal_order_releases,
+            "pending_exit_terminal_order_releases",
+        )
+        _db_pass(
             "matched_cancel_review_required_entries",
             reconcile_matched_cancel_review_required_entries,
             "matched_cancel_review_required_entries",

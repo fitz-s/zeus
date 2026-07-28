@@ -4951,6 +4951,12 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+        assert summary["pending_exit_terminal_order_releases"] == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
         assert command_state == "REJECTED"
         assert dict(current) == {
             "phase": "pending_exit",
