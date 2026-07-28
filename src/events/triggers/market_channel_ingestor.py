@@ -1257,10 +1257,11 @@ def active_weather_token_metadata_for_tokens(
         return {}
 
     predicates = []
-    if "active" in columns:
-        predicates.append("COALESCE(active, 0) = 1")
-    if "closed" in columns:
-        predicates.append("COALESCE(closed, 0) = 0")
+    if purpose == "entry":
+        if "active" in columns:
+            predicates.append("COALESCE(active, 0) = 1")
+        if "closed" in columns:
+            predicates.append("COALESCE(closed, 0) = 0")
     if "event_slug" in columns:
         predicates.append(
             "(LOWER(COALESCE(event_slug, '')) LIKE '%weather%' "
