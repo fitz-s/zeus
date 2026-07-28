@@ -5097,7 +5097,7 @@ def test_fast_residual_day0_bundle_drives_entry_and_held_redecision_q(
     observations.close()
 
 
-def test_provisional_hko_held_probability_conditions_unobserved_tail_after_local_day(
+def test_provisional_hko_held_probability_requires_revision_likelihood(
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
@@ -5377,65 +5377,27 @@ def test_provisional_hko_held_probability_conditions_unobserved_tail_after_local
     decision_at = _dt.datetime(
         2026, 7, 11, 7, 30, tzinfo=_dt.timezone.utc
     )
-    day0_payload: dict[str, object] = {}
-    prepared = era._prepare_current_global_probability_family(
-        event,
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        observation_conn=observations,
-        decision_time=decision_at,
-        max_age=_dt.timedelta(seconds=30),
-        day0_payload_out=day0_payload,
-        allow_provisional_day0_replacement=True,
-        entry_authority=False,
-    )
-
-    witness = prepared.probability_witness
-    assert remaining_calls == 1
-    assert replacement_calls == 1
-    assert bundle_reads == 1
-    assert witness.yes_point_q.tolist() == pytest.approx([0.2, 0.5, 0.3])
-    assert witness.yes_q_samples[0].tolist() == pytest.approx([0.2, 0.5, 0.3])
-    assert witness.band_basis == "current_coherent_day0_remaining_model_bootstrap_v3"
-    assert prepared.candidate_payoff_q_lcb_caps == ()
-    assert day0_payload["probability_authority"] == (
-        "day0_remaining_day_global_probability_v1"
-    )
-    assert day0_payload["q_source"] == "day0_remaining_day"
-    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
-    assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
-    assert day0_payload["_edli_day0_source_clock_bound_identity"]
-    binding = day0_payload["_edli_global_day0_binding"]
-    assert binding["evidence_finality"] == "PROVISIONAL_CURRENT_SNAPSHOT"
-    assert "_edli_day0_exact_yes_payoffs" not in day0_payload
-
-    post_day_payload: dict[str, object] = {}
-    post_day = era._prepare_current_global_probability_family(
-        event,
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        observation_conn=observations,
-        decision_time=_dt.datetime(
-            2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc
-        ),
-        max_age=_dt.timedelta(seconds=30),
-        day0_payload_out=post_day_payload,
-        allow_provisional_day0_replacement=True,
-        entry_authority=False,
-    )
-    assert post_day.probability_witness.yes_point_q.tolist() == pytest.approx(
-        [0.2, 0.5, 0.3]
-    )
-    assert post_day_payload["probability_authority"] == (
-        "day0_remaining_day_global_probability_v1"
-    )
-    assert post_day_payload["q_source"] == "day0_remaining_day"
-    assert post_day_payload["_edli_day0_q_mode"] == (
-        "post_local_provisional_tail"
-    )
-    assert post_day_payload["_edli_global_day0_binding"][
-        "evidence_finality"
-    ] == "PROVISIONAL_CURRENT_SNAPSHOT"
+    for held_decision_at in (
+        decision_at,
+        _dt.datetime(2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc),
+    ):
+        with pytest.raises(
+            ValueError,
+            match=(
+                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+            ),
+        ):
+            era._prepare_current_global_probability_family(
+                event,
+                forecast_conn=forecast,
+                topology_conn=forecast,
+                observation_conn=observations,
+                decision_time=held_decision_at,
+                max_age=_dt.timedelta(seconds=30),
+                day0_payload_out={},
+                allow_provisional_day0_replacement=True,
+                entry_authority=False,
+            )
 
     with pytest.raises(
         ValueError,
@@ -5452,33 +5414,9 @@ def test_provisional_hko_held_probability_conditions_unobserved_tail_after_local
             entry_authority=True,
         )
 
-    assert remaining_calls == 2
-    assert replacement_calls == 2
-
-    def unavailable_remaining_components(*_args, **_kwargs):
-        raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
-
-    monkeypatch.setattr(
-        era,
-        "_day0_remaining_global_probability_components",
-        unavailable_remaining_components,
-    )
-    with pytest.raises(
-        ValueError,
-        match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
-    ):
-        era._prepare_current_global_probability_family(
-            event,
-            forecast_conn=forecast,
-            topology_conn=forecast,
-            observation_conn=observations,
-            decision_time=_dt.datetime(
-                2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc
-            ),
-            max_age=_dt.timedelta(seconds=30),
-            allow_provisional_day0_replacement=True,
-            entry_authority=False,
-        )
+    assert remaining_calls == 0
+    assert replacement_calls == 0
+    assert bundle_reads == 2
 
     forecast.close()
     observations.close()
@@ -19338,6 +19276,14 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             ),
             True,
         ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+            ),
+            True,
+        ),
     ),
 )
 def test_global_batch_excludes_typed_current_q_ineligible_family(
@@ -19453,6 +19399,11 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                     raise ValueError(
                         "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
                     )
+                if "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason:
+                    raise ValueError(
+                        "GLOBAL_DAY0_PROVISIONAL_REVISION_"
+                        "LIKELIHOOD_UNAVAILABLE"
+                    )
                 raise ValueError(
                     "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
                     "REPLACEMENT_RAW_INPUT_HWM:"
@@ -19466,13 +19417,20 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
             prepare_family,
         )
         prepare_event = captured["prepare_event"]
-        if "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason:
+        if (
+            "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
+            or "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
+        ):
             held_receipt = captured["prepare_held_event"](event_a, decision_at)
             assert held_receipt.prepared_global_family is None
+            reason_suffix = (
+                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+                if "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
+                else "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
+            )
             assert held_receipt.reason == (
                 "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
-                "FamilyAuthorityUnavailable:"
-                "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
+                f"FamilyAuthorityUnavailable:{reason_suffix}"
             )
 
     def actuate(winner, chosen, _at):
@@ -19504,7 +19462,10 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
 
     expected_prepare_calls = (
         2
-        if "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
+        if (
+            "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
+            or "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
+        )
         else 1
     )
     assert calls["ineligible_prepare"] == expected_prepare_calls

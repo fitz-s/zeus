@@ -376,6 +376,7 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
+        "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE",
         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING",
         "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
         "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
@@ -398,6 +399,7 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
+        "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE",
         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING",
         "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
         "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
@@ -30929,6 +30931,17 @@ def _prepare_current_global_probability_family(
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
+        if (
+            provisional_day0_observation
+            and fast_residual_conditioning is None
+        ):
+            # SCOPE: this HKO family held-position q only. DRAIN: the final
+            # daily HKO fact or a validated revision likelihood becomes current
+            # probability evidence. RESET: the next family refresh consumes
+            # that evidence; other families and final-daily exact q are inert.
+            raise ValueError(
+                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+            )
     bindings = tuple(
         OutcomeTokenBinding(
             bin_id=outcome.bin_id,
