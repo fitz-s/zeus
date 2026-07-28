@@ -212,6 +212,67 @@ def _fetch_enqueue_row(db_path: Path) -> sqlite3.Row:
     return row
 
 
+def _record_missing_day0_owner(
+    db_path: Path,
+    cfg: Mapping[str, object],
+    *,
+    seed_name: str,
+) -> tuple[sqlite3.Connection, dict[str, object], Path, str, str]:
+    payload = _day0_payload("2026-07-19T05:00:00+00:00")
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC).isoformat()
+    seed_file = Path(cfg["seed_dir"]) / seed_name
+    identity = cycle_advance._day0_conditioning_identity(
+        source=payload["day0_observed_extreme_source"],
+        observation_time=payload["day0_observed_extreme_observation_time"],
+        observed_extreme_c=payload["day0_observed_extreme_c"],
+        unit=payload["day0_observed_extreme_unit"],
+    )
+    assert identity is not None
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=False,
+        seed_file=str(seed_file),
+        reason="MISSING_LIVE_POSTERIOR",
+        day0_observed_extreme_observation_time=payload[
+            "day0_observed_extreme_observation_time"
+        ],
+        day0_observed_extreme_source=payload["day0_observed_extreme_source"],
+        day0_observed_extreme_c=payload["day0_observed_extreme_c"],
+        day0_observed_extreme_unit=payload["day0_observed_extreme_unit"],
+    )
+    conn.commit()
+    return conn, payload, seed_file, identity, cycle
+
+
+def _missing_day0_owner_is_retained(
+    conn: sqlite3.Connection,
+    *,
+    payload: Mapping[str, object],
+    cycle: str,
+) -> bool:
+    return cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        as_of=datetime(2026, 7, 19, 6, tzinfo=UTC),
+        day0_observed_extreme_observation_time=str(
+            payload["day0_observed_extreme_observation_time"]
+        ),
+        day0_observed_extreme_source=str(payload["day0_observed_extreme_source"]),
+        day0_observed_extreme_c=float(payload["day0_observed_extreme_c"]),
+        day0_observed_extreme_unit=str(payload["day0_observed_extreme_unit"]),
+    )
+
+
 def _insert_live_posterior(
     db_path: Path,
     *,
@@ -2254,16 +2315,14 @@ def test_cycle_poll_catches_up_every_new_day0_identity_on_one_model_cycle(
     conn.close()
 
 
-def test_cycle_poll_keeps_inflight_day0_owner_until_timeout_then_reenqueues(
+def test_cycle_poll_keeps_later_claimed_owner_past_batch_timeout_until_terminal(
     tmp_path, monkeypatch
 ) -> None:
-    """A consumed root seed remains owned while its exact request is running.
+    """A request beyond worker width cannot inherit the whole batch's 270s death clock.
 
-    The poll runs much more often than a materializer may finish.  Its liveness
-    check must therefore see the queue's inflight witness, not mistake the
-    normal seed-to-request move for abandonment.  The queue's timeout window
-    is also the bounded reset: an owner left in-flight beyond that window can
-    be replaced instead of ratcheting the marker forever.
+    The queue can claim more requests than its four workers can start. The fifth
+    exact witness therefore remains owner even after claimed_at + 240s + 30s;
+    only the queue's terminal move/removal releases it for re-enqueue.
     """
     db_path = _prepare_forecast_db(tmp_path)
     cfg = _queue_config(tmp_path)
@@ -2319,11 +2378,20 @@ def test_cycle_poll_keeps_inflight_day0_owner_until_timeout_then_reenqueues(
 
     claim_dir = Path(cfg["inflight_dir"]) / "claimed-owner"
     claim_dir.mkdir(parents=True)
+    request_names = [f"earlier-{index}.json" for index in range(4)] + [owned_seed.name]
     (claim_dir / "_claim.json").write_text(
-        json.dumps({"claimed_at": "2026-07-19T05:00:00+00:00"}),
+        json.dumps(
+            {
+                "claimed_at": "2026-07-19T05:00:00+00:00",
+                "request_names": request_names,
+            }
+        ),
         encoding="utf-8",
     )
-    (claim_dir / owned_seed.name).write_text(
+    for request_name in request_names[:-1]:
+        (claim_dir / request_name).write_text("{}", encoding="utf-8")
+    claimed_request = claim_dir / owned_seed.name
+    claimed_request.write_text(
         json.dumps(
             {
                 "computed_at": "2026-07-19T05:00:00+00:00",
@@ -2360,6 +2428,21 @@ def test_cycle_poll_keeps_inflight_day0_owner_until_timeout_then_reenqueues(
         seed_dir=cfg["seed_dir"],
         raw_manifest_dir=cfg["raw_manifest_dir"],
         computed_at=datetime(2026, 7, 19, 5, 4, 31, tzinfo=UTC),
+        limit=1,
+        scopes=(("Shanghai", "2026-07-19", "high"),),
+        manifests=(),
+    )
+    assert report["seeds_enqueued"] == 0
+    assert report["already_enqueued"] == 1
+    assert calls["count"] == 0
+    assert _fetch_enqueue_row(db_path)["seed_file"] == str(owned_seed)
+
+    claimed_request.unlink()
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=cfg["seed_dir"],
+        raw_manifest_dir=cfg["raw_manifest_dir"],
+        computed_at=datetime(2026, 7, 19, 5, 4, 45, tzinfo=UTC),
         limit=1,
         scopes=(("Shanghai", "2026-07-19", "high"),),
         manifests=(),
@@ -2415,28 +2498,28 @@ def test_day0_owner_rechecks_after_request_moves_to_inflight_between_snapshots(
         encoding="utf-8",
     )
 
-    original_glob = Path.glob
+    original_iterdir = Path.iterdir
     scans = 0
 
-    def move_after_first_inflight_snapshot(path: Path, pattern: str):
+    def move_after_first_inflight_snapshot(path: Path):
         nonlocal scans
-        if path == Path(cfg["inflight_dir"]) and pattern == f"*/{seed_file.name}":
+        if path == Path(cfg["inflight_dir"]):
             scans += 1
             if scans == 1:
                 pending.replace(claim_dir / seed_file.name)
                 return iter(())
-        return original_glob(path, pattern)
+        return original_iterdir(path)
 
-    monkeypatch.setattr(Path, "glob", move_after_first_inflight_snapshot)
-    assert cycle_advance._day0_enqueue_owner_request_is_active(
+    monkeypatch.setattr(Path, "iterdir", move_after_first_inflight_snapshot)
+    check = cycle_advance._day0_enqueue_owner_request_check(
         city="Shanghai",
         target_date="2026-07-19",
         metric="high",
         target_cycle_iso=cycle,
         seed_file=str(seed_file),
         identity=identity,
-        as_of=datetime(2026, 7, 19, 5, 0, 15, tzinfo=UTC),
-    ) is True
+    )
+    assert check.state is cycle_advance._Day0EnqueueOwnerRequestState.ACTIVE
     assert scans == 2
 
 
@@ -2529,6 +2612,91 @@ def test_aged_pending_day0_owner_survives_until_terminal_request_move(
         day0_observed_extreme_c=payload["day0_observed_extreme_c"],
         day0_observed_extreme_unit=payload["day0_observed_extreme_unit"],
     ) is False
+    conn.close()
+
+
+def test_day0_owner_config_read_failure_is_indeterminate_and_retains_marker(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    db_path = _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    conn, payload, seed_file, _identity, cycle = _record_missing_day0_owner(
+        db_path,
+        cfg,
+        seed_name="owner.enqueue-config-error.json",
+    )
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: (_ for _ in ()).throw(RuntimeError("config unavailable")),
+    )
+
+    assert _missing_day0_owner_is_retained(conn, payload=payload, cycle=cycle) is True
+    assert _fetch_enqueue_row(db_path)["seed_file"] == str(seed_file)
+    assert (
+        "DAY0_ENQUEUE_OWNER_REQUEST_CONFIG_READ_FAILED:RuntimeError"
+        in caplog.text
+    )
+    conn.close()
+
+
+def test_day0_owner_directory_scan_failure_is_indeterminate_and_retains_marker(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    db_path = _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    conn, payload, seed_file, _identity, cycle = _record_missing_day0_owner(
+        db_path,
+        cfg,
+        seed_name="owner.enqueue-directory-error.json",
+    )
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    original_iterdir = Path.iterdir
+
+    def fail_inflight_scan(path: Path):
+        if path == Path(cfg["inflight_dir"]):
+            raise PermissionError("scan denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_inflight_scan)
+    assert _missing_day0_owner_is_retained(conn, payload=payload, cycle=cycle) is True
+    assert _fetch_enqueue_row(db_path)["seed_file"] == str(seed_file)
+    assert (
+        "DAY0_ENQUEUE_OWNER_REQUEST_INFLIGHT_SCAN_FAILED:PermissionError"
+        in caplog.text
+    )
+    conn.close()
+
+
+def test_day0_owner_json_failure_is_indeterminate_and_retains_marker(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    db_path = _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    conn, payload, seed_file, _identity, cycle = _record_missing_day0_owner(
+        db_path,
+        cfg,
+        seed_name="owner.enqueue-json-error.json",
+    )
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    pending = Path(cfg["request_dir"]) / seed_file.name
+    pending.parent.mkdir()
+    pending.write_text("{", encoding="utf-8")
+
+    assert _missing_day0_owner_is_retained(conn, payload=payload, cycle=cycle) is True
+    assert _fetch_enqueue_row(db_path)["seed_file"] == str(seed_file)
+    assert (
+        "DAY0_ENQUEUE_OWNER_REQUEST_PENDING_JSON_INVALID:JSONDecodeError"
+        in caplog.text
+    )
     conn.close()
 
 

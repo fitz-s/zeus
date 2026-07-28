@@ -48,6 +48,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -92,6 +93,18 @@ class _Day0BridgePending:
 _DAY0_BRIDGE_PENDING: dict[tuple[str, str, str], _Day0BridgePending] = {}
 _DAY0_BRIDGE_RETRY_BASE_SECONDS = 0.5
 _DAY0_BRIDGE_RETRY_MAX_SECONDS = 30.0
+
+
+class _Day0EnqueueOwnerRequestState(Enum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    INDETERMINATE = "INDETERMINATE"
+
+
+@dataclass(frozen=True)
+class _Day0EnqueueOwnerRequestCheck:
+    state: _Day0EnqueueOwnerRequestState
+    reason: str
 
 
 def _family_manifests_from_db(
@@ -509,7 +522,7 @@ def _latest_posterior_covers_target_cycle(
     return consumed_cycle is not None and consumed_cycle >= target_cycle
 
 
-def _day0_enqueue_owner_request_is_active(
+def _day0_enqueue_owner_request_check(
     *,
     city: str,
     target_date: str,
@@ -517,23 +530,18 @@ def _day0_enqueue_owner_request_is_active(
     target_cycle_iso: str,
     seed_file: str,
     identity: str,
-    as_of: datetime,
-) -> bool:
-    """Whether this exact Day0 enqueue owner still has a live queue request.
+) -> _Day0EnqueueOwnerRequestCheck:
+    """Classify whether this exact Day0 enqueue owner still has a live queue request.
 
     SCOPE: one (city, target_date, metric, target_cycle, seed_file, conditioning identity)
     witness. DRAIN: the materialization queue moves a completed/failed request out of requests or
-    inflight, and reclaims an abandoned *claimed* request after its subprocess timeout plus grace.
-    RESET: once no matching pending request or non-expired claimed request remains, the caller may
-    remove the vanished marker and enqueue a replacement owner. A pending request has no execution
-    deadline: its exact witness owns the marker until the queue reaches a terminal move. This avoids
-    both the requests-to-inflight move race and a pending queue backlog becoming a false timeout.
+    inflight, or canonically recovers an abandoned batch back into requests. RESET: only two
+    complete, error-free scans proving the exact witness absent permit marker withdrawal. Any
+    config/filesystem/JSON uncertainty is INDETERMINATE and retains the owner. Batch claimed_at is
+    not a per-request execution clock: a request later than the worker width may not have started,
+    so every exact witness in requests or inflight remains ACTIVE until the queue moves it.
     """
     try:
-        from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
-            _STALE_CLAIM_GRACE_SECONDS,
-            _materialization_subprocess_timeout_seconds,
-        )
         from src.data.replacement_forecast_production import (  # noqa: PLC0415
             _replacement_forecast_live_materialization_queue_config,
         )
@@ -541,20 +549,18 @@ def _day0_enqueue_owner_request_is_active(
         cfg = _replacement_forecast_live_materialization_queue_config()
         request_dir = cfg.get("request_dir")
         inflight_dir = cfg.get("inflight_dir")
-        if request_dir is None:
-            return False
+        if request_dir is None or inflight_dir is None:
+            return _Day0EnqueueOwnerRequestCheck(
+                _Day0EnqueueOwnerRequestState.INDETERMINATE,
+                "DAY0_ENQUEUE_OWNER_REQUEST_CONFIG_INCOMPLETE",
+            )
         request_path = Path(str(request_dir))
-        inflight_path = (
-            Path(str(inflight_dir))
-            if inflight_dir is not None
-            else request_path.parent / "inflight"
+        inflight_path = Path(str(inflight_dir))
+    except Exception as exc:
+        return _Day0EnqueueOwnerRequestCheck(
+            _Day0EnqueueOwnerRequestState.INDETERMINATE,
+            f"DAY0_ENQUEUE_OWNER_REQUEST_CONFIG_READ_FAILED:{type(exc).__name__}",
         )
-        timeout_s = (
-            float(_materialization_subprocess_timeout_seconds())
-            + float(_STALE_CLAIM_GRACE_SECONDS)
-        )
-    except Exception:
-        return False
 
     expected_witness = {
         "city": city,
@@ -564,46 +570,98 @@ def _day0_enqueue_owner_request_is_active(
         "seed_file": seed_file,
         "conditioning_identity": identity,
     }
-    def _scan() -> bool:
-        candidates: list[tuple[Path, bool]] = [(request_path / Path(seed_file).name, False)]
-        if inflight_path.exists():
-            candidates.extend(
-                (path, True) for path in inflight_path.glob(f"*/{Path(seed_file).name}")
+
+    def _request_check(request_file: Path, *, location: str) -> _Day0EnqueueOwnerRequestCheck:
+        try:
+            raw = request_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return _Day0EnqueueOwnerRequestCheck(
+                _Day0EnqueueOwnerRequestState.INACTIVE,
+                f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_ABSENT",
             )
-        for request_file, claimed in candidates:
+        except OSError as exc:
+            return _Day0EnqueueOwnerRequestCheck(
+                _Day0EnqueueOwnerRequestState.INDETERMINATE,
+                f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_READ_FAILED:{type(exc).__name__}",
+            )
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            return _Day0EnqueueOwnerRequestCheck(
+                _Day0EnqueueOwnerRequestState.INDETERMINATE,
+                f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_JSON_INVALID:{type(exc).__name__}",
+            )
+        if not isinstance(payload, Mapping):
+            return _Day0EnqueueOwnerRequestCheck(
+                _Day0EnqueueOwnerRequestState.INDETERMINATE,
+                f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_PAYLOAD_INVALID",
+            )
+        witness = payload.get("day0_enqueue_owner_witness")
+        if not isinstance(witness, Mapping):
+            return _Day0EnqueueOwnerRequestCheck(
+                _Day0EnqueueOwnerRequestState.INDETERMINATE,
+                f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_WITNESS_INVALID",
+            )
+        if {key: witness.get(key) for key in expected_witness} == expected_witness:
+            return _Day0EnqueueOwnerRequestCheck(
+                _Day0EnqueueOwnerRequestState.ACTIVE,
+                f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_ACTIVE",
+            )
+        return _Day0EnqueueOwnerRequestCheck(
+            _Day0EnqueueOwnerRequestState.INACTIVE,
+            f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_OTHER_OWNER",
+        )
+
+    def _scan() -> _Day0EnqueueOwnerRequestCheck:
+        try:
+            batches = tuple(inflight_path.iterdir())
+        except FileNotFoundError:
+            batches = ()
+        except OSError as exc:
+            return _Day0EnqueueOwnerRequestCheck(
+                _Day0EnqueueOwnerRequestState.INDETERMINATE,
+                f"DAY0_ENQUEUE_OWNER_REQUEST_INFLIGHT_SCAN_FAILED:{type(exc).__name__}",
+            )
+        pending = _request_check(
+            request_path / Path(seed_file).name,
+            location="PENDING",
+        )
+        if pending.state is not _Day0EnqueueOwnerRequestState.INACTIVE:
+            return pending
+        for batch_path in batches:
             try:
-                payload = json.loads(request_file.read_text(encoding="utf-8"))
-                if not isinstance(payload, Mapping):
-                    continue
-                witness = payload.get("day0_enqueue_owner_witness")
-                if not isinstance(witness, Mapping) or {
-                    key: witness.get(key) for key in expected_witness
-                } != expected_witness:
-                    continue
-                if not claimed:
-                    return True
-                claim_path = request_file.parent / "_claim.json"
-                if not claim_path.exists():
-                    return True
-                claim = json.loads(claim_path.read_text(encoding="utf-8"))
-                claimed_at = (
-                    _parse_cycle(claim.get("claimed_at"))
-                    if isinstance(claim, Mapping)
-                    else None
+                is_dir = batch_path.is_dir()
+            except OSError as exc:
+                return _Day0EnqueueOwnerRequestCheck(
+                    _Day0EnqueueOwnerRequestState.INDETERMINATE,
+                    f"DAY0_ENQUEUE_OWNER_REQUEST_INFLIGHT_ENTRY_FAILED:{type(exc).__name__}",
                 )
-                if claimed_at is None:
-                    return True
-                elapsed_s = (as_of.astimezone(UTC) - claimed_at).total_seconds()
-                if elapsed_s < timeout_s:
-                    return True
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            if not is_dir:
                 continue
-        return False
+            claimed = _request_check(
+                batch_path / Path(seed_file).name,
+                location="INFLIGHT",
+            )
+            if claimed.state is not _Day0EnqueueOwnerRequestState.INACTIVE:
+                return claimed
+        return _Day0EnqueueOwnerRequestCheck(
+            _Day0EnqueueOwnerRequestState.INACTIVE,
+            "DAY0_ENQUEUE_OWNER_REQUEST_ABSENT",
+        )
 
     # A consumer can move the request between the root/inflight snapshot and its read. Re-scan
     # the exact owner after any miss before allowing marker withdrawal; no stale snapshot can
     # therefore revoke a request that completed the normal atomic move meanwhile.
-    return _scan() or _scan()
+    first = _scan()
+    if first.state is not _Day0EnqueueOwnerRequestState.INACTIVE:
+        return first
+    second = _scan()
+    if second.state is not _Day0EnqueueOwnerRequestState.INACTIVE:
+        return second
+    return _Day0EnqueueOwnerRequestCheck(
+        _Day0EnqueueOwnerRequestState.INACTIVE,
+        "DAY0_ENQUEUE_OWNER_REQUEST_ABSENT_AFTER_TWO_SCANS",
+    )
 
 
 def _delete_missing_owned_cycle_advance_marker(
@@ -821,16 +879,28 @@ def _already_enqueued(
             as_of=decision_as_of,
         ):
             return True
-        if visible_seed_file is not None and _day0_enqueue_owner_request_is_active(
-            city=city,
-            target_date=target_date,
-            metric=metric,
-            target_cycle_iso=target_cycle_iso,
-            seed_file=seed_file,
-            identity=incoming_identity,
-            as_of=decision_as_of,
-        ):
-            return True
+        if visible_seed_file is not None:
+            request_check = _day0_enqueue_owner_request_check(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                target_cycle_iso=target_cycle_iso,
+                seed_file=seed_file,
+                identity=incoming_identity,
+            )
+            if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
+                return True
+            if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
+                _LOG.warning(
+                    "day0 enqueue owner request INDETERMINATE; retaining marker "
+                    "city=%s target_date=%s metric=%s target_cycle=%s reason=%s",
+                    city,
+                    target_date,
+                    metric,
+                    target_cycle_iso,
+                    request_check.reason,
+                )
+                return True
         if visible_seed_file is not None and owned_stage_file is not None:
             _delete_missing_owned_cycle_advance_marker(
                 conn,
