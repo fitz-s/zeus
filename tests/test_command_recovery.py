@@ -4952,6 +4952,15 @@ class TestRecoveryResolutionTable:
                     "lookup_method": "venue_order_id",
                 },
             )
+            seed.execute(
+                """
+                UPDATE position_current
+                   SET order_status = 'retry_pending',
+                       exit_retry_count = 1,
+                       next_exit_retry_at = '2026-06-29T05:25:34+00:00'
+                 WHERE position_id = 'pos-exit'
+                """
+            )
         _insert(
             seed,
             command_id="cmd-review-old",
@@ -5049,17 +5058,18 @@ class TestRecoveryResolutionTable:
             "SUBMIT_REJECTED" if deterministic_order_id else "REJECTED"
         )
         assert dict(current) == {
-            "phase": "pending_exit",
-            "order_status": "retry_pending",
-            "exit_retry_count": 1,
-            "next_exit_retry_at": current["next_exit_retry_at"],
+            "phase": "day0_window",
+            "order_status": "filled",
+            "exit_retry_count": 0,
+            "next_exit_retry_at": None,
         }
-        assert current["next_exit_retry_at"]
-        assert latest_event["event_type"] == "EXIT_ORDER_REJECTED"
-        assert latest_event["venue_status"] == "retry_pending"
+        assert latest_event["event_type"] == "EXIT_RETRY_RELEASED"
+        assert latest_event["venue_status"] == command_state
         event_payload = json.loads(latest_event["payload_json"])
-        assert event_payload["exit_reason"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
-        assert "submit absence for exit command cmd-exit" in event_payload["error"]
+        assert event_payload["proof_class"] == (
+            "submit_rejected_plus_order_and_positive_trade_absence"
+        )
+        assert event_payload["venue_order_id"] == deterministic_order_id
 
     def test_edli_confirmed_fill_terminalizes_submitting_without_order_id(
         self, conn, mock_client
