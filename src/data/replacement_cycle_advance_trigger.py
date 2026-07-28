@@ -47,7 +47,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 
@@ -207,6 +207,19 @@ def _day0_conditioning_identity(
     )
 
 
+def _active_day0_provisional_or_conditioning(
+    provenance: object,
+) -> Mapping[str, object] | None:
+    """Choose the Day0 posterior evidence authoritative for completion checks."""
+    if not isinstance(provenance, Mapping):
+        return None
+    provisional = provenance.get("day0_provisional_observation")
+    if isinstance(provisional, Mapping) and provisional.get("active") is True:
+        return provisional
+    conditioning = provenance.get("day0_conditioning")
+    return conditioning if isinstance(conditioning, Mapping) else None
+
+
 def _ensure_day0_conditioning_identity_column(conn: sqlite3.Connection) -> None:
     """Add the additive liveness column to pre-hotfix forecast DBs exactly once."""
     columns = {
@@ -226,8 +239,12 @@ def _latest_posterior_matches_day0_conditioning(
     target_date: str,
     metric: str,
     identity: str,
+    as_of: datetime | None,
 ) -> bool:
     """Whether the current live posterior has consumed this exact Day0 evidence."""
+    if as_of is None:
+        return False
+    as_of_iso = as_of.astimezone(UTC).isoformat()
     try:
         row = conn.execute(
             """
@@ -235,17 +252,18 @@ def _latest_posterior_matches_day0_conditioning(
             FROM forecast_posteriors
             WHERE city = ? AND target_date = ? AND temperature_metric = ?
               AND runtime_layer = 'live'
+              AND computed_at <= ?
             ORDER BY computed_at DESC, posterior_id DESC
             LIMIT 1
             """,
-            (city, target_date, metric),
+            (city, target_date, metric, as_of_iso),
         ).fetchone()
         if row is None:
             return False
         raw = row["provenance_json"] if hasattr(row, "keys") else row[0]
         provenance = json.loads(str(raw or "{}"))
-        conditioning = provenance.get("day0_conditioning")
-        if not isinstance(conditioning, dict):
+        conditioning = _active_day0_provisional_or_conditioning(provenance)
+        if conditioning is None:
             return False
         return _day0_conditioning_identity(
             source=conditioning.get("source"),
@@ -469,6 +487,7 @@ def _already_enqueued(
     day0_observed_extreme_source: str | None = None,
     day0_observed_extreme_c: float | None = None,
     day0_observed_extreme_unit: str | None = None,
+    as_of: datetime | None = None,
 ) -> bool:
     """True iff a real re-materialization seed already exists for this exact target cycle.
 
@@ -519,6 +538,7 @@ def _already_enqueued(
                 target_date=target_date,
                 metric=metric,
                 identity=incoming_identity,
+                as_of=as_of,
             )
         return True
     if day0_observed_extreme_observation_time is not None:
@@ -694,6 +714,10 @@ def _record_enqueue(
                        OR (
                            ? IS NOT NULL
                            AND (
+                               day0_observed_extreme_observation_time IS NULL
+                               OR ? >= day0_observed_extreme_observation_time
+                           )
+                           AND (
                                day0_conditioning_identity_json IS NULL
                                OR ? <> day0_conditioning_identity_json
                            )
@@ -716,6 +740,7 @@ def _record_enqueue(
                     day0_observed_extreme_observation_time,
                     day0_observed_extreme_observation_time,
                     day0_conditioning_identity,
+                    day0_observed_extreme_observation_time,
                     day0_conditioning_identity,
                 ),
             )
@@ -1315,6 +1340,7 @@ def enqueue_single_family_cycle_advance_reseed(
                         day0_observed_extreme_source=day0_observed_extreme_source,
                         day0_observed_extreme_c=day0_observed_extreme_c,
                         day0_observed_extreme_unit=day0_observed_extreme_unit,
+                        as_of=now,
                     ):
                         report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
                         report["consumed_cycle"] = consumed_cycle_iso
@@ -1408,6 +1434,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 day0_observed_extreme_source=day0_observed_extreme_source,
                 day0_observed_extreme_c=day0_observed_extreme_c,
                 day0_observed_extreme_unit=day0_observed_extreme_unit,
+                as_of=now,
             ):
                 if held_position:
                     report["held_priority_promoted"] = _promote_existing_enqueue_to_held(
@@ -1495,6 +1522,7 @@ def enqueue_single_family_cycle_advance_reseed(
             day0_observed_extreme_source=day0_observed_extreme_source,
             day0_observed_extreme_c=day0_observed_extreme_c,
             day0_observed_extreme_unit=day0_observed_extreme_unit,
+            as_of=now,
         ):
             if held_position:
                 report["held_priority_promoted"] = _promote_existing_enqueue_to_held(
