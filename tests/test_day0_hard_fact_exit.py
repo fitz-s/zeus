@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-27
+# Last reused or audited: 2026-07-28
 # Authority basis: alpha-clock realignment plus adversarial review MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),
 #   #3-wiring (resting-order cancel), #4 (METAR plausibility bound), #5 (day0
@@ -795,6 +795,7 @@ class TestSourceDiscipline:
 
     def test_hko_reseed_uses_latest_correction_not_cross_time_max(self, monkeypatch):
         from src.engine import monitor_refresh
+        from src.data import replacement_forecast_seed_discovery as seed_discovery
 
         city = _hong_kong()
         monkeypatch.setitem(monitor_refresh.cities_by_name, "Hong Kong", city)
@@ -834,6 +835,17 @@ class TestSourceDiscipline:
                 1,
             ),
         )
+        monkeypatch.setattr(
+            seed_discovery,
+            "_day0_observed_extreme_seed_payload",
+            lambda **_kwargs: {
+                "day0_observed_extreme_c": 29.7,
+                "day0_observed_extreme_source": "hko_hourly_accumulator",
+                "day0_observed_extreme_observation_time": "2026-07-20T08:00:00+00:00",
+                "day0_observed_extreme_sample_count": 1,
+                "day0_observed_extreme_unit": "C",
+            },
+        )
 
         payload = monitor_refresh._day0_observed_extreme_reseed_payload(
             city="Hong Kong",
@@ -846,6 +858,7 @@ class TestSourceDiscipline:
 
     def test_wu_canonical_only_reseed_preserves_absorbing_source(self, monkeypatch):
         from src.engine import monitor_refresh
+        from src.data import replacement_forecast_seed_discovery as seed_discovery
 
         city = _paris()
         monkeypatch.setitem(monitor_refresh.cities_by_name, "Paris", city)
@@ -873,6 +886,17 @@ class TestSourceDiscipline:
                 "wu_icao_history",
                 8,
             ),
+        )
+        monkeypatch.setattr(
+            seed_discovery,
+            "_day0_observed_extreme_seed_payload",
+            lambda **_kwargs: {
+                "day0_observed_extreme_c": 35.0,
+                "day0_observed_extreme_source": "wu_icao_history",
+                "day0_observed_extreme_observation_time": "2026-07-20T15:00:00+00:00",
+                "day0_observed_extreme_sample_count": 8,
+                "day0_observed_extreme_unit": "C",
+            },
         )
 
         payload = monitor_refresh._day0_observed_extreme_reseed_payload(

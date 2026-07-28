@@ -327,7 +327,7 @@ files:
   src/data/day0_fast_obs.py:
     zone: K1_truth
     authority_role: same_station_day0_physical_clock
-    why: Appends same-station METAR prints and emits authorized Day0 redecision events. WU-settled cities use the audited same-station distribution contract and a causal seven-day signed WU-minus-METAR residual likelihood with an explicit zero-hit unknown tail; this probability witness never becomes settlement truth. NOAA-settled Istanbul/Moscow/Tel Aviv consume the direct NOAA/NWS publication for their configured settlement station while Ogimet remains the canonical hourly/history mirror. The absorbing extreme and source observation version are independent monotone state; a newer plateau advances the remaining-window clock once without promoting the monitoring channel to final settlement truth.
+    why: Appends same-station METAR prints and emits authorized Day0 redecision events. WU-settled cities use the audited same-station distribution contract and a causal seven-day signed WU-minus-METAR residual likelihood with an explicit zero-hit unknown tail; this probability witness never becomes settlement truth. NOAA-settled Istanbul/Moscow/Tel Aviv consume the direct NOAA/NWS publication for their configured settlement station while Ogimet remains the canonical hourly/history mirror. Equivalent raw-METAR renderings collapse to their earliest causal publication before the absorbing extreme and source observation version advance, so a duplicate writer cannot mint a second conditioning identity or promote the monitoring channel to final settlement truth.
     downstream:
     - src/ingest_main.py
     - src/events/triggers/day0_extreme_updated.py
@@ -345,7 +345,7 @@ files:
   src/data/replacement_cycle_advance_trigger.py:
     zone: K2_runtime
     authority_role: day0_conditioning_reseed_liveness
-    why: Persists cycle-advance markers and Day0 reseed work. A Day0 marker is completion evidence only when its durable full conditioning identity matches the latest canonical fact and either an identical seed remains in flight or the current live posterior provenance consumed that identity; legacy time-only markers are healed by a fresh reseed.
+    why: Persists cycle-advance markers and Day0 reseed work. A Day0 marker is completion evidence only when its durable full conditioning identity matches the latest canonical fact and either an identical seed remains in flight or the current live posterior provenance consumed that identity; a same-model-cycle canonical Day0 identity advance re-enters this bounded poll lane, while legacy time-only markers are healed by a fresh reseed.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - STALE_BELIEF_AUTHORITY
@@ -387,7 +387,7 @@ files:
   src/data/replacement_forecast_current_target_plan.py:
     zone: K2_runtime
     authority_role: replacement_current_target_and_day0_fact_reader
-    why: Plans current replacement posterior coverage and reduces causal Day0 facts across settlement and same-station physical channels. Observation-ledger facts require both source publish and local fetch clocks inside the decision snapshot; equal-value plateaus advance only the physical time frontier, and Fahrenheit METAR evidence is derived from the precise tenths-Celsius T-group before unit conversion.
+    why: Plans current replacement posterior coverage and reduces causal Day0 facts across settlement and same-station physical channels. Observation-ledger facts require both source publish and local fetch clocks inside the decision snapshot; duplicate renderings of one raw METAR collapse to its earliest causal publication before a plateau advances the physical time frontier, and Fahrenheit METAR evidence is derived from the precise tenths-Celsius T-group before unit conversion.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1788,7 +1788,7 @@ files:
   src/engine/monitor_refresh.py:
     zone: K2_runtime
     authority_role: position_monitoring
-    why: Refreshes held position probabilities and exit signals using entry-parity math; current token identity reads use the compact latest-snapshot mirror rather than scanning the high-frequency append log. A bounded one-shot visibility retry covers both posterior identity commits and a newly committed observation clock that temporarily outruns its conditioned posterior, without caching or relabeling the failed cut as fresh.
+    why: Refreshes held position probabilities and exit signals using entry-parity math; current token identity reads use the compact latest-snapshot mirror rather than scanning the high-frequency append log. Day0 repair seeds read the same canonical conditioning payload as current-global/seed discovery, and a bounded one-shot visibility retry covers a freshly committed observation clock that temporarily outruns its conditioned posterior without caching or relabeling the failed cut as fresh.
     downstream:
     - src/engine/cycle_runtime.py
   src/engine/process_lock.py:

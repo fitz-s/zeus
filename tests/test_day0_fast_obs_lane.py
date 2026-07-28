@@ -486,7 +486,7 @@ def test_fast_residual_low_fahrenheit_requires_t_group(
         target_date="2026-07-27",
         metric="low",
         decision_time=decision_time,
-    ) == (10.0, post_trough_time.isoformat(), 23, "F")
+    ) == (10.0, post_trough_time.isoformat(), 4, "F")
     likelihood = build_fast_station_residual_likelihood(
         conn,
         city="Residual F City",
@@ -4079,3 +4079,57 @@ class TestTtlMissCacheAndPersistedTtl:
         # expired durable row was best-effort deleted (no restart re-hydration)
         rows = conn.execute("SELECT COUNT(*) FROM day0_oracle_anomaly_flags").fetchone()[0]
         assert rows == 0
+
+
+def test_fast_conditioning_deduplicates_same_metar_across_writer_prefixes(
+    monkeypatch,
+) -> None:
+    """A second rendering of one raw report cannot advance the Day0 identity."""
+    from src import config as config_module
+
+    monkeypatch.setitem(
+        config_module.cities_by_name,
+        "Wellington",
+        SimpleNamespace(
+            settlement_source_type="wu_icao",
+            wu_station="NZWN",
+            settlement_unit="C",
+            timezone="Pacific/Auckland",
+        ),
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observation_prints (
+            city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO observation_prints VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                "Wellington", "NZWN", FAST_OBS_SOURCE_ID,
+                "2026-07-28T19:34:12+00:00", 7.0, "C",
+                "2026-07-28T19:34:20+00:00",
+                "NZWN 281930Z AUTO 02014KT 9999 NCD 07/04 Q1025",
+            ),
+            (
+                "Wellington", "NZWN", FAST_OBS_SOURCE_ID,
+                "2026-07-28T19:34:13.003000+00:00", 7.0, "C",
+                "2026-07-28T19:35:41+00:00",
+                "METAR NZWN 281930Z AUTO 02014KT 9999 NCD 07/04 Q1025",
+            ),
+        ),
+    )
+
+    assert latest_fast_station_extreme_c(
+        conn,
+        city="Wellington",
+        target_date="2026-07-29",
+        metric="high",
+        decision_time=datetime(2026, 7, 28, 19, 40, tzinfo=UTC),
+    ) == (7.0, "2026-07-28T19:34:12+00:00", 1, "C")
+    conn.close()

@@ -2595,6 +2595,14 @@ def _apply_absorbing_floor_to_observed_extreme(
 def _day0_observed_extreme_reseed_payload(
     *, city: str, target_date: str, metric: str
 ) -> dict[str, object]:
+    """Read the exact Day0 conditioning identity used by seed discovery/current-global.
+
+    A monitor visibility repair must not compose a narrower local observation
+    view: it would enqueue a valid-but-stale identity after current-global has
+    advanced on a later causal ``observation_print``.  The shared producer
+    includes the canonical settlement fact, fast-station conditioning, and the
+    latest causal observation frontier under one identity contract.
+    """
     city_obj = cities_by_name.get(str(city))
     if city_obj is None or not _city_supports_executable_day0_observation(city_obj):
         return {}
@@ -2605,113 +2613,27 @@ def _day0_observed_extreme_reseed_payload(
     if not _is_position_target_local_day(None, city_obj, target_d):
         return {}
     try:
-        metric_id = MetricIdentity.from_raw(metric)
-    except Exception:
-        return {}
-    metric_is_low = metric_id.is_low()
-    unit = str(getattr(city_obj, "settlement_unit", "") or "").strip().upper()
+        from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+            _day0_observed_extreme_seed_payload,
+        )
 
-    # LIVE candidate: a validated live-provider reading (lowest latency when providers serve).
-    live: tuple[float, str, str, int] | None = None
-    obs = None
-    try:
-        obs = _fetch_day0_observation(city_obj, target_d)
-    except Exception as exc:
+        payload = _day0_observed_extreme_seed_payload(
+            city=str(city),
+            target_date=str(target_date),
+            metric=str(metric),
+            computed_at=datetime.now(timezone.utc),
+        )
+    except Exception as exc:  # noqa: BLE001 - monitor repair remains fail-soft
         logger.info(
-            "monitor belief reseed Day0 live observation unavailable city=%s target_date=%s "
-            "metric=%s exc=%s (composing with canonical surface)",
-            city, target_date, metric, exc,
-        )
-    if obs is not None and _day0_observation_field(obs, "observation_time"):
-        source_rejection = _day0_observation_source_rejection_reason(
-            city_obj,
-            obs,
-            consumer_label="replacement belief reseed",
-        )
-        if source_rejection is not None:
-            logger.info(
-                "monitor belief reseed Day0 live observation rejected city=%s target_date=%s "
-                "metric=%s reason=%s (composing with canonical surface)",
-                city, target_date, metric, source_rejection,
-            )
-        else:
-            live_native = _finite_day0_observation_float(
-                obs, "low_so_far" if metric_is_low else "high_so_far"
-            )
-            if live_native is not None:
-                try:
-                    live_sample = int(_day0_observation_field(obs, "sample_count", 0) or 0)
-                except Exception:
-                    live_sample = 0
-                live = (
-                    float(live_native),
-                    str(_day0_observation_field(obs, "observation_time", "") or ""),
-                    str(_day0_observation_field(obs, "source", "") or "live"),
-                    live_sample,
-                )
-
-    # CANONICAL candidate (ALWAYS read): preserve the selected source because the storage surface
-    # is not the evidence semantics. WU/Ogimet running extrema are absorbing bounds; HKO's current
-    # intraday accumulator is a revisable snapshot. See docs/evidence/same_day_exit_blindness/.
-    canonical = _day0_observed_extreme_from_canonical_surface(
-        city_name=str(getattr(city_obj, "name", "") or city),
-        target_date=str(target_date),
-        metric_is_low=metric_is_low,
-    )
-    source_type = str(
-        getattr(city_obj, "settlement_source_type", "") or ""
-    ).strip().lower()
-    if source_type == "hko":
-        # HKO may revise its official intraday snapshot. Choose the newest
-        # current fact and preserve its provisional source identity; MAX/MIN
-        # composition would resurrect a retracted value as a false hard bound.
-        from src.data.replacement_cycle_advance_trigger import (
-            normalize_observation_version,
-        )
-
-        hko_candidates: list[tuple[float, str, str, int]] = []
-        if live is not None:
-            hko_candidates.append(live)
-        if canonical is not None:
-            hko_candidates.append(
-                (
-                    float(canonical[0]),
-                    str(canonical[1]),
-                    str(canonical[2]),
-                    int(canonical[3]),
-                )
-            )
-        composed = (
-            max(
-                hko_candidates,
-                key=lambda candidate: normalize_observation_version(candidate[1]) or "",
-            )
-            if hko_candidates
-            else None
-        )
-    else:
-        composed = _compose_day0_observed_extreme(
-            live=live, canonical=canonical, metric_is_low=metric_is_low
-        )
-    if composed is None:
-        return {}
-    observed_native, observation_time, source_label, sample_count = composed
-    try:
-        observed_c = _temperature_native_value_to_c(observed_native, unit=unit)
-    except Exception as exc:
-        logger.info(
-            "monitor belief reseed Day0 observed-extreme unit conversion failed "
-            "city=%s target_date=%s metric=%s unit=%s exc=%s",
-            city, target_date, metric, unit, exc,
+            "monitor belief reseed Day0 canonical conditioning unavailable "
+            "city=%s target_date=%s metric=%s exc=%s",
+            city,
+            target_date,
+            metric,
+            exc,
         )
         return {}
-    return {
-        "day0_observed_extreme_c": float(observed_c),
-        "day0_observed_extreme_source": source_label,
-        "day0_observed_extreme_observation_time": observation_time,
-        "day0_observed_extreme_sample_count": sample_count,
-        "day0_observed_extreme_unit": unit,
-    }
+    return dict(payload or {})
 
 
 def _is_stale_day0_observation_quality_rejection(reason: str | None) -> bool:

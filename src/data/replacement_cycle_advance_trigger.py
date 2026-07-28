@@ -1052,6 +1052,7 @@ def enqueue_cycle_advance_reseeds(
         "freshest_materializable_cycle": None,
         "scopes_checked": 0,
         "advances_detected": 0,
+        "day0_observation_advances_detected": 0,
         "first_materializations_detected": 0,
         "held_advances_detected": 0,
         "seeds_enqueued": 0,
@@ -1189,6 +1190,12 @@ def enqueue_cycle_advance_reseeds(
                 day0_observation_time = str(
                     payload.get("day0_observed_extreme_observation_time") or ""
                 ) or None
+            day0_identity = _day0_conditioning_identity(
+                source=day0_payload.get("day0_observed_extreme_source"),
+                observation_time=day0_observation_time,
+                observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
+                unit=day0_payload.get("day0_observed_extreme_unit"),
+            )
             report["scopes_checked"] = int(report["scopes_checked"]) + 1
             try:
                 verdict = scope_needs_cycle_advance(
@@ -1199,19 +1206,30 @@ def enqueue_cycle_advance_reseeds(
                 _LOG.debug("cycle-advance comparison failed for %s/%s/%s: %s", city, target_date, metric, exc)
                 continue
             missing_posterior = verdict.get("consumed_cycle") is None
+            # A Day0 canonical observation is a separate causal clock from the
+            # model source cycle.  A fresh plateau print can advance its exact
+            # conditioning identity while the family remains on the same model
+            # cycle; let _already_enqueued bind that identity to the marker and
+            # completed posterior instead of suppressing this repair here.
+            day0_observation_advance_candidate = day0_identity is not None
             if not verdict["needs_advance"] and not (
                 include_missing_posterior and scopes is not None and missing_posterior
-            ):
+            ) and not day0_observation_advance_candidate:
                 continue
             if missing_posterior:
                 report["first_materializations_detected"] = (
                     int(report["first_materializations_detected"]) + 1
                 )
             else:
-                report["advances_detected"] = int(report["advances_detected"]) + 1
-                if is_held:
-                    report["held_advances_detected"] = (
-                        int(report["held_advances_detected"]) + 1
+                if verdict["needs_advance"]:
+                    report["advances_detected"] = int(report["advances_detected"]) + 1
+                    if is_held:
+                        report["held_advances_detected"] = (
+                            int(report["held_advances_detected"]) + 1
+                        )
+                elif day0_observation_advance_candidate:
+                    report["day0_observation_advances_detected"] = (
+                        int(report["day0_observation_advances_detected"]) + 1
                     )
             consumed_cycle_iso = (
                 "NO_LIVE_POSTERIOR"
@@ -1279,7 +1297,16 @@ def enqueue_cycle_advance_reseeds(
                 continue
             if (
                 not missing_posterior
-                and family_cycle <= consumed_cycle_dt(consumed_cycle_iso)
+                and family_cycle < consumed_cycle_dt(consumed_cycle_iso)
+            ):
+                report["family_cycle_not_newer"] = int(
+                    report.get("family_cycle_not_newer", 0)
+                ) + 1
+                continue
+            if (
+                not missing_posterior
+                and family_cycle == consumed_cycle_dt(consumed_cycle_iso)
+                and not day0_observation_advance_candidate
             ):
                 report["family_cycle_not_newer"] = int(
                     report.get("family_cycle_not_newer", 0)
@@ -1332,6 +1359,9 @@ def enqueue_cycle_advance_reseeds(
                     upgrade_trigger=(
                         "missing_live_posterior_reseed"
                         if missing_posterior
+                        else "day0_observation_advanced"
+                        if day0_observation_advance_candidate
+                        and not verdict["needs_advance"]
                         else "newer_cycle_ingested"
                     ),
                     day0_observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
@@ -1362,7 +1392,11 @@ def enqueue_cycle_advance_reseeds(
                 held_position=is_held,
                 seed_file=str(visible_seed_file),
                 reason=(
-                    "MISSING_LIVE_POSTERIOR" if missing_posterior else None
+                    "MISSING_LIVE_POSTERIOR"
+                    if missing_posterior
+                    else "DAY0_OBSERVATION_ADVANCED"
+                    if day0_observation_advance_candidate and not verdict["needs_advance"]
+                    else None
                 ),
                 replace_existing_seed_file=bool(day0_payload) or missing_posterior,
                 day0_observed_extreme_observation_time=day0_observation_time,

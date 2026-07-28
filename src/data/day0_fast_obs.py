@@ -330,7 +330,12 @@ def latest_fast_station_extreme_c(
         ).fetchall()
     except sqlite3.DatabaseError:
         return None
-    candidates: list[tuple[float, str]] = []
+    # One source METAR can be rendered by two writers with distinct receipt
+    # timestamps (for example with/without a leading ``METAR `` token).  Its
+    # raw valid time, channel, and conditioned value name one physical fact;
+    # retain the earliest causal publication so fast-conditioning identity
+    # agrees with the canonical Day0 fact reducer and event bridge.
+    canonical_candidates: dict[tuple[str, float], tuple[float, str]] = {}
     for row in rows:
         published = _fast_residual_utc(row[0])
         value_c = _fast_residual_value_c(
@@ -340,8 +345,18 @@ def latest_fast_station_extreme_c(
             raw_report=row[3],
             settlement_unit=unit,
         )
-        if published is not None and value_c is not None:
-            candidates.append((value_c, published.isoformat()))
+        if published is None or value_c is None:
+            continue
+        report_time = metar_observation_time_from_raw(
+            str(row[3] or ""), published_at=published
+        )
+        source_clock = (report_time or published).astimezone(UTC).isoformat()
+        identity = (source_clock, float(value_c))
+        candidate = (float(value_c), published.isoformat())
+        previous = canonical_candidates.get(identity)
+        if previous is None or candidate[1] < previous[1]:
+            canonical_candidates[identity] = candidate
+    candidates = tuple(canonical_candidates.values())
     if not candidates:
         return None
     extreme = (

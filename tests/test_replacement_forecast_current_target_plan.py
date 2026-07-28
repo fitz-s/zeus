@@ -1,5 +1,5 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-07-28
 # Lifecycle: created=2026-06-06; last_reviewed=2026-07-27; last_reused=2026-07-27
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
@@ -606,6 +606,75 @@ def _day0_source_switch_conn() -> sqlite3.Connection:
         """
     )
     return conn
+
+
+def test_day0_ledger_deduplicates_same_metar_report_across_writer_prefixes(
+    monkeypatch,
+) -> None:
+    """A second writer's ``METAR `` prefix must not mint a newer conditioning clock.
+
+    The two ledger rows describe one source report (NZWN 281930Z / 7C); the
+    first publication is the causal availability clock that the Day0 event and
+    its existing posterior already own.  Treating the alternate rendering's
+    later receipt timestamp as new evidence creates a false current-global
+    identity mismatch.
+    """
+    conn = _day0_source_switch_conn()
+    conn.execute(
+        """
+        CREATE TABLE observation_prints (
+            city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT
+        )
+        """
+    )
+    city = SimpleNamespace(
+        name="Wellington",
+        timezone="Pacific/Auckland",
+        settlement_unit="C",
+        settlement_source_type="wu_icao",
+        wu_station="NZWN",
+    )
+    monkeypatch.setattr(
+        "src.config.runtime_cities_by_name",
+        lambda: {"Wellington": city},
+    )
+    conn.executemany(
+        """
+        INSERT INTO observation_prints VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                "Wellington", "NZWN", "aviationweather_metar",
+                "2026-07-28T19:34:12+00:00", 7.0, "C",
+                "2026-07-28T19:34:20+00:00",
+                "NZWN 281930Z AUTO 02014KT 9999 NCD 07/04 Q1025",
+            ),
+            (
+                "Wellington", "NZWN", "aviationweather_metar",
+                "2026-07-28T19:34:13.003000+00:00", 7.0, "C",
+                "2026-07-28T19:35:41+00:00",
+                "METAR NZWN 281930Z AUTO 02014KT 9999 NCD 07/04 Q1025",
+            ),
+        ),
+    )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Wellington",
+        target_date="2026-07-29",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 28, 19, 40, tzinfo=timezone.utc),
+        require_settlement_channel=False,
+    )
+
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 7.0
+    assert fact["observation_source"] == "aviationweather_metar"
+    assert fact["observation_time"] == "2026-07-28T19:34:12+00:00"
+    assert fact["observation_available_at"] == "2026-07-28T19:34:20+00:00"
+    conn.close()
 
 
 def _insert_paris_observation_instant(

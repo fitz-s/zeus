@@ -235,6 +235,47 @@ def _insert_live_posterior(
     conn.close()
 
 
+def _insert_materialized_day0_posterior(
+    db_path: Path,
+    *,
+    cycle_iso: str,
+    computed_at: str,
+    payload: Mapping[str, object],
+) -> None:
+    """Model the queue/materializer's committed provenance for one drained seed."""
+    _insert_live_posterior(
+        db_path,
+        cycle_iso=cycle_iso,
+        computed_at=computed_at,
+    )
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        UPDATE forecast_posteriors
+           SET provenance_json = ?
+         WHERE posterior_id = (
+             SELECT MAX(posterior_id) FROM forecast_posteriors
+         )
+        """,
+        (
+            json.dumps(
+                {
+                    "day0_conditioning": {
+                        "source": payload["day0_observed_extreme_source"],
+                        "observation_time": payload[
+                            "day0_observed_extreme_observation_time"
+                        ],
+                        "observed_extreme_c": payload["day0_observed_extreme_c"],
+                        "unit": payload["day0_observed_extreme_unit"],
+                    }
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_day0_extreme_bridge_enqueues_exactly_one_seed_and_dedups_same_observation_time(
     tmp_path, monkeypatch
 ) -> None:
@@ -2093,6 +2134,122 @@ def test_day0_extreme_bridge_reseeds_new_observation_on_consumed_model_cycle(
     assert row["day0_observed_extreme_observation_time"] == (
         "2026-07-19T06:00:00+00:00"
     )
+
+
+def test_cycle_poll_catches_up_every_new_day0_identity_on_one_model_cycle(
+    tmp_path, monkeypatch
+) -> None:
+    """A→B→C causal observation clocks must each reach a posterior on one model cycle.
+
+    The bridge may miss a ledger publication (for example a second writer's
+    durable catch-up).  The bounded poll is therefore the durable liveness
+    backstop: after each queue drain commits the matching posterior, the next
+    canonical identity must re-enter the same-cycle seed transport.
+    """
+    db_path = _prepare_forecast_db(tmp_path)
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    seed_dir = tmp_path / "seeds"
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    payloads = [
+        _day0_payload("2026-07-19T05:00:00+00:00"),
+        _day0_payload("2026-07-19T05:01:00+00:00"),
+        _day0_payload("2026-07-19T05:02:00+00:00"),
+    ]
+    current = {"payload": payloads[0]}
+    monkeypatch.setattr(
+        seed_discovery,
+        "_day0_observed_extreme_seed_payload",
+        lambda **_kwargs: dict(current["payload"]),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "freshest_materializable_cycle",
+        lambda _conn: cycle,
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (cycle, ()),
+    )
+    fake_build_seed, calls = _fake_build_seed_factory()
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", fake_build_seed)
+
+    _insert_materialized_day0_posterior(
+        db_path,
+        cycle_iso=cycle.isoformat(),
+        computed_at="2026-07-19T05:00:30+00:00",
+        payload=payloads[0],
+    )
+    conn = sqlite3.connect(db_path)
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=cycle.isoformat(),
+        target_cycle_iso=cycle.isoformat(),
+        held_position=True,
+        seed_file=str(seed_dir / "a-drained.json"),
+        day0_observed_extreme_observation_time=payloads[0][
+            "day0_observed_extreme_observation_time"
+        ],
+        day0_observed_extreme_source=payloads[0]["day0_observed_extreme_source"],
+        day0_observed_extreme_c=payloads[0]["day0_observed_extreme_c"],
+        day0_observed_extreme_unit=payloads[0]["day0_observed_extreme_unit"],
+    )
+    conn.commit()
+    conn.close()
+
+    for index, payload in enumerate(payloads[1:], start=1):
+        current["payload"] = payload
+        report = cycle_advance.enqueue_cycle_advance_reseeds(
+            forecast_db=db_path,
+            seed_dir=seed_dir,
+            raw_manifest_dir=raw_dir,
+            computed_at=datetime(2026, 7, 19, 5, index, tzinfo=UTC),
+            limit=1,
+            scopes=(("Shanghai", "2026-07-19", "high"),),
+            manifests=(),
+        )
+        assert report["day0_observation_advances_detected"] == 1
+        assert report["seeds_enqueued"] == 1
+        marker = _fetch_enqueue_row(db_path)
+        assert marker["day0_observed_extreme_observation_time"] == payload[
+            "day0_observed_extreme_observation_time"
+        ]
+        marker_seed = Path(marker["seed_file"])
+        assert json.loads(marker_seed.read_text(encoding="utf-8"))[
+            "day0_observed_extreme_observation_time"
+        ] == payload["day0_observed_extreme_observation_time"]
+        marker_seed.unlink()
+        _insert_materialized_day0_posterior(
+            db_path,
+            cycle_iso=cycle.isoformat(),
+            computed_at=f"2026-07-19T05:0{index}:30+00:00",
+            payload=payload,
+        )
+
+    assert calls["count"] == 2
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    identity = cycle_advance._day0_conditioning_identity(
+        source=payloads[2]["day0_observed_extreme_source"],
+        observation_time=payloads[2]["day0_observed_extreme_observation_time"],
+        observed_extreme_c=payloads[2]["day0_observed_extreme_c"],
+        unit=payloads[2]["day0_observed_extreme_unit"],
+    )
+    assert identity is not None
+    assert cycle_advance._latest_posterior_matches_day0_conditioning(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        identity=identity,
+        target_cycle_iso=cycle.isoformat(),
+        as_of=datetime(2026, 7, 19, 5, 3, tzinfo=UTC),
+    )
+    conn.close()
 
 
 def test_day0_extreme_bridge_not_configured_is_failsoft(monkeypatch) -> None:
