@@ -39,6 +39,14 @@ def test_audit_uses_bounded_rowid_tail_without_mutating_db(tmp_path):
             position_id TEXT PRIMARY KEY,
             decision_snapshot_id TEXT
         );
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            snapshot_id TEXT
+        );
+        CREATE TABLE market_price_history (
+            id INTEGER PRIMARY KEY,
+            snapshot_id TEXT
+        );
         """
     )
     for row_id in range(1, 31):
@@ -76,6 +84,22 @@ def test_audit_uses_bounded_rowid_tail_without_mutating_db(tmp_path):
         [
             ("position-1", "snapshot-2"),
             ("position-2", "snapshot-3"),
+            ("position-legacy", "forecast-snapshot-1"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO position_events VALUES (?, ?)",
+        [
+            ("event-1", "snapshot-3"),
+            ("event-2", "snapshot-4"),
+            ("event-legacy", "forecast-snapshot-2"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO market_price_history VALUES (?, ?)",
+        [
+            (1, "snapshot-5"),
+            (2, "snapshot-5"),
         ],
     )
     conn.commit()
@@ -84,8 +108,8 @@ def test_audit_uses_bounded_rowid_tail_without_mutating_db(tmp_path):
 
     report = audit(db_path, tail_rows=10)
 
-    assert report["schema_version"] == 4
-    assert report["method"] == "bounded_rowid_tail_v3"
+    assert report["schema_version"] == 5
+    assert report["method"] == "bounded_rowid_tail_v4"
     assert report["freelist_count"] == 0
     decision = report["tables"]["decision_log"]
     assert decision["rowid_high_watermark"] == 30
@@ -123,20 +147,38 @@ def test_audit_uses_bounded_rowid_tail_without_mutating_db(tmp_path):
     assert decision_dedup["content_addresses"] == 10
     assert decision_dedup["repeated_rows"] == 0
     retention = report["snapshot_retention_evidence"]
-    assert retention["minimum_distinct_operational_snapshot_ids"] == 3
+    assert retention["minimum_distinct_operational_snapshot_ids"] == 5
     assert retention["sources"]["venue_commands"] == {
+        "nonnull_rows": 3,
         "cited_rows": 3,
         "distinct_snapshot_ids": 2,
+        "noncanonical_or_legacy_rows": 0,
     }
     assert retention["sources"]["position_current"] == {
+        "nonnull_rows": 3,
         "cited_rows": 2,
         "distinct_snapshot_ids": 2,
+        "noncanonical_or_legacy_rows": 1,
     }
-    assert retention["minimum_direct_ref_fraction_of_rowid_high_watermark"] == 0.1
-    assert report["tables"]["position_events"] == {"present": False}
+    assert retention["sources"]["position_events"] == {
+        "nonnull_rows": 3,
+        "cited_rows": 2,
+        "distinct_snapshot_ids": 2,
+        "noncanonical_or_legacy_rows": 1,
+    }
+    assert retention["sources"]["market_price_history"] == {
+        "nonnull_rows": 2,
+        "cited_rows": 2,
+        "distinct_snapshot_ids": 1,
+        "noncanonical_or_legacy_rows": 0,
+    }
+    assert (
+        retention["minimum_direct_ref_fraction_of_rowid_high_watermark"]
+        == 0.16666667
+    )
 
     check = sqlite3.connect(db_path)
     assert check.total_changes == 0
     assert check.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0] == 30
     check.close()
-    assert before == 65
+    assert before == 71
