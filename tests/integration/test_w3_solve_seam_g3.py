@@ -5067,7 +5067,7 @@ def test_fast_residual_day0_bundle_drives_entry_and_held_redecision_q(
     observations.close()
 
 
-def test_provisional_hko_held_probability_uses_remaining_day_without_entry_authority(
+def test_provisional_hko_held_probability_uses_replacement_after_local_day(
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
@@ -5394,10 +5394,14 @@ def test_provisional_hko_held_probability_uses_remaining_day_without_entry_autho
         entry_authority=False,
     )
     assert post_day.probability_witness.yes_point_q.tolist() == pytest.approx(
-        [0.2, 0.5, 0.3]
+        [0.1, 0.1, 0.8]
     )
     assert post_day_payload["probability_authority"] == (
-        "day0_remaining_day_global_probability_v1"
+        "replacement_provisional_day0_global_probability_v1"
+    )
+    assert post_day_payload["q_source"] == "replacement_0_1"
+    assert post_day_payload["_edli_day0_q_mode"] == (
+        "provisional_current_snapshot_replacement"
     )
     assert post_day_payload["_edli_global_day0_binding"][
         "evidence_finality"

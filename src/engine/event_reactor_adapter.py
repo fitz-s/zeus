@@ -30502,6 +30502,7 @@ def _prepare_current_global_probability_family(
     day0_snapshot: Mapping[str, object] | None = None
     day0_base_identity = ""
     provisional_day0_observation = False
+    post_local_provisional_monitor_authority = False
     provisional_day0_fact: Mapping[str, object] | None = None
     fast_residual_conditioning: Mapping[str, object] | None = None
     physical_frontier_requires_confirmation = False
@@ -30616,6 +30617,7 @@ def _prepare_current_global_probability_family(
                 provisional_day0_observation
                 and allow_provisional_day0_replacement
                 and not entry_authority
+                and local_target < local_now.date()
             )
             if (
                 local_target < local_now.date()
@@ -30975,6 +30977,35 @@ def _prepare_current_global_probability_family(
                         "q_source": "day0_conditioned_replacement",
                         "_edli_q_source": "day0_conditioned_replacement",
                         "_edli_day0_q_mode": "fast_residual_conditioned_replacement",
+                    }
+                )
+            elif post_local_provisional_monitor_authority:
+                # Once the local target day is complete there is no remaining
+                # atmospheric window to simulate. The bundle has already
+                # passed the exact provisional-observation binding above, so
+                # its persisted coherent settlement simplex is the newest
+                # complete probability carrier for held-position redecision.
+                # Entry authority remains excluded by the earlier gate.
+                components = _replacement_global_probability_components(
+                    bundle,
+                    candidates=family.candidates,
+                    bindings=bindings,
+                )
+                if components is None:
+                    raise ValueError(
+                        "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_INVALID"
+                    )
+                probability_authority = (
+                    "replacement_provisional_day0_global_probability_v1"
+                )
+                payload.update(
+                    {
+                        "probability_authority": probability_authority,
+                        "q_source": "replacement_0_1",
+                        "_edli_q_source": "replacement_0_1",
+                        "_edli_day0_q_mode": (
+                            "provisional_current_snapshot_replacement"
+                        ),
                     }
                 )
             else:

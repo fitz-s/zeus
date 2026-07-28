@@ -58,6 +58,9 @@ RESET:
 
 - Permit identity-bound provisional Day0 replacement probability to remain
   monitor authority after local midnight for reduce-only held redecision.
+- Route that post-local provisional state through its persisted coherent
+  replacement simplex; an empty remaining-day member window is not a valid
+  post-midnight probability carrier.
 - Preserve the hard boundary: provisional observation is never entry or final
   settlement authority.
 - Make posterior-starvation use each configured city's local calendar instead
