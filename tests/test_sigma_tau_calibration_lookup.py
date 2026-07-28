@@ -1,5 +1,12 @@
 # Created: 2026-07-28
-# Last reused or audited: 2026-07-28 (FIX 1/FIX 6 deep-review corrections)
+# Last reused/audited: 2026-07-28 (FIX 1/FIX 6 deep-review corrections)
+# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Pure-function antibody for the sigma-tau calibration loader's strict typed-schema
+#   fail-soft/fail-closed contract -- the artifact is the SOLE licensing authority and ANY schema
+#   deviation must make it (or the narrower scope it affects) inert, never partially trusted.
+# Reuse: Re-run whenever _sigma_tau_calibration_lookup's validation constants
+#   (_SIGMA_TAU_ARTIFACT_AUTHORITY / _SIGMA_TAU_SCHEMA_VERSION / _SIGMA_TAU_CLOCK_ID / the k-range
+#   bounds) change; these fixtures hardcode the CURRENT expected values.
 # Authority basis: docs/operations/current/sigma_tau_calibration/PLAN.md. The sigma-tau calibration
 #   is a NEW artifact (state/sigma_tau_calibration.json, scripts/fit_sigma_tau_calibration.py) that
 #   replaces the hardcoded neutral (1.0, 0.0, 0.0) at the CURRENT-EVIDENCE materializer site. These

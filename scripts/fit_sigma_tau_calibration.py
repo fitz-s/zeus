@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # Created: 2026-07-28
-# Last reused or audited: 2026-07-28 (deep-review corrections applied same day)
+# Last reused/audited: 2026-07-28 (deep-review corrections applied same day)
+# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Walk-forward fitter for the CURRENT-EVIDENCE (Day0) sigma-tau calibration artifact --
+#   the ONLY writer of state/sigma_tau_calibration.json, which the materializer reads fail-soft at
+#   the site formerly hardcoded to (1.0, 0.0, 0.0).
+# Reuse: Re-run to refresh the artifact as the live corpus grows; inspect the OOS gate verdict
+#   (`--validate CUTOFF`) and the `_meta.oos_acceptance_gate`/`oos_gate` fields on every group
+#   BEFORE placing a new artifact under state/ -- a group with `fitted=False` must stay untouched.
 # Authority basis: docs/operations/current/sigma_tau_calibration/PLAN.md. An OOS walk-forward
 #   bakeoff (calib_curves/bakeoff.py) selected per-(unit_family, metric) FITTED k(tau) times
 #   per-city variance shrinkage as the best legal sigma correction for the CURRENT-EVIDENCE (Day0)

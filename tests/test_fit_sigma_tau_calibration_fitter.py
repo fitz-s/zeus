@@ -1,5 +1,11 @@
 # Created: 2026-07-28
-# Last reused or audited: 2026-07-28 (FIX 1/2/3/4/5/8 deep-review corrections)
+# Last reused/audited: 2026-07-28 (FIX 1/2/3/4/5/8 deep-review corrections)
+# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Smoke-test scripts/fit_sigma_tau_calibration.py's fitting pipeline (query fence,
+#   local-date bucketing, settlement quantizer, log-domain MLE, OOS gate) against a synthetic
+#   fixture -- never the live DB.
+# Reuse: Re-run whenever the fitter's query shape, tau-clock definition, or gate thresholds change;
+#   the fixtures here encode the CURRENT expected constants (MIN_*_N, K_BOUNDS, OOS_MARGIN_NATS).
 # Authority basis: docs/operations/current/sigma_tau_calibration/PLAN.md.
 """Smoke tests for scripts/fit_sigma_tau_calibration.py on a SYNTHETIC sqlite fixture.
 

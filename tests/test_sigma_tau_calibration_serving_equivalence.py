@@ -1,5 +1,11 @@
 # Created: 2026-07-28
-# Last reused or audited: 2026-07-28 (FIX 1/FIX 6/FIX 7 deep-review corrections)
+# Last reused/audited: 2026-07-28 (FIX 1/FIX 6/FIX 7 deep-review corrections)
+# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Full-pipeline safety-property antibody for the sigma-tau calibration wiring -- proves
+#   the historical path is untouched and the current-evidence path is byte-identical to today when
+#   the artifact is absent, at the FULL materialize_replacement_forecast_live() level.
+# Reuse: Re-run whenever the artifact schema (authority/schema_version/tau_clock/bucket keys) or the
+#   materializer's provenance dict shape changes; the fixtures here must be kept in sync with both.
 # Authority basis: docs/operations/current/sigma_tau_calibration/PLAN.md. Proves the two safety
 #   properties the sigma-tau calibration wiring must hold at the FULL materializer pipeline level
 #   (not just the pure-function loader antibodies in test_sigma_tau_calibration_lookup.py):

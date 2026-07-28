@@ -12,8 +12,11 @@ OOS bakeoff (M0..M4 walk-forward, `/private/tmp/.../calib_curves/bakeoff.py`)
 selected M2 -- per-`(unit_family, metric)` `k(tau)` times per-city variance
 shrinkage -- as the best form that stays inside current law (no city bias
 term, no market-price anchor, no historical floor on the current-evidence
-shape). `tau = lead_target_h` = hours from `computed_at` to the END of
-`target_date` UTC (`target_date + 1 day 00:00 UTC`).
+shape). `tau = lead_issue_h` = hours from the posterior's ISSUE clock
+(`source_cycle_time`) to the CITY'S LOCAL target-date end (next local
+midnight, DST-aware) -- NOT `computed_at` (decision time) and NOT a UTC
+cut; see "2026-07-28 design-review corrections" and "FIX 1" below for why
+both corrections were required.
 
 The current-evidence site (`replacement_forecast_materializer.py`, comment
 "Historical k/w/floors would change a decision-time-only shape") hardcodes
