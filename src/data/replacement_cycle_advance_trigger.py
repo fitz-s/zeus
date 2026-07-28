@@ -1159,7 +1159,10 @@ def enqueue_single_family_cycle_advance_reseed(
             report["consumed_cycle"] = consumed_cycle_iso
             report["target_cycle"] = target_cycle_iso
             return report
-        if not verdict["needs_advance"]:
+        # Day0 observation time is an independent source clock. A newer global
+        # forecast cycle carried by another family must not divert this family
+        # around the monotone observation-time re-materialization path below.
+        if not verdict["needs_advance"] or has_day0_evidence:
             if verdict.get("consumed_cycle") is not None:
                 if has_day0_evidence:
                     if (

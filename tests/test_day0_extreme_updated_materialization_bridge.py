@@ -355,6 +355,14 @@ def test_day0_extreme_bridge_reseeds_new_observation_on_consumed_model_cycle(
         "family_materializable_cycle",
         lambda *args, **kwargs: (cycle, ()),
     )
+    # Another family has advanced the global cycle high-water mark. Shanghai
+    # still needs same-cycle re-materialization because its observation clock
+    # advanced independently.
+    monkeypatch.setattr(
+        cycle_advance,
+        "freshest_materializable_cycle",
+        lambda _conn: datetime(2026, 7, 19, 6, tzinfo=UTC),
+    )
     fake_build_seed, calls = _fake_build_seed_factory()
     monkeypatch.setattr(
         cycle_advance,
