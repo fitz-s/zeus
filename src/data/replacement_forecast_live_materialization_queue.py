@@ -296,7 +296,7 @@ def _move_request(path: Path, destination_dir: Path) -> Path:
 
 
 def _publish_latest_seed(seed_path: Path, seed: Mapping[str, object]) -> Path:
-    """Atomically retain one zero-copy current seed per forecast family."""
+    """Atomically retain one zero-copy, source-clock-monotone family seed."""
 
     city = str(seed["city"]).replace(" ", "_")
     target_date = str(seed["target_date"])
@@ -304,6 +304,19 @@ def _publish_latest_seed(seed_path: Path, seed: Mapping[str, object]) -> Path:
     latest_dir = seed_path.parent.parent / "seeds_latest"
     latest_dir.mkdir(parents=True, exist_ok=True)
     latest_path = latest_dir / f"{city}.{target_date}.{metric}.json"
+    candidate_cycle = _parse_utc_iso(seed.get("source_cycle_time"))
+    if latest_path.is_file() and candidate_cycle is not None:
+        try:
+            current_seed = json.loads(latest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            current_seed = None
+        current_cycle = (
+            _parse_utc_iso(current_seed.get("source_cycle_time"))
+            if isinstance(current_seed, Mapping)
+            else None
+        )
+        if current_cycle is not None and candidate_cycle < current_cycle:
+            return latest_path
     temporary = latest_dir / f".{_receipt_name(latest_path)}.tmp"
     try:
         os.link(seed_path, temporary)
@@ -1438,6 +1451,20 @@ def _prepare_seed_requests(
             # fusion could never heal. The upgrade seed's idempotency authority is the
             # fusion_upgrade_enqueues marker (at most one enqueue per (scope, cycle,
             # capturable-family-superset) transition), NOT coverage — so this bypass cannot loop.
+            if _seed_source_cycle_regresses_current_posterior(
+                forecast_db=forecast_db, seed=seed
+            ):
+                moved = _move_request(seed_json, processed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "SKIPPED_SOURCE_CYCLE_REGRESSION",
+                        "reason_codes": ["REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"],
+                        "request_written": False,
+                    },
+                )
+                processed.append(str(moved))
+                continue
             if not seed.get("upgrade_trigger") and _seed_already_covered(
                 forecast_db=forecast_db, seed=seed
             ):
@@ -1448,21 +1475,6 @@ def _prepare_seed_requests(
                     {
                         "status": "SKIPPED_ALREADY_COVERED",
                         "reason_codes": ["REPLACEMENT_MATERIALIZATION_SEED_ALREADY_COVERED"],
-                        "request_written": False,
-                    },
-                )
-                processed.append(str(moved))
-                continue
-            if _seed_source_cycle_regresses_current_posterior(
-                forecast_db=forecast_db, seed=seed
-            ):
-                moved = _move_request(seed_json, processed_path)
-                _publish_latest_seed(moved, seed)
-                _write_sidecar(
-                    moved,
-                    {
-                        "status": "SKIPPED_SOURCE_CYCLE_REGRESSION",
-                        "reason_codes": ["REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"],
                         "request_written": False,
                     },
                 )

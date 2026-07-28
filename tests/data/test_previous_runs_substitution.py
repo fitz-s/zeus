@@ -414,6 +414,7 @@ def test_queue_skips_seed_older_than_current_family_posterior(tmp_path, monkeypa
     receipt = json.loads(sidecar.read_text(encoding="utf-8"))
     assert receipt["status"] == "SKIPPED_SOURCE_CYCLE_REGRESSION"
     assert receipt["reason_codes"] == ["REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"]
+    assert not (tmp_path / "seeds_latest" / "Beijing.2026-06-12.high.json").exists()
 
 
 def test_queue_coverage_skip_requires_matching_openmeteo_anchor_source_run(tmp_path) -> None:
@@ -1737,3 +1738,31 @@ def test_processed_seed_publishes_one_zero_copy_family_cache(tmp_path) -> None:
     assert rotated == latest
     assert rotated.stat().st_ino == second.stat().st_ino
     assert json.loads(rotated.read_text(encoding="utf-8")) == {"generation": 2}
+
+
+def test_processed_seed_cache_never_regresses_source_clock(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    processed = tmp_path / "seeds_processed"
+    processed.mkdir()
+    current = processed / "Seoul.2026-07-22.high.current.json"
+    older = processed / "Seoul.2026-07-22.high.older.json"
+    current_seed = {
+        "city": "Seoul",
+        "target_date": "2026-07-22",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-22T00:00:00+00:00",
+    }
+    older_seed = {
+        **current_seed,
+        "source_cycle_time": "2026-07-21T18:00:00+00:00",
+    }
+    current.write_text(json.dumps(current_seed), encoding="utf-8")
+    older.write_text(json.dumps(older_seed), encoding="utf-8")
+
+    latest = queue_mod._publish_latest_seed(current, current_seed)
+    retained = queue_mod._publish_latest_seed(older, older_seed)
+
+    assert retained == latest
+    assert retained.stat().st_ino == current.stat().st_ino
+    assert json.loads(retained.read_text(encoding="utf-8")) == current_seed
