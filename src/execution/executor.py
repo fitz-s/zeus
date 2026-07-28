@@ -5894,6 +5894,7 @@ def execute_exit_order(
     intent: ExitOrderIntent,
     conn: Optional[sqlite3.Connection] = None,
     decision_id: str = "",
+    q_version: str = "",
 ) -> "OrderResult":
     """Place a live sell order via the executor and return a normalized OrderResult.
 
@@ -6281,6 +6282,7 @@ def execute_exit_order(
                 size=shares,
                 price=limit_price,
                 created_at=now_str,
+                q_version=q_version or None,
                 snapshot_checked_at=now_str,
                 expected_min_tick_size=intent.executable_snapshot_min_tick_size,
                 expected_min_order_size=intent.executable_snapshot_min_order_size,

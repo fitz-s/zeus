@@ -683,6 +683,12 @@ def build_monitor_refreshed_canonical_write(
         }
     ):
         payload_dict["day0_monitor_probability_receipt"] = day0_probability_receipt
+    probability_receipt = getattr(position, "_monitor_probability_receipt", None)
+    if (
+        probability_receipt
+        and bool(getattr(position, "last_monitor_prob_is_fresh", False))
+    ):
+        payload_dict["monitor_probability_receipt"] = probability_receipt
     if exit_decision is not None:
         exit_validations = list(
             getattr(exit_decision, "applied_validations", []) or []

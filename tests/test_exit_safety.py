@@ -1,6 +1,6 @@
 # Created: 2026-04-27
 # Last reused/audited: 2026-07-19
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -3560,6 +3560,9 @@ def test_execute_exit_order_uses_snapshot_tick_for_sell_price_planning(conn, mon
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
 
+        def bind_signed_submission_identity_persister(self, persister):
+            self.signed_identity_persister = persister
+
         def place_limit_order(self, **kwargs):
             calls.append(kwargs)
             return _fake_submit_result(self.bound_envelope, order_id="ord-tick")
@@ -3576,7 +3579,7 @@ def test_execute_exit_order_uses_snapshot_tick_for_sell_price_planning(conn, mon
                 trade_id="pos-dynamic-tick",
                 token_id=YES_TOKEN,
                 shares=5.0,
-                current_price=0.033323782234957027,
+                current_price=0.533323782234957,
                 best_bid=None,
                 executable_snapshot_id=snapshot_id,
                 executable_snapshot_min_tick_size=Decimal("0.001"),
@@ -3585,18 +3588,22 @@ def test_execute_exit_order_uses_snapshot_tick_for_sell_price_planning(conn, mon
             ),
             conn=conn,
             decision_id="exit-dynamic-tick",
+            q_version="posterior-9",
         )
         command_row = conn.execute(
-            "SELECT price, state FROM venue_commands WHERE position_id = ?",
+            "SELECT price, state, decision_id, q_version "
+            "FROM venue_commands WHERE position_id = ?",
             ("pos-dynamic-tick",),
         ).fetchone()
 
         assert result.status == "pending"
-        assert result.submitted_price == pytest.approx(0.032)
-        assert calls[0]["price"] == pytest.approx(0.032)
-        assert command_row["price"] == pytest.approx(0.032)
+        assert result.submitted_price == pytest.approx(0.532)
+        assert calls[0]["price"] == pytest.approx(0.532)
+        assert command_row["price"] == pytest.approx(0.532)
         assert Decimal(str(command_row["price"])) % Decimal("0.001") == 0
         assert command_row["state"] == "ACKED"
+        assert command_row["decision_id"] == "exit-dynamic-tick"
+        assert command_row["q_version"] == "posterior-9"
     finally:
         from src.risk_allocator import clear_global_allocator
 

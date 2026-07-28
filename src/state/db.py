@@ -13872,6 +13872,7 @@ def transition_phase(
     error: str,
     source_module: str = "src.execution.exit_lifecycle",
     extra_payload: dict | None = None,
+    decision_id: str | None = None,
 ) -> bool:
     """Re-export shim — delegates to src.state.canonical_write.transition_phase.
 
@@ -13887,6 +13888,7 @@ def transition_phase(
         error=error,
         source_module=source_module,
         extra_payload=extra_payload,
+        decision_id=decision_id,
     )
 
 

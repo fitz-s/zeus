@@ -18,6 +18,7 @@ Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_
 import logging
 import sqlite3
 import copy
+import hashlib
 import json
 import threading
 import time
@@ -95,6 +96,7 @@ _MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
 _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR = "_day0_zero_probability_exit_authority"
 _GLOBAL_MONITOR_SAMPLES_ATTR = "_current_global_held_probability_samples"
 _GLOBAL_MONITOR_ALPHA_ATTR = "_current_global_probability_band_alpha"
+_MONITOR_PROBABILITY_RECEIPT_ATTR = "_monitor_probability_receipt"
 _MONITOR_PREFETCHED_ORDERBOOKS_ATTR = "_zeus_monitor_prefetched_orderbooks"
 _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
     "_zeus_monitor_prefetch_attempted_tokens"
@@ -252,6 +254,44 @@ def _monitor_receipt_vector(values) -> list[float | None]:
     if arr.ndim == 0:
         arr = arr.reshape(1)
     return [_monitor_receipt_float(item) for item in arr.tolist()]
+
+
+def _compact_monitor_probability_receipt(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Keep probability identity and clocks without copying the full evidence."""
+
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    compact = {
+        key: payload[key]
+        for key in (
+            "schema_version",
+            "selected_method",
+            "probability_authority",
+            "probability_functional",
+            "posterior_id",
+            "computed_at",
+            "source_cycle_time",
+            "source_id",
+            "posterior_method",
+            "latest_raw_cycle_time",
+            "probability_witness_identity",
+            "probability_content_identity",
+            "q_version",
+            "source_truth_identity",
+            "held_side_probability",
+        )
+        if payload.get(key) is not None
+    }
+    compact["evidence_content_hash"] = hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    return compact
 
 
 def _monitor_receipt_quantiles(values) -> dict[str, float | None]:
@@ -5240,6 +5280,25 @@ def monitor_probability_refresh(
             f"probability_functional={POSTERIOR_PREDICTIVE_MEAN}",
         )
         _append_monitor_validation(fresh_pos, belief.freshness_validation())
+        setattr(
+            fresh_pos,
+            _MONITOR_PROBABILITY_RECEIPT_ATTR,
+            _compact_monitor_probability_receipt(
+                {
+                    "schema_version": 1,
+                    "selected_method": SELECTED_METHOD_REPLACEMENT_POSTERIOR,
+                    "probability_authority": belief.source_table,
+                    "probability_functional": belief.probability_functional,
+                    "posterior_id": belief.posterior_id,
+                    "computed_at": belief.computed_at,
+                    "source_cycle_time": belief.source_cycle_time,
+                    "source_id": belief.source_id,
+                    "posterior_method": belief.posterior_method,
+                    "latest_raw_cycle_time": belief.latest_raw_cycle_time,
+                    "held_side_probability": float(belief.held_side_prob),
+                }
+            ),
+        )
         _set_monitor_probability_fresh(fresh_pos, True)
         return float(belief.held_side_prob), fresh_pos, True
     if belief is not None:
@@ -5405,7 +5464,11 @@ def refresh_exact_zero_position(
     pos.last_monitor_market_vig = None
     pos.last_monitor_whale_toxicity = False
     pos.last_monitor_market_price_is_fresh = False
-    for attr in (_GLOBAL_MONITOR_SAMPLES_ATTR, _GLOBAL_MONITOR_ALPHA_ATTR):
+    for attr in (
+        _GLOBAL_MONITOR_SAMPLES_ATTR,
+        _GLOBAL_MONITOR_ALPHA_ATTR,
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+    ):
         try:
             delattr(pos, attr)
         except AttributeError:
@@ -5503,7 +5566,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         delattr(pos, "_day0_monitor_probability_receipt")
     except AttributeError:
         pass
-    for attr in (_GLOBAL_MONITOR_SAMPLES_ATTR, _GLOBAL_MONITOR_ALPHA_ATTR):
+    for attr in (
+        _GLOBAL_MONITOR_SAMPLES_ATTR,
+        _GLOBAL_MONITOR_ALPHA_ATTR,
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+    ):
         try:
             delattr(pos, attr)
         except AttributeError:
@@ -5557,6 +5624,21 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         _day0_receipt = getattr(refresh_pos, "_day0_monitor_probability_receipt", None)
         if _day0_receipt is not None:
             setattr(pos, "_day0_monitor_probability_receipt", _day0_receipt)
+        _probability_receipt = getattr(
+            refresh_pos,
+            _MONITOR_PROBABILITY_RECEIPT_ATTR,
+            None,
+        )
+        if _probability_receipt is None and isinstance(_day0_receipt, dict):
+            _probability_receipt = _compact_monitor_probability_receipt(
+                _day0_receipt
+            )
+        if _probability_receipt is not None:
+            setattr(
+                pos,
+                _MONITOR_PROBABILITY_RECEIPT_ATTR,
+                _probability_receipt,
+            )
         _global_samples = getattr(refresh_pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None)
         if _global_samples is not None:
             setattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, _global_samples)
