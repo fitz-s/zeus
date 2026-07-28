@@ -187,7 +187,7 @@ def test_bounded_token_metadata_keeps_past_end_only_for_still_executable_exit():
 
         INSERT INTO executable_market_snapshots VALUES
             ('snap-exit-open', 'cond-exit-open', 'token-exit-open', 'no-exit-open',
-             '0.01', '5', 0, 1, 1, 1, 0, 'weather-open',
+             '0.01', '5', 0, 1, 1, 0, 0, 'weather-open',
              '2026-07-16T12:00:00+00:00', '2026-07-16T12:01:00+00:00'),
             ('snap-exit-stopped', 'cond-exit-stopped', 'token-exit-stopped', 'no-exit-stopped',
              '0.01', '5', 0, 1, 0, 1, 0, 'weather-stopped',
