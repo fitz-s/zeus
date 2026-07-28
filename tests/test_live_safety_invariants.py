@@ -6051,7 +6051,7 @@ def test_holding_coverage_receipt_compresses_and_references_exact_payload(
     raw = zlib.decompress(
         base64.b64decode(first["holding_auction_coverage_zlib_b64"])
     )
-    assert first["schema_version"] == 18
+    assert first["schema_version"] == 19
     assert "holding_auction_coverage" not in first
     assert json.loads(raw) == [
         {
