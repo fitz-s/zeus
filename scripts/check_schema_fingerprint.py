@@ -1,5 +1,6 @@
-# Created: 2026-05-28
-# Last reused or audited: 2026-07-28
+# Lifecycle: created=2026-05-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Detect unreviewed world, forecast, or trade SQLite schema drift by content hash.
+# Reuse: Inspect src/state DB initializers and the pinned fingerprint before relying on it.
 # Authority basis: refactor-auth-econ-split B2 — cancel SCHEMA_VERSION counter
 """Schema content-hash fingerprint detector.
 

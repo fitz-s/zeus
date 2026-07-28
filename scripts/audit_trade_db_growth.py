@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# Created: 2026-07-28
-# Last reused/audited: 2026-07-28
+# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Quantify bounded trade-DB growth and evidence redundancy without mutation.
+# Reuse: Inspect TABLE_PROBES and retention limits before using output for planning.
 # Authority basis: operator-directed trade DB growth and decision-evidence audit.
 """Bounded, read-only trade DB growth census.
 
