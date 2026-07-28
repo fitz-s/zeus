@@ -31008,32 +31008,31 @@ def _prepare_current_global_probability_family(
                     }
                 )
             elif post_local_provisional_monitor_authority:
-                # Once the local target day is complete there is no remaining
-                # atmospheric window to simulate. The bundle has already
-                # passed the exact provisional-observation binding above, so
-                # its persisted coherent settlement simplex is the newest
-                # complete probability carrier for held-position redecision.
-                # Entry authority remains excluded by the earlier gate.
-                components = _replacement_global_probability_components(
-                    bundle,
-                    candidates=family.candidates,
-                    bindings=bindings,
+                # Wall-clock completion does not make the information set
+                # complete.  The interval after the latest official HKO
+                # snapshot and before local midnight has happened physically,
+                # but remains unobserved by the settlement channel.  Price that
+                # causal tail with the same observation-conditioned Day0
+                # kernel used before midnight; the full-day replacement
+                # simplex ignores the provisional observation entirely.
+                components = _day0_remaining_global_probability_components(
+                    event,
+                    forecast_conn=forecast_conn,
+                    calibration_conn=day0_observation_conn,
+                    family=family,
+                    payload=payload,
+                    decision_time=decision_time,
+                    snapshot=day0_snapshot,
                 )
-                if components is None:
-                    raise ValueError(
-                        "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_INVALID"
-                    )
                 probability_authority = (
-                    "replacement_provisional_day0_global_probability_v1"
+                    "day0_remaining_day_global_probability_v1"
                 )
                 payload.update(
                     {
                         "probability_authority": probability_authority,
-                        "q_source": "replacement_0_1",
-                        "_edli_q_source": "replacement_0_1",
-                        "_edli_day0_q_mode": (
-                            "provisional_current_snapshot_replacement"
-                        ),
+                        "q_source": "day0_remaining_day",
+                        "_edli_q_source": "day0_remaining_day",
+                        "_edli_day0_q_mode": "post_local_provisional_tail",
                     }
                 )
             else:

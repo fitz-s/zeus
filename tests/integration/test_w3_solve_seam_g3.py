@@ -5097,7 +5097,7 @@ def test_fast_residual_day0_bundle_drives_entry_and_held_redecision_q(
     observations.close()
 
 
-def test_provisional_hko_held_probability_uses_replacement_after_local_day(
+def test_provisional_hko_held_probability_conditions_unobserved_tail_after_local_day(
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
@@ -5424,14 +5424,14 @@ def test_provisional_hko_held_probability_uses_replacement_after_local_day(
         entry_authority=False,
     )
     assert post_day.probability_witness.yes_point_q.tolist() == pytest.approx(
-        [0.1, 0.1, 0.8]
+        [0.2, 0.5, 0.3]
     )
     assert post_day_payload["probability_authority"] == (
-        "replacement_provisional_day0_global_probability_v1"
+        "day0_remaining_day_global_probability_v1"
     )
-    assert post_day_payload["q_source"] == "replacement_0_1"
+    assert post_day_payload["q_source"] == "day0_remaining_day"
     assert post_day_payload["_edli_day0_q_mode"] == (
-        "provisional_current_snapshot_replacement"
+        "post_local_provisional_tail"
     )
     assert post_day_payload["_edli_global_day0_binding"][
         "evidence_finality"
@@ -5452,7 +5452,33 @@ def test_provisional_hko_held_probability_uses_replacement_after_local_day(
             entry_authority=True,
         )
 
+    assert remaining_calls == 2
     assert replacement_calls == 2
+
+    def unavailable_remaining_components(*_args, **_kwargs):
+        raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
+
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        unavailable_remaining_components,
+    )
+    with pytest.raises(
+        ValueError,
+        match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=_dt.datetime(
+                2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc
+            ),
+            max_age=_dt.timedelta(seconds=30),
+            allow_provisional_day0_replacement=True,
+            entry_authority=False,
+        )
 
     forecast.close()
     observations.close()
