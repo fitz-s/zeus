@@ -1331,7 +1331,7 @@ files:
   src/venue/polymarket_v2_adapter.py:
     zone: K2_runtime
     authority_role: v2_venue_adapter
-    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects prices outside [0.05,0.95] before any SDK submit contact. Its account-truth read fully paginates orders then trades through one authenticated HTTP client, one server timestamp, endpoint-specific signatures, and one monotonic wall-clock deadline; incomplete transport or page truth never becomes an empty-account fact.
+    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects prices outside [0.05,0.95] before any SDK submit contact. Its account-truth read fully paginates orders then trades through one authenticated HTTP client, one server timestamp, endpoint-specific signatures, and one monotonic wall-clock deadline; incomplete transport or page truth never becomes an empty-account fact. A synchronous CLOB 425 `order manager not ready, please retry` response is a deterministic whole-request rejection for both single and batch submission, while transport failures and unrecognized post-sign exceptions remain ambiguous.
     downstream:
     - src/execution/executor.py
     - src/data/polymarket_client.py
