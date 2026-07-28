@@ -1,5 +1,6 @@
-# Created: 2026-07-28
-# Last reused/audited: 2026-07-28
+# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Prove bounded trade-DB growth, rate, redundancy, and citation diagnostics.
+# Reuse: pytest tests/test_audit_trade_db_growth.py
 # Authority basis: operator-directed bounded trade DB growth audit.
 """Antibodies for the read-only, tail-bounded trade DB census."""
 
@@ -83,12 +84,20 @@ def test_audit_uses_bounded_rowid_tail_without_mutating_db(tmp_path):
 
     report = audit(db_path, tail_rows=10)
 
-    assert report["schema_version"] == 3
-    assert report["method"] == "bounded_rowid_tail_v2"
+    assert report["schema_version"] == 4
+    assert report["method"] == "bounded_rowid_tail_v3"
     assert report["freelist_count"] == 0
     decision = report["tables"]["decision_log"]
     assert decision["rowid_high_watermark"] == 30
     assert decision["sample_rows"] == 10
+    assert decision["sample_time_span_seconds"] == 9.0
+    assert decision["estimated_rate_status"] == "current_tail_extrapolation"
+    assert decision["estimated_rows_per_day_from_tail"] == 86400.0
+    assert decision["estimated_selected_payload_bytes_per_day"] > 0
+    assert (
+        decision["rowid_high_watermark_selected_payload_projection_bytes"]
+        > decision["sample_payload_max_bytes"]
+    )
     assert decision["sample_categories"] == {
         "exit_monitor": 5,
         "global_auction": 5,

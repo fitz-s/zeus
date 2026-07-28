@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 from src.state.db import _connect_read_only  # noqa: E402
 
 DEFAULT_DB = ROOT / "state" / "zeus_trades.db"
+CURRENT_RATE_MAX_NEWEST_AGE_SECONDS = 86_400.0
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,19 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
         str(row["name"])
         for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
     }
+
+
+def _parse_time(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _probe_table(
@@ -265,6 +279,38 @@ def _probe_table(
             categories[category] = categories.get(category, 0) + 1
             category_payload_lengths.setdefault(category, []).append(payload_length)
     times = [str(row[spec.time_column]) for row in rows if row[spec.time_column]]
+    parsed_times = [
+        parsed
+        for row in rows
+        if (parsed := _parse_time(row[spec.time_column])) is not None
+    ]
+    time_span_seconds = (
+        (max(parsed_times) - min(parsed_times)).total_seconds()
+        if len(parsed_times) > 1
+        else 0.0
+    )
+    newest_age_seconds = (
+        max(
+            0.0,
+            (datetime.now(timezone.utc) - max(parsed_times)).total_seconds(),
+        )
+        if parsed_times
+        else None
+    )
+    rate_is_current = (
+        newest_age_seconds is not None
+        and newest_age_seconds <= CURRENT_RATE_MAX_NEWEST_AGE_SECONDS
+    )
+    estimated_rows_per_day = (
+        (len(parsed_times) - 1) * 86_400.0 / time_span_seconds
+        if time_span_seconds > 0.0 and rate_is_current
+        else None
+    )
+    payload_mean = (
+        sum(payload_lengths) / len(payload_lengths)
+        if payload_lengths
+        else 0.0
+    )
     result: dict[str, object] = {
         "present": True,
         "rowid_high_watermark": int(high_watermark),
@@ -273,9 +319,7 @@ def _probe_table(
         "sample_oldest_at": min(times) if times else None,
         "sample_newest_at": max(times) if times else None,
         "sample_payload_mean_bytes": (
-            round(sum(payload_lengths) / len(payload_lengths), 1)
-            if payload_lengths
-            else 0
+            round(payload_mean, 1) if payload_lengths else 0
         ),
         "sample_payload_max_bytes": max(payload_lengths, default=0),
         "sample_payload_columns": payload_column_stats,
@@ -295,6 +339,30 @@ def _probe_table(
         },
         "retention_class": spec.retention_class,
         "rationale": spec.rationale,
+        "sample_time_span_seconds": round(time_span_seconds, 3),
+        "sample_newest_age_seconds": (
+            round(newest_age_seconds, 3)
+            if newest_age_seconds is not None
+            else None
+        ),
+        "estimated_rate_status": (
+            "current_tail_extrapolation"
+            if rate_is_current
+            else "stale_or_unparseable_tail_no_current_rate"
+        ),
+        "estimated_rows_per_day_from_tail": (
+            round(estimated_rows_per_day, 1)
+            if estimated_rows_per_day is not None
+            else None
+        ),
+        "estimated_selected_payload_bytes_per_day": (
+            round(estimated_rows_per_day * payload_mean)
+            if estimated_rows_per_day is not None
+            else None
+        ),
+        "rowid_high_watermark_selected_payload_projection_bytes": round(
+            int(high_watermark) * payload_mean
+        ),
     }
     if payload_dedup is not None:
         result["sample_payload_content_addressability"] = payload_dedup
@@ -377,8 +445,8 @@ def audit(path: Path, *, tail_rows: int) -> dict[str, object]:
                 8,
             )
     return {
-        "schema_version": 3,
-        "method": "bounded_rowid_tail_v2",
+        "schema_version": 4,
+        "method": "bounded_rowid_tail_v3",
         "authority": "read_only_diagnostic_not_retention_authority",
         "audited_at": datetime.now(timezone.utc).isoformat(),
         "db_path": str(resolved),
@@ -394,6 +462,18 @@ def audit(path: Path, *, tail_rows: int) -> dict[str, object]:
         "method_limits": [
             "rowid high-water marks are upper bounds when rows were deleted",
             "tail samples estimate current write shape, not whole-history size",
+            (
+                "per-day rates extrapolate the sampled timestamp span and can "
+                "overstate bursty writers or understate quiet intervals"
+            ),
+            (
+                "per-day rates are suppressed when the newest sampled row is "
+                "older than 24 hours"
+            ),
+            (
+                "rowid-HWM payload projections multiply current tail means by "
+                "an upper-bound row identity and are not table-size measurements"
+            ),
             "no dbstat, whole-table count, vacuum, checkpoint, or mutation is run",
             "direct snapshot refs are a lower bound and never authorize deletion",
             (
