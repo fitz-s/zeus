@@ -1,33 +1,48 @@
 # Created: 2026-07-28
+# Last reused or audited: 2026-07-28 (FIX 1/FIX 6 deep-review corrections)
 # Authority basis: docs/operations/current/sigma_tau_calibration/PLAN.md. The sigma-tau calibration
 #   is a NEW artifact (state/sigma_tau_calibration.json, scripts/fit_sigma_tau_calibration.py) that
 #   replaces the hardcoded neutral (1.0, 0.0, 0.0) at the CURRENT-EVIDENCE materializer site. These
-#   antibodies lock the fail-soft/fail-closed contract, mirroring
-#   tests/test_replacement_sigma_scale_f_family.py's pattern for the sibling historical-path
-#   artifact.
-"""Antibodies for the sigma-tau calibration loader -- the fitted artifact is the SOLE authority.
+#   antibodies lock the STRICT typed-schema fail-soft/fail-closed contract (FIX 6): a served k must
+#   be a real, in-range number (never a bool or an out-of-range float), `fitted`/`oos_gate.passed`
+#   must be EXACT booleans, the bucket key set must match exactly, and the artifact's
+#   authority/schema_version/tau_clock declaration must match this module's own constants exactly.
+"""Antibodies for the sigma-tau calibration loader -- the fitted artifact is the SOLE authority,
+and ANY schema deviation makes it (or the narrower scope it affects) inert, never partially
+trusted.
 
 Invariants proven:
-  1. Artifact absent -> exactly (1.0, 0.0, 0.0, None). Byte-identical to the prior hardcode.
+  1. Artifact absent -> exactly (1.0, 0.0, 0.0, None).
   2. Malformed JSON -> exactly (1.0, 0.0, 0.0, None).
   3. tau_bucket is None (unbucketable lead) -> exactly (1.0, 0.0, 0.0, None), regardless of the
      artifact's content.
-  4. A group (unit, metric) with fitted=False -> inert (1.0, 0.0, 0.0), but the artifact hash is
-     still returned (full audit trail even on an inert outcome).
-  5. A fitted group + fitted bucket + no city -> k_eff equals the bucket's k exactly; w and
-     floor_steps are always 0.0.
-  6. A fitted group + UNFITTED bucket -> inherits the group's global_k.
-  7. A fitted group whose global_k is itself invalid -> inert (nothing valid to inherit).
-  8. A fitted group + fitted bucket + a city with a shrunk c -> k_eff = k_bucket * c_shrunk.
-  9. A city absent from the artifact's cities map contributes c=1.0 (no per-city adjustment).
-  10. _effective_sigma_tau_scale is a pure delegate to the lookup (no allow-list).
-  11. _lead_target_h / _sigma_tau_bucket_label boundary correctness.
+  4. Wrong top-level authority / schema_version / tau_clock declaration -> the WHOLE artifact is
+     inert (hash still reported -- the bytes were read).
+  5. A group with fitted=False, or oos_gate missing/passed=False -> inert (hash reported).
+  6. `"fitted": "true"` (a STRING, not a bool) -> rejected (not truthy-coerced).
+  7. `fitted=True` with oos_gate MISSING entirely -> rejected (oos_gate.passed=True is REQUIRED).
+  8. A bool used as k (`true`/`false`) -> rejected (bool is an int subclass in Python; must be
+     explicitly excluded).
+  9. k outside [0.25, 4.0] (e.g. 1e100, or a too-small value) -> rejected.
+  10. The bucket key set must match the expected 7 labels EXACTLY -- a missing or extra key
+      invalidates the group.
+  11. A fitted group + fitted bucket + no city -> k_eff equals the bucket's k exactly; w and
+      floor_steps are always 0.0.
+  12. An UNFITTED bucket (or one absent from the artifact, or one that itself fails validation)
+      inherits the group's (already-validated) global_k.
+  13. City variance shrinkage multiplies the bucket k; an unknown city, a missing city argument, or
+      an out-of-range c_shrunk all contribute exactly c=1.0.
+  14. _effective_sigma_tau_scale is a pure delegate to the lookup (no allow-list).
+  15. _lead_target_h uses the CITY'S LOCAL midnight (DST-aware), not UTC.
+  16. The artifact is read+validated once per file generation (mtime-keyed cache); a genuine new
+      generation IS picked up.
 """
 from __future__ import annotations
 
 import json
 import math
-from datetime import date, datetime, timezone
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -36,70 +51,74 @@ import src.config as cfg
 import src.data.replacement_forecast_materializer as mod
 
 
-def _write_artifact(tmp_path: Path, monkeypatch, families: dict) -> None:
-    path = tmp_path / "sigma_tau_calibration.json"
-    path.write_text(json.dumps({"_meta": {"authority": "sigma_tau_calibration_v1_mle"}, "families": families}))
+def _write_artifact(tmp_path: Path, monkeypatch, artifact: dict, *, filename: str = "sigma_tau_calibration.json") -> Path:
+    path = tmp_path / filename
+    path.write_text(json.dumps(artifact))
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
+    return path
+
+
+def _valid_meta() -> dict:
+    return {
+        "authority": mod._SIGMA_TAU_ARTIFACT_AUTHORITY,
+        "schema_version": mod._SIGMA_TAU_SCHEMA_VERSION,
+        "tau_clock": mod._SIGMA_TAU_CLOCK_ID,
+    }
+
+
+def _valid_buckets(*, fitted_bucket: str = "[24,36)", bucket_k: float = 1.30, global_k: float = 1.08) -> dict:
+    return {
+        lab: (
+            {"k": bucket_k, "fitted": True}
+            if lab == fitted_bucket
+            else {"k": global_k, "fitted": False}
+        )
+        for lab in mod._SIGMA_TAU_BUCKET_LABELS
+    }
+
+
+def _valid_group(**overrides) -> dict:
+    global_k = overrides.pop("global_k", 1.08)
+    bucket_k = overrides.pop("bucket_k", 1.30)
+    cities = overrides.pop("cities", {"Seoul": {"c_shrunk": 1.01}, "Ankara": {"c_shrunk": 0.73}})
+    group = {
+        "fitted": True,
+        "global_k": global_k,
+        "oos_gate": {"passed": True, "censored_delta": 0.05},
+        "buckets": _valid_buckets(bucket_k=bucket_k, global_k=global_k),
+        "cities": cities,
+    }
+    group.update(overrides)
+    return group
+
+
+def _artifact(families: dict, *, meta_overrides: dict | None = None) -> dict:
+    meta = _valid_meta()
+    if meta_overrides:
+        meta.update(meta_overrides)
+    return {"_meta": meta, "families": families}
 
 
 def _fitted_c_high() -> dict:
-    return {
-        "C": {
-            "high": {
-                "fitted": True,
-                "global_k": 1.08,
-                "n": 14700,
-                "buckets": {
-                    "[0,6)": {"k": 0.91, "n": 689, "fitted": True},
-                    "[6,12)": {"k": 1.37, "n": 1103, "fitted": True},
-                    "[12,24)": {"k": 1.29, "n": 2773, "fitted": True},
-                    "[24,36)": {"k": 1.20, "n": 1933, "fitted": True},
-                    "[36,48)": {"k": None, "n": 40, "fitted": False},
-                    "[48,72)": {"k": 1.20, "n": 1675, "fitted": True},
-                    "[72,inf)": {"k": None, "n": 0, "fitted": False},
-                },
-                "cities": {
-                    "Seoul": {"c_raw": 1.02, "c_shrunk": 1.01, "n": 145},
-                    "Ankara": {"c_raw": 0.59, "c_shrunk": 0.73, "n": 254},
-                },
-            }
-        }
-    }
-
-
-def _refused_f_low() -> dict:
-    return {
-        "F": {
-            "low": {
-                "fitted": False,
-                "global_k": 1.0,
-                "n": 12,
-                "refusal_reason": "INSUFFICIENT_N:12<60",
-                "buckets": {},
-                "cities": {},
-            }
-        }
-    }
+    return {"C": {"high": _valid_group()}}
 
 
 # ---------------------------------------------------------------------------
-# 1. Artifact absent -> inert, no hash
+# 1-2. Artifact absent / malformed -> inert, no hash
 # ---------------------------------------------------------------------------
 
 def test_artifact_absent_is_inert(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
-    assert mod._sigma_tau_calibration_lookup("C", "high", "[12,24)", "Seoul") == (1.0, 0.0, 0.0, None)
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul") == (1.0, 0.0, 0.0, None)
 
-
-# ---------------------------------------------------------------------------
-# 2. Malformed JSON -> inert, no hash
-# ---------------------------------------------------------------------------
 
 def test_malformed_artifact_is_inert(monkeypatch, tmp_path) -> None:
     path = tmp_path / "sigma_tau_calibration.json"
     path.write_text("{not json")
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
-    assert mod._sigma_tau_calibration_lookup("C", "high", "[12,24)", "Seoul") == (1.0, 0.0, 0.0, None)
+    k, w, floor, artifact_hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")
+    assert (k, w, floor) == (1.0, 0.0, 0.0)
+    assert artifact_hash is not None, "bytes were read successfully -- hash must still be reported"
 
 
 # ---------------------------------------------------------------------------
@@ -107,106 +126,196 @@ def test_malformed_artifact_is_inert(monkeypatch, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_none_tau_bucket_is_inert(monkeypatch, tmp_path) -> None:
-    _write_artifact(tmp_path, monkeypatch, _fitted_c_high())
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high()))
     assert mod._sigma_tau_calibration_lookup("C", "high", None, "Seoul") == (1.0, 0.0, 0.0, None)
 
 
 # ---------------------------------------------------------------------------
-# 4. Refused group stays inert, but the artifact hash is still reported
+# 4. Top-level authority / schema_version / tau_clock mismatch -> WHOLE artifact inert
 # ---------------------------------------------------------------------------
 
-def test_refused_group_is_inert_but_hash_reported(monkeypatch, tmp_path) -> None:
-    _write_artifact(tmp_path, monkeypatch, _refused_f_low())
-    k, w, floor, artifact_hash = mod._sigma_tau_calibration_lookup("F", "low", "[12,24)", None)
+def test_wrong_authority_is_inert_but_hash_reported(monkeypatch, tmp_path) -> None:
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high(), meta_overrides={"authority": "some_other_authority"}))
+    k, w, floor, artifact_hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")
     assert (k, w, floor) == (1.0, 0.0, 0.0)
-    assert artifact_hash is not None, "the artifact WAS read/parsed -- hash must be reported even when inert"
-
-
-# ---------------------------------------------------------------------------
-# 5. Fitted group + fitted bucket + no city -> k_eff equals the bucket k exactly
-# ---------------------------------------------------------------------------
-
-def test_fitted_bucket_no_city_applies_bucket_k(monkeypatch, tmp_path) -> None:
-    _write_artifact(tmp_path, monkeypatch, _fitted_c_high())
-    k, w, floor, artifact_hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)
-    assert k == 1.20
-    assert w == 0.0
-    assert floor == 0.0
     assert artifact_hash is not None
 
 
+def test_wrong_schema_version_is_inert(monkeypatch, tmp_path) -> None:
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high(), meta_overrides={"schema_version": 2}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")[:3] == (1.0, 0.0, 0.0)
+
+
+def test_schema_version_as_bool_is_rejected(monkeypatch, tmp_path) -> None:
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high(), meta_overrides={"schema_version": True}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")[:3] == (1.0, 0.0, 0.0)
+
+
+def test_wrong_tau_clock_is_inert(monkeypatch, tmp_path) -> None:
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high(), meta_overrides={"tau_clock": "computed_at_utc_v0"}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")[:3] == (1.0, 0.0, 0.0)
+
+
 # ---------------------------------------------------------------------------
-# 6. Unfitted bucket inherits the group global_k
+# 5. fitted=False / oos_gate missing or passed=False -> group inert
 # ---------------------------------------------------------------------------
 
-def test_unfitted_bucket_inherits_global_k(monkeypatch, tmp_path) -> None:
-    _write_artifact(tmp_path, monkeypatch, _fitted_c_high())
-    k, w, floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[36,48)", None)
-    assert k == 1.08, "an UNFITTED bucket (n=40<60) must inherit the family/metric-global pooled k"
+def test_group_fitted_false_is_inert(monkeypatch, tmp_path) -> None:
+    families = {"F": {"low": _valid_group(fitted=False, buckets={}, cities={})}}
+    _write_artifact(tmp_path, monkeypatch, _artifact(families))
+    k, w, floor, artifact_hash = mod._sigma_tau_calibration_lookup("F", "low", "[12,24)", None)
+    assert (k, w, floor) == (1.0, 0.0, 0.0)
+    assert artifact_hash is not None
 
 
-def test_bucket_absent_from_artifact_also_inherits_global_k(monkeypatch, tmp_path) -> None:
-    """A bucket key entirely missing from the artifact (not just fitted=False) is treated the
-    same as an unfitted bucket -- inherit global_k, never raise."""
-    families = _fitted_c_high()
-    del families["C"]["high"]["buckets"]["[24,36)"]
-    _write_artifact(tmp_path, monkeypatch, families)
+def test_group_missing_oos_gate_is_rejected_even_when_fitted_true(monkeypatch, tmp_path) -> None:
+    """fitted=True with NO oos_gate key at all must be rejected -- oos_gate.passed=True is
+    REQUIRED, not merely consulted when present."""
+    group = _valid_group()
+    del group["oos_gate"]
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
+
+
+def test_group_oos_gate_passed_false_is_inert(monkeypatch, tmp_path) -> None:
+    group = _valid_group(oos_gate={"passed": False, "censored_delta": -0.03})
+    _write_artifact(tmp_path, monkeypatch, _artifact({"F": {"high": group}}))
+    assert mod._sigma_tau_calibration_lookup("F", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
+
+
+def test_group_fitted_as_string_is_rejected(monkeypatch, tmp_path) -> None:
+    """`"fitted": "true"` is a STRING, not a bool -- must not be truthy-coerced."""
+    group = _valid_group(fitted="true")
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
+
+
+def test_oos_gate_passed_as_string_is_rejected(monkeypatch, tmp_path) -> None:
+    group = _valid_group(oos_gate={"passed": "true"})
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# 8-9. k typed as bool, or out of [0.25, 4.0] range -> rejected
+# ---------------------------------------------------------------------------
+
+def test_global_k_as_bool_is_rejected(monkeypatch, tmp_path) -> None:
+    group = _valid_group()
+    group["global_k"] = True
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
+
+
+def test_global_k_absurdly_large_is_rejected(monkeypatch, tmp_path) -> None:
+    group = _valid_group(global_k=1e100)
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
+
+
+def test_global_k_too_small_is_rejected(monkeypatch, tmp_path) -> None:
+    group = _valid_group(global_k=0.05)
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
+
+
+def test_bucket_k_as_bool_falls_back_to_global(monkeypatch, tmp_path) -> None:
+    """A single malformed bucket entry does not invalidate the whole group -- it inherits global_k
+    (same posture as an unfitted bucket)."""
+    group = _valid_group(global_k=1.08)
+    group["buckets"]["[24,36)"] = {"k": True, "fitted": True}
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
+    k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)
+    assert k == 1.08
+
+
+def test_bucket_k_out_of_range_falls_back_to_global(monkeypatch, tmp_path) -> None:
+    group = _valid_group(global_k=1.08)
+    group["buckets"]["[24,36)"] = {"k": 9.9, "fitted": True}
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
     k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)
     assert k == 1.08
 
 
 # ---------------------------------------------------------------------------
-# 7. Group with an invalid global_k has nothing valid to inherit -> inert
+# 10. Bucket key set must match exactly
 # ---------------------------------------------------------------------------
 
-def test_unfitted_bucket_with_invalid_global_k_is_inert(monkeypatch, tmp_path) -> None:
-    families = _fitted_c_high()
-    families["C"]["high"]["global_k"] = -1.0  # non-positive: invalid
-    _write_artifact(tmp_path, monkeypatch, families)
-    k, w, floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[36,48)", None)
-    assert (k, w, floor) == (1.0, 0.0, 0.0)
+def test_missing_bucket_key_invalidates_group(monkeypatch, tmp_path) -> None:
+    group = _valid_group()
+    del group["buckets"]["[72,inf)"]
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
+
+
+def test_extra_bucket_key_invalidates_group(monkeypatch, tmp_path) -> None:
+    group = _valid_group()
+    group["buckets"]["[96,inf)"] = {"k": 1.0, "fitted": True}
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
 
 
 # ---------------------------------------------------------------------------
-# 8. City variance shrinkage multiplies the bucket k
+# 11-12. Fitted bucket applies its own k; unfitted/absent/invalid bucket inherits global_k
+# ---------------------------------------------------------------------------
+
+def test_fitted_bucket_no_city_applies_bucket_k(monkeypatch, tmp_path) -> None:
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high()))
+    k, w, floor, artifact_hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)
+    assert k == 1.30
+    assert w == 0.0
+    assert floor == 0.0
+    assert artifact_hash is not None
+
+
+def test_unfitted_bucket_inherits_global_k(monkeypatch, tmp_path) -> None:
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high()))
+    k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[36,48)", None)
+    assert k == 1.08
+
+
+# ---------------------------------------------------------------------------
+# 13. City variance shrinkage; unknown/absent/out-of-range city -> c=1.0
 # ---------------------------------------------------------------------------
 
 def test_city_shrinkage_multiplies_bucket_k(monkeypatch, tmp_path) -> None:
-    _write_artifact(tmp_path, monkeypatch, _fitted_c_high())
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high()))
     k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Ankara")
-    assert k == pytest.approx(1.20 * 0.73)
+    assert k == pytest.approx(1.30 * 0.73)
 
-
-# ---------------------------------------------------------------------------
-# 9. A city absent from the artifact contributes c=1.0 -- no adjustment, no failure
-# ---------------------------------------------------------------------------
 
 def test_unknown_city_contributes_no_adjustment(monkeypatch, tmp_path) -> None:
-    _write_artifact(tmp_path, monkeypatch, _fitted_c_high())
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high()))
     k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Nowhereville")
-    assert k == 1.20
+    assert k == 1.30
 
 
 def test_no_city_argument_contributes_no_adjustment(monkeypatch, tmp_path) -> None:
-    _write_artifact(tmp_path, monkeypatch, _fitted_c_high())
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high()))
     k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)
-    assert k == 1.20
+    assert k == 1.30
 
 
-def test_non_positive_city_c_shrunk_is_ignored(monkeypatch, tmp_path) -> None:
-    families = _fitted_c_high()
-    families["C"]["high"]["cities"]["Seoul"]["c_shrunk"] = 0.0
-    _write_artifact(tmp_path, monkeypatch, families)
+def test_out_of_range_city_c_shrunk_is_ignored(monkeypatch, tmp_path) -> None:
+    group = _valid_group(cities={"Seoul": {"c_shrunk": 9.9}})
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
     k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")
-    assert k == 1.20, "a malformed non-positive c_shrunk must fall back to c=1.0, never propagate"
+    assert k == 1.30, "an out-of-range c_shrunk must fall back to c=1.0, never propagate"
+
+
+def test_city_c_shrunk_as_bool_is_ignored(monkeypatch, tmp_path) -> None:
+    group = _valid_group(cities={"Seoul": {"c_shrunk": True}})
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
+    k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")
+    assert k == 1.30
 
 
 # ---------------------------------------------------------------------------
-# 10. _effective_sigma_tau_scale is a pure delegate (no allow-list)
+# 14. _effective_sigma_tau_scale is a pure delegate (no allow-list)
 # ---------------------------------------------------------------------------
 
 def test_effective_scale_equals_lookup(monkeypatch, tmp_path) -> None:
-    _write_artifact(tmp_path, monkeypatch, _fitted_c_high())
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high()))
     for unit, metric, bucket, city in [("C", "high", "[24,36)", "Ankara"), ("F", "low", "[0,6)", None)]:
         assert mod._effective_sigma_tau_scale(unit, metric, bucket, city) == mod._sigma_tau_calibration_lookup(
             unit, metric, bucket, city
@@ -214,20 +323,28 @@ def test_effective_scale_equals_lookup(monkeypatch, tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 11. _lead_target_h / _sigma_tau_bucket_label correctness
+# 15. _lead_target_h uses the CITY'S LOCAL midnight (DST-aware), not UTC
 # ---------------------------------------------------------------------------
 
-def test_lead_target_h_measures_to_end_of_target_date_utc() -> None:
-    # target_date 2026-07-20 ends at 2026-07-21T00:00:00Z; computed_at 18h earlier.
-    computed_at = datetime(2026, 7, 20, 6, 0, 0, tzinfo=timezone.utc)
-    lead_h = mod._lead_target_h(date(2026, 7, 20), computed_at)
-    assert lead_h == pytest.approx(18.0)
+def test_lead_target_h_uses_city_local_midnight_not_utc() -> None:
+    # target_date 2026-07-20; Asia/Shanghai is a FIXED +8h offset (no DST). Local midnight of
+    # 2026-07-21 Shanghai == 2026-07-20T16:00:00Z, NOT 2026-07-21T00:00:00Z (the old UTC cut).
+    issue_time = datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc)
+    lead_h = mod._lead_target_h("2026-07-20", issue_time, "Asia/Shanghai")
+    assert lead_h == pytest.approx(6.0), "expected the Shanghai LOCAL end (16:00Z), not the UTC end (00:00Z next day, which would give 14.0h)"
 
 
-def test_lead_target_h_accepts_string_target_date() -> None:
-    computed_at = "2026-07-20T00:00:00+00:00"
-    lead_h = mod._lead_target_h("2026-07-20", computed_at)
+def test_lead_target_h_is_dst_aware_for_chicago() -> None:
+    # 2026-07-20 is within US Central Daylight Time (UTC-5). Local midnight of 2026-07-21 Chicago
+    # (CDT, -5) == 2026-07-21T05:00:00Z.
+    issue_time = datetime(2026, 7, 20, 5, 0, 0, tzinfo=timezone.utc)
+    lead_h = mod._lead_target_h("2026-07-20", issue_time, "America/Chicago")
     assert lead_h == pytest.approx(24.0)
+
+
+def test_lead_target_h_accepts_string_target_date_and_issue_time() -> None:
+    lead_h = mod._lead_target_h("2026-07-20", "2026-07-20T10:00:00+00:00", "Asia/Shanghai")
+    assert lead_h == pytest.approx(6.0)
 
 
 def test_bucket_label_boundaries() -> None:
@@ -245,3 +362,22 @@ def test_bucket_label_none_for_negative_or_nonfinite_lead() -> None:
         "an infinite lead is non-finite input, not a real trading lead -- unbucketable, "
         "distinct from a large-but-finite lead which correctly buckets to [72,inf)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 16. Generation-pinned cache: read+validate once per mtime, not per lookup
+# ---------------------------------------------------------------------------
+
+def test_artifact_cache_reflects_a_new_generation(monkeypatch, tmp_path) -> None:
+    path = _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high()))
+    k1, *_ = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)
+    assert k1 == 1.30
+
+    # Rewrite with DIFFERENT content and force a distinct mtime (a genuinely new generation) --
+    # the next lookup must observe the new content, not a stale cached one.
+    new_group = _valid_group(global_k=2.0, bucket_k=2.5)
+    path.write_text(json.dumps(_artifact({"C": {"high": new_group}})))
+    os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 5.0))
+
+    k2, *_ = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)
+    assert k2 == 2.5, "a genuinely new file generation (different mtime) must be picked up"
