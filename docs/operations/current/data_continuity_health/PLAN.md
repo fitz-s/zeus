@@ -61,6 +61,10 @@ RESET:
 - Route that post-local provisional state through its persisted coherent
   replacement simplex; an empty remaining-day member window is not a valid
   post-midnight probability carrier.
+- Preserve held-monitor continuity when the canonical observation clock moves
+  forward without changing the conditioned extreme: keep both clocks and their
+  lag in the certificate, while value changes, clock reversal, and entry remain
+  fail closed.
 - Preserve the hard boundary: provisional observation is never entry or final
   settlement authority.
 - Make posterior-starvation use each configured city's local calendar instead

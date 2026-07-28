@@ -3450,6 +3450,36 @@ def test_global_day0_actuation_rejects_conditioning_not_equal_to_current_state()
             decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
             posterior_id=29914,
         )
+    monitor_rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(
+            city="Moscow",
+            target_date="2026-07-10",
+            metric="high",
+        ),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+        conditioning={
+            "active": True,
+            "metric": "high",
+            "observation_time": "2026-07-10T13:00:00+00:00",
+            "observed_extreme_c": 27.0,
+            "sample_count": 2,
+            "source": "durable_observation_instants",
+            "unit": "C",
+        },
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+        posterior_id=29914,
+        allow_equivalent_conditioning_clock_advance=True,
+    )
+    binding = monitor_rebound["_edli_global_day0_binding"]
+    assert binding["probability_conditioning_observation_time"] == (
+        "2026-07-10T13:00:00+00:00"
+    )
+    assert binding["current_observation_time"] == (
+        "2026-07-10T19:00:00+00:00"
+    )
+    assert binding["conditioning_clock_lag_seconds"] == pytest.approx(21600.0)
     conn.close()
 
 
