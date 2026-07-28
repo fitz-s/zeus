@@ -536,11 +536,12 @@ def _day0_enqueue_owner_request_check(
 
     SCOPE: one (city, target_date, metric, target_cycle, seed_file, conditioning identity)
     witness. DRAIN: the materialization queue moves a completed/failed request out of requests or
-    inflight, or canonically recovers an abandoned batch back into requests. RESET: only two
-    complete, error-free scans proving the exact witness absent permit marker withdrawal. Any
-    config/filesystem/JSON uncertainty is INDETERMINATE and retains the owner. Batch claimed_at is
-    not a per-request execution clock: a request later than the worker width may not have started,
-    so every exact witness in requests or inflight remains ACTIVE until the queue moves it.
+    inflight, or canonically recovers an abandoned batch back into requests. RESET: one complete,
+    error-free scan under the queue's claim lock proving the exact witness absent permits marker
+    withdrawal. Any lock/config/filesystem/JSON uncertainty is INDETERMINATE and retains the owner.
+    Batch claimed_at is not a per-request execution clock: a request later than the worker width
+    may not have started, so every exact witness in requests or inflight remains ACTIVE until the
+    queue moves it.
     """
     try:
         from src.data.replacement_forecast_production import (  # noqa: PLC0415
@@ -655,19 +656,23 @@ def _day0_enqueue_owner_request_check(
             "DAY0_ENQUEUE_OWNER_REQUEST_ABSENT",
         )
 
-    # A consumer can move the request between the root/inflight snapshot and its read. Re-scan
-    # the exact owner after any miss before allowing marker withdrawal; no stale snapshot can
-    # therefore revoke a request that completed the normal atomic move meanwhile.
-    first = _scan()
-    if first.state is not _Day0EnqueueOwnerRequestState.INACTIVE:
-        return first
-    second = _scan()
-    if second.state is not _Day0EnqueueOwnerRequestState.INACTIVE:
-        return second
-    return _Day0EnqueueOwnerRequestCheck(
-        _Day0EnqueueOwnerRequestState.INACTIVE,
-        "DAY0_ENQUEUE_OWNER_REQUEST_ABSENT_AFTER_TWO_SCANS",
-    )
+    try:
+        from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+            _queue_lock,
+        )
+
+        with _queue_lock(request_path.parent / ".materialization_queue.lock") as acquired:
+            if not acquired:
+                return _Day0EnqueueOwnerRequestCheck(
+                    _Day0EnqueueOwnerRequestState.INDETERMINATE,
+                    "DAY0_ENQUEUE_OWNER_REQUEST_QUEUE_LOCK_BUSY",
+                )
+            return _scan()
+    except OSError as exc:
+        return _Day0EnqueueOwnerRequestCheck(
+            _Day0EnqueueOwnerRequestState.INDETERMINATE,
+            f"DAY0_ENQUEUE_OWNER_REQUEST_QUEUE_LOCK_FAILED:{type(exc).__name__}",
+        )
 
 
 def _delete_missing_owned_cycle_advance_marker(

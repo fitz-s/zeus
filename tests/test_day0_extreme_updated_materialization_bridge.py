@@ -1883,82 +1883,6 @@ def test_day0_conditioning_marker_allows_same_time_revisions_but_never_regresses
     assert row["seed_file"] == str(tmp_path / "same-time-3.json")
 
 
-def test_day0_conditioning_marker_allows_same_time_revisions_but_never_regresses_time(
-    tmp_path,
-) -> None:
-    """A late older condition cannot replace a newer marker or its seed."""
-    db_path = _prepare_forecast_db(tmp_path)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    cycle_iso = "2026-07-19T00:00:00+00:00"
-
-    def record(seed_name: str, **identity: object) -> bool:
-        seed_file = tmp_path / seed_name
-        seed_file.write_text("{}", encoding="utf-8")
-        return cycle_advance._record_enqueue(
-            conn,
-            city="Shanghai",
-            target_date="2026-07-19",
-            metric="high",
-            consumed_cycle_iso=cycle_iso,
-            target_cycle_iso=cycle_iso,
-            held_position=True,
-            seed_file=str(seed_file),
-            reason=None,
-            **identity,
-        )
-
-    newer = {
-        "day0_observed_extreme_source": "wu_icao_history",
-        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.900000+00:00",
-        "day0_observed_extreme_c": 21.0,
-        "day0_observed_extreme_unit": "C",
-    }
-    assert record("newer.json", **newer) is True
-
-    older = {
-        "day0_observed_extreme_source": "late_alternate_source",
-        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
-        "day0_observed_extreme_c": 20.5,
-        "day0_observed_extreme_unit": "F",
-    }
-    assert record("older.json", **older) is False
-    row = conn.execute(
-        "SELECT day0_observed_extreme_observation_time, day0_conditioning_identity_json, seed_file "
-        "FROM cycle_advance_enqueues"
-    ).fetchone()
-    assert row["day0_observed_extreme_observation_time"] == newer[
-        "day0_observed_extreme_observation_time"
-    ]
-    assert row["seed_file"] == str(tmp_path / "newer.json")
-
-    same_time_revisions = (
-        {"day0_observed_extreme_source": "wu_api+same_station_fast_tail"},
-        {"day0_observed_extreme_c": 21.25},
-        {"day0_observed_extreme_unit": "F"},
-    )
-    current = newer
-    for index, revision in enumerate(same_time_revisions, start=1):
-        current = {**current, **revision}
-        assert record(f"same-time-{index}.json", **current) is True
-
-    row = conn.execute(
-        "SELECT day0_observed_extreme_observation_time, day0_conditioning_identity_json, seed_file "
-        "FROM cycle_advance_enqueues"
-    ).fetchone()
-    conn.close()
-    assert row["day0_observed_extreme_observation_time"] == newer[
-        "day0_observed_extreme_observation_time"
-    ]
-    assert json.loads(row["day0_conditioning_identity_json"]) == {
-        "observation_time": "2026-07-19T05:00:00.900000+00:00",
-        "observed_extreme_c": 21.25,
-        "source": "wu_api+same_station_fast_tail",
-        "unit": "F",
-    }
-    assert row["seed_file"] == str(tmp_path / "same-time-3.json")
-
-
 def test_day0_request_coalescing_keeps_distinct_conditioning_identities(tmp_path) -> None:
     """The request drain cannot discard a fresh Day0 condition as a duplicate cycle."""
     base = {
@@ -2454,10 +2378,10 @@ def test_cycle_poll_keeps_later_claimed_owner_past_batch_timeout_until_terminal(
     assert Path(marker["seed_file"]).is_file()
 
 
-def test_day0_owner_rechecks_after_request_moves_to_inflight_between_snapshots(
+def test_day0_owner_claim_lock_closes_pending_to_inflight_move_race(
     tmp_path, monkeypatch
 ) -> None:
-    """The second exact-owner scan closes the root-request to inflight move race."""
+    """A legal queue claim cannot move the request during owner classification."""
     cfg = _queue_config(tmp_path)
     monkeypatch.setattr(
         forecast_production,
@@ -2498,20 +2422,22 @@ def test_day0_owner_rechecks_after_request_moves_to_inflight_between_snapshots(
         encoding="utf-8",
     )
 
-    original_iterdir = Path.iterdir
-    scans = 0
+    lock_path = Path(cfg["request_dir"]).parent / ".materialization_queue.lock"
+    with materialization_queue._queue_lock(lock_path) as acquired:
+        assert acquired is True
+        blocked = cycle_advance._day0_enqueue_owner_request_check(
+            city="Shanghai",
+            target_date="2026-07-19",
+            metric="high",
+            target_cycle_iso=cycle,
+            seed_file=str(seed_file),
+            identity=identity,
+        )
+        assert blocked.state is cycle_advance._Day0EnqueueOwnerRequestState.INDETERMINATE
+        assert blocked.reason == "DAY0_ENQUEUE_OWNER_REQUEST_QUEUE_LOCK_BUSY"
+        pending.replace(claim_dir / seed_file.name)
 
-    def move_after_first_inflight_snapshot(path: Path):
-        nonlocal scans
-        if path == Path(cfg["inflight_dir"]):
-            scans += 1
-            if scans == 1:
-                pending.replace(claim_dir / seed_file.name)
-                return iter(())
-        return original_iterdir(path)
-
-    monkeypatch.setattr(Path, "iterdir", move_after_first_inflight_snapshot)
-    check = cycle_advance._day0_enqueue_owner_request_check(
+    claimed = cycle_advance._day0_enqueue_owner_request_check(
         city="Shanghai",
         target_date="2026-07-19",
         metric="high",
@@ -2519,8 +2445,7 @@ def test_day0_owner_rechecks_after_request_moves_to_inflight_between_snapshots(
         seed_file=str(seed_file),
         identity=identity,
     )
-    assert check.state is cycle_advance._Day0EnqueueOwnerRequestState.ACTIVE
-    assert scans == 2
+    assert claimed.state is cycle_advance._Day0EnqueueOwnerRequestState.ACTIVE
 
 
 def test_aged_pending_day0_owner_survives_until_terminal_request_move(
