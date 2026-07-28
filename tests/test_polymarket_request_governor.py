@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import threading
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,7 @@ from src.data.polymarket_request_governor import (
     _endpoint_class,
     request_identity,
 )
+import src.data.polymarket_request_governor as governor_module
 
 
 def _response(status: int, headers: dict[str, str] | None = None) -> httpx.Response:
@@ -38,6 +40,41 @@ class _Clock:
 
     def advance(self, seconds: float) -> None:
         self.now += timedelta(seconds=seconds)
+
+
+def test_governor_telemetry_rotates_at_configured_size_without_blocking_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "polymarket-request-governor-telemetry.jsonl"
+    old = ("old-telemetry\n" * 30).encode()
+    path.write_bytes(old)
+    monkeypatch.setenv("ZEUS_GOVERNOR_TELEMETRY_IN_TESTS", "1")
+    monkeypatch.setenv("ZEUS_POLYMARKET_GOVERNOR_TELEMETRY_MAX_BYTES", "450")
+    monkeypatch.setattr(governor_module, "state_path", lambda _name: path)
+
+    governor_module._emit_governor_telemetry({"event": "admitted", "route": "book"})
+
+    assert path.with_suffix(".jsonl.1").read_bytes() == old
+    current = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["event"] for row in current] == ["admitted"]
+    assert path.stat().st_size <= 450
+
+
+def test_governor_telemetry_skips_contended_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "polymarket-request-governor-telemetry.jsonl"
+    lock_path = path.with_suffix(".jsonl.lock")
+    monkeypatch.setenv("ZEUS_GOVERNOR_TELEMETRY_IN_TESTS", "1")
+    monkeypatch.setattr(governor_module, "state_path", lambda _name: path)
+
+    with lock_path.open("a+") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        governor_module._emit_governor_telemetry({"event": "skipped"})
+
+    assert not path.exists()
 
 
 def test_same_identity_is_singleflight_across_governor_instances(tmp_path: Path) -> None:

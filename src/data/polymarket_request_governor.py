@@ -270,10 +270,21 @@ def retry_after_seconds(value: str | None) -> float:
 
 
 _TELEMETRY_FILE = "polymarket-request-governor-telemetry.jsonl"
+_TELEMETRY_MAX_BYTES = 128 * 1024 * 1024
+
+
+def _telemetry_max_bytes() -> int:
+    raw = os.environ.get("ZEUS_POLYMARKET_GOVERNOR_TELEMETRY_MAX_BYTES")
+    if raw is None:
+        return _TELEMETRY_MAX_BYTES
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return _TELEMETRY_MAX_BYTES
 
 
 def _emit_governor_telemetry(payload: dict[str, Any]) -> None:
-    """Append-only, best-effort admission telemetry (GATE alpha-clock req).
+    """Size-bounded, best-effort admission telemetry (GATE alpha-clock req).
 
     Never raises and never blocks admission: a telemetry write failure is
     logged (by swallowing it) and the caller's admission decision proceeds
@@ -287,9 +298,26 @@ def _emit_governor_telemetry(payload: dict[str, Any]) -> None:
         path = state_path(_TELEMETRY_FILE)
         path.parent.mkdir(parents=True, exist_ok=True)
         record = {"recorded_at": datetime.now(timezone.utc).isoformat(), **payload}
-        line = json.dumps(record, sort_keys=True, separators=(",", ":"))
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        line = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+        max_bytes = _telemetry_max_bytes()
+        if len(line) > max_bytes:
+            return
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            try:
+                current_size = path.stat().st_size if path.exists() else 0
+                if current_size > 0 and current_size + len(line) > max_bytes:
+                    os.replace(path, path.with_suffix(path.suffix + ".1"))
+                with path.open("ab") as handle:
+                    handle.write(line)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception:  # noqa: BLE001 - telemetry must never block admission.
         pass
 
