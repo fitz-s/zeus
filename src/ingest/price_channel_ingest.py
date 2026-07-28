@@ -163,6 +163,7 @@ PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 25
 PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 2000
 PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS = 100
 PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS = 25
+PRICE_CHANNEL_REDECISION_WORLD_WRITE_BUDGET_MS = 750
 PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS = 25
 PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
 PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS = 0.25
@@ -388,16 +389,40 @@ def _edli_price_channel_world_write_connection(*, owner: str):
     started_ns = time.monotonic_ns()
     acquired_ns: int | None = None
     phase = "open"
+    phase_started_ns = started_ns
+    phase_durations_ns: dict[str, int] = {}
+    transaction_outcome = "open"
 
-    def _telemetry(next_phase: str) -> None:
-        nonlocal phase
+    def _telemetry(next_phase: str, *, outcome: str | None = None) -> None:
+        nonlocal phase, phase_started_ns, transaction_outcome
+        now_ns = time.monotonic_ns()
+        previous_phase = phase
+        previous_phase_ns = max(0, now_ns - phase_started_ns)
+        if acquired_ns is not None and previous_phase != "open":
+            phase_durations_ns[previous_phase] = (
+                phase_durations_ns.get(previous_phase, 0) + previous_phase_ns
+            )
         phase = next_phase
+        phase_started_ns = now_ns
+        if outcome is not None:
+            transaction_outcome = outcome
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "price_channel_world_writer owner=%s phase=%s elapsed_ms=%.3f",
+                "price_channel_world_writer owner=%s phase=%s monotonic_ns=%d "
+                "elapsed_ms=%.3f hold_ms=%.3f previous_phase=%s "
+                "previous_phase_ms=%.3f transaction=%s",
                 owner,
                 phase,
-                (time.monotonic_ns() - started_ns) / 1_000_000,
+                now_ns,
+                (now_ns - started_ns) / 1_000_000,
+                (
+                    0.0
+                    if acquired_ns is None
+                    else (now_ns - acquired_ns) / 1_000_000
+                ),
+                previous_phase,
+                previous_phase_ns / 1_000_000,
+                transaction_outcome,
             )
 
     # The live scheduler owns WAL checkpoints on a dedicated PASSIVE
@@ -426,33 +451,66 @@ def _edli_price_channel_world_write_connection(*, owner: str):
             )
         acquired_ns = time.monotonic_ns()
         _telemetry("acquire")
-        conn.execute("BEGIN IMMEDIATE")
         _telemetry("begin")
+        conn.execute("BEGIN IMMEDIATE")
         with EventWriter.write_phase_telemetry(lambda: _telemetry("write")):
             yield conn
         if not conn.in_transaction:
-            _telemetry("commit")
+            _telemetry("transaction_closed", outcome="caller_closed")
     except BaseException:
         if getattr(conn, "in_transaction", False):
             _telemetry("rollback")
             conn.rollback()
+            _telemetry("transaction_closed", outcome="rolled_back")
+        elif acquired_ns is not None and phase != "transaction_closed":
+            _telemetry("transaction_closed", outcome=f"{phase}_failed")
         raise
     finally:
         if getattr(conn, "in_transaction", False):
             _telemetry("rollback")
             conn.rollback()
+            _telemetry("transaction_closed", outcome="rolled_back")
         if acquired_ns is not None:
-            _telemetry("release")
+            release_started_ns = time.monotonic_ns()
+            previous_phase = phase
+            previous_phase_ns = max(0, release_started_ns - phase_started_ns)
+            if previous_phase != "open":
+                phase_durations_ns[previous_phase] = (
+                    phase_durations_ns.get(previous_phase, 0) + previous_phase_ns
+                )
             mutex.release()
-            hold_ms = (time.monotonic_ns() - acquired_ns) / 1_000_000
-            if hold_ms > PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS:
+            released_ns = time.monotonic_ns()
+            release_ns = max(0, released_ns - release_started_ns)
+            phase_durations_ns["release"] = release_ns
+            hold_ms = (released_ns - acquired_ns) / 1_000_000
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "price_channel_world_writer owner=%s phase=release "
+                    "monotonic_ns=%d elapsed_ms=%.3f hold_ms=%.3f "
+                    "previous_phase=%s previous_phase_ms=%.3f "
+                    "phase_ms=%.3f transaction=%s",
+                    owner,
+                    released_ns,
+                    (released_ns - started_ns) / 1_000_000,
+                    hold_ms,
+                    previous_phase,
+                    previous_phase_ns / 1_000_000,
+                    release_ns / 1_000_000,
+                    transaction_outcome,
+                )
+            if hold_ms > PRICE_CHANNEL_REDECISION_WORLD_WRITE_BUDGET_MS:
+                slow_phase, slow_ns = max(
+                    phase_durations_ns.items(), key=lambda item: item[1]
+                )
                 logger.warning(
                     "price_channel_world_writer over_budget owner=%s phase=%s "
-                    "hold_ms=%.3f budget_ms=%d",
+                    "phase_ms=%.3f hold_ms=%.3f budget_ms=%d transaction=%s",
                     owner,
-                    phase,
+                    slow_phase,
+                    slow_ns / 1_000_000,
                     hold_ms,
-                    PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS,
+                    PRICE_CHANNEL_REDECISION_WORLD_WRITE_BUDGET_MS,
+                    transaction_outcome,
                 )
         EventWriter.forget_preflight_world_event_tables(conn)
         conn.close()
