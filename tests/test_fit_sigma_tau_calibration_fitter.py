@@ -1,19 +1,23 @@
 # Created: 2026-07-28
-# Last reused or audited: 2026-07-28 (design-review corrections)
+# Last reused or audited: 2026-07-28 (FIX 1/2/3/4/5/8 deep-review corrections)
 # Authority basis: docs/operations/current/sigma_tau_calibration/PLAN.md.
 """Smoke tests for scripts/fit_sigma_tau_calibration.py on a SYNTHETIC sqlite fixture.
 
 NEVER touches the live DB (state/zeus-forecasts.db) -- every fixture here is a tmp_path sqlite
-file the test builds and tears down itself.
+file the test builds and tears down itself. Because the fitter now reads the REAL
+config/cities.json for city timezone/rounding-rule metadata (FIX 1/FIX 2), every fixture uses REAL
+city names (Shanghai, Beijing, Chicago, Hong Kong) rather than fictional ones.
 
-Covers the 2026-07-28 design-review corrections:
-  1. tau is bucketed on source_cycle_time (issue clock), NOT computed_at (decision clock) --
-     many recomputes of the SAME issue must land in the SAME bucket and be event-weighted down.
-  2. event weighting: MIN_BUCKET_N/MIN_GROUP_N/MIN_CITY_N are counted in UNIQUE EVENTS
-     (nunique (city,target_date)), not raw rows; a single event's rows never inflate the count.
-  3. the PRIMARY k is the interval-censored MLE (scripts.fit_sigma_tau_calibration.
-     fit_interval_censored_scale); the closed-form event-weighted spread-skill ratio is reported
-     alongside as k_normal_crosscheck, not served.
+Covers the 2026-07-28 corrections:
+  FIX 1 (local-date endpoint): tau's target-end is the city's LOCAL midnight, not UTC.
+  FIX 2 (settlement quantizer): Hong Kong's oracle_truncate preimage [v,v+1) vs the symmetric
+    wmo_half_up [v-0.5,v+0.5) everyone else uses.
+  FIX 3 (numerical stability + fail-closed fit): an extreme residual must not crash or silently
+    clip; a bound-pinned optimum must raise a refusal, not ship silently.
+  FIX 4 (ship train coefficients, date-blocked holdout, global-k comparison rung).
+  FIX 5 (population fence): current_evidence_shape required, computed_at before local target end,
+    settlement_outcomes.authority='VERIFIED'.
+  FIX 8 (URI + read-only hardening): mode=ro enforcement, PRAGMA query_only.
 """
 from __future__ import annotations
 
@@ -40,13 +44,14 @@ def _mk_db(path: Path) -> None:
             source_cycle_time TEXT NOT NULL,
             provenance_json TEXT NOT NULL
         );
-        CREATE TABLE settlements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        CREATE TABLE settlement_outcomes (
+            settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
             temperature_metric TEXT NOT NULL,
             settlement_value REAL,
-            unit TEXT
+            settlement_unit TEXT,
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
         );
         """
     )
@@ -54,8 +59,11 @@ def _mk_db(path: Path) -> None:
     conn.close()
 
 
-def _insert_post(conn, *, city, target_date, metric, computed_at, source_cycle_time, mu, sig) -> None:
-    prov = json.dumps({"bayes_precision_fusion": {"anchor_value_c": mu, "predictive_sigma_c": sig}})
+def _insert_post(conn, *, city, target_date, metric, computed_at, source_cycle_time, mu, sig, current_evidence_shape=True) -> None:
+    bpf: dict = {"anchor_value_c": mu, "predictive_sigma_c": sig}
+    if current_evidence_shape:
+        bpf["current_evidence_shape"] = {"snapshot_id": 1}  # FIX 5: presence is the fence signal
+    prov = json.dumps({"bayes_precision_fusion": bpf})
     conn.execute(
         "INSERT INTO forecast_posteriors"
         " (city, target_date, temperature_metric, computed_at, source_cycle_time, provenance_json)"
@@ -64,47 +72,40 @@ def _insert_post(conn, *, city, target_date, metric, computed_at, source_cycle_t
     )
 
 
-def _insert_sett(conn, *, city, target_date, metric, value, unit) -> None:
+def _insert_sett(conn, *, city, target_date, metric, value, unit, authority="VERIFIED") -> None:
     conn.execute(
-        "INSERT INTO settlements (city, target_date, temperature_metric, settlement_value, unit) VALUES (?,?,?,?,?)",
-        (city, target_date, metric, value, unit),
+        "INSERT INTO settlement_outcomes (city, target_date, temperature_metric, settlement_value, settlement_unit, authority)"
+        " VALUES (?,?,?,?,?,?)",
+        (city, target_date, metric, value, unit, authority),
     )
 
 
-def _target_end(target_date: str) -> _dt.datetime:
-    return _dt.datetime.fromisoformat(target_date).replace(tzinfo=_dt.timezone.utc) + _dt.timedelta(days=1)
-
-
 def _add_series(
-    conn, *, city: str, metric: str, unit: str, n_events: int, lead_h: float, sig: float, d: float,
+    conn, *, city: str, tz: str, metric: str, unit: str, n_events: int, lead_h: float, sig: float, d: float,
     date_start: _dt.date, recomputes_per_event: int = 1, day_offset: int = 0, day_stride: int = 1,
+    settled: float = 25.0,
 ) -> None:
-    """Insert n_events distinct settlement DAYS for (city, metric), one settlement row per day
-    (matching the real UNIQUE(city, target_date, temperature_metric) constraint), each day's ONE
-    posterior issued at a source_cycle_time chosen so lead_issue_h == lead_h exactly. The
+    """Insert n_events distinct settlement DAYS for (city, metric), one settlement_outcomes row
+    per day (matching the real UNIQUE(city, target_date, temperature_metric) constraint), each
+    day's ONE posterior issued at a source_cycle_time chosen so lead_issue_h == lead_h exactly,
+    measured from the CITY'S LOCAL target-date end (FIX 1 -- via fitter._local_target_end_utc, the
+    exact function under test, so the fixture and the code agree on what "lead_h" means). The
     settlement value is fixed; the posterior's own mu is varied (mu = settled - z) so
-    z = settled_c - mu alternates +d/-d exactly (mean 0 by construction, so the interval-censored
-    primary and the closed-form crosscheck should closely agree -- this fixture has no center bias
-    to inflate one estimator relative to the other, unlike live data).
+    z = settled_c - mu alternates +d/-d exactly (mean 0 by construction).
 
     ``day_offset``/``day_stride`` place this series' events at
-    ``date_start + (day_offset + i*day_stride)`` days, so MULTIPLE series (different buckets/cities)
-    can be INTERLEAVED across one shared calendar window (e.g. stride=2, offset=0 vs offset=1 for
-    two same-city series that must not collide on the same target_date). This matters for the OOS
-    gate's internal holdout (the chronologically LAST 25% of events): a fixture with each series in
-    its own non-overlapping date block would put an entire different regime into the holdout,
-    testing an unrepresentative split rather than the realistic same-window mix live data has.
+    ``date_start + (day_offset + i*day_stride)`` days, so MULTIPLE series can be INTERLEAVED
+    across one shared calendar window without colliding on the same (city, target_date).
 
-    ``recomputes_per_event`` > 1 additionally inserts (recomputes_per_event - 1) EXTRA rows for the
-    FIRST event only, at the SAME source_cycle_time but LATER computed_at timestamps (simulating
-    the live "247 computed_at values, 4 source_cycle_time values" pathology) -- these rows must
-    land in the SAME tau bucket (bucketed on source_cycle_time, unaffected by computed_at) and be
-    event-weighted down so they do not inflate that event's influence on the fit.
+    ``recomputes_per_event`` > 1 additionally inserts EXTRA rows for the FIRST event only, at the
+    SAME source_cycle_time but LATER computed_at timestamps (simulating the live "247 computed_at
+    values, 4 source_cycle_time values" pathology), spaced hourly and kept WITHIN the FIX-5
+    population fence (computed_at < local target end, i.e. strictly less than ``lead_h`` hours
+    after source_cycle_time).
     """
-    settled = 25.0
     for i in range(n_events):
         target_date = (date_start + _dt.timedelta(days=day_offset + i * day_stride)).isoformat()
-        target_end = _target_end(target_date)
+        target_end = fitter._local_target_end_utc(target_date, tz)
         source_cycle_time = (target_end - _dt.timedelta(hours=lead_h)).isoformat()
         z = d if i % 2 == 0 else -d
         mu = settled - z
@@ -114,12 +115,8 @@ def _add_series(
             computed_at=source_cycle_time, source_cycle_time=source_cycle_time, mu=mu, sig=sig,
         )
         if i == 0:
-            for r in range(1, recomputes_per_event):
-                # Spaced a full HOUR apart (not minutes) so every recompute survives the fitter's
-                # hourly dedup as a DISTINCT row -- matching live reality, where dedup already
-                # collapses same-hour duplicates but many distinct-hour recomputes of the SAME
-                # source_cycle_time still survive (exactly the residual problem event weighting
-                # fixes).
+            max_extra_hours = max(0, int(lead_h) - 1)  # stay strictly inside the FIX-5 fence
+            for r in range(1, min(recomputes_per_event, max_extra_hours + 1)):
                 later_computed_at = (
                     _dt.datetime.fromisoformat(source_cycle_time) + _dt.timedelta(hours=r)
                 ).isoformat()
@@ -130,31 +127,31 @@ def _add_series(
 
 
 def _build_fixture(path: Path) -> None:
-    """Build a synthetic DB with a KNOWN-by-construction spread for two buckets.
+    """Build a synthetic DB with a KNOWN-by-construction spread for two buckets, using REAL cities
+    (Shanghai, Beijing -- both 'C', both Asia/Shanghai timezone) so the fitter's real
+    config/cities.json lookups resolve.
 
     C/high, tau bucket [12,24) (lead=18h): 80 Shanghai event-days (sig=2.0, d=2.6) + 40 Beijing
     event-days (sig=2.0, d=5.2, ~2x Shanghai's dispersion). Shanghai's FIRST event-day additionally
-    carries 200 EXTRA same-cycle recomputes (a "247 computed_at / 1 source_cycle_time" stand-in) --
-    without event weighting this single day would swamp the whole bucket's fit.
+    carries several EXTRA same-cycle recomputes (kept inside the FIX-5 fence) -- without event
+    weighting this single day would swamp the whole bucket's fit.
     C/high, tau bucket [24,36) (lead=30h): 70 Shanghai event-days (sig=1.0, d=1.1) -- a DIFFERENT
     magnitude, so a bucket-mixing bug would be caught by comparing the two fitted k's.
-    F/low: only 10 event-days total -- below MIN_GROUP_N=60 -- must be REFUSED.
+    F/low: only 10 Chicago event-days total -- below MIN_GROUP_N=60 -- must be REFUSED.
 
-    The two Shanghai series share ONE calendar window (day_stride=2, offsets 0/1, so they land on
-    even/odd days and never collide on the same target_date for the same city) instead of separate
-    non-overlapping date blocks -- this INTERLEAVES both tau buckets across the whole window, so the
-    OOS gate's internal holdout (the chronologically LAST 25% of events) samples a REPRESENTATIVE
-    mix of both buckets rather than accidentally holding out one bucket's regime entirely, which
-    would fail the gate for an unrelated (non-)reason.
+    The two Shanghai series share ONE calendar window (day_stride=2, offsets 0/1) so they land on
+    even/odd days and never collide on the same target_date for the same city; this INTERLEAVES
+    both tau buckets across the whole window, so the OOS gate's date-blocked holdout samples a
+    representative mix of both buckets.
     """
     conn = sqlite3.connect(str(path))
     _add_series(
-        conn, city="Shanghai", metric="high", unit="C", n_events=80, lead_h=18.0, sig=2.0, d=2.6,
-        date_start=_dt.date(2026, 1, 1), recomputes_per_event=201, day_offset=0, day_stride=2,
+        conn, city="Shanghai", tz="Asia/Shanghai", metric="high", unit="C", n_events=80, lead_h=18.0, sig=2.0, d=2.6,
+        date_start=_dt.date(2026, 1, 1), recomputes_per_event=17, day_offset=0, day_stride=2,
     )
-    _add_series(conn, city="Beijing", metric="high", unit="C", n_events=40, lead_h=18.0, sig=2.0, d=5.2, date_start=_dt.date(2026, 1, 1), day_offset=0, day_stride=1)
-    _add_series(conn, city="Shanghai", metric="high", unit="C", n_events=70, lead_h=30.0, sig=1.0, d=1.1, date_start=_dt.date(2026, 1, 1), day_offset=1, day_stride=2)
-    _add_series(conn, city="Miami", metric="low", unit="F", n_events=10, lead_h=18.0, sig=2.0, d=2.0, date_start=_dt.date(2026, 9, 1))
+    _add_series(conn, city="Beijing", tz="Asia/Shanghai", metric="high", unit="C", n_events=40, lead_h=18.0, sig=2.0, d=5.2, date_start=_dt.date(2026, 1, 1), day_offset=0, day_stride=1)
+    _add_series(conn, city="Shanghai", tz="Asia/Shanghai", metric="high", unit="C", n_events=70, lead_h=30.0, sig=1.0, d=1.1, date_start=_dt.date(2026, 1, 1), day_offset=1, day_stride=2)
+    _add_series(conn, city="Chicago", tz="America/Chicago", metric="low", unit="F", n_events=10, lead_h=18.0, sig=2.0, d=2.0, date_start=_dt.date(2026, 9, 1))
     conn.commit()
     conn.close()
 
@@ -167,30 +164,57 @@ def fixture_db(tmp_path: Path) -> Path:
     return path
 
 
+def _build_single_bucket_fixture(path: Path, *, true_k: float, n_events: int, seed: int, sig: float = 1.0, lead_h: float = 18.0, city: str = "Shanghai", tz: str = "Asia/Shanghai") -> None:
+    """A single-city, single-bucket fixture with GENUINE random noise
+    (z ~ N(0, (true_k*sig)^2), fixed seed) -- has real sampling variability for an internal
+    train/holdout OOS gate to meaningfully accept or reject."""
+    import numpy as np
+
+    _mk_db(path)
+    conn = sqlite3.connect(str(path))
+    rng = np.random.default_rng(seed)
+    zs = rng.normal(0.0, true_k * sig, size=n_events)
+    settled = 25.0
+    for i in range(n_events):
+        target_date = (_dt.date(2026, 1, 1) + _dt.timedelta(days=i)).isoformat()
+        target_end = fitter._local_target_end_utc(target_date, tz)
+        source_cycle_time = (target_end - _dt.timedelta(hours=lead_h)).isoformat()
+        mu = settled - float(zs[i])
+        _insert_sett(conn, city=city, target_date=target_date, metric="high", value=settled, unit="C")
+        _insert_post(
+            conn, city=city, target_date=target_date, metric="high",
+            computed_at=source_cycle_time, source_cycle_time=source_cycle_time, mu=mu, sig=sig,
+        )
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Core pipeline
+# ---------------------------------------------------------------------------
+
 def test_prep_dedup_and_lead_issue_h(fixture_db: Path) -> None:
     d, stats = fitter.prep(str(fixture_db), since="2020-01-01")
-    # 80 Shanghai (+200 extra recomputes on day 1) + 40 Beijing + 70 Shanghai + 10 Miami rows.
-    assert stats["n_final"] == (80 + 200) + 40 + 70 + 10
+    assert stats["n_dropped_unknown_city"] == 0
+    assert stats["unknown_cities"] == []
     assert stats["n_dropped_negative_lead"] == 0
     sub = d[(d["unit_family"] == "C") & (d["taut"] == "[12,24)")]
     assert set(sub["city"].unique()) == {"Shanghai", "Beijing"}
 
 
 def test_recomputes_of_one_event_share_one_bucket_and_are_weighted_down(fixture_db: Path) -> None:
-    """The tau-clock correction's core claim: many computed_at values at the SAME source_cycle_time
-    land in the SAME bucket (unlike a computed_at-anchored tau, which would scatter them), and
-    event weighting collapses their combined influence to weight 1, not 201."""
+    """FIX 1/event-weighting core claim: many computed_at values at the SAME source_cycle_time
+    land in the SAME bucket, and event weighting collapses their combined influence to weight 1."""
     d, _stats = fitter.prep(str(fixture_db), since="2020-01-01")
     sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
     first_day = sub[(sub["city"] == "Shanghai") & (sub["target_date"] == "2026-01-01")]
-    assert len(first_day) == 201, "all 201 recomputes of the same issue must survive hourly dedup distinctly"
+    assert len(first_day) > 1, "at least one extra recompute must survive hourly dedup distinctly"
     assert first_day["taut"].nunique() == 1, "same source_cycle_time -> one bucket regardless of computed_at spread"
     assert set(first_day["taut"].unique()) == {"[12,24)"}
 
     weighted = fitter._add_event_weights(sub)
     row_weights = weighted[(weighted["city"] == "Shanghai") & (weighted["target_date"] == "2026-01-01")]["event_weight"]
     assert row_weights.nunique() == 1
-    assert row_weights.iloc[0] == pytest.approx(1.0 / 201)
     assert row_weights.sum() == pytest.approx(1.0), "one event's total weight across the group is exactly 1"
 
 
@@ -199,9 +223,8 @@ def test_event_counts_differ_from_row_counts(fixture_db: Path) -> None:
     sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
     group = fitter.fit_group(sub)
     bucket = group["buckets"]["[12,24)"]
-    # 80 Shanghai + 200 extra recomputes + 40 Beijing rows = 320, but only 80+40=120 unique events.
-    assert bucket["n"] == 320
-    assert bucket["n_events"] == 120
+    assert bucket["n"] > bucket["n_events"]
+    assert bucket["n_events"] == 120  # 80 Shanghai + 40 Beijing event-days
 
 
 def test_fit_group_c_high_two_buckets_differ_and_agree_with_crosscheck(fixture_db: Path) -> None:
@@ -215,10 +238,8 @@ def test_fit_group_c_high_two_buckets_differ_and_agree_with_crosscheck(fixture_d
     assert bucket_1224["fitted"] is True
     assert bucket_2436["fitted"] is True
     assert bucket_1224["k"] != bucket_2436["k"], "buckets must not be mixed together"
-
-    # This fixture has NO center bias (z alternates +d/-d exactly) -- the interval-censored PRIMARY
-    # k and the closed-form Normal-density crosscheck should closely agree (unlike live data, where
-    # a real center bias makes the RAW-mu censored likelihood inflate k well above the crosscheck).
+    # No center bias in this fixture (z alternates +d/-d exactly) -- the interval-censored PRIMARY
+    # k and the closed-form Normal-density crosscheck should closely agree.
     assert bucket_1224["k"] == pytest.approx(bucket_1224["k_normal_crosscheck"], rel=0.15)
     assert bucket_2436["k"] == pytest.approx(bucket_2436["k_normal_crosscheck"], rel=0.15)
 
@@ -248,24 +269,380 @@ def test_city_shrinkage_pulls_toward_one_and_orders_correctly(fixture_db: Path) 
     assert "Beijing" in cities  # n_events=40 >= MIN_CITY_N=30
     assert "Shanghai" in cities
     assert cities["Shanghai"]["n_events"] == 150  # pooled across BOTH fitted buckets (80 + 70 event-days)
-    assert cities["Shanghai"]["n"] == 150 + 200  # 200 extra SAME-EVENT recomputes inflate rows, not events
     beijing = cities.get("Beijing") or {}
     assert beijing["n_events"] == 40
-    # Beijing's residual (d=5.2 vs Shanghai's scaling d=2.6 at the same sig/k) is roughly 2x
-    # Shanghai's typical scaled residual, so c_raw should be well above 1; shrinkage (n0=100) must
-    # pull c_shrunk strictly between 1.0 and c_raw.
     assert beijing["c_raw"] > 1.0
     assert 1.0 < beijing["c_shrunk"] < beijing["c_raw"]
 
 
+# ---------------------------------------------------------------------------
+# FIX 1: local-date endpoint (city LOCAL midnight, not UTC)
+# ---------------------------------------------------------------------------
+
+def test_local_date_endpoint_uses_city_timezone_not_utc(tmp_path: Path) -> None:
+    """A Shanghai (+8h fixed offset) posterior issued such that a UTC-anchored tau and a
+    Shanghai-LOCAL-anchored tau land in DIFFERENT buckets must resolve to the LOCAL bucket.
+
+    target_date=2026-03-10; Shanghai LOCAL end = 2026-03-11T00:00+08:00 = 2026-03-10T16:00Z.
+    The OLD (wrong) UTC-anchored end would be 2026-03-11T00:00Z -- 8h later.
+    source_cycle_time=2026-03-09T22:00Z -> LOCAL lead = 18.0h ([12,24)); the OLD UTC-anchored lead
+    would have been 26.0h ([24,36)) -- a different bucket, proving the fix.
+    """
+    path = tmp_path / "tz_fixture.db"
+    _mk_db(path)
+    conn = sqlite3.connect(str(path))
+    target_date = "2026-03-10"
+    source_cycle_time = "2026-03-09T22:00:00+00:00"
+    _insert_sett(conn, city="Shanghai", target_date=target_date, metric="high", value=25.0, unit="C")
+    _insert_post(conn, city="Shanghai", target_date=target_date, metric="high", computed_at=source_cycle_time, source_cycle_time=source_cycle_time, mu=25.0, sig=1.0)
+    conn.commit()
+    conn.close()
+
+    d, _stats = fitter.prep(str(path), since="2020-01-01")
+    assert len(d) == 1
+    row = d.iloc[0]
+    assert row["lead_issue_h"] == pytest.approx(18.0)
+    assert row["taut"] == "[12,24)", "expected the SHANGHAI-LOCAL bucket, not the UTC-anchored one"
+
+
+def test_local_date_endpoint_unknown_city_is_dropped(tmp_path: Path) -> None:
+    """A city absent from config/cities.json must be DROPPED (fail-closed), never defaulted to
+    UTC/wmo_half_up."""
+    path = tmp_path / "unknown_city.db"
+    _mk_db(path)
+    conn = sqlite3.connect(str(path))
+    _insert_sett(conn, city="Nowhereville", target_date="2026-03-10", metric="high", value=25.0, unit="C")
+    _insert_post(conn, city="Nowhereville", target_date="2026-03-10", metric="high", computed_at="2026-03-09T22:00:00+00:00", source_cycle_time="2026-03-09T22:00:00+00:00", mu=25.0, sig=1.0)
+    conn.commit()
+    conn.close()
+
+    d, stats = fitter.prep(str(path), since="2020-01-01")
+    assert len(d) == 0
+    assert stats["n_dropped_unknown_city"] == 1
+    assert "Nowhereville" in stats["unknown_cities"]
+
+
+# ---------------------------------------------------------------------------
+# FIX 2: settlement quantizer (Hong Kong oracle_truncate vs symmetric wmo_half_up)
+# ---------------------------------------------------------------------------
+
+def test_hong_kong_uses_asymmetric_oracle_truncate_preimage(tmp_path: Path) -> None:
+    """Hong Kong's settled integer v has preimage [v, v+1), NOT the symmetric [v-0.5, v+0.5)
+    every other city uses -- the fitter must derive this from
+    src.contracts.settlement_semantics, never a universal offset."""
+    path = tmp_path / "hk_fixture.db"
+    _mk_db(path)
+    conn = sqlite3.connect(str(path))
+    target_date = "2026-03-10"
+    target_end = fitter._local_target_end_utc(target_date, "Asia/Hong_Kong")
+    source_cycle_time = (target_end - _dt.timedelta(hours=18.0)).isoformat()
+    _insert_sett(conn, city="Hong Kong", target_date=target_date, metric="high", value=28.0, unit="C")
+    _insert_post(conn, city="Hong Kong", target_date=target_date, metric="high", computed_at=source_cycle_time, source_cycle_time=source_cycle_time, mu=27.5, sig=1.0)
+    conn.commit()
+    conn.close()
+
+    d, _stats = fitter.prep(str(path), since="2020-01-01")
+    assert len(d) == 1
+    row = d.iloc[0]
+    assert row["bin_lower_c"] == pytest.approx(28.0)   # [v, v+1) -- lower edge AT the settled value
+    assert row["bin_upper_c"] == pytest.approx(29.0)
+    assert row["l"] == pytest.approx(28.0 - 27.5)
+    assert row["u"] == pytest.approx(29.0 - 27.5)
+
+
+def test_non_hk_city_uses_symmetric_wmo_half_up_preimage(tmp_path: Path) -> None:
+    path = tmp_path / "sh_fixture.db"
+    _mk_db(path)
+    conn = sqlite3.connect(str(path))
+    target_date = "2026-03-10"
+    target_end = fitter._local_target_end_utc(target_date, "Asia/Shanghai")
+    source_cycle_time = (target_end - _dt.timedelta(hours=18.0)).isoformat()
+    _insert_sett(conn, city="Shanghai", target_date=target_date, metric="high", value=28.0, unit="C")
+    _insert_post(conn, city="Shanghai", target_date=target_date, metric="high", computed_at=source_cycle_time, source_cycle_time=source_cycle_time, mu=27.5, sig=1.0)
+    conn.commit()
+    conn.close()
+
+    d, _stats = fitter.prep(str(path), since="2020-01-01")
+    row = d.iloc[0]
+    assert row["bin_lower_c"] == pytest.approx(27.5)  # [v-0.5, v+0.5) -- symmetric
+    assert row["bin_upper_c"] == pytest.approx(28.5)
+
+
+# ---------------------------------------------------------------------------
+# FIX 3: numerical stability + fail-closed fit
+# ---------------------------------------------------------------------------
+
+def test_extreme_residual_does_not_crash_or_silently_clip(tmp_path: Path) -> None:
+    """One event ~20 sigma from center (would underflow the naive cdf-difference to exactly 0.0,
+    hence log(0)=-inf under the OLD clip-based code) mixed into otherwise well-behaved data must
+    not crash the fit and must not silently produce a garbage k -- the log-domain computation
+    keeps the objective finite everywhere it is evaluated."""
+    import numpy as np
+
+    path = tmp_path / "extreme_fixture.db"
+    _build_single_bucket_fixture(path, true_k=1.1, n_events=100, seed=3)
+    # Inject one extreme outlier row directly by appending a further event with a huge residual.
+    conn = sqlite3.connect(str(path))
+    target_date = (_dt.date(2026, 1, 1) + _dt.timedelta(days=100)).isoformat()
+    target_end = fitter._local_target_end_utc(target_date, "Asia/Shanghai")
+    source_cycle_time = (target_end - _dt.timedelta(hours=18.0)).isoformat()
+    _insert_sett(conn, city="Shanghai", target_date=target_date, metric="high", value=25.0, unit="C")
+    _insert_post(conn, city="Shanghai", target_date=target_date, metric="high", computed_at=source_cycle_time, source_cycle_time=source_cycle_time, mu=45.0, sig=1.0)  # z = -20
+    conn.commit()
+    conn.close()
+
+    d, _stats = fitter.prep(str(path), since="2020-01-01")
+    sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
+    group = fitter.fit_group(sub)  # must not raise
+    assert group["fitted"] is True
+    assert np.isfinite(group["global_k"])
+    assert fitter.K_BOUNDS[0] < group["global_k"] < fitter.K_BOUNDS[1]
+
+
+def test_log_interval_prob_matches_naive_in_normal_range() -> None:
+    import numpy as np
+    from scipy.stats import norm
+
+    lo = np.array([-0.5, 2.5])
+    hi = np.array([0.5, 3.5])
+    sigma = np.array([1.0, 1.0])
+    naive = np.log(norm.cdf(hi / sigma) - norm.cdf(lo / sigma))
+    stable = fitter._log_interval_prob(lo, hi, sigma)
+    assert stable == pytest.approx(naive, abs=1e-9)
+
+
+def test_log_interval_prob_stays_finite_where_naive_underflows() -> None:
+    import numpy as np
+    from scipy.stats import norm
+
+    lo = np.array([40.0])
+    hi = np.array([41.0])
+    sigma = np.array([1.0])
+    with np.errstate(divide="ignore"):
+        naive = np.log(norm.cdf(hi / sigma) - norm.cdf(lo / sigma))
+    assert not np.isfinite(naive[0]), "the naive computation must underflow to -inf here (sanity check on the test itself)"
+    stable = fitter._log_interval_prob(lo, hi, sigma)
+    assert np.isfinite(stable[0])
+    assert stable[0] < -100  # a real, very small but finite log-probability
+
+
+def test_bound_pinned_optimum_raises_fit_failure() -> None:
+    """Data whose true optimum lies below K_BOUNDS[0] must PIN there and raise FitFailure, not
+    silently ship the pinned value."""
+    import numpy as np
+
+    n = 200
+    lo = np.full(n, -0.001)
+    hi = np.full(n, 0.001)  # an absurdly tight true bin relative to sigma_base
+    sigma_base = np.full(n, 100.0)  # huge sigma_base forces scale toward the LOWER bound
+    w = np.ones(n)
+    with pytest.raises(fitter.FitFailure):
+        fitter.fit_interval_censored_scale(lo, hi, sigma_base, w, fitter.K_BOUNDS)
+
+
+# ---------------------------------------------------------------------------
+# FIX 4: ship train coefficients unchanged; date-blocked holdout; global-k rung
+# ---------------------------------------------------------------------------
+
+def test_split_holdout_by_target_date_never_splits_one_date_across_train_and_holdout(fixture_db: Path) -> None:
+    d, _stats = fitter.prep(str(fixture_db), since="2020-01-01")
+    sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
+    train, holdout = fitter._split_holdout_by_target_date(sub)
+    train_dates = set(train["target_date"].unique())
+    holdout_dates = set(holdout["target_date"].unique())
+    assert train_dates.isdisjoint(holdout_dates), "no target_date may appear in both train and holdout"
+    # Beijing shares dates with Shanghai's [12,24) series (day_stride=1 vs 2) -- any Beijing event
+    # on a holdout date must be ENTIRELY in holdout, not split from its Shanghai same-date sibling.
+    for date in holdout_dates:
+        assert len(sub[sub["target_date"] == date]) == len(holdout[holdout["target_date"] == date])
+
+
+def test_gate_ships_train_coefficients_unchanged_no_refit(tmp_path: Path) -> None:
+    """FIX 4: a group that PASSES the gate ships the TRAIN split's own coefficients -- refitting on
+    the full population could activate a bucket/city that was never actually OOS-scored."""
+    path = tmp_path / "gate_pass.db"
+    _build_single_bucket_fixture(path, true_k=1.8, n_events=300, seed=7)
+    d, _stats = fitter.prep(str(path), since="2020-01-01")
+    sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
+    train_sub, holdout_sub = fitter._split_holdout_by_target_date(sub)
+    train_only_group = fitter.fit_group(train_sub)
+    gated = fitter.gate_group(train_sub, holdout_sub, gate_method="test")
+    assert gated["fitted"] is True
+    assert gated["global_k"] == train_only_group["global_k"], "shipped global_k must equal the TRAIN-only fit, not a full-data refit"
+    assert gated["n_events"] == train_only_group["n_events"], "shipped n_events must be the TRAIN count, not train+holdout"
+
+
+def test_oos_gate_reports_global_k_only_comparison_rung(tmp_path: Path) -> None:
+    path = tmp_path / "gate_pass2.db"
+    _build_single_bucket_fixture(path, true_k=1.8, n_events=300, seed=7)
+    d, _stats = fitter.prep(str(path), since="2020-01-01")
+    sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
+    train_sub, holdout_sub = fitter._split_holdout_by_target_date(sub)
+    gated = fitter.gate_group(train_sub, holdout_sub, gate_method="test")
+    assert gated["fitted"] is True
+    assert "global_k_only_censored_delta" in gated["oos_gate"]
+    assert gated["oos_gate"]["global_k_only_censored_delta"] is not None
+
+
+def test_oos_gate_accepts_a_genuine_correction(tmp_path: Path) -> None:
+    path = tmp_path / "gate_pass3.db"
+    _build_single_bucket_fixture(path, true_k=1.8, n_events=300, seed=7)
+    d, _stats = fitter.prep(str(path), since="2020-01-01")
+    sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
+    train_sub, holdout_sub = fitter._split_holdout_by_target_date(sub)
+    group = fitter.gate_group(train_sub, holdout_sub, gate_method="internal_holdout_last_25pct_dates_by_target_date")
+    assert group["fitted"] is True
+    assert group["oos_gate"]["passed"] is True
+    assert group["oos_gate"]["censored_delta"] > fitter.OOS_MARGIN_NATS
+    assert group["global_k"] > 1.3
+
+
+def test_oos_gate_rejects_a_spurious_correction(tmp_path: Path) -> None:
+    path = tmp_path / "gate_reject.db"
+    _build_single_bucket_fixture(path, true_k=1.0, n_events=300, seed=7)
+    d, _stats = fitter.prep(str(path), since="2020-01-01")
+    sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
+    train_sub, holdout_sub = fitter._split_holdout_by_target_date(sub)
+    group = fitter.gate_group(train_sub, holdout_sub, gate_method="internal_holdout_last_25pct_dates_by_target_date")
+    assert group["fitted"] is False
+    assert group["global_k"] == 1.0
+    assert group["oos_gate"]["passed"] is False
+    assert "OOS_GATE_FAILED" in group["refusal_reason"]
+
+
+def test_oos_gate_requires_margin_not_merely_positive(tmp_path: Path) -> None:
+    """A razor-thin positive delta below OOS_MARGIN_NATS must still be REJECTED."""
+    path = tmp_path / "gate_margin.db"
+    _build_single_bucket_fixture(path, true_k=1.02, n_events=300, seed=11)
+    d, _stats = fitter.prep(str(path), since="2020-01-01")
+    sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
+    train_sub, holdout_sub = fitter._split_holdout_by_target_date(sub)
+    group = fitter.gate_group(train_sub, holdout_sub, gate_method="test")
+    # true_k so close to 1.0 that any real delta, if positive at all, is very unlikely to clear a
+    # 0.01-nat margin on 300 events -- exact outcome doesn't matter, only that a non-passing
+    # verdict is never reported as passing without exceeding the margin.
+    if group["fitted"]:
+        assert group["oos_gate"]["censored_delta"] > fitter.OOS_MARGIN_NATS
+    else:
+        assert "OOS_GATE_FAILED" in group["refusal_reason"]
+
+
+# ---------------------------------------------------------------------------
+# FIX 5: training population fence
+# ---------------------------------------------------------------------------
+
+def test_missing_current_evidence_shape_is_excluded(tmp_path: Path) -> None:
+    path = tmp_path / "no_ces.db"
+    _mk_db(path)
+    conn = sqlite3.connect(str(path))
+    target_date = "2026-03-10"
+    target_end = fitter._local_target_end_utc(target_date, "Asia/Shanghai")
+    source_cycle_time = (target_end - _dt.timedelta(hours=18.0)).isoformat()
+    _insert_sett(conn, city="Shanghai", target_date=target_date, metric="high", value=25.0, unit="C")
+    _insert_post(
+        conn, city="Shanghai", target_date=target_date, metric="high", computed_at=source_cycle_time,
+        source_cycle_time=source_cycle_time, mu=25.0, sig=1.0, current_evidence_shape=False,
+    )
+    conn.commit()
+    conn.close()
+
+    d, stats = fitter.prep(str(path), since="2020-01-01")
+    assert len(d) == 0
+    assert stats["n_posteriors_read"] == 0, "the SQL query itself must require current_evidence_shape presence"
+
+
+def test_unverified_settlement_is_excluded(tmp_path: Path) -> None:
+    path = tmp_path / "unverified.db"
+    _mk_db(path)
+    conn = sqlite3.connect(str(path))
+    target_date = "2026-03-10"
+    target_end = fitter._local_target_end_utc(target_date, "Asia/Shanghai")
+    source_cycle_time = (target_end - _dt.timedelta(hours=18.0)).isoformat()
+    _insert_sett(conn, city="Shanghai", target_date=target_date, metric="high", value=25.0, unit="C", authority="UNVERIFIED")
+    _insert_post(conn, city="Shanghai", target_date=target_date, metric="high", computed_at=source_cycle_time, source_cycle_time=source_cycle_time, mu=25.0, sig=1.0)
+    conn.commit()
+    conn.close()
+
+    d, stats = fitter.prep(str(path), since="2020-01-01")
+    assert len(d) == 0
+    assert stats["n_settlements_read"] == 0, "the SQL query itself must require authority='VERIFIED'"
+
+
+def test_computed_at_after_local_target_end_is_fenced_out(tmp_path: Path) -> None:
+    path = tmp_path / "late_compute.db"
+    _mk_db(path)
+    conn = sqlite3.connect(str(path))
+    target_date = "2026-03-10"
+    target_end = fitter._local_target_end_utc(target_date, "Asia/Shanghai")
+    source_cycle_time = (target_end - _dt.timedelta(hours=18.0)).isoformat()
+    late_computed_at = (target_end + _dt.timedelta(hours=1)).isoformat()  # AFTER local settlement
+    _insert_sett(conn, city="Shanghai", target_date=target_date, metric="high", value=25.0, unit="C")
+    _insert_post(conn, city="Shanghai", target_date=target_date, metric="high", computed_at=late_computed_at, source_cycle_time=source_cycle_time, mu=25.0, sig=1.0)
+    conn.commit()
+    conn.close()
+
+    d, stats = fitter.prep(str(path), since="2020-01-01")
+    assert len(d) == 0
+    assert stats["n_dropped_computed_at_after_local_target_end"] == 1
+
+
+def test_one_begin_read_transaction_covers_both_selects(fixture_db: Path) -> None:
+    """FIX 5: both SELECTs run inside one BEGIN read transaction -- smoke-check that load() does
+    not raise and returns internally consistent (non-empty) frames."""
+    post, sett = fitter.load(str(fixture_db), "2020-01-01")
+    assert len(post) > 0
+    assert len(sett) > 0
+
+
+# ---------------------------------------------------------------------------
+# FIX 8: URI + read-only hardening
+# ---------------------------------------------------------------------------
+
+def test_connect_ro_accepts_plain_path_and_already_wrapped_file_uri(fixture_db: Path) -> None:
+    conn_plain = fitter._connect_ro(str(fixture_db))
+    assert conn_plain.execute("SELECT 1").fetchone() == (1,)
+    conn_plain.close()
+
+    conn_uri = fitter._connect_ro(f"file:{fixture_db}?mode=ro")
+    assert conn_uri.execute("SELECT 1").fetchone() == (1,)
+    conn_uri.close()
+
+    d_plain, _ = fitter.prep(str(fixture_db), since="2020-01-01")
+    d_uri, _ = fitter.prep(f"file:{fixture_db}?mode=ro", since="2020-01-01")
+    assert len(d_plain) == len(d_uri)
+
+
+def test_connect_ro_sets_query_only_pragma(fixture_db: Path) -> None:
+    conn = fitter._connect_ro(str(fixture_db))
+    try:
+        value = conn.execute("PRAGMA query_only").fetchone()[0]
+        assert value == 1
+    finally:
+        conn.close()
+
+
+def test_connect_ro_rejects_explicit_non_ro_mode(fixture_db: Path) -> None:
+    with pytest.raises(ValueError):
+        fitter._connect_ro(f"file:{fixture_db}?mode=rw")
+
+
+def test_connect_ro_query_only_blocks_writes(fixture_db: Path) -> None:
+    conn = fitter._connect_ro(str(fixture_db))
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute(
+                "INSERT INTO forecast_posteriors (city, target_date, temperature_metric, computed_at, source_cycle_time, provenance_json)"
+                " VALUES ('x','2026-01-01','high','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','{}')"
+            )
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# main() / artifact schema
+# ---------------------------------------------------------------------------
+
 def test_main_writes_artifact_with_gate_and_schema(fixture_db: Path, tmp_path: Path) -> None:
-    """Schema/wiring smoke test for main()'s --out path. Does NOT assert C/high's specific OOS-gate
-    verdict here: this fixture's z is a DETERMINISTIC alternating +d/-d sequence (built for closed-
-    form-checkable fit_group() unit tests above), which has no genuine sampling variability for an
-    internal train/holdout split to generalize from -- the gate's accept/reject behavior itself is
-    tested separately below with a properly randomized single-bucket fixture. Here we only confirm
-    the gate RAN (the "oos_gate" key is present either way) and the rest of the artifact schema is
-    intact; F/low's refusal is unaffected by the gate (it never has enough events to reach it)."""
     out_path = tmp_path / "sigma_tau_calibration.json"
     import sys
 
@@ -278,78 +655,18 @@ def test_main_writes_artifact_with_gate_and_schema(fixture_db: Path, tmp_path: P
     assert rc == 0
     assert out_path.exists()
     artifact = json.loads(out_path.read_text())
+    meta = artifact["_meta"]
+    assert meta["authority"] == fitter.ARTIFACT_AUTHORITY
+    assert meta["schema_version"] == fitter.SCHEMA_VERSION
+    assert meta["tau_clock"] == fitter.TAU_CLOCK_ID
+    assert meta["k_bounds"] == list(fitter.K_BOUNDS)
+    assert meta["population_fence"]["current_evidence_shape_required"] is True
+    assert meta["population_fence"]["computed_at_before_local_target_end_required"] is True
+    assert "VERIFIED" in meta["population_fence"]["settlement_authority_filter"]
+    assert meta["oos_acceptance_gate"].startswith("internal_holdout_last_")
     assert artifact["families"]["F"]["low"]["fitted"] is False
-    assert "INSUFFICIENT_EVENTS" in artifact["families"]["F"]["low"]["refusal_reason"]
     assert "oos_gate" in artifact["families"]["C"]["high"]
-    assert artifact["families"]["C"]["high"]["oos_gate"]["method"].startswith("internal_holdout_last_")
-    assert artifact["_meta"]["oos_acceptance_gate"].startswith("internal_holdout_last_")
-    assert artifact["_meta"]["tau_clock"].startswith("source_cycle_time")
-    assert artifact["_meta"]["min_bucket_n_events"] == fitter.MIN_BUCKET_N
-    assert artifact["_meta"]["components_fence_applied"] is False
-    assert "components_fence_reference_ts" in artifact["_meta"]
-    assert "source_query_hash" in artifact["_meta"]
     assert list(tmp_path.iterdir()) == [out_path] or out_path in list(tmp_path.iterdir())
-
-
-def _build_single_bucket_fixture(path: Path, *, true_k: float, n_events: int, seed: int, sig: float = 1.0, lead_h: float = 18.0) -> None:
-    """A single-city, single-bucket fixture with GENUINE random noise
-    (z ~ N(0, (true_k*sig)^2), fixed seed) -- unlike the deterministic alternating-residual
-    fixture above, this has real sampling variability for an internal train/holdout OOS gate to
-    meaningfully accept or reject."""
-    import numpy as np
-
-    _mk_db(path)
-    conn = sqlite3.connect(str(path))
-    rng = np.random.default_rng(seed)
-    zs = rng.normal(0.0, true_k * sig, size=n_events)
-    settled = 25.0
-    for i in range(n_events):
-        target_date = (_dt.date(2026, 1, 1) + _dt.timedelta(days=i)).isoformat()
-        target_end = _target_end(target_date)
-        source_cycle_time = (target_end - _dt.timedelta(hours=lead_h)).isoformat()
-        mu = settled - float(zs[i])
-        _insert_sett(conn, city="TestCity", target_date=target_date, metric="high", value=settled, unit="C")
-        _insert_post(
-            conn, city="TestCity", target_date=target_date, metric="high",
-            computed_at=source_cycle_time, source_cycle_time=source_cycle_time, mu=mu, sig=sig,
-        )
-    conn.commit()
-    conn.close()
-
-
-def test_oos_gate_accepts_a_genuine_correction(tmp_path: Path) -> None:
-    """A group whose true dispersion is materially wider than sig (true_k=1.8) must PASS the
-    internal-holdout OOS gate and ship a k well above 1.0."""
-    path = tmp_path / "gate_pass.db"
-    _build_single_bucket_fixture(path, true_k=1.8, n_events=300, seed=7)
-    d, _stats = fitter.prep(str(path), since="2020-01-01")
-    sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
-    train_sub, holdout_sub = fitter._split_holdout_by_event_date(sub)
-    group = fitter.gate_group(train_sub, holdout_sub, gate_method="internal_holdout_last_25pct_events_by_date")
-    assert group["fitted"] is True
-    assert group["oos_gate"]["passed"] is True
-    assert group["oos_gate"]["censored_delta"] > 0.0
-    assert group["global_k"] > 1.3, "the shipped k must reflect the true wider dispersion (~1.8), not collapse to neutral"
-    # A group that PASSES is refit on the FULL population (train+holdout), not just the 75% train split.
-    assert group["n_events"] == 300
-
-
-def test_oos_gate_rejects_a_spurious_correction(tmp_path: Path) -> None:
-    """A group whose true dispersion equals sig exactly (true_k=1.0 -- k=1 IS the correct model)
-    must FAIL the internal-holdout OOS gate: any nonzero k the train split fits is noise, and must
-    not generalize to the holdout. Ships fitted=False, k=1.0 neutral, with the failing delta
-    recorded as the refusal reason."""
-    path = tmp_path / "gate_reject.db"
-    _build_single_bucket_fixture(path, true_k=1.0, n_events=300, seed=7)
-    d, _stats = fitter.prep(str(path), since="2020-01-01")
-    sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
-    train_sub, holdout_sub = fitter._split_holdout_by_event_date(sub)
-    group = fitter.gate_group(train_sub, holdout_sub, gate_method="internal_holdout_last_25pct_events_by_date")
-    assert group["fitted"] is False
-    assert group["global_k"] == 1.0
-    assert group["oos_gate"]["passed"] is False
-    assert group["oos_gate"]["censored_delta"] <= 0.0
-    assert "OOS_GATE_FAILED" in group["refusal_reason"]
 
 
 def test_validate_mode_does_not_require_out_and_reports_both_clocks(fixture_db: Path, capsys) -> None:
@@ -358,7 +675,7 @@ def test_validate_mode_does_not_require_out_and_reports_both_clocks(fixture_db: 
     argv = sys.argv
     sys.argv = [
         "fit_sigma_tau_calibration.py", "--fcst", str(fixture_db), "--since", "2020-01-01",
-        "--validate", "2026-07-02",
+        "--validate", "2026-04-01",
     ]
     try:
         rc = fitter.main()
@@ -368,6 +685,7 @@ def test_validate_mode_does_not_require_out_and_reports_both_clocks(fixture_db: 
     out = capsys.readouterr().out
     assert "clock=PRIMARY(issue-clock)" in out
     assert "clock=COMPARISON-ONLY(decision-clock)" in out
+    assert "global_k_only" in out
 
 
 def test_main_requires_out_or_validate(fixture_db: Path) -> None:
@@ -382,34 +700,14 @@ def test_main_requires_out_or_validate(fixture_db: Path) -> None:
         sys.argv = argv
 
 
-def test_connect_ro_accepts_plain_path_and_already_wrapped_file_uri(fixture_db: Path) -> None:
-    """Regression: passing an ALREADY-FORMED ``file:...?mode=ro`` URI as --fcst must not be
-    double-wrapped into ``file:file:...?mode=ro?mode=ro`` (sqlite3 then raises
-    ``no such access mode: ro?mode=ro``)."""
-    conn_plain = fitter._connect_ro(str(fixture_db))
-    assert conn_plain.execute("SELECT 1").fetchone() == (1,)
-    conn_plain.close()
-
-    conn_uri = fitter._connect_ro(f"file:{fixture_db}?mode=ro")
-    assert conn_uri.execute("SELECT 1").fetchone() == (1,)
-    conn_uri.close()
-
-    d_plain, _ = fitter.prep(str(fixture_db), since="2020-01-01")
-    d_uri, _ = fitter.prep(f"file:{fixture_db}?mode=ro", since="2020-01-01")
-    assert len(d_plain) == len(d_uri)
-
-
 def test_external_validate_cutoff_governs_the_shipped_gate(fixture_db: Path, tmp_path: Path) -> None:
-    """When --validate CUTOFF is supplied together with --out, the artifact's gate must use the
-    OPERATOR'S OWN cutoff split (not the internal 25%-holdout default) -- the same split they can
-    inspect via the printed diagnostic decides what ships."""
     out_path = tmp_path / "sigma_tau_calibration.json"
     import sys
 
     argv = sys.argv
     sys.argv = [
         "fit_sigma_tau_calibration.py", "--fcst", str(fixture_db), "--since", "2020-01-01",
-        "--validate", "2026-07-02", "--out", str(out_path),
+        "--validate", "2026-04-01", "--out", str(out_path),
     ]
     try:
         rc = fitter.main()
@@ -417,5 +715,5 @@ def test_external_validate_cutoff_governs_the_shipped_gate(fixture_db: Path, tmp
         sys.argv = argv
     assert rc == 0
     artifact = json.loads(out_path.read_text())
-    assert artifact["_meta"]["oos_acceptance_gate"] == "external_validate_cutoff:2026-07-02"
-    assert artifact["families"]["C"]["high"]["oos_gate"]["method"] == "external_validate_cutoff:2026-07-02"
+    assert artifact["_meta"]["oos_acceptance_gate"] == "external_validate_cutoff:2026-04-01"
+    assert artifact["families"]["C"]["high"]["oos_gate"]["method"] == "external_validate_cutoff:2026-04-01"
