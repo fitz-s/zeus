@@ -1627,6 +1627,8 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             forecast_db=forecast_db,
             raw_manifest_dir=raw_manifest_dir,
             seed_dir=seed_dir,
+            request_dir=request_path,
+            inflight_dir=inflight_path,
             limit=int(seed_discovery_limit or seed_limit or limit),
         )
     seed_batch_limit = limit if seed_limit is None else int(seed_limit)

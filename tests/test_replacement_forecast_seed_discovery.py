@@ -154,21 +154,45 @@ def test_seed_discovery_detects_only_same_family_pending_queue_work(
     }
     unrelated = seed_dir / "London.2026-07-30.high.20260728T120000Z.json"
     unrelated.write_text("{}")
-    assert _target_has_pending_queue_work(seed_dir, target) is False
+    assert (
+        _target_has_pending_queue_work(
+            seed_dir,
+            target,
+            request_dir=request_dir,
+            inflight_dir=tmp_path / "inflight",
+        )
+        is False
+    )
 
     queued = request_dir / (
         "San_Francisco.2026-07-30.high."
         "20260728T120000Z.20260728T120001Z.pid1.json"
     )
     queued.write_text("{}")
-    assert _target_has_pending_queue_work(seed_dir, target) is True
+    assert (
+        _target_has_pending_queue_work(
+            seed_dir,
+            target,
+            request_dir=request_dir,
+            inflight_dir=tmp_path / "inflight",
+        )
+        is True
+    )
     queued.unlink()
 
     inflight = inflight_dir / (
         "San_Francisco.2026-07-30.high.20260728T120000Z.json"
     )
     inflight.write_text("{}")
-    assert _target_has_pending_queue_work(seed_dir, target) is True
+    assert (
+        _target_has_pending_queue_work(
+            seed_dir,
+            target,
+            request_dir=request_dir,
+            inflight_dir=tmp_path / "inflight",
+        )
+        is True
+    )
 
 
 def test_hko_seed_preserves_provisional_provider_source(monkeypatch) -> None:

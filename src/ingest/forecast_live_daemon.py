@@ -1226,6 +1226,8 @@ def _replacement_forecast_discovery_job() -> None:
         forecast_db=cfg["forecast_db"],
         raw_manifest_dir=cfg["raw_manifest_dir"],
         seed_dir=cfg["seed_dir"],
+        request_dir=cfg["request_dir"],
+        inflight_dir=cfg["inflight_dir"],
         limit=discovery_limit,
     )
     pending_family_skipped = (
