@@ -72,6 +72,19 @@ class CollateralSnapshotDegraded(RuntimeError):
     """The heartbeat completed mechanically but did not obtain authoritative collateral truth."""
 
 
+class _CapturedCollateralAdapter:
+    """Replay one completed network read into CollateralLedger on the caller thread."""
+
+    def __init__(self, payload: dict | None, error: Exception | None) -> None:
+        self._payload = payload
+        self._error = error
+
+    def get_collateral_payload(self) -> dict:
+        if self._error is not None:
+            raise self._error
+        return dict(self._payload or {})
+
+
 class _PusdOnlyCollateralAdapter:
     """Expose only pUSD collateral facts to the sidecar heartbeat.
 
@@ -85,6 +98,24 @@ class _PusdOnlyCollateralAdapter:
         self._adapter = adapter
 
     def get_collateral_payload(self) -> dict:
+        chain_payload = getattr(self._adapter, "get_chain_pusd_collateral_payload", None)
+        if callable(chain_payload):
+            try:
+                payload = dict(chain_payload() or {})
+                if (
+                    payload.get("pusd_balance_micro") is None
+                    or payload.get("pusd_allowance_micro") is None
+                    or payload.get("authority_tier") != "CHAIN"
+                    or payload.get("pusd_balance_source") != "CHAIN"
+                ):
+                    raise ValueError("incomplete chain pUSD collateral payload")
+                return payload
+            except Exception as exc:  # noqa: BLE001 - bounded CLOB fallback remains fail-closed
+                logger.warning(
+                    "chain pUSD collateral batch unavailable; trying authenticated CLOB "
+                    "balance with chain allowance fallback: %s",
+                    exc,
+                )
         pusd_payload = getattr(self._adapter, "get_pusd_collateral_payload", None)
         if callable(pusd_payload):
             # The CLOB ``balance-allowance/update`` endpoint is a cache-refresh
@@ -92,14 +123,22 @@ class _PusdOnlyCollateralAdapter:
             # consume the sidecar's whole deadline before the authoritative
             # reads happen.  Read the current CLOB balance directly and prove
             # allowance from chain when CLOB omits/zeros it.
-            return dict(
+            payload = dict(
                 pusd_payload(
                     refresh_allowance=False,
                     allow_chain_allowance_fallback=True,
                 )
                 or {}
             )
-        return dict(self._adapter.get_collateral_payload() or {})
+        else:
+            payload = dict(self._adapter.get_collateral_payload() or {})
+        # This fallback's balance fact is always the authenticated CLOB cache.
+        # A chain allowance may strengthen that one field, but it cannot promote
+        # the composite snapshot or wallet head to chain balance authority.
+        payload["pusd_balance_source"] = "CLOB"
+        if payload.get("authority_tier") == "CHAIN":
+            payload["authority_tier"] = "VENUE"
+        return payload
 
     @property
     def wallet_address(self) -> str:
@@ -115,17 +154,18 @@ class _PusdOnlyCollateralAdapter:
 def _post_trade_collateral_timeout_seconds() -> float:
     raw = os.environ.get("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS")
     if raw in (None, ""):
-        # This job creates a cold authenticated CLOB client, so its connect budget must cover
-        # DNS/TLS setup. The independent 25s absolute deadline still bounds update+read+fallback.
-        return 6.0
+        # The isolated heartbeat is always a cold process. Live VPN evidence on
+        # 2026-07-28 put one successful TLS+batch chain read near 15s; 20s covers
+        # that path while the independent 25s absolute deadline still fails closed.
+        return 20.0
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS=%r; using 6.0", raw)
-        return 6.0
+        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS=%r; using 20.0", raw)
+        return 20.0
     if value <= 0:
-        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS=%r; using 6.0", raw)
-        return 6.0
+        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS=%r; using 20.0", raw)
+        return 20.0
     return value
 
 
@@ -170,12 +210,7 @@ def _upsert_pusd_wallet_balance_head(snapshot, wallet_address: str) -> None:
             asset="PUSD",
             balance_micro=snapshot.pusd_balance_micro,
             allowance_micro=snapshot.pusd_allowance_micro,
-            # This refresh lane reads pUSD balance/allowance only via the
-            # authenticated CLOB balance-allowance endpoint (a chain ERC20
-            # read only ever covers the allowance-fallback leg inside that
-            # same call, never the balance) -- CHAIN is reserved for a future
-            # direct on-chain balance read (e.g. CTF winner balanceOf).
-            source="CLOB",
+            source="CHAIN" if snapshot.authority_tier == "CHAIN" else "CLOB",
             authority_tier=snapshot.authority_tier,
             block_or_source_ts=snapshot.captured_at.isoformat(),
         )
@@ -212,14 +247,20 @@ def collateral_snapshot_refresh_cycle() -> None:
     ledger = CollateralLedger(db_path=_zeus_trade_db_path())
     deadline_seconds = _post_trade_collateral_deadline_seconds()
 
-    def _refresh():
+    def _read():
         with PolymarketClient(public_http_timeout=_post_trade_collateral_timeout_seconds()) as clob:
             adapter = _PusdOnlyCollateralAdapter(clob._ensure_v2_adapter())
-            return ledger.refresh(adapter), adapter.wallet_address
+            try:
+                payload = adapter.get_collateral_payload()
+                error = None
+            except Exception as exc:  # noqa: BLE001 - replayed through ledger fail-closed logic
+                payload = None
+                error = exc
+            return payload, error, adapter.wallet_address
 
     try:
-        snapshot, wallet_address = run_with_timeout(
-            _refresh,
+        payload, read_error, wallet_address = run_with_timeout(
+            _read,
             seconds=deadline_seconds,
             label="post_trade_collateral_pusd_refresh",
         )
@@ -231,6 +272,9 @@ def collateral_snapshot_refresh_cycle() -> None:
             exc,
         )
         raise
+    # The timeout worker owns network reads only. Persist on this caller thread
+    # after bounded completion, so a timed-out worker can never advance freshness.
+    snapshot = ledger.refresh(_CapturedCollateralAdapter(payload, read_error))
     logger.info(
         "collateral_snapshot_refresh: authority=%s captured_at=%s pusd_available_micro=%s ctf_tokens=%d mode=pusd_only",
         snapshot.authority_tier,

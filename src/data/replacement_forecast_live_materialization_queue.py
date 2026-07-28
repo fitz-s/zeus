@@ -463,11 +463,15 @@ def _day0_seed_matches_conditioning(
     posterior_metric = str(conditioning.get("metric") or "").strip().lower()
     seed_source = str(seed.get("day0_observed_extreme_source") or "").strip()
     posterior_source = str(conditioning.get("source") or "").strip()
+    seed_unit = str(seed.get("day0_observed_extreme_unit") or "").strip().upper()
+    posterior_unit = str(conditioning.get("unit") or "").strip().upper()
     if (
         seed_metric not in {"high", "low"}
         or posterior_metric != seed_metric
         or not seed_source
         or posterior_source != seed_source
+        or not seed_unit
+        or posterior_unit != seed_unit
     ):
         return False
     try:
@@ -889,6 +893,7 @@ _REQUEST_DEDUP_KEY_FIELDS: tuple[str, ...] = (
     "baseline_source_run_id",
     "openmeteo_source_run_id",
 )
+_DAY0_CONDITIONING_IDENTITY_KEY = "day0_conditioning_identity"
 _UNCHANGED_BLOCKED_REASON = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
 _UNCHANGED_BLOCKED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
@@ -1028,6 +1033,38 @@ def _request_semantic_key(payload: Mapping[str, object]) -> tuple[str, ...] | No
                 return None
             value = parsed.isoformat()
         values.append(value)
+    day0_fields = (
+        "day0_observed_extreme_source",
+        "day0_observed_extreme_observation_time",
+        "day0_observed_extreme_c",
+        "day0_observed_extreme_unit",
+    )
+    if any(payload.get(field) is not None for field in day0_fields):
+        source = str(payload.get("day0_observed_extreme_source") or "").strip()
+        observation_time = _parse_utc_iso(
+            payload.get("day0_observed_extreme_observation_time")
+        )
+        unit = str(payload.get("day0_observed_extreme_unit") or "").strip().upper()
+        try:
+            observed_extreme_c = round(float(payload.get("day0_observed_extreme_c")), 9)
+        except (TypeError, ValueError):
+            return None
+        if not source or observation_time is None or not unit:
+            return None
+        values.append(
+            _DAY0_CONDITIONING_IDENTITY_KEY
+            + "="
+            + json.dumps(
+                {
+                    "observation_time": observation_time.isoformat(),
+                    "observed_extreme_c": observed_extreme_c,
+                    "source": source,
+                    "unit": unit,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
     return tuple(values)
 
 

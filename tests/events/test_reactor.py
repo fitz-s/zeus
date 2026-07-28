@@ -4054,6 +4054,19 @@ def test_global_batch_result_rejects_more_than_one_submit_or_wrong_winner():
             winner_event_id=None,
             venue_submit_count=0,
         )
+    target = _forecast_event("deferred-frontier", target_date="2026-05-25")
+    continuation = _forecast_event(
+        "submitted-continuation",
+        target_date="2026-05-26",
+    )
+    with pytest.raises(ValueError, match="next global claim"):
+        GlobalBatchSubmitResult(
+            receipts={"first": first},
+            winner_event_id="first",
+            venue_submit_count=1,
+            next_claim_event=target,
+            continuation_event=continuation,
+        )
 
 
 def _retry_reactor(store, snapshot_present: dict):
@@ -6417,6 +6430,82 @@ def _multiwinner_reactor(store, process_global_batch):
     )
     reactor._finalize_deferred_event_unit = _requeue_losers_finalize(reactor)
     return reactor
+
+
+def test_global_unknown_side_effect_winner_finalizes_before_no_submit_loser():
+    conn, store = _store()
+    loser, winner = _multiwinner_events("unknown-side-effect-order", 2)
+    for event in (loser, winner):
+        store.insert_or_ignore(event)
+
+    def _batch(claimed, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        return GlobalBatchSubmitResult(
+            receipts={
+                loser.event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=loser.event_id,
+                    causal_snapshot_id=loser.causal_snapshot_id,
+                    reason="GLOBAL_NOT_SELECTED:unknown-winner",
+                    proof_accepted=False,
+                ),
+                winner.event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=winner.event_id,
+                    causal_snapshot_id=winner.causal_snapshot_id,
+                    reason="POST_SUBMIT_UNKNOWN:test",
+                    proof_accepted=False,
+                    side_effect_status="POST_SUBMIT_UNKNOWN",
+                    venue_call_started=True,
+                    venue_ack_received=False,
+                ),
+            },
+            winner_event_id=winner.event_id,
+            venue_submit_count=0,
+        )
+
+    reactor = _multiwinner_reactor(store, _batch)
+    finalized_ids = []
+
+    def _finalize(
+        event,
+        _receipt,
+        *,
+        decision_time,
+        result,
+        wait_ms=None,
+        continuation_event=None,
+        claim_generation=None,
+        claim_attempt_count=None,
+    ):
+        del (
+            decision_time,
+            result,
+            wait_ms,
+            continuation_event,
+            claim_generation,
+            claim_attempt_count,
+        )
+        finalized_ids.append(event.event_id)
+        reactor._store.mark_processed(event.event_id)
+        return True
+
+    reactor._finalize_deferred_event_unit = _finalize
+    outcome = reactor._process_global_event_batch(
+        (loser, winner),
+        decision_time=_DT_VENUE_OPEN,
+        result=ReactorResult(),
+        budget=None,
+        cycle_start=time.monotonic(),
+        remaining=2,
+        already_charged_event_ids=frozenset(),
+        cancelled=lambda: False,
+    )
+
+    assert outcome.submitted is False
+    assert finalized_ids == [winner.event_id, loser.event_id]
+    assert _processing_status(conn, winner.event_id) == "processed"
+    assert _processing_status(conn, loser.event_id) == "processed"
 
 
 def test_global_winner_finalize_commits_fresh_frontier_with_terminal_carrier():
