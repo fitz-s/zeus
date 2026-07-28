@@ -323,11 +323,43 @@ def _fetch_hko_daily_extract_month(
     return rows, url, payload_hash
 
 
+def hko_daily_extract_target_date(*, now_utc: datetime) -> date:
+    """Return the completed HKO local date whose final row is now due."""
+
+    return now_utc.astimezone(ZoneInfo("Asia/Hong_Kong")).date() - timedelta(days=1)
+
+
+def hko_daily_extract_yesterday_present(
+    conn,
+    *,
+    now_utc: datetime,
+) -> bool:
+    """Check final-row presence without acquiring a writer or fetching HKO."""
+
+    target_d = hko_daily_extract_target_date(now_utc=now_utc)
+    return (
+        conn.execute(
+            """
+            SELECT 1
+              FROM observations
+             WHERE city = ? AND target_date = ? AND source = ?
+               AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
+             LIMIT 1
+            """,
+            (HKO_CITY_NAME, target_d.isoformat(), HKO_SOURCE),
+        ).fetchone()
+        is not None
+    )
+
+
 def append_hko_daily_extract_yesterday(
     conn,
     *,
     now_utc: datetime,
     rebuild_run_id: str,
+    prefetched: (
+        tuple[dict[tuple[int, int, int], tuple[float, float]], str, str] | None
+    ) = None,
 ) -> dict[str, int]:
     """Poll the finalized HKO Daily Extract until yesterday is published.
 
@@ -338,26 +370,19 @@ def append_hko_daily_extract_yesterday(
 
     stats = {"inserted": 0, "already_present": 0, "not_published": 0,
              "guard_rejected": 0, "fetch_errors": 0}
-    hkt = ZoneInfo("Asia/Hong_Kong")
-    target_d = now_utc.astimezone(hkt).date() - timedelta(days=1)
-    existing = conn.execute(
-        """
-        SELECT 1
-          FROM observations
-         WHERE city = ? AND target_date = ? AND source = ?
-           AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
-         LIMIT 1
-        """,
-        (HKO_CITY_NAME, target_d.isoformat(), HKO_SOURCE),
-    ).fetchone()
-    if existing is not None:
+    target_d = hko_daily_extract_target_date(now_utc=now_utc)
+    if hko_daily_extract_yesterday_present(conn, now_utc=now_utc):
         stats["already_present"] = 1
         return stats
 
     try:
-        rows, url, payload_hash = _fetch_hko_daily_extract_month(
-            target_d.year,
-            target_d.month,
+        rows, url, payload_hash = (
+            prefetched
+            if prefetched is not None
+            else _fetch_hko_daily_extract_month(
+                target_d.year,
+                target_d.month,
+            )
         )
     except Exception as exc:  # noqa: BLE001 - source failure is durable telemetry
         stats["fetch_errors"] = 1

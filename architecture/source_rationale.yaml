@@ -315,7 +315,7 @@ files:
   src/ingest_main.py:
     zone: K2_runtime
     authority_role: ingest_daemon_entry
-    why: Data-ingest daemon entry point. Schedules all K2 observation/forecast/settlement/UMA ingest ticks independent of the trading daemon. No imports from src.engine, src.execution, src.strategy, src.signal, src.control, or src.main.
+    why: Data-ingest daemon entry point. Schedules all K2 observation/forecast/settlement/UMA ingest ticks independent of the trading daemon. The HKO finalized prior-day Daily Extract has a dedicated five-minute poll with its own advisory lock, so WU batch latency or failure cannot delay post-local-day held-position authority; its read-only presence check and provider fetch happen before one non-blocking short cross-DB commit, never under canonical writer flocks. The realtime HKO source clock remains a separate monitoring role. No imports from src.engine, src.execution, src.strategy, src.signal, src.control, or src.main.
     downstream:
     - src/data/daily_obs_append.py
     - src/data/hourly_instants_append.py
@@ -1137,6 +1137,9 @@ files:
       no deploy/launchd plist ever set them). build_registry_scheduler() is now the sole,
       unconditional daemon-wiring path for src.ingest_main and src.ingest.forecast_live_daemon —
       DAEMON_WIRED, not a dormant planner.
+      HKO finalized Daily Extract polling has its own single-worker
+      hko_final_source_clock_db lane, separate from both METAR/WU observation batching and the
+      two-second HKO realtime poll, so either source's latency cannot suppress final authority.
     hazards: []
     downstream:
     - src/ingest_main.py
@@ -1167,7 +1170,7 @@ files:
   src/data/daily_obs_append.py:
     zone: K2_runtime
     authority_role: live_daily_observation_append
-    why: Appends live daily observations and coverage facts through ObservationAtom + IngestionGuard.
+    why: Appends live daily observations and coverage facts through ObservationAtom + IngestionGuard. The HKO finalized prior-day writer accepts an optional prefetched Daily Extract payload so retrying source-clock callers can keep provider I/O outside canonical writer flocks while preserving the same guarded atomic write path.
     downstream:
     - src/data/daily_observation_writer.py
     - src/data/wu_hourly_client.py
@@ -2614,7 +2617,7 @@ files:
   src/state/db.py:
     zone: K2_runtime
     authority_role: db_connection_schema_runtime
-    why: SQLite connections, schema setup, canonical DB queries, and raw provenance projection initialization. Every writable canonical connection holds the shared cutover lease for its full lifetime; all canonical schemas own the transaction-bound cutover generation receipt. Confirmed positive entry execution facts contribute their actual shares and cost to the runtime portfolio whether the command is fully filled or still has a resting partial remainder. Owns the token-suppression reason vocabulary and separates review resolution, permanent ignore, and external-drift suppression semantics. The trade DDL admits the additive POSITION_TOKEN_SPLIT_RECONSTRUCTED repair event so fresh databases preserve B71 append-first evidence.
+    why: SQLite connections, schema setup, canonical DB queries, and raw provenance projection initialization. Every writable canonical connection holds the shared cutover lease for its full lifetime; all canonical schemas own the transaction-bound cutover generation receipt. The sanctioned forecasts+world connection helper retains blocking admission by default and exposes an explicit non-blocking option for bounded retrying source clocks, applied identically to both canonically ordered flocks. Confirmed positive entry execution facts contribute their actual shares and cost to the runtime portfolio whether the command is fully filled or still has a resting partial remainder. Owns the token-suppression reason vocabulary and separates review resolution, permanent ignore, and external-drift suppression semantics. The trade DDL admits the additive POSITION_TOKEN_SPLIT_RECONSTRUCTED repair event so fresh databases preserve B71 append-first evidence.
     write_routes:
     - canonical_position_write
     - settlement_write

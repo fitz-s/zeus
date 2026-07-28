@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-07-18; last_reused=2026-07-18
+# Lifecycle: created=2026-05-24; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: Executor-class assignment (no DB writer on file-only executor; UMA->backfill_db).
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-07-18
+# Last reused or audited: 2026-07-28
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -1025,6 +1025,7 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
         assert j["executor"] in (
             "source_clock_db",
             "hko_source_clock_db",
+            "hko_final_source_clock_db",
             "forecast_clock_db",
             "oracle_guard_db",
             "observation_db",
@@ -1071,6 +1072,10 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
     by_id = {j["id"]: j for j in sched.jobs}
     assert by_id["ingest_day0_metar_source_clock"]["executor"] == "source_clock_db"
     assert by_id["ingest_k2_hko_tick"]["executor"] == "hko_source_clock_db"
+    assert (
+        by_id["ingest_k2_hko_daily_final"]["executor"]
+        == "hko_final_source_clock_db"
+    )
     assert by_id["ingest_replacement_availability_poll"]["executor"] == "forecast_clock_db"
     assert by_id["ingest_replacement_maintenance"]["executor"] == "derived_db"
     assert "ingest_day0_metar_commit_retry" not in by_id

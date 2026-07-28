@@ -107,6 +107,11 @@ class SourceJobSpec:
 _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
     SourceJobSpec("ingest_k2_daily_obs", "ingest_main", "live", "default", True,
                   source_id="wu_icao_history", callable_ref="_k2_daily_obs_tick", family="observation"),
+    SourceJobSpec("ingest_k2_hko_daily_final", "ingest_main", "live", "default", True,
+                  source_id="hko_daily_api", callable_ref="_k2_hko_daily_final_tick",
+                  family="observation", misfire_grace_time=600,
+                  notes="independent 5-minute finalized prior-day HKO Daily Extract poll; "
+                        "local no-op after the VERIFIED row exists, isolated from WU batching"),
     SourceJobSpec("ingest_k2_hourly_instants", "ingest_main", "backfill", "default", True,
                   callable_ref="_k2_hourly_instants_tick", family="observation",
                   notes="rolling archive of completed local days; isolated from live_db so "
@@ -122,7 +127,8 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   callable_ref="_k2_obs_tick", family="observation",
                   notes="multi-source: WU ICAO + Ogimet METAR via tier router"),
     SourceJobSpec("ingest_k2_hko_tick", "ingest_main", "live", "default", True,
-                  source_id="hko_daily_api", callable_ref="_k2_hko_tick", family="observation",
+                  source_id="hko_realtime_api", callable_ref="_k2_hko_tick",
+                  family="observation",
                   misfire_grace_time=10,
                   notes="2s default conditional HKO since-midnight-extrema source clock; "
                         "304 responses perform no DB work, validators advance only after the "

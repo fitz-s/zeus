@@ -16,6 +16,8 @@ Antibody coverage:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from datetime import date
 import subprocess
 import sys
 from pathlib import Path
@@ -84,6 +86,284 @@ def test_daily_obs_runs_after_hko_rhrread_publication_without_duplicate_writer()
             },
         )
     ]
+
+
+def test_hko_final_daily_poll_is_independent_and_bounded(monkeypatch) -> None:
+    """Final HKO authority retries independently; it is not an hourly WU tail."""
+    import src.ingest_main as im
+
+    monkeypatch.delenv(im.HKO_DAILY_FINAL_POLL_SECONDS_ENV, raising=False)
+    specs = [
+        (trigger, kwargs)
+        for func, trigger, kwargs in im._ingest_main_job_specs()
+        if func is im._k2_hko_daily_final_tick
+    ]
+
+    assert len(specs) == 1
+    trigger, kwargs = specs[0]
+    assert trigger == "interval"
+    assert kwargs["seconds"] == 300.0
+    assert kwargs["id"] == "ingest_k2_hko_daily_final"
+    assert kwargs["next_run_time"] is not None
+
+    from src.data.scheduler_adapter import build_job_specs
+
+    registry_spec = {
+        spec.job_id: spec
+        for spec in build_job_specs(owner_daemon="ingest_main")
+    }["ingest_k2_hko_daily_final"]
+    assert registry_spec.max_instances == 1
+    assert registry_spec.coalesce is True
+    assert registry_spec.misfire_grace_time == 600
+    assert registry_spec.executor_class == "hko_final_source_clock_db"
+
+
+def test_hko_final_daily_poll_has_own_lock_and_connection(monkeypatch) -> None:
+    """A WU batch failure cannot prevent the source-correct HKO final poll."""
+    import src.data.daily_obs_append as daily_obs
+    import src.data.job_lock as job_lock
+    import src.ingest_main as im
+    import src.state.db as state_db
+
+    calls: list[tuple[str, object]] = []
+    conn = object()
+
+    class ReadConnection:
+        def close(self) -> None:
+            calls.append(("read_close", True))
+
+    @contextmanager
+    def fake_lock(name: str):
+        calls.append(("lock", name))
+        yield True
+
+    @contextmanager
+    def fake_connection(*, write_class: str, blocking: bool):
+        calls.append(("connection", (write_class, blocking)))
+        yield conn
+
+    def fake_append(
+        given_conn,
+        *,
+        now_utc,
+        rebuild_run_id,
+        prefetched,
+    ):
+        calls.append(("append_conn", given_conn))
+        calls.append(("rebuild_run_id", rebuild_run_id))
+        calls.append(("prefetched", prefetched))
+        assert now_utc.tzinfo is not None
+        return {
+            "inserted": 0,
+            "already_present": 1,
+            "not_published": 0,
+            "guard_rejected": 0,
+            "fetch_errors": 0,
+        }
+
+    monkeypatch.setattr(job_lock, "acquire_lock", fake_lock)
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_with_world",
+        fake_connection,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_read_only",
+        lambda: calls.append(("read_connection", True)) or ReadConnection(),
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_yesterday_present",
+        lambda *_args, **_kwargs: calls.append(("present", False)) or False,
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_target_date",
+        lambda **_kwargs: date(2026, 7, 28),
+    )
+    prefetched = ({(2026, 7, 28): (29.5, 25.1)}, "url", "sha256:x")
+    monkeypatch.setattr(
+        daily_obs,
+        "_fetch_hko_daily_extract_month",
+        lambda *_args: calls.append(("fetch", True)) or prefetched,
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "append_hko_daily_extract_yesterday",
+        fake_append,
+    )
+
+    result = im._k2_hko_daily_final_tick.__wrapped__()
+
+    assert result["already_present"] == 1
+    assert calls[:7] == [
+        ("lock", "hko_daily_final"),
+        ("read_connection", True),
+        ("present", False),
+        ("read_close", True),
+        ("fetch", True),
+        ("connection", ("bulk", False)),
+        ("append_conn", conn),
+    ]
+    assert str(calls[7][1]).startswith("hko_daily_final_")
+    assert calls[8] == ("prefetched", prefetched)
+
+
+def test_hko_final_daily_poll_is_local_noop_after_publication(monkeypatch) -> None:
+    import src.data.daily_obs_append as daily_obs
+    import src.data.job_lock as job_lock
+    import src.ingest_main as im
+    import src.state.db as state_db
+
+    @contextmanager
+    def fake_lock(_name: str):
+        yield True
+
+    class ReadConnection:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(job_lock, "acquire_lock", fake_lock)
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_read_only",
+        ReadConnection,
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_yesterday_present",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "_fetch_hko_daily_extract_month",
+        lambda *_args: pytest.fail("published row must avoid provider fetch"),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_with_world",
+        lambda **_kwargs: pytest.fail("published row must avoid writer admission"),
+    )
+
+    result = im._k2_hko_daily_final_tick.__wrapped__()
+
+    assert result["already_present"] == 1
+
+
+def test_hko_final_daily_poll_surfaces_source_or_write_failure(monkeypatch) -> None:
+    import src.data.daily_obs_append as daily_obs
+    import src.data.job_lock as job_lock
+    import src.ingest_main as im
+    import src.state.db as state_db
+
+    @contextmanager
+    def fake_lock(_name: str):
+        yield True
+
+    class ReadConnection:
+        def close(self) -> None:
+            return None
+
+    @contextmanager
+    def fake_connection(*, write_class: str, blocking: bool):
+        assert write_class == "bulk"
+        assert blocking is False
+        yield object()
+
+    monkeypatch.setattr(job_lock, "acquire_lock", fake_lock)
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_with_world",
+        fake_connection,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_read_only",
+        ReadConnection,
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_yesterday_present",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_target_date",
+        lambda **_kwargs: date(2026, 7, 28),
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "_fetch_hko_daily_extract_month",
+        lambda *_args: ({}, "url", "sha256:x"),
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "append_hko_daily_extract_yesterday",
+        lambda *_args, **_kwargs: {
+            "inserted": 0,
+            "already_present": 0,
+            "not_published": 0,
+            "guard_rejected": 0,
+            "fetch_errors": 1,
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="HKO_DAILY_FINAL_POLL_FAILED"):
+        im._k2_hko_daily_final_tick.__wrapped__()
+
+
+def test_hko_final_daily_poll_defers_without_waiting_on_writer(monkeypatch) -> None:
+    import src.data.daily_obs_append as daily_obs
+    import src.data.job_lock as job_lock
+    import src.ingest_main as im
+    import src.state.db as state_db
+
+    @contextmanager
+    def fake_lock(_name: str):
+        yield True
+
+    class ReadConnection:
+        def close(self) -> None:
+            return None
+
+    @contextmanager
+    def contended_connection(*, write_class: str, blocking: bool):
+        assert write_class == "bulk"
+        assert blocking is False
+        raise BlockingIOError("writer busy")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(job_lock, "acquire_lock", fake_lock)
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_with_world",
+        contended_connection,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_read_only",
+        ReadConnection,
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_yesterday_present",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_target_date",
+        lambda **_kwargs: date(2026, 7, 28),
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "_fetch_hko_daily_extract_month",
+        lambda *_args: ({}, "url", "sha256:x"),
+    )
+
+    assert im._k2_hko_daily_final_tick.__wrapped__() == {
+        "status": "WRITE_CONTENDED"
+    }
 
 
 # ---------------------------------------------------------------------------
