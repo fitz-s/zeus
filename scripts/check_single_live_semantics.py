@@ -60,6 +60,20 @@ CUTOVER_RETIRED_ASSIGNMENTS = frozenset(
         "RETIRED_TRANSFER_TABLE",
     }
 )
+RAW_FORECAST_ARTIFACT_MANIFEST_SCRIPT = Path("src/data/raw_forecast_artifact_manifest.py")
+RAW_FORECAST_ARTIFACT_MANIFEST_RETIRED_ASSIGNMENTS = frozenset(
+    {"_RETIRED_TOP_LEVEL_MANIFEST_FIELDS"}
+)
+# Files permitted to hold a retired-token constant used ONLY to recognize and
+# discard the dead field/value on read (never to grant it live control). Each
+# entry is still checked by _retired_assignment_control_violations: the
+# retired constant may never flow into a live control target (mode, category,
+# lane, runtime, semantics). This is the same relapse-antibody shape as the
+# cutover script's exemption, scoped to additional named constants/files.
+_RETIRED_ASSIGNMENT_EXEMPTIONS: dict[Path, frozenset[str]] = {
+    CUTOVER_SCRIPT: CUTOVER_RETIRED_ASSIGNMENTS,
+    RAW_FORECAST_ARTIFACT_MANIFEST_SCRIPT: RAW_FORECAST_ARTIFACT_MANIFEST_RETIRED_ASSIGNMENTS,
+}
 _LIVE_CONTROL_TARGETS = frozenset({"category", "lane", "mode", "runtime", "semantics"})
 EXCLUDED_SUBTREES = (
     Path("docs/archive"),
@@ -157,20 +171,19 @@ def violations(
                 f"{rel}: {item}"
                 for item in _identifier_concept_violations(source)
             )
+            retired_assignments = _RETIRED_ASSIGNMENT_EXEMPTIONS.get(rel, frozenset())
             scan_value += "\n" + "\n".join(
                 _static_python_strings(
                     source,
-                    allowed_retired_assignments=(
-                        CUTOVER_RETIRED_ASSIGNMENTS
-                        if rel == CUTOVER_SCRIPT
-                        else frozenset()
-                    ),
+                    allowed_retired_assignments=retired_assignments,
                 )
             )
-            if rel == CUTOVER_SCRIPT:
+            if retired_assignments:
                 out.extend(
                     f"{rel}: {item}"
-                    for item in _retired_assignment_control_violations(source)
+                    for item in _retired_assignment_control_violations(
+                        source, retired_assignments=retired_assignments
+                    )
                 )
         for token in _CONCEPT_TOKENS:
             if _contains_live_alternate_concept(token, scan_value):
@@ -531,15 +544,17 @@ def _path_import_aliases(tree: ast.AST) -> dict[str, str]:
     return aliases
 
 
-def _retired_assignment_control_violations(source: str) -> list[str]:
-    """Reject use of cutover deletion constants as live control semantics."""
+def _retired_assignment_control_violations(
+    source: str, *, retired_assignments: frozenset[str]
+) -> list[str]:
+    """Reject use of retired deletion constants as live control semantics."""
 
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
 
-    literal_bindings = _literal_bindings(tree, excluded=CUTOVER_RETIRED_ASSIGNMENTS)
+    literal_bindings = _literal_bindings(tree, excluded=retired_assignments)
     assignments: list[tuple[list[ast.expr], ast.expr]] = []
     functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
     for node in ast.walk(tree):
@@ -550,7 +565,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             functions[node.name] = node
 
-    tainted = set(CUTOVER_RETIRED_ASSIGNMENTS)
+    tainted = set(retired_assignments)
     tainted_returns: set[str] = set()
     changed = True
     while changed:

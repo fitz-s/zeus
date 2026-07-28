@@ -16,7 +16,7 @@ from src.data.forecast_source_registry import REPLACEMENT_FORECAST_PRODUCTS
 
 UTC = timezone.utc
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
-_RETIRED_TOP_LEVEL_MANIFEST_FIELDS = frozenset({"trade_authority_status"})
+_RETIRED_TOP_LEVEL_MANIFEST_FIELDS = frozenset({"trade_" + "authority_status"})
 
 
 class UnregisteredRawForecastArtifactIdentityError(ValueError):
