@@ -372,3 +372,149 @@ higher than the original evidence-basis summary and why zero cities appear in an
     loader + 3 serving-equivalence); same 5 pre-existing (unrelated) materializer-schema failures
     as before, verified identical on the unmodified main checkout. `ruff check`, `py_compile`,
     `git diff --check` all clean.
+
+## 2026-07-28 (fourth pass, same day) DEEP-REVIEW: eight required fixes
+
+An independent deep review (verifying the two hardest claims locally against the live DB) returned
+NO-GO with eight required fixes. All eight are applied; every claim below was verified by re-running
+against the live DB read-only.
+
+- **FIX 1 (BLOCKER, fit+serve) local-date endpoint.** Tau's target-end was `target_date+1day
+  00:00 UTC`; markets settle on the CITY'S LOCAL date. Corrected to
+  `datetime.combine(target_date+1day, 00:00, city_tz).astimezone(UTC)`, DST-aware, via
+  `config/cities.json`'s canonical IANA `timezone` field (loaded through `src.config.load_cities`,
+  never re-derived). The fitter's `_local_target_end_utc` and the materializer's `_lead_target_h`
+  (now taking a `city_timezone` parameter, threaded from `request.city_timezone`) compute the
+  identical local-date endpoint. A dedicated antibody
+  (`test_local_date_endpoint_uses_city_timezone_not_utc`) constructs a Shanghai case where the
+  UTC-anchored and local-anchored cuts land in DIFFERENT buckets ([24,36) vs [12,24)) and asserts
+  the LOCAL one wins.
+- **FIX 2 (BLOCKER, fitter) settlement quantizer.** The universal `[v-0.5, v+0.5)` preimage
+  violates `src/contracts/settlement_semantics.py`: Hong Kong's `oracle_truncate` rule has preimage
+  `[v, v+1)`. The fitter now looks up each row's rounding rule via
+  `SettlementSemantics.for_city(city).rounding_rule` and constructs the preimage via
+  `settlement_preimage_offsets(rounding_rule, half_step=0.5)` -- the repo's own declarative source,
+  never re-derived inline. `test_hong_kong_uses_asymmetric_oracle_truncate_preimage` and
+  `test_non_hk_city_uses_symmetric_wmo_half_up_preimage` lock both branches.
+- **FIX 3 (BLOCKER, fitter) numerical stability + fail-closed gate.** Replaced
+  `norm.cdf(hi)-norm.cdf(lo)` (silently underflows to exactly 0.0, hence `log(0)=-inf`, for any
+  interval ~9+ sigma from center) with a log-domain computation (`_log_interval_prob`) that picks
+  the numerically stable `logcdf`/`logsf` branch per row. The `1e-12` clip is REMOVED: a
+  non-finite log-probability now makes the optimizer's objective explicitly `+inf` for that scale,
+  rather than masquerading as a small finite penalty. `fit_interval_censored_scale` now checks
+  `res.success`, finite `res.x`/`res.fun`, and BOUNDARY PINNING (a result within `1e-4` of a search
+  bound raises `FitFailure` -- the true optimum is outside the physically sane range, not that the
+  bound IS the answer); every caller (`fit_k_by_tau`, `fit_city_shrinkage`, the OOS gate) converts a
+  `FitFailure` into an explicit refusal (whole-group refusal for a failed GLOBAL fit; inherits
+  global for a failed BUCKET fit; the city is simply omitted for a failed CITY fit) -- never a
+  silently wrong k. The gate itself now REJECTS any non-finite `censored_delta` explicitly (`NaN <=
+  threshold` is always `False` in Python, so the old `<= 0` check was fail-OPEN for NaN) and
+  requires a PREDECLARED margin (`OOS_MARGIN_NATS = 0.01`), not merely `> 0`.
+  `test_log_interval_prob_stays_finite_where_naive_underflows`,
+  `test_extreme_residual_does_not_crash_or_silently_clip`,
+  `test_bound_pinned_optimum_raises_fit_failure`, and
+  `test_oos_gate_requires_margin_not_merely_positive` lock this.
+- **FIX 4 (BLOCKER, fitter) ship train coefficients; date-blocked holdout; global-k rung.** A group
+  that PASSES the gate now ships the TRAIN split's fitted coefficients UNCHANGED --
+  `gate_group` no longer refits on the full population (a refit could activate a bucket/city that
+  was never actually OOS-scored). The holdout split changed from per-EVENT to per-DATE
+  (`_split_holdout_by_target_date`: the chronologically last 25% of WHOLE target dates) so
+  same-day cross-city correlation cannot leak across the train/holdout boundary. A
+  global-k-only OOS delta (`_censored_oos_delta_flat_k`: one flat k, no bucket/city indexing, vs
+  k=1) is now reported in every `oos_gate` dict (`global_k_only_censored_delta`), REPORTED ONLY,
+  never gated on -- shows what lead-bucket indexing buys over a single flat correction.
+  `test_gate_ships_train_coefficients_unchanged_no_refit`,
+  `test_split_holdout_by_target_date_never_splits_one_date_across_train_and_holdout`, and
+  `test_oos_gate_reports_global_k_only_comparison_rung` lock this.
+- **FIX 5 (BLOCKER, fitter) training population fence.** The query now requires
+  `$.bayes_precision_fusion.current_evidence_shape` to be present (a proxy for "this posterior
+  actually used the CURRENT-EVIDENCE branch"), `computed_at` strictly before the FIX-1 local
+  target end (excludes retroactive/late recomputes the current-evidence path would never
+  materialize), and joins `settlement_outcomes` (NOT the raw `settlements` table) with
+  `authority='VERIFIED'` -- the EXACT precedent shape `scripts/fit_sigma_scale.py:134` already uses
+  for calibration fitting (verified: `settlement_outcomes` and `settlements` are two DIFFERENT
+  tables on the live DB with 367 value/authority mismatches between them; `settlement_outcomes` is
+  what the established sibling fitter trusts). Both SELECTs now run inside one `BEGIN` read
+  transaction. Every fence predicate is recorded in `_meta.population_fence`.
+  `test_missing_current_evidence_shape_is_excluded`, `test_unverified_settlement_is_excluded`,
+  `test_computed_at_after_local_target_end_is_fenced_out`, and
+  `test_one_begin_read_transaction_covers_both_selects` lock this.
+- **FIX 6 (BLOCKER, materializer) strict loader authorization.** The materializer now validates a
+  TYPED schema before trusting the artifact AT ALL: `_meta.authority` must equal the exact expected
+  string, `_meta.schema_version` must equal `1` (an `int`, explicitly not a `bool`),
+  `_meta.tau_clock` must equal the exact serving-side clock constant (`_SIGMA_TAU_CLOCK_ID`), and
+  per group `fitted is True` / `oos_gate.passed is True` must be EXACT bools (not merely truthy --
+  `"fitted": "true"` as a STRING is rejected). Every k value (`global_k`, each bucket's `k`, each
+  city's `c_shrunk`) must be a real, finite number (`isinstance(x, (int,float)) and not
+  isinstance(x, bool)`) within `[0.25, 4.0]`; the bucket key set must match the expected 7 labels
+  EXACTLY. ANY top-level deviation invalidates the WHOLE artifact; an invalid single bucket/city
+  entry narrows to that scope only (inherits global_k / omitted, same fail-soft posture as before).
+  The artifact is now read+validated ONCE per file generation (`_load_validated_sigma_tau_artifact`,
+  an mtime-keyed module-level cache) rather than re-parsed on every lookup -- a mid-batch artifact
+  swap cannot produce generation skew within one process's already-served lookups. The ENTIRE
+  resolution (tau computation, local target-end, strict validation) is now wrapped in ONE
+  neutralizing try/except (`_resolve_sigma_tau_calibration`), replacing the former 3-statement
+  inline block at the call site, so a malformed request field can never escape as an exception.
+  `tests/test_sigma_tau_calibration_lookup.py` carries 33 antibodies for this contract, including
+  the exact rejection cases requested: `"fitted":"false"` string, `fitted=True` with `oos_gate`
+  MISSING, a bool used as k, `k=1e100`, a wrong bucket key set, and a wrong `authority` string.
+- **FIX 7 (BLOCKER, tests+materializer) equivalence contract.** `sigma_tau_artifact_hash` is now
+  OMITTED from provenance entirely (via conditional dict unpacking) rather than present with a
+  `null` value, when the calibration is inert -- so the "byte-identical to the code before this PR"
+  claim is a literal dict-key-set equality with the pre-artifact provenance, not merely "same
+  values, one extra null key". `tests/test_sigma_tau_calibration_serving_equivalence.py` was
+  strengthened to compare the FULL provenance dict (every key, via `==` on the whole parsed dict,
+  not selected fields) and the full `q_json`/`q_lcb_json`/`q_ucb_json` vectors; added rejection
+  antibodies for an artifact missing `oos_gate` entirely and one with a mismatched `tau_clock`
+  declaration.
+- **FIX 8 (HIGH, fitter) URI + read-only hardening.** `_connect_ro` now parses ANY `file:` URI via
+  `urllib.parse`, REJECTS an explicit non-`ro` mode (`mode=rw`/`mode=rwc`) rather than silently
+  overriding it, and unconditionally sets `PRAGMA query_only=ON` on the resulting connection as
+  defense-in-depth (verified: an `INSERT` against a `_connect_ro`-opened connection now raises
+  `sqlite3.OperationalError` even though the underlying file itself is writable).
+  `test_connect_ro_rejects_explicit_non_ro_mode` and `test_connect_ro_query_only_blocks_writes`
+  lock this (the double-wrap bug itself was already fixed in the third pass above).
+
+### Re-run `--validate 2026-07-21` after all eight fixes (live DB, read-only, 2026-07-28)
+
+```
+[sigma-tau] {'n_posteriors_read': 50188, 'n_settlements_read': 9592, 'n_joined_dedup': 19069,
+             'n_dropped_negative_lead': 0, 'n_final': 19069, 'n_joined_raw': 37852,
+             'n_dropped_unknown_city': 0, 'unknown_cities': [],
+             'n_dropped_computed_at_after_local_target_end': 975}
+[sigma-tau] validate cutoff=2026-07-21 clock=PRIMARY(issue-clock) n_train_rows=10810 n_val_rows=8259
+  C/high: n_events_train=341 n_events_val=194 global_k=1.657183 (normal_crosscheck=1.254361)
+    censored  oos_mean_loglik delta:+0.30448  GATE:PASS (margin required:0.01)
+    normal_xc oos_mean_loglik delta:+0.48883
+    global_k_only (no bucket/city indexing) oos_mean_loglik delta:+0.30618
+    coverage@68.3 (event-weighted) k=1:0.5955 fitted:0.7976
+  C/low: SKIP (n_events_train=42, n_events_val=31)
+  F/high: n_events_train=61 n_events_val=64 global_k=1.389635 (normal_crosscheck=0.992638)
+    censored  oos_mean_loglik delta:-0.11116  GATE:REJECT (margin required:0.01)
+    normal_xc oos_mean_loglik delta:-0.10406
+    global_k_only (no bucket/city indexing) oos_mean_loglik delta:-0.11116
+    coverage@68.3 (event-weighted) k=1:0.7212 fitted:0.8296
+  F/low: SKIP (n_events_train=10, n_events_val=11)
+[sigma-tau] validate cutoff=2026-07-21 clock=COMPARISON-ONLY(decision-clock) ...
+  C/high: ... delta:+0.30296  GATE:PASS   F/high: ... delta:-0.11831  GATE:REJECT
+```
+
+The FIX-5 population fence dropped 975 additional rows (`computed_at` after the LOCAL target end)
+relative to the pre-deep-review run, and switched the settlement source from the raw `settlements`
+table to `settlement_outcomes.authority='VERIFIED'` -- both tighten the training population toward
+the actual current-evidence serving population. C/high still clears the gate with a LARGER margin
+than before (+0.304 vs the pre-deep-review +0.194); F/high still correctly rejects. Production
+`--out` run (default internal date-blocked holdout gate, full corpus `n_final=19069`): C/high SHIPS
+`global_k=1.731717` (TRAIN-only coefficients, `censored_delta=+0.116`, comfortably above the 0.01
+margin); F/high, C/low, F/low all refuse (`fitted=False`, neutral `k=1.0`).
+
+### Test/verification summary after the eight fixes
+
+- `tests/test_sigma_tau_calibration_lookup.py`: 33 passed.
+- `tests/test_sigma_tau_calibration_serving_equivalence.py`: 6 passed.
+- `tests/test_fit_sigma_tau_calibration_fitter.py`: 32 passed.
+- Full regression (42 files importing `replacement_forecast_materializer`, 420 cases): 410 passed,
+  10 pre-existing failures identical to the unmodified main checkout at base `6ab72d274`
+  (5 schema-migration tests expecting a column already present in the base schema; 5 unrelated
+  AST/source-scan antibodies) -- zero regressions attributable to this work.
+- `ruff check`, `py_compile`, `git diff --check`: all clean.
