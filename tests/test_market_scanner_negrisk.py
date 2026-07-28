@@ -375,12 +375,12 @@ def test_feasibility_row_preserves_exchange_metadata_when_reused() -> None:
     assert book["neg_risk"] is True
 
 
-def test_feasibility_prefetch_falls_back_to_depth_bearing_direction() -> None:
+def test_feasibility_prefetch_uses_depth_bearing_current_direction() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
         """
-        CREATE TABLE execution_feasibility_evidence (
+        CREATE TABLE execution_feasibility_latest (
             token_id TEXT,
             direction TEXT,
             quote_seen_at TEXT,
@@ -394,7 +394,7 @@ def test_feasibility_prefetch_falls_back_to_depth_bearing_direction() -> None:
     )
     conn.executemany(
         """
-        INSERT INTO execution_feasibility_evidence (
+        INSERT INTO execution_feasibility_latest (
             token_id, direction, quote_seen_at, book_hash_before,
             best_bid_before, best_ask_before, depth_before_json, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -505,6 +505,48 @@ def test_feasibility_prefetch_uses_latest_without_history_scan() -> None:
     ]
     assert books["yes-token"]["hash"] == "hash-latest"
     assert history_reads == []
+
+
+def test_feasibility_prefetch_does_not_revive_append_history() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            token_id TEXT,
+            direction TEXT,
+            quote_seen_at TEXT,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence VALUES (
+            'yes-token', 'buy_yes', '2026-05-24T10:01:00+00:00',
+            'append-hash', 0.48, 0.52,
+            '{"bids":[],"asks":[{"price":"0.52","size":"10"}]}',
+            '2026-05-24T10:01:00+00:00'
+        )
+        """
+    )
+    outcome = {
+        "token_id": "yes-token",
+        "no_token_id": "no-token",
+        "condition_id": "cond-real",
+    }
+
+    books = _prefetch_selected_orderbooks_from_feasibility(
+        conn,
+        [(0, 0, 0, {}, outcome, "cond-real", "buy_yes")],
+        captured=datetime.fromisoformat("2026-05-24T10:01:01+00:00"),
+    )
+
+    assert books == {}
 
 
 def test_negrisk_child_active_false_accepting_true_capture_snapshot_admits() -> None:
