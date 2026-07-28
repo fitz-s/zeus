@@ -194,6 +194,29 @@ def test_capture_snapshot_account_read_failure_is_typed_without_retry():
     assert client.trade_reads == 1
 
 
+def test_restart_preflight_uses_separate_bounded_account_truth_deadline(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    monkeypatch.setenv(
+        "ZEUS_RESTART_RECOVERY_ACCOUNT_TRUTH_DEADLINE_SECONDS",
+        "61",
+    )
+
+    assert command_recovery._account_truth_snapshot_kwargs(
+        "restart_preflight"
+    ) == {"account_truth_deadline_seconds": "61"}
+    assert command_recovery._account_truth_snapshot_kwargs("live_tick") == {}
+    assert command_recovery._account_truth_snapshot_kwargs("boot_fast") == {}
+    monkeypatch.delenv(
+        "ZEUS_RESTART_RECOVERY_ACCOUNT_TRUTH_DEADLINE_SECONDS",
+    )
+    assert command_recovery._account_truth_snapshot_kwargs(
+        "restart_preflight"
+    ) == {"account_truth_deadline_seconds": "60.0"}
+
+
 def test_incomplete_account_truth_never_reaches_apply_or_mutates_db(tmp_path):
     from src.execution import venue_sync_contract as vsc
 

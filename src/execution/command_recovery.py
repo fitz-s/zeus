@@ -77,10 +77,31 @@ logger = logging.getLogger(__name__)
 _RECOVERY_LOCK_RETRY_DELAYS = (2.0, 5.0, 10.0)
 _LIVE_TICK_DB_BUDGET_SECONDS = 0.1
 _LIVE_TICK_DB_PROGRESS_OPCODES = 1_000
+_RESTART_ACCOUNT_TRUTH_DEADLINE_ENV = (
+    "ZEUS_RESTART_RECOVERY_ACCOUNT_TRUTH_DEADLINE_SECONDS"
+)
+_RESTART_ACCOUNT_TRUTH_DEADLINE_SECONDS = 60.0
 
 
 class _LiveTickDBBudgetExhausted(RuntimeError):
     pass
+
+
+def _account_truth_snapshot_kwargs(scope: str) -> dict[str, object]:
+    if scope != "restart_preflight":
+        return {}
+    # SCOPE=deploy-time restart recovery only. DRAIN=one complete,
+    # authoritative account orders+trades pagination before the shared
+    # bounded deadline. RESET=the next restart attempt starts a new snapshot;
+    # an incomplete read still raises and leaves every daemon stopped. The
+    # larger budget changes patience, never truth semantics.
+    return {
+        "account_truth_deadline_seconds": os.environ.get(
+            _RESTART_ACCOUNT_TRUTH_DEADLINE_ENV,
+            str(_RESTART_ACCOUNT_TRUTH_DEADLINE_SECONDS),
+        )
+    }
+
 
 # Venue status strings that indicate an order is no longer active
 # (cancelled / expired at the venue).
@@ -21606,6 +21627,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         order_ids=priming["order_ids"],
         idempotency_keys=priming["idempotency_keys"],
         condition_ids=priming["condition_ids"],
+        **_account_truth_snapshot_kwargs(scope),
     )
 
     # -- PHASE 3: APPLY (each pass on its own short bounded write connection) ---
