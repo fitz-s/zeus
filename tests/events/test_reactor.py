@@ -2077,6 +2077,97 @@ def test_global_batch_completed_economic_no_trade_consumes_current_epoch(verdict
     assert all(_processing_status(conn, event.event_id) == "processed" for event in events)
 
 
+@pytest.mark.parametrize(
+    (
+        "economic_cut_completed",
+        "expected_status",
+        "expected_retried",
+        "expected_rejected",
+    ),
+    (
+        (True, "processed", 0, 1),
+        (False, "pending", 1, 0),
+    ),
+)
+def test_global_batch_action_set_exhaustion_obeys_explicit_economic_cut(
+    economic_cut_completed,
+    expected_status,
+    expected_retried,
+    expected_rejected,
+):
+    conn, store = _store()
+    event = _forecast_event("global-action-set-exhausted", target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    reactor = _global_batch_probe_reactor(store, {})
+
+    def _batch(events, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        return GlobalBatchSubmitResult(
+            receipts={
+                item.event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=item.event_id,
+                    causal_snapshot_id=item.causal_snapshot_id,
+                    reason=(
+                        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+                        "families=0:candidates=1"
+                    ),
+                    proof_accepted=False,
+                )
+                for item in events
+            },
+            winner_event_id=None,
+            venue_submit_count=0,
+            economic_cut_completed=economic_cut_completed,
+        )
+
+    reactor._submit.process_global_batch = _batch
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert result.retried == expected_retried
+    assert result.rejected == expected_rejected
+    assert result.global_auction_completed_non_cancelled == int(
+        economic_cut_completed
+    )
+    assert _processing_status(conn, event.event_id) == expected_status
+    if economic_cut_completed:
+        terminal_reason = (
+            "GLOBAL_AUCTION_NO_TRADE:"
+            "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+            "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+            "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+            "families=0:candidates=1"
+        )
+        assert result.rejection_reasons == [terminal_reason]
+        assert conn.execute(
+            """
+            SELECT stage, reason_code
+            FROM decision_compile_failures
+            WHERE event_id = ?
+            """,
+            (event.event_id,),
+        ).fetchall() == [("EXECUTOR_EXPRESSIBILITY", terminal_reason)]
+        assert conn.execute(
+            """
+            SELECT rejection_stage, rejection_reason, regret_bucket
+            FROM no_trade_regret_events
+            WHERE event_id = ?
+            """,
+            (event.event_id,),
+        ).fetchall() == [
+            ("EXECUTOR_EXPRESSIBILITY", terminal_reason, "HONEST_MARKET")
+        ]
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM decision_compile_failures
+            WHERE event_id = ? AND reason_code LIKE 'UNKNOWN_REVIEW_REQUIRED%'
+            """,
+            (event.event_id,),
+        ).fetchone()[0] == 0
+
+
 def test_cancelled_global_batch_is_not_a_fairness_completion():
     conn, store = _store()
     event = _forecast_event("global-cancelled", target_date="2026-05-25")
@@ -2161,6 +2252,9 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
             receipts=receipts,
             winner_event_id=winner.event_id,
             venue_submit_count=1,
+            # Even a malformed adapter disposition must never rewrite a batch
+            # that crossed the venue side-effect boundary.
+            economic_cut_completed=True,
         )
 
     reactor._submit.process_global_batch = _batch
@@ -2184,7 +2278,14 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
             claim_generation,
             claim_attempt_count,
         )
-        calls.append((event.event_id, receipt.side_effect_status, wait_ms))
+        calls.append(
+            (
+                event.event_id,
+                receipt.side_effect_status,
+                receipt.reason,
+                wait_ms,
+            )
+        )
         if event.event_id == winner.event_id and winner_finalized:
             return True
         result.rejection_reasons.append("WORLD_WRITE_LOCK_BUSY_POST_SUBMIT")
@@ -2195,19 +2296,168 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
 
     result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=3)
 
+    assert result.global_auction_completed_non_cancelled == 0
     assert calls == (
         [
-            (winner.event_id, "VENUE_SUBMIT_ACKED", None),
-            (events[0].event_id, "NO_SUBMIT", 123),
+            (winner.event_id, "VENUE_SUBMIT_ACKED", "TEST_RECEIPT", None),
+            (events[0].event_id, "NO_SUBMIT", "TEST_RECEIPT", 123),
         ]
         if winner_finalized
-        else [(winner.event_id, "VENUE_SUBMIT_ACKED", None)]
+        else [
+            (winner.event_id, "VENUE_SUBMIT_ACKED", "TEST_RECEIPT", None)
+        ]
     )
     assert result.retried == (2 if winner_finalized else 3)
     assert result.rejection_reasons == [
         "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"
     ] * result.retried
     assert _processing_status(conn, events[1].event_id) == "processing"
+
+
+def test_global_batch_rejects_partial_side_effect_as_completed_economic_cut():
+    conn, store = _store()
+    events = (
+        _forecast_event("partial-side-effect-a", target_date="2026-05-25"),
+        _forecast_event("partial-side-effect-b", target_date="2026-05-25"),
+    )
+    for event in events:
+        store.insert_or_ignore(event)
+    reactor = _global_batch_probe_reactor(store, {})
+    observed = {}
+
+    def _batch(claimed, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        return GlobalBatchSubmitResult(
+            receipts={
+                claimed[0].event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=claimed[0].event_id,
+                    causal_snapshot_id=claimed[0].causal_snapshot_id,
+                    side_effect_status="POST_SUBMIT_UNKNOWN",
+                    venue_call_started=True,
+                    reason="SUBMIT_UNKNOWN_SIDE_EFFECT",
+                    proof_accepted=True,
+                ),
+                claimed[1].event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=claimed[1].event_id,
+                    causal_snapshot_id=claimed[1].causal_snapshot_id,
+                    reason=(
+                        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+                        "families=0:candidates=1"
+                    ),
+                    proof_accepted=False,
+                ),
+            },
+            winner_event_id=None,
+            venue_submit_count=0,
+            economic_cut_completed=True,
+        )
+
+    def _finalize(
+        event,
+        receipt,
+        *,
+        decision_time,
+        result,
+        wait_ms=None,
+        continuation_event=None,
+        claim_generation=None,
+        claim_attempt_count=None,
+    ):
+        del (
+            decision_time,
+            result,
+            wait_ms,
+            continuation_event,
+            claim_generation,
+            claim_attempt_count,
+        )
+        observed[event.event_id] = receipt.reason
+        return True
+
+    reactor._submit.process_global_batch = _batch
+    reactor._finalize_deferred_event_unit = _finalize
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=2)
+
+    assert result.global_auction_completed_non_cancelled == 0
+    assert set(observed) == {event.event_id for event in events}
+    assert set(observed.values()) == {
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        (
+            "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+            "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+            "families=0:candidates=1"
+        ),
+    }
+
+
+def test_global_batch_economic_cut_requires_durable_window_b_finalization():
+    conn, store = _store()
+    event = _forecast_event(
+        "economic-cut-window-b-lock",
+        target_date="2026-05-25",
+    )
+    store.insert_or_ignore(event)
+    reactor = _global_batch_probe_reactor(store, {})
+
+    def _batch(claimed, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        return GlobalBatchSubmitResult(
+            receipts={
+                item.event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=item.event_id,
+                    causal_snapshot_id=item.causal_snapshot_id,
+                    reason=(
+                        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+                        "families=0:candidates=1"
+                    ),
+                    proof_accepted=False,
+                )
+                for item in claimed
+            },
+            winner_event_id=None,
+            venue_submit_count=0,
+            economic_cut_completed=True,
+        )
+
+    def _window_b_lock(
+        claimed_event,
+        _receipt,
+        *,
+        decision_time,
+        result,
+        wait_ms=None,
+        continuation_event=None,
+        claim_generation=None,
+        claim_attempt_count=None,
+    ):
+        del (
+            decision_time,
+            wait_ms,
+            continuation_event,
+            claim_generation,
+            claim_attempt_count,
+        )
+        reactor._store.requeue_pending(
+            claimed_event.event_id,
+            last_error="WORLD_WRITE_LOCK_BUSY_POST_SUBMIT",
+        )
+        result.retried += 1
+        return False
+
+    reactor._submit.process_global_batch = _batch
+    reactor._finalize_deferred_event_unit = _window_b_lock
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert result.retried == 1
+    assert result.global_auction_completed_non_cancelled == 0
+    assert _processing_status(conn, event.event_id) == "pending"
 
 
 def test_global_batch_incomplete_receipt_coverage_fails_closed_for_whole_epoch():

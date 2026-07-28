@@ -1514,6 +1514,24 @@ class OpportunityEventReactor:
                 and batch_result.winner_event_id not in claimed_ids
             ):
                 raise ValueError("global batch winner is not a claimed event")
+            economic_cut_completed = bool(
+                batch_result.economic_cut_completed
+                and batch_result.winner_event_id is None
+                and batch_result.venue_submit_count == 0
+                and batch_result.next_claim_event is None
+                and batch_result.continuation_event is None
+                and all(
+                    not receipt.submitted
+                    and not receipt.venue_call_started
+                    and receipt.side_effect_status == "NO_SUBMIT"
+                    for receipt in batch_result.receipts.values()
+                )
+            )
+            if batch_result.economic_cut_completed and not economic_cut_completed:
+                logging.getLogger("zeus.events.reactor").error(
+                    "global adapter economic-cut disposition rejected: "
+                    "batch is not wholly side-effect free"
+                )
             if batch_result.next_claim_event is not None:
                 next_claim_event = batch_result.next_claim_event
                 claim_lock_bounced = (
@@ -1579,8 +1597,29 @@ class OpportunityEventReactor:
         # both returned True (no Window-B lock/requeue failure) AND did not
         # route through the unknown-exception dead-letter path.
         winner_finalized = True
+        all_claimed_finalized = True
         for event in finalization_events:
             receipt = batch_result.receipts[event.event_id]
+            if (
+                economic_cut_completed
+                and not _global_auction_economic_no_trade_is_terminal(
+                    str(receipt.reason or "")
+                )
+            ):
+                # The opaque adapter, not receipt text, owns whether the full
+                # current global action set reached a complete HOLD/CASH cut.
+                # Preserve the adapter's detailed exclusion reason behind the
+                # existing terminal economic verdict so Window B writes honest
+                # rejection/regret evidence and consumes this causal carrier.
+                # Fresh price/probability/fill/monitor events remain the reset.
+                receipt = dataclass_replace(
+                    receipt,
+                    reason=(
+                        "GLOBAL_AUCTION_NO_TRADE:"
+                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+                        f"{receipt.reason or 'ECONOMIC_CUT_COMPLETE'}"
+                    ),
+                )
             side_effect_possible = bool(
                 receipt.submitted
                 or receipt.venue_call_started
@@ -1604,6 +1643,7 @@ class OpportunityEventReactor:
                 )
                 result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
                 result.retried += 1
+                all_claimed_finalized = False
                 continue
             is_winner = (
                 batch_result.venue_submit_count == 1
@@ -1624,6 +1664,7 @@ class OpportunityEventReactor:
             )
             if not finalized:
                 finalization_lock_busy = True
+                all_claimed_finalized = False
             if is_winner:
                 winner_finalized = (
                     finalized
@@ -1640,7 +1681,7 @@ class OpportunityEventReactor:
                 else frozenset()
             ),
             auction_completed_non_cancelled=bool(
-                batch_result.economic_cut_completed
+                economic_cut_completed and all_claimed_finalized
             ),
         )
 
