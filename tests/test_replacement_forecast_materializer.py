@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-19
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Last reused/audited: 2026-07-28
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-19; last_reused=2026-07-28
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -815,6 +815,329 @@ def test_materializer_day0_observed_extreme_conditions_q_and_bounds(monkeypatch:
     assert q["warm"] > q["hot"]
     assert provenance["q_shape"] == "fused_day0_conditioned_normal"
     assert provenance["day0_conditioning"]["observed_extreme_c"] == 26.0
+
+
+def test_materializer_write_keeps_high_physical_frontier_on_same_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AWC HIGH31 remains absorbing when an older WU HIGH30 re-materializes the same cycle."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    awc = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=31.0,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        day0_observed_extreme_sample_count=12,
+    )
+    old_wu = replace(
+        awc,
+        computed_at=_dt(18, 10),
+        day0_observed_extreme_c=30.0,
+        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_observation_time=_dt(17, 45).isoformat(),
+        day0_observed_extreme_sample_count=10,
+    )
+    prepared = materializer_mod.prepare_replacement_forecast_live(conn, old_wu)
+    assert isinstance(prepared, materializer_mod.PreparedReplacementForecastMaterialization)
+
+    # The old WU worker computed from an earlier read snapshot. A delayed AWC
+    # writer commits the stronger, still-causal HIGH31 before that worker owns
+    # the writer lock; write_prepared must re-reduce and recompute rather than
+    # commit its stale HIGH30 payload.
+    assert materialize_replacement_forecast_live(conn, awc).ok is True
+    result = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+
+    assert result.ok is True
+    provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (result.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    assert provenance["day0_conditioning"]["observed_extreme_c"] == 31.0
+    assert provenance["day0_conditioning"]["source"] == "aviationweather_metar"
+    assert provenance["day0_conditioning"]["observation_time"] == _dt(17, 55).isoformat()
+
+    plateau = materialize_replacement_forecast_live(
+        conn,
+        replace(
+            awc,
+            computed_at=_dt(18, 15),
+            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+            day0_observed_extreme_sample_count=13,
+        ),
+    )
+    assert plateau.ok is True
+    plateau_provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (plateau.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    assert plateau_provenance["day0_conditioning"]["observed_extreme_c"] == 31.0
+    assert plateau_provenance["day0_conditioning"]["observation_time"] == _dt(18, 5).isoformat()
+
+    same_source_regression = materialize_replacement_forecast_live(
+        conn,
+        replace(
+            awc,
+            computed_at=_dt(18, 20),
+            day0_observed_extreme_c=30.0,
+            day0_observed_extreme_observation_time=_dt(18, 10).isoformat(),
+            day0_observed_extreme_sample_count=14,
+        ),
+    )
+    assert same_source_regression.ok is True
+    regression_provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (same_source_regression.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    assert regression_provenance["day0_conditioning"]["observed_extreme_c"] == 31.0
+    assert regression_provenance["day0_conditioning"]["observation_time"] == _dt(18, 5).isoformat()
+
+
+def test_materializer_readonly_keeps_low_physical_frontier_on_same_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AWC LOW19 remains absorbing when a causal readonly WU LOW20 request arrives."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    awc = replace(
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=19.0,
+            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+            day0_observed_extreme_sample_count=12,
+        ),
+        temperature_metric="low",
+        baseline_data_version="ecmwf_opendata_mn2t3_local_calendar_day_min",
+    )
+    same_source_regression = replace(
+        awc,
+        computed_at=_dt(18, 10),
+        day0_observed_extreme_c=20.0,
+        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+        day0_observed_extreme_sample_count=13,
+    )
+    prepared = materializer_mod.prepare_replacement_forecast_live(
+        conn,
+        same_source_regression,
+    )
+    assert isinstance(
+        prepared,
+        materializer_mod.PreparedReplacementForecastMaterialization,
+    )
+    assert materialize_replacement_forecast_live(conn, awc).ok is True
+
+    write_result = materializer_mod.write_prepared_replacement_forecast_live(
+        conn,
+        prepared,
+    )
+    assert write_result.ok is True
+    write_provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (write_result.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    assert write_provenance["day0_conditioning"]["observed_extreme_c"] == 19.0
+    assert write_provenance["day0_conditioning"]["observation_time"] == _dt(
+        17, 55
+    ).isoformat()
+
+    old_wu = replace(
+        awc,
+        computed_at=_dt(18, 15),
+        day0_observed_extreme_c=20.0,
+        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_observation_time=_dt(17, 45).isoformat(),
+        day0_observed_extreme_sample_count=10,
+    )
+    posterior = materializer_mod.compute_replacement_posterior_readonly(conn, old_wu)
+
+    assert posterior is not None
+    assert posterior.provenance_payload is not None
+    assert posterior.provenance_payload["day0_conditioning"]["observed_extreme_c"] == 19.0
+    assert posterior.provenance_payload["day0_conditioning"]["source"] == "aviationweather_metar"
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize(
+    ("metric", "baseline_data_version", "extreme"),
+    [
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 31.0),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 19.0),
+    ],
+)
+def test_materializer_blocks_future_day0_observation(
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+    baseline_data_version: str,
+    extreme: float,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    request = replace(
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=extreme,
+            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_observation_time=_dt(18, 30).isoformat(),
+            day0_observed_extreme_sample_count=12,
+        ),
+        temperature_metric=metric,
+        baseline_data_version=baseline_data_version,
+    )
+
+    result = materialize_replacement_forecast_live(conn, request)
+
+    assert result.ok is False
+    assert result.reason_codes == (
+        "REPLACEMENT_MATERIALIZATION_DAY0_OBSERVATION_AFTER_COMPUTED_AT",
+    )
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+
+
+def test_materializer_blocks_when_day0_frontier_ledger_read_fails() -> None:
+    class BrokenFrontierLedger:
+        def execute(self, sql, params):
+            del sql, params
+            raise sqlite3.DatabaseError("frontier ledger unavailable")
+
+    request = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=31.0,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+    )
+
+    result = materializer_mod._request_with_day0_physical_frontier(
+        BrokenFrontierLedger(),
+        request,
+        metric="high",
+    )
+
+    assert isinstance(result, materializer_mod.ReplacementForecastMaterializeResult)
+    assert result.reason_codes == (
+        "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED",
+    )
+
+
+def test_materializer_blocks_malformed_day0_frontier_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    first = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=31.0,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+    )
+    written = materialize_replacement_forecast_live(conn, first)
+    assert written.ok is True
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        ("{malformed", written.posterior_id),
+    )
+
+    result = materialize_replacement_forecast_live(
+        conn,
+        replace(
+            first,
+            computed_at=_dt(18, 10),
+            day0_observed_extreme_c=30.0,
+            day0_observed_extreme_source="wu_icao_history",
+            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+        ),
+    )
+
+    assert result.ok is False
+    assert result.reason_codes == (
+        "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID",
+    )
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 1
+
+
+def test_materializer_blocks_ledger_observation_after_its_own_compute_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    first = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=31.0,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+    )
+    written = materialize_replacement_forecast_live(conn, first)
+    assert written.ok is True
+    provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (written.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    provenance["day0_conditioning"]["observation_time"] = _dt(18, 5).isoformat()
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), written.posterior_id),
+    )
+
+    result = materialize_replacement_forecast_live(
+        conn,
+        replace(
+            first,
+            computed_at=_dt(18, 10),
+            day0_observed_extreme_c=30.0,
+            day0_observed_extreme_source="wu_icao_history",
+            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+        ),
+    )
+
+    assert result.ok is False
+    assert result.reason_codes == (
+        "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID",
+    )
+
+
+def test_materializer_ignores_malformed_pre_day0_frontier_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    pre_day0 = materialize_replacement_forecast_live(conn, _request())
+    assert pre_day0.ok is True
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        ("{malformed", pre_day0.posterior_id),
+    )
+
+    day0 = materialize_replacement_forecast_live(
+        conn,
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=31.0,
+            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        ),
+    )
+
+    assert day0.ok is True
+    provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (day0.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    assert provenance["day0_conditioning"]["observed_extreme_c"] == 31.0
 
 
 def test_materializer_hko_provisional_observation_does_not_truncate_support(

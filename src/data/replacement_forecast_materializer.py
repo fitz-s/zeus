@@ -519,6 +519,209 @@ def _day0_absorbing_observed_extreme_c(
     return value if finality in DAY0_ABSORBING_FINALITIES else None
 
 
+def _request_with_day0_physical_frontier(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> ReplacementForecastMaterializeRequest | ReplacementForecastMaterializeResult:
+    """Retain the causal Day0 physical frontier across re-materializations.
+
+    ``forecast_posteriors`` is the materializer's durable local ledger.  A
+    same-cycle re-materialization may improve model evidence, but it must not
+    reopen support that an earlier absorbing observation already removed.  The
+    reducer mirrors the canonical Day0 fact shape: HIGH takes MAX, LOW takes
+    MIN, and a plateau advances its observation clock only from the source
+    that owns the winning extreme.  Rows materialized after this request's
+    clock are excluded, so this guard cannot introduce look-ahead.
+    """
+    if metric not in {"high", "low"}:
+        return request
+
+    def blocked(reason: str) -> ReplacementForecastMaterializeResult:
+        # SCOPE: only this city/date/metric materialization.
+        # DRAIN: transient DB reads retry on the next materializer cycle; a
+        # malformed causal-window row stays family-scoped until the canonical
+        # forecast-DB repair rewrites or removes that exact row.
+        # RESET: the next complete causal-window ledger read returns the reduced
+        # request; pre-Day0 rows are outside this gate.
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=(reason,),
+            posterior_id=None,
+            anchor_id=None,
+            readiness_id=None,
+        )
+
+    try:
+        computed_at = _to_utc(request.computed_at, field_name="computed_at")
+    except ValueError:
+        return blocked("REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_CLOCK_INVALID")
+    target_local_day_start = compute_target_local_day_window_utc(
+        city_timezone=request.city_timezone,
+        target_local_date=date.fromisoformat(_date_text(request.target_date)),
+    ).start_utc
+
+    candidates: list[tuple[float, datetime | None, str, int | None, str | None]] = []
+    request_observed_extreme = _day0_observed_extreme_c(request)
+    request_observed_at = _day0_observed_extreme_time(request)
+    if request_observed_extreme is not None:
+        if request_observed_at is None:
+            return blocked(
+                "REPLACEMENT_MATERIALIZATION_DAY0_OBSERVATION_TIME_REQUIRED"
+            )
+        if request_observed_at > computed_at:
+            return blocked(
+                "REPLACEMENT_MATERIALIZATION_DAY0_OBSERVATION_AFTER_COMPUTED_AT"
+            )
+    request_extreme = _day0_absorbing_observed_extreme_c(request)
+    if request_extreme is not None:
+        candidates.append(
+            (
+                request_extreme,
+                request_observed_at,
+                str(request.day0_observed_extreme_source or ""),
+                request.day0_observed_extreme_sample_count,
+                request.day0_observed_extreme_unit,
+            )
+        )
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT provenance_json, computed_at
+              FROM forecast_posteriors
+             WHERE source_id = ?
+               AND city = ?
+               AND target_date = ?
+               AND temperature_metric = ?
+            """,
+            (SOURCE_ID, request.city, _date_text(request.target_date), metric),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return blocked("REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED")
+
+    from src.events.day0_authority import (  # noqa: PLC0415
+        DAY0_ABSORBING_FINALITIES,
+        day0_evidence_finality,
+    )
+
+    for row in rows:
+        try:
+            row_computed_at = _to_utc(
+                str(row["computed_at"] if hasattr(row, "keys") else row[1]),
+                field_name="persisted_posterior_computed_at",
+            )
+        except (TypeError, ValueError):
+            return blocked(
+                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
+            )
+        if (
+            row_computed_at < target_local_day_start
+            or row_computed_at > computed_at
+        ):
+            continue
+        raw_provenance = row["provenance_json"] if hasattr(row, "keys") else row[0]
+        try:
+            provenance = json.loads(str(raw_provenance or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return blocked(
+                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
+            )
+        if not isinstance(provenance, Mapping):
+            return blocked(
+                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
+            )
+        conditioning = provenance.get("day0_conditioning")
+        if conditioning is None:
+            continue
+        if not isinstance(conditioning, Mapping):
+            return blocked(
+                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
+            )
+        if conditioning.get("active") is not True:
+            continue
+        if str(conditioning.get("metric") or "").strip().lower() != metric:
+            return blocked(
+                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
+            )
+        source = str(conditioning.get("source") or "")
+        if (
+            day0_evidence_finality({"settlement_source": source})
+            not in DAY0_ABSORBING_FINALITIES
+        ):
+            return blocked(
+                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
+            )
+        try:
+            extreme = float(conditioning["observed_extreme_c"])
+            observed_at = _to_utc(
+                str(conditioning["observation_time"]),
+                field_name="persisted_day0_observation_time",
+            )
+        except (KeyError, TypeError, ValueError):
+            return blocked(
+                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
+            )
+        if (
+            not math.isfinite(extreme)
+            or observed_at > row_computed_at
+            or observed_at > computed_at
+        ):
+            return blocked(
+                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
+            )
+        sample_count_raw = conditioning.get("sample_count")
+        sample_count = (
+            int(sample_count_raw)
+            if isinstance(sample_count_raw, int)
+            else None
+        )
+        unit_raw = conditioning.get("unit")
+        candidates.append(
+            (
+                extreme,
+                observed_at,
+                source,
+                sample_count,
+                None if unit_raw is None else str(unit_raw),
+            )
+        )
+
+    if not candidates:
+        return request
+    frontier = min(item[0] for item in candidates) if metric == "low" else max(item[0] for item in candidates)
+    dominant = [item for item in candidates if item[0] == frontier]
+    winner = (
+        max(
+            (item for item in dominant if item[1] is not None),
+            key=lambda item: item[1],
+        )
+        if any(item[1] is not None for item in dominant)
+        else dominant[0]
+    )
+    winner_source = winner[2]
+    source_frontier = [
+        item
+        for item in candidates
+        if item[0] == frontier and item[2] == winner_source
+    ]
+    clock_owner = max(
+        source_frontier,
+        key=lambda item: item[1] or datetime.min.replace(tzinfo=UTC),
+    )
+    return replace(
+        request,
+        day0_observed_extreme_c=frontier,
+        day0_observed_extreme_source=winner_source or None,
+        day0_observed_extreme_observation_time=(
+            None if clock_owner[1] is None else clock_owner[1].isoformat()
+        ),
+        day0_observed_extreme_sample_count=clock_owner[3],
+        day0_observed_extreme_unit=clock_owner[4],
+    )
+
+
 def _target_local_day_has_started(
     request: ReplacementForecastMaterializeRequest,
     *,
@@ -5311,6 +5514,14 @@ def _validated_replacement_forecast_request(
             readiness_id=None,
         )
     request = _request_with_materialization_clock(conn, request)
+    frontier_request = _request_with_day0_physical_frontier(
+        conn,
+        request,
+        metric=metric,
+    )
+    if isinstance(frontier_request, ReplacementForecastMaterializeResult):
+        return frontier_request
+    request = frontier_request
     prewrite_reasons = _prewrite_block_reasons(request)
     if prewrite_reasons:
         return ReplacementForecastMaterializeResult(
@@ -5360,21 +5571,24 @@ def write_prepared_replacement_forecast_live(
 ) -> ReplacementForecastMaterializeResult:
     """Persist a prepared family after the caller revalidates its DB snapshot."""
 
-    request = prepared.request
-    metric = prepared.metric
-    monotone_reasons = _cycle_monotone_block_reasons(conn, request, metric=metric)
-    if monotone_reasons:
-        return ReplacementForecastMaterializeResult(
-            status="BLOCKED",
-            reason_codes=monotone_reasons,
-            posterior_id=None,
-            anchor_id=None,
-            readiness_id=None,
-        )
+    validated = _validated_replacement_forecast_request(conn, prepared.request)
+    if isinstance(validated, ReplacementForecastMaterializeResult):
+        return validated
+    request, metric = validated
     anchor_id = prepared.anchor_id
+    posterior = prepared.posterior
+    if request != prepared.request:
+        # The writer lock may observe a newly persisted causal Day0 frontier
+        # after the read snapshot was computed. Rebuild the pure payload against
+        # that frontier before it can be committed.
+        posterior = _compute_posterior_payload(
+            conn,
+            request,
+            metric=metric,
+            anchor_id=anchor_id if anchor_id is not None else -1,
+        )
     if anchor_id is None:
         anchor_id = _insert_anchor(conn, request, metric=metric)
-    posterior = prepared.posterior
     if not posterior.live_eligible:
         return ReplacementForecastMaterializeResult(
             status="BLOCKED",
