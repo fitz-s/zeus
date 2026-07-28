@@ -29,6 +29,7 @@ import functools
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import time
@@ -50,61 +51,193 @@ _CURRENT_TARGET_BUCKET_POOL_LOCK = Lock()
 _CURRENT_TARGET_BUCKET_POOL: object | None = None
 _CURRENT_TARGET_BUCKET_POOL_CYCLE: datetime | None = None
 _BPF_EXTRA_ROTATION_LOCK = Lock()
-_BPF_EXTRA_ROTATION_CYCLE: str | None = None
-_BPF_EXTRA_ROTATION_CURSOR = 0
+_BPF_EXTRA_ROTATION_SCHEMA_VERSION = 1
+_BPF_EXTRA_ROTATION_FILENAME = ".bpf_extra_rotation_cursor.json"
+
+
+def _bpf_extra_group_key(target: object) -> tuple[str, str]:
+    return (
+        str(getattr(target, "city")),
+        str(getattr(target, "target_date")),
+    )
+
+
+def _fsync_file(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _atomic_write_bpf_extra_rotation(
+    path: Path,
+    *,
+    cycle_key: str,
+    last_attempted_group: tuple[str, str],
+) -> None:
+    parent = path.parent
+    stable_parent = parent.parent
+    if not stable_parent.is_dir():
+        raise FileNotFoundError(
+            f"BPF extra rotation stable parent missing: {stable_parent}"
+        )
+    parent.mkdir(exist_ok=True)
+    _fsync_directory(stable_parent)
+    temporary = parent / f".{path.name}.tmp"
+    payload = {
+        "schema_version": _BPF_EXTRA_ROTATION_SCHEMA_VERSION,
+        "cycle": cycle_key,
+        "last_attempted_group": {
+            "city": last_attempted_group[0],
+            "target_date": last_attempted_group[1],
+        },
+    }
+    try:
+        temporary.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        _fsync_file(temporary)
+        os.replace(temporary, path)
+        _fsync_directory(parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _bpf_extra_rotation_start(
+    *,
+    state_path: Path | None,
+    cycle_key: str,
+    keys: tuple[tuple[str, str], ...],
+) -> tuple[int, str]:
+    if state_path is None:
+        return 0, "UNCONFIGURED"
+    if not state_path.is_file():
+        return 0, "MISSING"
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        logger.warning("BPF extra rotation cursor read failed: %s", exc)
+        return 0, "READ_FAILED"
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("BPF extra rotation cursor corrupt: %s", exc)
+        return 0, "CORRUPT"
+    try:
+        if (
+            not isinstance(payload, dict)
+            or int(payload.get("schema_version")) != _BPF_EXTRA_ROTATION_SCHEMA_VERSION
+        ):
+            raise ValueError("unsupported schema")
+        stored_cycle = str(payload["cycle"])
+        raw_group = payload["last_attempted_group"]
+        if not isinstance(raw_group, dict):
+            raise ValueError("last_attempted_group must be an object")
+        last_key = (str(raw_group["city"]), str(raw_group["target_date"]))
+        if not all(last_key):
+            raise ValueError("last_attempted_group fields must be non-empty")
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("BPF extra rotation cursor corrupt: %s", exc)
+        return 0, "CORRUPT"
+    if stored_cycle != cycle_key:
+        return 0, "CYCLE_RESET"
+    if last_key in keys:
+        return (keys.index(last_key) + 1) % len(keys), "RESUMED"
+    ordered = sorted(keys)
+    successor = next((key for key in ordered if key > last_key), ordered[0])
+    return keys.index(successor), "MEMBERSHIP_RECOVERED"
+
+
+def _bpf_extra_rotation_state_path(
+    cfg: Mapping[str, object],
+) -> Path | None:
+    explicit = cfg.get("bpf_extra_rotation_state_path")
+    if explicit not in (None, ""):
+        return Path(str(explicit))
+    seed_dir = cfg.get("seed_dir")
+    if seed_dir in (None, ""):
+        return None
+    return Path(str(seed_dir)).parent / _BPF_EXTRA_ROTATION_FILENAME
 
 
 def _rotate_bpf_extra_targets(
     targets: Sequence[object],
     *,
     cycle: datetime,
-) -> tuple[tuple[object, ...], int, int]:
+    state_path: Path | None,
+) -> tuple[tuple[object, ...], int, int, str]:
     """Start each bounded extras pass after the groups attempted last time."""
 
     grouped: dict[tuple[str, str], list[object]] = {}
     for target in targets:
-        key = (
-            str(getattr(target, "city")),
-            str(getattr(target, "target_date")),
-        )
+        key = _bpf_extra_group_key(target)
         grouped.setdefault(key, []).append(target)
     keys = tuple(grouped)
     if not keys:
-        return (), 0, 0
+        return (), 0, 0, "NO_TARGETS"
 
     cycle_key = cycle.astimezone(timezone.utc).isoformat()
-    global _BPF_EXTRA_ROTATION_CYCLE, _BPF_EXTRA_ROTATION_CURSOR
     with _BPF_EXTRA_ROTATION_LOCK:
-        if _BPF_EXTRA_ROTATION_CYCLE != cycle_key:
-            _BPF_EXTRA_ROTATION_CYCLE = cycle_key
-            _BPF_EXTRA_ROTATION_CURSOR = 0
-        start = _BPF_EXTRA_ROTATION_CURSOR % len(keys)
+        start, cursor_status = _bpf_extra_rotation_start(
+            state_path=state_path,
+            cycle_key=cycle_key,
+            keys=keys,
+        )
 
     rotated_keys = keys[start:] + keys[:start]
     return (
         tuple(target for key in rotated_keys for target in grouped[key]),
         start,
         len(keys),
+        cursor_status,
     )
 
 
 def _advance_bpf_extra_rotation(
     *,
     cycle: datetime,
-    start: int,
-    group_count: int,
+    rotated_targets: Sequence[object],
     attempted_group_count: int,
-) -> None:
-    if group_count <= 0:
-        return
+    state_path: Path | None,
+) -> dict[str, object]:
+    keys = tuple(dict.fromkeys(_bpf_extra_group_key(target) for target in rotated_targets))
+    if not keys:
+        return {"status": "NO_TARGETS"}
+    attempted = min(len(keys), max(1, int(attempted_group_count)))
+    last_key = keys[attempted - 1]
+    if state_path is None:
+        return {
+            "status": "UNCONFIGURED",
+            "last_attempted_group": last_key,
+        }
     cycle_key = cycle.astimezone(timezone.utc).isoformat()
-    global _BPF_EXTRA_ROTATION_CYCLE, _BPF_EXTRA_ROTATION_CURSOR
     with _BPF_EXTRA_ROTATION_LOCK:
-        if _BPF_EXTRA_ROTATION_CYCLE != cycle_key:
-            _BPF_EXTRA_ROTATION_CYCLE = cycle_key
-        _BPF_EXTRA_ROTATION_CURSOR = (
-            int(start) + max(1, int(attempted_group_count))
-        ) % int(group_count)
+        try:
+            _atomic_write_bpf_extra_rotation(
+                state_path,
+                cycle_key=cycle_key,
+                last_attempted_group=last_key,
+            )
+        except Exception as exc:  # noqa: BLE001 - download result remains authoritative
+            logger.warning("BPF extra rotation cursor write failed: %s", exc)
+            return {
+                "status": "WRITE_FAILED",
+                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+                "last_attempted_group": last_key,
+            }
+    return {
+        "status": "PERSISTED",
+        "last_attempted_group": last_key,
+    }
 
 
 def _close_current_target_bucket_pool(cycle: datetime | None = None) -> None:
@@ -662,9 +795,20 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             ))
         if not targets:
             return {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
-        rotated_targets, rotation_start, rotation_group_count = (
-            _rotate_bpf_extra_targets(targets, cycle=cycle)
+        rotation_state_path = _bpf_extra_rotation_state_path(cfg)
+        (
+            rotated_targets,
+            rotation_start,
+            rotation_group_count,
+            rotation_read_status,
+        ) = (
+            _rotate_bpf_extra_targets(
+                targets,
+                cycle=cycle,
+                state_path=rotation_state_path,
+            )
         )
+        download_error: Exception | None = None
         try:
             result = download_bayes_precision_fusion_extra_raw_inputs(
                 forecast_db=Path(str(forecast_db)),
@@ -673,33 +817,45 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 release_lag_hours=release_lag_hours,
                 max_wall_clock_seconds=max_wall_clock_seconds,
             )
-        except Exception:
-            _advance_bpf_extra_rotation(
-                cycle=cycle,
-                start=rotation_start,
-                group_count=rotation_group_count,
-                attempted_group_count=1,
-            )
-            raise
-        unattempted = max(
-            0,
-            int(result.get("timebox_unattempted_target_groups") or 0),
-        )
-        if bool(result.get("timeboxed_incomplete")):
-            attempted = max(rotation_group_count - unattempted, 1)
-        elif bool(result.get("transport_aborted_remaining_targets")):
+        except Exception as exc:
+            download_error = exc
+            result = {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
+                "error": str(exc),
+            }
             attempted = 1
         else:
-            attempted = rotation_group_count
-        _advance_bpf_extra_rotation(
+            unattempted = max(
+                0,
+                int(result.get("timebox_unattempted_target_groups") or 0),
+            )
+            if bool(result.get("timeboxed_incomplete")):
+                attempted = max(rotation_group_count - unattempted, 1)
+            elif bool(result.get("transport_aborted_remaining_targets")):
+                attempted = 1
+            else:
+                attempted = rotation_group_count
+        rotation_write = _advance_bpf_extra_rotation(
             cycle=cycle,
-            start=rotation_start,
-            group_count=rotation_group_count,
+            rotated_targets=rotated_targets,
             attempted_group_count=attempted,
+            state_path=rotation_state_path,
         )
         result["target_rotation_start"] = rotation_start
         result["target_rotation_group_count"] = rotation_group_count
         result["target_rotation_attempted_group_count"] = attempted
+        result["target_rotation_cursor_read_status"] = rotation_read_status
+        result["target_rotation_cursor_write_status"] = rotation_write["status"]
+        result["target_rotation_last_attempted_group"] = rotation_write.get(
+            "last_attempted_group"
+        )
+        if rotation_write.get("error"):
+            result["target_rotation_cursor_error"] = rotation_write["error"]
+        if download_error is not None:
+            logger.warning(
+                "BAYES_PRECISION_FUSION extra-model capture skipped (fail-soft): %s",
+                download_error,
+            )
         return result
     except Exception as exc:  # noqa: BLE001 - fail-soft: extras accrual never breaks the cycle
         logger.warning("BAYES_PRECISION_FUSION extra-model capture skipped (fail-soft): %s", exc)

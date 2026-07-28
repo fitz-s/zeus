@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: Relationship regression test for BAYES_PRECISION_FUSION extra-model capture wiring in src/main.py; guards against bare `date` NameError (BLOCKER 9) and verifies capture is gated by the edli flag.
 # Reuse: Run with pytest; update if the BAYES_PRECISION_FUSION extra-capture wiring or flag gate in src/main.py changes.
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-07-28
 # Authority basis: PR#400 review (src/main.py:4909 bare `date` NameError swallowed by
 #   fail-soft); CONTINUITY_AND_WIRING.md §4 step 2 + BAYES_PRECISION_FUSION_SPEC.md §6 F1 (BAYES_PRECISION_FUSION multi-model
 #   SHADOW capture gated by edli.replacement_0_1_bayes_precision_fusion_capture_enabled).
@@ -36,7 +36,10 @@ No network: the plan builder and the downstream downloader are both injected.
 """
 from __future__ import annotations
 
+import importlib
+import json
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -209,13 +212,16 @@ def test_target_date_iso_is_parseable_by_date_fromisoformat() -> None:
     assert date.fromisoformat(td) == date.today() + timedelta(days=2)
 
 
-def test_timeboxed_extra_capture_rotates_past_attempted_city_date_groups(
-    monkeypatch,
-) -> None:
-    cycle = datetime(2026, 7, 28, 6, tzinfo=timezone.utc)
-    monkeypatch.setattr(production, "_BPF_EXTRA_ROTATION_CYCLE", None)
-    monkeypatch.setattr(production, "_BPF_EXTRA_ROTATION_CURSOR", 0)
-    targets = tuple(
+def _rotation_targets(
+    groups: tuple[tuple[str, str, str], ...] = (
+        ("Amsterdam", "2026-07-29", "high"),
+        ("Amsterdam", "2026-07-29", "low"),
+        ("London", "2026-07-30", "high"),
+        ("London", "2026-07-30", "low"),
+        ("Paris", "2026-07-30", "high"),
+    ),
+) -> tuple[BayesPrecisionFusionDownloadTarget, ...]:
+    return tuple(
         BayesPrecisionFusionDownloadTarget(
             city=city,
             metric=metric,
@@ -225,21 +231,23 @@ def test_timeboxed_extra_capture_rotates_past_attempted_city_date_groups(
             longitude=0.0,
             timezone_name="UTC",
         )
-        for city, target_date, metric in (
-            ("Amsterdam", "2026-07-29", "high"),
-            ("Amsterdam", "2026-07-29", "low"),
-            ("London", "2026-07-30", "high"),
-            ("London", "2026-07-30", "low"),
-            ("Paris", "2026-07-30", "high"),
-        )
+        for city, target_date, metric in groups
     )
 
-    first, start, group_count = production._rotate_bpf_extra_targets(
+
+def test_rotation_cursor_persists_across_process_restart(tmp_path) -> None:
+    cycle = datetime(2026, 7, 28, 6, tzinfo=timezone.utc)
+    state_path = tmp_path / "replacement_forecast_live" / ".rotation.json"
+    targets = _rotation_targets()
+
+    first, start, group_count, read_status = production._rotate_bpf_extra_targets(
         targets,
         cycle=cycle,
+        state_path=state_path,
     )
     assert start == 0
     assert group_count == 3
+    assert read_status == "MISSING"
     assert [target.city for target in first] == [
         "Amsterdam",
         "Amsterdam",
@@ -248,18 +256,23 @@ def test_timeboxed_extra_capture_rotates_past_attempted_city_date_groups(
         "Paris",
     ]
 
-    production._advance_bpf_extra_rotation(
+    write = production._advance_bpf_extra_rotation(
         cycle=cycle,
-        start=start,
-        group_count=group_count,
+        rotated_targets=first,
         attempted_group_count=2,
+        state_path=state_path,
     )
-    second, second_start, _ = production._rotate_bpf_extra_targets(
+    assert write["status"] == "PERSISTED"
+
+    restarted = importlib.reload(production)
+    second, second_start, _, second_status = restarted._rotate_bpf_extra_targets(
         targets,
         cycle=cycle,
+        state_path=state_path,
     )
 
     assert second_start == 2
+    assert second_status == "RESUMED"
     assert [target.city for target in second] == [
         "Paris",
         "Amsterdam",
@@ -267,9 +280,254 @@ def test_timeboxed_extra_capture_rotates_past_attempted_city_date_groups(
         "London",
         "London",
     ]
-    reset, reset_start, _ = production._rotate_bpf_extra_targets(
+
+
+def test_rotation_recovers_by_stable_key_when_membership_or_order_changes(
+    tmp_path,
+) -> None:
+    cycle = datetime(2026, 7, 28, 6, tzinfo=timezone.utc)
+    state_path = tmp_path / "replacement_forecast_live" / ".rotation.json"
+    initial = _rotation_targets()
+    production._advance_bpf_extra_rotation(
+        cycle=cycle,
+        rotated_targets=initial,
+        attempted_group_count=2,
+        state_path=state_path,
+    )
+
+    reordered = _rotation_targets(
+        (
+            ("Shanghai", "2026-07-30", "high"),
+            ("London", "2026-07-30", "high"),
+            ("Amsterdam", "2026-07-29", "high"),
+            ("Paris", "2026-07-30", "high"),
+        )
+    )
+    rotated, start, _, status = production._rotate_bpf_extra_targets(
+        reordered,
+        cycle=cycle,
+        state_path=state_path,
+    )
+    assert status == "RESUMED"
+    assert start == 2
+    assert rotated[0].city == "Amsterdam"
+
+    without_london = tuple(
+        target for target in reordered if target.city != "London"
+    )
+    recovered, recovered_start, _, recovered_status = (
+        production._rotate_bpf_extra_targets(
+            without_london,
+            cycle=cycle,
+            state_path=state_path,
+        )
+    )
+    assert recovered_status == "MEMBERSHIP_RECOVERED"
+    assert recovered_start == 2
+    assert recovered[0].city == "Paris"
+
+
+def test_rotation_resets_on_cycle_change(tmp_path) -> None:
+    cycle = datetime(2026, 7, 28, 6, tzinfo=timezone.utc)
+    state_path = tmp_path / "replacement_forecast_live" / ".rotation.json"
+    targets = _rotation_targets()
+    production._advance_bpf_extra_rotation(
+        cycle=cycle,
+        rotated_targets=targets,
+        attempted_group_count=2,
+        state_path=state_path,
+    )
+
+    reset, reset_start, _, reset_status = production._rotate_bpf_extra_targets(
         targets,
         cycle=cycle + timedelta(hours=6),
+        state_path=state_path,
     )
     assert reset_start == 0
+    assert reset_status == "CYCLE_RESET"
     assert reset == targets
+
+
+def test_corrupt_rotation_cursor_is_truthful_and_does_not_block_download_order(
+    tmp_path,
+) -> None:
+    cycle = datetime(2026, 7, 28, 6, tzinfo=timezone.utc)
+    state_path = tmp_path / "replacement_forecast_live" / ".rotation.json"
+    state_path.parent.mkdir()
+    state_path.write_text("{not-json", encoding="utf-8")
+    targets = _rotation_targets()
+
+    rotated, start, _, status = production._rotate_bpf_extra_targets(
+        targets,
+        cycle=cycle,
+        state_path=state_path,
+    )
+
+    assert status == "CORRUPT"
+    assert start == 0
+    assert rotated == targets
+    write = production._advance_bpf_extra_rotation(
+        cycle=cycle,
+        rotated_targets=rotated,
+        attempted_group_count=1,
+        state_path=state_path,
+    )
+    assert write["status"] == "PERSISTED"
+    assert json.loads(state_path.read_text(encoding="utf-8"))[
+        "last_attempted_group"
+    ] == {"city": "Amsterdam", "target_date": "2026-07-29"}
+
+
+def test_rotation_cursor_atomic_write_fsyncs_before_and_after_replace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    state_path = tmp_path / "replacement_forecast_live" / ".rotation.json"
+    events: list[tuple[str, Path, Path | None]] = []
+    real_fsync_file = production._fsync_file
+    real_fsync_directory = production._fsync_directory
+    real_replace = production.os.replace
+
+    def _fsync_file(path):
+        events.append(("fsync_file", Path(path), None))
+        real_fsync_file(Path(path))
+
+    def _fsync_directory(path):
+        events.append(("fsync_directory", Path(path), None))
+        real_fsync_directory(Path(path))
+
+    def _replace(source, destination):
+        events.append(("replace", Path(source), Path(destination)))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(production, "_fsync_file", _fsync_file)
+    monkeypatch.setattr(production, "_fsync_directory", _fsync_directory)
+    monkeypatch.setattr(production.os, "replace", _replace)
+
+    production._atomic_write_bpf_extra_rotation(
+        state_path,
+        cycle_key="2026-07-28T06:00:00+00:00",
+        last_attempted_group=("Amsterdam", "2026-07-29"),
+    )
+
+    temporary = state_path.parent / f".{state_path.name}.tmp"
+    assert events == [
+        ("fsync_directory", tmp_path, None),
+        ("fsync_file", temporary, None),
+        ("replace", temporary, state_path),
+        ("fsync_directory", state_path.parent, None),
+    ]
+
+
+def test_durable_rotation_does_not_starve_tail_groups_across_restarts(
+    tmp_path,
+) -> None:
+    cycle = datetime(2026, 7, 28, 6, tzinfo=timezone.utc)
+    state_path = tmp_path / "replacement_forecast_live" / ".rotation.json"
+    targets = _rotation_targets(
+        tuple(
+            (city, "2026-07-30", "high")
+            for city in ("Amsterdam", "Buenos Aires", "London", "Shanghai")
+        )
+    )
+    attempted: list[str] = []
+
+    for _ in range(8):
+        rotated, _, _, _ = production._rotate_bpf_extra_targets(
+            targets,
+            cycle=cycle,
+            state_path=state_path,
+        )
+        attempted.append(rotated[0].city)
+        production._advance_bpf_extra_rotation(
+            cycle=cycle,
+            rotated_targets=rotated,
+            attempted_group_count=1,
+            state_path=state_path,
+        )
+
+    assert attempted[:4] == [
+        "Amsterdam",
+        "Buenos Aires",
+        "London",
+        "Shanghai",
+    ]
+    assert attempted[4:] == attempted[:4]
+
+
+@pytest.mark.parametrize("outcome", ("partial", "transport", "exception"))
+def test_partial_transport_and_exception_advance_one_durable_group(
+    tmp_path,
+    monkeypatch,
+    outcome,
+) -> None:
+    cycle = datetime(2026, 7, 28, 6, tzinfo=timezone.utc)
+    rows = [
+        _row(city=city, target_date="2026-07-30", covered=False)
+        for city in ("Amsterdam", "London", "Paris")
+    ]
+    monkeypatch.setattr(
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        lambda _db: _plan(rows),
+    )
+    monkeypatch.setattr(
+        production,
+        "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda: cycle,
+    )
+    monkeypatch.setattr(
+        dl_mod,
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0.0,
+    )
+    attempted_heads: list[str] = []
+
+    def _download(**kwargs):
+        attempted_heads.append(kwargs["targets"][0].city)
+        if outcome == "exception":
+            raise RuntimeError("injected transport exception")
+        if outcome == "partial":
+            return {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+                "timeboxed_incomplete": True,
+                "timebox_unattempted_target_groups": 2,
+            }
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "transport_aborted_remaining_targets": True,
+        }
+
+    monkeypatch.setattr(
+        dl_mod,
+        "download_bayes_precision_fusion_extra_raw_inputs",
+        _download,
+    )
+    cfg_dict = {
+        "forecast_db": tmp_path / "forecasts.db",
+        "seed_dir": tmp_path / "replacement_forecast_live" / "seeds",
+        "download_release_lag_hours": 14.0,
+    }
+
+    first = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg_dict
+    )
+    second = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg_dict
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first["target_rotation_attempted_group_count"] == 1
+    assert first["target_rotation_cursor_write_status"] == "PERSISTED"
+    assert attempted_heads == ["Amsterdam", "London"]
+    expected_status = (
+        "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED"
+        if outcome == "exception"
+        else (
+            "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
+            if outcome == "partial"
+            else "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+        )
+    )
+    assert first["status"] == expected_status
