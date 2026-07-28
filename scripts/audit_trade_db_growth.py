@@ -417,23 +417,34 @@ def _direct_snapshot_citations(conn: sqlite3.Connection) -> dict[str, object]:
                 """
             ).fetchone()[0]
         )
-        rows = conn.execute(
-            f"""
-            SELECT TRIM(CAST(ref."{column}" AS TEXT))
+        canonical_join = f"""
               FROM "{table}" AS ref
               JOIN executable_market_snapshots AS snapshot
                 ON snapshot.snapshot_id = TRIM(CAST(ref."{column}" AS TEXT))
              WHERE ref."{column}" IS NOT NULL
                AND TRIM(CAST(ref."{column}" AS TEXT)) != ''
+        """
+        cited_rows, distinct_snapshot_ids = conn.execute(
+            f"""
+            SELECT COUNT(*),
+                   COUNT(DISTINCT TRIM(CAST(ref."{column}" AS TEXT)))
+            {canonical_join}
             """
-        ).fetchall()
-        ids = [str(row[0]).strip() for row in rows if str(row[0] or "").strip()]
-        cited_ids.update(ids)
+        ).fetchone()
+        cited_ids.update(
+            str(row[0])
+            for row in conn.execute(
+                f"""
+                SELECT DISTINCT TRIM(CAST(ref."{column}" AS TEXT))
+                {canonical_join}
+                """
+            ).fetchall()
+        )
         per_source[table] = {
             "nonnull_rows": nonnull_rows,
-            "cited_rows": len(ids),
-            "distinct_snapshot_ids": len(set(ids)),
-            "noncanonical_or_legacy_rows": nonnull_rows - len(ids),
+            "cited_rows": int(cited_rows),
+            "distinct_snapshot_ids": int(distinct_snapshot_ids),
+            "noncanonical_or_legacy_rows": nonnull_rows - int(cited_rows),
         }
     return {
         "minimum_distinct_operational_snapshot_ids": len(cited_ids),
