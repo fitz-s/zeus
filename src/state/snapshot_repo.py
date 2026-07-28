@@ -1,12 +1,14 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-20
+# Last reused/audited: 2026-07-28
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
 #                  docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
-"""Append-only persistence for ExecutableMarketSnapshot.
+"""Value-tiered persistence for executable market snapshots.
 
-The executable snapshot table is the U1 bridge from discovery facts to command
-submission.  Rows are immutable: a later market read appends a new snapshot_id;
-it never edits the evidence a prior venue_command cited.
+The full executable snapshot table is the U1 bridge from discovery facts to
+command submission. Rows are immutable: a later market read appends a new
+snapshot_id; it never edits evidence a prior venue_command cited. Broad
+discovery also has a separate compact, append-only time-series that is never
+valid command/submit evidence.
 """
 
 from __future__ import annotations
@@ -27,7 +29,13 @@ from src.contracts.executable_market_snapshot import (
 SNAPSHOT_TABLE = "executable_market_snapshots"
 SNAPSHOT_LATEST_TABLE = "executable_market_snapshot_latest"
 SNAPSHOT_INVALIDATIONS_TABLE = "executable_market_snapshot_invalidations"
+SNAPSHOT_COMPACT_TABLE = "executable_market_snapshot_compact"
 ABSENT_ORDERBOOK_SIDE = "ABSENT"
+COMPACT_SCHEMA_VERSION = 1
+COMPACT_CAPTURE_TRIGGERS: frozenset[str] = frozenset({
+    "DISCOVERY_SWEEP",
+    "NEAR_THRESHOLD_MISS_BELOW_FLOOR",
+})
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +53,7 @@ CAPTURE_TRIGGER_TAXONOMY: frozenset[str] = frozenset({
     "JIT_SUBMIT",
     "DISCOVERY_SWEEP",
 })
+FULL_CAPTURE_TRIGGERS = CAPTURE_TRIGGER_TAXONOMY - COMPACT_CAPTURE_TRIGGERS
 
 
 def _snapshot_table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -156,6 +165,50 @@ def init_snapshot_schema(
               ON executable_market_snapshot_latest (no_token_id, captured_at DESC);
             """
         )
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS executable_market_snapshot_compact (
+              compact_id TEXT PRIMARY KEY,
+              condition_id TEXT NOT NULL,
+              selected_outcome_token_id TEXT NOT NULL,
+              captured_at TEXT NOT NULL,
+              raw_orderbook_hash TEXT NOT NULL,
+              orderbook_top_bid TEXT,
+              orderbook_top_ask TEXT,
+              depth_at_best_ask INTEGER NOT NULL DEFAULT 0,
+              spread_usd TEXT,
+              top_k_bids_json TEXT NOT NULL DEFAULT '[]',
+              top_k_asks_json TEXT NOT NULL DEFAULT '[]',
+              prev_hash TEXT,
+              hash_delta_ms INTEGER,
+              capture_trigger TEXT NOT NULL CHECK (
+                capture_trigger IN (
+                  'DISCOVERY_SWEEP',
+                  'NEAR_THRESHOLD_MISS_BELOW_FLOOR'
+                )
+              ),
+              schema_version INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_snapshot_compact_condition_captured
+              ON executable_market_snapshot_compact (condition_id, captured_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_snapshot_compact_token_captured
+              ON executable_market_snapshot_compact (
+                selected_outcome_token_id, captured_at DESC
+              );
+            CREATE TRIGGER IF NOT EXISTS no_update_executable_market_snapshot_compact
+            BEFORE UPDATE ON executable_market_snapshot_compact
+            BEGIN SELECT RAISE(
+              ABORT,
+              'executable_market_snapshot_compact is APPEND-ONLY (NC-NEW-B)'
+            ); END;
+            CREATE TRIGGER IF NOT EXISTS no_delete_executable_market_snapshot_compact
+            BEFORE DELETE ON executable_market_snapshot_compact
+            BEGIN SELECT RAISE(
+              ABORT,
+              'executable_market_snapshot_compact is APPEND-ONLY (NC-NEW-B)'
+            ); END;
+            """
+        )
         init_snapshot_invalidation_schema(conn)
     # PR 2: add microstructure transparency columns (idempotent ADD COLUMN).
     # spread_observed_window_ms deferred to follow-up PR (Finding #8 decision-a).
@@ -213,12 +266,13 @@ def insert_snapshot(
     """
 
     row = _row_from_snapshot(snapshot)
-    if capture_trigger is not None and capture_trigger not in CAPTURE_TRIGGER_TAXONOMY:
+    if capture_trigger is not None and capture_trigger not in FULL_CAPTURE_TRIGGERS:
         raise ValueError(
-            f"insert_snapshot: capture_trigger {capture_trigger!r} is not in the "
-            f"capture_policy_spec.md §2 taxonomy {sorted(CAPTURE_TRIGGER_TAXONOMY)}. "
+            f"insert_snapshot: capture_trigger {capture_trigger!r} is not full-eligible "
+            "in the capture-policy taxonomy "
+            f"{sorted(FULL_CAPTURE_TRIGGERS)}. "
             "The DB column is unconstrained (an O(rows) boot scan was avoided); the "
-            "taxonomy is enforced here at the write boundary."
+            "value tier is enforced here at the write boundary."
         )
     row["capture_trigger"] = capture_trigger
     conn.execute(
@@ -252,6 +306,79 @@ def insert_snapshot(
         row,
     )
     _upsert_latest_snapshot(conn, row)
+
+
+def insert_compact_snapshot(
+    conn: sqlite3.Connection,
+    snapshot: ExecutableMarketSnapshot,
+    *,
+    capture_trigger: str,
+    prev_hash: str | None = None,
+    hash_delta_ms: int | None = None,
+    top_k: int = 5,
+) -> str:
+    """Persist discovery-only scalar/hash evidence, never executable truth."""
+
+    if capture_trigger not in COMPACT_CAPTURE_TRIGGERS:
+        raise ValueError(
+            f"insert_compact_snapshot: capture_trigger {capture_trigger!r} is not "
+            f"compact-eligible {sorted(COMPACT_CAPTURE_TRIGGERS)}"
+        )
+    if top_k < 1:
+        raise ValueError("insert_compact_snapshot: top_k must be positive")
+    try:
+        orderbook = json.loads(snapshot.orderbook_depth_jsonb)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("insert_compact_snapshot: invalid orderbook JSON") from exc
+    if not isinstance(orderbook, dict):
+        raise ValueError("insert_compact_snapshot: orderbook must be an object")
+
+    bids = _compact_levels(orderbook.get("bids"), limit=top_k)
+    asks = _compact_levels(orderbook.get("asks"), limit=top_k)
+    top_bid = _decimal_text(snapshot.orderbook_top_bid)
+    top_ask = _decimal_text(snapshot.orderbook_top_ask)
+    spread_usd: str | None = None
+    if top_bid is not None and top_ask is not None:
+        spread_usd = str(Decimal(top_ask) - Decimal(top_bid))
+    compact_id = "emc2-" + hashlib.sha256(
+        "|".join(
+            (
+                snapshot.condition_id,
+                str(snapshot.selected_outcome_token_id or ""),
+                _dt(snapshot.captured_at),
+                snapshot.raw_orderbook_hash,
+                snapshot.snapshot_id,
+            )
+        ).encode("utf-8")
+    ).hexdigest()[:40]
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshot_compact (
+          compact_id, condition_id, selected_outcome_token_id, captured_at,
+          raw_orderbook_hash, orderbook_top_bid, orderbook_top_ask,
+          depth_at_best_ask, spread_usd, top_k_bids_json, top_k_asks_json,
+          prev_hash, hash_delta_ms, capture_trigger, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            compact_id,
+            snapshot.condition_id,
+            snapshot.selected_outcome_token_id,
+            _dt(snapshot.captured_at),
+            snapshot.raw_orderbook_hash,
+            top_bid,
+            top_ask,
+            int(snapshot.depth_at_best_ask or 0),
+            spread_usd,
+            json.dumps(bids, separators=(",", ":")),
+            json.dumps(asks, separators=(",", ":")),
+            prev_hash,
+            hash_delta_ms,
+            capture_trigger,
+            COMPACT_SCHEMA_VERSION,
+        ),
+    )
+    return compact_id
 
 
 def init_snapshot_invalidation_schema(conn: sqlite3.Connection) -> None:
@@ -766,6 +893,28 @@ def _decimal_or_absent_text(value: Decimal | None) -> str:
     if value is None:
         return ABSENT_ORDERBOOK_SIDE
     return str(value)
+
+
+def _decimal_text(value: Decimal | None) -> str | None:
+    return None if value is None else str(value)
+
+
+def _compact_levels(value: Any, *, limit: int) -> list[list[str]]:
+    if not isinstance(value, list):
+        return []
+    compact: list[list[str]] = []
+    for level in value[:limit]:
+        if isinstance(level, dict):
+            price = level.get("price")
+            size = level.get("size")
+        elif isinstance(level, (list, tuple)) and len(level) >= 2:
+            price, size = level[0], level[1]
+        else:
+            continue
+        if price is None or size is None:
+            continue
+        compact.append([str(price), str(size)])
+    return compact
 
 
 def _decimal_or_absent(value: Any) -> Decimal | None:

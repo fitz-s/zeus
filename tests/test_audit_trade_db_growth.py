@@ -30,6 +30,14 @@ def test_audit_uses_bounded_rowid_tail_without_mutating_db(tmp_path):
             tradeability_status_json TEXT NOT NULL,
             capture_trigger TEXT
         );
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            snapshot_id TEXT
+        );
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            decision_snapshot_id TEXT
+        );
         """
     )
     for row_id in range(1, 31):
@@ -54,6 +62,21 @@ def test_audit_uses_bounded_rowid_tail_without_mutating_db(tmp_path):
                 "PRIORITY_MARKER" if row_id % 2 else "DISCOVERY_SWEEP",
             ),
         )
+    conn.executemany(
+        "INSERT INTO venue_commands VALUES (?, ?)",
+        [
+            ("command-1", "snapshot-1"),
+            ("command-2", "snapshot-2"),
+            ("command-3", "snapshot-2"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, ?)",
+        [
+            ("position-1", "snapshot-2"),
+            ("position-2", "snapshot-3"),
+        ],
+    )
     conn.commit()
     before = conn.total_changes
     conn.close()
@@ -81,10 +104,21 @@ def test_audit_uses_bounded_rowid_tail_without_mutating_db(tmp_path):
         "DISCOVERY_SWEEP": 5,
         "PRIORITY_MARKER": 5,
     }
+    retention = report["snapshot_retention_evidence"]
+    assert retention["minimum_distinct_operational_snapshot_ids"] == 3
+    assert retention["sources"]["venue_commands"] == {
+        "cited_rows": 3,
+        "distinct_snapshot_ids": 2,
+    }
+    assert retention["sources"]["position_current"] == {
+        "cited_rows": 2,
+        "distinct_snapshot_ids": 2,
+    }
+    assert retention["minimum_direct_ref_fraction_of_rowid_high_watermark"] == 0.1
     assert report["tables"]["position_events"] == {"present": False}
 
     check = sqlite3.connect(db_path)
     assert check.total_changes == 0
     assert check.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0] == 30
     check.close()
-    assert before == 60
+    assert before == 65

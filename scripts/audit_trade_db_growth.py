@@ -64,6 +64,16 @@ TABLE_PROBES: Final[dict[str, TableProbe]] = {
             "captures should move to a bounded current projection plus keyframes."
         ),
     ),
+    "executable_market_snapshot_compact": TableProbe(
+        time_column="captured_at",
+        payload_columns=("top_k_bids_json", "top_k_asks_json"),
+        category_column="capture_trigger",
+        retention_class="discovery_scalar_hash_time_series",
+        rationale=(
+            "Compact rows are not executable truth; measure their growth against "
+            "full keyframes before selecting an epoch/rotation horizon."
+        ),
+    ),
     "book_hash_transitions": TableProbe(
         time_column="observed_at",
         retention_class="derived_transition_history",
@@ -241,6 +251,48 @@ def _probe_table(
     }
 
 
+def _direct_snapshot_citations(conn: sqlite3.Connection) -> dict[str, object]:
+    """Bounded operational refs that are provably load-bearing today.
+
+    This is a minimum set, not deletion authority: certificate payloads can
+    retain hashes or other causal bindings without a relational snapshot_id
+    column.
+    """
+
+    sources: list[tuple[str, str]] = []
+    for table, column in (
+        ("venue_commands", "snapshot_id"),
+        ("position_current", "decision_snapshot_id"),
+    ):
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if exists is None or column not in _table_columns(conn, table):
+            continue
+        sources.append((table, column))
+    per_source: dict[str, dict[str, int]] = {}
+    cited_ids: set[str] = set()
+    for table, column in sources:
+        rows = conn.execute(
+            f'SELECT "{column}" FROM "{table}" WHERE "{column}" IS NOT NULL'
+        ).fetchall()
+        ids = [str(row[0]).strip() for row in rows if str(row[0] or "").strip()]
+        cited_ids.update(ids)
+        per_source[table] = {
+            "cited_rows": len(ids),
+            "distinct_snapshot_ids": len(set(ids)),
+        }
+    return {
+        "minimum_distinct_operational_snapshot_ids": len(cited_ids),
+        "sources": per_source,
+        "scope": (
+            "minimum direct relational refs only; decision-certificate payload "
+            "bindings and offline evidence are not classified here"
+        ),
+    }
+
+
 def audit(path: Path, *, tail_rows: int) -> dict[str, object]:
     resolved = path.expanduser().resolve()
     if not resolved.is_file():
@@ -258,8 +310,24 @@ def audit(path: Path, *, tail_rows: int) -> dict[str, object]:
             )
             for table, spec in TABLE_PROBES.items()
         }
+        direct_snapshot_citations = _direct_snapshot_citations(conn)
+        snapshot_high_watermark = (
+            tables.get("executable_market_snapshots", {}).get(
+                "rowid_high_watermark"
+            )
+        )
+        direct_count = int(
+            direct_snapshot_citations[
+                "minimum_distinct_operational_snapshot_ids"
+            ]
+        )
+        if isinstance(snapshot_high_watermark, int) and snapshot_high_watermark > 0:
+            direct_snapshot_citations["minimum_direct_ref_fraction_of_rowid_high_watermark"] = round(
+                direct_count / snapshot_high_watermark,
+                8,
+            )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "method": "bounded_rowid_tail_v1",
         "authority": "read_only_diagnostic_not_retention_authority",
         "audited_at": datetime.now(timezone.utc).isoformat(),
@@ -272,10 +340,12 @@ def audit(path: Path, *, tail_rows: int) -> dict[str, object]:
         "freelist_bytes": page_size * freelist_count,
         "tail_rows": tail_rows,
         "tables": tables,
+        "snapshot_retention_evidence": direct_snapshot_citations,
         "method_limits": [
             "rowid high-water marks are upper bounds when rows were deleted",
             "tail samples estimate current write shape, not whole-history size",
             "no dbstat, whole-table count, vacuum, checkpoint, or mutation is run",
+            "direct snapshot refs are a lower bound and never authorize deletion",
         ],
     }
 

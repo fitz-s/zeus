@@ -333,6 +333,12 @@ scripts:
   audit_replay_fidelity.py: {class: read_only_evidence}
   audit_time_semantics.py: {class: read_only_evidence}
   automation_analysis.py: {class: read_only_evidence}
+  check_schema_fingerprint.py:
+    class: enforcement
+    canonical_command: "python3 scripts/check_schema_fingerprint.py"
+    reuse_when: "Any canonical world, forecasts, or trade schema DDL changes."
+    do_not_use_when: "Never treat a matching fingerprint as proof of live DB migration state."
+    required_tests: [tests/test_schema_fingerprint.py]
   backfill_cluster_taxonomy.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
   backfill_current_market_price_snapshots.py: {class: etl_writer}
   backfill_decision_events_from_artifact_json.py:

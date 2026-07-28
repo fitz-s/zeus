@@ -1200,7 +1200,7 @@ files:
   src/data/market_scanner.py:
     zone: K2_runtime
     authority_role: market_discovery
-    why: Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh accepts a per-row persist context so CLOB/network work stays outside the unified trade write lease. Raw book changes remain reconstructable from the immutable executable snapshot sequence; the scanner no longer duplicates each change into book_hash_transitions. Its direct market-events writer opens through the canonical shared cutover lease.
+    why: Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh accepts a per-row persist context so CLOB/network work stays outside the unified trade write lease. JIT, priority, first-seen, and periodic keyframe books persist as full executable evidence; ordinary broad discovery persists only scalar/hash/top-K compact evidence and can never authorize submit or recovery. Raw full-book changes remain reconstructable from immutable keyframes while compact rows carry their own prev-hash interval lineage; the scanner no longer duplicates each change into book_hash_transitions. Its direct market-events writer opens through the canonical shared cutover lease.
     write_routes:
     - runtime_trade_write_coordinator
     downstream:
@@ -2478,7 +2478,7 @@ files:
   src/state/snapshot_repo.py:
     zone: K2_runtime
     authority_role: executable_market_snapshot_journal
-    why: R3 U1 append-only executable market snapshot persistence and lookup surface; snapshots are immutable evidence for venue_commands. Also maintains executable_market_snapshot_latest as a compact trade-DB read model so hot refresh-priority paths do not scan the high-frequency append log. Market-channel tick/lifecycle changes append executable_market_snapshot_invalidations instead of mutating historical snapshot rows; live readers and submit gates reject invalidated rows until newer snapshot evidence exists.
+    why: R3 U1 append-only executable market snapshot persistence and lookup surface; full snapshots are immutable evidence for venue_commands. A separate append-only executable_market_snapshot_compact table stores discovery-only scalar/hash/top-K time-series and is never executable, command, recovery, held-position, or submit authority. The repo also maintains executable_market_snapshot_latest as a bounded full-evidence read model so hot refresh-priority paths do not scan the append log. Market-channel tick/lifecycle changes append executable_market_snapshot_invalidations instead of mutating historical snapshot rows; live readers and submit gates reject invalidated rows until newer full snapshot evidence exists.
     downstream:
     - src/state/venue_command_repo.py
     - src/execution/executor.py
