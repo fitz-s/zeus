@@ -509,6 +509,90 @@ def _latest_posterior_covers_target_cycle(
     return consumed_cycle is not None and consumed_cycle >= target_cycle
 
 
+def _day0_enqueue_owner_request_is_active(
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    target_cycle_iso: str,
+    seed_file: str,
+    identity: str,
+    as_of: datetime,
+) -> bool:
+    """Whether this exact Day0 enqueue owner still has a live queue request.
+
+    SCOPE: one (city, target_date, metric, target_cycle, seed_file, conditioning identity)
+    witness.  DRAIN: the materialization queue moves a completed/failed request out of requests
+    or inflight, and reclaims an abandoned claim after its subprocess timeout plus grace.  RESET:
+    once no matching request remains within that same bounded window, the caller may remove the
+    vanished marker and enqueue a replacement owner.  This prevents a normal seed-to-request move
+    from turning a running materializer into a stale owner while keeping a crashed queue from
+    ratcheting the marker forever.
+    """
+    try:
+        from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+            _STALE_CLAIM_GRACE_SECONDS,
+            _materialization_subprocess_timeout_seconds,
+        )
+        from src.data.replacement_forecast_production import (  # noqa: PLC0415
+            _replacement_forecast_live_materialization_queue_config,
+        )
+
+        cfg = _replacement_forecast_live_materialization_queue_config()
+        request_dir = cfg.get("request_dir")
+        inflight_dir = cfg.get("inflight_dir")
+        if request_dir is None:
+            return False
+        request_path = Path(str(request_dir))
+        inflight_path = (
+            Path(str(inflight_dir))
+            if inflight_dir is not None
+            else request_path.parent / "inflight"
+        )
+        timeout_s = (
+            float(_materialization_subprocess_timeout_seconds())
+            + float(_STALE_CLAIM_GRACE_SECONDS)
+        )
+    except Exception:
+        return False
+
+    expected_witness = {
+        "city": city,
+        "target_date": target_date,
+        "metric": metric,
+        "target_cycle_time": target_cycle_iso,
+        "seed_file": seed_file,
+        "conditioning_identity": identity,
+    }
+    candidates = [request_path / Path(seed_file).name]
+    if inflight_path.exists():
+        candidates.extend(inflight_path.glob(f"*/{Path(seed_file).name}"))
+    for request_file in candidates:
+        try:
+            payload = json.loads(request_file.read_text(encoding="utf-8"))
+            if not isinstance(payload, Mapping):
+                continue
+            witness = payload.get("day0_enqueue_owner_witness")
+            if not isinstance(witness, Mapping) or {
+                key: witness.get(key) for key in expected_witness
+            } != expected_witness:
+                continue
+            started_at = _parse_cycle(payload.get("computed_at"))
+            claim_path = request_file.parent / "_claim.json"
+            if claim_path.exists():
+                claim = json.loads(claim_path.read_text(encoding="utf-8"))
+                if isinstance(claim, Mapping):
+                    started_at = _parse_cycle(claim.get("claimed_at")) or started_at
+            if started_at is None:
+                started_at = datetime.fromtimestamp(request_file.stat().st_mtime, tz=UTC)
+            elapsed_s = (as_of.astimezone(UTC) - started_at).total_seconds()
+            if elapsed_s < timeout_s:
+                return True
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return False
+
+
 def _delete_missing_owned_cycle_advance_marker(
     conn: sqlite3.Connection,
     *,
@@ -721,6 +805,16 @@ def _already_enqueued(
             metric=metric,
             identity=incoming_identity,
             target_cycle_iso=target_cycle_iso,
+            as_of=decision_as_of,
+        ):
+            return True
+        if visible_seed_file is not None and _day0_enqueue_owner_request_is_active(
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            target_cycle_iso=target_cycle_iso,
+            seed_file=seed_file,
+            identity=incoming_identity,
             as_of=decision_as_of,
         ):
             return True

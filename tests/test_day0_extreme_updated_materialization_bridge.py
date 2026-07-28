@@ -117,6 +117,8 @@ def _queue_config(tmp_path: Path) -> dict[str, object]:
         "forecast_db": tmp_path / "forecasts.db",
         "seed_dir": tmp_path / "seeds",
         "raw_manifest_dir": tmp_path / "raw",
+        "request_dir": tmp_path / "requests",
+        "inflight_dir": tmp_path / "inflight",
     }
 
 
@@ -2250,6 +2252,123 @@ def test_cycle_poll_catches_up_every_new_day0_identity_on_one_model_cycle(
         as_of=datetime(2026, 7, 19, 5, 3, tzinfo=UTC),
     )
     conn.close()
+
+
+def test_cycle_poll_keeps_inflight_day0_owner_until_timeout_then_reenqueues(
+    tmp_path, monkeypatch
+) -> None:
+    """A consumed root seed remains owned while its exact request is running.
+
+    The poll runs much more often than a materializer may finish.  Its liveness
+    check must therefore see the queue's inflight witness, not mistake the
+    normal seed-to-request move for abandonment.  The queue's timeout window
+    is also the bounded reset: an owner left in-flight beyond that window can
+    be replaced instead of ratcheting the marker forever.
+    """
+    db_path = _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    payload = _day0_payload("2026-07-19T05:00:00+00:00")
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "_day0_observed_extreme_seed_payload",
+        lambda **_kwargs: dict(payload),
+    )
+    monkeypatch.setattr(cycle_advance, "freshest_materializable_cycle", lambda _conn: cycle)
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (cycle, ()),
+    )
+    fake_build_seed, calls = _fake_build_seed_factory()
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", fake_build_seed)
+
+    owned_seed = Path(cfg["seed_dir"]) / "consumed.enqueue-owner.json"
+    identity = cycle_advance._day0_conditioning_identity(
+        source=payload["day0_observed_extreme_source"],
+        observation_time=payload["day0_observed_extreme_observation_time"],
+        observed_extreme_c=payload["day0_observed_extreme_c"],
+        unit=payload["day0_observed_extreme_unit"],
+    )
+    assert identity is not None
+    conn = sqlite3.connect(db_path)
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle.isoformat(),
+        held_position=False,
+        seed_file=str(owned_seed),
+        reason="MISSING_LIVE_POSTERIOR",
+        day0_observed_extreme_observation_time=payload[
+            "day0_observed_extreme_observation_time"
+        ],
+        day0_observed_extreme_source=payload["day0_observed_extreme_source"],
+        day0_observed_extreme_c=payload["day0_observed_extreme_c"],
+        day0_observed_extreme_unit=payload["day0_observed_extreme_unit"],
+    )
+    conn.commit()
+    conn.close()
+
+    claim_dir = Path(cfg["inflight_dir"]) / "claimed-owner"
+    claim_dir.mkdir(parents=True)
+    (claim_dir / "_claim.json").write_text(
+        json.dumps({"claimed_at": "2026-07-19T05:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    (claim_dir / owned_seed.name).write_text(
+        json.dumps(
+            {
+                "computed_at": "2026-07-19T05:00:00+00:00",
+                "day0_enqueue_owner_witness": {
+                    "city": "Shanghai",
+                    "target_date": "2026-07-19",
+                    "metric": "high",
+                    "target_cycle_time": cycle.isoformat(),
+                    "seed_file": str(owned_seed),
+                    "conditioning_identity": identity,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    for seconds in (15, 30, 45):
+        report = cycle_advance.enqueue_cycle_advance_reseeds(
+            forecast_db=db_path,
+            seed_dir=cfg["seed_dir"],
+            raw_manifest_dir=cfg["raw_manifest_dir"],
+            computed_at=datetime(2026, 7, 19, 5, 0, seconds, tzinfo=UTC),
+            limit=1,
+            scopes=(("Shanghai", "2026-07-19", "high"),),
+            manifests=(),
+        )
+        assert report["seeds_enqueued"] == 0
+        assert report["already_enqueued"] == 1
+        assert _fetch_enqueue_row(db_path)["seed_file"] == str(owned_seed)
+    assert calls["count"] == 0
+
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=cfg["seed_dir"],
+        raw_manifest_dir=cfg["raw_manifest_dir"],
+        computed_at=datetime(2026, 7, 19, 5, 4, 31, tzinfo=UTC),
+        limit=1,
+        scopes=(("Shanghai", "2026-07-19", "high"),),
+        manifests=(),
+    )
+    marker = _fetch_enqueue_row(db_path)
+    assert report["seeds_enqueued"] == 1
+    assert calls["count"] == 1
+    assert marker["seed_file"] != str(owned_seed)
+    assert Path(marker["seed_file"]).is_file()
 
 
 def test_day0_extreme_bridge_not_configured_is_failsoft(monkeypatch) -> None:
