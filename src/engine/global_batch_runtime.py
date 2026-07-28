@@ -1957,13 +1957,15 @@ def _store_global_auction_receipt(
     )
     connection_key = _decision_log_connection_key(conn)
     with _GLOBAL_AUCTION_PAYLOAD_REFS_LOCK:
-        payload_ref = (
-            _stored_global_auction_payload_ref(
-                conn,
-                connection_key=connection_key,
-            )
-            if winner is None
-            else None
+        # Winner identity, economics, selection epoch, and receipt hash remain
+        # inline. The large candidate/holding/book components are equally
+        # content-addressed for trade and no-trade decisions, so forcing every
+        # winner to duplicate them adds no authority and dominated live DB
+        # growth. A restart, missing base, or failed hash check still emits a
+        # self-contained full anchor through the existing fallback below.
+        payload_ref = _stored_global_auction_payload_ref(
+            conn,
+            connection_key=connection_key,
         )
         if payload_ref is not None:
             compact_receipt = {

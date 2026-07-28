@@ -1567,7 +1567,28 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
         "SELECT mode FROM decision_log WHERE id = ?",
         (winner_row_id,),
     ).fetchone()["mode"]
-    assert winner_mode == "global_single_order_auction"
+    assert winner_mode == "global_single_order_auction_delta"
+    winner_summary = json.loads(
+        conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (winner_row_id,),
+        ).fetchone()["artifact_json"]
+    )["summary"]
+    assert winner_summary["winner_candidate_id"] == "winner"
+    assert winner_summary["payload_compacted"] is True
+    assert "candidate_evaluations_delta_zlib_b64" in winner_summary
+    assert winner_summary["payload_reference_decision_log_id"] == (
+        deleted_anchor_recovery_id
+    )
+    assert "candidate_evaluations_zlib_b64" not in winner_summary
+    assert "holding_auction_coverage_zlib_b64" not in winner_summary
+    assert "buy_minimum_marketable_repairs_zlib_b64" not in winner_summary
+    assert len(
+        conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (winner_row_id,),
+        ).fetchone()["artifact_json"]
+    ) < len(rows[0]["artifact_json"])
     conn.close()
 
 
