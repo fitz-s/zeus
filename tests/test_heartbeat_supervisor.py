@@ -930,14 +930,13 @@ def test_invalid_heartbeat_id_restarts_chain_in_same_tick():
     assert adapter.heartbeat_ids == ["", "id-1", ""]
 
 
-def test_invalid_heartbeat_id_error_body_is_not_treated_as_canonical_hint():
+def test_invalid_heartbeat_id_uses_server_canonical_hint():
     """RELATIONSHIP: venue invalid-id body -> heartbeat lease owner.
 
     A read timeout can leave the client holding the previous heartbeat id even
-    though the venue processed and rotated the token. Polymarket's 400 body
-    echoes the rejected id, so retrying that value extends the lease gap long
-    enough to cancel resting GTC/GTD orders. Recovery must restart the chain
-    with the empty bootstrap id in the same tick.
+    though the venue processed and rotated the token. Polymarket's heartbeat
+    contract returns the current canonical id in the 400 body; recovery must
+    retry that id rather than bootstrap another chain.
     """
     adapter = FakeHeartbeatAdapter([
         RuntimeError(
@@ -962,17 +961,17 @@ def test_invalid_heartbeat_id_error_body_is_not_treated_as_canonical_hint():
     assert recovered.last_invalid_id_at is not None
     assert recovered.lease_gap_suspected_until is not None
     assert supervisor.gate_for_order_type("GTC") is False
-    assert adapter.heartbeat_ids == ["persisted-stale", ""]
+    assert adapter.heartbeat_ids == ["persisted-stale", "server-current"]
 
 
-def test_invalid_heartbeat_id_empty_chain_recovery_failure_loses_lease():
+def test_invalid_heartbeat_id_hint_recovery_failure_loses_lease():
     adapter = FakeHeartbeatAdapter([
         RuntimeError(
             "PolyApiException[status_code=400, "
             "error_message={'heartbeat_id': 'stale-id', "
             "'error_msg': 'Invalid Heartbeat ID'}]"
         ),
-        RuntimeError("empty-chain retry timed out"),
+        RuntimeError("server-hint retry timed out"),
     ])
     supervisor = HeartbeatSupervisor(
         adapter,
@@ -984,12 +983,12 @@ def test_invalid_heartbeat_id_empty_chain_recovery_failure_loses_lease():
 
     assert lost.health is HeartbeatHealth.LOST
     assert lost.consecutive_failures == 2
-    assert lost.heartbeat_id == ""
-    assert "empty-chain recovery failed" in (lost.last_error or "")
+    assert lost.heartbeat_id == "stale-id"
+    assert "server-hint recovery failed" in (lost.last_error or "")
     assert lost.last_invalid_id_at is not None
     assert lost.lease_gap_suspected_until is not None
     assert supervisor.gate_for_order_type("GTC") is False
-    assert adapter.heartbeat_ids == ["stale-id", ""]
+    assert adapter.heartbeat_ids == ["stale-id", "stale-id"]
 
 
 def test_overlapping_heartbeat_ticks_do_not_reuse_same_heartbeat_id():
