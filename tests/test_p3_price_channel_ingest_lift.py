@@ -101,6 +101,27 @@ def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> Non
     assert pci.PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS <= 1000
 
 
+def test_user_channel_reconcile_gets_bounded_writer_handoff_budget() -> None:
+    from src.ingest import price_channel_ingest as pci
+
+    inbox = pci._edli_price_channel_world_write_gate(
+        owner="price_channel_user_inbox"
+    )
+    reconcile = pci._edli_price_channel_world_write_gate(
+        owner="price_channel_venue_reconcile"
+    )
+    coalescible_tick = pci._edli_price_channel_world_write_gate(
+        owner="price_channel_market_event"
+    )
+
+    assert inbox._deadline_ms == (
+        pci.PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS
+    )
+    assert reconcile._deadline_ms == inbox._deadline_ms
+    assert 200 <= inbox._deadline_ms <= 500
+    assert coalescible_tick._deadline_ms <= 25
+
+
 def test_quote_refresh_no_coverage_is_business_failure() -> None:
     from src.ingest import price_channel_ingest as pci
 

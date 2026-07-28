@@ -157,6 +157,7 @@ def _write_market_channel_continuity(payload: dict[str, object]) -> None:
     tmp.replace(target)
 PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 25
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
+PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS = 250
 PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 25
 PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS = 100
 PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS = 25
@@ -311,7 +312,19 @@ class _PriceChannelWriteGate:
 
 
 def _edli_price_channel_world_write_gate(*, owner: str) -> _PriceChannelWriteGate:
-    return _PriceChannelWriteGate(owner=owner, scope="world")
+    deadline_ms = (
+        PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS
+        if owner in {
+            "price_channel_user_inbox",
+            "price_channel_venue_reconcile",
+        }
+        else PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS
+    )
+    return _PriceChannelWriteGate(
+        owner=owner,
+        scope="world",
+        deadline_ms=deadline_ms,
+    )
 
 
 def _edli_price_channel_trade_write_gate(*, owner: str) -> _PriceChannelWriteGate:
