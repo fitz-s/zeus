@@ -1332,6 +1332,7 @@ def test_price_channel_redecision_world_writer_is_bounded_and_preopened(monkeypa
     timeout_ms = pci.PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS
     assert order == [
         "open",
+        "sql:PRAGMA wal_autocheckpoint=0",
         f"busy:{timeout_ms}",
         f"acquire:{timeout_ms / 1000.0}",
         "sql:BEGIN IMMEDIATE",
@@ -1347,6 +1348,10 @@ def test_price_channel_redecision_world_writer_defers_without_waiting(monkeypatc
     from src.state import db
 
     class Connection:
+        def execute(self, sql: str):
+            self.sql.append(sql)
+            return self
+
         def close(self) -> None:
             self.closed = True
 
@@ -1357,6 +1362,7 @@ def test_price_channel_redecision_world_writer_defers_without_waiting(monkeypatc
 
     conn = Connection()
     conn.closed = False
+    conn.sql = []
     mutex = BusyMutex()
     monkeypatch.setattr(db, "get_world_connection", lambda **_kwargs: conn)
     monkeypatch.setattr(
@@ -1375,6 +1381,7 @@ def test_price_channel_redecision_world_writer_defers_without_waiting(monkeypatc
             raise AssertionError("busy producer must not enter the write unit")
 
     assert mutex.timeout == pci.PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS / 1000.0
+    assert conn.sql == ["PRAGMA wal_autocheckpoint=0"]
     assert conn.closed is True
 
 
