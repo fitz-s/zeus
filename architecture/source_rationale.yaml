@@ -1339,7 +1339,7 @@ files:
   src/venue/polymarket_v2_adapter.py:
     zone: K2_runtime
     authority_role: v2_venue_adapter
-    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects prices outside [0.05,0.95] before any SDK submit contact. Its account-truth read fully paginates orders then trades through one authenticated HTTP client, one server timestamp, endpoint-specific signatures, and one monotonic wall-clock deadline; incomplete transport or page truth never becomes an empty-account fact. A synchronous CLOB 425 `order manager not ready, please retry` response is a deterministic whole-request rejection for both single and batch submission, while transport failures and unrecognized post-sign exceptions remain ambiguous.
+    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects prices outside [0.05,0.95] before any SDK submit contact. Its account-truth read fully paginates orders then trades through one authenticated HTTP client, one server timestamp, endpoint-specific signatures, and one monotonic wall-clock deadline; incomplete transport or page truth never becomes an empty-account fact. Its chain collateral surface reads pUSD balance plus both executable allowances in one exact JSON-RPC batch, rejecting partial or duplicate response identities. A synchronous CLOB 425 `order manager not ready, please retry` response is a deterministic whole-request rejection for both single and batch submission, while transport failures and unrecognized post-sign exceptions remain ambiguous.
     downstream:
     - src/execution/executor.py
     - src/data/polymarket_client.py
@@ -3137,7 +3137,7 @@ files:
   src/execution/post_trade_capital.py:
     zone: K2_runtime
     authority_role: post_trade_capital_lifecycle_lane
-    why: P4 post-trade capital lane; owns chain-sync READ, settlement harvester, redeem/wrap state-machine pollers, and preserves no sell-order submission in this process.
+    why: P4 post-trade capital lane; owns chain-sync READ, settlement harvester, redeem/wrap state-machine pollers, and preserves no sell-order submission in this process. Its cold-process pUSD heartbeat prefers one authoritative chain batch for balance plus both allowances, then uses the existing bounded CLOB fallback without weakening DEGRADED fail-closed semantics.
     downstream:
     - src/ingest/post_trade_capital_daemon.py
   src/ingest/post_trade_capital_daemon.py:

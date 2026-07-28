@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 
 import pytest
 
@@ -16,9 +18,15 @@ def test_post_trade_collateral_refresh_publishes_pusd_without_ctf_enumeration(
     calls = {"pusd": 0, "full": 0}
 
     class _Adapter:
-        def get_pusd_collateral_payload(self, *, refresh_allowance=True):
+        def get_pusd_collateral_payload(
+            self,
+            *,
+            refresh_allowance=False,
+            allow_chain_allowance_fallback=True,
+        ):
             calls["pusd"] += 1
-            assert refresh_allowance is True
+            assert refresh_allowance is False
+            assert allow_chain_allowance_fallback is True
             return {
                 "pusd_balance_micro": 12_000_000,
                 "pusd_allowance_micro": 12_000_000,
@@ -66,7 +74,7 @@ def test_post_trade_collateral_refresh_publishes_pusd_without_ctf_enumeration(
 
     assert calls == {"pusd": 1, "full": 0}
     assert row is not None
-    assert row[0] == "CHAIN"
+    assert row[0] == "VENUE"
     assert row[1] == 12_000_000
     assert row[2] == 12_000_000
     assert json.loads(row[3]) == {}
@@ -115,7 +123,14 @@ def test_post_trade_collateral_refresh_dual_writes_wallet_balance_head(
     class _Adapter:
         funder_address = "0xFUNDER"
 
-        def get_pusd_collateral_payload(self, *, refresh_allowance=True):
+        def get_pusd_collateral_payload(
+            self,
+            *,
+            refresh_allowance=False,
+            allow_chain_allowance_fallback=True,
+        ):
+            assert refresh_allowance is False
+            assert allow_chain_allowance_fallback is True
             return {
                 "pusd_balance_micro": 5_000_000,
                 "pusd_allowance_micro": 6_000_000,
@@ -158,7 +173,137 @@ def test_post_trade_collateral_refresh_dual_writes_wallet_balance_head(
         conn.close()
 
     assert count == 1
-    assert row == ("0xFUNDER", "PUSD", 5_000_000, 6_000_000, "CLOB", "CHAIN")
+    assert row == ("0xFUNDER", "PUSD", 5_000_000, 6_000_000, "CLOB", "VENUE")
+
+
+def test_post_trade_collateral_refresh_prefers_one_chain_batch(
+    monkeypatch,
+    tmp_path,
+):
+    from src.execution import post_trade_capital
+
+    db_path = tmp_path / "trades.db"
+    calls = {"chain": 0, "clob": 0}
+
+    class _Adapter:
+        funder_address = "0xFUNDER"
+
+        def get_chain_pusd_collateral_payload(self):
+            calls["chain"] += 1
+            return {
+                "pusd_balance_micro": 7_000_000,
+                "pusd_allowance_micro": 8_000_000,
+                "authority_tier": "CHAIN",
+                "pusd_balance_source": "CHAIN",
+            }
+
+        def get_pusd_collateral_payload(self, **_kwargs):  # pragma: no cover - tripwire
+            calls["clob"] += 1
+            raise AssertionError("authoritative chain batch must bypass CLOB collateral cache")
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            assert kwargs["public_http_timeout"] == 20.0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def _ensure_v2_adapter(self):
+            return _Adapter()
+
+    monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: db_path)
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", _Client)
+
+    post_trade_capital.collateral_snapshot_refresh_cycle()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        snapshot = conn.execute(
+            """
+            SELECT authority_tier, pusd_balance_micro, pusd_allowance_micro
+              FROM collateral_ledger_snapshots
+             ORDER BY id DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        head = conn.execute(
+            """
+            SELECT source, authority_tier, balance_micro, allowance_micro
+              FROM wallet_balance_head
+             WHERE wallet = '0xFUNDER' AND asset = 'PUSD'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert calls == {"chain": 1, "clob": 0}
+    assert snapshot == ("CHAIN", 7_000_000, 8_000_000)
+    assert head == ("CHAIN", "CHAIN", 7_000_000, 8_000_000)
+
+
+def test_post_trade_collateral_timeout_worker_cannot_persist_after_deadline(
+    monkeypatch,
+    tmp_path,
+):
+    from src.execution import post_trade_capital
+
+    db_path = tmp_path / "trades.db"
+    release = threading.Event()
+
+    class _Adapter:
+        funder_address = "0xFUNDER"
+
+        def get_chain_pusd_collateral_payload(self):
+            assert release.wait(timeout=1.0)
+            return {
+                "pusd_balance_micro": 9_000_000,
+                "pusd_allowance_micro": 9_000_000,
+                "authority_tier": "CHAIN",
+                "pusd_balance_source": "CHAIN",
+            }
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def _ensure_v2_adapter(self):
+            return _Adapter()
+
+    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: db_path)
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", _Client)
+    monkeypatch.setattr(post_trade_capital, "_post_trade_collateral_deadline_seconds", lambda: 0.01)
+    timer = threading.Timer(0.05, release.set)
+    timer.start()
+    try:
+        with pytest.raises(TimeoutError):
+            post_trade_capital.collateral_snapshot_refresh_cycle()
+    finally:
+        timer.join(timeout=1.0)
+    time.sleep(0.05)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        snapshot_count = conn.execute(
+            "SELECT COUNT(*) FROM collateral_ledger_snapshots"
+        ).fetchone()[0]
+        head_table_count = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='wallet_balance_head'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert snapshot_count == 0
+    assert head_table_count == 0
 
 
 def test_post_trade_collateral_refresh_second_cycle_overwrites_head_in_place(
@@ -174,7 +319,14 @@ def test_post_trade_collateral_refresh_second_cycle_overwrites_head_in_place(
     class _Adapter:
         funder_address = "0xFUNDER"
 
-        def get_pusd_collateral_payload(self, *, refresh_allowance=True):
+        def get_pusd_collateral_payload(
+            self,
+            *,
+            refresh_allowance=False,
+            allow_chain_allowance_fallback=True,
+        ):
+            assert refresh_allowance is False
+            assert allow_chain_allowance_fallback is True
             return {
                 "pusd_balance_micro": balances["value"],
                 "pusd_allowance_micro": balances["value"],
@@ -232,7 +384,14 @@ def test_post_trade_collateral_refresh_head_upsert_failure_does_not_break_cycle(
     class _Adapter:
         funder_address = "0xFUNDER"
 
-        def get_pusd_collateral_payload(self, *, refresh_allowance=True):
+        def get_pusd_collateral_payload(
+            self,
+            *,
+            refresh_allowance=False,
+            allow_chain_allowance_fallback=True,
+        ):
+            assert refresh_allowance is False
+            assert allow_chain_allowance_fallback is True
             return {
                 "pusd_balance_micro": 1_000_000,
                 "pusd_allowance_micro": 1_000_000,

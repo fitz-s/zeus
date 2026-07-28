@@ -1623,6 +1623,71 @@ class PolymarketV2Adapter:
             raise V2AdapterError("balance allowance response missing balance")
         return balance
 
+    def get_chain_pusd_collateral_payload(self) -> dict[str, Any]:
+        """Read pUSD balance and both executable allowances in one chain snapshot.
+
+        The post-trade collateral heartbeat is a cold child process. Reusing one
+        JSON-RPC request for all three ERC-20 facts avoids three independent TLS
+        handshakes while preserving chain authority and one response boundary.
+        """
+
+        if not self.polygon_rpc_url:
+            raise V2ReadUnavailable("polygon RPC is required for chain pUSD collateral truth")
+        collateral, spenders = _collateral_allowance_contracts(self.chain_id)
+        calls = [
+            (
+                "eth_call",
+                [
+                    {
+                        "to": collateral,
+                        "data": "0x70a08231" + _abi_address(self.funder_address),
+                    },
+                    "latest",
+                ],
+            ),
+            *[
+                (
+                    "eth_call",
+                    [
+                        {
+                            "to": collateral,
+                            "data": (
+                                "0xdd62ed3e"
+                                + _abi_address(self.funder_address)
+                                + _abi_address(spender)
+                            ),
+                        },
+                        "latest",
+                    ],
+                )
+                for spender in spenders
+            ],
+        ]
+        values = _json_rpc_batch_call(
+            self.polygon_rpc_url,
+            calls,
+            timeout_seconds=self._network_timeout(20.0),
+        )
+        if len(values) != 3:
+            raise V2AdapterError(
+                f"polygon collateral batch returned {len(values)} results; expected 3"
+            )
+        balance, exchange_allowance, neg_risk_allowance = (
+            _uint256_hex_data_int(value, context="polygon collateral batch")
+            for value in values
+        )
+        return {
+            "pusd_balance_micro": balance,
+            "pusd_allowance_micro": min(exchange_allowance, neg_risk_allowance),
+            "usdc_e_legacy_balance_micro": 0,
+            "ctf_token_balances_units": {},
+            "ctf_token_allowances_units": {},
+            "authority_tier": "CHAIN",
+            "signature_type": self.signature_type,
+            "pusd_balance_source": "CHAIN",
+            "pusd_allowance_source": "chain_erc20_batch",
+        }
+
     def _pusd_collateral_payload_from_raw(
         self,
         raw: dict[str, Any],
@@ -3109,6 +3174,84 @@ def _json_rpc_call(
     if "error" in decoded:
         raise V2AdapterError(f"polygon rpc error: {decoded['error']}")
     return decoded.get("result")
+
+
+def _json_rpc_batch_call(
+    rpc_url: str,
+    calls: list[tuple[str, list[Any]]],
+    *,
+    timeout_seconds: float = 20.0,
+) -> list[Any]:
+    """Execute one ordered JSON-RPC batch and reject partial/ambiguous truth."""
+
+    _assert_no_world_mutex_held_for_io("onchain.batch")
+    if not calls:
+        return []
+    payload = json.dumps(
+        [
+            {"jsonrpc": "2.0", "id": index, "method": method, "params": params}
+            for index, (method, params) in enumerate(calls, start=1)
+        ],
+        separators=(",", ":"),
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        rpc_url,
+        data=payload,
+        headers={
+            "content-type": "application/json",
+            "user-agent": "zeus-readonly/1.0",
+        },
+    )
+    with urllib.request.urlopen(
+        request,
+        timeout=max(0.01, float(timeout_seconds)),
+    ) as response:
+        decoded = json.loads(response.read())
+    if not isinstance(decoded, list):
+        raise V2AdapterError("polygon rpc batch returned non-list payload")
+    by_id: dict[int, Any] = {}
+    for item in decoded:
+        if not isinstance(item, dict):
+            raise V2AdapterError("polygon rpc batch returned non-object item")
+        if item.get("jsonrpc") != "2.0":
+            raise V2AdapterError("polygon rpc batch returned invalid jsonrpc version")
+        response_id = item.get("id")
+        if type(response_id) is not int or response_id in by_id:
+            raise V2AdapterError("polygon rpc batch returned invalid or duplicate id")
+        if "error" in item:
+            raise V2AdapterError(f"polygon rpc batch error id={response_id}: {item['error']}")
+        if "result" not in item:
+            raise V2AdapterError(f"polygon rpc batch missing result id={response_id}")
+        result = item["result"]
+        _hex_data_bytes(result, context=f"polygon rpc batch id={response_id}")
+        by_id[response_id] = result
+    expected_ids = set(range(1, len(calls) + 1))
+    if set(by_id) != expected_ids:
+        raise V2AdapterError(
+            f"polygon rpc batch incomplete ids={sorted(by_id)} expected={sorted(expected_ids)}"
+        )
+    return [by_id[index] for index in range(1, len(calls) + 1)]
+
+
+def _hex_data_bytes(value: Any, *, context: str) -> bytes:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("0x")
+        or len(value) <= 2
+        or len(value[2:]) % 2 != 0
+    ):
+        raise V2AdapterError(f"{context} invalid hex data")
+    try:
+        return bytes.fromhex(value[2:])
+    except ValueError as exc:
+        raise V2AdapterError(f"{context} invalid hex data") from exc
+
+
+def _uint256_hex_data_int(value: Any, *, context: str) -> int:
+    raw = _hex_data_bytes(value, context=context)
+    if len(raw) != 32:
+        raise V2AdapterError(f"{context} expected 32-byte uint256 result")
+    return int.from_bytes(raw, "big")
 
 
 def _normalize_condition_id_bytes32(condition_id: str) -> bytes:

@@ -384,6 +384,11 @@ def _edli_price_channel_world_write_connection(*, owner: str):
     from src.state.db import get_world_connection
 
     conn = get_world_connection(write_class=None)
+    # The live scheduler owns WAL checkpoints on a dedicated PASSIVE
+    # connection. A commit-triggered auto-checkpoint here would run while this
+    # producer holds the global WORLD mutex, turning a small durable event write
+    # into a multi-writer outage on the append-heavy world DB.
+    conn.execute("PRAGMA wal_autocheckpoint=0")
     _bound_price_channel_sqlite_wait(
         conn,
         timeout_ms=PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS,
