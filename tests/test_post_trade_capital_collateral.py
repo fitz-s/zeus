@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Protect deadline-bounded, single-batch authoritative collateral refresh.
+# Reuse: Run when collateral chain reads, timeout isolation, or wallet-head writes change.
+
 import json
 import sqlite3
 import threading
