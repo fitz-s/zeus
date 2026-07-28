@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -253,6 +254,84 @@ def test_readthrough_restamps_expired_seed_ttl_to_decision_now(
     assert held_lcb == pytest.approx(0.67)
     assert held_ucb == pytest.approx(0.82)
     assert captured["payload"]["computed_at"] == monitor_now.isoformat()
+
+
+def test_readthrough_sqlite_work_is_interrupted_at_monitor_deadline(
+    monkeypatch,
+    tmp_path,
+):
+    """One stale family cannot overrun the whole-book monitor cycle budget."""
+    import tests.test_replacement_forecast_materializer as base
+    import src.data.replacement_forecast_materialization_request_builder as rb
+    import src.data.replacement_forecast_materializer as mat
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    monitor_now = datetime(2026, 6, 25, 14, 58, tzinfo=timezone.utc)
+    seed_payload = {
+        "city": "Karachi",
+        "target_date": "2026-06-12",
+        "temperature_metric": "high",
+        "computed_at": monitor_now.isoformat(),
+        "expires_at": (monitor_now + timedelta(hours=3)).isoformat(),
+    }
+    monkeypatch.setattr(
+        mr,
+        "_freshest_family_seed_on_disk",
+        lambda **kw: (
+            tmp_path / "Karachi.2026-06-12.high.seed.json",
+            seed_payload,
+        ),
+    )
+    monkeypatch.setattr(mr, "_seed_payload_covers_target_local_day", lambda **kw: True)
+    monkeypatch.setattr(
+        rb,
+        "build_replacement_forecast_materialization_request",
+        lambda payload, *, base_dir: SimpleNamespace(ok=True, request=dict(payload)),
+    )
+    monkeypatch.setattr(
+        rb,
+        "build_materialize_request_dataclass",
+        lambda request_json, *, base_dir: base._request(
+            source_cycle_time=datetime(2026, 6, 25, 12, tzinfo=timezone.utc),
+            computed_at=monitor_now,
+            expires_at=monitor_now + timedelta(hours=3),
+        ),
+    )
+
+    def deliberately_unbounded_sql(conn, request):
+        del request
+        conn.execute(
+            """
+            WITH RECURSIVE spin(value) AS (
+                SELECT 1
+                UNION ALL
+                SELECT value + 1 FROM spin
+            )
+            SELECT SUM(value) FROM spin
+            """
+        ).fetchone()
+        raise AssertionError("deadline failed to interrupt SQLite")
+
+    monkeypatch.setattr(mat, "compute_replacement_posterior_readonly", deliberately_unbounded_sql)
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda: sqlite3.connect(":memory:"),
+    )
+
+    started = time.monotonic()
+    result = mr._attempt_held_belief_readthrough(
+        _pos(),
+        city=object(),
+        target_d=None,
+        metric="high",
+        decision_now=monitor_now,
+        deadline_monotonic=started + 0.02,
+    )
+
+    assert result is None
+    assert time.monotonic() - started < 1.0
 
 
 def test_freshest_seed_skips_payload_without_target_local_day(tmp_path, monkeypatch):

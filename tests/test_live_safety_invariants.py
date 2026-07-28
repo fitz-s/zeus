@@ -406,9 +406,13 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     )
     portfolio = _make_portfolio(first, second, third)
     visited: list[str] = []
+    readthrough_deadlines: list[float] = []
 
     def fake_refresh(conn, clob, position):
         visited.append(position.trade_id)
+        readthrough_deadlines.append(
+            position._zeus_held_monitor_deadline_monotonic
+        )
         position.last_monitor_prob = 0.61
         position.last_monitor_prob_is_fresh = True
         position.last_monitor_edge = 0.12
@@ -491,6 +495,11 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     assert summary.get("held_monitor_defer_reason", "") == expected_reason
     assert summary["monitors"] == expected_count
     assert len(monitor_results) == expected_count
+    assert readthrough_deadlines == [pytest.approx(0.5)] * expected_count
+    assert all(
+        not hasattr(position, "_zeus_held_monitor_deadline_monotonic")
+        for position in (first, second, third)
+    )
 
 
 def test_monitor_reservations_cover_large_held_book_within_three_degraded_cycles():

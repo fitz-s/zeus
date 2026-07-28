@@ -5328,6 +5328,7 @@ def execute_monitoring_phase(
 ):
     from src.engine.monitor_refresh import (
         _GLOBAL_MONITOR_SAMPLES_ATTR,
+        _HELD_MONITOR_DEADLINE_ATTR,
         install_monitor_day0_family_cache,
         refresh_position,
     )
@@ -6299,7 +6300,18 @@ def execute_monitoring_phase(
                     + 1
                 )
             else:
-                edge_ctx = refresh_position(conn, clob, pos)
+                setattr(
+                    pos,
+                    _HELD_MONITOR_DEADLINE_ATTR,
+                    monitor_deadline,
+                )
+                try:
+                    edge_ctx = refresh_position(conn, clob, pos)
+                finally:
+                    try:
+                        delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
+                    except AttributeError:
+                        pass
             # === DAY0 HARD-FACT verdict — computed before the exit decision and
             # before closed-market pre-emption above. Settlement-authority hard
             # facts must not depend on estimator evidence.

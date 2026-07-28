@@ -99,6 +99,7 @@ _MONITOR_PREFETCHED_ORDERBOOKS_ATTR = "_zeus_monitor_prefetched_orderbooks"
 _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
     "_zeus_monitor_prefetch_attempted_tokens"
 )
+_HELD_MONITOR_DEADLINE_ATTR = "_zeus_held_monitor_deadline_monotonic"
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
 _DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS = 0.1
 _DAY0_MATERIALIZATION_VISIBILITY_REASONS = frozenset(
@@ -1019,6 +1020,7 @@ def _seed_payload_covers_target_local_day(*, seed_path, payload: dict) -> bool:
 def _attempt_held_belief_readthrough(
     pos: "Position", *, city, target_d, metric: str,
     decision_now: datetime | None = None,
+    deadline_monotonic: float | None = None,
 ) -> tuple[float, float, float] | None:
     """LAYER 2 — synchronous single-family read-through recompute (held-belief freeze fix).
 
@@ -1123,8 +1125,25 @@ def _attempt_held_belief_readthrough(
             # truth during the live monitor loop. The compute path is provably
             # write-free today; this is defense-in-depth on a live 51GB forecasts DB.
             fc_conn.execute("PRAGMA query_only=ON")
+            if deadline_monotonic is not None:
+                deadline = float(deadline_monotonic)
+
+                def _monitor_deadline_expired() -> int:
+                    return int(time.monotonic() >= deadline)
+
+                # SCOPE: only this position's synchronous fallback recompute.
+                # DRAIN: SQLite interrupts at the monitor cycle deadline and the
+                # remaining positions retain their fair next-cycle reservation.
+                # RESET: the progress handler dies with this read-only connection;
+                # every monitor cycle injects a fresh deadline.
+                fc_conn.set_progress_handler(_monitor_deadline_expired, 1_000)
             result = compute_replacement_posterior_readonly(fc_conn, request)
         finally:
+            if deadline_monotonic is not None:
+                try:
+                    fc_conn.set_progress_handler(None, 0)
+                except Exception:  # noqa: BLE001 - connection close is the backstop.
+                    pass
             fc_conn.close()
         if result is None or not result.live_eligible:
             return None
@@ -4953,6 +4972,7 @@ def _refresh_day0_monitor_probability(
     conn,
     city,
     target_d,
+    deadline_monotonic: float | None = None,
 ) -> tuple[float, Position, bool | None]:
     """Refresh same-day held probability from Day0 observation remaining-window."""
 
@@ -4990,7 +5010,11 @@ def _refresh_day0_monitor_probability(
             return unobserved_prefix
 
         readthrough_belief = _attempt_held_belief_readthrough(
-            pos, city=city, target_d=target_d, metric=metric
+            pos,
+            city=city,
+            target_d=target_d,
+            metric=metric,
+            deadline_monotonic=deadline_monotonic,
         )
         if readthrough_belief is not None:
             _append_monitor_validation(
@@ -5055,6 +5079,7 @@ def monitor_probability_refresh(
     city,
     target_d,
     day0_family_cache: _CurrentGlobalDay0FamilyCache | None = None,
+    deadline_monotonic: float | None = None,
 ) -> tuple[float, Position, bool | None]:
     """Refresh held-side posterior without consuming the held-token quote.
 
@@ -5132,6 +5157,7 @@ def monitor_probability_refresh(
             conn=conn,
             city=city,
             target_d=target_d,
+            deadline_monotonic=deadline_monotonic,
         )
 
     from src.engine.position_belief import (
@@ -5239,7 +5265,11 @@ def monitor_probability_refresh(
     # belief THIS cycle (so CI_SEPARATED_REVERSAL can arm); if not, we fail-close as
     # before AND record a durable, retryable belief_debt marker (never a silent freeze).
     readthrough_belief = _attempt_held_belief_readthrough(
-        pos, city=city, target_d=target_d, metric=_metric_for_family
+        pos,
+        city=city,
+        target_d=target_d,
+        metric=_metric_for_family,
+        deadline_monotonic=deadline_monotonic,
     )
     if readthrough_belief is not None:
         readthrough_prob, readthrough_lcb, readthrough_ucb = readthrough_belief
@@ -5494,6 +5524,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             city=city,
             target_d=target_d,
             day0_family_cache=day0_family_cache,
+            deadline_monotonic=getattr(
+                pos,
+                _HELD_MONITOR_DEADLINE_ATTR,
+                None,
+            ),
         )
         pos.selected_method = refresh_pos.selected_method
         pos.applied_validations = list(getattr(refresh_pos, "applied_validations", []) or [])
