@@ -63,14 +63,15 @@ def _observation(**overrides):
 def test_day0_online_hook_is_trigger_local_not_cycle_runtime_side_effect():
     cycle_runtime_source = Path("src/engine/cycle_runtime.py").read_text()
     trigger_source = Path("src/events/triggers/day0_extreme_updated.py").read_text()
-    # R4-b3 (2026-07-08): the reactor cycle body (the day0_authority_catchup_
-    # scanner_enabled gate check) moved from src/main.py to src.events.reactor.
+    # Durable Day0 catch-up is now unconditional reactor work rather than a
+    # config-gated compatibility lane.
     reactor_source = Path("src/events/reactor.py").read_text()
 
     assert "_queue_edli_day0_observation_event" not in cycle_runtime_source
     assert "def observation_context_to_live_observation(" in trigger_source
     assert "defaults to blocked" in trigger_source
-    assert "day0_authority_catchup_scanner_enabled" in reactor_source
+    assert "def _edli_scan_day0_with_lock_retry(" in reactor_source
+    assert "scan_observation_instants_rows(" in reactor_source
 
 
 def test_observation_context_live_hook_marks_wu_station_match_live_authority():
@@ -583,6 +584,76 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
 
     assert len(results) == 2
     assert direct.last_observation_time_utc == "2026-06-06T05:13:00+00:00"
+
+
+def test_scan_defers_subsecond_future_availability_without_failing_cycle():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO observation_instants (
+            city, target_date, source, timezone_name, local_hour,
+            local_timestamp, utc_timestamp, utc_offset_minutes, dst_active,
+            is_ambiguous_local_hour, is_missing_local_hour, time_basis,
+            temp_current, running_max, running_min, temp_unit, station_id,
+            observation_count, imported_at, authority, data_version,
+            provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "Paris",
+            "2026-06-06",
+            "wu_icao_history",
+            "Europe/Paris",
+            7.0,
+            "2026-06-06T07:00:00+02:00",
+            "2026-06-06T05:00:00+00:00",
+            120,
+            1,
+            0,
+            0,
+            "observed",
+            14.0,
+            14.0,
+            11.0,
+            "C",
+            "LFPB",
+            1,
+            "2026-06-06T05:20:00.000900+00:00",
+            "VERIFIED",
+            "v1.wu-native",
+            (
+                '{"source_url":"redacted","station_id":"LFPB",'
+                '"latest_raw_ts":"2026-06-06T05:13:00+00:00",'
+                '"hour_max_raw_ts":"2026-06-06T05:13:00+00:00",'
+                '"hour_min_raw_ts":"2026-06-06T05:03:00+00:00"}'
+            ),
+            1,
+            "OK",
+            "historical_hourly",
+        ),
+    )
+    trigger = Day0ExtremeUpdatedTrigger(EventWriter(conn))
+
+    deferred = trigger.scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(14),
+        decision_time=datetime(
+            2026, 6, 6, 5, 20, 0, 500, tzinfo=timezone.utc
+        ),
+        received_at="2026-06-06T05:20:00.000500+00:00",
+    )
+    emitted = trigger.scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(14),
+        decision_time=datetime(
+            2026, 6, 6, 5, 20, 0, 1000, tzinfo=timezone.utc
+        ),
+        received_at="2026-06-06T05:20:00.001000+00:00",
+    )
+
+    assert deferred == []
+    assert len(emitted) == 2
     payloads = [row[0] for row in conn.execute("SELECT payload_json FROM opportunity_events").fetchall()]
     assert {'"metric":"high"', '"metric":"low"'} == {
         '"metric":"high"' if '"metric":"high"' in payload else '"metric":"low"'

@@ -1,0 +1,39 @@
+packet: current/data_continuity_health
+status: active
+owner: agent
+frontier: []
+in_scope:
+- docs/operations/current/data_continuity_health/**
+- src/engine/event_reactor_adapter.py
+- src/engine/monitor_refresh.py
+- src/events/triggers/day0_extreme_updated.py
+- src/control/live_health.py
+- tests/integration/test_w3_solve_seam_g3.py
+- tests/test_monitor_refresh_nowcast_wiring.py
+- tests/events/test_day0_extreme_updated_trigger.py
+- tests/test_posterior_starvation_alert.py
+- architecture/source_rationale.yaml
+- architecture/test_topology.yaml
+allow_companions: []
+out_of_scope:
+- state/**
+- config/settings.json
+- docs/authority/**
+- src/state/**
+- src/execution/**
+- src/main.py
+- src/supervisor_api/**
+- migrations/**
+- .github/workflows/**
+- architecture/db_table_ownership.yaml
+- architecture/invariants.yaml
+- architecture/kernel_manifest.yaml
+- architecture/module_manifest.yaml
+live_side_effects_allowed: false
+supersedes: null
+tests:
+- tests/integration/test_w3_solve_seam_g3.py
+- tests/test_monitor_refresh_nowcast_wiring.py
+- tests/events/test_day0_extreme_updated_trigger.py
+- tests/test_posterior_starvation_alert.py
+closeout_required: true

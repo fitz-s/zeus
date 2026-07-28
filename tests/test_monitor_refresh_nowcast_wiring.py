@@ -553,6 +553,49 @@ def test_day0_monitor_retries_one_posterior_visibility_gap(
     assert cache.snapshots[("Hong Kong", "2026-07-28", "high")] == [snapshot]
 
 
+def test_day0_monitor_retries_observation_clock_visibility_gap(
+    monkeypatch,
+) -> None:
+    pos = _make_position()
+    pos.city = "Denver"
+    pos.target_date = "2026-07-28"
+    pos.temperature_metric = "high"
+    pos.condition_id = "0x" + "2e" * 32
+    cache = monitor_refresh_module._CurrentGlobalDay0FamilyCache()
+    snapshot = object()
+    attempts = []
+
+    def build(*_args, **_kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise ValueError(
+                "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
+            )
+        return snapshot
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_build_current_global_day0_family_snapshot",
+        build,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_materialize_current_global_day0_probability",
+        lambda position, current: (0.61, position, current is snapshot),
+    )
+    monkeypatch.setattr(monitor_refresh_module.time, "sleep", lambda _seconds: None)
+
+    result = monitor_refresh_module._refresh_current_global_day0_probability(
+        pos,
+        trade_conn=object(),
+        family_cache=cache,
+    )
+
+    assert result == (0.61, pos, True)
+    assert len(attempts) == 2
+    assert cache.failures == {}
+
+
 def test_day0_monitor_reuses_family_snapshot_across_sibling_bins(monkeypatch) -> None:
     """One family build serves sibling held bins without changing side identity."""
     import numpy as np

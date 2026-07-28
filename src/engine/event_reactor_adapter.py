@@ -30612,7 +30612,15 @@ def _prepare_current_global_probability_family(
                 raise ValueError(
                     "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY"
                 )
-            if local_target < local_now.date():
+            post_local_provisional_monitor_authority = bool(
+                provisional_day0_observation
+                and allow_provisional_day0_replacement
+                and not entry_authority
+            )
+            if (
+                local_target < local_now.date()
+                and not post_local_provisional_monitor_authority
+            ):
                 raise ValueError("POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
             observation_table = day0_observation_conn.execute(
                 "SELECT 1 FROM sqlite_master "

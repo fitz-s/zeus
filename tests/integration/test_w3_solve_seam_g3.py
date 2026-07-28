@@ -5378,6 +5378,31 @@ def test_provisional_hko_held_probability_uses_remaining_day_without_entry_autho
     binding = day0_payload["_edli_global_day0_binding"]
     assert binding["evidence_finality"] == "PROVISIONAL_CURRENT_SNAPSHOT"
     assert "_edli_day0_exact_yes_payoffs" not in day0_payload
+
+    post_day_payload: dict[str, object] = {}
+    post_day = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(
+            2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=post_day_payload,
+        allow_provisional_day0_replacement=True,
+        entry_authority=False,
+    )
+    assert post_day.probability_witness.yes_point_q.tolist() == pytest.approx(
+        [0.2, 0.5, 0.3]
+    )
+    assert post_day_payload["probability_authority"] == (
+        "day0_remaining_day_global_probability_v1"
+    )
+    assert post_day_payload["_edli_global_day0_binding"][
+        "evidence_finality"
+    ] == "PROVISIONAL_CURRENT_SNAPSHOT"
+
     with pytest.raises(
         ValueError,
         match="GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
@@ -5393,7 +5418,7 @@ def test_provisional_hko_held_probability_uses_remaining_day_without_entry_autho
             entry_authority=True,
         )
 
-    assert replacement_calls == 1
+    assert replacement_calls == 2
 
     forecast.close()
     observations.close()
