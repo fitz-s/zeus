@@ -72,6 +72,7 @@ REQUIRED_LIVE_HEALTH_SURFACES = (
 # DBs and classified separately; it is not a daemon-composite-owned surface.
 DIRECT_HEAD_LIVE_HEALTH_SURFACES = (
     "runtime_code",
+    "business_plane",
     "forecast_event_bridge",
     "pending_exit_release_loop",
     "monitor_probability_freshness",
@@ -910,10 +911,11 @@ def _entry_probability_evidence_status(root):
                 )
 
         detail = {
-            "ok": not missing and not nonpositive,
+            "ok": not missing,
             "evaluated": True,
             "active_exposure_count": len(positions),
-            "covered_count": covered,
+            "covered_count": len(positions) - len(missing),
+            "positive_edge_count": covered,
             "missing_count": len(missing),
             "nonpositive_count": len(nonpositive),
             "covered_sample": samples,
@@ -941,7 +943,14 @@ def _entry_probability_evidence_status(root):
         if missing:
             detail["issue"] = f"ENTRY_PROBABILITY_EVIDENCE_MISSING_ACTIVE:n={len(missing)}"
         elif nonpositive:
-            detail["issue"] = f"ENTRY_PROBABILITY_EDGE_NONPOSITIVE:n={len(nonpositive)}"
+            # A current certificate whose q_lcb moved below the historical entry
+            # price is an economic re-decision input, not missing probability
+            # evidence. Exit/hold policy owns the action; health owns whether the
+            # certificate exists and is readable.
+            detail["issue"] = None
+            detail["advisory"] = (
+                f"ENTRY_PROBABILITY_EDGE_NONPOSITIVE:n={len(nonpositive)}"
+            )
         else:
             detail["issue"] = None
         return detail
@@ -968,6 +977,7 @@ def _direct_head_live_health_surfaces(root, *, status_summary, heartbeat):
         sys.path.insert(0, root_path)
     try:
         from src.control.live_health import (
+            _business_plane_surface,
             _forecast_to_event_bridge_surface,
             _main_daemon_surface,
             _monitor_probability_freshness_surface,
@@ -988,6 +998,7 @@ def _direct_head_live_health_surfaces(root, *, status_summary, heartbeat):
     main_daemon = _main_daemon_surface(status_summary, heartbeat)
     surfaces = {
         "runtime_code": _runtime_code_surface(state_dir),
+        "business_plane": _business_plane_surface(status_summary),
         "forecast_event_bridge": _forecast_to_event_bridge_surface(
             state_dir,
             now_dt,
@@ -1020,6 +1031,10 @@ def _direct_head_surface_overrides_composite(report, surface):
     if surface not in DIRECT_HEAD_LIVE_HEALTH_SURFACES:
         return False
     detail = report.get(surface)
+    if surface == "business_plane":
+        # The daemon composite remains authoritative for a current failure.
+        # A newer proof-backed healthy cycle may clear only a stale failure.
+        return isinstance(detail, dict) and detail.get("ok") is True
     return isinstance(detail, dict) and detail.get("evaluated") is not False and "ok" in detail
 
 def _classify_alerts(report, ss_age):
@@ -1062,6 +1077,8 @@ def _classify_alerts(report, ss_age):
             or "ENTRY_PROBABILITY_EVIDENCE_UNHEALTHY"
         )
     for surface in DIRECT_HEAD_LIVE_HEALTH_SURFACES:
+        if surface == "business_plane":
+            continue
         direct_surface = report.get(surface, {})
         if direct_surface.get("ok") is False:
             alerts.append(

@@ -378,6 +378,7 @@ def _write_trade_db_with_entry_probability_evidence(
             (entry_price,),
         )
         if include_certificate:
+            decision_time = datetime.now(timezone.utc).isoformat()
             payload = {
                 "condition_id": "cond-entry-proof",
                 "token_id": "no-token",
@@ -400,12 +401,10 @@ def _write_trade_db_with_entry_probability_evidence(
                     payload_json
                 ) VALUES (
                     'cert-entry-proof', 'PreSubmitRevalidationCertificate',
-                    '2026-07-09T00:00:00+00:00',
-                    '2026-07-09T00:00:01+00:00',
-                    ?
+                    ?, ?, ?
                 )
                 """,
-                (json.dumps(payload),),
+                (decision_time, decision_time, json.dumps(payload)),
             )
         conn.commit()
         world.commit()
@@ -487,6 +486,28 @@ def test_live_probe_entry_probability_evidence_accepts_positive_q_lcb(tmp_path):
     assert status["active_exposure_count"] == 1
     assert status["covered_count"] == 1
     assert status["covered_sample"][0]["q_lcb"] == 0.72
+
+
+def test_live_probe_entry_probability_evidence_treats_negative_edge_as_advisory(
+    tmp_path,
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _write_trade_db_with_entry_probability_evidence(
+        root,
+        include_certificate=True,
+        q_lcb=0.40,
+        entry_price=0.60,
+    )
+
+    status = module._entry_probability_evidence_status(str(root))
+
+    assert status["ok"] is True
+    assert status["covered_count"] == 1
+    assert status["positive_edge_count"] == 0
+    assert status["nonpositive_count"] == 1
+    assert status["issue"] is None
+    assert status["advisory"] == "ENTRY_PROBABILITY_EDGE_NONPOSITIVE:n=1"
 
 
 def test_entry_probability_evidence_is_not_composite_owned():
@@ -676,6 +697,63 @@ def test_live_probe_direct_head_runtime_code_overrides_stale_composite_mismatch(
     assert out.startswith("OK")
     assert "LIVE_HEALTH_RUNTIME_CODE" not in out
     assert "old-runtime" not in out
+
+
+def test_live_probe_direct_head_business_plane_overrides_stale_composite_cycle(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    status = json.loads((root / "state" / "status_summary.json").read_text())
+    status["cycle"] = {
+        "mode": "edli_event_reactor",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "candidates": 2,
+        "final_intents_built": 0,
+        "submit_attempts": 0,
+        "no_trades": 2,
+        "top_no_trade_reasons": {
+            "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM": 2,
+        },
+    }
+    _write_json(root / "state" / "status_summary.json", status)
+    surfaces = {
+        surface: {"ok": True, "issue": None}
+        for surface in module.REQUIRED_LIVE_HEALTH_SURFACES
+    }
+    surfaces["business_plane"] = {
+        "ok": False,
+        "issue": "CANDIDATES_WITHOUT_FINAL_INTENTS_OR_NO_TRADE_REASONS",
+    }
+    _write_json(
+        root / "state" / "live_health_composite.json",
+        {
+            "healthy": False,
+            "status": "DEGRADED",
+            "failing_surfaces": ["business_plane"],
+            "surfaces": surfaces,
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+        {404: {"ZEUS_FORECAST_LIVE_OWNER": "forecast_live"}},
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("OK")
+    assert "LIVE_HEALTH_BUSINESS_PLANE" not in out
 
 
 def test_live_probe_direct_head_forecast_bridge_replaces_composite_issue(
