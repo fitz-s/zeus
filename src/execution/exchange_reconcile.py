@@ -5161,12 +5161,16 @@ def _ensure_exit_fill_position_event(
     # Capital reallocation may intentionally sell only part of the holding.  The
     # linked EXIT_INTENT is the position-finality authority; command size alone
     # cannot manufacture an EXIT_ORDER_FILLED/economically_closed projection.
-    from src.execution.exit_lifecycle import _canonical_reduction_intent_shares
+    from src.execution.exit_lifecycle import (
+        _canonical_full_exit_intent_shares,
+        _canonical_reduction_intent_shares,
+    )
 
     reduction_target = _canonical_reduction_intent_shares(
         conn,
         SimpleNamespace(trade_id=position_id),
         order_id=venue_order_id,
+        before_time=str(command.get("created_at") or ""),
     )
     if reduction_target is not None:
         logger.info(
@@ -5178,6 +5182,24 @@ def _ensure_exit_fill_position_event(
             position_id,
         )
         return
+    full_close_target = _canonical_full_exit_intent_shares(
+        conn,
+        SimpleNamespace(trade_id=position_id),
+        order_id=venue_order_id,
+        before_time=str(command.get("created_at") or ""),
+    )
+    command_size = _positive_decimal_or_none(command.get("size"))
+    if full_close_target is None or command_size != full_close_target:
+        logger.warning(
+            "exchange_reconcile: refuse exit economic close without exact "
+            "command-bound full-close intent command_id=%s intended=%s "
+            "command_size=%s order_id=%s",
+            command.get("command_id"),
+            full_close_target,
+            command_size,
+            venue_order_id,
+        )
+        return
     fill_economics = _exit_fill_economics_for_command(
         conn,
         command_id=str(command.get("command_id") or ""),
@@ -5187,38 +5209,32 @@ def _ensure_exit_fill_position_event(
     if fill_economics is None:
         return
     shares_dec, exit_price_dec = fill_economics
-    command_size = _positive_decimal_or_none(command.get("size"))
-    if command_size is None:
-        logger.warning(
-            "exchange_reconcile: refuse exit economic close without command size "
-            "command_id=%s filled=%s order_id=%s",
-            command.get("command_id"),
-            shares_dec,
-            venue_order_id,
-        )
-        return
-    close_sizes = [
-        command_size,
+    holding_sizes = [
         _positive_decimal_or_none(current.get("shares")),
         _positive_decimal_or_none(current.get("chain_shares")),
     ]
-    close_target = max(size for size in close_sizes if size is not None)
-    # C2 (money-path): an underfill is NOT a full close. This economic-close
-    # projection fabricates chain_shares/chain_avg_price/chain_cost_basis_usd to
-    # zero below, which is safe ONLY when the venue fill covers the ENTIRE
-    # on-record holding. Compare exact fill atomics against the exact holding
-    # (no dust tolerance) so a partial fill preserves the positive residual for
-    # the chain-confirmed-zero reconciler instead of fabricating a zero. Because
-    # close_target = max(command, shares, chain_shares) >= command_size, this
-    # also subsumes the command-underfill guard.
-    if shares_dec < close_target:
+    holding_sizes = [size for size in holding_sizes if size is not None]
+    current_holding = holding_sizes[0] if holding_sizes else None
+    holding_disagrees = any(
+        size != current_holding for size in holding_sizes[1:]
+    )
+    if (
+        current_holding is None
+        or holding_disagrees
+        or full_close_target != current_holding
+        or command_size != current_holding
+        or shares_dec != current_holding
+    ):
         logger.warning(
-            "exchange_reconcile: refuse partial exit economic close "
-            "command_id=%s filled=%s command_size=%s close_target=%s order_id=%s",
+            "exchange_reconcile: refuse non-exact exit economic close "
+            "command_id=%s filled=%s command_size=%s intended=%s "
+            "current_holding=%s holding_disagrees=%s order_id=%s",
             command.get("command_id"),
             shares_dec,
             command.get("size"),
-            close_target,
+            full_close_target,
+            current_holding,
+            holding_disagrees,
             venue_order_id,
         )
         return

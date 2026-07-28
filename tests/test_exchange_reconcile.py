@@ -307,10 +307,41 @@ def seed_command(
     envelope_no_token_id: str | None = None,
     q_version: str | None = None,
     order_type: str = "GTC",
+    exit_close_position: bool | None = None,
 ) -> None:
     from src.state.venue_command_repo import append_event, insert_command
 
     snapshot_token_id = snapshot_token_id or token_id
+    exit_intent_sequence = None
+    if side == "SELL" and exit_close_position is not None:
+        exit_intent_sequence = c.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+            "WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()[0]
+        c.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, ?, 'EXIT_INTENT', ?, 'active', 'pending_exit',
+                      'opening_inertia', 'tests.test_exchange_reconcile', ?, 'live')
+            """,
+            (
+                f"{position_id}:exit_intent:{exit_intent_sequence}",
+                position_id,
+                exit_intent_sequence,
+                (created_at - timedelta(microseconds=1)).isoformat(),
+                json.dumps(
+                    {
+                        "exit_intent_close_position": exit_close_position,
+                        "exit_intent_shares": size,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
     insert_command(
         c,
         command_id=command_id,
@@ -387,6 +418,26 @@ def seed_command(
             occurred_at=created_at.isoformat(),
             payload={"venue_order_id": venue_order_id},
         )
+        if side == "SELL" and exit_intent_sequence is not None:
+            c.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no, event_type,
+                    occurred_at, phase_before, phase_after, strategy_key,
+                    order_id, command_id, source_module, payload_json, env
+                ) VALUES (?, ?, 1, ?, 'EXIT_ORDER_POSTED', ?, 'pending_exit',
+                          'pending_exit', 'opening_inertia', ?, ?,
+                          'tests.test_exchange_reconcile', '{}', 'live')
+                """,
+                (
+                    f"{position_id}:exit_posted:{exit_intent_sequence + 1}",
+                    position_id,
+                    exit_intent_sequence + 1,
+                    created_at.isoformat(),
+                    venue_order_id,
+                    command_id,
+                ),
+            )
     if state == "PARTIAL":
         append_event(
             c,
@@ -3874,6 +3925,7 @@ def test_confirmed_exit_trade_economically_closes_active_position_projection(con
         size=35.6,
         price=0.13,
         state="ACKED",
+        exit_close_position=True,
     )
 
     result = run_reconcile_sweep(
@@ -3946,6 +3998,83 @@ def test_confirmed_exit_trade_economically_closes_active_position_projection(con
     }
 
 
+@pytest.mark.parametrize("filled_size", ["10", "11"])
+def test_confirmed_exit_fill_cannot_close_larger_current_holding(conn, filled_size):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = f"exit-holding-mismatch-token-{filled_size}"
+    position_id = f"pos-exit-holding-mismatch-{filled_size}"
+    command_id = f"cmd-exit-holding-mismatch-{filled_size}"
+    order_id = f"ord-exit-holding-mismatch-{filled_size}"
+    seed_position_baseline(
+        conn,
+        position_id=position_id,
+        order_id=f"ord-entry-holding-mismatch-{filled_size}",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               token_id = ?,
+               order_status = 'filled',
+               shares = 20,
+               chain_shares = 20,
+               chain_avg_price = 0.60,
+               chain_cost_basis_usd = 12,
+               cost_basis_usd = 12,
+               entry_price = 0.60,
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=token,
+        side="SELL",
+        size=10,
+        price=0.50,
+        state="ACKED",
+        exit_close_position=True,
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id=f"trade-exit-holding-mismatch-{filled_size}",
+                    order_id=order_id,
+                    size=filled_size,
+                    price="0.50",
+                    status="CONFIRMED",
+                )
+            ],
+            positions=[position(token_id=token, size="20")],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()["phase"] != "economically_closed"
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_FILLED'
+           AND order_id = ?
+        """,
+        (position_id, order_id),
+    ).fetchone()[0] == 0
+
+
 def test_existing_confirmed_exit_trade_repairs_missing_economic_close_projection(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
@@ -3979,6 +4108,7 @@ def test_existing_confirmed_exit_trade_repairs_missing_economic_close_projection
         size=35.6,
         price=0.13,
         state="FILLED",
+        exit_close_position=True,
     )
     append_trade_fact(
         conn,
@@ -4057,6 +4187,7 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
         size=35.6,
         price=0.13,
         state="FILLED",
+        exit_close_position=True,
     )
     append_trade_fact(
         conn,
@@ -4154,6 +4285,7 @@ def test_recorded_confirmed_exit_trade_economically_closes_disputed_chain_state_
         size=11.09,
         price=0.53,
         state="FILLED",
+        exit_close_position=True,
     )
     append_trade_fact(
         conn,
@@ -4768,7 +4900,7 @@ def test_filled_reduction_command_cannot_close_already_chain_reduced_position(co
             f"{position_id}:exit_intent:{sequence_no}",
             position_id,
             sequence_no,
-            NOW.isoformat(),
+            (NOW - timedelta(microseconds=1)).isoformat(),
             json.dumps(
                 {
                     "exit_intent_close_position": False,
@@ -4794,6 +4926,29 @@ def test_filled_reduction_command_cannot_close_already_chain_reduced_position(co
             sequence_no + 1,
             NOW.isoformat(),
             order_id,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, order_id,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'EXIT_INTENT', ?, 'pending_exit', 'pending_exit',
+                  'opening_inertia', NULL, 'src.execution.exit_lifecycle', ?, 'live')
+        """,
+        (
+            f"{position_id}:newer_full_exit_intent:{sequence_no + 2}",
+            position_id,
+            sequence_no + 2,
+            (NOW + timedelta(seconds=1)).isoformat(),
+            json.dumps(
+                {
+                    "exit_intent_close_position": True,
+                    "exit_intent_shares": 44.42,
+                },
+                sort_keys=True,
+            ),
         ),
     )
     seed_command(

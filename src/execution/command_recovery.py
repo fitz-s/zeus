@@ -8416,6 +8416,7 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
                cmd.state AS cmd_state,
                cmd.size AS cmd_size,
                cmd.price AS cmd_price,
+               cmd.created_at AS cmd_created_at,
                cmd.updated_at AS cmd_updated_at,
                exit_fill.fill_fact_count AS fill_fact_count,
                exit_fill.fill_pairs AS fill_pairs,
@@ -8490,6 +8491,22 @@ def _exit_close_target_size(candidate: dict, current: dict) -> Decimal | None:
     return max(sizes)
 
 
+def _exact_exit_close_holding(candidate: dict, current: dict) -> Decimal | None:
+    """Return one exact command/current/chain holding, or fail closed."""
+
+    command_size = _positive_decimal_or_none(candidate.get("cmd_size"))
+    current_shares = _positive_decimal_or_none(current.get("shares"))
+    chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
+    if (
+        command_size is None
+        or current_shares is None
+        or command_size != current_shares
+        or (chain_shares is not None and chain_shares != current_shares)
+    ):
+        return None
+    return current_shares
+
+
 def _chain_zero_retires_terminal_exit_dust(
     candidate: dict,
     current: dict,
@@ -8524,29 +8541,36 @@ def _chain_zero_retires_terminal_exit_dust(
     )
 
 
-def _exit_trade_fact_covers_full_close(candidate: dict, current: dict) -> bool:
+def _exit_trade_fact_covers_full_close(
+    conn: sqlite3.Connection,
+    candidate: dict,
+    current: dict,
+) -> bool:
     # C3: accumulate exact Decimal fill atoms (canonical TEXT). A SQLite REAL SUM
     # would lose binary precision on the close/settlement boundary and mis-decide
     # the full-close comparison below.
     filled_size, fill_notional = _accumulate_exact_fills(candidate.get("fill_pairs"))
     command_size = _positive_decimal_or_none(candidate.get("cmd_size"))
-    target_size = _exit_close_target_size(candidate, current)
-    # C2 (money-path): a full close is proven ONLY when the exact fill covers the
-    # ENTIRE on-record holding (target_size = max(command, chain_shares, shares)).
-    # _append_exit_filled_projection fabricates chain_shares/chain_avg_price/
-    # chain_cost_basis_usd to zero, so an underfill must NOT reach it: compare
-    # exact atomics with NO dust tolerance. target_size >= command_size, so
-    # `>= target_size` subsumes the command-fill guard; a residual is otherwise
-    # retired only by the chain-confirmed-zero reconciler.
+    target_size = _exact_exit_close_holding(candidate, current)
     exact_fill_close = (
         filled_size is not None
         and fill_notional is not None
         and command_size is not None
         and target_size is not None
-        and filled_size >= target_size
+        and filled_size == target_size
     )
     if exact_fill_close:
-        return True
+        from src.execution.exit_lifecycle import _canonical_full_exit_intent_shares
+
+        intended_shares = _canonical_full_exit_intent_shares(
+            conn,
+            SimpleNamespace(
+                trade_id=str(candidate.get("cmd_position_id") or "")
+            ),
+            order_id=str(candidate.get("cmd_venue_order_id") or ""),
+            before_time=str(candidate.get("cmd_created_at") or ""),
+        )
+        return intended_shares == command_size
     return (
         filled_size is not None
         and fill_notional is not None
@@ -8761,7 +8785,7 @@ def _append_exit_pending_projection(
         col: candidate.get(f"pc_{col}")
         for col in current_cols
     }
-    if _exit_trade_fact_covers_full_close(candidate, current):
+    if _exit_trade_fact_covers_full_close(conn, candidate, current):
         _append_exit_filled_projection(
             conn,
             candidate=candidate,
@@ -10231,17 +10255,6 @@ def _exit_lifecycle_alignment_candidates(conn: sqlite3.Connection) -> list[dict]
                            AND filled_event.event_type = 'EXIT_ORDER_FILLED'
                            AND filled_event.command_id = cmd.command_id
                     )
-                    AND COALESCE(
-                        (
-                            SELECT json_extract(intent.payload_json, '$.exit_intent_close_position')
-                              FROM position_events intent
-                             WHERE intent.position_id = cmd.position_id
-                               AND intent.event_type = 'EXIT_INTENT'
-                             ORDER BY intent.sequence_no DESC
-                             LIMIT 1
-                        ),
-                        1
-                    ) != 0
                 )
            )
            AND (
@@ -10250,10 +10263,41 @@ def _exit_lifecycle_alignment_candidates(conn: sqlite3.Connection) -> list[dict]
            )
          ORDER BY datetime(latest_order.observed_at), cmd.command_id
     """
-    return [
+    candidates = [
         _dict_row(row)
-        for row in conn.execute(sql, tuple(sorted(_EXIT_LIFECYCLE_REPAIR_COMMAND_STATES))).fetchall()
+        for row in conn.execute(
+            sql,
+            tuple(sorted(_EXIT_LIFECYCLE_REPAIR_COMMAND_STATES)),
+        ).fetchall()
     ]
+    return [
+        candidate
+        for candidate in candidates
+        if str(candidate.get("state") or "") != CommandState.FILLED.value
+        or _command_bound_full_exit_intent(conn, candidate)
+    ]
+
+
+def _command_bound_full_exit_intent(
+    conn: sqlite3.Connection,
+    command: Mapping[str, object],
+) -> bool:
+    """Prove that the exact pre-command intent authorized a full close."""
+
+    position_id = str(command.get("position_id") or "").strip()
+    command_size = _positive_decimal_or_none(command.get("size"))
+    command_created_at = str(command.get("created_at") or "").strip()
+    if not position_id or command_size is None or not command_created_at:
+        return False
+    from src.execution.exit_lifecycle import _canonical_full_exit_intent_shares
+
+    intended_shares = _canonical_full_exit_intent_shares(
+        conn,
+        SimpleNamespace(trade_id=position_id),
+        order_id=str(command.get("venue_order_id") or ""),
+        before_time=command_created_at,
+    )
+    return intended_shares == command_size
 
 
 def _order_fact_point_payload(candidate: Mapping[str, object]) -> dict | None:

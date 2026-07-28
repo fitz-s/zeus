@@ -298,6 +298,7 @@ def _insert_exit_command(
     size: float = 10.0,
     price: float = 0.49,
     venue_order_id: str | None = None,
+    created_at: datetime | None = None,
 ) -> None:
     from src.state.venue_command_repo import insert_command
 
@@ -315,8 +316,48 @@ def _insert_exit_command(
         side="SELL",
         size=size,
         price=price,
-        created_at=_NOW.isoformat(),
+        created_at=(created_at or _NOW).isoformat(),
         venue_order_id=venue_order_id,
+    )
+
+
+def _seed_exit_intent_event(
+    c,
+    *,
+    position_id: str,
+    shares: float,
+    close_position: bool,
+    occurred_at: datetime | None = None,
+    order_id: str | None = None,
+) -> None:
+    sequence_no = c.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+        "WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    c.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key,
+            source_module, payload_json, order_id, env
+        ) VALUES (?, ?, 1, ?, 'EXIT_INTENT', ?, 'active', 'pending_exit',
+                  'opening_inertia', 'tests.test_exit_safety', ?, ?, 'live')
+        """,
+        (
+            f"{position_id}:exit_intent:{sequence_no}",
+            position_id,
+            sequence_no,
+            (occurred_at or (_NOW - timedelta(microseconds=1))).isoformat(),
+            json.dumps(
+                {
+                    "exit_intent_close_position": close_position,
+                    "exit_intent_shares": shares,
+                },
+                sort_keys=True,
+            ),
+            order_id,
+        ),
     )
 
 
@@ -866,9 +907,155 @@ def test_confirmed_reduction_fill_size_requires_exact_venue_quantity(
     ) == expected
 
 
-def test_confirmed_partial_fak_capital_reduction_keeps_remaining_position_open(conn):
+def test_direct_order_intent_binding_fails_closed_on_conflicting_authority(conn):
     from src.execution import exit_lifecycle
     from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-direct-intent-conflict",
+        market_id="mkt-direct-intent-conflict",
+        city="Beijing",
+        cluster="Asia",
+        target_date="2026-07-27",
+        bin_label="34C",
+        direction="buy_no",
+        size_usd=12.0,
+        shares=20.0,
+        cost_basis_usd=12.0,
+        entry_price=0.60,
+        p_posterior=0.20,
+        state="pending_exit",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-direct-intent-conflict",
+        unit="C",
+        env="live",
+        strategy_key="center_buy",
+    )
+    order_id = "ord-direct-intent-conflict"
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=6.0,
+        close_position=False,
+        order_id=order_id,
+    )
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=20.0,
+        close_position=True,
+        order_id=order_id,
+    )
+
+    assert exit_lifecycle._canonical_reduction_intent_shares(
+        conn,
+        position,
+        order_id=order_id,
+    ) is None
+    assert exit_lifecycle._canonical_full_exit_intent_shares(
+        conn,
+        position,
+        order_id=order_id,
+    ) is None
+
+
+@pytest.mark.parametrize("filled_size", [10.0, 11.0])
+def test_full_exit_fill_cannot_close_larger_current_holding(conn, filled_size):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.venue_command_repo import append_trade_fact
+
+    position = Position(
+        trade_id=f"pos-full-exit-holding-mismatch-{filled_size:g}",
+        market_id="mkt-full-exit-holding-mismatch",
+        city="Beijing",
+        cluster="Asia",
+        target_date="2026-07-27",
+        bin_label="34C",
+        direction="buy_no",
+        size_usd=12.0,
+        shares=20.0,
+        chain_shares=20.0,
+        cost_basis_usd=12.0,
+        entry_price=0.60,
+        p_posterior=0.20,
+        state="pending_exit",
+        exit_state="sell_pending",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-full-exit-holding-mismatch",
+        unit="C",
+        env="live",
+        strategy_key="center_buy",
+        order_status="sell_pending",
+    )
+    order_id = f"ord-full-exit-holding-mismatch-{filled_size:g}"
+    command_id = f"cmd-full-exit-holding-mismatch-{filled_size:g}"
+    position.last_exit_order_id = order_id
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=10.0,
+        close_position=True,
+    )
+    _insert_exit_command(
+        conn,
+        command_id=command_id,
+        position_id=position.trade_id,
+        token_id=YES_TOKEN,
+        size=10.0,
+        price=0.50,
+        venue_order_id=order_id,
+    )
+    _ack_exit(conn, command_id=command_id, venue_order_id=order_id)
+    append_trade_fact(
+        conn,
+        trade_id=f"trade-full-exit-holding-mismatch-{filled_size:g}",
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size=str(filled_size),
+        fill_price="0.50",
+        source="REST",
+        observed_at=_NOW.isoformat(),
+        raw_payload_hash="f" * 64,
+        raw_payload_json={"matched_size": str(filled_size)},
+        tx_hash=f"0xholdingmismatch{filled_size:g}",
+    )
+
+    assert exit_lifecycle._exit_trade_fact_close_candidate(
+        conn,
+        position,
+        exit_order_id=order_id,
+    ) is None
+
+    class FakeClob:
+        def get_order_status(self, observed_order_id):
+            assert observed_order_id == order_id
+            return {
+                "status": "CONFIRMED",
+                "remaining_size": "0",
+                "matched_size": str(filled_size),
+                "avgPrice": "0.50",
+            }
+
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[position]),
+        FakeClob(),
+        conn=conn,
+    )
+
+    assert stats["filled"] == 0
+    assert stats["unchanged"] == 1
+    assert position.state == "pending_exit"
+    assert position.shares == pytest.approx(20.0)
+
+
+def test_confirmed_partial_fak_capital_reduction_keeps_remaining_position_open(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.venue_command_repo import append_trade_fact
 
     position = Position(
         trade_id="pos-capital-reduction",
@@ -899,6 +1086,36 @@ def test_confirmed_partial_fak_capital_reduction_keeps_remaining_position_open(c
         close_position=False,
     )
     exit_lifecycle._record_exit_intent_before_execution_gates(conn, position, intent)
+    intent_occurred_at = conn.execute(
+        """
+        SELECT occurred_at
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_INTENT'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()[0]
+    command_created_at = (
+        datetime.fromisoformat(intent_occurred_at.replace("Z", "+00:00"))
+        + timedelta(microseconds=1)
+    )
+    _insert_exit_command(
+        conn,
+        command_id="cmd-capital-reduction",
+        position_id=position.trade_id,
+        token_id=NO_TOKEN,
+        size=6.0,
+        price=0.60,
+        venue_order_id="ord-capital-reduction",
+        created_at=command_created_at,
+    )
+    _ack_exit(
+        conn,
+        command_id="cmd-capital-reduction",
+        venue_order_id="ord-capital-reduction",
+    )
     position.last_exit_order_id = "ord-capital-reduction"
     position.exit_state = "sell_placed"
     position.order_status = "sell_placed"
@@ -923,18 +1140,55 @@ def test_confirmed_partial_fak_capital_reduction_keeps_remaining_position_open(c
         position,
         order_id="ord-capital-reduction",
     ) == Decimal("6")
-
-    reduced = exit_lifecycle._complete_intentional_position_reduction(
+    newer_full_close = exit_lifecycle.ExitIntent(
+        trade_id=position.trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=NO_TOKEN,
+        shares=20.0,
+        current_market_price=0.60,
+        best_bid=0.60,
+        close_position=True,
+    )
+    exit_lifecycle._record_exit_intent_before_execution_gates(
+        conn,
         position,
-        intended_shares=Decimal("6"),
-        confirmed_filled_shares=Decimal("2.5"),
-        fill_price=0.60,
+        newer_full_close,
+    )
+    assert exit_lifecycle._canonical_reduction_intent_shares(
+        conn,
+        position,
+    ) is None
+    assert exit_lifecycle._canonical_reduction_intent_shares(
+        conn,
+        position,
         order_id="ord-capital-reduction",
-        status="CONFIRMED",
+    ) == Decimal("6")
+    append_trade_fact(
+        conn,
+        trade_id="trade-capital-reduction",
+        venue_order_id="ord-capital-reduction",
+        command_id="cmd-capital-reduction",
+        state="CONFIRMED",
+        filled_size="2.5",
+        fill_price="0.60",
+        source="REST",
+        observed_at=datetime.now(timezone.utc).isoformat(),
+        raw_payload_hash="a" * 64,
+        raw_payload_json={"trade_id": "trade-capital-reduction"},
+        tx_hash="0xcapitalreduction",
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"must not poll confirmed reduction: {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[position]),
+        FakeClob(),
         conn=conn,
     )
 
-    assert reduced == Decimal("2.5")
+    assert stats["reduced_from_trade_fact"] == 1
     assert position.state == "holding"
     assert position.exit_state == ""
     assert position.shares == pytest.approx(17.5)
@@ -1030,6 +1284,17 @@ def test_confirmed_partial_reduction_trade_fact_reopens_exact_remaining_claim(co
         error="",
         event_type="EXIT_ORDER_POSTED",
     )
+    intent_occurred_at = conn.execute(
+        """
+        SELECT occurred_at
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_INTENT'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()[0]
     _insert_exit_command(
         conn,
         command_id="cmd-capital-reduction-fact",
@@ -1038,6 +1303,10 @@ def test_confirmed_partial_reduction_trade_fact_reopens_exact_remaining_claim(co
         size=6.0,
         price=0.60,
         venue_order_id=position.last_exit_order_id,
+        created_at=(
+            datetime.fromisoformat(intent_occurred_at.replace("Z", "+00:00"))
+            + timedelta(microseconds=1)
+        ),
     )
     _ack_exit(
         conn,
@@ -2576,6 +2845,12 @@ def test_exit_lifecycle_full_fill_logs_commanded_execution_fact(conn):
         last_monitor_best_bid=0.44,
     )
     portfolio = PortfolioState(positions=[position])
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=20.0,
+        close_position=True,
+    )
     _insert_exit_command(
         conn,
         command_id="cmd-full-exit",
@@ -2653,12 +2928,18 @@ def test_pending_exit_existing_confirmed_trade_fact_closes_before_retry_or_cance
         last_monitor_best_bid=0.61,
     )
     portfolio = PortfolioState(positions=[position])
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=25.0799,
+        close_position=True,
+    )
     _insert_exit_command(
         conn,
         command_id="cmd-exit-filled",
         position_id=position.trade_id,
         token_id=YES_TOKEN,
-        size=25.07,
+        size=25.0799,
         price=0.60,
         venue_order_id="ord-exit-filled",
     )
@@ -2672,7 +2953,7 @@ def test_pending_exit_existing_confirmed_trade_fact_closes_before_retry_or_cance
             "reason": "place_exit_order_matched_submit",
             "venue_order_id": "ord-exit-filled",
             "trade_id": "trade-exit-filled",
-            "filled_size": "25.07",
+            "filled_size": "25.0799",
             "fill_price": "0.61",
             "tx_hash": "0xexitfilled",
         },
@@ -2683,14 +2964,14 @@ def test_pending_exit_existing_confirmed_trade_fact_closes_before_retry_or_cance
         venue_order_id="ord-exit-filled",
         command_id="cmd-exit-filled",
         state="CONFIRMED",
-        filled_size="25.07",
+        filled_size="25.0799",
         fill_price="0.61",
         source="REST",
         observed_at="2026-07-08T14:42:59+00:00",
         raw_payload_hash="f" * 64,
         raw_payload_json={
             "source": "place_exit_order_matched_submit",
-            "filled_size": "25.07",
+            "filled_size": "25.0799",
             "fill_price": "0.61",
         },
         tx_hash="0xexitfilled",
@@ -7484,6 +7765,209 @@ def test_check_pending_exits_recovers_adopted_open_sell_from_canonical_event(
            AND payload_json LIKE '%no_order_id%'
         """,
         (trade_id,),
+    ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    (
+        "order_size",
+        "current_shares_after_adoption",
+        "expected_shares",
+        "expected_filled",
+        "expected_reduced",
+    ),
+    [
+        (6.0, 20.0, 14.0, 0, 1),
+        (20.0, 20.0, 20.0, 1, 0),
+        (20.0, 19.0, 19.0, 0, 0),
+    ],
+)
+def test_adopted_external_sell_fill_obeys_immutable_adoption_size(
+    conn,
+    order_size,
+    current_shares_after_adoption,
+    expected_shares,
+    expected_filled,
+    expected_reduced,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    trade_id = f"pos-adopted-external-fill-{order_size:g}"
+    position = Position(
+        trade_id=trade_id,
+        market_id="mkt-adopted",
+        city="Beijing",
+        cluster="Asia",
+        target_date="2026-07-27",
+        bin_label="34C",
+        direction="buy_no",
+        size_usd=12.0,
+        shares=20.0,
+        cost_basis_usd=12.0,
+        entry_price=0.60,
+        p_posterior=0.20,
+        state="holding",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-adopted",
+        unit="C",
+        env="live",
+        strategy_key="center_buy",
+        order_status="filled",
+    )
+    order_id = f"ord-adopted-external-{order_size:g}"
+    adopted_row = {
+        "command_id": "",
+        "state": "LIVE",
+        "venue_order_id": order_id,
+        "price": 0.50,
+        "size": order_size,
+        "updated_at": _NOW.isoformat(),
+        "created_at": _NOW.isoformat(),
+    }
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, order_id,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, 1, 'EXIT_ORDER_POSTED', ?, 'active', 'pending_exit',
+                  'center_buy', ?, 'tests.test_exit_safety', '{}', 'live')
+        """,
+        (
+            f"{trade_id}:generic_exit_posted:1",
+            trade_id,
+            (_NOW - timedelta(seconds=1)).isoformat(),
+            order_id,
+        ),
+    )
+
+    exit_lifecycle._adopt_active_exit_sell(
+        position,
+        adopted_row,
+        conn=conn,
+        reason="ACTIVE_EXIT_SELL_IN_FLIGHT",
+    )
+
+    authority = conn.execute(
+        """
+        SELECT json_extract(payload_json, '$.adopted_order_size'),
+               json_extract(payload_json, '$.position_shares_at_adoption')
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_POSTED'
+           AND order_id = ?
+           AND json_extract(
+                   payload_json,
+                   '$.exit_intent_authority'
+               ) = 'ADOPTED_EXTERNAL_SELL'
+         ORDER BY sequence_no
+         LIMIT 1
+        """,
+        (trade_id, order_id),
+    ).fetchone()
+    assert tuple(authority) == (str(Decimal(str(order_size))), "20.0")
+    position.shares = current_shares_after_adoption
+    position.chain_shares = current_shares_after_adoption
+
+    class FakeClob:
+        def get_order_status(self, observed_order_id):
+            assert observed_order_id == order_id
+            return {
+                "status": "CONFIRMED",
+                "remaining_size": "0",
+                "matched_size": str(order_size),
+                "avgPrice": "0.50",
+            }
+
+    portfolio = PortfolioState(positions=[position])
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == expected_filled
+    assert stats.get("reduced", 0) == expected_reduced
+    if expected_filled:
+        assert stats["filled_positions"] == [position]
+        assert position.state == "economically_closed"
+    else:
+        assert position.state == (
+            "holding" if expected_reduced else "pending_exit"
+        )
+        assert position.shares == pytest.approx(expected_shares)
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_FILLED'
+            """,
+            (trade_id,),
+        ).fetchone()[0] == 0
+
+
+def test_adopted_external_sell_without_exact_size_has_no_close_authority(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-adopted-external-missing-size",
+        market_id="mkt-adopted-missing-size",
+        city="Beijing",
+        cluster="Asia",
+        target_date="2026-07-27",
+        bin_label="34C",
+        direction="buy_no",
+        size_usd=12.0,
+        shares=20.0,
+        cost_basis_usd=12.0,
+        entry_price=0.60,
+        p_posterior=0.20,
+        state="holding",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-adopted-missing-size",
+        unit="C",
+        env="live",
+        strategy_key="center_buy",
+        order_status="filled",
+    )
+    order_id = "ord-adopted-external-missing-size"
+
+    exit_lifecycle._adopt_active_exit_sell(
+        position,
+        {
+            "command_id": "",
+            "state": "LIVE",
+            "venue_order_id": order_id,
+            "price": 0.50,
+            "updated_at": _NOW.isoformat(),
+            "created_at": _NOW.isoformat(),
+        },
+        conn=conn,
+        reason="ACTIVE_EXIT_SELL_IN_FLIGHT",
+    )
+
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM venue_commands
+         WHERE position_id = ?
+           AND venue_order_id = ?
+        """,
+        (position.trade_id, order_id),
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND order_id = ?
+           AND json_extract(
+                   payload_json,
+                   '$.exit_intent_authority'
+               ) = 'ADOPTED_EXTERNAL_SELL'
+        """,
+        (position.trade_id, order_id),
     ).fetchone()[0] == 0
 
 

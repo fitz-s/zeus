@@ -666,6 +666,35 @@ def _active_exit_already_projected(
     return event_row is not None
 
 
+def _adopted_exit_authority_projected(
+    conn: sqlite3.Connection | None,
+    *,
+    position_id: str,
+    venue_order_id: str,
+) -> bool:
+    if conn is None or not position_id or not venue_order_id:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_POSTED'
+               AND order_id = ?
+               AND json_extract(
+                       payload_json,
+                       '$.exit_intent_authority'
+                   ) = 'ADOPTED_EXTERNAL_SELL'
+             LIMIT 1
+            """,
+            (position_id, venue_order_id),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
 def _venue_command_columns(conn: sqlite3.Connection) -> set[str]:
     try:
         return {str(row[1]) for row in conn.execute("PRAGMA table_info(venue_commands)").fetchall()}
@@ -714,6 +743,9 @@ def _ensure_adopted_exit_command(
     columns = _venue_command_columns(conn)
     if not columns:
         return str(_row_value(row, "command_id", 0) or "")
+    adopted_size = _positive_decimal(_row_value(row, "size", 6))
+    if adopted_size is None:
+        return str(_row_value(row, "command_id", 0) or "")
     digest = hashlib.sha256(f"{position_id}:{venue_order_id}".encode()).hexdigest()[:16]
     command_id = f"adopted_exit_{digest}"
     now = _utcnow().isoformat()
@@ -729,7 +761,7 @@ def _ensure_adopted_exit_command(
         "market_id": str(getattr(position, "market_id", "") or ""),
         "token_id": token_id,
         "side": "SELL",
-        "size": float(_row_value(row, "size", 6) or getattr(position, "effective_shares", 0.0) or 0.0),
+        "size": float(adopted_size),
         "price": float(_row_value(row, "price", 5) or 0.0),
         "venue_order_id": venue_order_id,
         "state": _local_state_for_adopted_exit_sell(venue_state),
@@ -763,6 +795,10 @@ def _adopt_active_exit_sell(
     reason: str,
 ) -> str:
     token_id = _asset_id_for_position(position)
+    adopted_order_size = _positive_decimal(_row_value(row, "size", 6))
+    position_shares_at_adoption = _positive_decimal(
+        getattr(position, "effective_shares", None)
+    )
     command_id = _ensure_adopted_exit_command(conn, position, row, token_id=token_id)
     command_state = str(_row_value(row, "state", 1) or "")
     venue_order_id = str(_row_value(row, "venue_order_id", 2) or "")
@@ -777,10 +813,34 @@ def _adopt_active_exit_sell(
     position.last_exit_error = reason[:500]
     if not str(getattr(position, "exit_reason", "") or ""):
         position.exit_reason = reason
-    if not _active_exit_already_projected(
+    active_exit_projected = _active_exit_already_projected(
         conn,
         position_id=str(getattr(position, "trade_id", "") or ""),
         venue_order_id=venue_order_id,
+    )
+    adopted_authority_projected = _adopted_exit_authority_projected(
+        conn,
+        position_id=str(getattr(position, "trade_id", "") or ""),
+        venue_order_id=venue_order_id,
+    )
+    synthetic_adoption = command_id.startswith("adopted_exit_")
+    adoption_authority_payload = (
+        {
+            "exit_intent_authority": "ADOPTED_EXTERNAL_SELL",
+            "adopted_order_id": venue_order_id,
+            "adopted_order_size": str(adopted_order_size),
+            "position_shares_at_adoption": str(position_shares_at_adoption),
+            "adopted_token_id": token_id,
+            "adopted_side": "SELL",
+        }
+        if synthetic_adoption
+        and adopted_order_size is not None
+        and position_shares_at_adoption is not None
+        else None
+    )
+    if not active_exit_projected or (
+        synthetic_adoption
+        and not adopted_authority_projected
     ):
         _dual_write_canonical_pending_exit_if_available(
             conn,
@@ -788,6 +848,7 @@ def _adopt_active_exit_sell(
             reason=position.exit_reason or reason,
             error=reason,
             event_type="EXIT_ORDER_POSTED",
+            extra_payload=adoption_authority_payload,
         )
     return (
         "sell_pending: active_prior_exit_sell "
@@ -5201,13 +5262,14 @@ def _dual_write_partial_exit_projection_if_available(
         return False
 
 
-def _canonical_reduction_intent_shares(
+def _canonical_exit_intent_payload(
     conn: sqlite3.Connection | None,
     position: Position,
     *,
     order_id: str = "",
-) -> Decimal | None:
-    """Return the latest partial-reduction size, optionally bound to its order."""
+    before_time: str = "",
+) -> dict[str, object] | None:
+    """Return the intent causally bound to an order or command-time cut."""
 
     if conn is None:
         return None
@@ -5215,6 +5277,125 @@ def _canonical_reduction_intent_shares(
     if not trade_id:
         return None
     try:
+        if order_id:
+            row = conn.execute(
+                """
+                SELECT intent.sequence_no, intent.payload_json, intent.occurred_at
+                  FROM position_events posted
+                  JOIN position_events intent
+                    ON intent.event_id = (
+                        SELECT prior.event_id
+                          FROM position_events prior
+                         WHERE prior.position_id = posted.position_id
+                           AND prior.event_type = 'EXIT_INTENT'
+                           AND prior.sequence_no < posted.sequence_no
+                         ORDER BY prior.sequence_no DESC
+                         LIMIT 1
+                    )
+                 WHERE posted.position_id = ?
+                   AND posted.event_type = 'EXIT_ORDER_POSTED'
+                   AND posted.order_id = ?
+                 ORDER BY posted.sequence_no
+                 LIMIT 1
+                """,
+                (trade_id, order_id),
+            ).fetchone()
+            if row is not None:
+                intent_time = _parse_iso(str(row[2] or ""))
+                boundary = _parse_iso(before_time) if before_time else None
+                if intent_time is not None and intent_time.tzinfo is None:
+                    intent_time = intent_time.replace(tzinfo=timezone.utc)
+                if boundary is not None and boundary.tzinfo is None:
+                    boundary = boundary.replace(tzinfo=timezone.utc)
+                if not before_time or (
+                    intent_time is not None
+                    and boundary is not None
+                    and intent_time < boundary
+                ):
+                    payload = json.loads(str(row[1] or "{}"))
+                    return payload if isinstance(payload, dict) else None
+            if not before_time:
+                direct_rows = conn.execute(
+                    """
+                    SELECT sequence_no, payload_json
+                      FROM position_events
+                     WHERE position_id = ?
+                       AND event_type = 'EXIT_INTENT'
+                       AND order_id = ?
+                     ORDER BY sequence_no
+                    """,
+                    (trade_id, order_id),
+                ).fetchall()
+                direct_payload: dict[str, object] | None = None
+                direct_authority: tuple[bool, Decimal] | None = None
+                for direct_row in direct_rows:
+                    candidate = json.loads(str(direct_row[1] or "{}"))
+                    if not isinstance(candidate, dict):
+                        return None
+                    close_position = candidate.get("exit_intent_close_position")
+                    shares = _positive_decimal(candidate.get("exit_intent_shares"))
+                    if not isinstance(close_position, bool) or shares is None:
+                        return None
+                    authority = (close_position, shares)
+                    if direct_authority is not None and authority != direct_authority:
+                        return None
+                    direct_authority = authority
+                    direct_payload = candidate
+                if direct_payload is not None:
+                    return direct_payload
+        if before_time:
+            boundary = _parse_iso(before_time)
+            if boundary is None:
+                return None
+            if boundary.tzinfo is None:
+                boundary = boundary.replace(tzinfo=timezone.utc)
+            rows = conn.execute(
+                """
+                SELECT sequence_no, occurred_at, payload_json
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_INTENT'
+                 ORDER BY sequence_no DESC
+                """,
+                (trade_id,),
+            ).fetchall()
+            selected: tuple[datetime, int, dict[str, object]] | None = None
+            malformed_sequences: list[int] = []
+            for candidate in rows:
+                sequence_no = int(candidate[0])
+                occurred_at = _parse_iso(str(candidate[1] or ""))
+                if occurred_at is None:
+                    malformed_sequences.append(sequence_no)
+                    continue
+                if occurred_at.tzinfo is None:
+                    occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+                if occurred_at >= boundary:
+                    continue
+                raw_payload = json.loads(str(candidate[2] or "{}"))
+                close_position = (
+                    raw_payload.get("exit_intent_close_position")
+                    if isinstance(raw_payload, dict)
+                    else None
+                )
+                shares = (
+                    _positive_decimal(raw_payload.get("exit_intent_shares"))
+                    if isinstance(raw_payload, dict)
+                    else None
+                )
+                if not isinstance(close_position, bool) or shares is None:
+                    malformed_sequences.append(sequence_no)
+                    continue
+                key = (occurred_at, sequence_no)
+                if selected is None or key > selected[:2]:
+                    selected = (occurred_at, sequence_no, raw_payload)
+            if selected is None:
+                return None
+            _, selected_sequence, payload = selected
+            if any(sequence_no > selected_sequence for sequence_no in malformed_sequences):
+                return None
+            return payload
+        if order_id:
+            return None
         row = conn.execute(
             """
             SELECT sequence_no, payload_json
@@ -5226,36 +5407,117 @@ def _canonical_reduction_intent_shares(
             """,
             (trade_id,),
         ).fetchone()
-    except sqlite3.Error:
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
         return None
     if row is None:
         return None
     try:
-        sequence_no = int(row[0])
         payload = json.loads(str(row[1] or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _canonical_reduction_intent_shares(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    order_id: str = "",
+    before_time: str = "",
+) -> Decimal | None:
+    """Return a partial-reduction size from its causally bound intent."""
+
+    payload = _canonical_exit_intent_payload(
+        conn,
+        position,
+        order_id=order_id,
+        before_time=before_time,
+    )
+    if payload is None:
+        return None
     if payload.get("exit_intent_close_position") is not False:
         return None
-    if order_id:
-        try:
-            posted = conn.execute(
-                """
-                SELECT 1
-                  FROM position_events
-                 WHERE position_id = ?
-                   AND event_type = 'EXIT_ORDER_POSTED'
-                   AND order_id = ?
-                   AND sequence_no > ?
-                 LIMIT 1
-                """,
-                (trade_id, order_id, sequence_no),
-            ).fetchone()
-        except sqlite3.Error:
-            return None
-        if posted is None:
-            return None
     return _positive_decimal(payload.get("exit_intent_shares"))
+
+
+def _canonical_full_exit_intent_shares(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    order_id: str = "",
+    before_time: str = "",
+) -> Decimal | None:
+    """Return full-close shares only from its causally bound intent."""
+
+    payload = _canonical_exit_intent_payload(
+        conn,
+        position,
+        order_id=order_id,
+        before_time=before_time,
+    )
+    if payload is None or payload.get("exit_intent_close_position") is not True:
+        return None
+    return _positive_decimal(payload.get("exit_intent_shares"))
+
+
+def _canonical_adopted_exit_authority(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    order_id: str,
+    command_size: Decimal | None,
+    command_token_id: str,
+    command_side: str,
+    command_review_reason: str,
+) -> tuple[Decimal, Decimal] | None:
+    """Return immutable adopted-order size and holding, or fail closed."""
+
+    if (
+        conn is None
+        or command_size is None
+        or not command_review_reason.startswith("adopted_from_clob_open_orders")
+        or command_side.upper() != "SELL"
+        or command_token_id != _asset_id_for_position(position)
+    ):
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_POSTED'
+               AND order_id = ?
+               AND json_extract(
+                       payload_json,
+                       '$.exit_intent_authority'
+                   ) = 'ADOPTED_EXTERNAL_SELL'
+             ORDER BY sequence_no
+             LIMIT 1
+            """,
+            (position.trade_id, order_id),
+        ).fetchone()
+        payload = json.loads(str(row[0] or "{}")) if row is not None else {}
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("exit_intent_authority") != "ADOPTED_EXTERNAL_SELL"
+        or str(payload.get("adopted_order_id") or "") != order_id
+        or str(payload.get("adopted_token_id") or "") != command_token_id
+        or str(payload.get("adopted_side") or "").upper() != "SELL"
+    ):
+        return None
+    order_size = _positive_decimal(payload.get("adopted_order_size"))
+    holding_size = _positive_decimal(payload.get("position_shares_at_adoption"))
+    if (
+        order_size is None
+        or holding_size is None
+        or order_size != command_size
+        or order_size > holding_size
+    ):
+        return None
+    return order_size, holding_size
 
 
 def _recorded_reduction_fill_shares(
@@ -5661,17 +5923,16 @@ def _accumulate_exact_fills(
     return filled_total, notional_total
 
 
-def _exit_close_target_size(position: Position, command_size: object) -> Decimal | None:
-    candidates = [
-        _positive_decimal(command_size),
-        _positive_decimal(getattr(position, "chain_shares", None)),
-        _positive_decimal(getattr(position, "effective_shares", None)),
-        _positive_decimal(getattr(position, "shares", None)),
-    ]
-    candidates = [candidate for candidate in candidates if candidate is not None]
-    if not candidates:
+def _exact_current_holding_size(position: Position) -> Decimal | None:
+    """Return one exact open holding, or None when local and chain disagree."""
+
+    effective = _positive_decimal(getattr(position, "effective_shares", None))
+    chain = _positive_decimal(getattr(position, "chain_shares", None))
+    if effective is None:
+        return chain
+    if chain is not None and chain != effective:
         return None
-    return max(candidates)
+    return effective
 
 
 def _exit_trade_fact_close_candidate(
@@ -5709,6 +5970,7 @@ def _exit_trade_fact_close_candidate(
                    cmd.venue_order_id,
                    cmd.size AS command_size,
                    cmd.state AS command_state,
+                   cmd.created_at AS command_created_at,
                    GROUP_CONCAT(
                        COALESCE(fact.filled_size, '0') || '#'
                        || COALESCE(fact.fill_price, '0'),
@@ -5743,29 +6005,31 @@ def _exit_trade_fact_close_candidate(
     # canonical decimal TEXT; a SQLite REAL SUM would lose binary precision on
     # the close/settlement boundary and mis-size the residual comparison below.
     filled_size, fill_notional = _accumulate_exact_fills(row["fill_pairs"])
-    latest_reduction_target = _canonical_reduction_intent_shares(conn, position)
-    reduction_target = (
-        _canonical_reduction_intent_shares(
-            conn,
-            position,
-            order_id=str(row["venue_order_id"] or ""),
-        )
-        if latest_reduction_target is not None
-        else None
+    command_size = _positive_decimal(row["command_size"])
+    intent_kwargs = {
+        "order_id": str(row["venue_order_id"] or ""),
+        "before_time": str(row["command_created_at"] or ""),
+    }
+    reduction_target = _canonical_reduction_intent_shares(
+        conn,
+        position,
+        **intent_kwargs,
     )
-    if latest_reduction_target is not None and reduction_target is None:
+    full_close_target = _canonical_full_exit_intent_shares(
+        conn,
+        position,
+        **intent_kwargs,
+    )
+    if reduction_target is not None:
+        if command_size is None or reduction_target != command_size:
+            return None
+    elif full_close_target is None or command_size != full_close_target:
         return None
-    # C2: the full-close target is the EXACT semantic command target (the sell
-    # command size), not the max() of command/chain/shares. A command that fully
-    # fills closes; the chain residual left by a command sized below the position
-    # is preserved by _close_pending_exit_from_trade_fact (never fabricated-zero).
+    current_holding = _exact_current_holding_size(position)
     target_size = (
         reduction_target
         if reduction_target is not None
-        else (
-            _positive_decimal(row["command_size"])
-            or _exit_close_target_size(position, row["command_size"])
-        )
+        else current_holding
     )
     if filled_size is None or fill_notional is None or target_size is None:
         return None
@@ -5773,12 +6037,11 @@ def _exit_trade_fact_close_candidate(
         filled_size > reduction_target + Decimal("1e-9")
     ):
         return None
-    if reduction_target is None and filled_size < target_size:
-        # C2: an underfill of a full-close command is NOT a close. Compare exact
-        # atomics vs the exact command target (no dust tolerance) so a partial
-        # fill (e.g. 0.990 of 1.000) preserves the positive residual instead of
-        # being zeroed by _close_pending_exit_from_trade_fact. A residual is only
-        # retired by the chain-confirmed-zero discipline (_void_chain_confirmed_zero).
+    if reduction_target is None and (
+        full_close_target != current_holding
+        or command_size != current_holding
+        or filled_size != current_holding
+    ):
         return None
     fill_price = fill_notional / filled_size
     if fill_price <= 0 or fill_price > 1:
@@ -6192,30 +6455,113 @@ def check_pending_exits(
                 )
                 stats["unchanged"] += 1
                 continue
+            try:
+                command_row = (
+                    conn.execute(
+                        """
+                        SELECT size, created_at, token_id, side,
+                               review_required_reason
+                          FROM venue_commands
+                         WHERE position_id = ?
+                           AND intent_kind = 'EXIT'
+                           AND venue_order_id = ?
+                         ORDER BY updated_at DESC, created_at DESC, command_id DESC
+                         LIMIT 1
+                        """,
+                        (pos.trade_id, exit_order_id),
+                    ).fetchone()
+                    if conn is not None
+                    else None
+                )
+            except sqlite3.Error:
+                command_row = None
+            command_size = (
+                _positive_decimal(command_row["size"])
+                if command_row is not None
+                else None
+            )
+            intent_kwargs = (
+                {
+                    "order_id": exit_order_id,
+                    "before_time": str(command_row["created_at"] or ""),
+                }
+                if command_row is not None
+                else {"order_id": exit_order_id}
+            )
             reduction_target = _canonical_reduction_intent_shares(
                 conn,
                 pos,
-                order_id=exit_order_id,
+                **intent_kwargs,
             )
-            if reduction_target is not None:
-                confirmed_shares = _confirmed_reduction_fill_shares(
-                    status_payload,
-                    intended_shares=reduction_target,
+            full_close_target = _canonical_full_exit_intent_shares(
+                conn,
+                pos,
+                **intent_kwargs,
+            )
+            adopted_authority = (
+                _canonical_adopted_exit_authority(
+                    conn,
+                    pos,
+                    order_id=exit_order_id,
+                    command_size=command_size,
+                    command_token_id=str(command_row["token_id"] or ""),
+                    command_side=str(command_row["side"] or ""),
+                    command_review_reason=str(
+                        command_row["review_required_reason"] or ""
+                    ),
                 )
-                if confirmed_shares is None:
-                    logger.error(
-                        "Confirmed reduction lacks exact fill size for %s order=%s",
-                        pos.trade_id,
-                        exit_order_id,
-                    )
-                    stats["reduction_fill_size_missing"] = (
-                        stats.get("reduction_fill_size_missing", 0) + 1
+                if command_row is not None
+                else None
+            )
+            intended_shares = reduction_target or full_close_target
+            holding_at_authority = full_close_target
+            if intended_shares is not None:
+                if command_row is not None and (
+                    command_size is None or intended_shares != command_size
+                ):
+                    stats["exit_intent_authority_mismatch"] = (
+                        stats.get("exit_intent_authority_mismatch", 0) + 1
                     )
                     stats["unchanged"] += 1
                     continue
+            elif adopted_authority is not None:
+                intended_shares, holding_at_authority = adopted_authority
+            else:
+                stats["exit_intent_authority_missing"] = (
+                    stats.get("exit_intent_authority_missing", 0) + 1
+                )
+                stats["unchanged"] += 1
+                continue
+            confirmed_shares = _confirmed_reduction_fill_shares(
+                status_payload,
+                intended_shares=intended_shares,
+            )
+            if confirmed_shares is None:
+                stats["reduction_fill_size_missing"] = (
+                    stats.get("reduction_fill_size_missing", 0) + 1
+                )
+                stats["unchanged"] += 1
+                continue
+            current_holding = _exact_current_holding_size(pos)
+            adopted_reduction = (
+                adopted_authority is not None
+                and holding_at_authority is not None
+                and intended_shares < holding_at_authority
+            )
+            if adopted_authority is not None and (
+                current_holding is None
+                or holding_at_authority != current_holding
+            ):
+                stats["exit_intent_authority_mismatch"] = (
+                    stats.get("exit_intent_authority_mismatch", 0) + 1
+                )
+                stats["unchanged"] += 1
+                continue
+            is_reduction = reduction_target is not None or adopted_reduction
+            if is_reduction:
                 reduced = _complete_intentional_position_reduction(
                     pos,
-                    intended_shares=reduction_target,
+                    intended_shares=intended_shares,
                     confirmed_filled_shares=confirmed_shares,
                     fill_price=actual_price,
                     order_id=exit_order_id,
@@ -6223,6 +6569,18 @@ def check_pending_exits(
                     conn=conn,
                 )
                 stats["reduced"] = stats.get("reduced", 0) + int(reduced > 0)
+                continue
+            closes_position = (
+                current_holding is not None
+                and holding_at_authority is not None
+                and intended_shares == holding_at_authority == current_holding
+                and confirmed_shares == current_holding
+            )
+            if not closes_position:
+                stats["exit_intent_authority_mismatch"] = (
+                    stats.get("exit_intent_authority_mismatch", 0) + 1
+                )
+                stats["unchanged"] += 1
                 continue
             exit_reason = pos.exit_reason or "DEFERRED_SELL_FILL"
             phase_before = _canonical_phase_before_for_economic_close(pos)

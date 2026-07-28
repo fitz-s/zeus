@@ -3156,6 +3156,66 @@ def _seed_pending_entry_projection(
     append_many_and_project(conn, events, projection)
 
 
+def _seed_full_exit_intent(
+    conn,
+    *,
+    position_id: str,
+    shares: float,
+    occurred_at: str = "2026-04-26T00:03:30Z",
+) -> None:
+    sequence_no = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+        "WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key,
+            source_module, env, payload_json
+        ) VALUES (?, ?, 1, ?, 'EXIT_INTENT', ?, 'active', 'pending_exit',
+                  'opening_inertia', 'tests.test_command_recovery', 'live', ?)
+        """,
+        (
+            f"{position_id}:full_exit_intent:{sequence_no}",
+            position_id,
+            sequence_no,
+            occurred_at,
+            json.dumps(
+                {
+                    "exit_intent_close_position": True,
+                    "exit_intent_shares": shares,
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize("filled_size", ["10", "11"])
+def test_recovery_full_exit_requires_exact_current_holding(conn, filled_size):
+    from src.execution.command_recovery import _exit_trade_fact_covers_full_close
+
+    assert not _exit_trade_fact_covers_full_close(
+        conn,
+        {
+            "cmd_position_id": "pos-unattributed-full-exit",
+            "cmd_venue_order_id": "ord-unattributed-full-exit",
+            "cmd_created_at": "2026-07-28T00:01:00Z",
+            "cmd_size": 10,
+            "cmd_state": "FILLED",
+            "fill_pairs": f"{filled_size}#0.50",
+        },
+        {
+            "phase": "pending_exit",
+            "shares": 20,
+            "chain_shares": 20,
+            "chain_state": "synced",
+        },
+    )
+
+
 def _append_test_filled_entry_projection(
     conn,
     *,
@@ -9271,6 +9331,11 @@ class TestRecoveryResolutionTable:
              WHERE position_id = 'pos-exit-review'
             """
         )
+        _seed_full_exit_intent(
+            conn,
+            position_id="pos-exit-review",
+            shares=85.17,
+        )
         _insert(
             conn,
             command_id="cmd-exit-review",
@@ -9279,6 +9344,7 @@ class TestRecoveryResolutionTable:
             side="SELL",
             size=85.17,
             price=0.05,
+            created_at="2026-04-26T00:04:00Z",
         )
         _advance_to_acked(
             conn,
@@ -16711,6 +16777,7 @@ class TestRecoveryResolutionTable:
              WHERE position_id = 'pos-001'
             """
         )
+        _seed_full_exit_intent(conn, position_id="pos-001", shares=6.0)
         _insert(
             conn,
             command_id="cmd-exit",
@@ -16720,6 +16787,7 @@ class TestRecoveryResolutionTable:
             size=6.0,
             price=0.29,
             token_id="tok-001",
+            created_at="2026-04-26T00:04:00Z",
         )
         _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
         _append_order_fact(
@@ -16854,6 +16922,7 @@ class TestRecoveryResolutionTable:
              WHERE position_id = 'pos-001'
             """
         )
+        _seed_full_exit_intent(conn, position_id="pos-001", shares=5.11)
         _insert(
             conn,
             command_id="cmd-exit",
@@ -16863,6 +16932,7 @@ class TestRecoveryResolutionTable:
             size=5.11,
             price=0.45,
             token_id="tok-001",
+            created_at="2026-04-26T00:04:00Z",
         )
         _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
         _append_trade_fact(
@@ -16916,7 +16986,7 @@ class TestRecoveryResolutionTable:
             "terminal_exec_status": "filled",
         }
 
-    def test_exit_fill_books_filled_economics_after_chain_reduces_position_to_dust(
+    def test_exit_fill_preserves_chain_residual_until_zero_confirmed(
         self,
         conn,
         mock_client,
@@ -16937,6 +17007,7 @@ class TestRecoveryResolutionTable:
              WHERE position_id = 'pos-001'
             """
         )
+        _seed_full_exit_intent(conn, position_id="pos-001", shares=28.81)
         _insert(
             conn,
             command_id="cmd-exit",
@@ -16946,6 +17017,7 @@ class TestRecoveryResolutionTable:
             size=28.81,
             price=0.12,
             token_id="tok-001",
+            created_at="2026-04-26T00:04:00Z",
         )
         _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
         _append_trade_fact(
@@ -16991,23 +17063,82 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()
         assert dict(current) == {
-            "phase": "economically_closed",
-            "realized_pnl_usd": pytest.approx(0.58),
-            "exit_price": pytest.approx(0.12),
+            "phase": "pending_exit",
+            "realized_pnl_usd": None,
+            "exit_price": None,
         }
-        close_payload = json.loads(
-            conn.execute(
-                """
-                SELECT payload_json
-                  FROM position_events
-                 WHERE position_id = 'pos-001'
-                   AND event_type = 'EXIT_ORDER_FILLED'
-                 ORDER BY sequence_no DESC
-                 LIMIT 1
-                """
-            ).fetchone()["payload_json"]
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'EXIT_ORDER_FILLED'
+            """
+        ).fetchone()[0] == 0
+
+    def test_exit_pending_recovery_without_full_intent_cannot_close(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import reconcile_exit_pending_projections
+
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=10, price=0.20)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 10,
+                   chain_shares = 10,
+                   cost_basis_usd = 2,
+                   entry_price = 0.20,
+                   order_status = 'sell_pending_confirmation',
+                   updated_at = '2026-04-26T00:06:00Z'
+             WHERE position_id = 'pos-001'
+            """
         )
-        assert close_payload["pnl"] == pytest.approx(0.58)
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=10,
+            price=0.40,
+            token_id="tok-001",
+            created_at="2026-04-26T00:04:00Z",
+        )
+        _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit-no-intent",
+            state="CONFIRMED",
+            filled_size="10",
+            fill_price="0.40",
+        )
+
+        summary = reconcile_exit_pending_projections(conn)
+
+        assert summary == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()["phase"] == "pending_exit"
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'EXIT_ORDER_FILLED'
+            """
+        ).fetchone()[0] == 0
 
     def test_chain_zero_retires_one_tick_terminal_exit_residual_with_full_basis(
         self,
@@ -17164,6 +17295,7 @@ class TestRecoveryResolutionTable:
              WHERE position_id = 'pos-001'
             """
         )
+        _seed_full_exit_intent(conn, position_id="pos-001", shares=5.11)
         _insert(
             conn,
             command_id="cmd-exit",
@@ -17173,6 +17305,7 @@ class TestRecoveryResolutionTable:
             size=5.11,
             price=0.45,
             token_id="tok-001",
+            created_at="2026-04-26T00:04:00Z",
         )
         _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
         _append_trade_fact(
@@ -18780,6 +18913,7 @@ class TestRecoveryResolutionTable:
              WHERE position_id = 'pos-001'
             """
         )
+        _seed_full_exit_intent(conn, position_id="pos-001", shares=15.23)
         _insert(
             conn,
             command_id="cmd-exit",
@@ -18789,6 +18923,7 @@ class TestRecoveryResolutionTable:
             size=15.23,
             price=0.60,
             token_id="tok-001",
+            created_at="2026-04-26T00:04:00Z",
         )
         _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
         append_order_fact(
@@ -18909,6 +19044,7 @@ class TestRecoveryResolutionTable:
             size=8.25,
             price=0.95,
             token_id="tok-001",
+            created_at="2026-04-26T00:04:30Z",
         )
         _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
         _append_trade_fact(
@@ -18992,6 +19128,331 @@ class TestRecoveryResolutionTable:
 
         second = reconcile_exit_lifecycle_alignment_repairs(conn)
         assert second["scanned"] == 0
+
+    def test_filled_partial_exit_command_ignores_newer_full_close_intent(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Recovery binds close semantics at command creation, not latest intent."""
+        from src.state.venue_command_repo import append_event, append_order_fact
+
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=31.0, price=0.14)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 21.0,
+                   chain_shares = 21.0,
+                   cost_basis_usd = 2.94,
+                   entry_price = 0.14,
+                   order_status = 'sell_pending_confirmation',
+                   updated_at = '2026-07-28T00:03:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+
+        def append_intent(*, event_id, sequence_no, occurred_at, close_position, shares):
+            conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no, event_type,
+                    occurred_at, phase_before, phase_after, strategy_key,
+                    source_module, env, payload_json
+                ) VALUES (
+                    ?, 'pos-001', 1, ?, 'EXIT_INTENT', ?, 'day0_window',
+                    'pending_exit', 'center_buy', 'tests.test_command_recovery',
+                    'live', ?
+                )
+                """,
+                (
+                    event_id,
+                    sequence_no,
+                    occurred_at,
+                    json.dumps(
+                        {
+                            "exit_intent_close_position": close_position,
+                            "exit_intent_shares": shares,
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
+
+        sequence_no = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()[0]
+        append_intent(
+            event_id="pos-001:partial-exit-intent",
+            sequence_no=sequence_no,
+            occurred_at="2026-07-28T00:01:00.100000Z",
+            close_position=False,
+            shares=10.0,
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit-partial",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=10.0,
+            price=0.14,
+            token_id="tok-001",
+            created_at="2026-07-28T00:01:00.200000Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit-partial",
+            venue_order_id="ord-exit-partial",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit-partial",
+            order_id="ord-exit-partial",
+            trade_id="0xpartialfill",
+            state="MATCHED",
+            filled_size="10",
+            fill_price="0.14",
+            tx_hash="0xpartialfill",
+        )
+        append_order_fact(
+            conn,
+            venue_order_id="ord-exit-partial",
+            command_id="cmd-exit-partial",
+            state="MATCHED",
+            remaining_size="0",
+            matched_size="10",
+            source="REST",
+            observed_at="2026-07-28T00:01:10Z",
+            venue_timestamp="2026-07-28T00:01:10Z",
+            raw_payload_hash="b" * 64,
+            raw_payload_json={
+                "submit_result": {
+                    "orderID": "ord-exit-partial",
+                    "status": "matched",
+                    "side": "SELL",
+                    "makingAmount": "10",
+                    "takingAmount": "1.4",
+                    "transactionsHashes": ["0xpartialfill"],
+                }
+            },
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit-partial",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-07-28T00:01:10Z",
+            payload={
+                "venue_order_id": "ord-exit-partial",
+                "filled_size": "10",
+                "fill_price": "0.14",
+                "trade_id": "0xpartialfill",
+            },
+        )
+        append_intent(
+            event_id="pos-001:new-full-close-intent",
+            sequence_no=sequence_no + 1,
+            occurred_at="2026-07-28T00:01:00.900000Z",
+            close_position=True,
+            shares=10.0,
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_exit_lifecycle_alignment_repairs,
+        )
+
+        summary = reconcile_exit_lifecycle_alignment_repairs(conn)
+
+        assert summary == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, chain_shares
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "shares": 21.0,
+            "chain_shares": 21.0,
+        }
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'EXIT_ORDER_FILLED'
+               AND command_id = 'cmd-exit-partial'
+            """
+        ).fetchone()[0] == 0
+
+    @pytest.mark.parametrize(
+        ("ambiguous_time", "ambiguous_payload"),
+        [
+            (
+                "2026-99-99T25:61:61Z",
+                json.dumps(
+                    {
+                        "exit_intent_close_position": True,
+                        "exit_intent_shares": 8.25,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+            ("2026-07-28T00:00:30Z", "[]"),
+        ],
+    )
+    def test_filled_exit_command_with_malformed_causal_time_fails_closed(
+        self,
+        conn,
+        mock_client,
+        ambiguous_time,
+        ambiguous_payload,
+    ):
+        """Recovery cannot infer full-close authority across malformed time."""
+        from src.state.venue_command_repo import append_event, append_order_fact
+
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=8.25, price=0.56)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 8.25,
+                   chain_shares = 8.25,
+                   cost_basis_usd = 4.62,
+                   entry_price = 0.56,
+                   order_status = 'sell_pending_confirmation'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        sequence_no = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()[0]
+        for event_id, seq, occurred_at, payload_json in (
+            (
+                "pos-001:full-close-intent",
+                sequence_no,
+                "2026-07-28T00:00:00Z",
+                json.dumps(
+                    {
+                        "exit_intent_close_position": True,
+                        "exit_intent_shares": 8.25,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+            (
+                "pos-001:ambiguous-intent",
+                sequence_no + 1,
+                ambiguous_time,
+                ambiguous_payload,
+            ),
+        ):
+            conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no, event_type,
+                    occurred_at, phase_before, phase_after, strategy_key,
+                    source_module, env, payload_json
+                ) VALUES (
+                    ?, 'pos-001', 1, ?, 'EXIT_INTENT', ?, 'active',
+                    'pending_exit', 'center_buy', 'tests.test_command_recovery',
+                    'live', ?
+                )
+                """,
+                (
+                    event_id,
+                    seq,
+                    occurred_at,
+                    payload_json,
+                ),
+            )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=8.25,
+            price=0.95,
+            token_id="tok-001",
+            created_at="2026-07-28T00:01:00Z",
+        )
+        _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="0xexitfill",
+            state="MATCHED",
+            filled_size="8.25",
+            fill_price="0.95",
+            tx_hash="0xexitfill",
+        )
+        append_order_fact(
+            conn,
+            venue_order_id="ord-exit",
+            command_id="cmd-exit",
+            state="MATCHED",
+            remaining_size="0",
+            matched_size="8.25",
+            source="REST",
+            observed_at="2026-07-28T00:02:00Z",
+            venue_timestamp="2026-07-28T00:02:00Z",
+            raw_payload_hash="c" * 64,
+            raw_payload_json={
+                "submit_result": {
+                    "orderID": "ord-exit",
+                    "status": "matched",
+                    "side": "SELL",
+                    "makingAmount": "8.25",
+                    "takingAmount": "7.8375",
+                }
+            },
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-07-28T00:02:00Z",
+            payload={
+                "venue_order_id": "ord-exit",
+                "filled_size": "8.25",
+                "fill_price": "0.95",
+                "trade_id": "0xexitfill",
+            },
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_exit_lifecycle_alignment_repairs,
+        )
+
+        assert reconcile_exit_lifecycle_alignment_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            "SELECT phase, shares, chain_shares FROM position_current "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "shares": 8.25,
+            "chain_shares": 8.25,
+        }
 
     def test_partial_matched_exit_order_fact_cannot_close_position(
         self,
@@ -19960,6 +20421,7 @@ class TestRecoveryResolutionTable:
             )
             """
         )
+        _seed_full_exit_intent(conn, position_id="pos-001", shares=6.0)
         _insert(
             conn,
             command_id="cmd-exit",
@@ -19969,6 +20431,7 @@ class TestRecoveryResolutionTable:
             size=6.0,
             price=0.29,
             token_id="tok-001",
+            created_at="2026-04-26T00:06:00Z",
         )
         _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
         _append_trade_fact(
@@ -20227,6 +20690,7 @@ class TestRecoveryResolutionTable:
              WHERE position_id = 'pos-001'
             """
         )
+        _seed_full_exit_intent(conn, position_id="pos-001", shares=23.7)
         _insert(
             conn,
             command_id="cmd-exit",
@@ -20236,6 +20700,7 @@ class TestRecoveryResolutionTable:
             size=23.7,
             price=0.05,
             token_id="tok-001",
+            created_at="2026-04-26T00:04:00Z",
         )
         _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
         _append_trade_fact(
@@ -20256,7 +20721,7 @@ class TestRecoveryResolutionTable:
                 venue_status, source_module, payload_json, env
             )
             VALUES (
-                'pos-001:exit_order_posted:cmd-exit', 'pos-001', 1, 3,
+                'pos-001:exit_order_posted:cmd-exit', 'pos-001', 1, 4,
                 'EXIT_ORDER_POSTED', '2026-04-26T00:06:00Z', 'active',
                 'pending_exit', 'opening_inertia', 'dec-001', 'snap-pos-001',
                 'ord-exit', 'cmd-exit', 'test_torn_setup',
