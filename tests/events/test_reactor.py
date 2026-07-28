@@ -743,6 +743,51 @@ def test_blocked_entry_cycle_returns_before_runtime_db_setup(monkeypatch):
     assert run_edli_event_reactor_cycle(active_lock=_Lock()) is True
 
 
+def test_blocked_entry_cycle_keeps_held_sell_completion_wake(monkeypatch):
+    import src.main as main
+    import src.state.db as db
+    from src.events.reactor import run_edli_event_reactor_cycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    class _Lock:
+        def locked(self):
+            return False
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        riskguard,
+        "get_current_level",
+        lambda: RiskLevel.YELLOW,
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: pytest.fail("completion wake must stay durable while blocked"),
+    )
+
+    assert (
+        run_edli_event_reactor_cycle(
+            active_lock=_Lock(),
+            producer_wake_reason=(
+                "held_sell_global_auction_completion_requested"
+            ),
+        )
+        is False
+    )
+
+
 def test_periodic_cycle_yields_to_already_pending_day0_before_runtime_db_setup(
     monkeypatch,
 ):
@@ -1069,6 +1114,13 @@ def test_reactor_wake_day0_still_preempts_older_joint_inputs(tmp_path):
         published_at=datetime(2026, 7, 25, 12, 0, 1, tzinfo=timezone.utc),
     )
     reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="completion-newer",
+        published_at=datetime(2026, 7, 25, 12, 0, 1, 500000, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
         source="fill",
         reason="position_fill_projected",
         path=path,
@@ -1157,6 +1209,73 @@ def test_reactor_wake_fill_is_bounded_fair_with_continuous_joint_inputs(tmp_path
     third = reactor_wake.read_reactor_wake(path=path)
     assert third is not None
     assert third.wake_id == "forecast-new"
+
+
+def test_restart_completion_debt_preempts_continuous_ordinary_wakes(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="periodic_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="completion-generic",
+        published_at=datetime(2026, 7, 28, 8, 0, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="forecast-between",
+        published_at=datetime(2026, 7, 28, 8, 0, 1, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="price-between",
+        published_at=datetime(2026, 7, 28, 8, 0, 1, 100000, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="fill",
+        reason="position_fill_projected",
+        path=path,
+        wake_id="fill-between",
+        published_at=datetime(2026, 7, 28, 8, 0, 1, 200000, tzinfo=timezone.utc),
+        event_ids=("fill-event",),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="forecast-later",
+        published_at=datetime(2026, 7, 28, 8, 0, 1, 300000, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="completion-family",
+        published_at=datetime(2026, 7, 28, 8, 0, 2, tzinfo=timezone.utc),
+        forecast_families=(("Paris", "2026-07-28", "low"),),
+    )
+
+    selected = reactor_wake.read_reactor_wake(path=path)
+    assert selected is not None
+    assert selected.wake_id == "completion-generic"
+    completion_batch = reactor_wake.coalescible_reactor_wakes(
+        selected,
+        path=path,
+    )
+    assert tuple(wake.wake_id for wake in completion_batch) == (
+        "completion-generic",
+        "completion-family",
+    )
+    assert {
+        family
+        for wake in completion_batch
+        for family in wake.forecast_families
+    } == {("Paris", "2026-07-28", "low")}
 
 
 def test_position_fill_wake_is_an_exact_targeted_reactor_fast_path():
@@ -1596,12 +1715,19 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         main._day0_exit_monitor_attempts.clear()
 
 
-def test_monitor_preempts_once_then_next_auction_must_complete():
+def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
     from types import SimpleNamespace
 
     from src.events import reactor
+    from src.runtime import reactor_wake
 
     pending = [True]
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", lambda _at: ())
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **_kwargs: None,
+    )
     reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     try:
         due_at_start, first_probe = (
@@ -1636,6 +1762,122 @@ def test_monitor_preempts_once_then_next_auction_must_complete():
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
+def test_held_sell_completion_request_deduplicates_durable_family(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    wakes = []
+
+    def publish(**kwargs):
+        wakes.append(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        publish,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _at: tuple(
+            SimpleNamespace(
+                reason=wake["reason"],
+                forecast_families=wake["forecast_families"],
+            )
+            for wake in wakes
+        ),
+    )
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-1",
+        )
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-2",
+        )
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-3",
+            family=("Paris", "2026-07-28", "LOW"),
+        )
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-4",
+            family=("Paris", "2026-07-28", "low"),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+        assert wakes == [
+            {
+                "source": "held_position_monitor",
+                "reason": (
+                    "held_sell_global_auction_completion_requested"
+                ),
+                "forecast_families": (),
+            },
+            {
+                "source": "held_position_monitor",
+                "reason": (
+                    "held_sell_global_auction_completion_requested"
+                ),
+                "forecast_families": (
+                    ("Paris", "2026-07-28", "low"),
+                ),
+            },
+        ]
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_held_sell_completion_request_survives_wake_io_failure(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    attempts = []
+    durable_wakes = []
+
+    def flaky_publish(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise OSError("wake path unavailable")
+        durable_wakes.append(
+            SimpleNamespace(
+                reason=kwargs["reason"],
+                forecast_families=kwargs["forecast_families"],
+            )
+        )
+
+    monkeypatch.setattr(reactor_wake, "publish_reactor_wake", flaky_publish)
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _at: tuple(durable_wakes),
+    )
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-1",
+            family=("Paris", "2026-07-28", "low"),
+        )
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-1",
+            family=("Paris", "2026-07-28", "low"),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+        assert len(attempts) == 2
+        assert len(durable_wakes) == 1
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
 def test_day0_cancellation_does_not_discharge_monitor_fairness_debt():
     from types import SimpleNamespace
 
@@ -1655,6 +1897,57 @@ def test_day0_cancellation_does_not_discharge_monitor_fairness_debt():
                     "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
                 ],
             ),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_new_fact_supersession_does_not_discharge_monitor_fairness_debt():
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(
+                processed=0,
+                proof_accepted=0,
+                rejected=1,
+                retried=1,
+                global_auction_completed_non_cancelled=0,
+                rejection_reasons=[
+                    "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT"
+                ],
+            ),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_completion_wake_recovers_debt_after_process_restart():
+    from src.events import reactor
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        due_at_start, cancellation_probe = (
+            reactor._global_auction_monitor_cancellation_probe(
+                None,
+                completion_due=True,
+            )
+        )
+        assert due_at_start is True
+        assert cancellation_probe() is False
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+        assert (
+            reactor._settle_global_auction_monitor_fairness(
+                completion_due_at_start=True,
+                result=ReactorResult(),
+            )
+            is False
         )
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
     finally:
@@ -1772,6 +2065,7 @@ def test_global_batch_completed_economic_no_trade_consumes_current_epoch(verdict
             },
             winner_event_id=None,
             venue_submit_count=0,
+            economic_cut_completed=True,
         )
 
     reactor._submit.process_global_batch = _batch

@@ -5511,7 +5511,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         "_entry_global_submit_suppression_reason",
         lambda: "entries_paused:test_containment",
     )
-    def make_adapter():
+    def make_adapter(*, completion_reserved=False):
         return era.event_bound_live_adapter_from_trade_conn(
             trade,
             get_current_level=lambda: era.RiskLevel.GREEN,
@@ -5522,6 +5522,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
                 "cycle-start portfolio must not back global selection wealth"
             ),
             auction_capital_authority=CapacityAuthority(),
+            selection_completion_reserved=completion_reserved,
         )
 
     adapter = make_adapter()
@@ -5561,6 +5562,19 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
             "correlation_key": "family-dallas",
         }
     ]
+    reserved_adapter = make_adapter(completion_reserved=True)
+    reserved_adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 12, tzinfo=_dt.timezone.utc),
+    )
+    urgent_revision["value"] = (7, 8, 9)
+    urgent_reason["value"] = "forecast_posterior_advanced"
+    assert captured["epoch_superseded"]() is False
+    urgent_revision["value"] = (10, 11, 12)
+    urgent_reason["value"] = "day0_extreme_event_committed"
+    assert captured["epoch_superseded"]() is True
+    urgent_revision["value"] = (4, 5, 6)
+    urgent_reason["value"] = "market_price_advanced"
     prepared_receipt = captured["prepare_event"](
         event,
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
@@ -16948,6 +16962,36 @@ def test_global_batch_reduce_only_skips_nonheld_universe(monkeypatch):
     )
 
 
+def test_entry_suppression_rewrite_invalidates_economic_cut_completion():
+    from src.events.reactor import GlobalBatchSubmitResult
+
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    result = GlobalBatchSubmitResult(
+        receipts={
+            event.event_id: EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES",
+                proof_accepted=False,
+            )
+        },
+        winner_event_id=None,
+        venue_submit_count=0,
+        economic_cut_completed=True,
+    )
+
+    rewritten = era._retain_transient_entry_suppressed_batch(
+        result,
+        "entries_paused:test",
+    )
+
+    assert rewritten.economic_cut_completed is False
+    assert rewritten.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_NO_TRADE:entries_paused:test"
+    )
+
+
 def test_global_batch_routes_restricted_day0_epoch_to_day0_only_scope(monkeypatch):
     from src.events.candidate_binding import weather_family_id
 
@@ -17237,6 +17281,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"
     )
+    assert result.economic_cut_completed is True
 
     held_failure_reason = (
         "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
@@ -17571,6 +17616,7 @@ def test_global_batch_cancelled_selection_skips_holding_coverage_and_receipt(
 
     assert result.winner_event_id is None
     assert result.venue_submit_count == 0
+    assert result.economic_cut_completed is False
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
     )
@@ -17939,6 +17985,7 @@ def test_global_batch_requeues_claimed_epoch_when_new_durable_fact_arrives(
     assert prepared == []
     assert result.venue_submit_count == 0
     assert result.winner_event_id is None
+    assert result.economic_cut_completed is False
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT"
     )
@@ -21278,6 +21325,7 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch, batch_rea
     }
     assert result.winner_event_id is None
     assert result.venue_submit_count == 0
+    assert result.economic_cut_completed is False
     assert result.receipts[event.event_id].reason == (
         f"GLOBAL_PREFLIGHT_BATCH_BLOCKED:{batch_reason}"
     )

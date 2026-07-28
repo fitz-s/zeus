@@ -6550,6 +6550,27 @@ def execute_monitoring_phase(
                     [],
                 ).append(coverage_receipt_id)
             elif statistical_sell_requires_global:
+                from src.events.reactor import (
+                    request_global_auction_completion,
+                )
+
+                request_global_auction_completion(
+                    reason=(
+                        "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+                    ),
+                    position_id=str(
+                        getattr(pos, "position_id", "")
+                        or getattr(pos, "trade_id", "")
+                        or ""
+                    ),
+                    family=(
+                        str(getattr(pos, "city", "") or "").strip(),
+                        str(getattr(pos, "target_date", "") or "").strip(),
+                        str(
+                            getattr(pos, "temperature_metric", "") or ""
+                        ).strip().lower(),
+                    ),
+                )
                 should_exit = False
                 exit_reason = (
                     "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
@@ -6560,12 +6581,22 @@ def execute_monitoring_phase(
                             *(pos.applied_validations or []),
                             "local_statistical_sell_non_authoritative_record",
                             "global_statistical_sell_authority_unavailable",
+                            "global_auction_completion_requested",
                         ]
                     )
                 )
                 summary["monitor_statistical_sells_blocked_without_global_authority"] = (
                     summary.get(
                         "monitor_statistical_sells_blocked_without_global_authority",
+                        0,
+                    )
+                    + 1
+                )
+                summary[
+                    "monitor_statistical_sell_auction_completion_requested"
+                ] = (
+                    summary.get(
+                        "monitor_statistical_sell_auction_completion_requested",
                         0,
                     )
                     + 1

@@ -3440,7 +3440,11 @@ def _retain_transient_entry_suppressed_batch(
         for event_id, receipt in result.receipts.items()
     ):
         return result
-    return dataclass_replace(result, receipts=receipts)
+    return dataclass_replace(
+        result,
+        receipts=receipts,
+        economic_cut_completed=False,
+    )
 
 
 _DURABLE_LIVE_CAP_NO_EXPOSURE_TERMINAL_COMMAND_STATES = frozenset(
@@ -6257,6 +6261,7 @@ def event_bound_live_adapter_from_trade_conn(
     producer_wake_ids: tuple[str, ...] = (),
     producer_wake_published_at: str | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
+    selection_completion_reserved: bool = False,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -7150,6 +7155,30 @@ def event_bound_live_adapter_from_trade_conn(
                 _global_batch_wake_cutoff,
                 exclude_wake_ids=_global_batch_owned_wake_ids,
             )
+            if selection_completion_reserved:
+                # SCOPE: one global auction cut after a held SELL or periodic
+                # monitor proved that prior work lacked current handoff.
+                # DRAIN: complete selection publishes the globally comparable
+                # BUY/SELL/HOLD/CASH result; newer ordinary facts stay queued.
+                # RESET: reactor fairness clears the reservation only for a
+                # completed economic cut. A new Day0 physical fact still
+                # supersedes immediately and keeps the reservation armed.
+                if any(
+                    str(getattr(wake, "reason", "") or "")
+                    == "day0_extreme_event_committed"
+                    for wake in pending_wakes
+                ):
+                    return True
+                if not pending_wakes:
+                    marker = reactor_urgent_wake_identity()
+                    if (
+                        marker is not None
+                        and marker[0] not in _global_batch_owned_wake_ids
+                        and marker[1] == "day0_extreme_event_committed"
+                    ):
+                        return True
+                _global_batch_urgent_wake_revision[0] = current
+                return False
             if not pending_wakes:
                 marker = reactor_urgent_wake_identity()
                 if marker is None:

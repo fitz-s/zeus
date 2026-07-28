@@ -7233,6 +7233,75 @@ def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
     assert pending.is_set() is True
 
 
+def test_held_sell_completion_wake_stays_durable_until_economic_cut(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    wake = wake_module.ReactorWake(
+        "wake-held-sell-completion",
+        "2026-07-28T08:00:00+00:00",
+        "held_position_monitor",
+        "held_sell_global_auction_completion_requested",
+    )
+    family_wake = wake_module.ReactorWake(
+        "wake-held-sell-family",
+        "2026-07-28T08:00:01+00:00",
+        "held_position_monitor",
+        "held_sell_global_auction_completion_requested",
+        forecast_families=(("Paris", "2026-07-28", "low"),),
+    )
+    acknowledgements = []
+    cycle_calls = []
+
+    class IdleLock:
+        def locked(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_excluded_wake_ids",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        wake_module,
+        "coalescible_reactor_wakes",
+        lambda _wake: (wake, family_wake),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleLock())
+    monkeypatch.setattr(
+        main_module,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: cycle_calls.append(kwargs) or False,
+    )
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert acknowledgements == []
+    assert main_module._edli_last_reactor_wake_id is None
+    assert cycle_calls == [
+        {
+            "producer_wake_reason": wake.reason,
+            "producer_wake_ids": (wake.wake_id, family_wake.wake_id),
+            "producer_wake_published_at": wake.published_at,
+            "producer_wake_event_ids": (),
+            "producer_wake_families": family_wake.forecast_families,
+        }
+    ]
+
+
 def test_claimed_monitor_owns_day0_priority_without_starving_reactor(
     monkeypatch,
 ) -> None:

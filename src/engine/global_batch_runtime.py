@@ -754,6 +754,15 @@ def _global_preflight_exhaustion_reason(
     )
 
 
+_COMPLETE_ECONOMIC_NO_TRADE_REASONS = frozenset(
+    {
+        "CASH_DOMINATES",
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        "ROBUST_MAJORITY_LOSS",
+    }
+)
+
+
 @dataclass(frozen=True)
 class GlobalPreflightAuthority:
     """Frozen whole-universe authority carried by one one-shot preflight."""
@@ -3359,6 +3368,7 @@ def process_current_global_batch(
         reason: str,
         *,
         next_claim_event: OpportunityEvent | None = None,
+        economic_cut_completed: bool = False,
     ) -> GlobalBatchSubmitResult:
         release_selection_snapshot()
         return GlobalBatchSubmitResult(
@@ -3376,6 +3386,7 @@ def process_current_global_batch(
             },
             winner_event_id=None,
             venue_submit_count=0,
+            economic_cut_completed=economic_cut_completed,
             next_claim_event=next_claim_event,
         )
 
@@ -4070,9 +4081,14 @@ def process_current_global_batch(
         log_stage(initial_select_stage, families=len(prepared_by_event))
         if selected.decision.candidate is None:
             log_no_trade(initial_select_stage, selected.decision)
+            no_trade_reason = str(
+                selected.decision.no_trade_reason or "unknown"
+            )
             return reject(
-                "GLOBAL_AUCTION_NO_TRADE:"
-                f"{selected.decision.no_trade_reason or 'unknown'}"
+                f"GLOBAL_AUCTION_NO_TRADE:{no_trade_reason}",
+                economic_cut_completed=(
+                    no_trade_reason in _COMPLETE_ECONOMIC_NO_TRADE_REASONS
+                ),
             )
         log_winner(initial_select_stage, selected, probabilities)
         if selected.actuation is None:
@@ -4489,12 +4505,18 @@ def process_current_global_batch(
                             "select_preflight_fallthrough",
                             selected.decision,
                         )
-                        return reject(
+                        exhaustion_reason = (
                             _global_preflight_exhaustion_reason(
                                 selected.decision.no_trade_reason,
                                 excluded_by_family=excluded_by_family,
                                 excluded_by_candidate=excluded_by_candidate,
                             )
+                        )
+                        return reject(
+                            exhaustion_reason,
+                            economic_cut_completed=exhaustion_reason.startswith(
+                                "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL:"
+                            ),
                         )
                     log_winner(
                         "select_preflight_fallthrough",
@@ -4684,6 +4706,9 @@ def process_current_global_batch(
             receipts=receipts,
             winner_event_id=winner_id,
             venue_submit_count=venue_delta,
+            economic_cut_completed=bool(
+                venue_delta == 1 and winner_receipt.submitted
+            ),
             continuation_event=continuation_event,
         )
     except Exception as exc:  # noqa: BLE001 - one authority fault invalidates epoch

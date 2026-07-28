@@ -4959,6 +4959,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime, monitor_refresh
     from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.events import reactor as event_reactor
     from src.state.db import append_many_and_project, get_connection, init_schema
     from src.state.lifecycle_manager import LifecyclePhase
 
@@ -5090,6 +5091,12 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         lambda: invalidations.append("venue_side_effect"),
     )
     execute_calls = []
+    auction_completion_requests = []
+    monkeypatch.setattr(
+        event_reactor,
+        "request_global_auction_completion",
+        lambda **kwargs: auction_completion_requests.append(kwargs),
+    )
 
     def fake_execute_exit(*args, **kwargs):
         execute_calls.append(kwargs.get("position") or args[1])
@@ -5158,6 +5165,23 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             == "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
         )
         assert "local_statistical_sell_non_authoritative_record" in pos.applied_validations
+        assert "global_auction_completion_requested" in pos.applied_validations
+        assert summary[
+            "monitor_statistical_sell_auction_completion_requested"
+        ] == 1
+        assert auction_completion_requests == [
+            {
+                "reason": (
+                    "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+                ),
+                "position_id": pos.trade_id,
+                "family": (
+                    pos.city,
+                    pos.target_date,
+                    pos.temperature_metric,
+                ),
+            }
+        ]
         assert execute_calls == []
     else:
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
@@ -5168,6 +5192,8 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert results[0].should_exit is True
         assert results[0].exit_reason == trigger
         assert execute_calls == [pos]
+    if outcome != "blocked":
+        assert auction_completion_requests == []
     assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()
 

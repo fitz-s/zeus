@@ -59,6 +59,7 @@ from src.decision_kernel.compiler import PreSubmitProofBundle
 from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.event_store import EventStore, GLOBAL_WINNER_TARGETED_CLAIM
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
+from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
 from src.state.db import get_trade_connection_read_only, get_world_connection_read_only, world_write_mutex
 from src.strategy.live_inference.live_admission import (
     live_buy_no_conservative_evidence_rejection_reason,
@@ -896,6 +897,7 @@ class GlobalBatchSubmitResult:
     venue_submit_count: int
     next_claim_event: OpportunityEvent | None = None
     continuation_event: OpportunityEvent | None = None
+    economic_cut_completed: bool = False
 
     def __post_init__(self) -> None:
         if self.venue_submit_count not in {0, 1}:
@@ -963,9 +965,11 @@ class GlobalEpochOutcome:
     ``claimed_event_ids`` is the set of events this epoch actually claimed (a
     subset of the scanned events) — see ``attempted``.
 
-    ``auction_completed_non_cancelled`` is true only after the opaque global
-    adapter returned a valid receipt partition without a selection-cancelled
-    outcome. Pre-submit event rejection and batch exceptions remain false.
+    ``auction_completed_non_cancelled`` copies the opaque adapter's explicit
+    ``economic_cut_completed`` disposition. It is never inferred from receipt
+    text: a complete CASH-dominates result or successful actuation is true;
+    cancellation, supersession, preflight rejection, and batch failure are
+    false.
 
     BLOCKER FIX (2026-07-19 external review,
     ~/cgc-answers/2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md,
@@ -1635,9 +1639,8 @@ class OpportunityEventReactor:
                 if winner_finalized and batch_result.continuation_event is not None
                 else frozenset()
             ),
-            auction_completed_non_cancelled=not any(
-                "GLOBAL_SELECTION_CANCELLED" in str(receipt.reason or "")
-                for receipt in batch_result.receipts.values()
+            auction_completed_non_cancelled=bool(
+                batch_result.economic_cut_completed
             ),
         )
 
@@ -5960,16 +5963,85 @@ def _reactor_wake_cancellation_probe(
 _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE = threading.Event()
 
 
+def request_global_auction_completion(
+    *,
+    reason: str,
+    position_id: str,
+    family: tuple[str, str, str] | None = None,
+) -> None:
+    """Persistently reserve one complete global cut for a held SELL."""
+
+    already_due = _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    clean_family = tuple(
+        str(value or "").strip().lower()
+        if index == 2
+        else str(value or "").strip()
+        for index, value in enumerate(family or ())
+    )
+    wake_families: tuple[tuple[str, str, str], ...] = ()
+    if len(clean_family) == 3 and all(clean_family):
+        wake_families = (
+            (clean_family[0], clean_family[1], clean_family[2]),
+        )
+    try:
+        from src.runtime.reactor_wake import (
+            publish_reactor_wake,
+            reactor_wakes_since,
+        )
+
+        durable_wakes = tuple(
+            wake
+            for wake in reactor_wakes_since(None)
+            if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        )
+        durable_request_exists = (
+            any(wake_families[0] in wake.forecast_families for wake in durable_wakes)
+            if wake_families
+            else bool(durable_wakes)
+        )
+    except OSError:
+        durable_request_exists = False
+    if not already_due:
+        logger = logging.getLogger("zeus.events.reactor")
+        logger.warning(
+            "global auction completion requested by held SELL: "
+            "position_id=%s reason=%s",
+            str(position_id or "unknown"),
+            str(reason or "authority_unavailable"),
+        )
+    else:
+        logger = logging.getLogger("zeus.events.reactor")
+    if not durable_request_exists:
+        try:
+            publish_reactor_wake(
+                source="held_position_monitor",
+                reason=GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+                forecast_families=wake_families,
+            )
+        except OSError:
+            logger.exception(
+                "held SELL global-auction wake publish failed; "
+                "scheduled reactor remains the fallback"
+            )
+
+
 def _global_auction_monitor_cancellation_probe(
     monitor_pending: Callable[[], bool] | None,
+    *,
+    completion_due: bool = False,
 ) -> tuple[bool, Callable[[], bool]]:
     """Allow one periodic-monitor preemption, then reserve auction completion."""
 
-    completion_due_at_start = _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    completion_due_at_start = (
+        completion_due or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    )
+    if completion_due_at_start:
+        _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
     cancelled_this_cycle = False
     if completion_due_at_start:
         logging.getLogger("zeus.events.reactor").info(
-            "global auction completion reserved after periodic-monitor preemption"
+            "global auction economic-cut completion reserved"
         )
 
     def _cancelled() -> bool:
@@ -5990,7 +6062,10 @@ def _global_auction_monitor_cancellation_probe(
         # ignores ordinary monitor pressure until one global auction finishes.
         # RESET: _settle_global_auction_monitor_fairness clears the debt only
         # after a non-cancelled auction result; Day0 cancellation keeps it due.
-        _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+        request_global_auction_completion(
+            reason="periodic_monitor_preemption",
+            position_id="",
+        )
         cancelled_this_cycle = True
         logging.getLogger("zeus.events.reactor").info(
             "global auction yielded once to periodic held monitor; completion debt armed"
@@ -6002,22 +6077,22 @@ def _global_auction_monitor_cancellation_probe(
 
 def _settle_global_auction_monitor_fairness(
     *, completion_due_at_start: bool, result: object
-) -> None:
+) -> bool:
     """Clear a prior monitor preemption only after useful auction completion."""
 
     if not completion_due_at_start:
-        return
-    reasons = tuple(getattr(result, "rejection_reasons", ()) or ())
-    if any("GLOBAL_SELECTION_CANCELLED" in str(reason) for reason in reasons):
-        return
+        return False
     completed = int(
         getattr(result, "global_auction_completed_non_cancelled", 0) or 0
     )
     if completed > 0:
         _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
         logging.getLogger("zeus.events.reactor").info(
-            "global auction completion debt cleared after non-cancelled result"
+            "global auction completion debt cleared after economic cut"
         )
+        return True
+    _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    return False
 
 
 def run_edli_event_reactor_cycle(
@@ -6078,6 +6153,10 @@ def run_edli_event_reactor_cycle(
     _log = _logging.getLogger("zeus.events.reactor")
 
     edli_cfg = _settings_section("edli", {})
+    completion_wake = (
+        producer_wake_reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+    )
+    completion_wake_needs_retry = False
     committed_day0_wake = (
         producer_wake_reason == "day0_extreme_event_committed"
     )
@@ -6108,7 +6187,8 @@ def run_edli_event_reactor_cycle(
             forecast_wake_families.add(family)
             forecast_wake_family_order.append(family)
     targeted_forecast_wake = (
-        producer_wake_reason == "forecast_posterior_advanced"
+        producer_wake_reason
+        in {"forecast_posterior_advanced", GLOBAL_AUCTION_COMPLETION_WAKE_REASON}
         and bool(forecast_wake_families)
     )
     producer_fast_path = committed_event_wake or targeted_forecast_wake
@@ -6132,7 +6212,7 @@ def run_edli_event_reactor_cycle(
         _log.info(
             "EDLI reactor skipped before runtime DB setup: new entries are globally blocked"
         )
-        return True
+        return not completion_wake
     import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
@@ -6645,7 +6725,8 @@ def run_edli_event_reactor_cycle(
             _monitor_completion_due_at_start,
             _monitor_selection_cancelled,
         ) = _global_auction_monitor_cancellation_probe(
-            held_position_monitor_pending
+            held_position_monitor_pending,
+            completion_due=completion_wake,
         )
         submit_adapter = event_bound_live_adapter_from_trade_conn(
             trade_conn,
@@ -6678,6 +6759,9 @@ def run_edli_event_reactor_cycle(
             producer_wake_ids=producer_wake_ids,
             producer_wake_published_at=producer_wake_published_at,
             selection_cancelled=_monitor_selection_cancelled,
+            selection_completion_reserved=(
+                _monitor_completion_due_at_start
+            ),
         )
 
         reactor = OpportunityEventReactor(
@@ -6724,9 +6808,12 @@ def run_edli_event_reactor_cycle(
                 urgent_day0_pending=urgent_day0_pending,
             ),
         )
-        _settle_global_auction_monitor_fairness(
+        completion_satisfied = _settle_global_auction_monitor_fairness(
             completion_due_at_start=_monitor_completion_due_at_start,
             result=_rr,
+        )
+        completion_wake_needs_retry = (
+            completion_wake and not completion_satisfied
         )
         _log_stage("process_pending")
         # Canonical event/finalization truth must commit before the derived status
@@ -6807,7 +6894,7 @@ def run_edli_event_reactor_cycle(
             # every later cycle into "previous cycle is still running".
             active_lock.release()
             _start_venue_background_maintenance_after_reactor_if_required()
-    return True
+    return not completion_wake_needs_retry
 
 def _edli_positive_int_or_unbounded(
     config: dict, key: str, *, default: int, maximum: int
