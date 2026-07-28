@@ -36,6 +36,7 @@ from src.events.reactor import (
     TRANSIENT_MONEY_PATH_REASONS,
     _EXECUTABLE_SNAPSHOT_RETRY,
     _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
+    _build_day0_posterior_redecision_events,
     _edli_emit_day0_extreme_events,
     _is_posterior_staleness_reason,
     _process_pending_cancelled,
@@ -1032,6 +1033,70 @@ def test_targeted_forecast_wake_ignores_disjoint_family_revision(monkeypatch):
     assert cancelled() is False
     assert cancelled() is False
     assert reads == [frozenset({current.wake_id})]
+
+
+def test_day0_posterior_advance_reemits_current_observation_on_new_probability_clock():
+    conn, _store_obj = _store()
+    observation = Day0ExtremeUpdatedPayload(
+        city="Chicago",
+        target_date="2026-07-28",
+        metric="high",
+        settlement_source="weather_underground",
+        station_id="KORD",
+        observation_time="2026-07-28T12:00:00+00:00",
+        observation_available_at="2026-07-28T12:00:05+00:00",
+        raw_value=30.0,
+        rounded_value=30,
+        high_so_far=30.0,
+        source_match_status="MATCH",
+        local_date_status="MATCH",
+        station_match_status="MATCH",
+        dst_status="UNAMBIGUOUS",
+        metric_match_status="MATCH",
+        rounding_status="MATCH",
+        source_authorized_status="AUTHORIZED",
+        live_authority_status="live",
+    )
+    prior = make_day0_extreme_updated_event(
+        entity_key="Chicago|2026-07-28|high|KORD",
+        source="day0_extreme_updated_trigger",
+        observed_at=observation.observation_time,
+        received_at="2026-07-28T12:00:06+00:00",
+        payload=observation,
+        causal_snapshot_id="observation-context",
+    )
+    EventStore(conn).insert_or_ignore(prior)
+    conn.commit()
+    posterior = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Chicago|2026-07-28|high|posterior-42",
+        source="cycle-test-1",
+        observed_at="2026-07-28T12:09:55+00:00",
+        available_at="2026-07-28T12:09:56+00:00",
+        received_at="2026-07-28T12:09:57+00:00",
+        payload={
+            "city": "Chicago",
+            "target_date": "2026-07-28",
+            "metric": "high",
+        },
+        causal_snapshot_id="posterior-42",
+    )
+
+    events = _build_day0_posterior_redecision_events(
+        conn,
+        (posterior,),
+        day0_families={("Chicago", "2026-07-28", "high")},
+        received_at="2026-07-28T12:09:57+00:00",
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == "DAY0_EXTREME_UPDATED"
+    assert event.available_at == posterior.available_at
+    assert event.causal_snapshot_id == "posterior-42"
+    payload = json.loads(event.payload_json)
+    assert payload["observation_available_at"] == observation.observation_available_at
+    assert payload["posterior_redecision_identity"] == "posterior-42"
 
 
 def test_reactor_wake_oldest_joint_input_prevents_forecast_starvation(tmp_path):

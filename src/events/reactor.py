@@ -52,13 +52,17 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.decision_kernel import claims
 from src.decision_kernel.compiler import PreSubmitProofBundle
 from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.event_store import EventStore, GLOBAL_WINNER_TARGETED_CLAIM
-from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
+from src.events.opportunity_event import (
+    OpportunityEvent,
+    assert_available_for_decision,
+    make_opportunity_event,
+)
 from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
 from src.state.db import get_trade_connection_read_only, get_world_connection_read_only, world_write_mutex
 from src.strategy.live_inference.live_admission import (
@@ -5513,6 +5517,137 @@ def _substrate_refresh_family_key(
     )
 
 
+def _current_local_day_families(
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+) -> set[tuple[str, str, str]]:
+    """Return wake families whose target is the city's current local day."""
+
+    from src.config import runtime_cities_by_name
+
+    city_map = runtime_cities_by_name()
+    decision_utc = decision_time.astimezone(timezone.utc)
+    current: set[tuple[str, str, str]] = set()
+    for city, target_date, metric in families:
+        city_cfg = city_map.get(city)
+        city_tz = str(getattr(city_cfg, "timezone", "") or "")
+        if not city_tz:
+            continue
+        try:
+            target = date.fromisoformat(target_date)
+            local_today = decision_utc.astimezone(ZoneInfo(city_tz)).date()
+        except (ValueError, TypeError, ZoneInfoNotFoundError):
+            continue
+        if target == local_today:
+            current.add((city, target_date, metric))
+    return current
+
+
+def _build_day0_posterior_redecision_events(
+    world_conn,
+    posterior_events: Iterable[OpportunityEvent],
+    *,
+    day0_families: set[tuple[str, str, str]],
+    received_at: str,
+) -> list[OpportunityEvent]:
+    """Bind a new Day0 probability clock to the latest immutable observation.
+
+    A posterior may advance after the latest ``DAY0_EXTREME_UPDATED`` event was
+    already consumed.  Reusing the old event would deduplicate and silently skip
+    re-decision; routing the posterior through the forecast lane would be rejected
+    by the settlement-day phase gate.  This bridge keeps the Day0 observation
+    payload unchanged and advances only the top-level availability/causal clock.
+    """
+
+    from src.events.event_priority import PRIORITY_DAY0
+    from src.events.triggers.day0_extreme_updated import Day0HardFactGate
+
+    out: list[OpportunityEvent] = []
+    for posterior_event in posterior_events:
+        try:
+            posterior_payload = json.loads(posterior_event.payload_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        family = (
+            str(posterior_payload.get("city") or ""),
+            str(posterior_payload.get("target_date") or ""),
+            str(posterior_payload.get("metric") or ""),
+        )
+        if family not in day0_families:
+            continue
+        row = world_conn.execute(
+            """
+            SELECT entity_key,
+                   observed_at,
+                   available_at,
+                   payload_json
+              FROM opportunity_events
+             WHERE event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(payload_json, '$.city') = ?
+               AND json_extract(payload_json, '$.target_date') = ?
+               AND json_extract(payload_json, '$.metric') = ?
+               AND julianday(available_at) <= julianday(?)
+             ORDER BY julianday(available_at) DESC, rowid DESC
+             LIMIT 1
+            """,
+            (*family, posterior_event.available_at),
+        ).fetchone()
+        if row is None:
+            continue
+        entity_key, observed_at, _available_at, payload_json = row
+        try:
+            observation_payload = json.loads(payload_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        gate = Day0HardFactGate(
+            source_match_status=str(
+                observation_payload.get("source_match_status") or ""
+            ),
+            local_date_status=str(
+                observation_payload.get("local_date_status") or ""
+            ),
+            station_match_status=str(
+                observation_payload.get("station_match_status") or ""
+            ),
+            dst_status=str(observation_payload.get("dst_status") or ""),
+            metric_match_status=str(
+                observation_payload.get("metric_match_status") or ""
+            ),
+            rounding_status=str(
+                observation_payload.get("rounding_status") or ""
+            ),
+            source_authorized_status=str(
+                observation_payload.get("source_authorized_status") or ""
+            ),
+            live_authority_status=str(
+                observation_payload.get("live_authority_status") or ""
+            ),
+        )
+        if not gate.live_eligible():
+            continue
+        observation_payload["posterior_redecision_identity"] = str(
+            posterior_event.causal_snapshot_id or ""
+        )
+        observation_payload["posterior_redecision_available_at"] = (
+            posterior_event.available_at
+        )
+        out.append(
+            make_opportunity_event(
+                event_type="DAY0_EXTREME_UPDATED",
+                entity_key=str(entity_key),
+                source="day0_posterior_advanced",
+                observed_at=str(observed_at),
+                available_at=posterior_event.available_at,
+                received_at=received_at,
+                payload=observation_payload,
+                causal_snapshot_id=posterior_event.causal_snapshot_id,
+                priority=PRIORITY_DAY0,
+            )
+        )
+    return out
+
+
 @dataclass(frozen=True)
 class _Day0LiveFamilyAdmission:
     admitted_families: frozenset[tuple[str, str, str]]
@@ -6493,6 +6628,17 @@ def run_edli_event_reactor_cycle(
                         ),
                         cancelled=_urgent_wake_pending,
                     )
+                _day0_posterior_wake_families = (
+                    _current_local_day_families(
+                        forecast_wake_families,
+                        decision_time=now,
+                    )
+                    if producer_wake_reason == "forecast_posterior_advanced"
+                    else set()
+                )
+                _forecast_only_wake_families = (
+                    forecast_wake_families - _day0_posterior_wake_families
+                )
                 _fsr_events = _edli_build_forecast_snapshot_events(
                     conn,
                     decision_time=now,
@@ -6503,10 +6649,40 @@ def run_edli_event_reactor_cycle(
                     suppress_recent_no_value_refutations=True,
                     budget_seconds=_edli_forecast_snapshot_build_budget_seconds(edli_cfg),
                     restrict_to_families=(
-                        forecast_wake_families if targeted_forecast_wake else None
+                        _forecast_only_wake_families
+                        if targeted_forecast_wake
+                        else None
                     ),
                     cancelled=_urgent_wake_pending,
                 )
+                if _day0_posterior_wake_families:
+                    _day0_posterior_carriers = (
+                        _edli_build_forecast_snapshot_events(
+                            conn,
+                            decision_time=now,
+                            received_at=received_at,
+                            limit=None,
+                            source=_fair_source,
+                            already_pending_keys=None,
+                            suppress_recent_no_value_refutations=False,
+                            budget_seconds=_edli_forecast_snapshot_build_budget_seconds(
+                                edli_cfg
+                            ),
+                            restrict_to_families=_day0_posterior_wake_families,
+                            phase_filter_exempt_families=(
+                                _day0_posterior_wake_families
+                            ),
+                            cancelled=_urgent_wake_pending,
+                        )
+                    )
+                    _fsr_events.extend(
+                        _build_day0_posterior_redecision_events(
+                            conn,
+                            _day0_posterior_carriers,
+                            day0_families=_day0_posterior_wake_families,
+                            received_at=received_at,
+                        )
+                    )
                 if targeted_forecast_wake and _urgent_wake_pending():
                     _log.info(
                         "EDLI targeted forecast build superseded by a newer "

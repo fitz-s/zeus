@@ -4539,6 +4539,56 @@ def test_high_yes_edge_degrades_without_yes_action_or_rejection_trace(
     assert surface["missed_high_yes_edge_sample"][0]["condition_id"] == "cond-high-yes-1"
 
 
+def test_high_yes_edge_recognizes_day0_posterior_redecision_carrier(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd)
+    forecast_conn = sqlite3.connect(sd / "zeus-forecasts.db")
+    computed_at = forecast_conn.execute(
+        "SELECT computed_at FROM forecast_posteriors WHERE posterior_id = 1"
+    ).fetchone()[0]
+    forecast_conn.close()
+    world_conn = sqlite3.connect(sd / "zeus-world.db")
+    world_conn.execute("ALTER TABLE opportunity_events ADD COLUMN available_at TEXT")
+    world_conn.execute(
+        "INSERT INTO opportunity_events "
+        "(event_id, event_type, payload_json, created_at, available_at) "
+        "VALUES ('day0-posterior-1', 'DAY0_EXTREME_UPDATED', ?, ?, ?)",
+        (
+            json.dumps(
+                {
+                    "city": "Paris",
+                    "target_date": "2026-07-09",
+                    "metric": "low",
+                    "available_at": computed_at,
+                }
+            ),
+            computed_at,
+            computed_at,
+        ),
+    )
+    world_conn.execute(
+        "INSERT INTO opportunity_event_processing VALUES "
+        "('day0-posterior-1', 'edli_reactor_v1', 'processed')"
+    )
+    world_conn.commit()
+    world_conn.close()
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+
+    assert surface["issue"] == (
+        "HIGH_YES_EDGE_PROCESSED_WITHOUT_ACTIONABLE_YES:n=1"
+    )
+    assert surface["missing_fsr_high_yes_edge_count"] == 0
+    assert surface["processed_without_action_high_yes_edge_count"] == 1
+
+
 def test_high_yes_edge_accepts_canonical_global_entry_pause(
     tmp_path: Path,
 ) -> None:

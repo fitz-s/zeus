@@ -4818,7 +4818,11 @@ def _forecast_snapshot_status_counts_for_edges(
               LEFT JOIN opportunity_event_processing p
                 ON p.event_id = e.event_id
                AND p.consumer_name = 'edli_reactor_v1'
-             WHERE e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
+             WHERE e.event_type IN (
+                       'FORECAST_SNAPSHOT_READY',
+                       'EDLI_REDECISION_PENDING',
+                       'DAY0_EXTREME_UPDATED'
+                   )
                AND e.available_at IN ({placeholders})
             """,
             tuple(available_times),
