@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -219,13 +220,23 @@ def _conda_python() -> str:
     """Return the python interpreter the legacy 51 scripts expect.
 
     The 51-source-data scripts were written against the conda base python
-    (where ``ecmwfapi`` is installed). Falls back to ``sys.executable`` if
-    conda is missing — tests and dry-runs won't actually invoke MARS so the
-    fallback is safe.
+    (where ``ecmwfapi`` is installed). Resolution order:
+      1. ZEUS_CONDA_PYTHON env var (explicit deployment config)
+      2. ~/miniconda3/bin/python (conda default install location, portable
+         across machines/usernames via Path.home())
+      3. `python` resolved on PATH (covers non-default conda install dirs)
+      4. sys.executable — tests and dry-runs won't actually invoke MARS so
+         this fallback is safe.
     """
-    candidate = Path("/Users/leofitz/miniconda3/bin/python")
+    from_env = os.environ.get("ZEUS_CONDA_PYTHON")
+    if from_env:
+        return from_env
+    candidate = Path.home() / "miniconda3" / "bin" / "python"
     if candidate.exists():
         return str(candidate)
+    which_python = shutil.which("python")
+    if which_python:
+        return which_python
     return sys.executable
 
 

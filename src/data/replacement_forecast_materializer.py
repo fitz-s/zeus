@@ -1409,8 +1409,9 @@ def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float, float]:
         # Resolve the σ-scale fit against the RUNTIME state dir (ZEUS_PRIMARY_ROOT/
         # state — the shared live state the fitter writes), like every other state
         # artifact, NOT relative to __file__ (the deployed code tree). The live
-        # daemon runs CODE from zeus-live-main but STATE from /Users/leofitz/zeus/
-        # state; resolving via __file__ made it read a STALE bundled copy (C k=1.0)
+        # daemon runs CODE from zeus-live-main but STATE from the repo root's
+        # state/ dir (ZEUS_PRIMARY_ROOT); resolving via __file__ made it read a
+        # STALE bundled copy (C k=1.0)
         # and silently drop the fitted k<1 sharpening, so the served forecast stayed
         # too flat (modal under-weighted → YES leaks to tails, NO on the predicted
         # bin). Dev/tests resolve to the same path, so they are unchanged.

@@ -419,16 +419,21 @@ def _conda_python() -> str:
 
     Resolution order:
       1. ZEUS_ECMWF_PYTHON env var (explicit deployment config)
-      2. /Users/leofitz/miniconda3/bin/python (dev-machine fallback if it exists)
-      3. sys.executable (test environments that already carry ecmwf deps)
+      2. ~/miniconda3/bin/python (conda default install location, portable
+         across machines/usernames via Path.home())
+      3. `python` resolved on PATH (covers non-default conda install dirs)
+      4. sys.executable (test environments that already carry ecmwf deps)
     """
     import os as _os
     from_env = _os.environ.get("ZEUS_ECMWF_PYTHON")
     if from_env:
         return from_env
-    candidate = Path("/Users/leofitz/miniconda3/bin/python")
+    candidate = Path.home() / "miniconda3" / "bin" / "python"
     if candidate.exists():
         return str(candidate)
+    which_python = shutil.which("python")
+    if which_python:
+        return which_python
     return sys.executable
 
 
