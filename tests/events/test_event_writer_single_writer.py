@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-07-28
 # Authority basis: EDLI v1 implementation prompt §7 EventWriter single-writer contract.
 from __future__ import annotations
 
@@ -76,3 +76,22 @@ def test_event_writer_requires_world_event_tables():
 
     with pytest.raises(EventStoreSchemaError):
         writer.write(_event())
+
+
+def test_event_writer_rollback_can_retry_as_pending():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    conn.commit()
+    event = _event()
+
+    assert EventWriter(conn).write_many([event])[0].inserted is True
+    conn.rollback()
+
+    retry = EventWriter(conn).write_many([event])[0]
+    conn.commit()
+
+    assert retry.inserted is True
+    assert conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0] == "pending"

@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-27 (WORLD writer critical-section read cut)
+# Last reused or audited: 2026-07-28 (WORLD writer critical-section read cut)
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
 #   §8 Step 3 (lift the user-channel WS thread + market-channel + reconcile cycles),
 #   §9 (regression-unconstructable proof — failure-domain isolation).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P3 — lift the
 #   price-channel / CLOB-fact ingest (the persistent user/market WebSocket lifecycle)
 #   out of the order daemon into its own process (com.zeus.price-channel-ingest).
@@ -1382,6 +1382,82 @@ def test_price_channel_redecision_world_writer_defers_without_waiting(monkeypatc
     assert mutex.timeout == pci.PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS / 1000.0
     assert conn.sql == ["PRAGMA wal_autocheckpoint=0"]
     assert conn.closed is True
+
+
+def test_price_channel_redecision_preflights_schema_before_world_flock(monkeypatch, tmp_path, caplog):
+    """The locked redecision write unit must not rediscover world tables."""
+    from src.events.event_store import EventStore
+    from src.events.event_writer import EventWriter
+    from src.events.opportunity_event import make_opportunity_event
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest import price_channel_ingest as pci
+    from src.state import db
+    from src.state.db import init_schema
+
+    caplog.set_level("DEBUG", logger="zeus.price_channel_ingest")
+    db_path = tmp_path / "world.db"
+    conn = sqlite3.connect(db_path)
+    init_schema(conn)
+    locked = False
+    schema_checks: list[bool] = []
+    hold_seconds: list[float] = []
+
+    class Mutex:
+        def acquire(self, *, timeout: float) -> bool:
+            nonlocal locked
+            assert timeout == pci.PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS / 1000.0
+            locked = True
+            hold_seconds.append(time.monotonic())
+            return True
+
+        def release(self) -> None:
+            nonlocal locked
+            hold_seconds.append(time.monotonic())
+            locked = False
+
+    original_require = EventStore._require_world_event_tables
+
+    def slow_require(store):  # noqa: ANN001
+        if store._world_event_tables_ready:
+            return original_require(store)
+        schema_checks.append(locked)
+        if locked:
+            time.sleep(0.05)
+        return original_require(store)
+
+    monkeypatch.setattr(EventStore, "_require_world_event_tables", slow_require)
+    monkeypatch.setattr(db, "get_world_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(market_channel_ingestor, "_world_write_mutex", Mutex)
+    monkeypatch.setattr(pci, "_bound_price_channel_sqlite_wait", lambda *_args, **_kwargs: None)
+
+    event = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Paris|2026-07-28|high|run-1",
+        source="market-price",
+        observed_at="2026-07-28T00:00:00+00:00",
+        available_at="2026-07-28T00:00:00+00:00",
+        received_at="2026-07-28T00:00:01+00:00",
+        payload={"city": "Paris", "target_date": "2026-07-28", "metric": "high"},
+    )
+    with pci._edli_price_channel_world_write_connection(
+        owner="price_channel_redecision_emit"
+    ) as world:
+        assert EventWriter(world).write_many([event])[0].inserted is True
+        world.commit()
+
+    assert schema_checks == [False]
+    assert hold_seconds[1] - hold_seconds[0] < 0.04
+    assert [
+        record.message.split(" phase=", 1)[1].split(" ", 1)[0]
+        for record in caplog.records
+        if record.message.startswith("price_channel_world_writer")
+    ] == ["acquire", "begin", "write", "commit", "release"]
+    verify = sqlite3.connect(db_path)
+    assert verify.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0] == "pending"
+    verify.close()
 
 
 def test_price_channel_redecision_coalesced_sink_does_not_block_ingest(

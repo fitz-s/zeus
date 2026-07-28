@@ -380,39 +380,81 @@ def _edli_price_channel_world_write_connection(*, owner: str):
     producer ahead of the consumer that turns an existing event into an order.
     """
 
+    from src.events.event_writer import EventWriter
     from src.events.triggers.market_channel_ingestor import _world_write_mutex
     from src.state.db import get_world_connection
 
     conn = get_world_connection(write_class=None)
+    started_ns = time.monotonic_ns()
+    acquired_ns: int | None = None
+    phase = "open"
+
+    def _telemetry(next_phase: str) -> None:
+        nonlocal phase
+        phase = next_phase
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "price_channel_world_writer owner=%s phase=%s elapsed_ms=%.3f",
+                owner,
+                phase,
+                (time.monotonic_ns() - started_ns) / 1_000_000,
+            )
+
     # The live scheduler owns WAL checkpoints on a dedicated PASSIVE
     # connection. A commit-triggered auto-checkpoint here would run while this
     # producer holds the global WORLD mutex, turning a small durable event write
     # into a multi-writer outage on the append-heavy world DB.
-    conn.execute("PRAGMA wal_autocheckpoint=0")
-    _bound_price_channel_sqlite_wait(
-        conn,
-        timeout_ms=PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS,
-    )
-    mutex = _world_write_mutex()
-    acquired = mutex.acquire(
-        timeout=PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS / 1000.0
-    )
-    if not acquired:
-        conn.close()
-        raise TimeoutError(
-            f"{owner} deferred: WORLD writer busy for "
-            f"{PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS}ms"
-        )
     try:
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        _bound_price_channel_sqlite_wait(
+            conn,
+            timeout_ms=PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS,
+        )
+        if owner == "price_channel_redecision_emit":
+            # EventStore validates its tables through sqlite_master. Do that
+            # bounded metadata read before the cross-process flock, then reuse
+            # this exact store for the insert-only critical section below.
+            EventWriter.preflight_world_event_tables(conn)
+        mutex = _world_write_mutex()
+        acquired = mutex.acquire(
+            timeout=PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS / 1000.0
+        )
+        if not acquired:
+            raise TimeoutError(
+                f"{owner} deferred: WORLD writer busy for "
+                f"{PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS}ms"
+            )
+        acquired_ns = time.monotonic_ns()
+        _telemetry("acquire")
         conn.execute("BEGIN IMMEDIATE")
-        yield conn
+        _telemetry("begin")
+        with EventWriter.write_phase_telemetry(lambda: _telemetry("write")):
+            yield conn
+        if not conn.in_transaction:
+            _telemetry("commit")
     except BaseException:
-        conn.rollback()
+        if getattr(conn, "in_transaction", False):
+            _telemetry("rollback")
+            conn.rollback()
         raise
     finally:
-        if conn.in_transaction:
+        if getattr(conn, "in_transaction", False):
+            _telemetry("rollback")
             conn.rollback()
-        mutex.release()
+        if acquired_ns is not None:
+            _telemetry("release")
+            mutex.release()
+            hold_ms = (time.monotonic_ns() - acquired_ns) / 1_000_000
+            if hold_ms > PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS:
+                logger.warning(
+                    "price_channel_world_writer over_budget owner=%s phase=%s "
+                    "hold_ms=%.3f budget_ms=%d",
+                    owner,
+                    phase,
+                    hold_ms,
+                    PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS,
+                )
+        EventWriter.forget_preflight_world_event_tables(conn)
         conn.close()
 
 
