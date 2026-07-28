@@ -15,9 +15,9 @@ heartbeat, riskguard covers position reference, the monitor-cadence watchdog
 alert (or its silent exclusion from logging) goes RED.
 
 Invariant: log-only alert, not a gate. This surface name is deliberately
-absent from ``src.engine.event_reactor_adapter._ENTRY_LIVE_HEALTH_REQUIRED_SURFACES``
-(checked directly in T6) so a starved family can never itself block a live
-entry — the existing freshness gates already fail closed on the money path.
+absent from ``src.engine.event_reactor_adapter`` (checked directly in T6) so
+a starved family can never itself block a live entry — the existing freshness
+gates already fail closed on the money path.
 """
 
 from __future__ import annotations
@@ -303,6 +303,62 @@ def test_past_target_date_market_is_excluded(tmp_path):
     assert result["starved_count"] == 0
 
 
+def test_completed_east_of_utc_target_day_is_excluded(tmp_path):
+    sd = tmp_path / "state"
+    sd.mkdir()
+    now = datetime(2026, 7, 28, 18, 0, tzinfo=timezone.utc)
+
+    _write_market_events(
+        sd,
+        city="Shanghai",
+        target_date="2026-07-28",
+        metric="low",
+        token_id="tok-shanghai-low",
+        created_at=_now_iso(now, -48.0),
+    )
+    _write_forecast_posterior(
+        sd,
+        city="Shanghai",
+        target_date="2026-07-28",
+        metric="low",
+        runtime_layer="live",
+        computed_at=_now_iso(now, -20.0),
+    )
+
+    result = _posterior_starvation_surface(sd, now)
+
+    assert result["ok"] is True
+    assert result["starved_count"] == 0
+
+
+def test_utc_yesterday_still_current_western_local_day_is_checked(tmp_path):
+    sd = tmp_path / "state"
+    sd.mkdir()
+    now = datetime(2026, 7, 18, 4, 0, tzinfo=timezone.utc)
+
+    _write_market_events(
+        sd,
+        city="Los Angeles",
+        target_date="2026-07-17",
+        metric="high",
+        token_id="tok-los-angeles-high",
+        created_at=_now_iso(now, -48.0),
+    )
+    _write_forecast_posterior(
+        sd,
+        city="Los Angeles",
+        target_date="2026-07-17",
+        metric="high",
+        runtime_layer="live",
+        computed_at=_now_iso(now, -20.0),
+    )
+
+    result = _posterior_starvation_surface(sd, now)
+
+    assert result["ok"] is False
+    assert result["starved_sample"][0]["city"] == "Los Angeles"
+
+
 # ---------------------------------------------------------------------------
 # T5: newest_blocked_reason enrichment from the failed-materialization sidecar
 # ---------------------------------------------------------------------------
@@ -433,9 +489,13 @@ def test_composite_includes_posterior_starvation_surface(tmp_path):
 
 
 def test_posterior_starvation_is_not_an_entry_gate_surface():
-    from src.engine.event_reactor_adapter import _ENTRY_LIVE_HEALTH_REQUIRED_SURFACES
+    import inspect
 
-    assert "posterior_starvation" not in _ENTRY_LIVE_HEALTH_REQUIRED_SURFACES
+    from src.engine import event_reactor_adapter
+
+    assert "posterior_starvation" not in inspect.getsource(
+        event_reactor_adapter
+    )
 
 
 # ---------------------------------------------------------------------------

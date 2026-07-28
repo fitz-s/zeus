@@ -25,6 +25,7 @@ import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -6154,6 +6155,32 @@ def _posterior_starvation_newest_blocked_reasons(
         return {}
 
 
+def _target_local_day_complete(
+    city: str,
+    target_date: str,
+    now: datetime,
+) -> bool:
+    """Whether forecast freshness has yielded to post-day observation truth."""
+
+    try:
+        from src.config import runtime_cities_by_name
+
+        city_obj = runtime_cities_by_name().get(str(city))
+        timezone_name = str(getattr(city_obj, "timezone", "") or "")
+        target = datetime.fromisoformat(str(target_date)).date()
+        local_today = now.astimezone(ZoneInfo(timezone_name)).date()
+    except (
+        AttributeError,
+        TypeError,
+        ValueError,
+        ZoneInfoNotFoundError,
+    ):
+        # Unknown identity stays visible. Health must not silently exclude a
+        # family whose local calendar cannot be proven.
+        return False
+    return target < local_today
+
+
 def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
     """Alert (log-only) on a live-tradeable family with no fresh live posterior.
 
@@ -6210,7 +6237,11 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
             "skip_reason": posterior_err or "FORECAST_POSTERIORS_COLUMNS_MISSING",
         }
 
-    today_utc = now.astimezone(timezone.utc).date().isoformat()
+    # UTC-12 can still be on yesterday's local target day. Keep a bounded
+    # two-day SQL window, then apply the authoritative per-city timezone below.
+    earliest_possible_local_today = (
+        now.astimezone(timezone.utc).date() - timedelta(days=1)
+    ).isoformat()
     family_rows, family_err = _sqlite_ro_rows(
         forecast_db,
         """
@@ -6229,7 +6260,7 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
            AND me.target_date >= ?
          GROUP BY me.city, me.target_date, me.temperature_metric
         """,
-        (today_utc,),
+        (earliest_possible_local_today,),
     )
     if family_err:
         return {
@@ -6245,6 +6276,8 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
         city = str(row.get("city") or "")
         target_date = str(row.get("target_date") or "")
         metric = str(row.get("metric") or "")
+        if _target_local_day_complete(city, target_date, now_utc):
+            continue
         newest_posterior_at = _parse_iso_utc(row.get("newest_live_posterior_at"))
         if newest_posterior_at is not None:
             age_h = max(0.0, (now_utc - newest_posterior_at).total_seconds() / 3600.0)
