@@ -2,9 +2,12 @@
 #
 # Companion to SECURITY-FALSE-POSITIVES.md (root). The allowlist below mirrors
 # entries in that file — do NOT add raw values here without also recording the
-# operator ruling there. REVIEW-SAFE tags are registry-validated by
-# .claude/hooks/pre-commit-secrets.sh; this file only carries exact scanner
-# allowlists for already-registered rulings.
+# operator ruling there. REVIEW-SAFE tags are recorded by manual operator
+# ruling in SECURITY-FALSE-POSITIVES.md, not by an automated registry check —
+# this file only carries exact scanner allowlists for already-registered
+# rulings. Enforcement of this config against pushes and PRs is
+# .github/workflows/secrets-scan.yml (server-side gitleaks); there is no
+# local pre-commit hook that validates it.
 #
 # When adding an entry: also add the [REVIEW-SAFE: <TAG>] banner at the source
 # site so a human reading the file sees the clearance without consulting this
