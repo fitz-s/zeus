@@ -129,9 +129,9 @@ def _staged_blob(repo_root: str, path: str) -> bytes | None:
 
 
 def _registered_review_safe_tags(repo_root: str) -> set[str]:
-    staged = _staged_blob(repo_root, "SECURITY-FALSE-POSITIVES.md")
+    staged = _staged_blob(repo_root, "docs/reference/security_false_positives.md")
     if staged is None:
-        registry_path = Path(repo_root) / "SECURITY-FALSE-POSITIVES.md"
+        registry_path = Path(repo_root) / "docs" / "reference" / "security_false_positives.md"
         if not registry_path.exists():
             return set()
         text = registry_path.read_text(encoding="utf-8", errors="replace")
@@ -196,7 +196,7 @@ def git_add_is_broad(command: str) -> bool:
 def validate_staged_review_safe_tags(repo_root: str) -> list[tuple[str, str]]:
     """Return newly staged REVIEW-SAFE tag lines not registered in the index.
 
-    The registry is read from the staged SECURITY-FALSE-POSITIVES.md blob when
+    The registry is read from the staged docs/reference/security_false_positives.md blob when
     present, allowing a source tag and its registry entry to land atomically in
     the same commit. If no staged registry exists, the working-tree registry is
     used as the current authority. Only added diff lines are scanned; an

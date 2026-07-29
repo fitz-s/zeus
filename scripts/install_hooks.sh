@@ -100,7 +100,7 @@ cat <<EOF
   pre-commit          → dispatch.py invariant-test + secrets-scan
   pre-merge-commit    → dispatch.py pre-merge contamination advisory
 
-Companion config: .gitleaks.toml + SECURITY-FALSE-POSITIVES.md (root).
+Companion config: .gitleaks.toml + docs/reference/security_false_positives.md.
 
 To verify on next commit:
   git commit --allow-empty -m "test: hooks active"

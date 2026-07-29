@@ -99,6 +99,11 @@ which module reference matters.
 | `modules/manifests_system.md` | Dense manifest-system reference for fact ownership and repair routing |
 | `modules/closeout_and_receipts_system.md` | Dense closeout/receipts reference for scoped gates and evidence |
 | `zeus_oracle_density_discount_reference.md` | Oracle penalty, Data Density Discount, source-thinness handling, and Mismatch↔DDD↔Platt-regime-absorption relationship reference |
+| `design_system_decomposition_plan.md` | System decomposition design spec (P1..P4 boundaries, I1..I7 seams); moved from root-level `architecture/` (showcase brief 03) |
+| `design_system_decomposition_implementation.md` | System decomposition implementation notes; moved from root-level `architecture/` (showcase brief 03) |
+| `design_data_pipeline_and_db_design.md` | Data pipeline and DB design reference; moved from root-level `architecture/` (showcase brief 03) |
+| `security_false_positives.md` | Gitleaks secret-scan false-positive ruling registry, companion to `.gitleaks.toml`; moved from root `SECURITY-FALSE-POSITIVES.md` (showcase brief 03) |
+| `lessons/` | Dated topology-lore snapshots (point-in-time, not authority); moved from root-level `docs/lore/` (showcase brief 03) |
 
 ## Rules
 

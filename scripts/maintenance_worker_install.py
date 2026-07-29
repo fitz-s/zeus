@@ -3,7 +3,7 @@
 # Authority basis:
 #   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md §P6
 #   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DRY_RUN_PROTOCOL.md
-#   bindings/zeus/config.yaml
+#   deploy/agent_safety/zeus/config.yaml
 #
 # IDEMPOTENT: safe to re-run. Re-run does NOT reset first_run_at.
 # Re-run refreshes the plist and config.json if the templates changed,
@@ -50,7 +50,7 @@ from pathlib import Path
 LAUNCHD_LABEL = "com.zeus.maintenance"
 PLIST_DEST_DIR = Path.home() / "Library" / "LaunchAgents"
 PLIST_FILENAME = f"{LAUNCHD_LABEL}.plist"
-PLIST_TEMPLATE = "bindings/zeus/launchd_plist.plist"
+PLIST_TEMPLATE = "deploy/agent_safety/zeus/launchd_plist.plist"
 CONFIG_FILENAME = "maintenance_worker_config.json"
 INSTALL_METADATA_FILENAME = "install_metadata.json"
 AGENT_VERSION = "0.1.0"

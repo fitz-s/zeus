@@ -69,13 +69,9 @@ parent_coverage_allowed_patterns:
 - docs/archive/2026-Q2/
 - docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/
 - docs/operations/*_package_*/
-- docs/operations/edli_v1/
 - docs/operations/current/
-- docs/evidence/
-- docs/rebuild/
-- docs/lore/
+- docs/reference/lessons/
 - docs/review/
-- docs/architecture/
 - docs/methodology/
 - docs/operations/
 - docs/artifacts/
@@ -622,25 +618,6 @@ entries:
   current_tense_allowed: false
   refresh_source: n/a
 
-- path: docs/operations/edli_v1/
-  doc_class: operations
-  default_read: false
-  direct_reference_allowed: true
-  current_role: EDLI v1 implementation package, reference spec copy, redemption evidence, critic reports, and no-submit daemon runbooks
-  canonical_replaced_by: []
-  next_action: retain_as_evidence
-  lifecycle_state: active
-  coverage_scope: descendants
-  parent_coverage_allowed: true
-  truth_profile: package_input
-  freshness_class: packet_bound
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: true
-  current_tense_allowed: true
-  refresh_source: packet_audit
-
 - path: docs/operations/task_2026-04-29_design_simplification_audit/
   doc_class: operations
   default_read: false
@@ -736,6 +713,78 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: code_and_manifest
+- path: docs/reference/design_system_decomposition_plan.md
+  doc_class: reference
+  default_read: false
+  direct_reference_allowed: true
+  current_role: system decomposition design spec (P1..P4 boundaries, I1..I7 seams); formerly docs/architecture/system_decomposition_plan.md
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: durable_reference
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
+- path: docs/reference/design_system_decomposition_implementation.md
+  doc_class: reference
+  default_read: false
+  direct_reference_allowed: true
+  current_role: system decomposition implementation notes; formerly docs/architecture/system_decomposition_implementation.md
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: durable_reference
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
+- path: docs/reference/security_false_positives.md
+  doc_class: reference
+  default_read: false
+  direct_reference_allowed: true
+  current_role: gitleaks secret-scan false-positive ruling registry, companion to .gitleaks.toml; formerly root SECURITY-FALSE-POSITIVES.md
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: durable_reference
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: manual_operator_audit
+- path: docs/reference/design_data_pipeline_and_db_design.md
+  doc_class: reference
+  default_read: false
+  direct_reference_allowed: true
+  current_role: data pipeline and DB design reference; formerly docs/architecture/data_pipeline_and_db_design.md
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: durable_reference
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
 - path: docs/reference/AGENTS.md
   doc_class: router
   default_read: false
@@ -1598,47 +1647,11 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: manual_operator_audit
-- path: docs/evidence/
-  doc_class: operations
-  default_read: false
-  direct_reference_allowed: true
-  current_role: dated evidence packets (investigations, root-causes, consult answers); each file is point-in-time evidence, never current-fact authority
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: active
-  coverage_scope: descendants
-  parent_coverage_allowed: true
-  truth_profile: report_evidence
-  freshness_class: packet_bound
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: true
-  current_tense_allowed: false
-  refresh_source: packet_audit
-- path: docs/rebuild/
-  doc_class: operations
-  default_read: false
-  direct_reference_allowed: true
-  current_role: rebuild/design working notes and consult review artifacts; point-in-time, never current-fact authority
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: active
-  coverage_scope: descendants
-  parent_coverage_allowed: true
-  truth_profile: report_evidence
-  freshness_class: packet_bound
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: true
-  current_tense_allowed: false
-  refresh_source: packet_audit
-- path: docs/lore/
+- path: docs/reference/lessons/
   doc_class: report
   default_read: false
   direct_reference_allowed: true
-  current_role: topology lore snapshots (dated, point-in-time)
+  current_role: topology lore snapshots (dated, point-in-time); formerly docs/lore/
   canonical_replaced_by: []
   next_action: keep
   lifecycle_state: active
@@ -1657,24 +1670,6 @@ entries:
   default_read: false
   direct_reference_allowed: true
   current_role: review scope maps and code-review law
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: durable
-  coverage_scope: descendants
-  parent_coverage_allowed: true
-  truth_profile: durable_reference
-  freshness_class: slow_changing
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: manual_operator_audit
-- path: docs/architecture/
-  doc_class: reference
-  default_read: false
-  direct_reference_allowed: true
-  current_role: system decomposition design docs (dated design artifacts)
   canonical_replaced_by: []
   next_action: keep
   lifecycle_state: durable

@@ -8,7 +8,7 @@ system itself.
 
 Its modules (`cli/`, `core/`, `rules/`, `types/`) are designed to remain
 stdlib-only and free of Zeus-specific wiring; Zeus integration (paths,
-install metadata, launchd plist) is injected through `bindings/` rather
+install metadata, launchd plist) is injected through `deploy/agent_safety/` rather
 than hardcoded here. That separation is deliberate:
 `maintenance_worker` can be reasoned about, tested, and audited on its
 own, without pulling in the trading machine's state or risk posture, and

@@ -1,6 +1,6 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-07-28
-# Authority basis: docs/architecture/system_decomposition_plan.md
+# Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row), §7 (I2 no-back-coupling:
 #   durable fill bridge + execution_feasibility_evidence), §8 Step 3 (lift the
 #   user-channel WS thread + market-channel + reconcile cycles), §9 (regression-

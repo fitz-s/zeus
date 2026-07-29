@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Created: 2026-06-08
-  Authority basis: docs/architecture/system_decomposition_plan.md §4.1 / §6 (P2 row) / §8 Step 1.
+  Authority basis: docs/reference/design_system_decomposition_plan.md §4.1 / §6 (P2 row) / §8 Step 1.
 
   ARTIFACT ONLY. This launchd job description is committed for the operator to install
   when the cutover is performed; the process-topology refactor that produced it does NOT

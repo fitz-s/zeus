@@ -1,6 +1,6 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: docs/architecture/system_decomposition_plan.md §4.1 / §7 I1 / criterion 3
+# Authority basis: docs/reference/design_system_decomposition_plan.md §4.1 / §7 I1 / criterion 3
 #   (failure-domain isolation): the executable-substrate producer (P2) reads market_events
 #   topology but must NOT import the trading lane. This module relocates the lane-neutral
 #   topology-row read cluster (formerly private to src/engine/event_reactor_adapter.py) so

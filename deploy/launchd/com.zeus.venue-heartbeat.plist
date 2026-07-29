@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Created: 2026-06-28
-  Authority basis: docs/architecture/system_decomposition_plan.md §4.1 / §6;
+  Authority basis: docs/reference/design_system_decomposition_plan.md §4.1 / §6;
   src/control/heartbeat_supervisor.py external venue-heartbeat split.
 
   ARTIFACT ONLY. This launchd job description is committed so the live venue

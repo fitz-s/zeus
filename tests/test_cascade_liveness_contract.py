@@ -1,7 +1,7 @@
 # Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=2026-06-08
 # Last reused or audited: 2026-06-08 (P4 fix: orphan check -> positive identification of
 #   state-machine pollers by the contract's own naming convention, replacing the stale
-#   NON_STATE_MACHINE_JOB_IDS denylist). Authority basis: docs/architecture/system_decomposition_plan.md §8 Step 2.
+#   NON_STATE_MACHINE_JOB_IDS denylist). Authority basis: docs/reference/design_system_decomposition_plan.md §8 Step 2.
 # Purpose: Antibody test for architecture/cascade_liveness_contract.yaml; enforces
 #   that every state-machine table with *_INTENT_CREATED rows has a registered
 #   APScheduler poller in src/main.py, and that every terminal_states_with_operator_action

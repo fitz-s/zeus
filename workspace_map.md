@@ -24,7 +24,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | tracked derived context | Tracked artifacts that help review and retrieval but are not authority | `.code-review-graph/graph.db` | Read as derived context, never as law |
 | historical cold storage | Historical bodies and bundles that may exist locally but are not part of the default boot path | `docs/archives/**`, local archive bundles | Do not default-read; route through `docs/archive_registry.md` |
 | runtime-local scratch and control | Runtime state, DBs, coordination files, and ignored planning scratch | `state/**`, `.omx/**`, `.omc/**` | Treat as runtime context, not repo law |
-| generated evidence sinks | Dated evidence packets and raw captures | `docs/evidence/**`, `docs/rebuild/**`, `raw/**`; artifacts/historical_evidence untracked on disk | Evidence only unless promoted through a packet |
+| generated evidence sinks | Dated evidence packets and raw captures | `docs/operations/live_egress/**`, `docs/operations/sd3_validation_evidence/**`; artifacts/historical_evidence untracked on disk | Evidence only unless promoted through a packet |
 
 ## Root reference docs
 
@@ -51,15 +51,11 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `docs/reference/modules/` | Dense module books; reference only, never constitutional law | `docs/reference/modules/AGENTS.md` (`state`, `engine`, and `data` landed first) |
 | `docs/reference/legacy/` | Demoted historical reference snapshots (`legacy_reference_*.md`); doc_class `legacy_reference` per 2026-05-17 W6 | `docs/reference/legacy/AGENTS.md` |
 | `docs/operations/` | Live control pointer, active packets (.archived stubs dropped 2026-05-17 — git is backup, docs/archives/packets/ holds canonical) | `docs/operations/AGENTS.md` |
-| `docs/operations/edli_v1/` | EDLI v1 operation package, context envelope, and repo/spec cross-reference | `docs/operations/AGENTS.md` |
-| `docs/evidence/` | Dated evidence packets (investigations, root-causes, consult answers) | point-in-time evidence, never current-fact authority |
-| `docs/rebuild/` | Rebuild/design working notes and consult artifacts | point-in-time, never current-fact authority |
 | `architecture/` | Machine-checkable workspace law | `architecture/AGENTS.md` |
 | `config/` | Runtime settings and reality contracts | `config/AGENTS.md` |
 | `.code-review-graph/` | Tracked derived online context | graph status via `python3 scripts/topology_doctor.py --code-review-graph-status --json` |
 | `state/` | Runtime DBs and local control files | classify before treating as truth |
 | `loop/` | 24/7 improvement loop v3 (codex-sandbox single tick, INTERVAL cadence knob, query escrow `queries/`, HALT/JOURNAL/LEDGER state, prompts) — inert until the operator loads the launchd plist | `loop/tick.sh` header; design: `docs/operations/current/plans/allday_improvement_loop_v3_codex_2026-07-09.md` (method authority: v2 design doc) |
-| `raw/` | Raw external evidence captures | `raw/README.md` |
 | artifacts (untracked) | Review artifacts untracked 2026-05-23 — bodies on disk, gitignored. See `docs/archive_registry.md`. | untracked |
 | historical evidence (untracked) | Historical evidence trails untracked 2026-05-23 — bodies on disk, gitignored. | untracked |
 | `.agents/` | Repo-local workflow skills and AI handoff guidance | `.agents/skills/AGENTS.md` |
@@ -103,7 +99,8 @@ Prefer these over prose when they exist:
 
 - `docs/archives/**` and local archive bundles
 - `.code-review-graph/graph.db` as if it were authority
-- `docs/evidence/**` or `docs/rebuild/**` as if placement made them law
+- the `lab` branch (dated investigations and rebuild notes, no shared history
+  with `live`) as if branch placement made it law
 - `docs/reference/modules/*.md` before a scoped router or module manifest says
   which module actually matters
 - `.omx/context/**` and `.omc/**` runtime scratch

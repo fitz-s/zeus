@@ -1,6 +1,6 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: docs/architecture/system_decomposition_plan.md
+# Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision:
 #   a persistent WS thread is a distinct lifecycle → own service),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),

@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-15
 # Authority basis:
 #   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md §P6
-#   bindings/zeus/launchd_plist.plist
+#   deploy/agent_safety/zeus/launchd_plist.plist
 """
 test_launchd_plist.py — Verify launchd plist generates valid XML.
 
@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # test_bindings/ -> maintenance_worker/ -> tests/ -> repo root
-BINDINGS_DIR = REPO_ROOT / "bindings" / "zeus"
+BINDINGS_DIR = REPO_ROOT / "deploy" / "agent_safety" / "zeus"
 PLIST_TEMPLATE_PATH = BINDINGS_DIR / "launchd_plist.plist"
 PLACEHOLDER = "ZEUS_REPO_PLACEHOLDER"
 

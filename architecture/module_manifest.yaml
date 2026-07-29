@@ -1005,7 +1005,7 @@ modules:
     archive_extraction_status: none
 
   zeus_bindings:
-    path: bindings/zeus/
+    path: deploy/agent_safety/zeus/
     scoped_agents: AGENTS.md
     module_book: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
     priority: p2_runtime
@@ -1013,11 +1013,11 @@ modules:
     zone: config
     authority_role: zeus_binding_config
     high_risk_files:
-      - bindings/zeus/safety_overrides.yaml
-      - bindings/zeus/config.yaml
+      - deploy/agent_safety/zeus/safety_overrides.yaml
+      - deploy/agent_safety/zeus/config.yaml
     public_entry_files:
-      - bindings/zeus/config.yaml
-      - bindings/zeus/safety_overrides.yaml
+      - deploy/agent_safety/zeus/config.yaml
+      - deploy/agent_safety/zeus/safety_overrides.yaml
     law_dependencies:
       - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
     current_fact_dependencies:

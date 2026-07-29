@@ -1196,7 +1196,7 @@ scripts:
     required_tests: [tests/test_market_scanner_provenance.py]
     reason: "Cron-safe source-contract transition controller that reuses the source watch, computes deterministic conversion/date scopes, keeps affected cities source-blocked, writes durable receipts under a cron lock, emits mini-model execution contracts/reports with locator/write-scope safety, and can execute Phase B same-provider WU station conversions only behind explicit apply/force plus evidence gates."
     promotion_barrier: "Default is plan/dry-run. Apply mode is limited to auto-confirmed same-provider WU station changes with exact station metadata, scoped DB commands, backup/DB path evidence, verification, and complete release evidence refs; no live venue placement."
-  oracle_snapshot_listener.py: {class: runtime_support, canonical_command: "python3 scripts/oracle_snapshot_listener.py", reason: "Cron 10:00 UTC — captures WU/HKO API responses at PM settlement window for oracle error rate calibration. Writes oracle-time evidence to raw/oracle_time_snapshots/{city}/{date}.json."}
+  oracle_snapshot_listener.py: {class: runtime_support, canonical_command: "python3 scripts/oracle_snapshot_listener.py", reason: "Cron 10:00 UTC — captures WU/HKO API responses at PM settlement window for oracle error rate calibration. Writes oracle-time evidence to storage_root()/raw/oracle_time_snapshots/{city}/{date}.json (src.state.paths.oracle_snapshot_dir; storage_root defaults to REPO_ROOT unless ZEUS_STORAGE_ROOT overrides it, per the operator's external canonical raw-data location)."}
   # K1-batch2 fix 2026-05-17: now reads source_run + readiness_state from zeus-forecasts.db
   # (forecast_class post-K1 split). Registered here per map-maintenance contract.
   data_chain_monitor.sh: {class: read_only_evidence, canonical_command: "bash scripts/data_chain_monitor.sh", dangerous_if_run: false, dry_run_default: false, read_targets: [state/zeus-forecasts.db], write_targets: [stdout], target_db: state/zeus-forecasts.db, required_tests: [tests/test_k1_reader_isolation_batch2.py], reason: "Operator pipeline health check. Reads source_run + readiness_state from zeus-forecasts.db (forecast_class). Emits human-readable status to stdout; no writes."}
@@ -1398,13 +1398,13 @@ scripts:
     dry_run_default: true
     apply_flag: "none"
     dangerous_if_run: false
-    read_targets: [docs/lore/]
-    write_targets: [docs/lore/INDEX.json]
+    read_targets: [docs/reference/lessons/]
+    write_targets: [docs/reference/lessons/INDEX.json]
     external_inputs: []
     delete_policy: permanent
     canonical_command: "python3 scripts/lore_indexer.py [--validate-only] [--output PATH]"
     reuse_when: >
-      Building or refreshing docs/lore/INDEX.json for agent consumption.
+      Building or refreshing docs/reference/lessons/INDEX.json for agent consumption.
       Use --validate-only to check frontmatter without writing.
     do_not_use_when: >
       Promoting draft cards (use lore_promoter.py) or re-verifying cards (use lore_reverify.py).
@@ -1424,8 +1424,8 @@ scripts:
     dry_run_default: true
     apply_flag: "none (use --dry-run to preview)"
     dangerous_if_run: false
-    read_targets: [docs/lore/_drafts/]
-    write_targets: [docs/lore/<topic>/]
+    read_targets: [docs/reference/lessons/_drafts/]
+    write_targets: [docs/reference/lessons/<topic>/]
     external_inputs: []
     delete_policy: permanent
     canonical_command: "python3 scripts/lore_promoter.py promote <draft_id> <topic> [--dry-run]"
@@ -1451,8 +1451,8 @@ scripts:
     dry_run_default: true
     apply_flag: "none (omit --dry-run to run verification commands)"
     dangerous_if_run: false
-    read_targets: [docs/lore/]
-    write_targets: [docs/lore/<topic>/<card>.md]
+    read_targets: [docs/reference/lessons/]
+    write_targets: [docs/reference/lessons/<topic>/<card>.md]
     external_inputs: []
     delete_policy: permanent
     canonical_command: "python3 scripts/lore_reverify.py [--dry-run] [--timeout 60] [--strict]"

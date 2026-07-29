@@ -7,7 +7,7 @@
 #   active-duplicate is now RESOLVED, gone from both the live detection map and the known-open list)
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR3);
 #   operator spec §"Job registry" + §4 (ownership map);
-#   docs/architecture/system_decomposition_plan.md §8 Step 4.
+#   docs/reference/design_system_decomposition_plan.md §8 Step 4.
 """Relationship tests for the job registry + inventory/audit CLIs (PR3, advisory).
 
 Key antibody: the registry must MIRROR the scheduler — a scheduled add_job id that is not

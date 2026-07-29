@@ -13,7 +13,7 @@ The promoter:
     2. Parses and validates required frontmatter fields.
     3. Verifies the topic matches the card's frontmatter topic field.
     4. Creates the destination directory if needed.
-    5. Moves the file to docs/lore/<topic>/<draft_id>.md.
+    5. Moves the file to docs/reference/lessons/<topic>/<draft_id>.md.
 
 Required frontmatter fields (per LORE_EXTRACTION_PROTOCOL):
     id, title, topic, extracted_from, extracted_on, status, authority_class, last_verified
@@ -47,7 +47,7 @@ else:
         yaml = None  # type: ignore[assignment]
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_LORE_ROOT = ROOT / "docs" / "lore"
+DEFAULT_LORE_ROOT = ROOT / "docs" / "reference" / "lessons"
 DRAFTS_DIR_NAME = "_drafts"
 
 VALID_TOPICS = frozenset(
@@ -259,7 +259,7 @@ Examples:
     p.add_argument(
         "--lore-root",
         default=str(DEFAULT_LORE_ROOT),
-        help="Root lore directory (default: docs/lore/)",
+        help="Root lore directory (default: docs/reference/lessons/)",
     )
 
     sub = p.add_subparsers(dest="subcommand", title="subcommands")

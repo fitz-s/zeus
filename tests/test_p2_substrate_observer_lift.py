@@ -1,6 +1,6 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: docs/architecture/system_decomposition_plan.md
+# Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.1 (Executable-Substrate Observer), §6 (P2 row), §7 (I1 no-back-coupling),
 #   §8 Step 1 (lift + delete outer pending gates), §9 (regression-unconstructable proof).
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=never

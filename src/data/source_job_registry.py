@@ -5,7 +5,7 @@
 #   ingest_k2_daily_obs is the sole live WU owner. Earlier same-day: P3 lift repointed the
 #   user-WS ingestor dispatch-kind doc-comment from src.main to src.ingest.price_channel_ingest.)
 # Authority basis: operator "Zeus Data Ingest + Collection Efficiency Refactor" spec §7
-#   + docs/architecture/system_decomposition_plan.md §8 Step 3 (P3 price-channel lift)
+#   + docs/reference/design_system_decomposition_plan.md §8 Step 3 (P3 price-channel lift)
 #   (Job registry) + §4 (scheduler/ownership map); docs/operations/current/plans/data_temporal_kernel/PLAN.md;
 #   extracted from src/ingest_main.py + src/ingest/forecast_live_daemon.py add_job() calls (2026-05-24).
 """Machine-readable inventory of every data-collection job — PR3 + PR #329 review B.

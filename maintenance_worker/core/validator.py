@@ -97,7 +97,7 @@ class ForbiddenRule:
 # Forbidden rules source selection
 # ---------------------------------------------------------------------------
 # MW_FORBIDDEN_RULES_FROM_CODE=1 → use hardcoded list below (transition safety).
-# Default (unset or 0) → load from bindings/ via forbidden_rules_loader.
+# Default (unset or 0) → load from deploy/agent_safety/ via forbidden_rules_loader.
 # BINDINGS_DIR env var overrides the default bindings path resolution.
 # Loader is called lazily inside _get_active_rules() to avoid import-time
 # circular-dependency (loader → validator → loader).
@@ -115,8 +115,8 @@ def _get_active_rules(bindings_dir: "Optional[Path]" = None) -> "list[ForbiddenR
     Otherwise: delegate to forbidden_rules_loader.load_forbidden_rules().
 
     bindings_dir: explicit override; if None, resolved from BINDINGS_DIR env
-                  var or from the file's own location (../../bindings relative
-                  to this module).
+                  var or from the file's own location (../../deploy/agent_safety
+                  relative to this module).
     """
     if os.environ.get("MW_FORBIDDEN_RULES_FROM_CODE", "").strip() == "1":
         return _FORBIDDEN_RULES
@@ -127,10 +127,10 @@ def _get_active_rules(bindings_dir: "Optional[Path]" = None) -> "list[ForbiddenR
         if env_dir:
             bindings_dir = Path(env_dir)
         else:
-            # Default: bindings/ is two levels up from this file
-            # (maintenance_worker/core/validator.py → maintenance_worker/ → repo_root/bindings/)
+            # Default: deploy/agent_safety/ is two levels up from this file
+            # (maintenance_worker/core/validator.py → maintenance_worker/ → repo_root/deploy/agent_safety/)
             _here = Path(__file__).resolve().parent  # .../maintenance_worker/core/
-            bindings_dir = _here.parent.parent / "bindings"
+            bindings_dir = _here.parent.parent / "deploy" / "agent_safety"
 
     # No fallback: if the loader raises (ConfigurationError or any other exception),
     # propagate it to the caller. Silent fallback to stale hardcoded rules masks
