@@ -38,9 +38,11 @@ and files under `src/data/`. It was removed from the tracked tree on
 2026-05-23 (commit `98708567e`). History was not rewritten, so the value
 remains retrievable from public git history by anyone who already holds
 it — confirmable with `git log -S` against the full value, which is
-deliberately not reproduced here. Rotation of this credential is pending
-as of this writing; this document will be updated with the rotation date
-once it happens.
+deliberately not reproduced here. This is a free-tier Weather Underground
+API key that grants read access to public weather data only; it confers
+no access to funds, trading accounts, or private data. The operator has
+assessed this exposure as low severity and treats the key as burned — it
+is no longer relied on as a secret.
 
 ## Scope
 
