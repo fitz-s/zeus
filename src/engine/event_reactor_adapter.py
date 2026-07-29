@@ -7795,6 +7795,10 @@ def event_bound_live_adapter_from_trade_conn(
                 missing_held_binding_families = (
                     _missing_held_binding_families(probability_slice)
                 )
+                force_current_gamma = (
+                    force_current_gamma
+                    or bool(missing_held_binding_families)
+                )
                 slice_required_tokens = (
                     None
                     if missing_held_binding_families

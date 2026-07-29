@@ -6538,6 +6538,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     metadata_calls = []
     bind_calls = []
     bind_required_tokens = []
+    bind_trade_connections = []
     capture_required_tokens = []
     omitted_bind_families = set()
     rebound_no_token_by_family = {}
@@ -6572,6 +6573,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     ):
         bind_calls.append(metadata_sink is not None)
         bind_required_tokens.append(_.get("required_token_ids"))
+        bind_trade_connections.append(_.get("trade_conn"))
         if metadata_sink is not None:
             for metadata_key in metadata_keys:
                 metadata_sink[metadata_key] = metadata
@@ -6724,6 +6726,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     )
     assert returned_probabilities["family"].bindings[0].no_token_id == "no-token"
     assert bind_required_tokens[-1] is None
+    assert bind_trade_connections[-1] is None
     assert capture_required_tokens[-1] == frozenset({"no-token"})
 
     trade.execute(
