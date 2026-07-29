@@ -1435,21 +1435,418 @@ def _replacement_city_candidate_lookup(unit: str, city: str | None) -> dict | No
         return None
 
 
-def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequest") -> str:
-    """Return the settlement unit ('C' or 'F') for the city, derived from the request bins.
+# Created: 2026-07-28
+# Last reused or audited: 2026-07-28 (deep-review corrections FIX 1/FIX 6/FIX 7 applied same day)
+# Authority basis: docs/operations/current/sigma_tau_calibration/PLAN.md. OOS walk-forward bakeoff
+#   (calib_curves/bakeoff.py) selected per-(unit_family, metric) FITTED k(tau) times per-city
+#   variance shrinkage as the best legal sigma correction for the CURRENT-EVIDENCE (Day0) shape --
+#   the ONLY site this governs is the `_current_shape is not None` branch below, which previously
+#   hardcoded (1.0, 0.0, 0.0) (see "Historical k/w/floors would change a decision-time-only shape").
+#   This is a SEPARATE calibration surface from state/sigma_scale_fit.json (the HISTORICAL-path
+#   artifact _replacement_sigma_scale_lookup/_effective_unit_sigma_scale read above); that machinery
+#   is untouched. scripts/fit_sigma_tau_calibration.py is this artifact's ONLY writer.
+#
+# 2026-07-28 DEEP-REVIEW CORRECTIONS:
+#   FIX 1 LOCAL-DATE ENDPOINT: tau's target-end is the CITY'S LOCAL midnight (DST-aware, via
+#     request.city_timezone + zoneinfo), not target_date+1day 00:00 UTC -- markets settle on the
+#     local calendar date. The fitter (scripts/fit_sigma_tau_calibration.py) computes the SAME
+#     local-date endpoint from config/cities.json's IANA timezone.
+#   FIX 6 STRICT LOADER AUTHORIZATION: the artifact is validated against a TYPED schema (exact
+#     authority string, exact schema_version int, per-group `fitted is True` / `oos_gate.passed is
+#     True` as EXACT bools -- not merely truthy, k values as real numbers -- NOT bool -- within
+#     [0.25, 4.0], the exact expected bucket key set, and the clock declaration matching the
+#     serving-side constant). ANY deviation makes the WHOLE ARTIFACT (or, for a single malformed
+#     bucket/city entry, that narrower scope) inert -- never partially trusted. The artifact is
+#     read+validated ONCE per file generation (cached by mtime, see
+#     _load_validated_sigma_tau_artifact) rather than re-read on every lookup, so a mid-batch
+#     artifact swap cannot produce generation skew WITHIN one process's already-served lookups. The
+#     entire resolution (tau computation included) is wrapped in ONE neutralizing try/except
+#     (_resolve_sigma_tau_calibration) so a malformed request field can never escape the fail-closed
+#     boundary as an exception.
+#   FIX 7 EQUIVALENCE CONTRACT: sigma_tau_artifact_hash is OMITTED from provenance (not merely set
+#     to null) when the calibration is inert, so byte-for-byte equivalence with the pre-artifact
+#     code holds exactly, not just semantically.
+_SIGMA_TAU_BUCKET_EDGES: tuple[float, ...] = (0.0, 6.0, 12.0, 24.0, 36.0, 48.0, 72.0, math.inf)
+_SIGMA_TAU_BUCKET_LABELS: tuple[str, ...] = (
+    "[0,6)", "[6,12)", "[12,24)", "[24,36)", "[36,48)", "[48,72)", "[72,inf)",
+)
+_SIGMA_TAU_EXPECTED_BUCKET_KEYS: frozenset[str] = frozenset(_SIGMA_TAU_BUCKET_LABELS)
+# MUST equal scripts/fit_sigma_tau_calibration.py's ARTIFACT_AUTHORITY / SCHEMA_VERSION / TAU_CLOCK_ID
+# exactly -- these are the artifact's typed identity, not prose. A mismatch on ANY of the three
+# invalidates the whole artifact (FIX 6).
+_SIGMA_TAU_ARTIFACT_AUTHORITY = "sigma_tau_calibration_v1_mle"
+_SIGMA_TAU_SCHEMA_VERSION = 1
+_SIGMA_TAU_CLOCK_ID = "source_cycle_time_local_target_end_v1"
+_SIGMA_TAU_K_MIN, _SIGMA_TAU_K_MAX = 0.25, 4.0
+# MODEL SELECTION LAW (B2, deep-review 2026-07-28) -- MUST equal
+# scripts/fit_sigma_tau_calibration.py's MODEL_TYPE_* constants exactly. Every schema-valid group
+# declares which of these two models it is; the loader dispatches STRICTLY on this declaration and
+# rejects a group whose actual bucket/city shape doesn't match what the declared model_type
+# promises (a "global_k_v1" group whose buckets vary, or that carries city corrections, is a shape
+# mismatch -- corruption, not data).
+_SIGMA_TAU_MODEL_TYPE_GLOBAL_K_V1 = "global_k_v1"
+_SIGMA_TAU_MODEL_TYPE_BUCKET_CITY_K_V1 = "bucket_city_k_v1"
+_SIGMA_TAU_VALID_MODEL_TYPES = frozenset({_SIGMA_TAU_MODEL_TYPE_GLOBAL_K_V1, _SIGMA_TAU_MODEL_TYPE_BUCKET_CITY_K_V1})
+
+
+def _lead_target_h(target_date: "date | str", issue_time: "datetime | str", city_timezone: str) -> float:
+    """Hours from ``issue_time`` to the LOCAL END of ``target_date`` (next local midnight in
+    ``city_timezone``, DST-aware, converted to UTC -- FIX 1).
+
+    This is the tau used by the sigma-tau calibration fit and serving lookup. The caller MUST pass
+    the forecast ISSUE clock (``request.source_cycle_time``), NOT decision time
+    (``request.computed_at``) -- 2026-07-28 design-review correction: a single source_cycle_time is
+    reused across many recomputes (live evidence: Hong Kong 2026-07-20 HIGH had 247 distinct
+    computed_at values collapse to just 4 distinct source_cycle_time values), so a
+    computed_at-anchored tau would shrink on every wall-clock recompute with no new provider issue
+    -- a look-ahead-adjacent defect. ``scripts/fit_sigma_tau_calibration.py`` trains on the same
+    issue clock AND the same local-date endpoint (via config/cities.json's IANA timezone).
+
+    FIX 1 (deep-review, 2026-07-28): markets settle on the CITY'S LOCAL date, not UTC. The prior
+    cut used ``target_date+1day 00:00 UTC`` universally, misassigning tau buckets by up to the
+    city's UTC offset (e.g. Shanghai +8h, Chicago -5h).
+
+    This is NOT the settlement-availability lead used elsewhere in this module (e.g.
+    ``_lead_hours`` in fit_sigma_scale.py measures lag to target_date START, a different clock for
+    a different, HISTORICAL-path artifact).
+    """
+    target = date.fromisoformat(_date_text(target_date))
+    next_local_date = target + timedelta(days=1)
+    local_midnight = datetime(
+        next_local_date.year, next_local_date.month, next_local_date.day, tzinfo=ZoneInfo(city_timezone)
+    )
+    target_end = local_midnight.astimezone(UTC)
+    issue = _to_utc(issue_time, field_name="issue_time")
+    return (target_end - issue).total_seconds() / 3600.0
+
+
+def _sigma_tau_bucket_label(lead_target_h: float) -> str | None:
+    """Bucket label for the fitted artifact's ``buckets`` key, or None if unbucketable.
+
+    A negative or non-finite lead has no trading-lead meaning (mirrors the fitter's drop of
+    lead_target_h<0 rows) and returns None, which the lookup below treats as INERT.
+    """
+    if not math.isfinite(lead_target_h) or lead_target_h < 0.0:
+        return None
+    for lo, hi, label in zip(
+        _SIGMA_TAU_BUCKET_EDGES, _SIGMA_TAU_BUCKET_EDGES[1:], _SIGMA_TAU_BUCKET_LABELS
+    ):
+        if lo <= lead_target_h < hi:
+            return label
+    return None
+
+
+def _is_strict_finite_number(value: object) -> bool:
+    """True iff ``value`` is a real, finite int/float -- explicitly NOT a bool (Python's ``bool``
+    is an ``int`` subclass, so ``isinstance(True, int)`` is True; a served k of literal ``true``
+    must be rejected, not silently coerced to 1)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _validate_sigma_tau_group(group: object) -> dict | None:
+    """Strictly validate one ``(unit, metric)`` group entry (FIX 6, tightened by deep-review B6).
+    Returns a CLEANED dict (``global_k``, ``buckets`` mapping label->k, ``cities`` mapping
+    name->c_shrunk) with every value already range/type-checked, or None if the group fails
+    validation.
+
+    B6: a MALFORMED bucket or city subtree INVALIDATES THE WHOLE GROUP -- schema corruption in one
+    part of an artifact is grounds to distrust the whole group, not a reason to silently patch
+    around it. The ONLY legitimate "inherit global_k" case is a SCHEMA-VALID bucket entry whose
+    ``fitted`` is the exact bool ``False`` (the fitter's honest "not enough events for this
+    bucket" signal) -- everything else that deviates from the expected shape (wrong types, a
+    ``fitted``/``k`` pair that doesn't parse, an out-of-range value) is treated as corruption, not
+    as "absent" or "unfitted". Cities have no such legitimate degraded state at all: every PRESENT
+    city entry must be fully schema-valid, or the group is invalidated; a city simply ABSENT from
+    the map (not present as a key at all) is the only "no adjustment" case, handled by the caller's
+    ``.get(city, 1.0)`` fallback, not by this function.
+
+    B2: the group MUST declare a ``model_type`` in ``{"global_k_v1", "bucket_city_k_v1"}`` (the
+    fitter's OOS model-selection law's verdict). The loader dispatches STRICTLY on it: a
+    "global_k_v1" group whose bucket k's are not ALL identical to global_k, or that carries any
+    city corrections, is a SHAPE MISMATCH against its own declaration -- corruption, not data --
+    and invalidates the group exactly like any other schema violation."""
+    if not isinstance(group, dict):
+        return None
+    fitted = group.get("fitted")
+    if not (isinstance(fitted, bool) and fitted is True):
+        return None
+    model_type = group.get("model_type")
+    if model_type not in _SIGMA_TAU_VALID_MODEL_TYPES:
+        return None
+    oos_gate = group.get("oos_gate")
+    if not isinstance(oos_gate, dict):
+        return None
+    gate_passed = oos_gate.get("passed")
+    if not (isinstance(gate_passed, bool) and gate_passed is True):
+        return None
+    global_k = group.get("global_k")
+    if not (_is_strict_finite_number(global_k) and _SIGMA_TAU_K_MIN <= global_k <= _SIGMA_TAU_K_MAX):
+        return None
+    global_k = float(global_k)
+
+    buckets = group.get("buckets")
+    if not isinstance(buckets, dict) or set(buckets.keys()) != _SIGMA_TAU_EXPECTED_BUCKET_KEYS:
+        return None
+    clean_buckets: dict[str, float] = {}
+    for label in _SIGMA_TAU_BUCKET_LABELS:
+        entry = buckets.get(label)
+        if not isinstance(entry, dict):
+            return None  # malformed bucket subtree -> invalidate the WHOLE group (B6)
+        bucket_fitted = entry.get("fitted")
+        if not isinstance(bucket_fitted, bool):
+            return None  # a "fitted" flag that isn't a real bool is corruption -> invalidate group
+        if bucket_fitted is False:
+            clean_buckets[label] = global_k  # the ONLY legitimate inherit-global case
+            continue
+        k_value = entry.get("k")
+        if not (_is_strict_finite_number(k_value) and _SIGMA_TAU_K_MIN <= k_value <= _SIGMA_TAU_K_MAX):
+            return None  # fitted=True with an invalid k is corruption -> invalidate group
+        clean_buckets[label] = float(k_value)
+
+    cities_raw = group.get("cities")
+    if not isinstance(cities_raw, dict):
+        return None  # malformed cities container -> invalidate the WHOLE group (B6)
+    clean_cities: dict[str, float] = {}
+    for city_name, entry in cities_raw.items():
+        if not isinstance(entry, dict):
+            return None  # malformed city subtree -> invalidate the WHOLE group (B6)
+        c_value = entry.get("c_shrunk")
+        if not (_is_strict_finite_number(c_value) and _SIGMA_TAU_K_MIN <= c_value <= _SIGMA_TAU_K_MAX):
+            return None  # malformed/out-of-range c_shrunk is corruption -> invalidate group
+        clean_cities[str(city_name)] = float(c_value)
+
+    # B2 shape-mismatch check: "global_k_v1" PROMISES no bucket variation and no city corrections.
+    if model_type == _SIGMA_TAU_MODEL_TYPE_GLOBAL_K_V1:
+        if clean_cities:
+            return None  # a global_k_v1 group carrying city corrections is a shape mismatch
+        if any(k_val != global_k for k_val in clean_buckets.values()):
+            return None  # a global_k_v1 group whose buckets vary is a shape mismatch
+
+    return {"global_k": global_k, "buckets": clean_buckets, "cities": clean_cities}
+
+
+def _validate_sigma_tau_artifact(raw_bytes: bytes) -> dict | None:
+    """Strictly validate the WHOLE artifact (FIX 6): exact ``authority``, exact
+    ``schema_version``, and exact ``tau_clock`` declaration (matching the serving-side clock
+    constant this module uses) at the top level -- ANY deviation invalidates the ENTIRE artifact,
+    before any per-group work happens. Returns ``{"families": {UNIT: {metric: clean_group}}}``
+    (only groups that individually pass ``_validate_sigma_tau_group`` survive) or None."""
+    artifact = json.loads(raw_bytes.decode("utf-8"))
+    if not isinstance(artifact, dict):
+        return None
+    meta = artifact.get("_meta")
+    if not isinstance(meta, dict):
+        return None
+    if meta.get("authority") != _SIGMA_TAU_ARTIFACT_AUTHORITY:
+        return None
+    schema_version = meta.get("schema_version")
+    if not (isinstance(schema_version, int) and not isinstance(schema_version, bool)):
+        return None
+    if schema_version != _SIGMA_TAU_SCHEMA_VERSION:
+        return None
+    if meta.get("tau_clock") != _SIGMA_TAU_CLOCK_ID:
+        return None
+    families = artifact.get("families")
+    if not isinstance(families, dict):
+        return None
+    validated: dict[str, dict[str, dict]] = {}
+    for unit_key, metrics in families.items():
+        if not isinstance(metrics, dict):
+            continue
+        for metric_key, group in metrics.items():
+            clean = _validate_sigma_tau_group(group)
+            if clean is not None:
+                validated.setdefault(str(unit_key).upper(), {})[str(metric_key).lower()] = clean
+    return {"families": validated}
+
+
+# Module-level cache: read+validate the artifact ONCE per observed file generation (keyed by
+# mtime_ns AND size, not mtime alone -- B4 hardening, deep-review 2026-07-28: mtime alone cannot
+# distinguish two different same-second writes on a coarse-grained filesystem clock), not on every
+# lookup (FIX 6 -- "generation skew" guard). A fresh generation is picked up on the NEXT lookup;
+# every lookup already served from an older generation is unaffected.
+#
+# CYCLE-PINNING NOTE (B4, deep-review 2026-07-28): the reviewer asked for the artifact to be
+# snapshotted ONCE per materialization CYCLE (an explicit cycle boundary), not merely once per
+# observed file generation. Investigated the live batch entry point
+# (src/data/replacement_forecast_live_materialization_queue.py::_run_materialization_batch): each
+# queued item is materialized in its OWN SUBPROCESS (_materialization_command invokes
+# scripts/materialize_replacement_forecast_live.py per item via subprocess.run), so in the ACTUAL
+# live batch architecture this module-level cache is already naturally scoped to exactly one
+# materialization -- there is no in-process multi-item loop in that path for the artifact to skew
+# across. The residual risk is a hypothetical FUTURE in-process caller that materializes many
+# requests in one long-lived process; threading an explicit cycle-id snapshot through would require
+# touching the queue/batch caller, which is outside this module's scope. mtime+size is the
+# practical hardening available at this file's boundary; a true cycle-id-keyed snapshot is a
+# follow-up if an in-process batch caller is ever introduced.
+_sigma_tau_artifact_cache: dict[str, object] = {"path": None, "mtime_ns": None, "size": None, "validated": None, "hash": None}
+
+
+def _load_validated_sigma_tau_artifact() -> tuple[dict | None, str | None]:
+    """Return ``(validated_families_or_None, artifact_hash_or_None)``, reading+validating
+    ``state/sigma_tau_calibration.json`` at most once per observed file generation (mtime_ns +
+    size). The hash is captured whenever the file's bytes were successfully read, REGARDLESS of
+    whether validation subsequently accepts or rejects the content -- full audit trail even on an
+    inert outcome."""
+    try:
+        import os  # noqa: PLC0415
+
+        from src.config import runtime_state_path  # noqa: PLC0415
+
+        path = str(runtime_state_path("sigma_tau_calibration.json"))
+    except Exception:
+        return None, None
+    try:
+        stat_result = os.stat(path)
+        mtime_ns = stat_result.st_mtime_ns
+        size = stat_result.st_size
+    except OSError:
+        _sigma_tau_artifact_cache.update(path=None, mtime_ns=None, size=None, validated=None, hash=None)
+        return None, None
+    if (
+        _sigma_tau_artifact_cache.get("path") == path
+        and _sigma_tau_artifact_cache.get("mtime_ns") == mtime_ns
+        and _sigma_tau_artifact_cache.get("size") == size
+    ):
+        return _sigma_tau_artifact_cache.get("validated"), _sigma_tau_artifact_cache.get("hash")  # type: ignore[return-value]
+    try:
+        with open(path, "rb") as fh_bytes:
+            raw_bytes = fh_bytes.read()
+    except OSError:
+        _sigma_tau_artifact_cache.update(path=path, mtime_ns=mtime_ns, size=size, validated=None, hash=None)
+        return None, None
+    artifact_hash = hashlib.sha256(raw_bytes).hexdigest()
+    try:
+        validated = _validate_sigma_tau_artifact(raw_bytes)
+    except Exception:
+        validated = None
+    _sigma_tau_artifact_cache.update(path=path, mtime_ns=mtime_ns, size=size, validated=validated, hash=artifact_hash)
+    return validated, artifact_hash
+
+
+def _log_sigma_tau_rejection(reason: str) -> None:
+    """Log-only (never raises, never affects control flow) -- the audit trail deep-review B5 asks
+    for in place of stamping a hash on a rejected/inert outcome."""
+    try:
+        import logging  # noqa: PLC0415
+
+        logging.getLogger("zeus.sigma_tau_calibration").warning(
+            "sigma-tau calibration inert: %s", reason
+        )
+    except Exception:
+        pass
+
+
+def _sigma_tau_calibration_lookup(
+    unit: str, metric: str, tau_bucket: str | None, city: str | None
+) -> tuple[float, float, float, str | None]:
+    """CURRENT-EVIDENCE lead-time sigma calibration: FITTED k(tau) x per-city variance shrinkage.
+
+    Reads ``state/sigma_tau_calibration.json`` (written ONLY by
+    ``scripts/fit_sigma_tau_calibration.py``, validated ONCE per generation by
+    ``_load_validated_sigma_tau_artifact``) and returns ``(k, w, floor_steps, artifact_hash)`` for
+    the given settlement unit family ('C'/'F'), metric ('high'/'low'), tau bucket label, and city.
+    ``w`` and ``floor_steps`` are ALWAYS ``0.0`` -- this is a k-only artifact for the current-
+    evidence shape (the uniform-mixture/absolute-floor terms belong to the separate historical-path
+    sigma_scale_fit.json surface and are out of scope here).
+
+    FAIL-CLOSED TO TODAY -- returns exactly ``(1.0, 0.0, 0.0, None)``, never raises, when:
+      - ``tau_bucket`` is None (unbucketable lead, e.g. negative/non-finite);
+      - the artifact file is absent, unreadable, or fails STRICT schema validation (FIX 6: wrong
+        authority/schema_version/tau_clock, `fitted`/`oos_gate.passed` not exactly `True`, a k
+        outside [0.25, 4.0] or typed as bool, a malformed bucket/city subtree, or a bucket key set
+        that doesn't match exactly -- B6: any of these invalidates the WHOLE group);
+      - the ``(unit, metric)`` group is absent after validation;
+      - the composed ``k_eff`` is non-finite or escapes [0.25, 4.0] (B3 -- never clamped);
+      - the composed ``k_eff`` equals exactly ``1.0`` (a validated, gate-passed group that happens
+        to be neutral is still neutral -- matches the established ``sigma_scale_k_applied``
+        "stamped iff k != 1.0" convention exactly).
+    A city with no entry contributes exactly ``c=1.0`` (no per-city adjustment).
+
+    B5 (deep-review 2026-07-28): the 4th element (the artifact's sha256 identity hash) is returned
+    ONLY in the SUCCESS case above -- a schema-valid, gate-authorized group that actually applies a
+    non-neutral ``k_eff``. Every rejection/inert path returns ``None`` for the hash and instead
+    LOGS the rejection reason (``_log_sigma_tau_rejection``) -- persisting a hash for an artifact
+    that was never actually trusted would misleadingly suggest the correction fired.
+    """
+    if tau_bucket is None:
+        return 1.0, 0.0, 0.0, None
+    validated, artifact_hash = _load_validated_sigma_tau_artifact()
+    if validated is None:
+        if artifact_hash is not None:
+            _log_sigma_tau_rejection(f"artifact present but failed schema validation (sha256={artifact_hash})")
+        return 1.0, 0.0, 0.0, None
+    group = (validated.get("families") or {}).get(str(unit).upper(), {}).get(str(metric).lower())
+    if group is None:
+        _log_sigma_tau_rejection(f"no schema-valid gate-passed group for {unit}/{metric} (artifact sha256={artifact_hash})")
+        return 1.0, 0.0, 0.0, None
+    k_bucket = group["buckets"].get(tau_bucket, group["global_k"])
+    c_shrunk = group["cities"].get(str(city), 1.0) if city else 1.0
+    k_eff = float(k_bucket) * float(c_shrunk)
+    # COMPOSED BOUND (B3): each factor individually passing [0.25, 4.0] at validation time does NOT
+    # guarantee the PRODUCT does (e.g. 4.0 * 4.0 = 16.0). Enforce the bound on k_eff itself here --
+    # NEVER clamp, fall back to the neutral tuple instead. The fitter (fit_city_shrinkage) already
+    # refuses to EMIT a city whose composed product would violate this, so this is a second,
+    # independent enforcement at the serving boundary.
+    if not (math.isfinite(k_eff) and _SIGMA_TAU_K_MIN <= k_eff <= _SIGMA_TAU_K_MAX):
+        _log_sigma_tau_rejection(
+            f"composed k_eff={k_eff!r} out of [{_SIGMA_TAU_K_MIN},{_SIGMA_TAU_K_MAX}] for "
+            f"{unit}/{metric}/{tau_bucket}/{city} (artifact sha256={artifact_hash})"
+        )
+        return 1.0, 0.0, 0.0, None
+    if k_eff == 1.0:
+        return 1.0, 0.0, 0.0, None  # neutral by coincidence, not by rejection -- still no hash (B5)
+    return k_eff, 0.0, 0.0, artifact_hash
+
+
+def _effective_sigma_tau_scale(
+    unit: str, metric: str, tau_bucket: str | None, city: str | None
+) -> tuple[float, float, float, str | None]:
+    """The (k, w, floor_steps, artifact_hash) the current-evidence build applies.
+
+    Pure delegate to ``_sigma_tau_calibration_lookup`` -- the fitted artifact's per-group ``fitted``
+    flag is the sole licensing authority, exactly as ``_effective_unit_sigma_scale`` delegates for
+    the historical path. No unit/metric/bucket allow-list here.
+    """
+    return _sigma_tau_calibration_lookup(unit, metric, tau_bucket, city)
+
+
+def _resolve_sigma_tau_calibration(
+    request: "ReplacementForecastMaterializeRequest", unit: str, metric: str
+) -> tuple[float, float, float, str | None]:
+    """Single fail-closed entry point for the CURRENT-EVIDENCE sigma-tau calibration (FIX 6): computes
+    tau from the request's issue clock and city LOCAL target end, resolves the fitted artifact, and
+    returns ``(k, w, floor_steps, artifact_hash)``. Wraps the ENTIRE resolution -- tau computation
+    included -- in ONE try/except so a malformed request field (bad ``target_date``,
+    ``source_cycle_time``, or ``city_timezone``) can never escape as an exception; any failure
+    anywhere in this pipeline resolves to the exact neutral ``(1.0, 0.0, 0.0, None)``, never raises."""
+    try:
+        lead_h = _lead_target_h(request.target_date, request.source_cycle_time, request.city_timezone)
+        bucket = _sigma_tau_bucket_label(lead_h)
+        return _effective_sigma_tau_scale(unit, metric, bucket, request.city)
+    except Exception:
+        return 1.0, 0.0, 0.0, None
+
+
+def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequest") -> str | None:
+    """Return the settlement unit ('C' or 'F') for the city, derived from the request bins, or
+    None when bins are absent/malformed.
 
     Uses the first bin's ``settlement_unit`` field (the family is uniform — the bin topology
-    validator enforces a single unit across all bins in a family). Falls back to 'C' on any
-    error so the scale gate is safe: the C scale is only applied when the unit is positively
-    identified as 'C', never speculatively.
-    """
+    validator enforces a single unit across all bins in a family). Deep-review B6 (2026-07-28):
+    returns None on absent bins or ANY error -- never defaults to 'C'. A silent 'C' default would
+    let an unidentified unit be positively (mis)treated as Celsius by every downstream consumer
+    (the historical sigma-scale lookup, the sigma-tau lookup, the uniform-mixture gate); every
+    caller of this function already resolves None safely to its own inert/neutral fallback
+    (``str(None).upper()`` never matches a real family key), so None propagates to "no correction
+    applied" rather than "silently apply the C-family correction to an unknown unit"."""
     try:
         bins = request.bins
         if bins:
             return str(bins[0].settlement_unit)
-        return "C"
+        return None
     except Exception:
-        return "C"
+        return None
 
 
 def _build_sigma_repr_by_model(
@@ -4012,6 +4409,75 @@ def _day0_conditioned_bin_probability(
     raise ValueError(f"metric must be high or low, got {metric!r}")
 
 
+def served_settlement_log_probability(
+    *,
+    anchor_value_c: float,
+    predictive_sigma_c: float,
+    k: float,
+    metric: str,
+    bin_low_c: float | None,
+    bin_high_c: float | None,
+    half_step: float,
+    rounding_rule: str,
+    day0_observed_extreme_c: float | None,
+    day0_center_delta_c: float,
+) -> float:
+    """log P(settlement lands in [bin_low_c, bin_high_c]) under the served kernel -- B1 (deep-review
+    2026-07-28) fit/serve parity: the ONE function both the live serving path and
+    ``scripts/fit_sigma_tau_calibration.py`` score through, so a fitted k means exactly what it is
+    applied to.
+
+    Reproduces, verbatim, the two transforms ``_compute_posterior_payload`` applies before any bin
+    is integrated:
+      - the T0-1 remaining-window Day0 center correction (HIGH: mu -= delta, LOW: mu += delta,
+        applied only when ``day0_center_delta_c > 0.0`` -- see the identical branch around
+        ``_mu_anchor`` in ``_compute_posterior_payload``);
+      - the day0/normal dispatch ``_build_scaled_normal_uniform_q._bin_mass`` uses: when
+        ``day0_observed_extreme_c`` is not None, integrate through ``_day0_conditioned_bin_probability``
+        (the max/min absorbing-observed-extreme transform); otherwise through
+        ``bin_probability_settlement``, the SAME settlement integrator serving uses.
+
+    Deliberately excludes the settlement sigma floor and step-unit floor (both serving-only,
+    config-impure, and floor-only-widens by construction -- fitting k against the honest,
+    unfloored predictive sigma is what "k means what it says" requires) and the uniform-mixture w
+    (a serving-time policy knob downstream of the k this function is used to fit).
+    """
+    from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
+
+    mu = float(anchor_value_c)
+    if day0_center_delta_c > 0.0:
+        if metric == "high":
+            mu -= float(day0_center_delta_c)
+        elif metric == "low":
+            mu += float(day0_center_delta_c)
+        else:
+            raise ValueError(f"metric must be high or low, got {metric!r}")
+    sigma = float(predictive_sigma_c)
+    if k != 1.0 and k > 0.0:
+        sigma = sigma * float(k)
+    if day0_observed_extreme_c is not None:
+        p = _day0_conditioned_bin_probability(
+            metric=metric,
+            observed_extreme_c=day0_observed_extreme_c,
+            mu=mu,
+            sigma=sigma,
+            bin_low_c=bin_low_c,
+            bin_high_c=bin_high_c,
+            half_step=half_step,
+            rounding_rule=rounding_rule,
+        )
+    else:
+        p = bin_probability_settlement(
+            mu=mu,
+            sigma=sigma,
+            bin_low=bin_low_c,
+            bin_high=bin_high_c,
+            half_step=half_step,
+            rounding_rule=rounding_rule,
+        )
+    return math.log(max(float(p), 1e-300))
+
+
 def _build_fused_q_bounds(
     *,
     mu_star: float,
@@ -4321,6 +4787,11 @@ def _compute_posterior_payload(
     # C3 calibration surface 2026-06-12 — FITTED σ_pred scale provenance. None when scaling is not
     # applied (artifact missing / family unfitted / k=1.0); float applied value when scaling fires.
     sigma_scale_k_applied: float | None = None
+    # Sigma-tau calibration (2026-07-28) — identity of the state/sigma_tau_calibration.json artifact
+    # actually read on the CURRENT-EVIDENCE path. None when non-current-evidence (that path never
+    # reads this artifact) or when the artifact could not be read/parsed at all; the sha256 hash
+    # whenever it WAS read, regardless of whether k ended up firing (full audit trail either way).
+    sigma_tau_artifact_hash: str | None = None
     # FITTED uniform-mixture weight provenance. None when no mixture applied (artifact missing /
     # family unfitted / w=0.0); float applied w when the mixture fires. Both come from the SAME
     # state/sigma_scale_fit.json family entry (MLE-fitted, operator law 2026-06-12).
@@ -4468,9 +4939,23 @@ def _compute_posterior_payload(
             # (1.0,0.0,0.0) inert from the lookup), so NO hardcoded settlement-unit allow-list here.
             _city_unit = _city_settlement_unit_from_bins(request)
             if _current_shape is not None:
-                # Historical k/w/floors would change a decision-time-only shape
-                # into a second probability regime. They are exactly neutral here.
-                _k, _uniform_w, _floor_steps = 1.0, 0.0, 0.0
+                # SIGMA-TAU CALIBRATION (2026-07-28): the historical sigma_scale_fit.json k/w/floor
+                # would change a decision-time-only shape into a second probability regime, so that
+                # artifact stays exactly neutral here (unchanged). In its place, a SEPARATE artifact
+                # (state/sigma_tau_calibration.json, docs/operations/current/sigma_tau_calibration/
+                # PLAN.md) supplies a FITTED, lead-time-indexed k(tau) x per-city variance
+                # shrinkage for THIS shape only -- w and floor_steps remain exactly 0.0 (k-only).
+                # FAIL-CLOSED TO TODAY: artifact absent/malformed/unfitted -> exactly (1.0, 0.0, 0.0),
+                # byte-identical to the prior hardcoded neutral tuple. The ENTIRE resolution (tau
+                # computation, city-local target-end, strict artifact validation) is wrapped in ONE
+                # neutralizing try/except inside _resolve_sigma_tau_calibration (FIX 6) so a
+                # malformed request field can never escape as an exception here.
+                (
+                    _k,
+                    _uniform_w,
+                    _floor_steps,
+                    sigma_tau_artifact_hash,
+                ) = _resolve_sigma_tau_calibration(request, _city_unit, metric)
             else:
                 _k, _uniform_w, _floor_steps = _effective_unit_sigma_scale(
                     _city_unit
@@ -4836,6 +5321,7 @@ def _compute_posterior_payload(
             sigma_scale_k_applied = None
             uniform_mixture_w_applied = None
             sigma_floor_steps_applied = None
+            sigma_tau_artifact_hash = None
             city_calibration_layer_applied = False
             city_calibration_rho = None
             city_score_capital = None
@@ -5062,6 +5548,13 @@ def _compute_posterior_payload(
         # when inert (live artifact has no floor_steps key, or the floor did not bind); the applied
         # floor_steps when σ_core was lifted to floor_steps·step. Same artifact family entry as k/w.
         "sigma_floor_steps_applied": sigma_floor_steps_applied,
+        # Sigma-tau calibration (2026-07-28) — identity of the state/sigma_tau_calibration.json
+        # artifact read on the CURRENT-EVIDENCE path. OMITTED entirely (not merely null -- FIX 7)
+        # when inert: the historical path, or the artifact could not be read at all. This keeps the
+        # no-artifact/historical-path provenance dict BYTE-IDENTICAL to the code before this
+        # artifact existed, not just semantically equivalent. Authority:
+        # docs/operations/current/sigma_tau_calibration/PLAN.md
+        **({"sigma_tau_artifact_hash": sigma_tau_artifact_hash} if sigma_tau_artifact_hash is not None else {}),
         # Catch-all exemption (2026-06-10): open-ended bins whose floored mass was capped at the
         # un-floored predictive-sigma mass (the floor may only flatten, never inflate a catch-all).
         "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),
