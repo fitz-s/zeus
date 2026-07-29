@@ -77,7 +77,7 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py unsupported_edge_claim_guard",
-            "description": "Edge-claim guard (fixed 2026-07-28, replaces no_edge_rule1_guard): block + challenge when the final message concludes tradeable edge or a deploy/scale-up decision without a settled-sample count, an interval, or settlement-graded evidence \u2014 a null result is never blocked, only an unsupported positive one. Bypass ZEUS_EDGE_CLAIM_GUARD_OFF=1."
+            "description": "Edge-claim guard (fixed 2026-07-28, replaces no_edge_rule1_guard): ADVISORY reminder (never blocks) when the final message concludes tradeable edge or a deploy/scale-up decision missing a settled-sample count, an interval, or settlement-graded evidence \u2014 a null result is never touched. Bypass ZEUS_EDGE_CLAIM_GUARD_OFF=1."
           }
         ]
       }

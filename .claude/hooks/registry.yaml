@@ -313,25 +313,30 @@ hooks:
     event: Stop
     matcher: "*"
     intent: >
-      Fixed 2026-07-28, replaces no_edge_rule1_guard. The predecessor blocked
+      Fixed 2026-07-28, replaces no_edge_rule1_guard. The predecessor BLOCKED
       the CONCLUSION "no edge" / "market efficient" via a ~35-phrase blocklist
       (two languages) — directly contradicting loop/LEDGER.yaml's own rule
       that "'insufficient evidence' is a legitimate, required conclusion", and
       running one layer above the selection calibrator / FDR control to
       cancel them out. On 2026-07-28 it fired on a session's own summary of
       the plan to fix it, proving the trigger was lexical, not structural.
-      This guard inverts what gets challenged: it fires on a POSITIVE
-      tradeable-edge / deploy-or-scale-up claim asserted WITHOUT a settled-
-      sample count, an interval/bound, or a settlement-graded evidence
-      reference — or with a stated sample count below this codebase's own
-      floor (MIN_SETTLED_N=30, matching loop/LEDGER.yaml min_n and
-      src/decision/selection_calibrator.py MIN_N). It never blocks a null
-      result, and is exempt on messages that merely discuss edges/guards/this
-      mechanism (2026-07-28 incident is the regression case). Loop-safe: when
-      stop_hook_active it degrades to a non-blocking reminder. Bypass:
-      ZEUS_EDGE_CLAIM_GUARD_OFF=1 (operator deliberate override only).
-    blocked_when:
-      - final_message_asserts_unsupported_positive_edge_claim
+      Deleting that guard is the actual fix; this replacement is a mirror-
+      shaped reminder for the opposite failure, not a substitute mechanism.
+      It surfaces a non-blocking ADVISORY when the final message reads as a
+      POSITIVE tradeable-edge / deploy-or-scale-up claim missing ANY of: a
+      settled-sample count, an interval/bound, or a settlement-graded
+      evidence reference (each requiring an actual number near the token,
+      not just the keyword) — or with a stated sample count below this
+      codebase's own floor (MIN_SETTLED_N=30, matching loop/LEDGER.yaml
+      min_n and src/decision/selection_calibrator.py MIN_N). It never
+      touches a null result, and is exempt (documented known bypass, not a
+      gap) on messages that merely discuss edges/guards/this mechanism
+      (2026-07-28 incident is the regression case). AUTHORITY BOUNDARY: a
+      regex over prose cannot verify a claim, only notice its shape — prose
+      can describe authority, prose must not instantiate authority, so this
+      guard never blocks; the calibrator/ledger remain the real floor.
+      Bypass: ZEUS_EDGE_CLAIM_GUARD_OFF=1 (silences the reminder).
+    blocked_when: []
     severity: ADVISORY
     bypass_env: ZEUS_EDGE_CLAIM_GUARD_OFF
     sunset_date: 2026-12-14
