@@ -3523,6 +3523,8 @@ def test_global_day0_actuation_rejects_conditioning_not_equal_to_current_state()
     "conditioning_source",
     (
         "aviationweather_metar",
+        "same_station_fast_tail",
+        "wu_api",
         "wu_api+same_station_fast_tail",
     ),
 )
@@ -3533,6 +3535,11 @@ def test_global_day0_held_conditioning_uses_named_physical_frontier(
     from src.data import replacement_forecast_current_target_plan as current_plan
 
     conn, carrier = _stale_day0_carrier_and_current_observations()
+    physical_source = (
+        conditioning_source
+        if conditioning_source in {"same_station_fast_tail", "wu_api"}
+        else "aviationweather_metar"
+    )
     settlement_fact = {
         "observed_extreme_native": 27.0,
         "observation_time": "2026-07-10T19:00:00+00:00",
@@ -3547,7 +3554,7 @@ def test_global_day0_held_conditioning_uses_named_physical_frontier(
         "observation_time": "2026-07-10T19:30:00+00:00",
         "observation_available_at": "2026-07-10T19:35:00+00:00",
         "sample_count": 3,
-        "observation_source": "aviationweather_metar",
+        "observation_source": physical_source,
         "station_id": "UUWW",
         "unit": "C",
     }
@@ -3594,8 +3601,79 @@ def test_global_day0_held_conditioning_uses_named_physical_frontier(
     binding = rebound["_edli_global_day0_binding"]
     assert binding["observed_extreme_native"] == pytest.approx(27.0)
     assert binding["statistical_physical_boundary"]["source"] == (
-        "aviationweather_metar"
+        physical_source
     )
+    conn.close()
+
+
+def test_global_day0_settlement_conditioning_ignores_older_same_source_physical_view(
+    monkeypatch,
+):
+    from src.data import replacement_forecast_current_target_plan as current_plan
+
+    conn, carrier = _stale_day0_carrier_and_current_observations()
+    settlement_fact = {
+        "observed_extreme_native": 27.0,
+        "observation_time": "2026-07-10T19:30:00+00:00",
+        "observation_available_at": "2026-07-10T19:35:00+00:00",
+        "sample_count": 3,
+        "observation_source": "wu_icao_history",
+        "station_id": "UUWW",
+        "unit": "C",
+    }
+    older_physical_view = {
+        **settlement_fact,
+        "observation_time": "2026-07-10T19:00:00+00:00",
+        "observation_available_at": "2026-07-10T19:05:00+00:00",
+        "sample_count": 2,
+    }
+    monkeypatch.setattr(
+        current_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, require_settlement_channel=False, **_kwargs: (
+            settlement_fact
+            if require_settlement_channel
+            else older_physical_view
+        ),
+    )
+
+    rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(
+            city="Moscow",
+            target_date="2026-07-10",
+            metric="high",
+        ),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+        conditioning={
+            "active": True,
+            "metric": "high",
+            "observation_time": "2026-07-10T19:30:00+00:00",
+            "observed_extreme_c": 27.0,
+            "sample_count": 3,
+            "source": "wu_icao_history",
+            "unit": "C",
+        },
+        observation_conn=conn,
+        decision_time=_dt.datetime(
+            2026,
+            7,
+            10,
+            20,
+            0,
+            tzinfo=_dt.timezone.utc,
+        ),
+        posterior_id=29917,
+        allow_equivalent_conditioning_clock_advance=True,
+    )
+
+    binding = rebound["_edli_global_day0_binding"]
+    assert binding["observation_time"] == (
+        "2026-07-10T19:30:00+00:00"
+    )
+    assert "probability_conditioning_observation_time" not in binding
+    assert "conditioning_clock_lag_seconds" not in binding
+    assert "physical_frontier_clock" not in binding
     conn.close()
 
 

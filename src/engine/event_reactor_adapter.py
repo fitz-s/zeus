@@ -28416,12 +28416,16 @@ def _conditioning_names_physical_frontier(
     conditioning_source: str,
     physical_source: str,
 ) -> bool:
-    """Match a fused WU/fast-tail label to its same-station wire channel."""
+    """Match only an explicitly physical conditioning channel."""
 
     conditioned = str(conditioning_source or "").strip().lower()
     physical = str(physical_source or "").strip().lower()
     if conditioned == physical:
-        return True
+        return conditioned in {
+            "aviationweather_metar",
+            "same_station_fast_tail",
+            "wu_api",
+        }
     return (
         conditioned == "wu_api+same_station_fast_tail"
         and physical
