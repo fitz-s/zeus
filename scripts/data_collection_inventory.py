@@ -99,6 +99,9 @@ _SRC_MAIN_NON_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
                                           # (trading control loop, reads already-collected data)
     "world_wal_checkpoint",       # WAL checkpoint (DB maintenance, not data collection)
     "trades_wal_checkpoint",      # WAL checkpoint (DB maintenance, not data collection)
+    "family_book_telemetry_ingest",  # book_snapshot_persistence: delivers already-captured
+                                      # internal decision telemetry from the local outbox spool
+                                      # into canonical tables -- not external data collection.
 })
 
 

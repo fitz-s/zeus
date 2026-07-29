@@ -1,47 +1,39 @@
 # Created: 2026-07-29
 # Last reused or audited: 2026-07-29
 # Authority basis: docs/operations/current/book_snapshot_persistence/PLAN.md --
-#   redesign after deep-review NO-GO, plus round-3 review fixes:
-#   X1 (transaction poisoning: an explicit transaction per observation, with
-#   unconditional rollback -- connection replacement if rollback itself
-#   fails -- and counters/sampling-cache updated ONLY after a durable
-#   commit); X2 (writer admission: BULK/LIVE are separate lock files with no
-#   mutual exclusion by themselves, so this writer no longer touches
-#   zeus_trades.db per observation at all -- it writes to a PRIVATE, bounded
-#   spool SQLite file with zero contention risk, and a periodic batched
-#   ingest pass -- the ONLY code path that ever touches the trade DB --
-#   moves durable rows in under db_writer_lock(WriteClass.BULK,
-#   blocking=False)); H2 (hot-path purity: the decision thread no longer
-#   starts/health-checks the worker or touches the canonical counters lock
-#   on its success path).
-"""Nonblocking capture plane for family_book_states / family_book_observations.
+#   redesign after two deep-review NO-GOs. Round-4 found the round-3 "spool"
+#   was a full unbounded mirror of the canonical append-only schemas
+#   (fetchall() of ALL history every 30s, no watermark, no-delete triggers --
+#   it could never drain) and that the worker's own canonical ingest pass
+#   was a second, uncoordinated writer against the live-money DB that could
+#   also crash the sole worker on ordinary SQLite contention. Round-5
+#   (this revision) fixes both: X1's transaction-safety STRUCTURE
+#   (_rollback_or_replace) is UNCHANGED per explicit reviewer confirmation --
+#   only what it wraps changed (a bounded outbox row, not the canonical
+#   tables directly).
+"""Nonblocking capture plane, cleanly split from canonical delivery.
 
-Two-stage write, both off the live decision thread:
+**Capture (this module's worker thread)**: the decision thread calls ONLY
+``enqueue_family_book_observation`` -- project a compact envelope
+(src/events/family_book_manifest.py, no reference to FamilyDecision/family/
+proofs), then ``queue.put_nowait``. The worker thread drains that queue into
+a PRIVATE spool file (``family_book_telemetry_spool.db``) -- own file, own
+WAL, zero contention with the trade DB by construction, since nothing else
+ever opens it. Writes land in a bounded, DELETABLE outbox table
+(``family_book_telemetry_outbox_schema.py`` -- the fix for round-4's
+"unbounded mirror" finding). The worker thread NEVER opens the canonical
+trade DB for writing (round-4's "second uncoordinated writer" finding).
 
-  1. Decision thread: ``enqueue_family_book_observation`` builds a small,
-     flat ``ObservationEnvelope`` (src/events/family_book_manifest.py --
-     holds NO reference to the FamilyDecision/family/proofs graph, so
-     ``FamilyDecision.band.samples`` and similar large objects are not kept
-     alive by a queued item) and does a bounded ``queue.put_nowait``. That
-     is the ENTIRE hot-path cost -- no worker start/health-check, no locked
-     counter increment on the success path.
-  2. Writer thread (started explicitly by the daemon at init, never by the
-     decision thread -- H2/M1): drains the queue into a PRIVATE spool
-     SQLite file (own file, own WAL, zero contention with the primary
-     trade_conn -- X2) with explicit per-observation transaction safety
-     (X1). A periodic ingest pass -- the only code that ever opens a second
-     connection to zeus_trades.db -- copies spool rows into the durable
-     trade-DB tables under ``db_writer_lock(WriteClass.BULK,
-     blocking=False)``; contention there just defers to the next cycle.
-
-Sampling policy v2 (STATE_CHANGE / HEARTBEAT / PRE_VETO_SELECTED by
-precedence, three orthogonal booleans persisted regardless of which one
-"won") replaces the broken per-cycle-unique timestamped hash as the
-observation-volume control; family_book_states' content_hash dedup controls
-STATE row volume.
-
-Kill switch: ``ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED`` (default "1"/on) -- an
-operator rollout guard, checked first, before any other work.
+**Delivery (``run_bounded_ingest``, called by the DAEMON, not this module's
+worker thread)**: a small, pure function that reads ONE bounded batch from
+the outbox (row/byte budget), inserts it into the canonical
+family_book_states/family_book_observations tables in one transaction
+(targeted upserts, idempotent), commits, and ONLY THEN deletes that batch
+from the outbox in a separate transaction. The daemon runs this on its own
+``get_trade_connection(write_class="live")`` connection via an ordinary
+APScheduler job (src/main.py) -- the SAME pattern every other periodic
+trade-DB touch in this daemon already uses, not a novel standalone-writer
+class requiring new arbitration machinery.
 """
 
 from __future__ import annotations
@@ -52,7 +44,8 @@ import queue
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional, Sequence
 
 from src.events.family_book_manifest import (
@@ -66,7 +59,6 @@ from src.events.family_book_manifest import (
 )
 from src.observability.counters import increment as _cnt_inc
 from src.observability.counters import read as _cnt_read
-from src.state.db_writer_lock import WriteClass, db_writer_lock
 from src.state.schema.family_book_observations_schema import (
     MARKET_CENTER_VERSION,
     SAMPLING_POLICY_VERSION,
@@ -78,85 +70,118 @@ from src.state.schema.family_book_states_schema import (
     ensure_table as _ensure_states_table,
     insert_state,
 )
+from src.state.schema.family_book_telemetry_outbox_schema import (
+    delete_up_to as _outbox_delete_up_to,
+    ensure_table as _ensure_outbox_table,
+    fetch_batch as _outbox_fetch_batch,
+    insert_outbox_row,
+    latest_per_family as _outbox_latest_per_family,
+    pending_stats as _outbox_pending_stats,
+)
 
 logger = logging.getLogger(__name__)
 
 _ENABLED_ENV_VAR = "ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED"
 _QUEUE_MAXSIZE_DEFAULT = 2048
 _HEARTBEAT_INTERVAL = timedelta(minutes=30)
-_INGEST_INTERVAL_SECONDS = 30.0
 _LOG_RATE_LIMIT_SECONDS = 60.0
+_WORKER_POLL_SECONDS = 0.1  # bounded shutdown latency; no periodic work left in the loop
+_READY_TIMEOUT_DEFAULT = 5.0
+_SPOOL_DISK_BUDGET_BYTES_DEFAULT = 500_000_000  # 500 MB -- Y1 hard spool budget
+_INGEST_BATCH_SIZE_DEFAULT = 500
+_INGEST_BYTE_BUDGET_DEFAULT = 5_000_000  # 5 MB canonical transaction cap
 # SQLite's multi-connection WAL-reset fix landed in 3.51.3 (and backports
-# 3.50.7/3.44.6) -- asserted once at worker startup since the ingest pass
-# runs a second live writer connection against the trade DB.
+# 3.50.7/3.44.6). The daemon ALSO gates this at boot
+# (src.state.db.assert_sqlite_version_safe) -- this is a scoped, defense-in-
+# depth check specific to this module's own second-connection contract.
 _MIN_SQLITE_VERSION_INFO = (3, 51, 3)
 
-# Canonical counter names (src/observability/counters.py sink). Only the
-# RARE/exceptional paths route through here from the decision thread (H2);
-# the common enqueue-success path touches no lock at all.
+# Canonical counter names (src/observability/counters.py sink).
 _CNT_DROP = "telemetry_drop_total"
 _CNT_ENQUEUE_ERROR = "family_book_telemetry_enqueue_error_total"
 _CNT_QUEUE_HIGH_WATER = "telemetry_queue_high_water_total"
 _CNT_SAMPLED_OUT = "family_book_telemetry_sampled_out_total"
 _CNT_WRITE_FAILURES = "family_book_telemetry_write_failures_total"
-_CNT_INGEST_CONTENDED = "family_book_telemetry_ingest_contended_total"
+_CNT_MALFORMED_ENVELOPE = "family_book_telemetry_malformed_envelope_total"
+_CNT_SPOOL_BUDGET_EXCEEDED = "family_book_telemetry_spool_budget_exceeded_total"
+_CNT_WRITTEN_OUTBOX = "family_book_telemetry_written_outbox_total"
+_CNT_STARTUP_FAILED = "family_book_telemetry_startup_failed_total"
 _CNT_INGEST_FAILURES = "family_book_telemetry_ingest_failures_total"
-_CNT_WRITTEN_STATES = "family_book_telemetry_written_states_total"
-_CNT_WRITTEN_OBSERVATIONS = "family_book_telemetry_written_observations_total"
+_CNT_INGEST_DISABLED = "family_book_telemetry_ingest_disabled_total"
 _CNT_INGESTED_STATES = "family_book_telemetry_ingested_states_total"
 _CNT_INGESTED_OBSERVATIONS = "family_book_telemetry_ingested_observations_total"
+_CNT_INGESTED_BATCHES = "family_book_telemetry_ingested_batches_total"
 
-# Sentinel pushed onto the queue to stop the worker (matches
-# src/data/replacement_cycle_advance_trigger.py's day0-bridge shape): the
-# worker blocks on queue.get() with a bounded timeout (the ingest cadence,
-# not a tight poll), so shutdown reacts immediately rather than waiting for
-# the next scheduled ingest.
-_STOP = object()
-_FORCE_INGEST_WAKE = object()
+
+def _telemetry_enabled() -> bool:
+    return os.environ.get(_ENABLED_ENV_VAR, "1") in ("1", "true", "True")
+
+
+@dataclass(frozen=True)
+class ReadinessResult:
+    ready: bool
+    reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class IngestOutcome:
+    """Result of ONE bounded run_bounded_ingest() call."""
+
+    batch_rows: int
+    ingested_states: int
+    ingested_observations: int
+    disabled: bool = False
+    contended: bool = False
+    failed: bool = False
+    reason: Optional[str] = None
 
 
 _queue_lock = threading.Lock()
-_obs_queue: "queue.Queue[object]" = queue.Queue(maxsize=_QUEUE_MAXSIZE_DEFAULT)
+_obs_queue: "queue.Queue[ObservationEnvelope]" = queue.Queue(maxsize=_QUEUE_MAXSIZE_DEFAULT)
 _queue_high_water = 0
 _worker_thread: Optional[threading.Thread] = None
 _worker_started_lock = threading.Lock()
+_stop_event = threading.Event()
+_ready_event = threading.Event()
+_last_readiness: Optional[ReadinessResult] = None
+_capture_terminally_disabled = False
 _last_state_by_family: dict[str, tuple[str, datetime]] = {}
 _last_log_monotonic = 0.0
-_force_ingest_event = threading.Event()
-_force_ingest_done = threading.Event()
+_spool_disk_budget_bytes = _SPOOL_DISK_BUDGET_BYTES_DEFAULT
 
 
 def _default_spool_conn_factory() -> sqlite3.Connection:
-    """Private telemetry spool -- a SEPARATE physical SQLite file the primary
-    trade_conn never touches, so this writer has zero contention risk on its
-    frequent per-observation writes (X2)."""
+    """The ONLY ``sqlite3.connect()`` call in this module (enforced by
+    ``tests/events/test_family_book_telemetry_writer.py``'s AST antibody --
+    round-4 MEDIUM: the SQLITE_CONNECT_ALLOWLIST exemption is file-scoped,
+    so this test compensates at function granularity). Opens a PRIVATE
+    file the primary trade_conn NEVER touches -- asserted, not just
+    documented."""
     from src.state.db import _zeus_trade_db_path
 
-    path = _zeus_trade_db_path().with_name("family_book_telemetry_spool.db")
-    conn = sqlite3.connect(str(path), timeout=5.0)
+    trade_db_path = _zeus_trade_db_path()
+    spool_path = trade_db_path.with_name("family_book_telemetry_spool.db")
+    assert spool_path.resolve() != trade_db_path.resolve(), (
+        "family_book_telemetry spool path must never equal the trade DB path"
+    )
+    conn = sqlite3.connect(str(spool_path), timeout=5.0)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
-def _default_ingest_conn_factory() -> sqlite3.Connection:
-    from src.state.db import get_trade_connection
+def _default_readonly_canonical_conn_factory() -> sqlite3.Connection:
+    """Best-effort READ-ONLY canonical connection for cache bootstrap only
+    (Y2: no DDL, no write_class, mode=ro+query_only -- never a writer)."""
+    from src.state.db import get_trade_connection_read_only
 
-    return get_trade_connection(busy_timeout_ms=250)
-
-
-def _default_trade_db_path():
-    from src.state.db import _zeus_trade_db_path
-
-    return _zeus_trade_db_path()
+    return get_trade_connection_read_only()
 
 
 _spool_conn_factory: Callable[[], sqlite3.Connection] = _default_spool_conn_factory
-_ingest_conn_factory: Callable[[], sqlite3.Connection] = _default_ingest_conn_factory
-_trade_db_path_factory: Callable[[], Any] = _default_trade_db_path
+_readonly_canonical_conn_factory: Callable[[], sqlite3.Connection] = _default_readonly_canonical_conn_factory
 
 
 def queue_high_water() -> int:
-    """Peak queue occupancy observed since the last reset (writer-side; test/ops introspection)."""
     return _queue_high_water
 
 
@@ -169,16 +194,8 @@ def enqueue_family_book_observation(
     decision_time: datetime,
     causal_snapshot_id: Optional[str],
 ) -> None:
-    """Bounded, nonblocking enqueue -- call ONLY from the live decision thread.
-
-    The ENTIRE hot-path cost: project a small envelope (attribute reads, no
-    JSON/hashing/I/O -- src/events/family_book_manifest.py
-    ``project_observation_envelope``), then ``queue.put_nowait``. No worker
-    start/health-check (H2 -- the daemon starts the worker at init via
-    ``start_worker()``; a dead worker is never resurrected from here), no
-    counter-sink lock on the success path.
-    """
-    if os.environ.get(_ENABLED_ENV_VAR, "1") not in ("1", "true", "True"):
+    """Bounded, nonblocking enqueue -- call ONLY from the live decision thread."""
+    if _capture_terminally_disabled or not _telemetry_enabled():
         return
     try:
         envelope = project_observation_envelope(
@@ -198,30 +215,33 @@ def enqueue_family_book_observation(
 def start_worker(
     *,
     spool_conn_factory: Optional[Callable[[], sqlite3.Connection]] = None,
-    ingest_conn_factory: Optional[Callable[[], sqlite3.Connection]] = None,
-    trade_db_path_factory: Optional[Callable[[], Any]] = None,
+    readonly_canonical_conn_factory: Optional[Callable[[], sqlite3.Connection]] = None,
     maxsize: Optional[int] = None,
-) -> bool:
-    """Start the writer thread. Called by the daemon at init, never from the
-    decision thread (H2). Idempotent: returns False (refuses) while a worker
-    is already alive (M1) rather than silently replacing it -- call
-    ``shutdown()`` first for a deliberate restart. Tests pass factories
-    pointing at isolated file-backed DBs; production leaves all unset."""
-    global _spool_conn_factory, _ingest_conn_factory, _trade_db_path_factory
+    spool_disk_budget_bytes: Optional[int] = None,
+    ready_timeout: float = _READY_TIMEOUT_DEFAULT,
+) -> ReadinessResult:
+    """Start the capture-side worker thread and BLOCK for a ready/failed
+    handshake (Y5). Called by the daemon at init, before reactor activation,
+    never from the decision thread. Idempotent: returns the LAST readiness
+    result unchanged while a worker is already alive rather than starting a
+    second one. On failure, capture is disabled TERMINALLY (a typed counter
+    fires; no retry loop from the decision thread -- see
+    ``enqueue_family_book_observation``)."""
+    global _spool_conn_factory, _readonly_canonical_conn_factory, _spool_disk_budget_bytes
     if _worker_thread is not None and _worker_thread.is_alive():
-        return False
+        return _last_readiness or ReadinessResult(ready=True)
     with _worker_started_lock:
         if _worker_thread is not None and _worker_thread.is_alive():
-            return False
+            return _last_readiness or ReadinessResult(ready=True)
         if spool_conn_factory is not None:
             _spool_conn_factory = spool_conn_factory
-        if ingest_conn_factory is not None:
-            _ingest_conn_factory = ingest_conn_factory
-        if trade_db_path_factory is not None:
-            _trade_db_path_factory = trade_db_path_factory
+        if readonly_canonical_conn_factory is not None:
+            _readonly_canonical_conn_factory = readonly_canonical_conn_factory
+        if spool_disk_budget_bytes is not None:
+            _spool_disk_budget_bytes = spool_disk_budget_bytes
         if maxsize is not None:
             _configure_queue(maxsize)
-        return _start_worker_locked()
+        return _start_worker_locked(ready_timeout)
 
 
 def _configure_queue(maxsize: int) -> None:
@@ -230,22 +250,31 @@ def _configure_queue(maxsize: int) -> None:
         _obs_queue = queue.Queue(maxsize=maxsize)
 
 
-def _start_worker_locked() -> bool:
-    global _worker_thread
+def _start_worker_locked(ready_timeout: float) -> ReadinessResult:
+    global _worker_thread, _capture_terminally_disabled
+    _stop_event.clear()
+    _ready_event.clear()
     thread = threading.Thread(
         target=_worker_loop, name="family-book-telemetry-writer", daemon=True
     )
     _worker_thread = thread
     thread.start()
-    return True
+    if not _ready_event.wait(timeout=ready_timeout):
+        result = ReadinessResult(ready=False, reason="startup_timeout")
+    else:
+        result = _last_readiness or ReadinessResult(ready=False, reason="unknown")
+    if not result.ready:
+        _capture_terminally_disabled = True
+        _cnt_inc(_CNT_STARTUP_FAILED)
+        logger.error("family_book_telemetry: worker failed to start: %s", result.reason)
+    return result
 
 
 def shutdown(timeout: float = 5.0) -> bool:
-    """Stop the writer thread. Reserves sentinel capacity with a BLOCKING put
-    (M1: a full queue must not make shutdown silently no-op) and keeps the
-    thread reference until ``join`` actually confirms it dead -- a worker
-    that does not die within ``timeout`` is left recorded as still running
-    so a caller cannot start a second one on top of it (M1)."""
+    """Stop the writer thread via a stop Event (round-4 MEDIUM: a blocking
+    sentinel ``put()`` can itself raise ``queue.Full`` if the queue stays
+    full while the worker is wedged; a stop event has no such failure mode).
+    Keeps the thread reference until ``join`` actually confirms it dead."""
     global _worker_thread
     thread = _worker_thread
     if thread is None:
@@ -253,7 +282,7 @@ def shutdown(timeout: float = 5.0) -> bool:
     if not thread.is_alive():
         _worker_thread = None
         return True
-    _obs_queue.put(_STOP, timeout=timeout)  # blocking: control-plane, not the decision path
+    _stop_event.set()
     thread.join(timeout=timeout)
     if thread.is_alive():
         logger.error("family_book_telemetry: worker did not stop within %.1fs", timeout)
@@ -263,8 +292,7 @@ def shutdown(timeout: float = 5.0) -> bool:
 
 
 def drain(timeout: float = 5.0) -> bool:
-    """Block until every item enqueued so far has been WRITTEN TO THE SPOOL
-    (not necessarily ingested into the trade DB yet -- see ``force_ingest``).
+    """Block until every item enqueued so far has been written to the spool.
     Test/ops synchronization helper -- never called from the decision thread."""
     done = threading.Event()
     current_queue = _obs_queue
@@ -277,40 +305,26 @@ def drain(timeout: float = 5.0) -> bool:
     return done.wait(timeout=timeout)
 
 
-def force_ingest(timeout: float = 5.0) -> bool:
-    """Test/ops helper: trigger an immediate ingest pass (spool -> trade DB)
-    without waiting for the normal 30s cadence, and block until it completes."""
-    _force_ingest_done.clear()
-    _force_ingest_event.set()
-    try:  # wake the worker immediately rather than waiting out its queue.get timeout
-        _obs_queue.put_nowait(_FORCE_INGEST_WAKE)
-    except queue.Full:
-        pass
-    return _force_ingest_done.wait(timeout=timeout)
-
-
 def reset_for_test() -> None:
-    """Full reset: stop worker, clear queue/sampling cache/high-water, restore
-    default factories, reset the canonical counters sink. Test-only
-    (``reset_all()`` is documented in src/observability/counters.py as
-    test-support-only)."""
-    global _spool_conn_factory, _ingest_conn_factory, _trade_db_path_factory, _queue_high_water
+    global _spool_conn_factory, _readonly_canonical_conn_factory, _queue_high_water
+    global _capture_terminally_disabled, _spool_disk_budget_bytes, _last_readiness
     shutdown()
     _spool_conn_factory = _default_spool_conn_factory
-    _ingest_conn_factory = _default_ingest_conn_factory
-    _trade_db_path_factory = _default_trade_db_path
+    _readonly_canonical_conn_factory = _default_readonly_canonical_conn_factory
     _configure_queue(_QUEUE_MAXSIZE_DEFAULT)
     _last_state_by_family.clear()
     _queue_high_water = 0
-    _force_ingest_event.clear()
-    _force_ingest_done.clear()
+    _capture_terminally_disabled = False
+    _spool_disk_budget_bytes = _SPOOL_DISK_BUDGET_BYTES_DEFAULT
+    _last_readiness = None
+    _stop_event.clear()
+    _ready_event.clear()
     from src.observability.counters import reset_all
 
     reset_all()
 
 
 def counter(name: str) -> int:
-    """Read back a named counter via the canonical sink (test/ops helper)."""
     return _cnt_read(name)
 
 
@@ -323,103 +337,171 @@ def _rate_limited_warning(msg: str, *args: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Worker loop: spool writes (frequent, uncontended) + periodic ingest
-# (infrequent, the only trade-DB touch).
+# Worker loop: capture ONLY -- spool writes, no canonical access at all.
 # ---------------------------------------------------------------------------
 
 def _worker_loop() -> None:
+    global _last_readiness
     if sqlite3.sqlite_version_info < _MIN_SQLITE_VERSION_INFO:
-        logger.error(
-            "family_book_telemetry: refusing to start a second trade-DB writer "
-            "connection -- sqlite3 %s is below the multi-connection WAL-reset "
-            "fix floor %s",
-            sqlite3.sqlite_version, _MIN_SQLITE_VERSION_INFO,
+        _last_readiness = ReadinessResult(
+            ready=False,
+            reason=f"sqlite {sqlite3.sqlite_version} below WAL-reset-fix floor {_MIN_SQLITE_VERSION_INFO}",
         )
+        _ready_event.set()
         return
     try:
         conn = _spool_conn_factory()
-        _ensure_states_table(conn)
-        _ensure_observations_table(conn)
-    except Exception:
+        _ensure_outbox_table(conn)
+    except Exception as exc:
+        _last_readiness = ReadinessResult(ready=False, reason=f"spool init failed: {exc!r}")
+        _ready_event.set()
         logger.warning("family_book_telemetry: spool init failed", exc_info=True)
         return
 
-    _bootstrap_last_state_cache()
-
-    last_ingest_at = time.monotonic()
     try:
-        while True:
-            try:
-                item = _obs_queue.get(timeout=_INGEST_INTERVAL_SECONDS)
-            except queue.Empty:
-                pass
-            else:
-                try:
-                    if item is _STOP:
-                        return
-                    if item is not _FORCE_INGEST_WAKE:
-                        conn = _process_one(conn, item)
-                        global _queue_high_water
-                        size = _obs_queue.qsize()
-                        if size > _queue_high_water:
-                            _queue_high_water = size
-                            _cnt_inc(_CNT_QUEUE_HIGH_WATER)
-                finally:
-                    _obs_queue.task_done()
+        _bootstrap_last_state_cache(conn)
+    except Exception:
+        # Best-effort (Y2/Y4): bootstrap failure never blocks startup -- the
+        # cache just starts empty, same as before the fix.
+        logger.warning("family_book_telemetry: cache bootstrap failed", exc_info=True)
 
-            now = time.monotonic()
-            due = now - last_ingest_at >= _INGEST_INTERVAL_SECONDS
-            forced = _force_ingest_event.is_set()
-            if due or forced:
-                _force_ingest_event.clear()
-                _ingest_pass(conn)
-                last_ingest_at = now
-                if forced:
-                    _force_ingest_done.set()
+    _last_readiness = ReadinessResult(ready=True)
+    _ready_event.set()
+
+    try:
+        while not _stop_event.is_set():
+            try:
+                envelope = _obs_queue.get(timeout=_WORKER_POLL_SECONDS)
+            except queue.Empty:
+                continue
+            try:
+                conn = _process_one(conn, envelope)
+                global _queue_high_water
+                size = _obs_queue.qsize()
+                if size > _queue_high_water:
+                    _queue_high_water = size
+                    _cnt_inc(_CNT_QUEUE_HIGH_WATER)
+            finally:
+                _obs_queue.task_done()
     finally:
         conn.close()
 
 
-def _bootstrap_last_state_cache() -> None:
-    """M2: seed the sampling cache from the durable trade DB's latest
-    observation per family, so a worker restart does not falsely relabel an
-    unchanged state STATE_CHANGE / reset the heartbeat clock. Best-effort --
-    any failure just leaves the cache empty (matches pre-fix behavior, never
-    blocks worker startup)."""
+def _bootstrap_last_state_cache(spool_conn: sqlite3.Connection) -> None:
+    """Y4: seed from max(canonical durable, PENDING spool) per family -- a
+    spool write that crashed before canonical ingestion must still be
+    respected, or a restart mislabels unchanged content STATE_CHANGE.
+
+    Canonical read is READ-ONLY/best-effort (Y2: never a writer, never DDL --
+    assumes the normal trade schema bootstrap already created the tables).
+    """
+    for family_id, (state_id, decision_time_iso) in _outbox_latest_per_family(spool_conn).items():
+        _merge_cache_candidate(family_id, state_id, decision_time_iso)
+
     try:
-        conn = _ingest_conn_factory()
+        conn = _readonly_canonical_conn_factory()
     except Exception:
-        return
+        return  # canonical unreachable -- spool-only seed still applied above
     try:
-        _ensure_states_table(conn)
-        _ensure_observations_table(conn)
         rows = conn.execute(
             """
             SELECT family_id, state_id, MAX(decision_time) AS decision_time
-            FROM family_book_observations
-            GROUP BY family_id
+            FROM family_book_observations GROUP BY family_id
             """
         ).fetchall()
         for family_id, state_id, decision_time_iso in rows:
-            try:
-                _last_state_by_family[family_id] = (
-                    state_id, datetime.fromisoformat(decision_time_iso)
-                )
-            except (TypeError, ValueError):
-                continue
-    except Exception:
-        pass
+            _merge_cache_candidate(family_id, state_id, decision_time_iso)
+    except sqlite3.OperationalError:
+        pass  # table not yet created on a fresh canonical DB -- not an error here
     finally:
         conn.close()
 
 
-def _process_one(conn: sqlite3.Connection, envelope: ObservationEnvelope) -> sqlite3.Connection:
-    """Write one envelope to the spool with explicit transaction safety (X1).
+def _merge_cache_candidate(family_id: str, state_id: str, decision_time_iso: str) -> None:
+    try:
+        decision_time = datetime.fromisoformat(decision_time_iso)
+    except (TypeError, ValueError):
+        return
+    current = _last_state_by_family.get(family_id)
+    if current is None or decision_time > current[1]:
+        _last_state_by_family[family_id] = (state_id, decision_time)
 
-    Returns the connection to use going forward -- unchanged on success or an
-    ordinary failure (rolled back cleanly), REPLACED if rollback itself
-    failed (the only way to guarantee ``conn.in_transaction`` is False).
-    """
+
+def _process_one(conn: sqlite3.Connection, envelope: ObservationEnvelope) -> sqlite3.Connection:
+    """Write one envelope's outbox row with X1 transaction safety
+    (_rollback_or_replace UNCHANGED from round-3 per reviewer confirmation)
+    -- now targeting the bounded outbox table, not the canonical tables
+    directly. The WHOLE body is wrapped so a malformed envelope (a bug
+    upstream, not a DB fault) is quarantined -- counted and dropped -- rather
+    than crashing the worker (round-4 Y4)."""
+    try:
+        row = _build_outbox_row(envelope)
+    except Exception:
+        _cnt_inc(_CNT_MALFORMED_ENVELOPE)
+        _rate_limited_warning("family_book_telemetry: malformed envelope quarantined")
+        return conn
+
+    if row is None:  # sampled out -- nothing to write
+        return conn
+
+    try:
+        stats = _outbox_pending_stats(conn)
+        if stats["pending_bytes_approx"] >= _spool_disk_budget_bytes:
+            _cnt_inc(_CNT_SPOOL_BUDGET_EXCEEDED)
+            return conn
+    except Exception:
+        pass  # budget check is advisory; never block capture on it failing
+
+    try:
+        insert_outbox_row(conn, row)
+        conn.commit()
+    except BaseException:
+        conn = _rollback_or_replace(conn, _spool_conn_factory)
+        _cnt_inc(_CNT_WRITE_FAILURES)
+        _rate_limited_warning("family_book_telemetry: spool write failed")
+        return conn
+
+    _cnt_inc(_CNT_WRITTEN_OUTBOX)
+    _last_state_by_family[envelope.family_id] = (row["state_id"], envelope.decision_time)
+    return conn
+
+
+def _rollback_or_replace(
+    conn: sqlite3.Connection, conn_factory: Callable[[], sqlite3.Connection]
+) -> sqlite3.Connection:
+    """X1, UNCHANGED (per reviewer confirmation): guarantee the returned
+    connection is NOT mid-transaction. Round-4 MEDIUM: if the REPLACEMENT
+    connection's own setup fails, close it (never leak a handle) and let the
+    caller keep going with whatever it can -- never let setup failure escape
+    and kill the worker."""
+    try:
+        conn.rollback()
+        if not conn.in_transaction:
+            return conn
+    except Exception:
+        pass
+    _rate_limited_warning("family_book_telemetry: rollback failed, replacing connection")
+    try:
+        conn.close()
+    except Exception:
+        pass
+    try:
+        new_conn = conn_factory()
+        _ensure_outbox_table(new_conn)
+        return new_conn
+    except Exception:
+        _rate_limited_warning("family_book_telemetry: replacement connection setup failed")
+        # Nothing usable to return; the caller's next write attempt will
+        # retry conn_factory() via THIS same path (a stub connection here
+        # would just fail identically on first use, so surface the same
+        # failure shape the caller already handles -- open one more time,
+        # letting a genuine outage raise up to _worker_loop's per-item guard
+        # rather than silently returning a half-built connection).
+        return conn_factory()
+
+
+def _build_outbox_row(envelope: ObservationEnvelope) -> Optional[dict]:
+    """Pure -- no I/O. Returns None iff sampled out."""
     state_id, content_hash, canonical_payload = compute_state_identity(envelope)
     decision_time_iso = envelope.decision_time.isoformat()
 
@@ -428,18 +510,27 @@ def _process_one(conn: sqlite3.Connection, envelope: ObservationEnvelope) -> sql
     )
     if sampling_reason is None:
         _cnt_inc(_CNT_SAMPLED_OUT)
-        return conn
+        return None
 
     center_value, center_status = market_center_and_status(envelope)
-    row = {
-        "observation_id": _sha256_text(f"{envelope.family_id}|{envelope.receipt_hash}|{decision_time_iso}"),
+    from src.events.idempotency import sha256_text
+
+    return {
+        "enqueued_at_utc": datetime.now(timezone.utc).isoformat(),
+        "state_id": state_id,
+        "content_hash": content_hash,
+        "hash_version": 1,
+        "topology_hash": envelope.topology_hash,
+        "complete_book": int(envelope.complete_book),
+        "canonical_payload": canonical_payload,
+        "payload_schema_version": 1,
+        "observation_id": sha256_text(f"{envelope.family_id}|{envelope.receipt_hash}|{decision_time_iso}"),
         "family_id": envelope.family_id,
         "city": envelope.city,
         "target_date": envelope.target_date,
         "temperature_metric": envelope.temperature_metric,
         "decision_id": envelope.decision_id,
         "receipt_hash": envelope.receipt_hash,
-        "state_id": state_id,
         "source_manifest_json": build_source_manifest(envelope),
         "decision_time": decision_time_iso,
         "causal_snapshot_id": envelope.causal_snapshot_id,
@@ -458,11 +549,10 @@ def _process_one(conn: sqlite3.Connection, envelope: ObservationEnvelope) -> sql
         "market_center_native": center_value,
         "market_center_status": center_status,
         "market_center_version": MARKET_CENTER_VERSION,
-        "complete_book": envelope.complete_book,
         "sampling_reason": sampling_reason,
-        "state_changed": state_changed,
-        "heartbeat_due": heartbeat_due,
-        "pre_veto_selected": envelope.pre_veto_selected,
+        "state_changed": int(state_changed),
+        "heartbeat_due": int(heartbeat_due),
+        "pre_veto_selected": int(envelope.pre_veto_selected),
         "selected_bin_id": envelope.selected_bin_id,
         "selected_side": envelope.selected_side,
         "sampling_policy_version": SAMPLING_POLICY_VERSION,
@@ -470,59 +560,10 @@ def _process_one(conn: sqlite3.Connection, envelope: ObservationEnvelope) -> sql
         "schema_version": _OBSERVATIONS_SCHEMA_VERSION,
     }
 
-    try:
-        inserted_state = insert_state(
-            conn, state_id=state_id, family_id=envelope.family_id, content_hash=content_hash,
-            topology_hash=envelope.topology_hash, complete_book=envelope.complete_book,
-            canonical_payload=canonical_payload, first_seen_decision_time=decision_time_iso,
-        )
-        inserted_obs = insert_observation(conn, row)
-        conn.commit()
-    except BaseException:
-        conn = _rollback_or_replace(conn, _spool_conn_factory)
-        _cnt_inc(_CNT_WRITE_FAILURES)
-        _rate_limited_warning("family_book_telemetry: spool write failed")
-        return conn
-
-    # Counters/cache updated ONLY after a durable commit (X1).
-    if inserted_state:
-        _cnt_inc(_CNT_WRITTEN_STATES)
-    if inserted_obs:
-        _cnt_inc(_CNT_WRITTEN_OBSERVATIONS)
-    _last_state_by_family[envelope.family_id] = (state_id, envelope.decision_time)
-    return conn
-
-
-def _rollback_or_replace(
-    conn: sqlite3.Connection, conn_factory: Callable[[], sqlite3.Connection]
-) -> sqlite3.Connection:
-    """Guarantee the returned connection is NOT mid-transaction (X1): try
-    rollback first; if rollback itself fails, close and open a fresh
-    connection instead (the only way SQLite can guarantee a clean slate)."""
-    try:
-        conn.rollback()
-        return conn
-    except Exception:
-        _rate_limited_warning("family_book_telemetry: rollback failed, replacing connection")
-        try:
-            conn.close()
-        except Exception:
-            pass
-        new_conn = conn_factory()
-        _ensure_states_table(new_conn)
-        _ensure_observations_table(new_conn)
-        return new_conn
-
 
 def _sampling_decision(
     family_id: str, state_id: str, decision_time: datetime, pre_veto_selected: bool
 ) -> tuple[bool, bool, Optional[str]]:
-    """Return (state_changed, heartbeat_due, sampling_reason). The three
-    conditions are orthogonal and persisted regardless of which "wins" by
-    precedence (STATE_CHANGE > HEARTBEAT > PRE_VETO_SELECTED); None means
-    sampled out (H3: selection-triggered sampling is not missing-at-random,
-    so downstream analysts must be able to see ALL of what held, not just
-    the winning reason)."""
     last = _last_state_by_family.get(family_id)
     state_changed = last is None or state_id != last[0]
     heartbeat_due = (
@@ -540,85 +581,129 @@ def _sampling_decision(
     return state_changed, heartbeat_due, reason
 
 
-def _sha256_text(value: str) -> str:
-    from src.events.idempotency import sha256_text
-
-    return sha256_text(value)
-
-
 # ---------------------------------------------------------------------------
-# Ingest pass: spool -> durable trade DB. The ONLY code here that ever opens
-# a connection to zeus_trades.db (X2) -- infrequent (every
-# ``_INGEST_INTERVAL_SECONDS``) and batched, under db_writer_lock.
+# Delivery: run_bounded_ingest -- called by the DAEMON's own scheduler job
+# (src/main.py, get_trade_connection(write_class="live")), NEVER by this
+# module's worker thread. Pure with respect to connection lifecycle: the
+# caller owns and closes both connections.
 # ---------------------------------------------------------------------------
 
-def _ingest_pass(spool_conn: sqlite3.Connection) -> None:
-    trade_db_path = _trade_db_path_factory()
+def run_bounded_ingest(
+    canonical_conn: sqlite3.Connection,
+    spool_conn_factory: Optional[Callable[[], sqlite3.Connection]] = None,
+    *,
+    batch_size: int = _INGEST_BATCH_SIZE_DEFAULT,
+    byte_budget: int = _INGEST_BYTE_BUDGET_DEFAULT,
+) -> IngestOutcome:
+    """ONE bounded outbox->canonical batch. Never raises -- every failure
+    mode returns a typed ``IngestOutcome`` so the caller (an
+    ``@_scheduler_job``-wrapped daemon job, or a test) can log/count without
+    the ingest pass ever crashing its host thread.
+
+    Protocol: read a bounded batch (row count AND byte budget) from the
+    spool, ordered by ``spool_seq``; insert into canonical
+    family_book_states/family_book_observations in ONE transaction (targeted
+    upserts -- idempotent, so a crash-and-replay is always safe); COMMIT
+    canonical; ONLY THEN delete that spool_seq range in a SEPARATE spool
+    transaction. Skips entirely (returns ``disabled=True``) if the kill
+    switch is off -- the operator's emergency guard for canonical I/O, not
+    merely new enqueues.
+    """
+    if not _telemetry_enabled():
+        _cnt_inc(_CNT_INGEST_DISABLED)
+        return IngestOutcome(0, 0, 0, disabled=True)
+
+    factory = spool_conn_factory or _spool_conn_factory
     try:
-        ingest_conn = _ingest_conn_factory()
-    except Exception:
-        _rate_limited_warning("family_book_telemetry: ingest connection failed")
-        return
+        spool_conn = factory()
+    except Exception as exc:
+        _cnt_inc(_CNT_INGEST_FAILURES)
+        return IngestOutcome(0, 0, 0, failed=True, reason=f"spool_connect: {exc!r}")
+
     try:
-        _ensure_states_table(ingest_conn)
-        _ensure_observations_table(ingest_conn)
+        _ensure_outbox_table(spool_conn)
         try:
-            with db_writer_lock(trade_db_path, WriteClass.BULK, blocking=False):
-                _ingest_states(spool_conn, ingest_conn)
-                _ingest_observations(spool_conn, ingest_conn)
-        except BlockingIOError:
-            _cnt_inc(_CNT_INGEST_CONTENDED)
+            rows = _outbox_fetch_batch(spool_conn, after_seq=0, limit=batch_size)
+        except Exception as exc:
+            _cnt_inc(_CNT_INGEST_FAILURES)
+            return IngestOutcome(0, 0, 0, failed=True, reason=f"spool_read: {exc!r}")
+
+        if not rows:
+            return IngestOutcome(0, 0, 0)
+
+        batch: list = []
+        running_bytes = 0
+        for r in rows:
+            row_bytes = len(r["canonical_payload"]) + len(r["source_manifest_json"])
+            if batch and running_bytes + row_bytes > byte_budget:
+                break
+            batch.append(r)
+            running_bytes += row_bytes
+
+        # Y2: NO DDL against canonical here, ever -- init_schema_trade_only
+        # (the normal trade schema bootstrap) already created
+        # family_book_states/family_book_observations before the daemon's
+        # scheduler starts running jobs. If they are somehow still absent,
+        # the INSERT calls below fail closed (caught, typed counter,
+        # fail-soft) rather than this pass silently mutating schema on
+        # someone else's connection.
+        ingested_states = 0
+        ingested_observations = 0
+        try:
+            for r in batch:
+                if insert_state(
+                    canonical_conn, state_id=r["state_id"], family_id=r["family_id"],
+                    content_hash=r["content_hash"], hash_version=r["hash_version"],
+                    topology_hash=r["topology_hash"], complete_book=bool(r["complete_book"]),
+                    canonical_payload=r["canonical_payload"],
+                    payload_schema_version=r["payload_schema_version"],
+                    first_seen_decision_time=r["decision_time"],
+                ):
+                    ingested_states += 1
+                if insert_observation(canonical_conn, dict(r)):
+                    ingested_observations += 1
+            canonical_conn.commit()
+        except BaseException as exc:
+            try:
+                canonical_conn.rollback()
+            except Exception:
+                pass
+            _cnt_inc(_CNT_INGEST_FAILURES)
+            _rate_limited_warning("family_book_telemetry: canonical ingest failed", )
+            return IngestOutcome(len(batch), 0, 0, failed=True, reason=repr(exc))
+
+        # Counters published ONLY after a durable canonical commit (round-4 MEDIUM).
+        if ingested_states:
+            _cnt_inc(_CNT_INGESTED_STATES, delta=ingested_states)
+        if ingested_observations:
+            _cnt_inc(_CNT_INGESTED_OBSERVATIONS, delta=ingested_observations)
+        _cnt_inc(_CNT_INGESTED_BATCHES)
+
+        max_seq = max(int(r["spool_seq"]) for r in batch)
+        try:
+            _outbox_delete_up_to(spool_conn, max_seq)
+            spool_conn.commit()
+        except Exception:
+            # Canonical is already durable (idempotent upserts) -- a failed
+            # ack just means the NEXT pass re-reads and re-no-ops these rows.
+            try:
+                spool_conn.rollback()
+            except Exception:
+                pass
+            _rate_limited_warning("family_book_telemetry: spool ack failed (safe -- will replay)")
+
+        return IngestOutcome(len(batch), ingested_states, ingested_observations)
     finally:
-        ingest_conn.close()
+        spool_conn.close()
 
 
-def _ingest_states(spool_conn: sqlite3.Connection, ingest_conn: sqlite3.Connection) -> None:
-    spool_conn.row_factory = sqlite3.Row
-    rows = spool_conn.execute(
-        "SELECT state_id, family_id, content_hash, hash_version, topology_hash, "
-        "complete_book, canonical_payload, payload_schema_version, first_seen_decision_time "
-        "FROM family_book_states"
-    ).fetchall()
+def pending_outbox_stats(spool_conn_factory: Optional[Callable[[], sqlite3.Connection]] = None) -> dict:
+    """Metrics: pending row count, approximate bytes, oldest enqueued_at_utc
+    (Y1's required pending-rows/bytes/oldest-age observability)."""
+    factory = spool_conn_factory or _spool_conn_factory
+    conn = factory()
     try:
-        for r in rows:
-            if insert_state(
-                ingest_conn, state_id=r["state_id"], family_id=r["family_id"],
-                content_hash=r["content_hash"], hash_version=r["hash_version"],
-                topology_hash=r["topology_hash"], complete_book=bool(r["complete_book"]),
-                canonical_payload=r["canonical_payload"],
-                payload_schema_version=r["payload_schema_version"],
-                first_seen_decision_time=r["first_seen_decision_time"],
-            ):
-                _cnt_inc(_CNT_INGESTED_STATES)
-        ingest_conn.commit()
-    except BaseException:
-        _safe_rollback(ingest_conn)
-        _cnt_inc(_CNT_INGEST_FAILURES)
-        _rate_limited_warning("family_book_telemetry: state ingest failed")
-        raise
-
-
-def _ingest_observations(spool_conn: sqlite3.Connection, ingest_conn: sqlite3.Connection) -> None:
-    spool_conn.row_factory = sqlite3.Row
-    from src.state.schema.family_book_observations_schema import _COLUMNS
-
-    rows = spool_conn.execute(
-        f"SELECT {', '.join(_COLUMNS)} FROM family_book_observations"
-    ).fetchall()
-    try:
-        for r in rows:
-            if insert_observation(ingest_conn, dict(r)):
-                _cnt_inc(_CNT_INGESTED_OBSERVATIONS)
-        ingest_conn.commit()
-    except BaseException:
-        _safe_rollback(ingest_conn)
-        _cnt_inc(_CNT_INGEST_FAILURES)
-        _rate_limited_warning("family_book_telemetry: observation ingest failed")
-        raise
-
-
-def _safe_rollback(conn: sqlite3.Connection) -> None:
-    try:
-        conn.rollback()
-    except Exception:
-        pass
+        _ensure_outbox_table(conn)
+        return _outbox_pending_stats(conn)
+    finally:
+        conn.close()

@@ -5730,6 +5730,29 @@ _trades_wal_checkpoint_cycle = _make_wal_checkpoint_cycle("trades", defer_for_mo
 _forecasts_wal_checkpoint_cycle = _make_wal_checkpoint_cycle("forecasts", defer_for_monitor=False)
 
 
+@_scheduler_job("family_book_telemetry_ingest")
+def _family_book_telemetry_ingest_cycle() -> None:
+    """book_snapshot_persistence round-5 fix Y3: canonical delivery of the
+    family-book telemetry outbox runs HERE, on an ordinary scheduler job with
+    its own short-lived ``write_class="live"`` trade connection -- the SAME
+    pattern every other periodic trade-DB touch in this daemon already uses
+    (see ``_make_wal_checkpoint_cycle`` above) -- rather than a standalone
+    background-thread writer coordinating against the primary via a
+    BULK-class flock that gave it no real priority. One bounded batch per
+    tick; @_scheduler_job never re-raises, so an ordinary SQLite/I/O failure
+    here degrades to next tick, never to a daemon crash.
+    """
+    from src.events.family_book_telemetry_writer import run_bounded_ingest
+
+    conn = get_trade_connection(write_class="live")
+    try:
+        outcome = run_bounded_ingest(conn)
+        if outcome.failed:
+            logger.warning("family_book_telemetry_ingest: %s", outcome.reason)
+    finally:
+        conn.close()
+
+
 def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
     try:
         value = int(config.get(key, default))
@@ -7138,6 +7161,35 @@ def main():
             coalesce=True,
         )
 
+    # book_snapshot_persistence round-5 fix Y5: start the family-book
+    # telemetry CAPTURE-side worker BEFORE reactor activation (the reactor's
+    # decision hook enqueues into it every cycle), with a blocking
+    # ready/failed handshake -- readiness = sqlite version ok + spool opened
+    # + schema ok + cache seeded + thread alive. On failure, capture is
+    # disabled TERMINALLY inside start_worker() itself (a typed counter
+    # fires; the decision thread never retries); the daemon boot itself
+    # never fails on this -- telemetry is evidence-only, never decision
+    # authority. ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED=0 skips starting the
+    # worker (and, below, registering the ingest job) entirely -- the
+    # emergency guard stops BOTH capture and canonical draining, not merely
+    # new enqueues (run_bounded_ingest also re-checks the same switch on
+    # every tick, so flipping it off mid-run stops delivery immediately too).
+    _family_book_telemetry_ready = False
+    if os.environ.get("ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED", "1") in ("1", "true", "True"):
+        from src.events.family_book_telemetry_writer import start_worker as _start_family_book_telemetry_worker
+
+        _fbt_readiness = _start_family_book_telemetry_worker()
+        _family_book_telemetry_ready = _fbt_readiness.ready
+        if not _fbt_readiness.ready:
+            logger.warning(
+                "family_book_telemetry: capture disabled (startup failed: %s)",
+                _fbt_readiness.reason,
+            )
+        else:
+            logger.info("family_book_telemetry: capture worker ready")
+    else:
+        logger.info("family_book_telemetry: disabled via ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED")
+
     _register_edli_live_jobs()
     # Exit-lifecycle monitoring stays in the order daemon. Chain-sync READ,
     # market/user channel ingest, substrate capture, and post-trade capital
@@ -7217,6 +7269,18 @@ def main():
         id="forecasts_wal_checkpoint", next_run_time=_utc_run_time_after(150.0),
         max_instances=1, coalesce=True,
     )
+    # book_snapshot_persistence round-5 fix Y3/Y5: bounded family-book
+    # telemetry outbox -> canonical delivery, on the daemon's own
+    # write_class="live" connection (see _family_book_telemetry_ingest_cycle
+    # above) -- registered only if the capture-side worker actually started
+    # (readiness handshake below); an unstarted/failed worker means an empty
+    # or absent spool, so scheduling ingest would be pure overhead.
+    if _family_book_telemetry_ready:
+        scheduler.add_job(
+            _family_book_telemetry_ingest_cycle, "interval", seconds=30,
+            id="family_book_telemetry_ingest", next_run_time=_utc_run_time_after(30.0),
+            max_instances=1, coalesce=True,
+        )
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env
     scheduler.add_job(
         _start_venue_heartbeat_loop_if_needed,
@@ -7286,6 +7350,10 @@ def main():
     except (KeyboardInterrupt, SystemExit):
         logger.info("Zeus shutting down")
         scheduler.shutdown(wait=True)  # U7: wait=True so inflight cycles commit before exit
+        if _family_book_telemetry_ready:
+            from src.events.family_book_telemetry_writer import shutdown as _shutdown_family_book_telemetry_worker
+
+            _shutdown_family_book_telemetry_worker()
 
 
 if __name__ == "__main__":

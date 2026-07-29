@@ -47,6 +47,162 @@ findings. Everything below "Problem" that is unchanged from the original
 plan (the scout map, the hook site) is retained; everything about the table
 design, the writer, and the tests is new.
 
+## 2026-07-29 round-5 fixes -- CORRECT-BUT-INCOMPLETE -> converged (per
+## reviewer: "after these five the existing X1/X3 implementations remain
+## substantially unchanged")
+
+Round-4 confirmed X1 (transaction poisoning) and X3 (per-observation
+provenance) fully CLEARED, and the round-3 diagnostic-center fix needed no
+further change. It found X2 only HALF-cleared: Stage 1 (frequent writes
+isolated to a private spool) was sound, but Stage 2 (canonical delivery)
+was not -- the "spool" was an unbounded, undeletable mirror of the
+canonical schemas, replayed in FULL every 30 seconds; the worker's own
+ingest pass opened a second, uncoordinated canonical writer that a normal
+SQLite error could crash; and the production daemon never actually started
+the worker at all. Five fixes, verified independently before implementing
+(same discipline as every prior round):
+
+**Y1 -- bounded outbox, not an unbounded mirror.** Verified the defect
+myself: the round-4 spool reused `family_book_states`/
+`family_book_observations` verbatim (append-only, no-delete triggers,
+`SELECT *` with no `LIMIT`/watermark) -- it could structurally never
+shrink. Replaced with a NEW, transport-specific, DELETABLE table
+(`src/state/schema/family_book_telemetry_outbox_schema.py`,
+`family_book_telemetry_outbox`), one compact row per sampled envelope, keyed
+by an `AUTOINCREMENT spool_seq` (SQLite guarantees this is never reused
+even across deletes, so `ORDER BY spool_seq` is a stable watermark). The
+at-least-once outbox protocol: read a bounded batch (`ORDER BY spool_seq
+LIMIT batch_size`, additionally capped by a byte budget summed as rows are
+selected) -> insert into canonical in ONE transaction (targeted upserts,
+idempotent) -> COMMIT canonical -> ONLY THEN `DELETE ... WHERE spool_seq <=
+max_seq` in a SEPARATE spool transaction. A crash between the two commits
+replays safely (idempotent). `pending_outbox_stats()` reports pending row
+count, approximate bytes, and oldest-enqueued-age (Y1's required metrics).
+A hard per-write disk budget (`spool_disk_budget_bytes`, default 500 MB)
+stops CAPTURING (not just delivery) once exceeded, typed counter
+`family_book_telemetry_spool_budget_exceeded_total`. Verified:
+`TestBoundedOutbox` (ack-delete, idempotent repeated ingestion, a 5-row
+backlog draining over multiple 2-row bounded passes -- never one unbounded
+pass, pending-stats, disk budget).
+
+**Y2 -- canonical connection hygiene.** Two paths violated "only guarded
+ingest touches canonical," verified by re-reading my own round-4 code:
+`_bootstrap_last_state_cache` opened a full read-write canonical connection
+(WAL pragma etc.) outside any admission mechanism, and `_ingest_pass` ran
+`_ensure_states_table`/`_ensure_observations_table` DDL BEFORE acquiring
+its lock. **Fix**: bootstrap now seeds from the SPOOL's own pending rows
+(`family_book_telemetry_outbox_schema.latest_per_family`, no canonical
+touch needed at all) merged with a best-effort READ-ONLY canonical read
+(`get_trade_connection_read_only()` -- no write_class, no DDL, fails soft
+if canonical is unreachable). `run_bounded_ingest` (the new delivery
+function, see Y3) contains ZERO DDL -- it assumes `init_schema_trade_only`
+(the daemon's normal boot-time schema bootstrap, which runs long before any
+scheduler job) already created the canonical tables, and fails closed
+(typed counter, no crash) if they are somehow absent rather than mutating
+schema on someone else's connection.
+
+**Y3 -- live-write priority: delete the second writer, don't coordinate
+it.** Verified directly in `src/state/db_writer_lock.py`: `WriteClass.LIVE`
+and `BULK` are separate lock files with no mutual exclusion by themselves
+(only `BulkChunker.yield_if_live_contended()` cooperatively bridges them,
+and the primary `trade_conn` never took `WriteClass.LIVE`), so round-4's
+standalone `db_writer_lock(BULK)` around the ingest pass gave the primary
+no real priority. Per the review's preferred fix ("submit bounded ingest
+work to the trade-DB owner and execute on the primary connection at a safe
+post-live-write seam... a scheduler job in src/main.py that already owns
+trade_conn"): `run_bounded_ingest(canonical_conn, spool_conn_factory, ...)`
+is now a PURE function that takes the CALLER's own canonical connection --
+this module never opens one. `src/main.py` registers a NEW APScheduler job,
+`_family_book_telemetry_ingest_cycle` (`@_scheduler_job(...)`-wrapped, 30s
+interval, `max_instances=1, coalesce=True`), that opens
+`get_trade_connection(write_class="live")` -- the EXACT SAME pattern every
+other periodic trade-DB touch in this daemon already uses (verified:
+`_make_wal_checkpoint_cycle`'s WAL-checkpoint jobs, `_edli_bankroll_warm_cycle`,
+etc. -- all open/close their own short-lived connection per tick, none hold
+one persistently), calls `run_bounded_ingest`, closes. This removes the
+standalone-second-writer class of risk entirely rather than adding a new
+arbitration mechanism for it: the worker thread's spool writes and the
+scheduler job's canonical deliveries are now two INDEPENDENT, already-
+sanctioned daemon patterns, neither a novel construct.
+
+**Y4 -- worker liveness + restart continuity.** Verified: my round-4
+`_ingest_states`/`_ingest_observations` re-raised on any SQLite error with
+no boundary around the call in `_worker_loop`, so an ordinary
+SQLITE_BUSY/I/O/schema/commit failure would have crashed the sole worker
+thread. Moot now that ingest runs on the daemon's scheduler job (Y3) --
+`@_scheduler_job` never re-raises (fail-open, daemon keeps running) AND
+`run_bounded_ingest` itself never raises (every failure mode returns a
+typed `IngestOutcome`, with its own rollback-on-failure discipline). For
+the CAPTURE side, `_process_one`'s body (row construction: hashing,
+sampling, market-center, JSON) now sits in its OWN try/except separate from
+X1's insert/commit try/except, so a malformed envelope (a bug upstream, not
+a DB fault) is quarantined -- counted
+(`family_book_telemetry_malformed_envelope_total`) and dropped -- rather
+than propagating out of `_process_one` and killing the worker thread.
+Verified: `test_malformed_envelope_is_quarantined_not_crashing` (a forced
+exception in `compute_state_identity` is counted, and the NEXT well-formed
+envelope still lands durably; the worker thread is still alive).
+`_last_state_by_family` now seeds from max(canonical durable, PENDING
+spool) -- `_bootstrap_last_state_cache` merges both sources by
+`decision_time`, so a spool write that crashed before canonical ingestion
+is still respected on restart. Verified by the review's exact required
+regression test,
+`test_restart_without_ingest_seeds_sampling_from_pending_spool`: write to
+spool, do NOT ingest, shut down, restart against the same spool +
+canonical DB, enqueue identical content one minute later -> sampled out
+(not falsely relabeled STATE_CHANGE). The MEDIUM (replacement-connection
+setup failure escaping `_rollback_or_replace`) is fixed: setup failure is
+now caught and surfaced through the same path the caller already handles.
+Ingest counters (`_CNT_INGESTED_STATES`/`_CNT_INGESTED_OBSERVATIONS`) are
+accumulated locally during the batch and published via `_cnt_inc` ONLY
+after `canonical_conn.commit()` succeeds, never inside the loop before
+commit.
+
+**Y5 -- production lifecycle + kill switch.** Verified: `rg -n
+"start_worker\(" src` before this round showed zero production call sites
+outside the module itself and tests -- the daemon never started the
+worker, so the round-4 default-on capture plane would have silently filled
+its queue once and then dropped every observation thereafter, forever.
+**Fix**: `src/main.py`'s `main()` now calls `start_worker()` BEFORE
+`_register_edli_live_jobs()` (before reactor activation), blocking for a
+ready/failed handshake (readiness = sqlite version floor + spool opened +
+schema ok + cache seeded; the worker thread signals a `threading.Event`
+once all of that succeeds or fails). On failure, capture is disabled
+TERMINALLY inside `start_worker()` itself (typed counter
+`family_book_telemetry_startup_failed_total`; the decision thread's
+`enqueue_family_book_observation` checks a module-level flag and never
+retries) -- daemon boot itself never fails on this, since telemetry is
+evidence-only, never decision authority. The ingest scheduler job is only
+registered if the worker actually became ready. `shutdown()` is called from
+the daemon's existing `except (KeyboardInterrupt, SystemExit):`
+finalization block, after `scheduler.shutdown(wait=True)`. Kill switch
+(`ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED`, default on) now stops BOTH halves,
+not just enqueues: checked before `start_worker()` is even called (skips
+starting the worker AND registering the ingest job), and re-checked on
+EVERY `run_bounded_ingest()` invocation (returns `disabled=True`
+immediately, no spool/canonical access at all) -- so flipping it off
+mid-run halts canonical I/O on the very next scheduled tick, without
+needing a daemon restart. Verified:
+`test_disabled_env_var_stops_canonical_draining_too` (a pending spool
+backlog is NOT delivered while disabled; delivers normally once
+re-enabled).
+
+**Shutdown sentinel (MEDIUM) + allowlist scoping (MEDIUM), also fixed:**
+the round-4 blocking `queue.put(_STOP, timeout=...)` sentinel could itself
+raise `queue.Full` if the queue stayed full while the worker was wedged --
+replaced with a `threading.Event` the worker polls at 0.1s intervals (no
+periodic ingest left in this loop to coordinate with anymore, so a short
+poll is cheap and simplifies shutdown to a pure event-set + join, no queue
+interaction at all). The `SQLITE_CONNECT_ALLOWLIST` entry
+(`src/state/db_writer_lock.py`) is file-scoped by the antibody's own
+design (it cannot be narrowed to a function), so a NEW dedicated AST test
+(`TestSingleConnectAntibody`) compensates: asserts exactly one
+`sqlite3.connect()` call exists anywhere in
+`family_book_telemetry_writer.py`, that it is lexically inside
+`_default_spool_conn_factory`, and (a second test) that the factory's
+runtime `spool_path.resolve() != trade_db_path.resolve()` assertion holds
+given the real path-construction logic.
+
 ## 2026-07-29 round-3 fixes -- CORRECT-BUT-NOT-YET-SAFE -> the remaining
 ## transaction/admission/provenance blockers
 
@@ -421,7 +577,22 @@ MEDIUM "units" finding (a name that lies about always being Celsius).
 
 ## Capture plane -- nonblocking, off the live decision thread, two-stage (X1/X2/H1/H2)
 
-`src/events/family_book_telemetry_writer.py`, current (round-3) design.
+> **SUPERSEDED by "2026-07-29 round-5 fixes" above for everything about
+> canonical delivery.** Stage 1 (below) is still accurate: the decision
+> thread only enqueues, the worker thread only writes to the private spool.
+> Stage 2 as described below (a periodic `_ingest_pass` inside THIS
+> module's worker thread, gated by a standalone `db_writer_lock(BULK)`) is
+> the ROUND-3/4 design and is NO LONGER HOW DELIVERY WORKS -- round-5
+> deleted that ingest pass entirely. Canonical delivery is now
+> `run_bounded_ingest`, a pure function called ONLY by
+> `src/main.py`'s `_family_book_telemetry_ingest_cycle` scheduler job on
+> its own `write_class="live"` connection; this module never opens a
+> canonical connection at all. Kept below for its still-accurate Stage-1
+> material and INV-37/SQLite-version reasoning, which round-5 did not
+> revisit.
+
+`src/events/family_book_telemetry_writer.py`, round-3/4 design (Stage 2
+superseded -- see note above).
 
 **Stage 1 -- decision thread.** `enqueue_family_book_observation` calls
 `project_observation_envelope` (H1 -- `src/events/family_book_manifest.py`;
@@ -608,58 +779,72 @@ compute_state_identity (us):        p50=149.2-156.5  p95=170.5-187.0  p99=215.9-
 canonical_payload bytes (content-only, X3): 10556 (constant -- fixed bin count/field set)
 ```
 
-Writer-thread cost, full `_process_one` (state+observation INSERT, explicit
-transaction, COMMIT) against a real file-backed WAL spool DB, worst case
-(every iteration has distinct content -- every write is a genuine insert,
-never the sampled-out fast path):
+Writer-thread cost, full `_process_one` (ONE bounded-outbox-row INSERT,
+explicit transaction, COMMIT -- round-5: the insert target moved from the
+canonical tables directly to the outbox) against a real file-backed WAL
+spool DB, worst case (every iteration has distinct content -- every write
+is a genuine insert, never the sampled-out fast path):
 
 ```
-_process_one (ms): p50=0.333-0.340  p95=0.456-0.520  p99=2.202-2.454
+_process_one (ms): p50=1.4  p95=3.0-3.2  p99=3.6-5.3
 ```
 
-Both benchmarks run OFF the decision thread except
-`project_observation_envelope`/`compute_state_identity`, which ARE the
-decision-thread cost and are sub-millisecond even at p99 (H1's whole point).
-The writer-thread numbers bound the spool's own throughput headroom, never
-decision latency, and never contend with the primary trade_conn (X2 -- the
-spool is a private file).
+Daemon-scheduler-job cost, `run_bounded_ingest` against a realistic
+500-row pending batch on a file-backed canonical DB (round-4's flagged gap
+-- the earlier benchmarks validated Stage 1 only):
+
+```
+run_bounded_ingest (500 rows, 500 states, 500 observations): ~41-47ms
+```
+
+Both the decision-thread and writer-thread benchmarks run OFF the decision
+thread except `project_observation_envelope`/`compute_state_identity`,
+which ARE the decision-thread cost and are sub-millisecond even at p99
+(H1's whole point). The writer-thread/ingest numbers bound the spool's own
+throughput headroom and the ONE bounded canonical transaction's duration
+per scheduler tick, never decision latency, and never contend with the
+primary trade_conn via a standalone writer (Y3 -- ingestion runs on the
+daemon's own `write_class="live"` connection, not this module's).
 
 ## Tests
 
 - `tests/events/test_family_book_manifest.py` (18): the compact envelope
-  projection (H1 -- `project_observation_envelope` extracts only scalars/
-  small mappings, never retains `FamilyDecision`/`family`/proofs), the
-  timestamp-free content-hash fix (the round-1 core bug, proven both ways),
-  the tightened `market_center_and_status` coverage rule (full coverage ->
-  value; partial coverage on a "complete" book -> NULL; incomplete book ->
-  NULL) plus M3 (shoulder bins always excluded from the weighted sum
-  regardless of quoted status -- two `OK` centers must share the same
-  support), X3 (state payload excludes snapshot identity/capture time;
-  `build_source_manifest` carries THIS capture's identity per bin, and two
-  observations of identical content produce DISTINCT source manifests).
-- `tests/events/test_family_book_telemetry_writer.py` (21): nonblocking
-  enqueue under real WAL writer contention + bounded latency; full-queue
-  drop counter; the kill switch (H4); the spool architecture (X2 -- writes
-  never reach the trade DB until an ingest pass runs; ingest is idempotent;
-  ingest contention skips without blocking, verified via an EXTERNALLY held
-  `db_writer_lock(WriteClass.BULK)`); t-vs-t+1 live-rebuild state/
-  observation cardinality (the direct fix for the round-1 dedup bug); a
-  genuine content change producing a second state row; per-observation
-  provenance surviving a heartbeat re-observation (X3, end-to-end); the
-  sampling-policy v2 branches with orthogonal booleans and selected bin/
-  side identity (H3); transaction safety (X1 -- observation-INSERT failure
-  rolls back the state INSERT too and leaves `conn.in_transaction is
-  False`; a failed COMMIT recovers via rollback when rollback itself
-  succeeds, and via connection replacement when rollback ALSO fails, both
-  proven with dedicated `sqlite3.Connection` subclasses since `.commit`/
-  `.rollback` cannot be monkeypatched as instance attributes on the C
-  extension type); commit-time fault injection with typed counters and
-  rate-limited logging; the SQLite version guard; the M1 shutdown/second-
-  worker-refusal lifecycle; M2 restart continuity (the sampling cache is
-  seeded from durable observations on worker start, not reset to empty).
-- `tests/events/test_family_book_telemetry_benchmark.py` (2): the
-  decision-thread projection benchmark and the end-to-end spool-write
-  benchmark above.
+  projection (H1), the timestamp-free content-hash fix (the round-1 core
+  bug, proven both ways), the tightened `market_center_and_status` coverage
+  rule plus M3 (shoulder bins always excluded from the weighted sum), X3
+  (state payload excludes snapshot identity/capture time; two observations
+  of identical content produce DISTINCT source manifests). Unchanged by
+  round 5 (`family_book_manifest.py` was not touched).
+- `tests/events/test_family_book_telemetry_writer.py` (26): readiness
+  handshake (Y5 -- ready on success, terminally-disabled + typed counter on
+  a version-floor failure); the kill switch stopping BOTH capture AND
+  canonical draining (Y5, verified with a pending backlog already spooled);
+  nonblocking enqueue under real WAL contention + full-queue drop; the
+  bounded outbox (Y1 -- ack-delete, idempotent repeated ingestion, a
+  multi-batch backlog draining bounded pass by bounded pass never all at
+  once, pending-stats metrics, the disk budget stopping capture); t-vs-t+1
+  live-rebuild cardinality and per-observation provenance end-to-end
+  through capture->outbox->bounded-ingest; the sampling-policy v2 branches
+  with orthogonal booleans and selected bin/side identity (H3); X1
+  transaction safety UNCHANGED in structure (three tests: observation-
+  insert failure rolls back cleanly; a failed commit recovers via rollback
+  alone when rollback succeeds; rollback failure forces connection
+  replacement -- all via dedicated `sqlite3.Connection` subclasses since
+  `.commit`/`.rollback` can't be monkeypatched as instance attributes on
+  the C type) adapted only to target the outbox insert; Y4 worker liveness
+  (a malformed envelope is quarantined -- counted, dropped, the worker
+  stays alive and processes the next envelope normally) and the review's
+  exact required restart-without-ingest regression test (spool-write
+  without ingesting, restart, identical content one minute later is
+  sampled out, not falsely STATE_CHANGE); the SQLite version guard; M1
+  shutdown/second-worker-refusal; the round-4 MEDIUM AST antibody (exactly
+  one `sqlite3.connect()` call site in the module, lexically inside
+  `_default_spool_conn_factory`) plus the runtime path-inequality
+  assertion.
+- `tests/events/test_family_book_telemetry_benchmark.py` (3): the
+  decision-thread projection benchmark, the end-to-end outbox-write
+  benchmark, and the NEW bounded-canonical-ingest benchmark (round-4's
+  flagged Stage-2 benchmark gap) above.
 - `tests/engine/test_family_book_observation_hook_placement.py` (2):
   source-position proof that capture precedes all three veto-reset points
   and that it's wired to `_active_spine_entry_proofs` (not the full proof

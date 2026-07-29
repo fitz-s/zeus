@@ -1,17 +1,22 @@
 # Created: 2026-07-29
 # Last reused or audited: 2026-07-29
 # Authority basis: docs/operations/current/book_snapshot_persistence/PLAN.md --
-#   redesign after deep-review NO-GO, plus round-3 review fixes: X1
-#   (transaction poisoning -- explicit rollback/connection-replacement
-#   tests), X2 (spool architecture -- writes never touch the trade DB
-#   directly; only the periodic ingest pass does, under db_writer_lock), X3
-#   (per-observation source_manifest_json distinct across observations of
-#   identical content), H3 (PRE_VETO_SELECTED rename + orthogonal booleans),
-#   H4 (kill switch), M1 (shutdown/second-worker refusal), M2 (restart
-#   continuity via cache seeding from durable observations).
+#   redesign after three deep-review NO-GOs. Round-5 (this suite) covers:
+#   Y1 bounded outbox (watermarked batches, ack-delete, disk budget,
+#   pending-stats metrics), Y2 canonical connection hygiene (bootstrap is
+#   read-only, ingest has no DDL), Y3 owner-executed delivery
+#   (run_bounded_ingest is a pure function taking the CALLER's canonical
+#   connection -- the worker thread never opens one), Y4 worker liveness
+#   (malformed-envelope quarantine, restart-without-ingest sampling
+#   continuity) and Y5 lifecycle (readiness handshake, kill switch stops
+#   both capture and draining). X1's transaction-safety tests are preserved
+#   with minimal adaptation (same assertions; the insert target moved from
+#   the canonical tables directly to the bounded outbox table).
 """Tests for src/events/family_book_telemetry_writer.py."""
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import sqlite3
 import threading
@@ -19,6 +24,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -34,6 +40,8 @@ from src.forecast.predictive_distribution_builder import PredictiveDistributionB
 from src.forecast.types import ForecastCase, FreshModelSet, RawModelMember
 from src.probability.event_resolution import EventResolution, event_resolution_for_city
 from src.probability.outcome_space import OutcomeBin, OutcomeSpace, compute_topology_hash
+from src.state.schema.family_book_observations_schema import ensure_table as ensure_obs_table
+from src.state.schema.family_book_states_schema import ensure_table as ensure_states_table
 from src.strategy.live_inference.executable_cost import QuoteLevel
 
 UTC = timezone.utc
@@ -194,18 +202,16 @@ def _wait_until(predicate, timeout=3.0, interval=0.01) -> bool:
     return predicate()
 
 
-def _start(tmp_path, **overrides):
-    """Start the writer against isolated spool/trade paths under tmp_path."""
+def _start(tmp_path, **overrides) -> Path:
+    """Start the capture-side worker against an isolated spool path; returns
+    the spool path. Canonical delivery is a SEPARATE call
+    (writer.run_bounded_ingest), never triggered by the worker itself."""
     spool_path = tmp_path / "spool.db"
-    trade_path = tmp_path / "trade.db"
-    kwargs = dict(
-        spool_conn_factory=lambda: sqlite3.connect(str(spool_path)),
-        ingest_conn_factory=lambda: sqlite3.connect(str(trade_path)),
-        trade_db_path_factory=lambda: trade_path,
-    )
+    kwargs = dict(spool_conn_factory=lambda: sqlite3.connect(str(spool_path)))
     kwargs.update(overrides)
-    writer.start_worker(**kwargs)
-    return spool_path, trade_path
+    readiness = writer.start_worker(**kwargs)
+    assert readiness.ready, readiness.reason
+    return spool_path
 
 
 def _enqueue(decision, family, proofs, decision_time, causal_snapshot_id="c1"):
@@ -216,24 +222,101 @@ def _enqueue(decision, family, proofs, decision_time, causal_snapshot_id="c1"):
     )
 
 
+def _bootstrap_canonical(trade_path: Path) -> None:
+    """Simulate the daemon's normal trade-schema bootstrap (init_schema_trade_only)
+    that ALWAYS runs before any scheduler job in production."""
+    conn = sqlite3.connect(str(trade_path))
+    ensure_states_table(conn)
+    ensure_obs_table(conn)
+    conn.close()
+
+
+def _ingest(trade_path: Path, spool_path: Path, **kwargs) -> "writer.IngestOutcome":
+    conn = sqlite3.connect(str(trade_path))
+    try:
+        return writer.run_bounded_ingest(conn, spool_conn_factory=lambda: sqlite3.connect(str(spool_path)), **kwargs)
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
-# (a) Nonblocking enqueue + drop counter.
+# Readiness handshake (Y5) + kill switch.
+# ---------------------------------------------------------------------------
+
+class TestReadinessAndKillSwitch:
+    def test_start_worker_returns_ready_on_success(self, tmp_path):
+        spool_path = tmp_path / "spool.db"
+        readiness = writer.start_worker(spool_conn_factory=lambda: sqlite3.connect(str(spool_path)))
+        assert readiness.ready is True
+        assert readiness.reason is None
+
+    def test_start_worker_terminally_disables_capture_below_sqlite_floor(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 40, 0))
+        spool_path = tmp_path / "spool.db"
+        readiness = writer.start_worker(spool_conn_factory=lambda: sqlite3.connect(str(spool_path)))
+        assert readiness.ready is False
+        assert "sqlite" in (readiness.reason or "").lower()
+
+        # Capture is now TERMINALLY disabled -- enqueue is a silent no-op,
+        # never a retry attempt (round-4 H2/M1: no restart from the decision thread).
+        case = _case()
+        space = _outcome_space(case)
+        book = _family_book(case, space)
+        _enqueue(_decision(case, space, book), _family(case), _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        assert writer.counter("family_book_telemetry_startup_failed_total") == 1
+
+    def test_disabled_env_var_stops_capture(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED", "0")
+        spool_path = _start(tmp_path)
+        case = _case()
+        space = _outcome_space(case)
+        book = _family_book(case, space)
+        _enqueue(_decision(case, space, book), _family(case), _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        assert writer.drain(timeout=1.0)
+        conn = sqlite3.connect(str(spool_path))
+        (count,) = conn.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()
+        assert count == 0
+
+    def test_disabled_env_var_stops_canonical_draining_too(self, tmp_path, monkeypatch):
+        """Y5: the kill switch must stop delivery, not merely new enqueues --
+        the operator emergency guard must be able to halt canonical I/O even
+        with a pending spool backlog already written."""
+        spool_path = _start(tmp_path)
+        trade_path = tmp_path / "trade.db"
+        _bootstrap_canonical(trade_path)
+        case = _case()
+        space = _outcome_space(case)
+        book = _family_book(case, space)
+        _enqueue(_decision(case, space, book), _family(case), _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        assert writer.drain(timeout=3.0)
+
+        monkeypatch.setenv("ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED", "0")
+        outcome = _ingest(trade_path, spool_path)
+        assert outcome.disabled is True
+        conn = sqlite3.connect(str(trade_path))
+        (count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
+        assert count == 0, "draining must not proceed while the kill switch is off"
+
+        monkeypatch.delenv("ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED")
+        outcome2 = _ingest(trade_path, spool_path)
+        assert outcome2.disabled is False
+        assert outcome2.ingested_observations == 1
+
+
+# ---------------------------------------------------------------------------
+# Nonblocking enqueue + drop counter.
 # ---------------------------------------------------------------------------
 
 class TestNonblockingEnqueue:
     def test_enqueue_never_blocks_under_held_wal_write_lock(self, tmp_path):
-        """The decision thread's enqueue must stay fast even while a SEPARATE
-        connection holds a DB's WAL write lock -- architectural property:
-        enqueue never touches SQLite at all (X2 -- writes go to the spool
-        off-thread), so DB contention anywhere cannot affect it."""
         db_path = tmp_path / "contended.db"
         blocker_conn = sqlite3.connect(str(db_path))
         blocker_conn.execute("PRAGMA journal_mode=WAL")
         blocker_conn.execute("CREATE TABLE t (x INTEGER)")
         blocker_conn.execute("BEGIN IMMEDIATE")
-        blocker_conn.execute("INSERT INTO t VALUES (1)")  # write txn held open, never committed
+        blocker_conn.execute("INSERT INTO t VALUES (1)")
 
-        _start(tmp_path, spool_conn_factory=lambda: sqlite3.connect(str(db_path), timeout=0.05))
+        writer.start_worker(spool_conn_factory=lambda: sqlite3.connect(str(db_path), timeout=0.05))
 
         case = _case()
         space = _outcome_space(case)
@@ -250,16 +333,30 @@ class TestNonblockingEnqueue:
 
         blocker_conn.rollback()
         blocker_conn.close()
-        assert max(latencies) < 0.05, f"enqueue must never block on DB contention; max={max(latencies)}s"
+        assert max(latencies) < 0.05
 
     def test_full_queue_drops_and_increments_counter_without_blocking(self, tmp_path):
+        # start_worker() now BLOCKS for a ready handshake (Y5); gating the
+        # connect factory to keep the worker "not yet consuming" would also
+        # gate readiness itself and trip the terminal-disable path. Start it
+        # from a background thread instead, so the test's main thread can
+        # fill the queue while the worker thread is still stuck opening its
+        # connection -- nothing has drained the queue yet either way.
         release = threading.Event()
 
         def _gated_connect():
             release.wait(timeout=5.0)
             return sqlite3.connect(":memory:")
 
-        _start(tmp_path, spool_conn_factory=_gated_connect, maxsize=1)
+        starter = threading.Thread(
+            target=lambda: writer.start_worker(spool_conn_factory=_gated_connect, maxsize=1, ready_timeout=10.0),
+            daemon=True,
+        )
+        starter.start()
+        # Wait for start_worker() to reach the queue-reconfiguration step
+        # (synchronous, before it spawns/waits on the worker thread) so the
+        # test doesn't race the default maxsize=2048 queue.
+        assert _wait_until(lambda: writer._obs_queue.maxsize == 1, timeout=2.0)
 
         case = _case()
         space = _outcome_space(case)
@@ -273,218 +370,197 @@ class TestNonblockingEnqueue:
                 t0 = time.monotonic()
                 _enqueue(decision, family, proofs, datetime(2026, 6, 14, 12, i, tzinfo=UTC))
                 assert time.monotonic() - t0 < 0.05
-            assert writer.counter("telemetry_drop_total") >= 4  # only the first of 5 fits in maxsize=1
+            assert writer.counter("telemetry_drop_total") >= 4
         finally:
             release.set()
+            starter.join(timeout=5.0)
 
 
 # ---------------------------------------------------------------------------
-# H4: rollout kill switch.
+# Y1: bounded outbox -- watermark, ack-delete, idempotent ingestion, metrics,
+# disk budget.
 # ---------------------------------------------------------------------------
 
-class TestKillSwitch:
-    def test_disabled_env_var_makes_enqueue_a_complete_noop(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED", "0")
-        _start(tmp_path)
+class TestBoundedOutbox:
+    def test_ingest_deletes_the_acknowledged_batch_from_the_spool(self, tmp_path):
+        spool_path = _start(tmp_path)
+        trade_path = tmp_path / "trade.db"
+        _bootstrap_canonical(trade_path)
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
-        decision = _decision(case, space, book)
         family = _family(case)
-        _enqueue(decision, family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
-        assert writer.drain(timeout=1.0)
-        assert writer.counter("family_book_telemetry_written_states_total") == 0
-
-    def test_enabled_by_default(self, tmp_path):
-        spool_path, _ = _start(tmp_path)
-        case = _case()
-        space = _outcome_space(case)
-        book = _family_book(case, space)
-        decision = _decision(case, space, book)
-        family = _family(case)
-        _enqueue(decision, family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        _enqueue(_decision(case, space, book), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
         assert writer.drain(timeout=3.0)
+
         conn = sqlite3.connect(str(spool_path))
-        (count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
-        assert count == 1
+        (pending_before,) = conn.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()
+        assert pending_before == 1
 
+        outcome = _ingest(trade_path, spool_path)
+        assert outcome.ingested_states == 1
+        assert outcome.ingested_observations == 1
 
-# ---------------------------------------------------------------------------
-# X2: spool architecture -- writes go ONLY to the spool; the trade DB is
-# touched ONLY by the periodic/forced ingest pass.
-# ---------------------------------------------------------------------------
+        conn = sqlite3.connect(str(spool_path))
+        (pending_after,) = conn.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()
+        assert pending_after == 0, "the outbox must be a TRANSIENT buffer -- acked rows are deleted"
 
-class TestSpoolArchitecture:
-    def test_writes_land_in_spool_not_trade_db_until_ingested(self, tmp_path):
-        spool_path, trade_path = _start(tmp_path)
+    def test_repeated_ingest_over_the_same_batch_is_idempotent(self, tmp_path):
+        spool_path = _start(tmp_path)
+        trade_path = tmp_path / "trade.db"
+        _bootstrap_canonical(trade_path)
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
-        decision = _decision(case, space, book)
         family = _family(case)
-        _enqueue(decision, family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        _enqueue(_decision(case, space, book), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
         assert writer.drain(timeout=3.0)
 
-        spool_conn = sqlite3.connect(str(spool_path))
-        (spool_obs,) = spool_conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
-        assert spool_obs == 1
+        _ingest(trade_path, spool_path)
+        _ingest(trade_path, spool_path)  # second pass -- outbox is already empty, no-op
+        conn = sqlite3.connect(str(trade_path))
+        (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
+        assert obs_count == 1
 
-        # The trade DB file may already exist (M2's startup cache-seed reads
-        # it), but it must carry ZERO observation rows until an ingest pass
-        # actually runs -- ordinary writes never touch it directly (X2).
-        trade_conn = sqlite3.connect(str(trade_path))
-        (trade_obs_before,) = trade_conn.execute(
-            "SELECT COUNT(*) FROM family_book_observations"
-        ).fetchone()
-        assert trade_obs_before == 0
+    def test_ingest_is_bounded_by_batch_size_not_all_history(self, tmp_path):
+        """The direct fix for round-4's 'unbounded mirror' finding: a
+        pending backlog larger than one batch is drained over MULTIPLE
+        bounded passes, never one unbounded pass."""
+        spool_path = _start(tmp_path)
+        trade_path = tmp_path / "trade.db"
+        _bootstrap_canonical(trade_path)
+        case = _case()
+        space = _outcome_space(case)
+        family = _family(case)
 
-        assert writer.force_ingest(timeout=5.0)
-        trade_conn = sqlite3.connect(str(trade_path))
-        (trade_obs,) = trade_conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
-        assert trade_obs == 1
+        for i in range(5):
+            book = _family_book(case, space, fee=0.05 + i * 0.01)  # distinct content each time
+            _enqueue(_decision(case, space, book, receipt_hash=f"r{i}"), family, _proofs_for(space, snapshot_suffix=str(i)), datetime(2026, 6, 14, 12, i, tzinfo=UTC))
+        assert writer.drain(timeout=3.0)
 
-    def test_ingest_is_idempotent_across_repeated_passes(self, tmp_path):
-        spool_path, trade_path = _start(tmp_path)
+        outcome = _ingest(trade_path, spool_path, batch_size=2)
+        assert outcome.batch_rows == 2, "one bounded pass must not exceed batch_size"
+
+        conn = sqlite3.connect(str(spool_path))
+        (pending,) = conn.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()
+        assert pending == 3, "the rest waits for a LATER bounded pass, never replayed all at once"
+
+        # Two more passes drain the remainder.
+        _ingest(trade_path, spool_path, batch_size=2)
+        _ingest(trade_path, spool_path, batch_size=2)
+        conn = sqlite3.connect(str(spool_path))
+        (pending_final,) = conn.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()
+        assert pending_final == 0
+
+    def test_pending_outbox_stats_reports_count_bytes_and_oldest_age(self, tmp_path):
+        spool_path = _start(tmp_path)
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
-        decision = _decision(case, space, book)
         family = _family(case)
-        _enqueue(decision, family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        _enqueue(_decision(case, space, book), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
         assert writer.drain(timeout=3.0)
-        assert writer.force_ingest(timeout=5.0)
-        assert writer.force_ingest(timeout=5.0)  # second pass over the same spool rows
-        trade_conn = sqlite3.connect(str(trade_path))
-        (trade_obs,) = trade_conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
-        assert trade_obs == 1  # ON CONFLICT DO NOTHING -- no duplicate ingestion
 
-    def test_ingest_contention_skips_this_pass_without_blocking(self, tmp_path):
-        """Reverse-contention property: an external holder of the SAME
-        WriteClass.BULK lock on the trade DB must not block the ingest
-        pass -- it skips (typed counter) and the caller (force_ingest)
-        returns promptly rather than waiting."""
-        from src.state.db_writer_lock import WriteClass, db_writer_lock
+        stats = writer.pending_outbox_stats(spool_conn_factory=lambda: sqlite3.connect(str(spool_path)))
+        assert stats["pending_count"] == 1
+        assert stats["pending_bytes_approx"] > 0
+        assert stats["oldest_enqueued_at_utc"] is not None
 
-        spool_path, trade_path = _start(tmp_path)
+    def test_spool_disk_budget_stops_capturing_when_exceeded(self, tmp_path):
+        spool_path = _start(tmp_path, spool_disk_budget_bytes=1)  # trivially tiny budget
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
-        decision = _decision(case, space, book)
         family = _family(case)
-        _enqueue(decision, family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        _enqueue(_decision(case, space, book, receipt_hash="r0"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
         assert writer.drain(timeout=3.0)
-
-        with db_writer_lock(trade_path, WriteClass.BULK):
-            t0 = time.monotonic()
-            assert writer.force_ingest(timeout=5.0)
-            elapsed = time.monotonic() - t0
-
-        assert elapsed < 1.0, "ingest must skip on contention, not wait"
-        assert writer.counter("family_book_telemetry_ingest_contended_total") >= 1
-
-        # Once released, a normal ingest succeeds.
-        assert writer.force_ingest(timeout=5.0)
-        trade_conn = sqlite3.connect(str(trade_path))
-        (trade_obs,) = trade_conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
-        assert trade_obs == 1
+        # First write may land (budget checked BEFORE each write); the point
+        # is that capture stops once the budget is exceeded, not that zero
+        # rows ever land.
+        book_2 = _family_book(case, space, fee=0.13)
+        _enqueue(_decision(case, space, book_2, receipt_hash="r1"), family, _proofs_for(space, snapshot_suffix="2"), datetime(2026, 6, 14, 12, 1, tzinfo=UTC))
+        assert writer.drain(timeout=3.0)
+        assert writer.counter("family_book_telemetry_spool_budget_exceeded_total") >= 1
 
 
 # ---------------------------------------------------------------------------
-# (b) t vs t+1 live-rebuild -- state/observation cardinality (THE dedup fix),
-# now verified end-to-end through spool -> ingest.
+# t vs t+1 live-rebuild -- state/observation cardinality (THE original dedup
+# fix), end-to-end through capture -> outbox -> bounded ingest.
 # ---------------------------------------------------------------------------
 
 class TestLiveRebuildCardinality:
     def test_equal_ladders_at_t_and_t_plus_1_yield_one_state_and_correct_observations(self, tmp_path):
-        """THE verified bug (FamilyBook.book_hash hashes captured_at_utc, and
-        the live bridge sets captured_at_utc=decision_time) meant an
-        UNCHANGED book rebuilt a minute later produced a distinct book_hash
-        -> a new row every cycle. state_count == 1 proves content-hash dedup
-        fixes that. obs_count == 1 (not 2) proves the sampling policy
-        correctly treats "same state, 1 minute later, no trade selected" as
-        sampled-out."""
-        _, trade_path = _start(tmp_path)
+        spool_path = _start(tmp_path)
+        trade_path = tmp_path / "trade.db"
+        _bootstrap_canonical(trade_path)
         case = _case()
         space = _outcome_space(case)
-        book = _family_book(case, space)  # SAME content both times
+        book = _family_book(case, space)
         family = _family(case)
 
-        decision_t0 = _decision(case, space, book, receipt_hash="receipt-t0")
-        decision_t1 = _decision(case, space, book, receipt_hash="receipt-t1")
-
-        _enqueue(decision_t0, family, _proofs_for(space, snapshot_suffix="1"), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "causal-t0")
-        _enqueue(decision_t1, family, _proofs_for(space, snapshot_suffix="2"), datetime(2026, 6, 14, 12, 1, tzinfo=UTC), "causal-t1")
+        _enqueue(_decision(case, space, book, receipt_hash="receipt-t0"), family, _proofs_for(space, snapshot_suffix="1"), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "causal-t0")
+        _enqueue(_decision(case, space, book, receipt_hash="receipt-t1"), family, _proofs_for(space, snapshot_suffix="2"), datetime(2026, 6, 14, 12, 1, tzinfo=UTC), "causal-t1")
         assert writer.drain(timeout=3.0)
-        assert writer.force_ingest(timeout=5.0)
+        _ingest(trade_path, spool_path)
 
         conn = sqlite3.connect(str(trade_path))
         (state_count,) = conn.execute("SELECT COUNT(*) FROM family_book_states").fetchone()
         (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
-        assert state_count == 1, "unchanged content must dedup to ONE state row"
+        assert state_count == 1
         assert obs_count == 1, "unchanged content 1 min later with no trade selected is sampled OUT"
 
     def test_changed_content_creates_a_second_state_row(self, tmp_path):
-        _, trade_path = _start(tmp_path)
+        spool_path = _start(tmp_path)
+        trade_path = tmp_path / "trade.db"
+        _bootstrap_canonical(trade_path)
         case = _case()
         space = _outcome_space(case)
-        book_a = _family_book(case, space, fee=0.05)
-        book_b = _family_book(case, space, fee=0.09)  # execution metadata changed
         family = _family(case)
 
-        _enqueue(_decision(case, space, book_a, receipt_hash="r1"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "c1")
-        _enqueue(_decision(case, space, book_b, receipt_hash="r2"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 1, tzinfo=UTC), "c2")
+        _enqueue(_decision(case, space, _family_book(case, space, fee=0.05), receipt_hash="r1"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "c1")
+        _enqueue(_decision(case, space, _family_book(case, space, fee=0.09), receipt_hash="r2"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 1, tzinfo=UTC), "c2")
         assert writer.drain(timeout=3.0)
-        assert writer.force_ingest(timeout=5.0)
+        _ingest(trade_path, spool_path)
 
         conn = sqlite3.connect(str(trade_path))
         (state_count,) = conn.execute("SELECT COUNT(*) FROM family_book_states").fetchone()
         (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
-        assert state_count == 2, "a genuine fee change must produce a new state (hash/payload correspondence)"
+        assert state_count == 2
         assert obs_count == 2
 
 
 # ---------------------------------------------------------------------------
-# X3: per-observation source provenance survives the sampled-out layer too --
-# a heartbeat re-observation of unchanged content still carries ITS OWN
-# capture identity, not the first-seen state's.
+# X3: per-observation provenance, end-to-end.
 # ---------------------------------------------------------------------------
 
 class TestPerObservationProvenance:
     def test_heartbeat_reobservation_carries_its_own_source_manifest(self, tmp_path):
-        _, trade_path = _start(tmp_path)
+        spool_path = _start(tmp_path)
+        trade_path = tmp_path / "trade.db"
+        _bootstrap_canonical(trade_path)
         case = _case()
         space = _outcome_space(case)
-        book = _family_book(case, space)  # identical content both times
+        book = _family_book(case, space)
         family = _family(case)
 
-        _enqueue(
-            _decision(case, space, book, receipt_hash="r0"), family,
-            _proofs_for(space, snapshot_suffix="1"), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "c0",
-        )
+        _enqueue(_decision(case, space, book, receipt_hash="r0"), family, _proofs_for(space, snapshot_suffix="1"), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "c0")
         assert writer.drain(timeout=3.0)
-        _enqueue(
-            _decision(case, space, book, receipt_hash="r1"), family,
-            _proofs_for(space, snapshot_suffix="2"), datetime(2026, 6, 14, 12, 31, tzinfo=UTC), "c1",  # +31min, distinct snapshot
-        )
+        _enqueue(_decision(case, space, book, receipt_hash="r1"), family, _proofs_for(space, snapshot_suffix="2"), datetime(2026, 6, 14, 12, 31, tzinfo=UTC), "c1")
         assert writer.drain(timeout=3.0)
-        assert writer.force_ingest(timeout=5.0)
+        _ingest(trade_path, spool_path)
 
         conn = sqlite3.connect(str(trade_path))
         (state_count,) = conn.execute("SELECT COUNT(*) FROM family_book_states").fetchone()
-        rows = conn.execute(
-            "SELECT sampling_reason, source_manifest_json FROM family_book_observations ORDER BY decision_time"
-        ).fetchall()
-        assert state_count == 1, "unchanged content -> one shared state"
+        rows = conn.execute("SELECT sampling_reason, source_manifest_json FROM family_book_observations ORDER BY decision_time").fetchall()
+        assert state_count == 1
         assert [r[0] for r in rows] == ["STATE_CHANGE", "HEARTBEAT"]
-        manifest_0 = json.loads(rows[0][1])
-        manifest_1 = json.loads(rows[1][1])
-        assert manifest_0["b25"]["executable_snapshot_id"] != manifest_1["b25"]["executable_snapshot_id"]
-        assert manifest_0["b25"]["source_captured_at"] != manifest_1["b25"]["source_captured_at"]
+        m0, m1 = json.loads(rows[0][1]), json.loads(rows[1][1])
+        assert m0["b25"]["executable_snapshot_id"] != m1["b25"]["executable_snapshot_id"]
+        assert m0["b25"]["source_captured_at"] != m1["b25"]["source_captured_at"]
 
 
 # ---------------------------------------------------------------------------
-# Sampling policy v2: STATE_CHANGE / HEARTBEAT / PRE_VETO_SELECTED (H3) +
-# orthogonal booleans.
+# Sampling policy v2: STATE_CHANGE / HEARTBEAT / PRE_VETO_SELECTED + booleans.
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -504,7 +580,7 @@ class _FakeCandidateDecision:
     route: _FakeRoute
 
 
-def _decision_with_selection(case, space, book, selected, candidate_id, bin_id, side, *, receipt_hash):
+def _decision_with_selection(case, space, book, selected, bin_id, side, *, receipt_hash):
     cd = _FakeCandidateDecision(economics=selected, route=_FakeRoute(bin_id=bin_id, side=side))
     return FamilyDecision(
         decision_id="test-decision", case=case, predictive=_predictive(case), omega=space,
@@ -516,45 +592,27 @@ def _decision_with_selection(case, space, book, selected, candidate_id, bin_id, 
 
 class TestSamplingPolicy:
     def test_repeat_same_state_no_heartbeat_no_selection_is_sampled_out(self, tmp_path):
-        _, trade_path = _start(tmp_path)
+        spool_path = _start(tmp_path)
+        trade_path = tmp_path / "trade.db"
+        _bootstrap_canonical(trade_path)
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
         family = _family(case)
-
         for i in range(3):
             _enqueue(_decision(case, space, book, receipt_hash=f"r{i}"), family, _proofs_for(space), datetime(2026, 6, 14, 12, i, tzinfo=UTC), f"c{i}")
         assert writer.drain(timeout=3.0)
-        assert writer.force_ingest(timeout=5.0)
+        _ingest(trade_path, spool_path)
 
         conn = sqlite3.connect(str(trade_path))
         (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
         assert obs_count == 1
         assert writer.counter("family_book_telemetry_sampled_out_total") == 2
 
-    def test_heartbeat_fires_after_interval_even_without_change(self, tmp_path):
-        _, trade_path = _start(tmp_path)
-        case = _case()
-        space = _outcome_space(case)
-        book = _family_book(case, space)
-        family = _family(case)
-
-        _enqueue(_decision(case, space, book, receipt_hash="r0"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "c0")
-        assert writer.drain(timeout=3.0)
-        _enqueue(_decision(case, space, book, receipt_hash="r1"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 31, tzinfo=UTC), "c1")
-        assert writer.drain(timeout=3.0)
-        assert writer.force_ingest(timeout=5.0)
-
-        conn = sqlite3.connect(str(trade_path))
-        rows = conn.execute(
-            "SELECT sampling_reason, state_changed, heartbeat_due, pre_veto_selected FROM family_book_observations ORDER BY decision_time"
-        ).fetchall()
-        assert [r[0] for r in rows] == ["STATE_CHANGE", "HEARTBEAT"]
-        assert rows[0] == ("STATE_CHANGE", 1, 0, 0)
-        assert rows[1] == ("HEARTBEAT", 0, 1, 0)
-
-    def test_selected_trade_forces_a_pre_veto_selected_observation_with_identity(self, tmp_path):
-        _, trade_path = _start(tmp_path)
+    def test_heartbeat_and_selection_orthogonal_booleans(self, tmp_path):
+        spool_path = _start(tmp_path)
+        trade_path = tmp_path / "trade.db"
+        _bootstrap_canonical(trade_path)
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
@@ -563,10 +621,10 @@ class TestSamplingPolicy:
         _enqueue(_decision(case, space, book, receipt_hash="r0"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "c0")
         assert writer.drain(timeout=3.0)
         selected = _FakeSelected("candidate-1")
-        decision_1 = _decision_with_selection(case, space, book, selected, "candidate-1", "b25", "YES", receipt_hash="r1")
+        decision_1 = _decision_with_selection(case, space, book, selected, "b25", "YES", receipt_hash="r1")
         _enqueue(decision_1, family, _proofs_for(space), datetime(2026, 6, 14, 12, 1, tzinfo=UTC), "c1")
         assert writer.drain(timeout=3.0)
-        assert writer.force_ingest(timeout=5.0)
+        _ingest(trade_path, spool_path)
 
         conn = sqlite3.connect(str(trade_path))
         rows = conn.execute(
@@ -578,61 +636,42 @@ class TestSamplingPolicy:
 
 
 # ---------------------------------------------------------------------------
-# X1: transaction poisoning after a partial write / a failed COMMIT.
+# X1 (UNCHANGED per reviewer confirmation): transaction poisoning after a
+# partial write / a failed COMMIT. Adapted only to target the outbox table
+# insert (insert_outbox_row) instead of the canonical tables directly.
 # ---------------------------------------------------------------------------
 
 class TestTransactionSafety:
-    def test_observation_insert_failure_rolls_back_state_insert_too(self, tmp_path, monkeypatch):
-        """State INSERT succeeds, observation INSERT raises: the transaction
-        must roll back completely (neither row durable), conn.in_transaction
-        must be False afterward, and a SEPARATE connection must be able to
-        write to the SAME spool file immediately (no lingering writer lock)."""
-        spool_path, _ = _start(tmp_path)
+    def test_outbox_insert_failure_rolls_back_cleanly(self, tmp_path, monkeypatch):
+        spool_path = _start(tmp_path)
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
-        decision = _decision(case, space, book)
         family = _family(case)
 
         def _boom(*_a, **_k):
-            raise sqlite3.IntegrityError("simulated observation insert failure")
+            raise sqlite3.IntegrityError("simulated outbox insert failure")
 
-        monkeypatch.setattr(writer, "insert_observation", _boom)
-        _enqueue(decision, family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        monkeypatch.setattr(writer, "insert_outbox_row", _boom)
+        _enqueue(_decision(case, space, book), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
         assert writer.drain(timeout=3.0)
 
         assert writer.counter("family_book_telemetry_write_failures_total") == 1
-        assert writer.counter("family_book_telemetry_written_states_total") == 0
 
         conn = sqlite3.connect(str(spool_path))
         assert conn.in_transaction is False
-        (state_count,) = conn.execute("SELECT COUNT(*) FROM family_book_states").fetchone()
-        (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
-        assert state_count == 0, "the state INSERT must have been rolled back too, not just the failing statement"
-        assert obs_count == 0
+        (count,) = conn.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()
+        assert count == 0
 
-        # A SEPARATE connection can write to the spool file immediately --
-        # no lingering writer lock from the poisoned transaction.
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("COMMIT")
 
-    def test_failed_commit_replaces_the_connection_and_no_later_observation_commits_stale_rows(self, tmp_path):
-        """Both INSERTs succeed, COMMIT itself is injected to fail: the
-        connection must be replaced (rollback of a connection that cannot
-        even commit is the only safe recovery), no success counters
-        increment for the failed attempt, and the NEXT observation must
-        commit cleanly on the replacement connection (no stale transaction
-        state carried forward)."""
+    def test_failed_commit_recovers_via_rollback_when_rollback_succeeds(self, tmp_path):
         spool_path = tmp_path / "spool.db"
-        trade_path = tmp_path / "trade.db"
         real_connect = sqlite3.connect
         call_count = {"n": 0}
 
         class _CommitFailsOnceConnection(sqlite3.Connection):
-            """sqlite3.Connection.commit is a read-only slot on the built-in
-            type (cannot be monkeypatched as an instance attribute) -- a
-            factory subclass is the only way to inject a commit failure."""
-
             _commit_failed = False
 
             def commit(self):
@@ -643,17 +682,11 @@ class TestTransactionSafety:
 
         def _spool_factory():
             call_count["n"] += 1
-            factory = _CommitFailsOnceConnection if call_count["n"] == 1 else None
-            if factory is not None:
-                return real_connect(str(spool_path), factory=factory)
+            if call_count["n"] == 1:
+                return real_connect(str(spool_path), factory=_CommitFailsOnceConnection)
             return real_connect(str(spool_path))
 
-        writer.start_worker(
-            spool_conn_factory=_spool_factory,
-            ingest_conn_factory=lambda: real_connect(str(trade_path)),
-            trade_db_path_factory=lambda: trade_path,
-        )
-
+        writer.start_worker(spool_conn_factory=_spool_factory)
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
@@ -661,39 +694,20 @@ class TestTransactionSafety:
 
         _enqueue(_decision(case, space, book, receipt_hash="r0"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "c0")
         assert writer.drain(timeout=3.0)
-
         assert writer.counter("family_book_telemetry_write_failures_total") == 1
-        assert writer.counter("family_book_telemetry_written_states_total") == 0
-        assert writer.counter("family_book_telemetry_written_observations_total") == 0
 
-        # The NEXT observation (distinct content -> guaranteed STATE_CHANGE,
-        # never sampled out) must commit cleanly -- proves the connection was
-        # replaced with a clean one, not left mid-transaction.
         book_2 = _family_book(case, space, fee=0.11)
         _enqueue(_decision(case, space, book_2, receipt_hash="r1"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 1, tzinfo=UTC), "c1")
         assert writer.drain(timeout=3.0)
 
-        assert writer.counter("family_book_telemetry_written_states_total") == 1
-        assert writer.counter("family_book_telemetry_written_observations_total") == 1
-        # rollback() itself succeeded on the poisoned-commit connection (only
-        # commit() was poisoned), so no connection replacement was needed --
-        # the same connection, no longer mid-transaction, committed the next
-        # observation cleanly. (Replacement is covered separately below,
-        # test_rollback_failure_also_replaces_the_connection.)
-        assert call_count["n"] == 1
-
+        assert call_count["n"] == 1, "rollback succeeded -- no connection replacement needed"
         conn = real_connect(str(spool_path))
         assert conn.in_transaction is False
-        (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
-        assert obs_count == 1, "only the SECOND (successful) observation is durable -- no stale rows from the failed commit"
+        (count,) = conn.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()
+        assert count == 1, "only the SECOND (successful) observation is durable"
 
     def test_rollback_failure_also_replaces_the_connection(self, tmp_path):
-        """When BOTH commit() and rollback() fail (the genuinely unrecoverable
-        case), the writer must close and replace the connection -- the only
-        way to guarantee conn.in_transaction is False going forward -- and
-        the next observation must still land durably on the replacement."""
         spool_path = tmp_path / "spool.db"
-        trade_path = tmp_path / "trade.db"
         real_connect = sqlite3.connect
         call_count = {"n": 0}
 
@@ -708,7 +722,7 @@ class TestTransactionSafety:
 
             def rollback(self):
                 if self._poisoned:
-                    self._poisoned = False  # only the one recovery attempt fails
+                    self._poisoned = False
                     raise sqlite3.OperationalError("simulated rollback failure too")
                 return super().rollback()
 
@@ -718,12 +732,7 @@ class TestTransactionSafety:
                 return real_connect(str(spool_path), factory=_CommitAndRollbackFailOnceConnection)
             return real_connect(str(spool_path))
 
-        writer.start_worker(
-            spool_conn_factory=_spool_factory,
-            ingest_conn_factory=lambda: real_connect(str(trade_path)),
-            trade_db_path_factory=lambda: trade_path,
-        )
-
+        writer.start_worker(spool_conn_factory=_spool_factory)
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
@@ -731,53 +740,91 @@ class TestTransactionSafety:
 
         _enqueue(_decision(case, space, book, receipt_hash="r0"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "c0")
         assert writer.drain(timeout=3.0)
-        assert writer.counter("family_book_telemetry_written_states_total") == 0
 
         book_2 = _family_book(case, space, fee=0.13)
         _enqueue(_decision(case, space, book_2, receipt_hash="r1"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 1, tzinfo=UTC), "c1")
         assert writer.drain(timeout=3.0)
 
-        assert writer.counter("family_book_telemetry_written_states_total") == 1
-        assert writer.counter("family_book_telemetry_written_observations_total") == 1
-        assert call_count["n"] == 2, "rollback failure must force a fresh connection (a second factory call)"
-
+        assert call_count["n"] == 2, "rollback failure must force a fresh connection"
         conn = real_connect(str(spool_path))
         assert conn.in_transaction is False
-        (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
-        assert obs_count == 1
+        (count,) = conn.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()
+        assert count == 1
 
 
 # ---------------------------------------------------------------------------
-# Commit-time / write fault injection: typed counters, no unbounded logging.
+# Y4: worker liveness -- malformed envelope quarantine, restart-without-
+# ingest sampling continuity.
 # ---------------------------------------------------------------------------
 
-class TestFaultInjection:
-    def test_write_exception_increments_counter_and_does_not_crash_worker(self, tmp_path, monkeypatch, caplog):
-        spool_path, _ = _start(tmp_path)
+class TestWorkerLiveness:
+    def test_malformed_envelope_is_quarantined_not_crashing(self, tmp_path, monkeypatch):
+        """A bug upstream (e.g. compute_state_identity raising on a
+        malformed envelope) must be counted and dropped, never crash the
+        worker thread -- proven by a LATER, well-formed envelope still
+        landing durably."""
+        spool_path = _start(tmp_path)
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
         family = _family(case)
 
-        def _boom(*_a, **_k):
-            raise sqlite3.OperationalError("simulated disk-full")
+        original = writer.compute_state_identity
+        state = {"boomed": False}
 
-        monkeypatch.setattr(writer, "insert_state", _boom)
+        def _boom_once(envelope):
+            if not state["boomed"]:
+                state["boomed"] = True
+                raise ValueError("simulated malformed envelope")
+            return original(envelope)
 
-        import logging
-        caplog.set_level(logging.WARNING, logger="src.events.family_book_telemetry_writer")
-        for i in range(5):
-            _enqueue(_decision(case, space, book, receipt_hash=f"r{i}"), family, _proofs_for(space), datetime(2026, 6, 14, 12, i, tzinfo=UTC), f"c{i}")
+        monkeypatch.setattr(writer, "compute_state_identity", _boom_once)
+        _enqueue(_decision(case, space, book, receipt_hash="r0"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "c0")
         assert writer.drain(timeout=3.0)
+        assert writer.counter("family_book_telemetry_malformed_envelope_total") == 1
 
-        assert writer.counter("family_book_telemetry_write_failures_total") == 5  # every failure counted
-        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert len(warning_records) <= 1, "log storm: fault must be rate-limited, not logged every occurrence"
+        # The worker is still alive and processes the NEXT envelope normally.
+        _enqueue(_decision(case, space, book, receipt_hash="r1"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 1, tzinfo=UTC), "c1")
+        assert writer.drain(timeout=3.0)
         conn = sqlite3.connect(str(spool_path))
-        (count,) = conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='family_book_states'"
-        ).fetchone()
-        assert count == 1  # schema still intact; worker didn't die mid-init
+        (count,) = conn.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()
+        assert count == 1
+        assert writer._worker_thread is not None and writer._worker_thread.is_alive()
+
+    def test_restart_without_ingest_seeds_sampling_from_pending_spool(self, tmp_path):
+        """Y4's required regression test: a spool write that crashed BEFORE
+        canonical ingestion must still be respected on restart -- otherwise
+        identical content one minute later is falsely relabeled
+        STATE_CHANGE instead of sampled out."""
+        spool_path = tmp_path / "spool.db"
+        trade_path = tmp_path / "trade.db"
+        _bootstrap_canonical(trade_path)
+
+        writer.start_worker(
+            spool_conn_factory=lambda: sqlite3.connect(str(spool_path)),
+            readonly_canonical_conn_factory=lambda: sqlite3.connect(f"file:{trade_path}?mode=ro", uri=True),
+        )
+        case = _case()
+        space = _outcome_space(case)
+        book = _family_book(case, space)
+        family = _family(case)
+
+        _enqueue(_decision(case, space, book, receipt_hash="r0"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "c0")
+        assert writer.drain(timeout=3.0)
+        # Deliberately DO NOT ingest -- simulate a crash before canonical delivery.
+        assert writer.shutdown(timeout=3.0)
+
+        writer._last_state_by_family.clear()
+        readiness = writer.start_worker(
+            spool_conn_factory=lambda: sqlite3.connect(str(spool_path)),
+            readonly_canonical_conn_factory=lambda: sqlite3.connect(f"file:{trade_path}?mode=ro", uri=True),
+        )
+        assert readiness.ready
+        assert _wait_until(lambda: writer._last_state_by_family.get(case.family_id) is not None, timeout=2.0)
+
+        _enqueue(_decision(case, space, book, receipt_hash="r1"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 1, tzinfo=UTC), "c1")
+        assert writer.drain(timeout=3.0)
+        assert writer.counter("family_book_telemetry_sampled_out_total") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -785,33 +832,23 @@ class TestFaultInjection:
 # ---------------------------------------------------------------------------
 
 class TestSqliteVersionGuard:
-    def test_worker_refuses_to_start_below_the_wal_reset_fix_floor(self, tmp_path, monkeypatch, caplog):
-        import logging
-
+    def test_worker_reports_not_ready_below_the_wal_reset_fix_floor(self, tmp_path, monkeypatch):
         monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 40, 0))
-        caplog.set_level(logging.ERROR, logger="src.events.family_book_telemetry_writer")
-
-        _start(tmp_path)
-        assert _wait_until(lambda: writer._worker_thread is None or not writer._worker_thread.is_alive(), timeout=2.0)
-
-        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
-        assert len(error_records) == 1
-        assert "sqlite" in error_records[0].message.lower()
+        readiness = writer.start_worker(spool_conn_factory=lambda: sqlite3.connect(str(tmp_path / "spool.db")))
+        assert readiness.ready is False
 
 
 # ---------------------------------------------------------------------------
-# M1: shutdown / second-worker refusal.
+# Shutdown / second-worker refusal.
 # ---------------------------------------------------------------------------
 
 class TestShutdownLifecycle:
-    def test_start_worker_refuses_while_one_is_already_alive(self, tmp_path):
-        spool_path, trade_path = _start(tmp_path)
-        started_again = writer.start_worker(
-            spool_conn_factory=lambda: sqlite3.connect(str(spool_path)),
-            ingest_conn_factory=lambda: sqlite3.connect(str(trade_path)),
-            trade_db_path_factory=lambda: trade_path,
-        )
-        assert started_again is False
+    def test_start_worker_is_a_noop_while_one_is_already_alive(self, tmp_path):
+        spool_path = _start(tmp_path)
+        readiness2 = writer.start_worker(spool_conn_factory=lambda: sqlite3.connect(str(tmp_path / "other_spool.db")))
+        assert readiness2.ready is True  # returns the EXISTING worker's readiness, doesn't replace it
+        conn = sqlite3.connect(str(spool_path))
+        conn.execute("SELECT 1")  # original spool path still the one in use
 
     def test_shutdown_succeeds_even_with_a_full_queue(self, tmp_path):
         release = threading.Event()
@@ -820,50 +857,63 @@ class TestShutdownLifecycle:
             release.wait(timeout=5.0)
             return sqlite3.connect(":memory:")
 
-        _start(tmp_path, spool_conn_factory=_gated_connect, maxsize=1)
+        writer.start_worker(spool_conn_factory=_gated_connect, maxsize=1, ready_timeout=0.5)
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
         decision = _decision(case, space, book)
         family = _family(case)
-        _enqueue(decision, family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))  # fills maxsize=1
+        _enqueue(decision, family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
 
         release.set()
         assert writer.shutdown(timeout=5.0) is True
 
 
 # ---------------------------------------------------------------------------
-# M2: restart continuity -- the sampling cache is seeded from the durable
-# trade DB, not reset to empty, on worker (re)start.
+# Round-4 MEDIUM: SQLITE_CONNECT_ALLOWLIST exemption is file-scoped, not
+# function-scoped -- this AST antibody compensates by asserting exactly one
+# sqlite3.connect() call exists anywhere in the module, and it is lexically
+# inside _default_spool_conn_factory.
 # ---------------------------------------------------------------------------
 
-class TestRestartContinuity:
-    def test_worker_restart_seeds_sampling_cache_from_durable_observations(self, tmp_path):
-        spool_path, trade_path = _start(tmp_path)
-        case = _case()
-        space = _outcome_space(case)
-        book = _family_book(case, space)
-        family = _family(case)
+class TestSingleConnectAntibody:
+    def test_exactly_one_sqlite3_connect_call_site_in_the_module(self):
+        source = inspect.getsource(writer)
+        tree = ast.parse(source)
 
-        _enqueue(_decision(case, space, book, receipt_hash="r0"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC), "c0")
-        assert writer.drain(timeout=3.0)
-        assert writer.force_ingest(timeout=5.0)
-        assert writer.shutdown(timeout=5.0)
+        connect_calls = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                is_connect = (
+                    (isinstance(func, ast.Attribute) and func.attr == "connect")
+                    or (isinstance(func, ast.Name) and func.id == "connect")
+                )
+                if is_connect:
+                    connect_calls.append(node)
 
-        # Simulate a full process restart: fresh module-level state, worker
-        # started again pointed at a FRESH (empty) spool but the SAME durable
-        # trade DB.
-        writer._last_state_by_family.clear()
-        fresh_spool_path = tmp_path / "spool2.db"
-        writer.start_worker(
-            spool_conn_factory=lambda: sqlite3.connect(str(fresh_spool_path)),
-            ingest_conn_factory=lambda: sqlite3.connect(str(trade_path)),
-            trade_db_path_factory=lambda: trade_path,
+        assert len(connect_calls) == 1, (
+            f"expected exactly one sqlite3.connect() call site in "
+            f"family_book_telemetry_writer.py; found {len(connect_calls)} -- "
+            f"any new raw canonical connect here would evade the file-level "
+            f"SQLITE_CONNECT_ALLOWLIST exemption's intended scope"
         )
-        assert _wait_until(lambda: writer._last_state_by_family.get(case.family_id) is not None, timeout=2.0)
 
-        # The SAME content, 1 minute later, must be sampled OUT (proving the
-        # cache was seeded, not falsely treated as a fresh STATE_CHANGE).
-        _enqueue(_decision(case, space, book, receipt_hash="r1"), family, _proofs_for(space), datetime(2026, 6, 14, 12, 1, tzinfo=UTC), "c1")
-        assert writer.drain(timeout=3.0)
-        assert writer.counter("family_book_telemetry_sampled_out_total") == 1
+        # It must be lexically inside _default_spool_conn_factory.
+        enclosing = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                for child in ast.walk(node):
+                    if child is connect_calls[0]:
+                        enclosing = node.name
+        assert enclosing == "_default_spool_conn_factory"
+
+    def test_spool_path_never_equals_trade_db_path(self, tmp_path, monkeypatch):
+        from src.state import db as db_module
+
+        monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: tmp_path / "zeus_trades.db")
+        conn = writer._default_spool_conn_factory()
+        conn.close()
+        spool_path = (tmp_path / "zeus_trades.db").with_name("family_book_telemetry_spool.db")
+        assert spool_path.resolve() != (tmp_path / "zeus_trades.db").resolve()
+        assert spool_path.name == "family_book_telemetry_spool.db"

@@ -33,8 +33,7 @@ from src.forecast.predictive_distribution_builder import PredictiveDistributionB
 from src.forecast.types import ForecastCase, FreshModelSet, RawModelMember
 from src.probability.event_resolution import EventResolution, event_resolution_for_city
 from src.probability.outcome_space import OutcomeBin, OutcomeSpace, compute_topology_hash
-from src.state.schema.family_book_observations_schema import ensure_table as ensure_obs_table
-from src.state.schema.family_book_states_schema import ensure_table as ensure_states_table
+from src.state.schema.family_book_telemetry_outbox_schema import ensure_table as ensure_outbox_table
 from src.strategy.live_inference.executable_cost import QuoteLevel
 
 UTC = timezone.utc
@@ -163,9 +162,9 @@ def test_benchmark_envelope_projection_and_hash(tmp_path, capsys):
 
 
 def test_benchmark_end_to_end_spool_write(tmp_path, capsys):
-    """Writer-thread cost: the FULL _process_one path (state+observation
+    """Writer-thread cost: the FULL _process_one path (one bounded-outbox row
     INSERT, explicit transaction, COMMIT) against a real file-backed WAL
-    spool database -- not merely the state INSERT in isolation."""
+    spool database -- not merely a state INSERT in isolation."""
     case = _case()
     space = _wide_outcome_space(case)
     markets = {b.bin_id: _market(b.bin_id) for b in space.bins}
@@ -175,8 +174,7 @@ def test_benchmark_end_to_end_spool_write(tmp_path, capsys):
     spool_path = tmp_path / "bench_spool.db"
     conn = sqlite3.connect(str(spool_path))
     conn.execute("PRAGMA journal_mode=WAL")
-    ensure_states_table(conn)
-    ensure_obs_table(conn)
+    ensure_outbox_table(conn)
 
     n_iters = 200
     write_latencies = []
@@ -199,11 +197,62 @@ def test_benchmark_end_to_end_spool_write(tmp_path, capsys):
 
     with capsys.disabled():
         print("\n--- family_book_telemetry benchmark: end-to-end spool write, worst-case every-cycle-changes (N_BINS=%d, n_iters=%d) ---" % (N_BINS, n_iters))
-        print(f"_process_one (state+observation INSERT+COMMIT, ms): p50={_percentile(write_latencies, 0.50)*1000:.3f} "
+        print(f"_process_one (outbox row INSERT+COMMIT, ms): p50={_percentile(write_latencies, 0.50)*1000:.3f} "
               f"p95={_percentile(write_latencies, 0.95)*1000:.3f} p99={_percentile(write_latencies, 0.99)*1000:.3f}")
 
-    (state_count,) = conn.execute("SELECT COUNT(*) FROM family_book_states").fetchone()
-    (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
-    assert state_count == n_iters  # every iteration has distinct content -- n_iters state rows
-    assert obs_count == n_iters
+    (outbox_count,) = conn.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()
+    assert outbox_count == n_iters  # every iteration has distinct content -- n_iters outbox rows
     assert _percentile(write_latencies, 0.99) < 0.5
+    conn.close()
+
+
+def test_benchmark_bounded_canonical_ingest(tmp_path, capsys):
+    """Round-4 review 3.6: the earlier benchmark validated Stage 1 (compact
+    projection + private-spool write) but not the Stage-2 delivery path --
+    this measures run_bounded_ingest() against a REALISTIC pending backlog
+    (a full batch, N_BINS=51) on a file-backed canonical DB."""
+    from src.state.schema.family_book_observations_schema import ensure_table as ensure_obs_table
+    from src.state.schema.family_book_states_schema import ensure_table as ensure_states_table
+
+    case = _case()
+    space = _wide_outcome_space(case)
+    markets = {b.bin_id: _market(b.bin_id) for b in space.bins}
+    book = build_family_book(omega=space, markets=markets, captured_at_utc=_CAPTURED)
+    family = _family(case)
+
+    spool_path = tmp_path / "bench_spool2.db"
+    spool_conn = sqlite3.connect(str(spool_path))
+    ensure_outbox_table(spool_conn)
+
+    batch_size = 500
+    for i in range(batch_size):
+        decision = _decision(case, space, book, receipt_hash=f"bench-batch-{i}")
+        envelope = project_observation_envelope(
+            decision=decision, family=family, active_proofs=_proofs(space, variant=f"batch{i}"),
+            candidate_bin_id=_candidate_bin_id,
+            decision_time=datetime(2026, 6, 14, 12, 0, tzinfo=UTC) + timedelta(minutes=i),
+            causal_snapshot_id="causal-1",
+        )
+        spool_conn = writer._process_one(spool_conn, envelope)
+    spool_conn.close()
+
+    trade_path = tmp_path / "bench_trade.db"
+    trade_conn = sqlite3.connect(str(trade_path))
+    ensure_states_table(trade_conn)
+    ensure_obs_table(trade_conn)
+
+    t0 = time.perf_counter()
+    outcome = writer.run_bounded_ingest(
+        trade_conn, spool_conn_factory=lambda: sqlite3.connect(str(spool_path)),
+        batch_size=batch_size, byte_budget=50_000_000,  # large enough to not truncate this 500-row batch
+    )
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    trade_conn.close()
+
+    with capsys.disabled():
+        print(f"\n--- family_book_telemetry benchmark: bounded canonical ingest (batch_size={batch_size}) ---")
+        print(f"run_bounded_ingest: {elapsed_ms:.2f}ms for {outcome.batch_rows} rows "
+              f"({outcome.ingested_states} states, {outcome.ingested_observations} observations)")
+
+    assert outcome.batch_rows == batch_size
+    assert not outcome.failed
