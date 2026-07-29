@@ -6645,6 +6645,9 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     trade.execute(
         """
         CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
             direction TEXT,
             token_id TEXT,
             no_token_id TEXT,
@@ -6654,9 +6657,24 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         )
         """
     )
+    monkeypatch.setattr(
+        era,
+        "weather_family_id",
+        lambda *, city, target_date, metric: city,
+    )
     trade.execute(
-        "INSERT INTO position_current VALUES (?,?,?,?,?,?)",
-        ("buy_no", "yes-token", "no-token", "day0_window", 5.0, 5.0),
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "family",
+            "2026-07-11",
+            "high",
+            "buy_no",
+            "yes-token",
+            "no-token",
+            "day0_window",
+            5.0,
+            5.0,
+        ),
     )
     reserved_adapter = make_adapter(completion_reserved=True)
     reserved_adapter.process_global_batch(
@@ -6670,8 +6688,11 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert capture_required_tokens[-1] == frozenset({"no-token"})
 
     trade.execute(
-        "INSERT INTO position_current VALUES (?,?,?,?,?,?)",
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?)",
         (
+            "failed-family",
+            "2026-07-11",
+            "high",
             "buy_no",
             "failed-yes-token",
             "failed-no-token",
@@ -19462,6 +19483,55 @@ def test_global_batch_isolates_family_omitted_by_current_book_provider(monkeypat
     )
     assert result.winner_event_id is None
     assert result.venue_submit_count == 0
+
+
+def test_selection_holdings_require_only_current_book_native_tokens():
+    @dataclass(frozen=True)
+    class Prepared:
+        probability_witness: object
+        holdings_snapshot: object | None = None
+
+    family_key = "family-held"
+    probability = SimpleNamespace(
+        family_key=family_key,
+        bindings=(
+            SimpleNamespace(
+                bin_id="bin-held",
+                condition_id="condition-held",
+                yes_token_id="yes-held",
+                no_token_id=None,
+            ),
+        ),
+    )
+    position = SimpleNamespace(
+        position_id="position-held",
+        trade_id="trade-held",
+        condition_id="condition-held",
+        direction="buy_yes",
+        token_id="yes-held",
+        no_token_id="",
+        chain_shares=Decimal("5"),
+    )
+    portfolio = SimpleNamespace(positions=(position,))
+    wealth = SimpleNamespace(
+        ledger_snapshot_id="ledger",
+        native_holdings_micro=(("yes-held", 5_000_000),),
+        pending_entry_endowments_micro=(),
+    )
+
+    rebound = global_batch_runtime._bind_selection_holdings(
+        {"event-held": Prepared(probability_witness=probability)},
+        portfolio_state=portfolio,
+        wealth_witness=wealth,
+        required_token_ids_by_family={
+            family_key: frozenset({"yes-held"})
+        },
+    )
+
+    holdings = rebound["event-held"].holdings_snapshot.holdings
+    assert len(holdings) == 1
+    assert holdings[0].token_id == "yes-held"
+    assert holdings[0].shares == Decimal("5")
 
 
 def test_global_batch_preempts_after_preflight_before_actuation(monkeypatch):

@@ -7662,7 +7662,8 @@ def event_bound_live_adapter_from_trade_conn(
             try:
                 held_token_rows = trade_conn.execute(
                     """
-                    SELECT direction, token_id, no_token_id
+                    SELECT city, target_date, temperature_metric,
+                           direction, token_id, no_token_id
                       FROM position_current
                      WHERE phase IN ('active', 'day0_window', 'pending_exit')
                        AND COALESCE(chain_shares, shares, 0) > 0
@@ -7672,20 +7673,38 @@ def event_bound_live_adapter_from_trade_conn(
                 if "no such table: position_current" not in str(exc).lower():
                     raise
                 held_token_rows = ()
+            held_tokens_by_family: dict[str, set[str]] = {}
+            for (
+                city,
+                target_date,
+                metric,
+                direction,
+                token_id,
+                no_token_id,
+            ) in held_token_rows:
+                held_token = str(
+                    no_token_id
+                    if str(direction or "").strip().lower() == "buy_no"
+                    else token_id
+                ).strip()
+                if not held_token:
+                    continue
+                family_key = weather_family_id(
+                    city=str(city or ""),
+                    target_date=str(target_date or ""),
+                    metric=str(metric or "").lower(),
+                )
+                held_tokens_by_family.setdefault(family_key, set()).add(
+                    held_token
+                )
             held_tokens = frozenset(
-                str(
-                    no_token_id
-                    if str(direction or "").strip().lower() == "buy_no"
-                    else token_id
-                ).strip()
-                for direction, token_id, no_token_id in held_token_rows
-                if str(
-                    no_token_id
-                    if str(direction or "").strip().lower() == "buy_no"
-                    else token_id
-                ).strip()
+                token
+                for family_tokens in held_tokens_by_family.values()
+                for token in family_tokens
             )
             reduce_only_book_tokens = held_tokens or None
+        else:
+            held_tokens_by_family = {}
 
         def _current_book_epoch(probabilities, _at):
             from src.contracts.executable_market_snapshot import (
@@ -8768,15 +8787,19 @@ def event_bound_live_adapter_from_trade_conn(
                 bound_probabilities = {
                     family_key: witness
                     for family_key, witness in bound_probabilities.items()
-                    if any(
-                        str(token_id or "").strip() in reduce_only_book_tokens
-                        for binding in tuple(
-                            getattr(witness, "bindings", ()) or ()
-                        )
-                        for token_id in (
-                            getattr(binding, "yes_token_id", ""),
-                            getattr(binding, "no_token_id", ""),
-                        )
+                    if held_tokens_by_family.get(family_key)
+                    and held_tokens_by_family[family_key].issubset(
+                        {
+                            str(token_id or "").strip()
+                            for binding in tuple(
+                                getattr(witness, "bindings", ()) or ()
+                            )
+                            for token_id in (
+                                getattr(binding, "yes_token_id", ""),
+                                getattr(binding, "no_token_id", ""),
+                            )
+                            if str(token_id or "").strip()
+                        }
                     )
                 }
             if reduce_only_book_tokens is not None and not bound_probabilities:

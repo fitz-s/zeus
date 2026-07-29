@@ -813,6 +813,7 @@ def _bind_selection_holdings(
     *,
     portfolio_state: object,
     wealth_witness: object,
+    required_token_ids_by_family: Mapping[str, frozenset[str]] | None = None,
 ) -> dict[str, object]:
     """Bind every family holding to the same selection-time ledger generation."""
 
@@ -852,6 +853,11 @@ def _bind_selection_holdings(
             ledger_snapshot_id=ledger_snapshot_id,
             token_shares_by_id=token_shares_by_id,
             pending_entry_endowments=pending_entry_endowments,
+            required_token_ids=(
+                required_token_ids_by_family.get(family_key)
+                if required_token_ids_by_family is not None
+                else None
+            ),
         )
         rebound[event_id] = replace(prepared, holdings_snapshot=holdings)
     return rebound
@@ -4432,10 +4438,22 @@ def process_current_global_batch(
             selection_at = current_time()
             prepared_for_selection = attempt_prepared
             if attempt_book_epoch is not None and selection_state is not None:
+                required_tokens_by_family: dict[str, set[str]] = {}
+                for state in tuple(
+                    getattr(attempt_book_epoch, "asset_states", ()) or ()
+                ):
+                    required_tokens_by_family.setdefault(
+                        str(state[0]),
+                        set(),
+                    ).add(str(state[4]))
                 prepared_for_selection = _bind_selection_holdings(
                     attempt_prepared,
                     portfolio_state=selection_state,
                     wealth_witness=selection_wealth,
+                    required_token_ids_by_family={
+                        family_key: frozenset(tokens)
+                        for family_key, tokens in required_tokens_by_family.items()
+                    },
                 )
             excluded_candidates = dict(preflight_excluded_by_candidate or {})
             if attempt_book_epoch is not None and excluded_candidates:
