@@ -82,6 +82,7 @@ from src.data.ingestion_guard import IngestionGuard, IngestionRejected
 from src.contracts.dst_semantics import _is_missing_local_hour
 from src.state.data_coverage import (
     CoverageReason,
+    CoverageStatus,
     DataTable,
     record_failed,
     record_legitimate_gap,
@@ -290,6 +291,7 @@ HKO_REALTIME_SOURCE = "hko_realtime_api"
 HKO_FETCH_RETRY_COUNT = 2
 HKO_FETCH_RETRY_BACKOFF_SEC = 3.0
 HKO_REALTIME_MIN_READINGS = 18
+HKO_DAILY_EXTRACT_CATCHUP_DAYS = 7
 
 
 def _fetch_hko_daily_extract_month(
@@ -323,41 +325,177 @@ def _fetch_hko_daily_extract_month(
     return rows, url, payload_hash
 
 
-def append_hko_daily_extract_yesterday(
+def hko_daily_extract_target_date(*, now_utc: datetime) -> date:
+    """Return the completed HKO local date whose final row is now due."""
+
+    return now_utc.astimezone(ZoneInfo("Asia/Hong_Kong")).date() - timedelta(days=1)
+
+
+def hko_daily_extract_recent_target_dates(
+    *,
+    now_utc: datetime,
+    lookback_days: int = HKO_DAILY_EXTRACT_CATCHUP_DAYS,
+) -> tuple[date, ...]:
+    """Return the bounded completed-date catch-up window, newest first."""
+
+    latest = hko_daily_extract_target_date(now_utc=now_utc)
+    days = max(1, int(lookback_days))
+    return tuple(latest - timedelta(days=offset) for offset in range(days))
+
+
+def hko_daily_extract_date_present(conn, *, target_date: date) -> bool:
+    """Check one final-row identity without acquiring a writer or fetching HKO."""
+
+    return (
+        conn.execute(
+            """
+            SELECT 1
+              FROM observations
+             WHERE city = ? AND target_date = ? AND source = ?
+               AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
+             LIMIT 1
+            """,
+            (HKO_CITY_NAME, target_date.isoformat(), HKO_SOURCE),
+        ).fetchone()
+        is not None
+    )
+
+
+_HKO_COVERAGE_STATUS_MAIN_SQL = """
+    SELECT status
+      FROM data_coverage
+     WHERE data_table = ? AND city = ? AND target_date = ?
+       AND data_source = ?
+     LIMIT 1
+"""
+
+_HKO_COVERAGE_STATUS_WORLD_SQL = """
+    SELECT status
+      FROM world.data_coverage
+     WHERE data_table = ? AND city = ? AND target_date = ?
+       AND data_source = ?
+     LIMIT 1
+"""
+
+
+def _hko_daily_extract_coverage_status(
+    conn,
+    *,
+    target_date: date,
+) -> str | None:
+    attached = {
+        str(row[1])
+        for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    sql = (
+        _HKO_COVERAGE_STATUS_WORLD_SQL
+        if "world" in attached
+        else _HKO_COVERAGE_STATUS_MAIN_SQL
+    )
+    row = conn.execute(
+        sql,
+        (
+            DataTable.OBSERVATIONS.value,
+            HKO_CITY_NAME,
+            target_date.isoformat(),
+            HKO_SOURCE,
+        ),
+    ).fetchone()
+    return None if row is None else str(row[0])
+
+
+def hko_daily_extract_coverage_repair_needed(
+    conn,
+    *,
+    target_date: date,
+) -> bool:
+    """Return whether a present final observation may repair coverage."""
+
+    return _hko_daily_extract_coverage_status(
+        conn,
+        target_date=target_date,
+    ) in {
+        None,
+        CoverageStatus.MISSING.value,
+        CoverageStatus.FAILED.value,
+    }
+
+
+def hko_daily_extract_recent_coverage_repair_dates(
+    conn,
+    *,
+    present_dates: Iterable[date],
+) -> tuple[date, ...]:
+    """Filter present observations to repairable canonical coverage gaps."""
+
+    return tuple(
+        target_d
+        for target_d in present_dates
+        if hko_daily_extract_coverage_repair_needed(
+            conn,
+            target_date=target_d,
+        )
+    )
+
+
+def hko_daily_extract_recent_missing_dates(
     conn,
     *,
     now_utc: datetime,
-    rebuild_run_id: str,
-) -> dict[str, int]:
-    """Poll the finalized HKO Daily Extract until yesterday is published.
+    lookback_days: int = HKO_DAILY_EXTRACT_CATCHUP_DAYS,
+) -> tuple[date, ...]:
+    """Return missing source-correct final rows inside the bounded window."""
 
-    The hourly daemon retries only while the source-correct VERIFIED row is
-    absent. This makes publication latency, rather than an arbitrary clock
-    hour, determine when post-day probability can become exact.
-    """
+    return tuple(
+        target_d
+        for target_d in hko_daily_extract_recent_target_dates(
+            now_utc=now_utc,
+            lookback_days=lookback_days,
+        )
+        if not hko_daily_extract_date_present(conn, target_date=target_d)
+    )
+
+
+def hko_daily_extract_yesterday_present(
+    conn,
+    *,
+    now_utc: datetime,
+) -> bool:
+    """Check final-row presence without acquiring a writer or fetching HKO."""
+
+    return hko_daily_extract_date_present(
+        conn,
+        target_date=hko_daily_extract_target_date(now_utc=now_utc),
+    )
+
+
+def append_hko_daily_extract_date(
+    conn,
+    *,
+    target_date: date,
+    now_utc: datetime,
+    rebuild_run_id: str,
+    prefetched: (
+        tuple[dict[tuple[int, int, int], tuple[float, float]], str, str] | None
+    ) = None,
+) -> dict[str, int]:
+    """Materialize one completed HKO Daily Extract row when published."""
 
     stats = {"inserted": 0, "already_present": 0, "not_published": 0,
              "guard_rejected": 0, "fetch_errors": 0}
-    hkt = ZoneInfo("Asia/Hong_Kong")
-    target_d = now_utc.astimezone(hkt).date() - timedelta(days=1)
-    existing = conn.execute(
-        """
-        SELECT 1
-          FROM observations
-         WHERE city = ? AND target_date = ? AND source = ?
-           AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
-         LIMIT 1
-        """,
-        (HKO_CITY_NAME, target_d.isoformat(), HKO_SOURCE),
-    ).fetchone()
-    if existing is not None:
+    target_d = target_date
+    if hko_daily_extract_date_present(conn, target_date=target_d):
         stats["already_present"] = 1
         return stats
 
     try:
-        rows, url, payload_hash = _fetch_hko_daily_extract_month(
-            target_d.year,
-            target_d.month,
+        rows, url, payload_hash = (
+            prefetched
+            if prefetched is not None
+            else _fetch_hko_daily_extract_month(
+                target_d.year,
+                target_d.month,
+            )
         )
     except Exception as exc:  # noqa: BLE001 - source failure is durable telemetry
         stats["fetch_errors"] = 1
@@ -443,6 +581,146 @@ def append_hko_daily_extract_yesterday(
         )
     conn.commit()
     return stats
+
+
+def append_hko_daily_extract_yesterday(
+    conn,
+    *,
+    now_utc: datetime,
+    rebuild_run_id: str,
+    prefetched: (
+        tuple[dict[tuple[int, int, int], tuple[float, float]], str, str] | None
+    ) = None,
+) -> dict[str, int]:
+    """Poll yesterday's final HKO row for the legacy daily batch."""
+
+    return append_hko_daily_extract_date(
+        conn,
+        target_date=hko_daily_extract_target_date(now_utc=now_utc),
+        now_utc=now_utc,
+        rebuild_run_id=rebuild_run_id,
+        prefetched=prefetched,
+    )
+
+
+def append_hko_daily_extract_recent(
+    conn,
+    *,
+    now_utc: datetime,
+    rebuild_run_id: str,
+    lookback_days: int = HKO_DAILY_EXTRACT_CATCHUP_DAYS,
+    prefetched_by_month: (
+        dict[
+            tuple[int, int],
+            tuple[
+                dict[tuple[int, int, int], tuple[float, float]],
+                str,
+                str,
+            ],
+        ]
+        | None
+    ) = None,
+    prefetch_failures_by_month: dict[tuple[int, int], str] | None = None,
+) -> dict[str, int]:
+    """Catch up all missing final HKO rows in the bounded recent window.
+
+    SCOPE: Hong Kong completed dates in the most recent seven-day window.
+    DRAIN: the five-minute source-clock job re-fetches each missing month until
+    every published row is committed. RESET: a VERIFIED row removes only its
+    own date from the next tick; unpublished dates and unrelated sources remain
+    independent.
+    """
+
+    totals = {
+        "inserted": 0,
+        "already_present": 0,
+        "not_published": 0,
+        "guard_rejected": 0,
+        "fetch_errors": 0,
+    }
+    month_cache = dict(prefetched_by_month or {})
+    month_failures = dict(prefetch_failures_by_month or {})
+    logged_failure_months: set[tuple[int, int]] = set()
+    coverage_repairs = 0
+    for target_d in hko_daily_extract_recent_target_dates(
+        now_utc=now_utc,
+        lookback_days=lookback_days,
+    ):
+        if hko_daily_extract_date_present(conn, target_date=target_d):
+            if hko_daily_extract_coverage_repair_needed(
+                conn,
+                target_date=target_d,
+            ):
+                record_written(
+                    conn,
+                    data_table=DataTable.OBSERVATIONS,
+                    city=HKO_CITY_NAME,
+                    data_source=HKO_SOURCE,
+                    target_date=target_d,
+                )
+                coverage_repairs += 1
+            totals["already_present"] += 1
+            continue
+        month_key = (target_d.year, target_d.month)
+        if month_key in month_failures:
+            if month_key not in logged_failure_months:
+                logger.warning(
+                    "HKO Daily Extract prefetch failed for %04d-%02d: %s",
+                    *month_key,
+                    month_failures[month_key],
+                )
+                logged_failure_months.add(month_key)
+            totals["fetch_errors"] += 1
+            record_failed(
+                conn,
+                data_table=DataTable.OBSERVATIONS,
+                city=HKO_CITY_NAME,
+                data_source=HKO_SOURCE,
+                target_date=target_d,
+                reason=CoverageReason.NETWORK_ERROR,
+                retry_after=_retry_embargo(hours=1),
+            )
+            conn.commit()
+            continue
+        prefetched = month_cache.get(month_key)
+        if prefetched is None:
+            try:
+                prefetched = _fetch_hko_daily_extract_month(*month_key)
+            except Exception as exc:  # noqa: BLE001 - one month remains retryable
+                totals["fetch_errors"] += 1
+                logger.warning(
+                    "HKO Daily Extract fetch failed for %04d-%02d: %s",
+                    *month_key,
+                    exc,
+                )
+                record_failed(
+                    conn,
+                    data_table=DataTable.OBSERVATIONS,
+                    city=HKO_CITY_NAME,
+                    data_source=HKO_SOURCE,
+                    target_date=target_d,
+                    reason=CoverageReason.NETWORK_ERROR,
+                    retry_after=_retry_embargo(hours=1),
+                )
+                conn.commit()
+                continue
+            month_cache[month_key] = prefetched
+        result = append_hko_daily_extract_date(
+            conn,
+            target_date=target_d,
+            now_utc=now_utc,
+            rebuild_run_id=rebuild_run_id,
+            prefetched=prefetched,
+        )
+        for key in totals:
+            totals[key] += int(result.get(key, 0))
+    if coverage_repairs:
+        conn.commit()
+        logger.info(
+            "HKO Daily Extract repaired canonical coverage rows: %d",
+            coverage_repairs,
+        )
+    return totals
 
 
 def _fetch_hko_month(

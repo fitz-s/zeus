@@ -1,5 +1,5 @@
 # Created: prior to 2026-05-24
-# Last reused or audited: 2026-06-04
+# Last reused or audited: 2026-07-28
 # Authority basis: EDLI v1 §10 online MarketChannelIngestor contract.
 #   2026-06-04: 5th-instance WAL-bloat fix — pre-capture pattern for on_connect
 #   REST orderbook fetch; seed_from_rest gains pre_cached kwarg; on_connect gains
@@ -1257,10 +1257,11 @@ def active_weather_token_metadata_for_tokens(
         return {}
 
     predicates = []
-    if "active" in columns:
-        predicates.append("COALESCE(active, 0) = 1")
-    if "closed" in columns:
-        predicates.append("COALESCE(closed, 0) = 0")
+    if purpose == "entry":
+        if "active" in columns:
+            predicates.append("COALESCE(active, 0) = 1")
+        if "closed" in columns:
+            predicates.append("COALESCE(closed, 0) = 0")
     if "event_slug" in columns:
         predicates.append(
             "(LOWER(COALESCE(event_slug, '')) LIKE '%weather%' "
@@ -1710,6 +1711,23 @@ class MarketChannelOnlineService:
                 )
                 written += len(results)
                 continue
+            prior_quotes = {
+                token_id: self.ingestor.quote_cache.get(token_id)
+                for token_id in captured
+            }
+            seen_order_size = len(self.ingestor._seen_quote_event_order)
+            prior_sink_events = list(
+                self.ingestor._deferred_market_event_sink_events
+            )
+            prior_sink_indexes = dict(
+                self.ingestor._deferred_market_event_sink_indexes
+            )
+            prior_sink_coalesced = (
+                self.ingestor.deferred_market_event_sink_coalesced_count
+            )
+            prior_sink_overflow = (
+                self.ingestor.deferred_market_event_sink_overflow_count
+            )
             with self.ingestor.defer_market_event_sink():
                 try:
                     with write_gate:
@@ -1726,7 +1744,47 @@ class MarketChannelOnlineService:
                             commit()
                     if self.ingestor._market_event_sink_independently_coordinated:
                         self.ingestor.flush_deferred_market_event_sink()
-                except TimeoutError as exc:
+                except (TimeoutError, sqlite3.OperationalError) as exc:
+                    if not _is_sqlite_write_contention(exc):
+                        raise
+                    try:
+                        self.ingestor._feasibility_conn.rollback()
+                    except sqlite3.Error:
+                        if logger is not None:
+                            logger.exception(
+                                "EDLI market-channel REST seed rollback failed"
+                            )
+                    for token_id, previous in prior_quotes.items():
+                        if previous is None:
+                            self.ingestor.quote_cache.by_token_id.pop(token_id, None)
+                        else:
+                            self.ingestor.quote_cache.by_token_id[token_id] = previous
+                    if len(self.ingestor._seen_quote_event_order) >= seen_order_size:
+                        while (
+                            len(self.ingestor._seen_quote_event_order)
+                            > seen_order_size
+                        ):
+                            event_id = self.ingestor._seen_quote_event_order.pop()
+                            self.ingestor._seen_quote_event_ids.discard(event_id)
+                    else:
+                        # The bounded dedupe queue evicted an older id while this
+                        # uncommitted chunk was being built. Clearing is conservative:
+                        # a retry may repeat an idempotent projection write, but it
+                        # cannot suppress the rolled-back quote as already durable.
+                        self.ingestor._seen_quote_event_order.clear()
+                        self.ingestor._seen_quote_event_ids.clear()
+                    self.ingestor._deferred_market_event_sink_events = (
+                        prior_sink_events
+                    )
+                    self.ingestor._deferred_market_event_sink_indexes = (
+                        prior_sink_indexes
+                    )
+                    self.ingestor.deferred_market_event_sink_coalesced_count = (
+                        prior_sink_coalesced
+                    )
+                    self.ingestor.deferred_market_event_sink_overflow_count = (
+                        prior_sink_overflow
+                    )
                     self.rest_seed_backpressure_count += 1
                     self.rest_seed_backpressure_reason = str(exc)
                     if logger is not None:

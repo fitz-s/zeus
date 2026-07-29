@@ -339,6 +339,7 @@ _MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
         "entry_price",
         "p_posterior",
         "entry_ci_width",
+        "decision_snapshot_id",
         "entry_method",
         "fill_authority",
         "recovery_authority",

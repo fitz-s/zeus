@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-20; last_reviewed=2026-07-03; last_reused=2026-07-03
+# Lifecycle: created=2026-06-20; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival
 #   (exit_pending_missing re-stamp loop, day0 static-close deferral, canonical
 #   EXIT_ORDER_POSTED dual-write, monitor-cadence watchdog).
@@ -45,7 +45,10 @@ from src.execution.exit_lifecycle import (
 from src.state.portfolio import ExitContext, Position, PortfolioState
 from src.state.db import init_schema
 from src.state.projection import upsert_position_current
-from src.engine.lifecycle_events import build_position_current_projection
+from src.engine.lifecycle_events import (
+    build_monitor_refreshed_canonical_write,
+    build_position_current_projection,
+)
 
 
 _SAFE_ADDRESS = "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f"
@@ -829,6 +832,10 @@ class TestCanonicalExitOrderPostedProvenance:
             position_state="day0_window",
             day0_active=True,
             exit_reason="DAY0_HARD_FACT_BIN_DEAD",
+            probability_receipt={
+                "probability_witness_identity": "day0-witness-1",
+                "evidence_content_hash": "b" * 64,
+            },
         )
         exit_intent = build_exit_intent(pos, exit_context)
         hard_fact_authority = replace(
@@ -869,7 +876,7 @@ class TestCanonicalExitOrderPostedProvenance:
 
         row = conn.execute(
             """
-            SELECT payload_json
+            SELECT decision_id, payload_json
               FROM position_events
              WHERE position_id = ?
                AND event_type = 'EXIT_INTENT'
@@ -880,6 +887,12 @@ class TestCanonicalExitOrderPostedProvenance:
         ).fetchone()
         assert row is not None
         payload = json.loads(row["payload_json"])
+        assert row["decision_id"] == exit_intent.decision_id
+        assert payload["exit_intent_decision_id"] == exit_intent.decision_id
+        assert payload["exit_intent_probability_receipt"] == {
+            "probability_witness_identity": "day0-witness-1",
+            "evidence_content_hash": "b" * 64,
+        }
         assert payload["exit_intent_reason"] == "DAY0_HARD_FACT_BIN_DEAD"
         assert payload["exit_intent_current_market_price"] == pytest.approx(0.5)
         assert payload["exit_intent_best_bid"] == pytest.approx(0.48)
@@ -890,6 +903,28 @@ class TestCanonicalExitOrderPostedProvenance:
         assert payload["exit_intent_hours_to_settlement"] == pytest.approx(0.5)
         assert payload["exit_intent_position_state"] == "day0_window"
         assert payload["exit_intent_day0_active"] is True
+
+    def test_monitor_refreshed_writes_compact_probability_receipt(self):
+        pos = _make_position()
+        pos.last_monitor_at = "2026-07-28T14:00:00+00:00"
+        pos.last_monitor_prob = 0.41
+        pos.last_monitor_prob_is_fresh = True
+        pos._monitor_probability_receipt = {
+            "posterior_id": "posterior-9",
+            "evidence_content_hash": "c" * 64,
+        }
+
+        events, _projection = build_monitor_refreshed_canonical_write(
+            pos,
+            sequence_no=4,
+            phase_after="active",
+        )
+
+        payload = json.loads(events[0]["payload_json"])
+        assert payload["monitor_probability_receipt"] == {
+            "posterior_id": "posterior-9",
+            "evidence_content_hash": "c" * 64,
+        }
 
 
 # ---------------------------------------------------------------------------

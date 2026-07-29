@@ -879,6 +879,8 @@ class ExitIntent:
     submit_order_type: str | None = None
     close_position: bool = True
     capital_certificate: Mapping[str, object] | None = None
+    decision_id: str = ""
+    probability_receipt: Mapping[str, object] | None = None
     fresh_prob: float | None = None
     fresh_prob_is_fresh: bool | None = None
     best_ask: float | None = None
@@ -1076,6 +1078,7 @@ def place_sell_order(
     executable_snapshot_orderbook_top_bid: object | None = None,
     executable_snapshot_orderbook_top_ask: object | None = None,
     decision_id: str = "",
+    q_version: str = "",
     execution_proof_verified: bool = False,
     execution_authority_deadline_utc: str = "",
 ) -> OrderResult:
@@ -1110,17 +1113,23 @@ def place_sell_order(
             status="rejected",
             reason=deadline_error,
         )
-    if decision_id:
+    if decision_id or q_version:
         try:
             params = signature(execute_exit_order).parameters
-            accepts_decision_id = (
-                "decision_id" in params
-                or any(param.kind == Parameter.VAR_KEYWORD for param in params.values())
+            accepts_kwargs = any(
+                param.kind == Parameter.VAR_KEYWORD
+                for param in params.values()
             )
         except (TypeError, ValueError):
-            accepts_decision_id = True
-        if accepts_decision_id:
-            return execute_exit_order(intent, decision_id=decision_id)
+            params = {}
+            accepts_kwargs = True
+        kwargs = {}
+        if decision_id and ("decision_id" in params or accepts_kwargs):
+            kwargs["decision_id"] = decision_id
+        if q_version and ("q_version" in params or accepts_kwargs):
+            kwargs["q_version"] = q_version
+        if kwargs:
+            return execute_exit_order(intent, **kwargs)
     return execute_exit_order(intent)
 
 
@@ -2329,6 +2338,29 @@ def _dual_write_canonical_economic_close_if_available(
 def build_exit_intent(position: Position, exit_context: ExitContext) -> ExitIntent:
     """Build the explicit exit-intent contract before any execution behavior happens."""
     token_id = position.token_id if position.direction == "buy_yes" else position.no_token_id
+    probability_receipt = (
+        dict(exit_context.probability_receipt)
+        if exit_context.probability_receipt is not None
+        else None
+    )
+    decision_payload = {
+        "trade_id": position.trade_id,
+        "reason": exit_context.exit_reason,
+        "token_id": token_id,
+        "shares": position.effective_shares,
+        "fresh_prob": exit_context.fresh_prob,
+        "current_market_price": exit_context.current_market_price,
+        "best_bid": exit_context.best_bid,
+        "probability_receipt": probability_receipt,
+    }
+    decision_digest = hashlib.sha256(
+        json.dumps(
+            decision_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()[:24]
     return ExitIntent(
         trade_id=position.trade_id,
         reason=exit_context.exit_reason,
@@ -2336,6 +2368,8 @@ def build_exit_intent(position: Position, exit_context: ExitContext) -> ExitInte
         shares=position.effective_shares,
         current_market_price=float(exit_context.current_market_price) if exit_context.current_market_price is not None else 0.0,
         best_bid=exit_context.best_bid,
+        decision_id=f"exit:{position.trade_id}:{decision_digest}",
+        probability_receipt=probability_receipt,
         fresh_prob=float(exit_context.fresh_prob) if exit_context.fresh_prob is not None else None,
         fresh_prob_is_fresh=exit_context.fresh_prob_is_fresh,
         best_ask=exit_context.best_ask,
@@ -3565,6 +3599,7 @@ def _record_exit_intent_before_execution_gates(
         error="",
         event_type="EXIT_INTENT",
         extra_payload=_exit_intent_audit_payload(exit_intent),
+        decision_id=exit_intent.decision_id or None,
     )
     _commit_exit_write_boundary(conn, stage="exit_intent")
 
@@ -3586,6 +3621,12 @@ def _exit_intent_audit_payload(exit_intent: ExitIntent) -> dict[str, object]:
             if exit_intent.capital_certificate is not None
             else None
         ),
+        "exit_intent_decision_id": exit_intent.decision_id,
+        "exit_intent_probability_receipt": (
+            dict(exit_intent.probability_receipt)
+            if exit_intent.probability_receipt is not None
+            else None
+        ),
         "exit_intent_best_ask": exit_intent.best_ask,
         "exit_intent_market_vig": exit_intent.market_vig,
         "exit_intent_fresh_prob": exit_intent.fresh_prob,
@@ -3604,6 +3645,7 @@ def _dual_write_canonical_pending_exit_if_available(
     error: str,
     event_type: str = "EXIT_ORDER_REJECTED",
     extra_payload: dict[str, object] | None = None,
+    decision_id: str | None = None,
 ) -> bool:
     """Backwards-compat shim — routes to the canonical transition_phase writer.
 
@@ -3624,6 +3666,7 @@ def _dual_write_canonical_pending_exit_if_available(
         error=error,
         source_module="src.execution.exit_lifecycle",
         extra_payload=extra_payload,
+        decision_id=decision_id,
     )
 
 
@@ -4296,7 +4339,19 @@ def _execute_live_exit(
             best_bid=best_bid,
             exact_limit_price=exit_intent.exact_limit_price,
             submit_order_type=exit_intent.submit_order_type,
-            decision_id=f"exit:{position.trade_id}",
+            decision_id=exit_intent.decision_id or f"exit:{position.trade_id}",
+            q_version=str(
+                (
+                    exit_intent.probability_receipt.get("q_version")
+                    or exit_intent.probability_receipt.get(
+                        "probability_content_identity"
+                    )
+                    or exit_intent.probability_receipt.get("posterior_id")
+                    or ""
+                )
+                if exit_intent.probability_receipt is not None
+                else ""
+            ),
             execution_proof_verified=True,
             **submit_snapshot_context,
         )

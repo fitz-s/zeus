@@ -6,7 +6,7 @@
 #   byte-identical reconciliation events vs the legacy long-connection path.
 # Reuse: Run when command_recovery orchestration, venue_sync_contract, or the
 #   scheduled _edli_command_recovery_cycle connection topology changes.
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-28
 # Authority basis: operator directive 2026-06-11 ("cleanest STRUCTURAL fix") +
 #   the dependency_db_locked live incident (riskguard DATA_DEGRADED since ~03:36Z).
 """Relationship tests for the three-phase venue/DB sync contract.
@@ -112,6 +112,17 @@ class _RecordingClient:
         self._recorder.on_client_call("get_open_orders")
         return list(self._open_orders)
 
+    def get_account_truth(self, *, deadline_monotonic):
+        assert deadline_monotonic > time.monotonic()
+        return type(
+            "Truth",
+            (),
+            {
+                "open_orders": tuple(self.get_open_orders()),
+                "trades": tuple(self.get_trades()),
+            },
+        )()
+
     def get_trades(self):
         self._recorder.on_client_call("get_trades")
         return list(self._trades)
@@ -125,64 +136,154 @@ class _RecordingClient:
         return {}
 
 
-def test_capture_snapshot_reads_account_surfaces_from_v2_adapter_when_outer_client_lacks_trades():
+def test_capture_snapshot_uses_one_authoritative_v2_account_truth_read():
     from src.execution import venue_sync_contract as vsc
 
     class Adapter:
-        def get_open_orders(self):
-            return [{"id": "adapter-order"}]
+        def __init__(self):
+            self.calls = 0
 
-        def get_trades(self):
-            return [{"id": "adapter-trade"}]
+        def get_account_truth(self, *, deadline_monotonic):
+            assert deadline_monotonic > time.monotonic()
+            self.calls += 1
+            return type(
+                "Truth",
+                (),
+                {
+                    "open_orders": [{"id": "adapter-order"}],
+                    "trades": [{"id": "adapter-trade"}],
+                },
+            )()
 
     class OuterClient:
         def __init__(self):
             self.adapter = Adapter()
 
         def get_open_orders(self):
-            return [{"id": "outer-order"}]
+            raise AssertionError("outer account fallback must not run")
+
+        def get_trades(self):
+            raise AssertionError("outer account fallback must not run")
 
         def _ensure_v2_adapter(self):
             return self.adapter
 
     snapshot = vsc.capture_venue_read_snapshot(OuterClient(), order_ids=[])
 
-    assert snapshot.get_open_orders() == [{"id": "outer-order"}]
+    assert snapshot.get_open_orders() == [{"id": "adapter-order"}]
     assert snapshot.get_trades() == [{"id": "adapter-trade"}]
+    assert snapshot._live_client.adapter.calls == 1
 
 
-def test_capture_snapshot_retries_transient_account_read_once():
+def test_capture_snapshot_account_read_failure_is_typed_without_retry():
     from src.execution import venue_sync_contract as vsc
 
     class Client:
         def __init__(self):
             self.trade_reads = 0
 
-        def get_open_orders(self):
-            return []
-
-        def get_trades(self):
+        def get_account_truth(self, *, deadline_monotonic):
+            assert deadline_monotonic > time.monotonic()
             self.trade_reads += 1
-            if self.trade_reads == 1:
-                raise ConnectionError("incomplete response body")
-            return [{"id": "confirmed-trade"}]
+            raise ConnectionError("incomplete response body")
 
     client = Client()
-    snapshot = vsc.capture_venue_read_snapshot(client, order_ids=[])
+    with pytest.raises(vsc.IncompleteAccountTruthError, match="INCOMPLETE_ACCOUNT_TRUTH"):
+        vsc.capture_venue_read_snapshot(client, order_ids=[])
 
-    assert snapshot.get_trades() == [{"id": "confirmed-trade"}]
-    assert client.trade_reads == 2
+    assert client.trade_reads == 1
+
+
+def test_restart_preflight_uses_separate_bounded_account_truth_deadline(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    monkeypatch.setenv(
+        "ZEUS_RESTART_RECOVERY_ACCOUNT_TRUTH_DEADLINE_SECONDS",
+        "61",
+    )
+
+    assert command_recovery._account_truth_snapshot_kwargs(
+        "restart_preflight"
+    ) == {"account_truth_deadline_seconds": "61"}
+    assert command_recovery._account_truth_snapshot_kwargs("live_tick") == {}
+    assert command_recovery._account_truth_snapshot_kwargs("boot_fast") == {}
+    monkeypatch.delenv(
+        "ZEUS_RESTART_RECOVERY_ACCOUNT_TRUTH_DEADLINE_SECONDS",
+    )
+    assert command_recovery._account_truth_snapshot_kwargs(
+        "restart_preflight"
+    ) == {"account_truth_deadline_seconds": "60.0"}
+
+
+def test_incomplete_account_truth_never_reaches_apply_or_mutates_db(tmp_path):
+    from src.execution import venue_sync_contract as vsc
+
+    class Adapter:
+        def get_account_truth(self, *, deadline_monotonic):
+            raise vsc.IncompleteAccountTruthError("INCOMPLETE_ACCOUNT_TRUTH: TLS failure")
+
+    class Client:
+        def _ensure_v2_adapter(self):
+            return Adapter()
+
+    db_path = tmp_path / "account-truth.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE writes (value TEXT NOT NULL)")
+    conn.commit()
+    conn.close()
+
+    def factory():
+        return sqlite3.connect(db_path)
+
+    with pytest.raises(vsc.IncompleteAccountTruthError, match="INCOMPLETE_ACCOUNT_TRUTH"):
+        vsc.run_three_phase(
+            lambda conn: conn.execute("SELECT 1").fetchone()[0],
+            lambda _snapshot: vsc.capture_venue_read_snapshot(Client(), order_ids=[]),
+            lambda conn, _payload: conn.execute("INSERT INTO writes VALUES ('apply')"),
+            conn_factory=factory,
+            label="test.incomplete_account_truth",
+        )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM writes").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_post_submit_unknown_snapshot_absence_never_applies(tmp_path):
+    """A point-in-time empty account cannot clear an already-started submit."""
+    from src.execution import command_recovery
+
+    db_path = tmp_path / "fast-pass-incomplete-account-truth.db"
+    seed = sqlite3.connect(db_path)
+    seed.execute("CREATE TABLE fast_pass_probe (value TEXT NOT NULL)")
+    seed.commit()
+    summary = command_recovery._apply_edli_post_submit_unknown_absence(
+        seed,
+        [{
+            "aggregate_id": "aggregate-incomplete",
+            "execution_command_id": "command-incomplete",
+            "token_id": "token-incomplete",
+        }],
+        None,
+        None,
+    )
+
+    assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+    assert seed.execute("SELECT COUNT(*) FROM fast_pass_probe").fetchone()[0] == 0
+    seed.close()
 
 
 def test_capture_snapshot_preserves_point_order_timeout_as_unknown():
     from src.execution import venue_sync_contract as vsc
 
     class Client:
-        def get_open_orders(self):
-            return []
-
-        def get_trades(self):
-            return []
+        def get_account_truth(self, *, deadline_monotonic):
+            assert deadline_monotonic > time.monotonic()
+            return type("Truth", (), {"open_orders": (), "trades": ()})()
 
         def get_order(self, _order_id):
             raise TimeoutError("transient timeout")
@@ -198,11 +299,9 @@ def test_capture_snapshot_normalizes_exact_empty_point_order_shape_to_not_found(
     from src.venue.response_contracts import VenueResponseShapeError
 
     class Client:
-        def get_open_orders(self):
-            return []
-
-        def get_trades(self):
-            return []
+        def get_account_truth(self, *, deadline_monotonic):
+            assert deadline_monotonic > time.monotonic()
+            return type("Truth", (), {"open_orders": (), "trades": ()})()
 
         def get_order(self, _order_id):
             raise VenueResponseShapeError("get_order", {}, "missing status")
@@ -647,22 +746,22 @@ def test_restart_preflight_scope_projects_acked_entry_order_before_preflight(mon
         verify.close()
 
 
-def test_live_tick_releases_post_submit_unknown_no_command_before_broad_snapshot(
+def test_live_tick_keeps_post_submit_unknown_before_broad_snapshot(
     monkeypatch,
     tmp_path,
 ):
-    """No-command EDLI unknowns must not wait behind historical venue reads."""
+    """The fast pass keeps unknown authority even when broad reads are delayed."""
     import tests.test_command_recovery as h
     from src.execution import command_recovery, venue_sync_contract
 
     db_path = tmp_path / "recovery-live-tick-post-submit-unknown.db"
-    world_path = tmp_path / "empty-world-with-legacy-edli-tables.db"
     aggregate_id = "event-fast:intent-fast:token-fast"
     execution_command_id = "edli_exec_cmd:event-fast:intent-fast:token-fast:buy_no"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     init_schema(seed_conn)
+    init_schema_trade_only(seed_conn)
     h._insert_edli_live_order_event(
         seed_conn,
         aggregate_id=aggregate_id,
@@ -735,18 +834,18 @@ def test_live_tick_releases_post_submit_unknown_no_command_before_broad_snapshot
     )
     seed_conn.commit()
     seed_conn.close()
-    world_conn = sqlite3.connect(str(world_path))
-    from src.state.db import init_schema as init_world_schema
-    init_world_schema(world_conn)
-    world_conn.commit()
-    world_conn.close()
 
     recorder = _Recorder()
-    factory = _make_conn_factory(db_path, recorder, attach_world_path=world_path)
+    factory = _make_conn_factory(db_path, recorder)
     client = _RecordingClient(recorder, open_orders=[], trades=[])
     monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "5")
+
+    capture_calls = 0
 
     def _block_broad_snapshot(*args, **kwargs):
+        nonlocal capture_calls
+        capture_calls += 1
         raise RuntimeError("broad snapshot blocked")
 
     monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _block_broad_snapshot)
@@ -757,6 +856,7 @@ def test_live_tick_releases_post_submit_unknown_no_command_before_broad_snapshot
             client=client,
             scope="live_tick",
         )
+    assert capture_calls == 1
 
     verify = sqlite3.connect(str(db_path))
     verify.row_factory = sqlite3.Row
@@ -782,12 +882,10 @@ def test_live_tick_releases_post_submit_unknown_no_command_before_broad_snapshot
         (aggregate_id,),
     ).fetchone()
 
-    assert projection["current_state"] == "CAP_TRANSITIONED"
-    assert bool(projection["pending_reconcile"]) is False
-    assert cap["reservation_status"] == "RELEASED"
-    assert json.loads(reconcile_payload["payload_json"])["required_predicates"][
-        "no_venue_command"
-    ] is True
+    assert projection["current_state"] == "PENDING_RECONCILE"
+    assert bool(projection["pending_reconcile"]) is True
+    assert cap["reservation_status"] == "RESERVED"
+    assert reconcile_payload is None
     for method, open_ids, open_labels in recorder.client_calls:
         assert not open_ids, (
             f"venue call {method} occurred while {len(open_ids)} DB connection(s) "

@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-07-28
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ from src.events.reactor import (
     TRANSIENT_MONEY_PATH_REASONS,
     _EXECUTABLE_SNAPSHOT_RETRY,
     _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
+    _build_day0_posterior_redecision_events,
     _edli_emit_day0_extreme_events,
     _is_posterior_staleness_reason,
     _process_pending_cancelled,
@@ -324,7 +325,7 @@ def test_global_batch_claim_tokens_drain_paged_and_unpaged_no_submit_losers(
     ).fetchall()
     assert [tuple(row) for row in drained_rows] == [
         ("pending", None, _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY),
-        ("pending", None, _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY),
+        ("pending", None, GLOBAL_WINNER_TARGETED_CLAIM),
     ]
     assert reactor._no_submit_claim_requeue_debt == {}
 
@@ -743,6 +744,51 @@ def test_blocked_entry_cycle_returns_before_runtime_db_setup(monkeypatch):
     assert run_edli_event_reactor_cycle(active_lock=_Lock()) is True
 
 
+def test_blocked_entry_cycle_keeps_held_sell_completion_wake(monkeypatch):
+    import src.main as main
+    import src.state.db as db
+    from src.events.reactor import run_edli_event_reactor_cycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    class _Lock:
+        def locked(self):
+            return False
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        riskguard,
+        "get_current_level",
+        lambda: RiskLevel.YELLOW,
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: pytest.fail("completion wake must stay durable while blocked"),
+    )
+
+    assert (
+        run_edli_event_reactor_cycle(
+            active_lock=_Lock(),
+            producer_wake_reason=(
+                "held_sell_global_auction_completion_requested"
+            ),
+        )
+        is False
+    )
+
+
 def test_periodic_cycle_yields_to_already_pending_day0_before_runtime_db_setup(
     monkeypatch,
 ):
@@ -989,6 +1035,70 @@ def test_targeted_forecast_wake_ignores_disjoint_family_revision(monkeypatch):
     assert reads == [frozenset({current.wake_id})]
 
 
+def test_day0_posterior_advance_reemits_current_observation_on_new_probability_clock():
+    conn, _store_obj = _store()
+    observation = Day0ExtremeUpdatedPayload(
+        city="Chicago",
+        target_date="2026-07-28",
+        metric="high",
+        settlement_source="weather_underground",
+        station_id="KORD",
+        observation_time="2026-07-28T12:00:00+00:00",
+        observation_available_at="2026-07-28T12:00:05+00:00",
+        raw_value=30.0,
+        rounded_value=30,
+        high_so_far=30.0,
+        source_match_status="MATCH",
+        local_date_status="MATCH",
+        station_match_status="MATCH",
+        dst_status="UNAMBIGUOUS",
+        metric_match_status="MATCH",
+        rounding_status="MATCH",
+        source_authorized_status="AUTHORIZED",
+        live_authority_status="live",
+    )
+    prior = make_day0_extreme_updated_event(
+        entity_key="Chicago|2026-07-28|high|KORD",
+        source="day0_extreme_updated_trigger",
+        observed_at=observation.observation_time,
+        received_at="2026-07-28T12:00:06+00:00",
+        payload=observation,
+        causal_snapshot_id="observation-context",
+    )
+    EventStore(conn).insert_or_ignore(prior)
+    conn.commit()
+    posterior = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Chicago|2026-07-28|high|posterior-42",
+        source="cycle-test-1",
+        observed_at="2026-07-28T12:09:55+00:00",
+        available_at="2026-07-28T12:09:56+00:00",
+        received_at="2026-07-28T12:09:57+00:00",
+        payload={
+            "city": "Chicago",
+            "target_date": "2026-07-28",
+            "metric": "high",
+        },
+        causal_snapshot_id="posterior-42",
+    )
+
+    events = _build_day0_posterior_redecision_events(
+        conn,
+        (posterior,),
+        day0_families={("Chicago", "2026-07-28", "high")},
+        received_at="2026-07-28T12:09:57+00:00",
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == "DAY0_EXTREME_UPDATED"
+    assert event.available_at == posterior.available_at
+    assert event.causal_snapshot_id == "posterior-42"
+    payload = json.loads(event.payload_json)
+    assert payload["observation_available_at"] == observation.observation_available_at
+    assert payload["posterior_redecision_identity"] == "posterior-42"
+
+
 def test_reactor_wake_oldest_joint_input_prevents_forecast_starvation(tmp_path):
     from src.runtime import reactor_wake
 
@@ -1067,6 +1177,13 @@ def test_reactor_wake_day0_still_preempts_older_joint_inputs(tmp_path):
         path=path,
         wake_id="day0-new",
         published_at=datetime(2026, 7, 25, 12, 0, 1, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="completion-newer",
+        published_at=datetime(2026, 7, 25, 12, 0, 1, 500000, tzinfo=timezone.utc),
     )
     reactor_wake.publish_reactor_wake(
         source="fill",
@@ -1157,6 +1274,73 @@ def test_reactor_wake_fill_is_bounded_fair_with_continuous_joint_inputs(tmp_path
     third = reactor_wake.read_reactor_wake(path=path)
     assert third is not None
     assert third.wake_id == "forecast-new"
+
+
+def test_restart_completion_debt_preempts_continuous_ordinary_wakes(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="periodic_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="completion-generic",
+        published_at=datetime(2026, 7, 28, 8, 0, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="forecast-between",
+        published_at=datetime(2026, 7, 28, 8, 0, 1, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="price-between",
+        published_at=datetime(2026, 7, 28, 8, 0, 1, 100000, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="fill",
+        reason="position_fill_projected",
+        path=path,
+        wake_id="fill-between",
+        published_at=datetime(2026, 7, 28, 8, 0, 1, 200000, tzinfo=timezone.utc),
+        event_ids=("fill-event",),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="forecast-later",
+        published_at=datetime(2026, 7, 28, 8, 0, 1, 300000, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="completion-family",
+        published_at=datetime(2026, 7, 28, 8, 0, 2, tzinfo=timezone.utc),
+        forecast_families=(("Paris", "2026-07-28", "low"),),
+    )
+
+    selected = reactor_wake.read_reactor_wake(path=path)
+    assert selected is not None
+    assert selected.wake_id == "completion-generic"
+    completion_batch = reactor_wake.coalescible_reactor_wakes(
+        selected,
+        path=path,
+    )
+    assert tuple(wake.wake_id for wake in completion_batch) == (
+        "completion-generic",
+        "completion-family",
+    )
+    assert {
+        family
+        for wake in completion_batch
+        for family in wake.forecast_families
+    } == {("Paris", "2026-07-28", "low")}
 
 
 def test_position_fill_wake_is_an_exact_targeted_reactor_fast_path():
@@ -1596,12 +1780,19 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         main._day0_exit_monitor_attempts.clear()
 
 
-def test_monitor_preempts_once_then_next_auction_must_complete():
+def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
     from types import SimpleNamespace
 
     from src.events import reactor
+    from src.runtime import reactor_wake
 
     pending = [True]
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", lambda _at: ())
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **_kwargs: None,
+    )
     reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     try:
         due_at_start, first_probe = (
@@ -1636,6 +1827,122 @@ def test_monitor_preempts_once_then_next_auction_must_complete():
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
+def test_held_sell_completion_request_deduplicates_durable_family(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    wakes = []
+
+    def publish(**kwargs):
+        wakes.append(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        publish,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _at: tuple(
+            SimpleNamespace(
+                reason=wake["reason"],
+                forecast_families=wake["forecast_families"],
+            )
+            for wake in wakes
+        ),
+    )
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-1",
+        )
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-2",
+        )
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-3",
+            family=("Paris", "2026-07-28", "LOW"),
+        )
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-4",
+            family=("Paris", "2026-07-28", "low"),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+        assert wakes == [
+            {
+                "source": "held_position_monitor",
+                "reason": (
+                    "held_sell_global_auction_completion_requested"
+                ),
+                "forecast_families": (),
+            },
+            {
+                "source": "held_position_monitor",
+                "reason": (
+                    "held_sell_global_auction_completion_requested"
+                ),
+                "forecast_families": (
+                    ("Paris", "2026-07-28", "low"),
+                ),
+            },
+        ]
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_held_sell_completion_request_survives_wake_io_failure(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    attempts = []
+    durable_wakes = []
+
+    def flaky_publish(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise OSError("wake path unavailable")
+        durable_wakes.append(
+            SimpleNamespace(
+                reason=kwargs["reason"],
+                forecast_families=kwargs["forecast_families"],
+            )
+        )
+
+    monkeypatch.setattr(reactor_wake, "publish_reactor_wake", flaky_publish)
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _at: tuple(durable_wakes),
+    )
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-1",
+            family=("Paris", "2026-07-28", "low"),
+        )
+        reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-1",
+            family=("Paris", "2026-07-28", "low"),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+        assert len(attempts) == 2
+        assert len(durable_wakes) == 1
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
 def test_day0_cancellation_does_not_discharge_monitor_fairness_debt():
     from types import SimpleNamespace
 
@@ -1655,6 +1962,57 @@ def test_day0_cancellation_does_not_discharge_monitor_fairness_debt():
                     "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
                 ],
             ),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_new_fact_supersession_does_not_discharge_monitor_fairness_debt():
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(
+                processed=0,
+                proof_accepted=0,
+                rejected=1,
+                retried=1,
+                global_auction_completed_non_cancelled=0,
+                rejection_reasons=[
+                    "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT"
+                ],
+            ),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_completion_wake_recovers_debt_after_process_restart():
+    from src.events import reactor
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        due_at_start, cancellation_probe = (
+            reactor._global_auction_monitor_cancellation_probe(
+                None,
+                completion_due=True,
+            )
+        )
+        assert due_at_start is True
+        assert cancellation_probe() is False
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+        assert (
+            reactor._settle_global_auction_monitor_fairness(
+                completion_due_at_start=True,
+                result=ReactorResult(),
+            )
+            is False
         )
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
     finally:
@@ -1772,6 +2130,7 @@ def test_global_batch_completed_economic_no_trade_consumes_current_epoch(verdict
             },
             winner_event_id=None,
             venue_submit_count=0,
+            economic_cut_completed=True,
         )
 
     reactor._submit.process_global_batch = _batch
@@ -1781,6 +2140,97 @@ def test_global_batch_completed_economic_no_trade_consumes_current_epoch(verdict
     assert result.rejected == 2
     assert result.global_auction_completed_non_cancelled == 1
     assert all(_processing_status(conn, event.event_id) == "processed" for event in events)
+
+
+@pytest.mark.parametrize(
+    (
+        "economic_cut_completed",
+        "expected_status",
+        "expected_retried",
+        "expected_rejected",
+    ),
+    (
+        (True, "processed", 0, 1),
+        (False, "pending", 1, 0),
+    ),
+)
+def test_global_batch_action_set_exhaustion_obeys_explicit_economic_cut(
+    economic_cut_completed,
+    expected_status,
+    expected_retried,
+    expected_rejected,
+):
+    conn, store = _store()
+    event = _forecast_event("global-action-set-exhausted", target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    reactor = _global_batch_probe_reactor(store, {})
+
+    def _batch(events, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        return GlobalBatchSubmitResult(
+            receipts={
+                item.event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=item.event_id,
+                    causal_snapshot_id=item.causal_snapshot_id,
+                    reason=(
+                        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+                        "families=0:candidates=1"
+                    ),
+                    proof_accepted=False,
+                )
+                for item in events
+            },
+            winner_event_id=None,
+            venue_submit_count=0,
+            economic_cut_completed=economic_cut_completed,
+        )
+
+    reactor._submit.process_global_batch = _batch
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert result.retried == expected_retried
+    assert result.rejected == expected_rejected
+    assert result.global_auction_completed_non_cancelled == int(
+        economic_cut_completed
+    )
+    assert _processing_status(conn, event.event_id) == expected_status
+    if economic_cut_completed:
+        terminal_reason = (
+            "GLOBAL_AUCTION_NO_TRADE:"
+            "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+            "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+            "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+            "families=0:candidates=1"
+        )
+        assert result.rejection_reasons == [terminal_reason]
+        assert conn.execute(
+            """
+            SELECT stage, reason_code
+            FROM decision_compile_failures
+            WHERE event_id = ?
+            """,
+            (event.event_id,),
+        ).fetchall() == [("EXECUTOR_EXPRESSIBILITY", terminal_reason)]
+        assert conn.execute(
+            """
+            SELECT rejection_stage, rejection_reason, regret_bucket
+            FROM no_trade_regret_events
+            WHERE event_id = ?
+            """,
+            (event.event_id,),
+        ).fetchall() == [
+            ("EXECUTOR_EXPRESSIBILITY", terminal_reason, "HONEST_MARKET")
+        ]
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM decision_compile_failures
+            WHERE event_id = ? AND reason_code LIKE 'UNKNOWN_REVIEW_REQUIRED%'
+            """,
+            (event.event_id,),
+        ).fetchone()[0] == 0
 
 
 def test_cancelled_global_batch_is_not_a_fairness_completion():
@@ -1867,6 +2317,9 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
             receipts=receipts,
             winner_event_id=winner.event_id,
             venue_submit_count=1,
+            # Even a malformed adapter disposition must never rewrite a batch
+            # that crossed the venue side-effect boundary.
+            economic_cut_completed=True,
         )
 
     reactor._submit.process_global_batch = _batch
@@ -1890,7 +2343,14 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
             claim_generation,
             claim_attempt_count,
         )
-        calls.append((event.event_id, receipt.side_effect_status, wait_ms))
+        calls.append(
+            (
+                event.event_id,
+                receipt.side_effect_status,
+                receipt.reason,
+                wait_ms,
+            )
+        )
         if event.event_id == winner.event_id and winner_finalized:
             return True
         result.rejection_reasons.append("WORLD_WRITE_LOCK_BUSY_POST_SUBMIT")
@@ -1901,19 +2361,168 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
 
     result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=3)
 
+    assert result.global_auction_completed_non_cancelled == 0
     assert calls == (
         [
-            (winner.event_id, "VENUE_SUBMIT_ACKED", None),
-            (events[0].event_id, "NO_SUBMIT", 123),
+            (winner.event_id, "VENUE_SUBMIT_ACKED", "TEST_RECEIPT", None),
+            (events[0].event_id, "NO_SUBMIT", "TEST_RECEIPT", 123),
         ]
         if winner_finalized
-        else [(winner.event_id, "VENUE_SUBMIT_ACKED", None)]
+        else [
+            (winner.event_id, "VENUE_SUBMIT_ACKED", "TEST_RECEIPT", None)
+        ]
     )
     assert result.retried == (2 if winner_finalized else 3)
     assert result.rejection_reasons == [
         "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"
     ] * result.retried
     assert _processing_status(conn, events[1].event_id) == "processing"
+
+
+def test_global_batch_rejects_partial_side_effect_as_completed_economic_cut():
+    conn, store = _store()
+    events = (
+        _forecast_event("partial-side-effect-a", target_date="2026-05-25"),
+        _forecast_event("partial-side-effect-b", target_date="2026-05-25"),
+    )
+    for event in events:
+        store.insert_or_ignore(event)
+    reactor = _global_batch_probe_reactor(store, {})
+    observed = {}
+
+    def _batch(claimed, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        return GlobalBatchSubmitResult(
+            receipts={
+                claimed[0].event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=claimed[0].event_id,
+                    causal_snapshot_id=claimed[0].causal_snapshot_id,
+                    side_effect_status="POST_SUBMIT_UNKNOWN",
+                    venue_call_started=True,
+                    reason="SUBMIT_UNKNOWN_SIDE_EFFECT",
+                    proof_accepted=True,
+                ),
+                claimed[1].event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=claimed[1].event_id,
+                    causal_snapshot_id=claimed[1].causal_snapshot_id,
+                    reason=(
+                        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+                        "families=0:candidates=1"
+                    ),
+                    proof_accepted=False,
+                ),
+            },
+            winner_event_id=None,
+            venue_submit_count=0,
+            economic_cut_completed=True,
+        )
+
+    def _finalize(
+        event,
+        receipt,
+        *,
+        decision_time,
+        result,
+        wait_ms=None,
+        continuation_event=None,
+        claim_generation=None,
+        claim_attempt_count=None,
+    ):
+        del (
+            decision_time,
+            result,
+            wait_ms,
+            continuation_event,
+            claim_generation,
+            claim_attempt_count,
+        )
+        observed[event.event_id] = receipt.reason
+        return True
+
+    reactor._submit.process_global_batch = _batch
+    reactor._finalize_deferred_event_unit = _finalize
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=2)
+
+    assert result.global_auction_completed_non_cancelled == 0
+    assert set(observed) == {event.event_id for event in events}
+    assert set(observed.values()) == {
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        (
+            "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+            "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+            "families=0:candidates=1"
+        ),
+    }
+
+
+def test_global_batch_economic_cut_requires_durable_window_b_finalization():
+    conn, store = _store()
+    event = _forecast_event(
+        "economic-cut-window-b-lock",
+        target_date="2026-05-25",
+    )
+    store.insert_or_ignore(event)
+    reactor = _global_batch_probe_reactor(store, {})
+
+    def _batch(claimed, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        return GlobalBatchSubmitResult(
+            receipts={
+                item.event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=item.event_id,
+                    causal_snapshot_id=item.causal_snapshot_id,
+                    reason=(
+                        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+                        "families=0:candidates=1"
+                    ),
+                    proof_accepted=False,
+                )
+                for item in claimed
+            },
+            winner_event_id=None,
+            venue_submit_count=0,
+            economic_cut_completed=True,
+        )
+
+    def _window_b_lock(
+        claimed_event,
+        _receipt,
+        *,
+        decision_time,
+        result,
+        wait_ms=None,
+        continuation_event=None,
+        claim_generation=None,
+        claim_attempt_count=None,
+    ):
+        del (
+            decision_time,
+            wait_ms,
+            continuation_event,
+            claim_generation,
+            claim_attempt_count,
+        )
+        reactor._store.requeue_pending(
+            claimed_event.event_id,
+            last_error="WORLD_WRITE_LOCK_BUSY_POST_SUBMIT",
+        )
+        result.retried += 1
+        return False
+
+    reactor._submit.process_global_batch = _batch
+    reactor._finalize_deferred_event_unit = _window_b_lock
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert result.retried == 1
+    assert result.global_auction_completed_non_cancelled == 0
+    assert _processing_status(conn, event.event_id) == "pending"
 
 
 def test_global_batch_incomplete_receipt_coverage_fails_closed_for_whole_epoch():
@@ -2344,9 +2953,10 @@ def test_global_batch_defers_target_when_claim_is_reclaimed_during_solve():
         (target.event_id,),
     ).fetchone() is None
     assert conn.execute(
-        "SELECT last_error FROM opportunity_event_processing WHERE event_id = ?",
+        "SELECT processing_status, claimed_at, last_error "
+        "FROM opportunity_event_processing WHERE event_id = ?",
         (claimed.event_id,),
-    ).fetchone()[0] == "SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_NO_CURRENT_WINNER"
+    ).fetchone() == ("processing", "2026-05-25T06:16:00+00:00", None)
 
 
 def test_global_target_keeps_claim_priority_after_transient_epoch():
@@ -3068,6 +3678,86 @@ def test_global_target_processing_lease_blocks_new_target_materialization():
     ).fetchone() is None
 
 
+def test_boot_recovers_targeted_claim_only_after_prior_owner_died():
+    conn, store = _store()
+    target = _forecast_event("boot-orphan-target", target_date="2026-05-25")
+    assert store.prioritize_global_winner(target)
+    assert store.claim(
+        target.event_id,
+        claimed_at="2026-05-24T18:00:00+00:00",
+    )
+    conn.execute(
+        "UPDATE opportunity_event_processing "
+        "SET processing_status='expired', processed_at=?, "
+        "last_error='GLOBAL_WINNER_TARGET_SUPERSEDED' "
+        "WHERE consumer_name=? AND event_id=?",
+        (
+            "2026-05-24T18:01:00+00:00",
+            store._winner_pointer_consumer_name,
+            target.event_id,
+        ),
+    )
+    conn.commit()
+
+    assert (
+        store.requeue_processing_before_boot(
+            boot_at="2026-05-24T18:05:00+00:00"
+        )
+        == 1
+    )
+
+    assert conn.execute(
+        "SELECT processing_status, claimed_at, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+        (store.consumer_name, target.event_id),
+    ).fetchone() == ("pending", None, GLOBAL_WINNER_TARGETED_CLAIM)
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+        (store._winner_pointer_consumer_name, target.event_id),
+    ).fetchone() == ("pending", GLOBAL_WINNER_TARGETED_CLAIM)
+    assert store.fetch_pending(
+        decision_time="2026-05-24T18:06:00+00:00",
+        limit=1,
+    )[0].event_id == target.event_id
+
+
+def test_late_targeted_requeue_cannot_replace_newer_winner_pointer():
+    conn, store = _store()
+    old = _forecast_event("late-old-target", target_date="2026-05-25")
+    new = _forecast_event("late-new-target", target_date="2026-05-25")
+    assert store.prioritize_global_winner(old)
+    claimed_at = "2026-05-24T18:00:00+00:00"
+    assert store.claim(old.event_id, claimed_at=claimed_at)
+    attempt_count = store.attempt_count(old.event_id)
+    conn.commit()
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert store.prioritize_global_winner(
+        new,
+        current_batch_claim_generations={old.event_id: claimed_at},
+    )
+    conn.commit()
+
+    assert store.requeue_claim_if_current(
+        old.event_id,
+        claimed_at=claimed_at,
+        attempt_count=attempt_count,
+        last_error=GLOBAL_WINNER_TARGETED_CLAIM,
+    )
+
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+        (store.consumer_name, old.event_id),
+    ).fetchone() == ("expired", "GLOBAL_WINNER_TARGET_SUPERSEDED")
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+        (store._winner_pointer_consumer_name, new.event_id),
+    ).fetchone() == ("pending", GLOBAL_WINNER_TARGETED_CLAIM)
+
+
 def test_boot_generation_requeues_only_prior_runtime_claims():
     conn, store = _store()
     old = _forecast_event("prior-runtime", target_date="2026-05-25")
@@ -3363,6 +4053,19 @@ def test_global_batch_result_rejects_more_than_one_submit_or_wrong_winner():
             receipts={"first": first},
             winner_event_id=None,
             venue_submit_count=0,
+        )
+    target = _forecast_event("deferred-frontier", target_date="2026-05-25")
+    continuation = _forecast_event(
+        "submitted-continuation",
+        target_date="2026-05-26",
+    )
+    with pytest.raises(ValueError, match="next global claim"):
+        GlobalBatchSubmitResult(
+            receipts={"first": first},
+            winner_event_id="first",
+            venue_submit_count=1,
+            next_claim_event=target,
+            continuation_event=continuation,
         )
 
 
@@ -5727,6 +6430,82 @@ def _multiwinner_reactor(store, process_global_batch):
     )
     reactor._finalize_deferred_event_unit = _requeue_losers_finalize(reactor)
     return reactor
+
+
+def test_global_unknown_side_effect_winner_finalizes_before_no_submit_loser():
+    conn, store = _store()
+    loser, winner = _multiwinner_events("unknown-side-effect-order", 2)
+    for event in (loser, winner):
+        store.insert_or_ignore(event)
+
+    def _batch(claimed, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        return GlobalBatchSubmitResult(
+            receipts={
+                loser.event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=loser.event_id,
+                    causal_snapshot_id=loser.causal_snapshot_id,
+                    reason="GLOBAL_NOT_SELECTED:unknown-winner",
+                    proof_accepted=False,
+                ),
+                winner.event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=winner.event_id,
+                    causal_snapshot_id=winner.causal_snapshot_id,
+                    reason="POST_SUBMIT_UNKNOWN:test",
+                    proof_accepted=False,
+                    side_effect_status="POST_SUBMIT_UNKNOWN",
+                    venue_call_started=True,
+                    venue_ack_received=False,
+                ),
+            },
+            winner_event_id=winner.event_id,
+            venue_submit_count=0,
+        )
+
+    reactor = _multiwinner_reactor(store, _batch)
+    finalized_ids = []
+
+    def _finalize(
+        event,
+        _receipt,
+        *,
+        decision_time,
+        result,
+        wait_ms=None,
+        continuation_event=None,
+        claim_generation=None,
+        claim_attempt_count=None,
+    ):
+        del (
+            decision_time,
+            result,
+            wait_ms,
+            continuation_event,
+            claim_generation,
+            claim_attempt_count,
+        )
+        finalized_ids.append(event.event_id)
+        reactor._store.mark_processed(event.event_id)
+        return True
+
+    reactor._finalize_deferred_event_unit = _finalize
+    outcome = reactor._process_global_event_batch(
+        (loser, winner),
+        decision_time=_DT_VENUE_OPEN,
+        result=ReactorResult(),
+        budget=None,
+        cycle_start=time.monotonic(),
+        remaining=2,
+        already_charged_event_ids=frozenset(),
+        cancelled=lambda: False,
+    )
+
+    assert outcome.submitted is False
+    assert finalized_ids == [winner.event_id, loser.event_id]
+    assert _processing_status(conn, winner.event_id) == "processed"
+    assert _processing_status(conn, loser.event_id) == "processed"
 
 
 def test_global_winner_finalize_commits_fresh_frontier_with_terminal_carrier():

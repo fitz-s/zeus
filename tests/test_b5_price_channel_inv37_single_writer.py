@@ -1,6 +1,6 @@
 # Created: 2026-06-20
-# Last audited: 2026-07-18
-# Last reused/audited: 2026-07-18
+# Last audited: 2026-07-28
+# Last reused/audited: 2026-07-28
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). Quote projection
 #   writes TRADE only; derived redecision and NEW_MARKET_DISCOVERED facts write WORLD
 #   through independently coordinated lanes. TRADE quote refresh must never acquire
@@ -125,7 +125,12 @@ def test_refresh_uses_trade_only_write_connection(func_name):
     assert "world_connection_with_trades_flocked" not in called, (
         f"{func_name} must not couple TRADE quote evidence to WORLD ownership."
     )
-    assert "_bound_price_channel_sqlite_wait" in called, (
+    expected_bound = (
+        "_bound_held_quote_sqlite_wait"
+        if func_name == "_edli_refresh_held_position_quote_evidence"
+        else "_bound_price_channel_sqlite_wait"
+    )
+    assert expected_bound in called, (
         f"{func_name} must cap SQLite busy wait before entering the TRADE writer gate."
     )
 
@@ -294,6 +299,130 @@ def test_live_quote_gate_has_millisecond_contention_budget(monkeypatch):
         }
     ]
     assert leases[0]["deadline_ms"] <= 25
+
+
+def test_held_quote_gate_wait_is_clamped_by_refresh_deadline(monkeypatch):
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+
+    leases: list[dict[str, int]] = []
+
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, *_args, **kwargs):
+            leases.append(kwargs)
+            yield
+
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+    monkeypatch.setattr(lane.time, "monotonic", lambda: 100.0)
+
+    with lane._edli_price_channel_trade_write_gate(
+        owner="held-quote-budget-antibody",
+        deadline_ms=lane.PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
+        deadline_monotonic=100.75,
+    ):
+        pass
+
+    assert leases == [
+        {
+            "owner": "held-quote-budget-antibody",
+            "write_class": "live",
+            "deadline_ms": 750,
+            "max_hold_ms": lane.PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS,
+        }
+    ]
+
+
+def test_held_quote_sqlite_wait_is_clamped_by_hold_and_refresh_deadlines(
+    monkeypatch,
+):
+    from src.ingest import price_channel_ingest as lane
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        monkeypatch.setattr(lane.time, "monotonic", lambda: 100.0)
+        lane._bound_held_quote_sqlite_wait(
+            conn,
+            deadline_monotonic=101.0,
+        )
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 100
+
+        lane._bound_held_quote_sqlite_wait(
+            conn,
+            deadline_monotonic=100.075,
+        )
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 75
+
+        with pytest.raises(TimeoutError, match="deadline elapsed before DB write"):
+            lane._bound_held_quote_sqlite_wait(
+                conn,
+                deadline_monotonic=99.0,
+            )
+    finally:
+        conn.close()
+
+
+def test_held_quote_gate_never_enters_sql_after_absolute_deadline(
+    monkeypatch,
+):
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+
+    clock = iter((100.0, 100.0, 101.0))
+    monkeypatch.setattr(lane.time, "monotonic", lambda: next(clock))
+
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, *_args, **_kwargs):
+            yield
+
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+    conn = sqlite3.connect(":memory:")
+    entered = False
+    try:
+        with pytest.raises(TimeoutError, match="deadline elapsed before DB write"):
+            with lane._edli_price_channel_trade_write_gate(
+                owner="held-absolute-deadline-antibody",
+                deadline_ms=2000,
+                deadline_monotonic=100.5,
+                on_enter=lambda: lane._bound_held_quote_sqlite_wait(
+                    conn,
+                    deadline_monotonic=100.5,
+                ),
+            ):
+                entered = True
+        assert entered is False
+    finally:
+        conn.close()
+
+
+def test_held_refresh_uses_fair_deadline_bounded_trade_gate():
+    node = _func_node("_edli_refresh_held_position_quote_evidence")
+    calls = [
+        sub
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Name)
+        and sub.func.id == "_edli_price_channel_trade_write_gate"
+    ]
+    assert len(calls) == 1
+    keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+    assert isinstance(keywords["deadline_ms"], ast.Name)
+    assert (
+        keywords["deadline_ms"].id
+        == "PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS"
+    )
+    assert isinstance(keywords["deadline_monotonic"], ast.Name)
+    assert keywords["deadline_monotonic"].id == "deadline"
+    assert isinstance(keywords["on_enter"], ast.Lambda)
 
 
 def test_forever_ingestor_uses_owner_connections_not_attached_connection():

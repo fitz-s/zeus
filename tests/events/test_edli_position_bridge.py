@@ -204,6 +204,7 @@ def _seed_confirmed_buy_no_aggregate(
     *,
     fills: list[tuple[float, float, float]] | None = None,
     fill_payload_extras: list[dict] | None = None,
+    pre_submit_snapshot_id: str | None = "exec-snap-1",
 ) -> str:
     """Seed a realistic CONFIRMED buy_no aggregate.
 
@@ -230,8 +231,9 @@ def _seed_confirmed_buy_no_aggregate(
         "unit": "C",
         "market_id": CONDITION_ID,
         "q_live": 0.55,
-        "executable_snapshot_id": "exec-snap-1",
     }
+    if pre_submit_snapshot_id is not None:
+        pre_submit["executable_snapshot_id"] = pre_submit_snapshot_id
     _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=1, event_type="PreSubmitRevalidated", payload=pre_submit, source_authority="engine_adapter")
     _insert_edli_event(
         conn, aggregate_id=aggregate_id, sequence=2, event_type="ExecutionCommandCreated",
@@ -869,6 +871,212 @@ def test_confirmed_edli_fill_appends_canonical_trade_fact(conn):
     assert payload["edli_aggregate_id"] == aggregate_id
     assert payload["source_edli_event_hash"] == fact["raw_payload_hash"]
     assert payload["fill_authority_state"] == "FILL_CONFIRMED"
+
+
+def test_confirmed_fill_repairs_command_snapshot_and_attribution_identity(conn):
+    aggregate_id = _seed_confirmed_buy_no_aggregate(
+        conn,
+        aggregate_id="agg-edli-command-decision-links",
+        pre_submit_snapshot_id=None,
+    )
+    orphan_position_id = "pre-bridge-position"
+    command_id = "cmd-decision-links"
+    _seed_venue_command_for_execution_command_id(
+        conn,
+        command_id=command_id,
+        execution_command_id=EXECUTION_COMMAND_ID,
+        position_id=orphan_position_id,
+    )
+    from src.state.schema.position_decision_attribution_schema import ensure_table
+
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO position_decision_attribution (
+            attribution_id, position_id, command_id, decision_certificate_hash,
+            resolution, resolution_reason, source, intent_kind, created_at,
+            schema_version
+        ) VALUES (
+            'attr-decision-links', ?, ?, 'cert-decision-links',
+            'ATTRIBUTED', NULL, 'LIVE_DECISION', 'ENTRY',
+            '2026-06-01T11:59:58+00:00', 1
+        )
+        """,
+        (orphan_position_id, command_id),
+    )
+
+    result = materialize_position_current_from_edli_fill(
+        conn,
+        aggregate_id,
+        now=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result is not None
+    canonical_position_id = edli_bridge_position_id(aggregate_id)
+    position = conn.execute(
+        """
+        SELECT decision_snapshot_id
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (canonical_position_id,),
+    ).fetchone()
+    assert position["decision_snapshot_id"] == "snap-1"
+    attribution = conn.execute(
+        """
+        SELECT position_id, decision_certificate_hash
+          FROM position_decision_attribution
+         WHERE command_id = ?
+        """,
+        (command_id,),
+    ).fetchone()
+    assert dict(attribution) == {
+        "position_id": canonical_position_id,
+        "decision_certificate_hash": "cert-decision-links",
+    }
+
+
+def test_existing_command_link_repairs_missing_snapshot_and_stale_attribution(conn):
+    from src.events.edli_position_bridge import (
+        sync_venue_command_position_link_for_edli_fill,
+    )
+    from src.state.schema.position_decision_attribution_schema import ensure_table
+
+    aggregate_id = _seed_confirmed_buy_no_aggregate(
+        conn,
+        aggregate_id="agg-edli-existing-command-decision-links",
+        pre_submit_snapshot_id=None,
+    )
+    canonical_position_id = edli_bridge_position_id(aggregate_id)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, decision_snapshot_id,
+            temperature_metric, updated_at
+        ) VALUES (?, 'active', ?, '', 'high', '2026-06-01T12:00:00+00:00')
+        """,
+        (canonical_position_id, canonical_position_id),
+    )
+    command_id = "cmd-existing-decision-links"
+    _seed_venue_command_for_execution_command_id(
+        conn,
+        command_id=command_id,
+        execution_command_id=EXECUTION_COMMAND_ID,
+        position_id=canonical_position_id,
+    )
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO position_decision_attribution (
+            attribution_id, position_id, command_id, decision_certificate_hash,
+            resolution, resolution_reason, source, intent_kind, created_at,
+            schema_version
+        ) VALUES (
+            'attr-existing-decision-links', 'pre-bridge-position', ?,
+            'cert-existing-decision-links', 'ATTRIBUTED', NULL,
+            'LIVE_DECISION', 'ENTRY', '2026-06-01T11:59:58+00:00', 1
+        )
+        """,
+        (command_id,),
+    )
+
+    repaired = sync_venue_command_position_link_for_edli_fill(
+        conn,
+        aggregate_id,
+        position_id=canonical_position_id,
+        now=datetime(2026, 6, 1, 12, 5, tzinfo=timezone.utc),
+    )
+
+    assert repaired is True
+    position = conn.execute(
+        """
+        SELECT decision_snapshot_id
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (canonical_position_id,),
+    ).fetchone()
+    assert position["decision_snapshot_id"] == "snap-1"
+    attribution = conn.execute(
+        """
+        SELECT position_id
+          FROM position_decision_attribution
+         WHERE command_id = ?
+        """,
+        (command_id,),
+    ).fetchone()
+    assert attribution["position_id"] == canonical_position_id
+
+
+def test_decision_link_repair_is_fail_closed_before_identity_updates(conn):
+    from src.events.edli_position_bridge import (
+        sync_venue_command_position_link_for_edli_fill,
+    )
+    from src.state.schema.position_decision_attribution_schema import ensure_table
+
+    aggregate_id = _seed_confirmed_buy_no_aggregate(
+        conn,
+        aggregate_id="agg-edli-conflicting-command-snapshot",
+    )
+    canonical_position_id = edli_bridge_position_id(aggregate_id)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, decision_snapshot_id,
+            temperature_metric, updated_at
+        ) VALUES (
+            ?, 'active', ?, 'different-snapshot', 'high',
+            '2026-06-01T12:00:00+00:00'
+        )
+        """,
+        (canonical_position_id, canonical_position_id),
+    )
+    command_id = "cmd-conflicting-command-snapshot"
+    orphan_position_id = "pre-bridge-conflicting-position"
+    _seed_venue_command_for_execution_command_id(
+        conn,
+        command_id=command_id,
+        execution_command_id=EXECUTION_COMMAND_ID,
+        position_id=orphan_position_id,
+    )
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO position_decision_attribution (
+            attribution_id, position_id, command_id, decision_certificate_hash,
+            resolution, resolution_reason, source, intent_kind, created_at,
+            schema_version
+        ) VALUES (
+            'attr-conflicting-command-snapshot', ?, ?,
+            'cert-conflicting-command-snapshot', 'ATTRIBUTED', NULL,
+            'LIVE_DECISION', 'ENTRY', '2026-06-01T11:59:58+00:00', 1
+        )
+        """,
+        (orphan_position_id, command_id),
+    )
+
+    with pytest.raises(ValueError, match="conflicting.*decision_snapshot_id"):
+        sync_venue_command_position_link_for_edli_fill(
+            conn,
+            aggregate_id,
+            position_id=canonical_position_id,
+            now=datetime(2026, 6, 1, 12, 5, tzinfo=timezone.utc),
+        )
+
+    command = conn.execute(
+        "SELECT position_id FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    attribution = conn.execute(
+        """
+        SELECT position_id
+          FROM position_decision_attribution
+         WHERE command_id = ?
+        """,
+        (command_id,),
+    ).fetchone()
+    assert command["position_id"] == orphan_position_id
+    assert attribution["position_id"] == orphan_position_id
 
 
 def test_confirmed_edli_fill_uses_linked_trade_fact_time_for_runtime_exposure(conn):

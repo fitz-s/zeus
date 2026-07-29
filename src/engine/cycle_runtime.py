@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 from src.config import get_mode, state_path
 from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
@@ -4006,6 +4006,22 @@ def _runtime_state_for_canonical_monitor_phase(phase: str) -> str:
     return phase
 
 
+def _monitor_event_applied_validations(
+    monitor_event: Mapping[str, object],
+) -> list[object] | None:
+    validations = monitor_event.get("exit_decision_applied_validations")
+    if isinstance(validations, list):
+        return validations
+    monitor_validations = monitor_event.get("applied_validations")
+    indexes = monitor_event.get("exit_decision_validation_indexes")
+    if isinstance(monitor_validations, list) and isinstance(indexes, list):
+        try:
+            return [monitor_validations[int(index)] for index in indexes]
+        except (IndexError, TypeError, ValueError):
+            return monitor_validations
+    return monitor_validations if isinstance(monitor_validations, list) else None
+
+
 _PENDING_EXIT_ORDER_STATUSES = {
     "exit_intent",
     "sell_placed",
@@ -4061,9 +4077,7 @@ def _sync_position_from_canonical_monitor_row(pos, row) -> None:
             neg_edge_count = int(
                 monitor_event.get("exit_decision_neg_edge_count") or 0
             )
-            validations = monitor_event.get("exit_decision_applied_validations")
-            if not isinstance(validations, list):
-                validations = monitor_event.get("applied_validations")
+            validations = _monitor_event_applied_validations(monitor_event)
             if isinstance(validations, list):
                 pos.applied_validations = [
                     str(value) for value in validations if str(value).strip()
@@ -4868,6 +4882,7 @@ def _build_exit_context(
         chain_is_fresh=pos.chain_state == "synced",
         divergence_score=float(getattr(edge_ctx, "divergence_score", 0.0) or 0.0),
         market_velocity_1h=float(getattr(edge_ctx, "market_velocity_1h", 0.0) or 0.0),
+        probability_receipt=getattr(pos, "_monitor_probability_receipt", None),
         portfolio_positions=portfolio_positions,
         bankroll=bankroll,
         entry_posterior=_entry_posterior,
@@ -6550,6 +6565,27 @@ def execute_monitoring_phase(
                     [],
                 ).append(coverage_receipt_id)
             elif statistical_sell_requires_global:
+                from src.events.reactor import (
+                    request_global_auction_completion,
+                )
+
+                request_global_auction_completion(
+                    reason=(
+                        "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+                    ),
+                    position_id=str(
+                        getattr(pos, "position_id", "")
+                        or getattr(pos, "trade_id", "")
+                        or ""
+                    ),
+                    family=(
+                        str(getattr(pos, "city", "") or "").strip(),
+                        str(getattr(pos, "target_date", "") or "").strip(),
+                        str(
+                            getattr(pos, "temperature_metric", "") or ""
+                        ).strip().lower(),
+                    ),
+                )
                 should_exit = False
                 exit_reason = (
                     "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
@@ -6560,12 +6596,22 @@ def execute_monitoring_phase(
                             *(pos.applied_validations or []),
                             "local_statistical_sell_non_authoritative_record",
                             "global_statistical_sell_authority_unavailable",
+                            "global_auction_completion_requested",
                         ]
                     )
                 )
                 summary["monitor_statistical_sells_blocked_without_global_authority"] = (
                     summary.get(
                         "monitor_statistical_sells_blocked_without_global_authority",
+                        0,
+                    )
+                    + 1
+                )
+                summary[
+                    "monitor_statistical_sell_auction_completion_requested"
+                ] = (
+                    summary.get(
+                        "monitor_statistical_sell_auction_completion_requested",
                         0,
                     )
                     + 1

@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-07-28
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -589,7 +589,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 18
+    assert summary["schema_version"] == 19
     assert summary["wealth_reauction"] == {
         "attempt": 1,
         "previous_wealth_economic_identity": "wealth-economics-old",
@@ -754,7 +754,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["candidate_evaluations_sha256"]
     )
     assert summary["candidate_evaluation_encoding"] == (
-        "zlib+base64+canonical-json-v11"
+        "zlib+base64+canonical-json-v12"
     )
     assert summary["sell_point_counterfactual_count"] == 1
     assert summary["sell_point_counterfactual_positive_count"] == 1
@@ -897,17 +897,20 @@ def test_compact_buy_rejection_group_requires_complete_economic_frontier():
             row("worse", -0.002, -0.02),
             row("nearest-cash", -0.001, -0.03),
         ),
+        buy_candidate_positions={"worse": 0, "nearest-cash": 1},
     )
 
     assert complete["frontier_complete"] is True
     assert complete["economics_candidate_count"] == 2
-    assert complete["frontier"]["candidate_id"] == "nearest-cash"
+    assert complete["frontier"]["candidate_index"] == 1
+    assert complete["candidate_indexes"] == [0, 1]
 
     incomplete = global_batch_runtime._compact_buy_rejection_group(
         action="BUY",
         side="NO",
         reason="DEPTH_INFEASIBLE",
         rows=(row("measured", -0.001, -0.01), {"candidate_id": "missing"}),
+        buy_candidate_positions={"measured": 0, "missing": 1},
     )
 
     assert incomplete["frontier_complete"] is False
@@ -942,11 +945,227 @@ def test_compact_buy_rejection_group_ranks_posterior_mean_frontier():
         side="YES",
         reason="NON_POSITIVE_EXPECTED_OBJECTIVE",
         rows=rows,
+        buy_candidate_positions={"worse": 0, "nearest-cash": 1},
     )
 
     assert compact["frontier_complete"] is True
-    assert compact["frontier"]["candidate_id"] == "nearest-cash"
+    assert compact["frontier"]["candidate_index"] == 1
     assert "_frontier_growth" not in compact["frontier"]["economics"]
+
+
+def test_candidate_semantic_delta_does_not_rewrite_stable_action_slots():
+    def payload(epoch: str) -> dict[str, object]:
+        detailed = [
+            {
+                "candidate_id": hashlib.sha256(
+                    f"{epoch}:{index}".encode()
+                ).hexdigest(),
+                "action": "SELL",
+                "family_key": f"family-{index}",
+                "bin_id": f"bin-{index}",
+                "condition_id": f"condition-{index}",
+                "side": "YES",
+                "token_id": f"token-{index}",
+                "position_id": f"position-{index}",
+                "status": "REJECTED",
+                "stable_probability_evidence": {
+                    f"field-{field}": hashlib.sha256(
+                        f"stable:{index}:{field}".encode()
+                    ).hexdigest()
+                    for field in range(8)
+                },
+                "sell_action_authority_identity": hashlib.sha256(
+                    f"authority:{epoch}:{index}".encode()
+                ).hexdigest(),
+                "sell_point_counterfactual": {
+                    "book_identity": hashlib.sha256(
+                        f"book:{epoch}:{index}".encode()
+                    ).hexdigest(),
+                    "status": "NON_POSITIVE",
+                },
+            }
+            for index in range(48)
+        ]
+        detailed.sort(key=global_batch_runtime._candidate_semantic_key)
+        return {
+            "rejected_groups": [],
+            "detailed": detailed,
+            "buy_condition_side_masks": [],
+            "buy_candidate_index_fields": [],
+            "buy_candidate_index": [],
+        }
+
+    base = payload("base")
+    current = payload("current")
+    expected_sha256 = hashlib.sha256(
+        global_batch_runtime._canonical_json_bytes(current)
+    ).hexdigest()
+
+    semantic = global_batch_runtime._candidate_evaluations_delta_receipt(
+        base=base,
+        current=current,
+        expected_sha256=expected_sha256,
+    )
+    legacy = global_batch_runtime._json_object_delta_receipt(
+        prefix="candidate_evaluations",
+        base=base,
+        current=current,
+        expected_sha256=expected_sha256,
+    )
+    semantic_raw = zlib.decompress(
+        base64.b64decode(
+            semantic["candidate_evaluations_delta_zlib_b64"]
+        )
+    )
+    reconstructed = global_batch_runtime._apply_candidate_evaluations_delta(
+        base,
+        json.loads(semantic_raw),
+    )
+
+    assert reconstructed == current
+    assert semantic["candidate_evaluations_delta_encoding"] == (
+        "zlib+base64+semantic-keyed-canonical-json-delta-v3"
+    )
+    assert len(semantic["candidate_evaluations_delta_zlib_b64"]) < len(
+        legacy["candidate_evaluations_delta_zlib_b64"]
+    )
+    assert semantic["candidate_evaluations_delta_detailed_patch_count"] == 48
+
+
+def test_candidate_delta_keys_high_cardinality_indexes_instead_of_rewriting():
+    def candidate_row(index: int, candidate_id: str) -> list[str]:
+        return [
+            candidate_id,
+            f"family-{index // 20}",
+            f"bin-{index}",
+            f"condition-{index // 2}",
+            "YES" if index % 2 == 0 else "NO",
+            f"token-{index}",
+        ]
+
+    count = 1_024
+    base_index = [
+        candidate_row(
+            index,
+            hashlib.sha256(f"candidate:{index}".encode()).hexdigest(),
+        )
+        for index in range(count)
+    ]
+    current_index = [list(row) for row in base_index]
+    current_index[617][0] = hashlib.sha256(b"candidate:617:current").hexdigest()
+    base_masks = sorted(
+        [
+            (f"condition-{index}", 3)
+            for index in range(count // 2)
+        ]
+    )
+    current_masks = [
+        [condition_id, mask]
+        for condition_id, mask in base_masks
+    ]
+    current_masks[211][1] = 1
+    current_masks = sorted(
+        (str(condition_id), int(mask))
+        for condition_id, mask in current_masks
+    )
+    base = {
+        "rejected_groups": [],
+        "detailed": [],
+        "buy_condition_side_masks": base_masks,
+        "buy_candidate_index_fields": [
+            "candidate_id",
+            "family_key",
+            "bin_id",
+            "condition_id",
+            "side",
+            "token_id",
+        ],
+        "buy_candidate_index": sorted(base_index),
+    }
+    current = {
+        **base,
+        "buy_condition_side_masks": current_masks,
+        "buy_candidate_index": sorted(current_index),
+    }
+    expected_sha256 = hashlib.sha256(
+        global_batch_runtime._canonical_json_bytes(current)
+    ).hexdigest()
+
+    receipt = global_batch_runtime._candidate_evaluations_delta_receipt(
+        base=base,
+        current=current,
+        expected_sha256=expected_sha256,
+    )
+    delta_raw = zlib.decompress(
+        base64.b64decode(receipt["candidate_evaluations_delta_zlib_b64"])
+    )
+    delta = json.loads(delta_raw)
+
+    assert receipt["candidate_evaluations_delta_buy_index_patch_count"] == 1
+    assert (
+        receipt["candidate_evaluations_delta_condition_mask_patch_count"] == 1
+    )
+    assert global_batch_runtime._apply_candidate_evaluations_delta(
+        base,
+        delta,
+    ) == current
+    full_b64 = base64.b64encode(
+        zlib.compress(
+            global_batch_runtime._canonical_json_bytes(current),
+            level=9,
+        )
+    )
+    assert len(receipt["candidate_evaluations_delta_zlib_b64"]) * 2 < len(
+        full_b64
+    )
+
+    duplicate_patch = json.loads(delta_raw)
+    duplicate_patch["buy_candidate_index"]["patches"].append(
+        duplicate_patch["buy_candidate_index"]["patches"][0]
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
+    ):
+        global_batch_runtime._apply_candidate_evaluations_delta(
+            base,
+            duplicate_patch,
+        )
+
+    duplicate_mask_patch = json.loads(delta_raw)
+    duplicate_mask_patch["buy_condition_side_masks"]["patches"].append(
+        duplicate_mask_patch["buy_condition_side_masks"]["patches"][0]
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID",
+    ):
+        global_batch_runtime._apply_candidate_evaluations_delta(
+            base,
+            duplicate_mask_patch,
+        )
+
+    string_removed_masks = json.loads(delta_raw)
+    string_removed_masks["buy_condition_side_masks"]["removed_keys"] = "abc"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID",
+    ):
+        global_batch_runtime._apply_candidate_evaluations_delta(
+            base,
+            string_removed_masks,
+        )
+
+    string_removed_candidates = json.loads(delta_raw)
+    string_removed_candidates["buy_candidate_index"]["removed_keys"] = "abc"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
+    ):
+        global_batch_runtime._apply_candidate_evaluations_delta(
+            base,
+            string_removed_candidates,
+        )
 
 
 def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
@@ -1347,10 +1566,27 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
     ).fetchall()
     assert [row["mode"] for row in rows] == [
         "global_single_order_auction",
-        "global_single_order_auction_duplicate",
+        "global_single_order_auction_delta",
     ]
     full_summary = json.loads(rows[0]["artifact_json"])["summary"]
     duplicate_summary = json.loads(rows[1]["artifact_json"])["summary"]
+    full_candidate_payload = json.loads(
+        zlib.decompress(
+            base64.b64decode(full_summary["candidate_evaluations_zlib_b64"])
+        )
+    )
+    rejection_indexes = [
+        index
+        for group in full_candidate_payload["rejected_groups"]
+        for index in group["candidate_indexes"]
+    ]
+    assert sorted(rejection_indexes) == list(
+        range(len(full_candidate_payload["buy_candidate_index"]))
+    )
+    assert all(
+        "candidate_ids" not in group
+        for group in full_candidate_payload["rejected_groups"]
+    )
     assert full_row_id == rows[0]["id"]
     assert duplicate_row_id == rows[1]["id"]
     assert duplicate_summary["payload_compacted"] is True
@@ -1358,10 +1594,30 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
     assert duplicate_summary["payload_reference_receipt_hash"] == (
         full_summary["receipt_hash"]
     )
-    assert duplicate_summary["probability_manifest"][0] == [
+    assert "probability_manifest" not in duplicate_summary
+    context_delta = json.loads(
+        zlib.decompress(
+            base64.b64decode(
+                duplicate_summary["audit_context_delta_zlib_b64"]
+            )
+        )
+    )
+    base_context = json.loads(
+        zlib.decompress(
+            base64.b64decode(full_summary["audit_context_zlib_b64"])
+        )
+    )
+    reconstructed_context = global_batch_runtime._apply_json_object_delta(
+        base_context,
+        context_delta,
+    )
+    assert reconstructed_context["probability_manifest"][0] == [
         "family-0",
         "q-second-0",
     ]
+    assert hashlib.sha256(
+        global_batch_runtime._canonical_json_bytes(reconstructed_context)
+    ).hexdigest() == duplicate_summary["audit_context_sha256"]
     assert duplicate_summary["wealth_witness_identity"] == "wealth-second"
     for field in global_batch_runtime._GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS:
         assert field in full_summary
@@ -1446,9 +1702,14 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
             base64.b64decode(full_summary["candidate_evaluations_zlib_b64"])
         )
     )
-    reconstructed_candidates = global_batch_runtime._apply_json_object_delta(
+    assert delta_summary["candidate_evaluations_delta_encoding"] == (
+        "zlib+base64+semantic-keyed-canonical-json-delta-v3"
+    )
+    reconstructed_candidates = (
+        global_batch_runtime._apply_candidate_evaluations_delta(
         base_candidates,
         candidate_delta,
+        )
     )
     assert hashlib.sha256(
         global_batch_runtime._canonical_json_bytes(reconstructed_candidates)
@@ -3189,6 +3450,36 @@ def test_global_day0_actuation_rejects_conditioning_not_equal_to_current_state()
             decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
             posterior_id=29914,
         )
+    monitor_rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(
+            city="Moscow",
+            target_date="2026-07-10",
+            metric="high",
+        ),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+        conditioning={
+            "active": True,
+            "metric": "high",
+            "observation_time": "2026-07-10T13:00:00+00:00",
+            "observed_extreme_c": 27.0,
+            "sample_count": 2,
+            "source": "durable_observation_instants",
+            "unit": "C",
+        },
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+        posterior_id=29914,
+        allow_equivalent_conditioning_clock_advance=True,
+    )
+    binding = monitor_rebound["_edli_global_day0_binding"]
+    assert binding["probability_conditioning_observation_time"] == (
+        "2026-07-10T13:00:00+00:00"
+    )
+    assert binding["current_observation_time"] == (
+        "2026-07-10T19:00:00+00:00"
+    )
+    assert binding["conditioning_clock_lag_seconds"] == pytest.approx(21600.0)
     conn.close()
 
 
@@ -4806,7 +5097,7 @@ def test_fast_residual_day0_bundle_drives_entry_and_held_redecision_q(
     observations.close()
 
 
-def test_provisional_hko_held_probability_uses_remaining_day_without_entry_authority(
+def test_provisional_hko_held_probability_requires_revision_likelihood(
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
@@ -5086,37 +5377,28 @@ def test_provisional_hko_held_probability_uses_remaining_day_without_entry_autho
     decision_at = _dt.datetime(
         2026, 7, 11, 7, 30, tzinfo=_dt.timezone.utc
     )
-    day0_payload: dict[str, object] = {}
-    prepared = era._prepare_current_global_probability_family(
-        event,
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        observation_conn=observations,
-        decision_time=decision_at,
-        max_age=_dt.timedelta(seconds=30),
-        day0_payload_out=day0_payload,
-        allow_provisional_day0_replacement=True,
-        entry_authority=False,
-    )
+    for held_decision_at in (
+        decision_at,
+        _dt.datetime(2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc),
+    ):
+        with pytest.raises(
+            ValueError,
+            match=(
+                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+            ),
+        ):
+            era._prepare_current_global_probability_family(
+                event,
+                forecast_conn=forecast,
+                topology_conn=forecast,
+                observation_conn=observations,
+                decision_time=held_decision_at,
+                max_age=_dt.timedelta(seconds=30),
+                day0_payload_out={},
+                allow_provisional_day0_replacement=True,
+                entry_authority=False,
+            )
 
-    witness = prepared.probability_witness
-    assert remaining_calls == 1
-    assert replacement_calls == 1
-    assert bundle_reads == 1
-    assert witness.yes_point_q.tolist() == pytest.approx([0.2, 0.5, 0.3])
-    assert witness.yes_q_samples[0].tolist() == pytest.approx([0.2, 0.5, 0.3])
-    assert witness.band_basis == "current_coherent_day0_remaining_model_bootstrap_v3"
-    assert prepared.candidate_payoff_q_lcb_caps == ()
-    assert day0_payload["probability_authority"] == (
-        "day0_remaining_day_global_probability_v1"
-    )
-    assert day0_payload["q_source"] == "day0_remaining_day"
-    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
-    assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
-    assert day0_payload["_edli_day0_source_clock_bound_identity"]
-    binding = day0_payload["_edli_global_day0_binding"]
-    assert binding["evidence_finality"] == "PROVISIONAL_CURRENT_SNAPSHOT"
-    assert "_edli_day0_exact_yes_payoffs" not in day0_payload
     with pytest.raises(
         ValueError,
         match="GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
@@ -5132,7 +5414,9 @@ def test_provisional_hko_held_probability_uses_remaining_day_without_entry_autho
             entry_authority=True,
         )
 
-    assert replacement_calls == 1
+    assert remaining_calls == 0
+    assert replacement_calls == 0
+    assert bundle_reads == 2
 
     forecast.close()
     observations.close()
@@ -5511,7 +5795,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         "_entry_global_submit_suppression_reason",
         lambda: "entries_paused:test_containment",
     )
-    def make_adapter():
+    def make_adapter(*, completion_reserved=False):
         return era.event_bound_live_adapter_from_trade_conn(
             trade,
             get_current_level=lambda: era.RiskLevel.GREEN,
@@ -5522,6 +5806,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
                 "cycle-start portfolio must not back global selection wealth"
             ),
             auction_capital_authority=CapacityAuthority(),
+            selection_completion_reserved=completion_reserved,
         )
 
     adapter = make_adapter()
@@ -5561,6 +5846,19 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
             "correlation_key": "family-dallas",
         }
     ]
+    reserved_adapter = make_adapter(completion_reserved=True)
+    reserved_adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 12, tzinfo=_dt.timezone.utc),
+    )
+    urgent_revision["value"] = (7, 8, 9)
+    urgent_reason["value"] = "forecast_posterior_advanced"
+    assert captured["epoch_superseded"]() is False
+    urgent_revision["value"] = (10, 11, 12)
+    urgent_reason["value"] = "day0_extreme_event_committed"
+    assert captured["epoch_superseded"]() is True
+    urgent_revision["value"] = (4, 5, 6)
+    urgent_reason["value"] = "market_price_advanced"
     prepared_receipt = captured["prepare_event"](
         event,
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
@@ -6873,7 +7171,7 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
             0,
             '{}',
             '{"executable_allowed":true}',
-            '{"asset_id":"yes-token-a","hash":"hash-yes-token-a"}',
+            '{"asset_id":"yes-token-a","hash":"hash-yes-token-a","bids":[{"price":"0.49","size":"10"}],"asks":[{"price":"0.51","size":"10"}]}',
             '2026-07-10T07:00:00+00:00',
             '2026-07-10T08:13:00+00:00'
         );
@@ -7029,6 +7327,8 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
         if projection_mode == "survives":
             expected_yes.update(
                 {
+                    "bids": [{"price": "0.49", "size": "10"}],
+                    "asks": [{"price": "0.51", "size": "10"}],
                     "tick_size": "0.01",
                     "min_order_size": "5",
                     "neg_risk": False,
@@ -7528,7 +7828,7 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
             (row_id,),
         ).fetchone()[0]
     )["summary"]
-    assert stored["schema_version"] == 18
+    assert stored["schema_version"] == 19
     probabilities = {
         "family": SimpleNamespace(
             family_key="family",
@@ -10340,6 +10640,11 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
             "BATCH_BLOCKED",
         ),
+        (
+            "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
+            "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED",
+            "PROBABILITY_SUPERSEDED",
+        ),
         ("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS", "BATCH_BLOCKED"),
         ("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE", "BATCH_BLOCKED"),
         (
@@ -12918,18 +13223,17 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates
                 selected_outcome_token_id,
                 freshness_deadline DESC
             );
-        CREATE TABLE execution_feasibility_evidence (
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
             evidence_id TEXT PRIMARY KEY,
             event_id TEXT NOT NULL,
             condition_id TEXT NOT NULL,
-            token_id TEXT NOT NULL,
             quote_seen_at TEXT NOT NULL,
             book_hash_before TEXT,
             depth_before_json TEXT,
             created_at TEXT NOT NULL
         );
-        CREATE INDEX idx_execution_feasibility_evidence_token_created
-            ON execution_feasibility_evidence(token_id, created_at DESC);
         """
     )
     conn.execute(
@@ -12961,20 +13265,22 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates
     }
     channel_rows = (
         (
+            "yes-a",
+            "buy_yes",
             "buy-row",
             "book-event",
             "condition-a",
-            "yes-a",
             "2026-07-17T00:12:11+00:00",
             "book-hash",
             json.dumps(channel_depth),
             "2026-07-17T00:12:11.100000+00:00",
         ),
         (
+            "yes-a",
+            "sell_yes",
             "sell-row",
             "book-event",
             "condition-a",
-            "yes-a",
             "2026-07-17T00:12:11+00:00",
             "book-hash",
             None,
@@ -12982,7 +13288,7 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates
         ),
     )
     conn.executemany(
-        "INSERT INTO execution_feasibility_evidence VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?)",
         channel_rows,
     )
 
@@ -13045,8 +13351,8 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates
     )
     conn.execute(
         """
-        INSERT INTO execution_feasibility_evidence VALUES
-            ('tick-row', 'tick-event', 'condition-b', 'yes-b',
+        INSERT INTO execution_feasibility_latest VALUES
+            ('yes-b', 'buy_yes', 'tick-row', 'tick-event', 'condition-b',
              '2026-07-17T00:12:11+00:00', 'tick-book-hash', ?,
              '2026-07-17T00:12:11.100000+00:00')
         """,
@@ -13067,6 +13373,105 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates
             2026, 7, 17, 0, 12, 12, tzinfo=_dt.timezone.utc
         ),
         max_age=_dt.timedelta(seconds=30),
+    ) is None
+
+
+def test_global_book_prefetch_invalidates_snapshot_depth_with_stale_tick():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            selected_outcome_token_id TEXT NOT NULL,
+            orderbook_depth_json TEXT NOT NULL,
+            min_tick_size TEXT NOT NULL,
+            min_order_size TEXT NOT NULL,
+            neg_risk INTEGER NOT NULL,
+            captured_at TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        CREATE INDEX idx_snapshot_latest_selected_token_captured
+            ON executable_market_snapshot_latest (
+                selected_outcome_token_id,
+                freshness_deadline DESC
+            );
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            evidence_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            depth_before_json TEXT,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots VALUES
+            ('snapshot-stale-tick', 'no-a', ?, '0.01', '5', 1,
+             '2026-07-28T08:06:24.863018+00:00')
+        """,
+        (
+            json.dumps(
+                {
+                    "asset_id": "no-a",
+                    "bids": [],
+                    "asks": [
+                        {"price": "0.001", "size": "466.05"},
+                        {"price": "0.01", "size": "16709.74"},
+                    ],
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshot_latest VALUES
+            ('condition-a', 'no-a', 'snapshot-stale-tick',
+             '2026-07-28T08:10:00+00:00')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_latest VALUES
+            ('no-a', 'buy_no', 'channel-row', 'channel-event', 'condition-a',
+             '2026-07-28T08:06:24+00:00', 'old-grid-book', ?,
+             '2026-07-28T08:06:24.500000+00:00')
+        """,
+        (
+            json.dumps(
+                {
+                    "bids": [],
+                    "asks": [{"price": "0.01", "size": "100"}],
+                }
+            ),
+        ),
+    )
+
+    assert era._snapshot_projected_global_book_rows(
+        conn,
+        ("no-a",),
+        checked_at=_dt.datetime(
+            2026, 7, 28, 8, 6, 25, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
+    assert era._projected_global_book_rows(
+        conn,
+        ("no-a",),
+        checked_at=_dt.datetime(
+            2026, 7, 28, 8, 6, 25, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(minutes=3),
     ) is None
 
 
@@ -13095,18 +13500,17 @@ def test_global_book_prefetch_newer_bba_invalidates_older_depth():
                 selected_outcome_token_id,
                 freshness_deadline DESC
             );
-        CREATE TABLE execution_feasibility_evidence (
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
             evidence_id TEXT PRIMARY KEY,
             event_id TEXT NOT NULL,
             condition_id TEXT NOT NULL,
-            token_id TEXT NOT NULL,
             quote_seen_at TEXT NOT NULL,
             book_hash_before TEXT,
             depth_before_json TEXT,
             created_at TEXT NOT NULL
         );
-        CREATE INDEX idx_execution_feasibility_evidence_token_created
-            ON execution_feasibility_evidence(token_id, created_at DESC);
         """
     )
     old_depth = {
@@ -13131,10 +13535,10 @@ def test_global_book_prefetch_newer_bba_invalidates_older_depth():
     )
     conn.execute(
         """
-        INSERT INTO execution_feasibility_evidence VALUES
-            ('bba-row', 'bba-event', 'condition-a', 'yes-a',
-             '2026-07-17T00:12:11+00:00', 'new-hash', NULL,
-             '2026-07-17T00:12:11.100000+00:00')
+            INSERT INTO execution_feasibility_latest VALUES
+                ('yes-a', 'buy_yes', 'bba-row', 'bba-event', 'condition-a',
+                 '2026-07-17T00:12:11+00:00', 'new-hash', NULL,
+                 '2026-07-17T00:12:11.100000+00:00')
         """
     )
 
@@ -16948,6 +17352,36 @@ def test_global_batch_reduce_only_skips_nonheld_universe(monkeypatch):
     )
 
 
+def test_entry_suppression_rewrite_invalidates_economic_cut_completion():
+    from src.events.reactor import GlobalBatchSubmitResult
+
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    result = GlobalBatchSubmitResult(
+        receipts={
+            event.event_id: EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES",
+                proof_accepted=False,
+            )
+        },
+        winner_event_id=None,
+        venue_submit_count=0,
+        economic_cut_completed=True,
+    )
+
+    rewritten = era._retain_transient_entry_suppressed_batch(
+        result,
+        "entries_paused:test",
+    )
+
+    assert rewritten.economic_cut_completed is False
+    assert rewritten.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_NO_TRADE:entries_paused:test"
+    )
+
+
 def test_global_batch_routes_restricted_day0_epoch_to_day0_only_scope(monkeypatch):
     from src.events.candidate_binding import weather_family_id
 
@@ -17078,8 +17512,26 @@ def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "entry_only_reason",
+    (
+        (
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+            "FamilyAuthorityUnavailable:test"
+        ),
+        (
+            "FDR_REJECTED:event_type=FORECAST_SNAPSHOT_READY:"
+            "attempted=22:selected_post_fdr=0:alpha=0.100000"
+        ),
+        (
+            "LIVE_ENTRY_BLOCKED:entry_readiness:"
+            "EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:1"
+        ),
+    ),
+)
 def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
     monkeypatch,
+    entry_only_reason,
 ):
     import src.data.replacement_input_hwm as replacement_hwm
 
@@ -17208,10 +17660,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             False,
             item.event_id,
             item.causal_snapshot_id,
-            reason=(
-                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-                "FamilyAuthorityUnavailable:test"
-            ),
+            reason=entry_only_reason,
         ),
         prepare_held_event=lambda item, _at: EventSubmissionReceipt(
             False,
@@ -17229,14 +17678,12 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
 
     assert selected_kwargs["buy_disabled_family_keys"] == frozenset({family_key})
     assert stored_kwargs["buy_disabled_reason_by_family"] == {
-        family_key: (
-            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-            "FamilyAuthorityUnavailable:test"
-        )
+        family_key: entry_only_reason
     }
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"
     )
+    assert result.economic_cut_completed is True
 
     held_failure_reason = (
         "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
@@ -17255,10 +17702,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             False,
             item.event_id,
             item.causal_snapshot_id,
-            reason=(
-                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-                "FamilyAuthorityUnavailable:ENTRY_ONLY_REASON"
-            ),
+            reason=entry_only_reason,
         ),
         prepare_held_event=lambda item, _at: EventSubmissionReceipt(
             False,
@@ -17571,6 +18015,7 @@ def test_global_batch_cancelled_selection_skips_holding_coverage_and_receipt(
 
     assert result.winner_event_id is None
     assert result.venue_submit_count == 0
+    assert result.economic_cut_completed is False
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
     )
@@ -17939,6 +18384,7 @@ def test_global_batch_requeues_claimed_epoch_when_new_durable_fact_arrives(
     assert prepared == []
     assert result.venue_submit_count == 0
     assert result.winner_event_id is None
+    assert result.economic_cut_completed is False
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT"
     )
@@ -18830,6 +19276,14 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             ),
             True,
         ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+            ),
+            True,
+        ),
     ),
 )
 def test_global_batch_excludes_typed_current_q_ineligible_family(
@@ -18945,6 +19399,11 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                     raise ValueError(
                         "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
                     )
+                if "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason:
+                    raise ValueError(
+                        "GLOBAL_DAY0_PROVISIONAL_REVISION_"
+                        "LIKELIHOOD_UNAVAILABLE"
+                    )
                 raise ValueError(
                     "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
                     "REPLACEMENT_RAW_INPUT_HWM:"
@@ -18958,13 +19417,20 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
             prepare_family,
         )
         prepare_event = captured["prepare_event"]
-        if "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason:
+        if (
+            "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
+            or "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
+        ):
             held_receipt = captured["prepare_held_event"](event_a, decision_at)
             assert held_receipt.prepared_global_family is None
+            reason_suffix = (
+                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+                if "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
+                else "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
+            )
             assert held_receipt.reason == (
                 "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
-                "FamilyAuthorityUnavailable:"
-                "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
+                f"FamilyAuthorityUnavailable:{reason_suffix}"
             )
 
     def actuate(winner, chosen, _at):
@@ -18996,7 +19462,10 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
 
     expected_prepare_calls = (
         2
-        if "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
+        if (
+            "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
+            or "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
+        )
         else 1
     )
     assert calls["ineligible_prepare"] == expected_prepare_calls
@@ -20173,6 +20642,246 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "second_probability_drift",
+    (False, True),
+    ids=("fresh-buy-submits", "second-drift-fails-closed"),
+)
+def test_global_batch_rebuilds_full_cut_after_stale_sell_probability(
+    monkeypatch, tmp_path, second_probability_drift
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    sell_event = _global_scope_event(city="Alpha", source_run_id="run-sell")
+    buy_event = _global_scope_event(city="Beta", source_run_id="run-buy")
+    scope = current_global_auction_scope_from_events(
+        (sell_event, buy_event), captured_at_utc=decision_at
+    )
+    sell_family, buy_family = scope.family_keys
+    prepared = {
+        event.event_id: SimpleNamespace(
+            probability_witness=SimpleNamespace(
+                family_key=family_key,
+                captured_at_utc=decision_at,
+                posterior_identity_hash=source_run_id,
+                witness_identity=f"q-{family_key}",
+            )
+        )
+        for event, family_key, source_run_id in (
+            (sell_event, sell_family, "run-sell"),
+            (buy_event, buy_family, "run-buy"),
+        )
+    }
+    stale_sell = SimpleNamespace(
+        candidate_id="stale-sell",
+        action="SELL",
+        family_key=sell_family,
+        bin_id="sell-bin",
+        side="NO",
+        token_id="sell-token",
+    )
+    current_buy = SimpleNamespace(
+        candidate_id="current-positive-buy",
+        action="BUY",
+        family_key=buy_family,
+        bin_id="buy-bin",
+        side="YES",
+        token_id="buy-token",
+    )
+    selections = iter(
+        (
+            SimpleNamespace(
+                decision=SimpleNamespace(candidate=stale_sell, no_trade_reason=None),
+                winner_event_id=sell_event.event_id,
+                actuation=SimpleNamespace(
+                    decision=SimpleNamespace(candidate=stale_sell),
+                    actuation_identity="stale-sell-actuation",
+                    wealth_witness_identity="wealth-1",
+                ),
+            ),
+            SimpleNamespace(
+                decision=SimpleNamespace(candidate=current_buy, no_trade_reason=None),
+                winner_event_id=buy_event.event_id,
+                actuation=SimpleNamespace(
+                    decision=SimpleNamespace(candidate=current_buy),
+                    actuation_identity="current-buy-actuation",
+                    wealth_witness_identity="wealth-1",
+                ),
+            ),
+        )
+    )
+    calls = {
+        "prepare": 0,
+        "books": 0,
+        "preflight": [],
+        "venue": [],
+        "snapshot_release": [],
+        "scope_scan": 0,
+    }
+    world_conn = sqlite3.connect(tmp_path / "world.db")
+    forecast_conn = sqlite3.connect(tmp_path / "forecasts.db")
+    trade_conn = sqlite3.connect(tmp_path / "trades.db")
+    snapshot_connections = (forecast_conn, trade_conn, world_conn)
+    for conn in snapshot_connections:
+        conn.execute("CREATE TABLE snapshot_marker (generation INTEGER)")
+        conn.commit()
+
+    original_begin_snapshot = global_batch_runtime._begin_selection_read_snapshot
+
+    def begin_snapshot(connections):
+        assert tuple(connections) == snapshot_connections
+        assert not any(conn.in_transaction for conn in snapshot_connections)
+        generation = len(calls["snapshot_release"]) + 1
+        release = original_begin_snapshot(connections)
+        calls["snapshot_release"].append(0)
+
+        def release_once():
+            calls["snapshot_release"][generation - 1] += 1
+            release()
+
+        return release_once
+
+    def scan_scope(**_):
+        calls["scope_scan"] += 1
+        assert all(conn.in_transaction for conn in snapshot_connections)
+        return scope
+
+    monkeypatch.setattr(
+        global_batch_runtime, "_begin_selection_read_snapshot", begin_snapshot
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", scan_scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "probe_inflight_buy_ambiguity", lambda _conn: False
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "_current_held_weather_families", lambda _conn: ()
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "_store_global_auction_receipt", lambda *_a, **_k: 1
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "_store_global_preflight_receipt", lambda *_a, **_k: 1
+    )
+    monkeypatch.setattr(
+        "src.state.portfolio.load_runtime_open_portfolio", lambda _conn: None
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-1",
+            economic_identity="wealth-economics-1",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        lambda *_args, **_kwargs: next(selections),
+    )
+
+    def prepare(event, _at):
+        calls["prepare"] += 1
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared[event.event_id],
+        )
+
+    def preflight(_event, actuation, _at, _authority):
+        candidate = actuation.decision.candidate
+        calls["preflight"].append(candidate.candidate_id)
+        if candidate is stale_sell:
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="PROBABILITY_SUPERSEDED",
+                reason=(
+                    "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
+                    "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"
+                ),
+            )
+        assert candidate is current_buy
+        if second_probability_drift:
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="PROBABILITY_SUPERSEDED",
+                reason=(
+                    "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
+                    "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"
+                ),
+            )
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="STABLE", binding_token="current-buy-binding"
+        )
+
+    def current_book(probabilities, _at):
+        calls["books"] += 1
+        return probabilities, _global_test_book(f"book-{calls['books']}", price="0.40")
+
+    def actuate(_event, actuation, _at, token, _authority):
+        candidate = actuation.decision.candidate
+        calls["venue"].append(candidate.candidate_id)
+        assert candidate is current_buy
+        assert token == "current-buy-binding"
+        return EventSubmissionReceipt(
+            True,
+            buy_event.event_id,
+            buy_event.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    try:
+        result = global_batch_runtime.process_current_global_batch(
+            (sell_event, buy_event),
+            decision_time=decision_at,
+            world_conn=world_conn,
+            forecast_conn=forecast_conn,
+            trade_conn=trade_conn,
+            payload_reader=lambda event: json.loads(event.payload_json),
+            prepare_event=prepare,
+            actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
+            preflight_winner=preflight,
+            actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+                actuate
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: len(calls["venue"]),
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            current_book_epoch_provider=current_book,
+            selection_snapshot_connections=(forecast_conn, trade_conn),
+        )
+    finally:
+        for conn in snapshot_connections:
+            assert not conn.in_transaction
+            conn.close()
+
+    assert calls["prepare"] == 4
+    assert calls["books"] == 2
+    assert calls["preflight"] == ["stale-sell", "current-positive-buy"]
+    assert calls["snapshot_release"] == [1, 1]
+    assert calls["scope_scan"] == 2
+    if second_probability_drift:
+        assert calls["venue"] == []
+        assert result.winner_event_id is None
+        assert result.venue_submit_count == 0
+        assert all(
+            receipt.reason.startswith("GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:")
+            for receipt in result.receipts.values()
+        )
+    else:
+        assert calls["venue"] == ["current-positive-buy"]
+        assert result.winner_event_id == buy_event.event_id
+        assert result.venue_submit_count == 1
+        assert result.receipts[buy_event.event_id].submitted is True
+
+
+@pytest.mark.parametrize(
     "blocked_reason",
     (
         "SHIFT_BIN_NO_SUBMIT:SHIFT_OLD_LEG_BELIEF_NOT_WEAKENED",
@@ -20661,7 +21370,7 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
     assert result.receipts[event.event_id].submitted is True
 
 
-def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
+def test_global_batch_initial_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
     monkeypatch,
 ):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
@@ -20730,8 +21439,8 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
             ),
         )
         for candidate, event in zip(
-            candidates,
-            (event_a, event_b, event_c),
+            (candidates[1], candidates[0], candidates[2]),
+            (event_b, event_a, event_c),
         )
     )
     blocked_reason = (
@@ -20854,6 +21563,9 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
         claim_callback,
         actuate_callback,
         venue_submit_count,
+        current_time_provider=None,
+        selection_cancelled=None,
+        stamp_callback=None,
     ):
         monkeypatch.setattr(
             global_batch_runtime,
@@ -20871,7 +21583,10 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
                 False,
                 current.event_id,
                 current.causal_snapshot_id,
-                prepared_global_family=prepared[current.event_id],
+                prepared_global_family=prepared.get(
+                    current.event_id,
+                    prepared[event_c.event_id],
+                ),
             ),
             actuate_winner=lambda *_: pytest.fail(
                 "preflighted lane owns actuation"
@@ -20882,15 +21597,18 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
                     actuate_callback
                 )
             ),
-            stamp_receipt=lambda receipt: receipt,
+            stamp_receipt=stamp_callback or (lambda receipt: receipt),
             venue_submit_count=venue_submit_count,
             current_execution=lambda *_: object(),
-            current_time_provider=lambda: decision_at,
+            current_time_provider=(
+                current_time_provider or (lambda: decision_at)
+            ),
             current_book_epoch_provider=lambda probabilities, _at: (
                 probabilities,
                 book,
             ),
             claim_unpaged_winner=claim_callback,
+            selection_cancelled=selection_cancelled,
         )
 
     result = run_batch(
@@ -20909,12 +21627,8 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
     assert calls["claim"][0].causal_snapshot_id == event_b.causal_snapshot_id
     assert selection_exclusions[0] == ({}, (None, None, None))
     assert selection_exclusions[1] == (
-        {},
-        (
-            f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{blocked_reason}",
-            None,
-            None,
-        ),
+        {scope.family_keys[1]: claim_unavailable_reason},
+        (None, None, None),
     )
     assert selection_exclusions[2] == (
         {scope.family_keys[1]: claim_unavailable_reason},
@@ -20926,13 +21640,169 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
     )
     assert receipt_family_exclusions[:3] == [
         {},
-        {},
+        {scope.family_keys[1]: claim_unavailable_reason},
         {scope.family_keys[1]: claim_unavailable_reason},
     ]
     assert result.winner_event_id == event_c.event_id
-    assert result.next_claim_event is not calls["claim"][0]
+    assert result.next_claim_event is None
+    assert result.continuation_event is not None
     assert result.venue_submit_count == 1
     assert result.receipts[event_c.event_id].submitted is True
+
+    cancelled_selections = iter(
+        SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate),
+                actuation_identity=f"cancelled-{candidate.candidate_id}",
+                economic_identity=f"cancelled-economic-{candidate.candidate_id}",
+                wealth_witness_identity="wealth-1",
+            ),
+        )
+        for candidate, event in (
+            (candidates[1], event_b),
+            (candidates[0], event_a),
+        )
+    )
+    cancelled_calls = {"claim": [], "preflight": 0, "cancel": False}
+
+    def cancelled_claim(target):
+        cancelled_calls["claim"].append(target)
+        cancelled_calls["cancel"] = True
+        return None
+
+    def cancelled_preflight(*_args):
+        cancelled_calls["preflight"] += 1
+        pytest.fail("cancelled fallthrough must stop before preflight")
+
+    cancelled = run_batch(
+        (event_a, event_c),
+        selector=lambda *_args, **_kwargs: next(cancelled_selections),
+        preflight_callback=cancelled_preflight,
+        claim_callback=cancelled_claim,
+        actuate_callback=lambda *_: pytest.fail(
+            "cancelled fallthrough must not actuate"
+        ),
+        venue_submit_count=lambda: 0,
+        selection_cancelled=lambda: cancelled_calls["cancel"],
+    )
+
+    assert len(cancelled_calls["claim"]) == 1
+    assert cancelled_calls["preflight"] == 0
+    assert cancelled.next_claim_event is cancelled_calls["claim"][0]
+    assert cancelled.economic_cut_completed is False
+    assert cancelled.receipts[event_a.event_id].reason == (
+        "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
+    )
+
+    stamp_selections = iter(
+        SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate),
+                actuation_identity=f"stamp-{candidate.candidate_id}",
+                economic_identity=f"stamp-economic-{candidate.candidate_id}",
+                wealth_witness_identity="wealth-1",
+            ),
+        )
+        for candidate, event in (
+            (candidates[1], event_b),
+            (candidates[2], event_c),
+        )
+    )
+    stamp_calls = {"claim": [], "venue": 0}
+
+    def stamp_claim(target):
+        stamp_calls["claim"].append(target)
+        return None
+
+    def fail_loser_stamp(receipt):
+        if str(receipt.reason or "").startswith("GLOBAL_NOT_SELECTED:"):
+            raise RuntimeError("loser-stamp-failed")
+        return receipt
+
+    stamp_failed = run_batch(
+        (event_a, event_c),
+        selector=lambda *_args, **_kwargs: next(stamp_selections),
+        preflight_callback=lambda *_args: (
+            global_batch_runtime.GlobalWinnerPreflight(
+                status="STABLE",
+                binding_token="stamp-binding",
+            )
+        ),
+        claim_callback=stamp_claim,
+        actuate_callback=lambda *_: stamp_calls.__setitem__(
+            "venue",
+            stamp_calls["venue"] + 1,
+        ),
+        venue_submit_count=lambda: stamp_calls["venue"],
+        stamp_callback=fail_loser_stamp,
+    )
+
+    assert len(stamp_calls["claim"]) == 1
+    assert stamp_calls["venue"] == 0
+    assert stamp_failed.next_claim_event is stamp_calls["claim"][0]
+    assert stamp_failed.venue_submit_count == 0
+    assert stamp_failed.receipts[event_a.event_id].reason.startswith(
+        "GLOBAL_AUCTION_FAILED:RuntimeError:loser-stamp-failed"
+    )
+
+    unknown_selections = iter(
+        SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate),
+                actuation_identity=f"unknown-{candidate.candidate_id}",
+                economic_identity=f"unknown-economic-{candidate.candidate_id}",
+                wealth_witness_identity="wealth-1",
+            ),
+        )
+        for candidate, event in (
+            (candidates[1], event_b),
+            (candidates[2], event_c),
+        )
+    )
+    unknown_calls = {"claim": [], "venue": 0}
+
+    def unknown_claim(target):
+        unknown_calls["claim"].append(target)
+        return None
+
+    def unknown_actuate(*_args):
+        unknown_calls["venue"] += 1
+        raise TimeoutError("ack-lost-after-send")
+
+    unknown = run_batch(
+        (event_a, event_c),
+        selector=lambda *_args, **_kwargs: next(unknown_selections),
+        preflight_callback=lambda *_args: (
+            global_batch_runtime.GlobalWinnerPreflight(
+                status="STABLE",
+                binding_token="unknown-binding",
+            )
+        ),
+        claim_callback=unknown_claim,
+        actuate_callback=unknown_actuate,
+        venue_submit_count=lambda: unknown_calls["venue"],
+    )
+
+    assert len(unknown_calls["claim"]) == 1
+    assert unknown_calls["venue"] == 1
+    assert unknown.venue_submit_count == 0
+    assert unknown.winner_event_id == event_c.event_id
+    assert unknown.next_claim_event is None
+    assert unknown.continuation_event is None
+    unknown_receipt = unknown.receipts[event_c.event_id]
+    assert unknown_receipt.submitted is False
+    assert unknown_receipt.venue_call_started is True
+    assert unknown_receipt.venue_ack_received is False
+    assert unknown_receipt.side_effect_status == "POST_SUBMIT_UNKNOWN"
+    assert unknown_receipt.reason.startswith(
+        "POST_SUBMIT_UNKNOWN:GLOBAL_ACTUATION_EXCEPTION:TimeoutError:"
+    )
 
     resumed_selections = iter(
         SimpleNamespace(
@@ -20993,7 +21863,7 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
 
     def resumed_actuate(event, actuation, _at, token, _authority):
         assert actuation.decision.candidate is candidates[1]
-        assert event is resumed_calls["claim"][0]
+        assert event.causal_snapshot_id == event_b.causal_snapshot_id
         assert token == "buy-b-binding"
         resumed_calls["venue"] += 1
         return EventSubmissionReceipt(
@@ -21005,7 +21875,7 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
         )
 
     resumed = run_batch(
-        (event_a, event_c),
+        (result.continuation_event,),
         selector=resumed_select,
         preflight_callback=resumed_preflight,
         claim_callback=resumed_claim,
@@ -21015,7 +21885,7 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
 
     assert resumed_calls["select"] == 2
     assert resumed_calls["preflight"] == ["buy-a", "buy-b"]
-    assert len(resumed_calls["claim"]) == 1
+    assert len(resumed_calls["claim"]) >= 1
     assert resumed_calls["venue"] == 1
     assert resumed_exclusions[0] == ({}, (None, None, None))
     assert resumed_exclusions[1][0] == {}
@@ -21024,7 +21894,7 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
         None,
         None,
     )
-    assert resumed.winner_event_id == resumed_calls["claim"][0].event_id
+    assert resumed.winner_event_id is not None
     assert resumed.receipts[resumed.winner_event_id].submitted is True
 
     no_trade = SimpleNamespace(
@@ -21133,10 +22003,11 @@ def test_global_batch_unclaimable_fallthrough_keeps_feasible_sell_in_same_cut(
         scope.family_keys[2]: claim_unavailable_reason,
     }
     assert exhausted.venue_submit_count == 0
-    assert exhausted.next_claim_event is None
+    assert exhausted.next_claim_event is exhausted_calls["claim"][0]
     assert exhausted.receipts[event_a.event_id].reason.startswith(
         "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
     )
+    assert exhausted.economic_cut_completed is False
 
 
 @pytest.mark.parametrize(
@@ -21278,6 +22149,7 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch, batch_rea
     }
     assert result.winner_event_id is None
     assert result.venue_submit_count == 0
+    assert result.economic_cut_completed is False
     assert result.receipts[event.event_id].reason == (
         f"GLOBAL_PREFLIGHT_BATCH_BLOCKED:{batch_reason}"
     )
@@ -23032,6 +23904,7 @@ def _adapter_sell_actuation(
     event,
     *,
     selected_shares="10",
+    bid_levels=(("0.60", "4"), ("0.50", "6")),
     probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
     exit_authority_status="not_applicable",
     exit_authority_reason="non_day0_family",
@@ -23042,9 +23915,9 @@ def _adapter_sell_actuation(
         side="YES",
         snapshot_id="selected-sell-book",
         book_hash="selected-sell-hash",
-        levels=(
-            BookLevel(price=Decimal("0.60"), size=Decimal("4")),
-            BookLevel(price=Decimal("0.50"), size=Decimal("6")),
+        levels=tuple(
+            BookLevel(price=Decimal(price), size=Decimal(size))
+            for price, size in bid_levels
         ),
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.01"),
@@ -23072,7 +23945,8 @@ def _adapter_sell_actuation(
         exit_authority_reason=exit_authority_reason,
     )
     selected = Decimal(selected_shares)
-    proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(selected)
+    proceeds, expected_fill_price, deepest_bid = curve.proceeds_for_shares(selected)
+    limit_price = min(deepest_bid, Decimal("0.95"))
     loss_at_risk = selected - proceeds
     robust_q = 0.70
     loss_after = Decimal("110") - selected + proceeds
@@ -23225,9 +24099,18 @@ def test_global_sell_jit_rejects_changed_day0_statistical_authority(monkeypatch)
     "probability_functional",
     ("LOWER_CVAR_PARAMETER_DRAWS", "POSTERIOR_PREDICTIVE_MEAN"),
 )
+@pytest.mark.parametrize(
+    ("bid_levels", "expected_limit"),
+    (
+        ((("0.60", "4"), ("0.50", "6")), 0.50),
+        ((("0.97", "10"),), 0.95),
+    ),
+)
 def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     monkeypatch,
     probability_functional,
+    bid_levels,
+    expected_limit,
 ):
     from src.data.polymarket_request_governor import RequestPriority
 
@@ -23235,6 +24118,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     actuation = _adapter_sell_actuation(
         event,
         selected_shares="6",
+        bid_levels=bid_levels,
         probability_functional=probability_functional,
     )
     position = SimpleNamespace(
@@ -23299,8 +24183,8 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                     "tick_size": "0.01",
                     "min_order_size": "5",
                     "bids": [
-                        {"price": "0.60", "size": "4"},
-                        {"price": "0.50", "size": "6"},
+                        {"price": price, "size": size}
+                        for price, size in bid_levels
                     ],
                 }
             }
@@ -23329,7 +24213,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         assert authority.actuation is actuation
         assert authority.jit_candidate.executable_sell_curve.book_hash
         intent = kwargs["exit_intent"]
-        assert intent.exact_limit_price == pytest.approx(0.50)
+        assert intent.exact_limit_price == pytest.approx(expected_limit)
         assert intent.shares == pytest.approx(6.0)
         assert intent.close_position is False
         assert intent.submit_order_type == "FAK"

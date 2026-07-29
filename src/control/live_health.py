@@ -25,6 +25,7 @@ import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -4448,6 +4449,15 @@ def _evaluate_high_yes_edge_missed_surface_python(
             status_counts.get("pending", 0) + status_counts.get("processing", 0)
         )
         edge["expired_fsr_count"] = status_counts.get("expired", 0)
+        edge["day0_pending_count"] = status_counts.get("day0_pending", 0)
+        edge["day0_processed_count"] = status_counts.get("day0_processed", 0)
+        edge["day0_expired_count"] = status_counts.get("day0_expired", 0)
+        edge["global_entry_suppressed_count"] = status_counts.get(
+            "global_entry_suppressed", 0
+        )
+        edge["global_preflight_batch_blocked_count"] = status_counts.get(
+            "global_preflight_batch_blocked", 0
+        )
 
     unresolved = [
         edge
@@ -4466,9 +4476,28 @@ def _evaluate_high_yes_edge_missed_surface_python(
         if int(edge.get("processed_fsr_count") or 0) == 0
         and int(edge.get("pending_fsr_count") or 0) == 0
         and int(edge.get("expired_fsr_count") or 0) == 0
+        and int(edge.get("day0_processed_count") or 0) == 0
+        and int(edge.get("day0_pending_count") or 0) == 0
+        and int(edge.get("day0_expired_count") or 0) == 0
     ]
     processed_without_action = [
-        edge for edge in unresolved if int(edge.get("processed_fsr_count") or 0) > 0
+        edge
+        for edge in unresolved
+        if int(edge.get("processed_fsr_count") or 0) > 0
+        or int(edge.get("day0_processed_count") or 0) > 0
+    ]
+    day0_pending = [
+        edge for edge in unresolved if int(edge.get("day0_pending_count") or 0) > 0
+    ]
+    global_entry_suppressed = [
+        edge
+        for edge in unresolved
+        if int(edge.get("global_entry_suppressed_count") or 0) > 0
+    ]
+    global_preflight_batch_blocked = [
+        edge
+        for edge in unresolved
+        if int(edge.get("global_preflight_batch_blocked_count") or 0) > 0
     ]
     missed = missing_fsr + processed_without_action
     very_high_count = sum(
@@ -4492,6 +4521,11 @@ def _evaluate_high_yes_edge_missed_surface_python(
         "missed_high_yes_edge_sample": missed[:HIGH_YES_EDGE_SAMPLE_LIMIT],
         "pending_fsr_high_yes_edge_count": len(pending_fsr),
         "pending_fsr_high_yes_edge_sample": pending_fsr[:HIGH_YES_EDGE_SAMPLE_LIMIT],
+        "day0_pending_high_yes_edge_count": len(day0_pending),
+        "global_entry_suppressed_high_yes_edge_count": len(global_entry_suppressed),
+        "global_preflight_batch_blocked_high_yes_edge_count": len(
+            global_preflight_batch_blocked
+        ),
         "missing_fsr_high_yes_edge_count": len(missing_fsr),
         "processed_without_action_high_yes_edge_count": len(processed_without_action),
         "global_auction_candidate_evidence": auction_candidate_evidence,
@@ -4516,6 +4550,30 @@ def _evaluate_high_yes_edge_missed_surface_python(
         }
     if detail["entries_paused"]:
         return {"ok": True, "issue": None, **detail}
+    if global_preflight_batch_blocked:
+        return {
+            "ok": False,
+            "issue": (
+                "HIGH_YES_EDGE_GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
+                f"n={len(global_preflight_batch_blocked)}"
+            ),
+            **detail,
+        }
+    if global_entry_suppressed:
+        return {
+            "ok": False,
+            "issue": (
+                "HIGH_YES_EDGE_GLOBAL_ENTRY_SUPPRESSED:"
+                f"n={len(global_entry_suppressed)}"
+            ),
+            **detail,
+        }
+    if day0_pending:
+        return {
+            "ok": False,
+            "issue": f"HIGH_YES_EDGE_DAY0_PENDING:n={len(day0_pending)}",
+            **detail,
+        }
     if missing_fsr:
         return {
             "ok": False,
@@ -4587,20 +4645,26 @@ def _recent_buy_yes_entry_command_count(conn: object, *, cutoff: str) -> int | N
 
 _LATEST_LIVE_POSTERIORS_SQL = """
     SELECT posterior_id,
+           source_id,
+           posterior_identity_hash,
            city,
            target_date,
            temperature_metric,
            computed_at,
            q_json,
-           q_lcb_json
+           q_lcb_json,
+           provenance_json
       FROM (
             SELECT posterior_id,
+                   source_id,
+                   posterior_identity_hash,
                    city,
                    target_date,
                    temperature_metric,
                    computed_at,
                    q_json,
                    q_lcb_json,
+                   provenance_json,
                    ROW_NUMBER() OVER (
                        PARTITION BY city, target_date, temperature_metric
                        ORDER BY datetime(computed_at) DESC, posterior_id DESC
@@ -4722,10 +4786,23 @@ def _load_high_yes_edges_python(
         try:
             q_values = json.loads(row["q_json"] or "{}")
             q_lcb_values = json.loads(row["q_lcb_json"] or "{}")
+            provenance = json.loads(row["provenance_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
             continue
-        if not isinstance(q_values, dict) or not isinstance(q_lcb_values, dict):
+        if (
+            not isinstance(q_values, dict)
+            or not isinstance(q_lcb_values, dict)
+            or not isinstance(provenance, dict)
+        ):
             continue
+        day0_provenance = provenance.get("day0_conditioning")
+        if not isinstance(day0_provenance, dict):
+            day0_provenance = provenance.get("day0_provisional_observation")
+        if (
+            not isinstance(day0_provenance, dict)
+            or day0_provenance.get("active") is not True
+        ):
+            day0_provenance = {}
         city = str(row["city"] or "")
         target_date = str(row["target_date"] or "")
         metric = str(row["temperature_metric"] or "")
@@ -4751,6 +4828,16 @@ def _load_high_yes_edges_python(
                     yes_q = None
                 edge = {
                     "posterior_id": row["posterior_id"],
+                    "posterior_identity_hash": str(
+                        row["posterior_identity_hash"] or ""
+                    ),
+                    "posterior_source_id": str(row["source_id"] or ""),
+                    "day0_observation_source": str(
+                        day0_provenance.get("source") or ""
+                    ),
+                    "day0_observation_identity": str(
+                        day0_provenance.get("observation_time") or ""
+                    ),
                     "city": city,
                     "target_date": target_date,
                     "temperature_metric": metric,
@@ -4798,13 +4885,32 @@ def _forecast_snapshot_status_counts_for_edges(
             str(edge.get("target_date") or ""),
             str(edge.get("temperature_metric") or ""),
             str(edge.get("computed_at") or ""),
-        )
+        ): {
+            "posterior_identity_hash": str(
+                edge.get("posterior_identity_hash") or ""
+            ),
+            "posterior_source_id": str(edge.get("posterior_source_id") or ""),
+            "day0_observation_source": str(
+                edge.get("day0_observation_source") or ""
+            ),
+            "day0_observation_identity": str(
+                edge.get("day0_observation_identity") or ""
+            ),
+        }
         for edge in edges
     }
-    available_times = sorted({key[3] for key in wanted if key[3]})
-    if not available_times:
+    latest_edge_time = max((key[3] for key in wanted if key[3]), default="")
+    cutoff_at = _parse_iso_utc(cutoff)
+    if not latest_edge_time or cutoff_at is None:
         return {}
-    placeholders = ",".join("?" for _ in available_times)
+    processing_columns = _connection_table_columns(
+        conn, "opportunity_event_processing"
+    )
+    last_error_select = (
+        "p.last_error"
+        if "last_error" in processing_columns
+        else "NULL AS last_error"
+    )
     try:
         rows = conn.execute(
             f"""
@@ -4813,15 +4919,21 @@ def _forecast_snapshot_status_counts_for_edges(
                    e.available_at,
                    e.created_at,
                    e.payload_json,
-                   p.processing_status
+                   p.processing_status,
+                   {last_error_select}
               FROM opportunity_events e
               LEFT JOIN opportunity_event_processing p
                 ON p.event_id = e.event_id
                AND p.consumer_name = 'edli_reactor_v1'
-             WHERE e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
-               AND e.available_at IN ({placeholders})
+             WHERE e.event_type IN (
+                       'FORECAST_SNAPSHOT_READY',
+                       'EDLI_REDECISION_PENDING',
+                       'DAY0_EXTREME_UPDATED'
+                   )
+               AND e.available_at <= ?
+               AND e.available_at >= ?
             """,
-            tuple(available_times),
+            (latest_edge_time, cutoff),
         ).fetchall()
     except Exception:  # noqa: BLE001 - optional trace detail must not mask the edge alarm
         return {}
@@ -4831,13 +4943,19 @@ def _forecast_snapshot_status_counts_for_edges(
             payload = json.loads(row["payload_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
             continue
-        key = (
+        family = (
             str(payload.get("city") or ""),
             str(payload.get("target_date") or ""),
             str(payload.get("metric") or ""),
-            str(payload.get("available_at") or row["available_at"] or ""),
         )
-        if key not in wanted:
+        event_type = str(row["event_type"] or "")
+        event_available_at = _parse_iso_utc(
+            payload.get("observation_available_at")
+            or payload.get("available_at")
+            or row["available_at"]
+            or ""
+        )
+        if event_available_at is None or event_available_at < cutoff_at:
             continue
         status = str(row["processing_status"] or "pending").lower()
         if status == "processed":
@@ -4848,8 +4966,74 @@ def _forecast_snapshot_status_counts_for_edges(
             bucket = "processing"
         else:
             bucket = "pending"
-        by_status = counts.setdefault(key, {})
-        by_status[bucket] = by_status.get(bucket, 0) + 1
+        reason = str(row["last_error"] or "")
+        for key, identity in wanted.items():
+            posterior_computed_at = _parse_iso_utc(key[3])
+            if (
+                key[:3] != family
+                or posterior_computed_at is None
+                or event_available_at > posterior_computed_at
+            ):
+                continue
+            if event_type == "DAY0_EXTREME_UPDATED":
+                expected_source = identity["day0_observation_source"]
+                expected_observation = _parse_iso_utc(
+                    identity["day0_observation_identity"]
+                )
+                event_source = str(
+                    payload.get("settlement_source")
+                    or payload.get("observation_source")
+                    or payload.get("source")
+                    or ""
+                )
+                event_observation = _parse_iso_utc(
+                    payload.get("observation_time") or ""
+                )
+                if (
+                    not expected_source
+                    or event_source != expected_source
+                    or expected_observation is None
+                    or event_observation != expected_observation
+                ):
+                    continue
+            else:
+                if (
+                    not identity["posterior_identity_hash"]
+                    or str(
+                        payload.get("source_run_id")
+                        or payload.get("posterior_identity_hash")
+                        or ""
+                    )
+                    != identity["posterior_identity_hash"]
+                    or str(payload.get("source_id") or "")
+                    != identity["posterior_source_id"]
+                ):
+                    continue
+            by_status = counts.setdefault(key, {})
+            if event_type == "DAY0_EXTREME_UPDATED" and bucket in {
+                "pending",
+                "processing",
+            }:
+                by_status["day0_pending"] = (
+                    by_status.get("day0_pending", 0) + 1
+                )
+            elif event_type == "DAY0_EXTREME_UPDATED":
+                by_status[f"day0_{bucket}"] = (
+                    by_status.get(f"day0_{bucket}", 0) + 1
+                )
+            elif event_type != "DAY0_EXTREME_UPDATED":
+                by_status[bucket] = by_status.get(bucket, 0) + 1
+            if "GLOBAL_PREFLIGHT_BATCH_BLOCKED" in reason:
+                by_status["global_preflight_batch_blocked"] = (
+                    by_status.get("global_preflight_batch_blocked", 0) + 1
+                )
+            if (
+                "GLOBAL_ENTRY_SUPPRESSED" in reason
+                or reason.startswith("LIVE_ENTRY_BLOCKED:")
+            ):
+                by_status["global_entry_suppressed"] = (
+                    by_status.get("global_entry_suppressed", 0) + 1
+                )
     return counts
 
 
@@ -5512,6 +5696,19 @@ def _global_auction_holding_authority_matches(
     )
 
 
+def _apply_global_auction_candidate_semantic_delta(
+    base: Mapping[str, object],
+    delta: Mapping[str, object],
+) -> dict[str, object]:
+    """Rehydrate the engine's bounded one-hop candidate receipt delta."""
+
+    from src.engine.global_batch_runtime import (
+        _apply_candidate_evaluations_delta,
+    )
+
+    return _apply_candidate_evaluations_delta(base, delta)
+
+
 def _current_global_auction_candidate_payload(
     conn: object,
     summary: Mapping[str, object],
@@ -5522,9 +5719,14 @@ def _current_global_auction_candidate_payload(
 
     delta_field = "candidate_evaluations_delta_zlib_b64"
     if delta_field in summary:
-        if summary.get("candidate_evaluations_delta_encoding") != (
-            "zlib+base64+canonical-json-object-delta-v1"
-        ):
+        delta_encoding = str(
+            summary.get("candidate_evaluations_delta_encoding") or ""
+        )
+        if delta_encoding not in {
+            "zlib+base64+canonical-json-object-delta-v1",
+            "zlib+base64+semantic-keyed-canonical-json-delta-v2",
+            "zlib+base64+semantic-keyed-canonical-json-delta-v3",
+        }:
             raise ValueError("DELTA_ENCODING")
         base_row_id = int(summary["candidate_evaluations_base_decision_log_id"])
         base_receipt_hash = str(
@@ -5563,13 +5765,21 @@ def _current_global_auction_candidate_payload(
         ):
             raise ValueError("DELTA_HASH_MISMATCH")
         delta = json.loads(delta_raw)
-        replacements = delta.get("replacements", {})
-        if not isinstance(replacements, dict):
-            raise ValueError("DELTA_PAYLOAD_SHAPE")
-        payload = dict(base)
-        for key in delta.get("removed_keys", ()):
-            payload.pop(str(key), None)
-        payload.update((str(key), value) for key, value in replacements.items())
+        if delta_encoding == "zlib+base64+canonical-json-object-delta-v1":
+            replacements = delta.get("replacements", {})
+            if not isinstance(replacements, dict):
+                raise ValueError("DELTA_PAYLOAD_SHAPE")
+            payload = dict(base)
+            for key in delta.get("removed_keys", ()):
+                payload.pop(str(key), None)
+            payload.update(
+                (str(key), value) for key, value in replacements.items()
+            )
+        else:
+            payload = _apply_global_auction_candidate_semantic_delta(
+                base,
+                delta,
+            )
         raw = json.dumps(
             payload,
             sort_keys=True,
@@ -5666,11 +5876,21 @@ def _latest_global_auction_candidate_counts(
             "zlib+base64+canonical-json-v9",
             "zlib+base64+canonical-json-v10",
             "zlib+base64+canonical-json-v11",
+            "zlib+base64+canonical-json-v12",
         }:
             return invalid("ENCODING")
         holding_payload = None
-        if candidate_encoding == "zlib+base64+canonical-json-v11":
-            if schema_version not in {17, 18}:
+        current_candidate_encodings = {
+            "zlib+base64+canonical-json-v11",
+            "zlib+base64+canonical-json-v12",
+        }
+        if candidate_encoding in current_candidate_encodings:
+            expected_schema_versions = (
+                {17, 18}
+                if candidate_encoding == "zlib+base64+canonical-json-v11"
+                else {19}
+            )
+            if schema_version not in expected_schema_versions:
                 return invalid("SCHEMA_VERSION_CONTRACT")
             if summary.get("holding_auction_coverage_encoding") != (
                 "zlib+base64+canonical-json-v2"
@@ -5687,7 +5907,7 @@ def _latest_global_auction_candidate_counts(
     yes: dict[str, int] = {}
     no: dict[str, int] = {}
     covered = 0
-    if candidate_encoding == "zlib+base64+canonical-json-v11" and (
+    if candidate_encoding in current_candidate_encodings and (
         holding_payload is None
         or not _global_auction_holding_authority_matches(
             payload,
@@ -5697,13 +5917,61 @@ def _latest_global_auction_candidate_counts(
     ):
         return invalid("HOLDING_AUTHORITY_PAYLOAD")
     try:
+        rejected_indexes: set[int] = set()
+        buy_candidate_ids: tuple[str, ...] = ()
+        if candidate_encoding == "zlib+base64+canonical-json-v12":
+            buy_index = payload["buy_candidate_index"]
+            if not isinstance(buy_index, list) or any(
+                not isinstance(row, list) or len(row) != 6
+                for row in buy_index
+            ):
+                return invalid("BUY_CANDIDATE_INDEX_INVALID")
+            buy_candidate_ids = tuple(str(row[0] or "") for row in buy_index)
+            if (
+                not all(buy_candidate_ids)
+                or len(buy_candidate_ids) != len(set(buy_candidate_ids))
+            ):
+                return invalid("BUY_CANDIDATE_INDEX_INVALID")
+        buy_candidate_count = len(buy_candidate_ids)
         for group in payload["rejected_groups"]:
-            candidate_ids = group["candidate_ids"]
-            covered += len(candidate_ids)
+            if candidate_encoding == "zlib+base64+canonical-json-v12":
+                candidate_indexes = [
+                    int(value) for value in group["candidate_indexes"]
+                ]
+                if (
+                    len(candidate_indexes) != len(set(candidate_indexes))
+                    or any(
+                        value < 0 or value >= buy_candidate_count
+                        for value in candidate_indexes
+                    )
+                    or rejected_indexes.intersection(candidate_indexes)
+                ):
+                    return invalid("REJECTION_INDEX_INVALID")
+                rejected_indexes.update(candidate_indexes)
+                covered += len(candidate_indexes)
+                frontier = group.get("frontier")
+                if frontier is not None and (
+                    not isinstance(frontier, dict)
+                    or int(frontier["candidate_index"])
+                    not in candidate_indexes
+                ):
+                    return invalid("REJECTION_FRONTIER_INDEX_INVALID")
+            else:
+                candidate_ids = group["candidate_ids"]
+                covered += len(candidate_ids)
+        detailed_buy_ids: set[str] = set()
         for evaluation in payload["detailed"]:
             covered += 1
             if (
-                candidate_encoding == "zlib+base64+canonical-json-v11"
+                candidate_encoding == "zlib+base64+canonical-json-v12"
+                and evaluation.get("action") == "BUY"
+            ):
+                candidate_id = str(evaluation.get("candidate_id") or "")
+                if not candidate_id or candidate_id in detailed_buy_ids:
+                    return invalid("DETAILED_BUY_ID_INVALID")
+                detailed_buy_ids.add(candidate_id)
+            if (
+                candidate_encoding in current_candidate_encodings
                 and evaluation.get("action") == "SELL"
             ):
                 functional = evaluation.get("sell_probability_functional")
@@ -5756,6 +6024,16 @@ def _latest_global_auction_candidate_counts(
                     )
                 ):
                     return invalid("SELL_EXPECTED_AUTHORITY")
+        if candidate_encoding == "zlib+base64+canonical-json-v12":
+            rejected_ids = {
+                buy_candidate_ids[index] for index in rejected_indexes
+            }
+            if (
+                rejected_ids.intersection(detailed_buy_ids)
+                or rejected_ids.union(detailed_buy_ids)
+                != set(buy_candidate_ids)
+            ):
+                return invalid("BUY_CANDIDATE_PARTITION_INVALID")
         seen_conditions: set[str] = set()
         for condition_id, raw_mask in payload["buy_condition_side_masks"]:
             condition_id = str(condition_id or "")
@@ -5814,6 +6092,9 @@ def _high_yes_edge_schema_missing(
                 "runtime_layer",
                 "q_json",
                 "q_lcb_json",
+                "source_id",
+                "posterior_identity_hash",
+                "provenance_json",
             },
         ),
         "forecast.market_events": (
@@ -6056,6 +6337,28 @@ def _posterior_starvation_newest_blocked_reasons(
         return {}
 
 
+def _target_local_day_complete(
+    city: str,
+    target_date: str,
+    now: datetime,
+) -> bool:
+    """Whether forecast freshness has yielded to post-day observation truth."""
+
+    try:
+        from src.config import runtime_cities_by_name
+
+        city_obj = runtime_cities_by_name().get(str(city))
+        timezone_name = str(getattr(city_obj, "timezone", "") or "")
+        target = datetime.fromisoformat(str(target_date)).date()
+        local_today = now.astimezone(ZoneInfo(timezone_name)).date()
+    except Exception:  # noqa: BLE001 - best-effort scope; health must remain observable.
+        # Unknown identity stays visible. Health must not silently exclude a
+        # family whose local calendar cannot be proven, and a config reload
+        # failure must not crash the composite health pass.
+        return False
+    return target < local_today
+
+
 def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
     """Alert (log-only) on a live-tradeable family with no fresh live posterior.
 
@@ -6112,7 +6415,11 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
             "skip_reason": posterior_err or "FORECAST_POSTERIORS_COLUMNS_MISSING",
         }
 
-    today_utc = now.astimezone(timezone.utc).date().isoformat()
+    # UTC-12 can still be on yesterday's local target day. Keep a bounded
+    # two-day SQL window, then apply the authoritative per-city timezone below.
+    earliest_possible_local_today = (
+        now.astimezone(timezone.utc).date() - timedelta(days=1)
+    ).isoformat()
     family_rows, family_err = _sqlite_ro_rows(
         forecast_db,
         """
@@ -6131,7 +6438,7 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
            AND me.target_date >= ?
          GROUP BY me.city, me.target_date, me.temperature_metric
         """,
-        (today_utc,),
+        (earliest_possible_local_today,),
     )
     if family_err:
         return {
@@ -6147,6 +6454,8 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
         city = str(row.get("city") or "")
         target_date = str(row.get("target_date") or "")
         metric = str(row.get("metric") or "")
+        if _target_local_day_complete(city, target_date, now_utc):
+            continue
         newest_posterior_at = _parse_iso_utc(row.get("newest_live_posterior_at"))
         if newest_posterior_at is not None:
             age_h = max(0.0, (now_utc - newest_posterior_at).total_seconds() / 3600.0)

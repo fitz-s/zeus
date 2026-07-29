@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-27
-# Lifecycle: created=2026-06-10; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Last reused/audited: 2026-07-28
+# Lifecycle: created=2026-06-10; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -486,7 +486,7 @@ def test_fast_residual_low_fahrenheit_requires_t_group(
         target_date="2026-07-27",
         metric="low",
         decision_time=decision_time,
-    ) == (10.0, post_trough_time.isoformat(), 23, "F")
+    ) == (10.0, post_trough_time.isoformat(), 4, "F")
     likelihood = build_fast_station_residual_likelihood(
         conn,
         city="Residual F City",
@@ -1765,6 +1765,7 @@ class TestEmpiricalThresholds:
             ("Guangzhou", "ZGGG"),
             ("Wellington", "NZWN"),
             ("Ankara", "LTAC"),
+            ("Karachi", "OPKC"),
         ),
     )
     def test_recent_loss_cities_use_measured_zero_margin_fast_lane(
@@ -1814,6 +1815,10 @@ class TestEmpiricalThresholds:
             "2026-07-20T07:42:38.732852+00:00",
             "2026-07-27T07:42:38.732852+00:00",
         ]
+        expected_windows["Karachi"] = [
+            "2026-07-21T09:55:56.854853+00:00",
+            "2026-07-28T09:55:56.854853+00:00",
+        ]
         for city_name, expected_window in expected_windows.items():
             measurement = divergence[city_name]
             city = cities[city_name]
@@ -1823,6 +1828,21 @@ class TestEmpiricalThresholds:
             assert measurement["matched_pairs"] >= 100
             assert measurement["measurement_window_days"] == 7
             assert measurement["measurement_window"] == expected_window
+
+        karachi = divergence["Karachi"]
+        assert karachi["matched_pairs"] == 202
+        assert karachi["p95_abs_rounded_delta"] == 0.0
+        assert karachi["p99_abs_rounded_delta"] == 0.0
+        assert karachi["max_abs_rounded_delta"] == 0.0
+        assert karachi["disagree_rate_ge_1unit"] == 0.0
+        assert karachi["empirical_threshold"] == 1.0
+        assert karachi["threshold_provenance"] == "empirical"
+        assert karachi["settlement_faithful"] is True
+        assert karachi["station_id"] == "OPKC"
+        assert karachi["unit"] == "C"
+        assert datetime.fromisoformat(karachi["measurement_generated_at"]) > (
+            datetime.fromisoformat(karachi["measurement_window"][1])
+        )
 
     def test_unmeasured_city_falls_back_to_conservative_default(self):
         from src.data.day0_oracle_anomaly import (
@@ -2033,7 +2053,7 @@ class TestMetarMarginAbsorption:
         assert city_metar_settlement_faithful("Shenzhen", path=path) is False
         assert metar_margin_units_for_city("Shenzhen", "C", path=path) is None
 
-    def test_all_26_measured_cities_have_expected_margin(self):
+    def test_all_27_measured_cities_have_expected_margin(self):
         """Regression: the (b) default-direction fix changes behavior for
         UNMEASURED cities only. Every already-measured city in the real
         config/wu_metar_divergence.json (no path override) must keep its
@@ -2050,7 +2070,7 @@ class TestMetarMarginAbsorption:
             f_cities | {
                 "London", "Paris", "Amsterdam", "Milan", "Munich", "Madrid",
                 "Tokyo", "Singapore", "Taipei", "Toronto", "Beijing",
-                "Guangzhou", "Wellington", "Ankara",
+                "Guangzhou", "Wellington", "Ankara", "Karachi",
             }
         )}
         expected_margin["Seoul"] = 2.0
@@ -4059,3 +4079,57 @@ class TestTtlMissCacheAndPersistedTtl:
         # expired durable row was best-effort deleted (no restart re-hydration)
         rows = conn.execute("SELECT COUNT(*) FROM day0_oracle_anomaly_flags").fetchone()[0]
         assert rows == 0
+
+
+def test_fast_conditioning_deduplicates_same_metar_across_writer_prefixes(
+    monkeypatch,
+) -> None:
+    """A second rendering of one raw report cannot advance the Day0 identity."""
+    from src import config as config_module
+
+    monkeypatch.setitem(
+        config_module.cities_by_name,
+        "Wellington",
+        SimpleNamespace(
+            settlement_source_type="wu_icao",
+            wu_station="NZWN",
+            settlement_unit="C",
+            timezone="Pacific/Auckland",
+        ),
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observation_prints (
+            city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO observation_prints VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                "Wellington", "NZWN", FAST_OBS_SOURCE_ID,
+                "2026-07-28T19:34:12+00:00", 7.0, "C",
+                "2026-07-28T19:34:20+00:00",
+                "NZWN 281930Z AUTO 02014KT 9999 NCD 07/04 Q1025",
+            ),
+            (
+                "Wellington", "NZWN", FAST_OBS_SOURCE_ID,
+                "2026-07-28T19:34:13.003000+00:00", 7.0, "C",
+                "2026-07-28T19:35:41+00:00",
+                "METAR NZWN 281930Z AUTO 02014KT 9999 NCD 07/04 Q1025",
+            ),
+        ),
+    )
+
+    assert latest_fast_station_extreme_c(
+        conn,
+        city="Wellington",
+        target_date="2026-07-29",
+        metric="high",
+        decision_time=datetime(2026, 7, 28, 19, 40, tzinfo=UTC),
+    ) == (7.0, "2026-07-28T19:34:12+00:00", 1, "C")
+    conn.close()

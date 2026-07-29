@@ -52,13 +52,18 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.decision_kernel import claims
 from src.decision_kernel.compiler import PreSubmitProofBundle
 from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.event_store import EventStore, GLOBAL_WINNER_TARGETED_CLAIM
-from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
+from src.events.opportunity_event import (
+    OpportunityEvent,
+    assert_available_for_decision,
+    make_opportunity_event,
+)
+from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
 from src.state.db import get_trade_connection_read_only, get_world_connection_read_only, world_write_mutex
 from src.strategy.live_inference.live_admission import (
     live_buy_no_conservative_evidence_rejection_reason,
@@ -896,16 +901,19 @@ class GlobalBatchSubmitResult:
     venue_submit_count: int
     next_claim_event: OpportunityEvent | None = None
     continuation_event: OpportunityEvent | None = None
+    economic_cut_completed: bool = False
 
     def __post_init__(self) -> None:
         if self.venue_submit_count not in {0, 1}:
             raise ValueError("global batch may start at most one venue submit")
         if self.winner_event_id is None and self.venue_submit_count != 0:
             raise ValueError("venue submit requires one selected winner")
-        if self.next_claim_event is not None and (
-            self.winner_event_id is not None
-            or self.venue_submit_count != 0
-            or self.next_claim_event.event_id in self.receipts
+        if (
+            self.next_claim_event is not None
+            and (
+                self.venue_submit_count != 0
+                or self.next_claim_event.event_id in self.receipts
+            )
         ):
             raise ValueError("next global claim must be unclaimed and side-effect free")
         if self.continuation_event is not None and (
@@ -963,9 +971,11 @@ class GlobalEpochOutcome:
     ``claimed_event_ids`` is the set of events this epoch actually claimed (a
     subset of the scanned events) — see ``attempted``.
 
-    ``auction_completed_non_cancelled`` is true only after the opaque global
-    adapter returned a valid receipt partition without a selection-cancelled
-    outcome. Pre-submit event rejection and batch exceptions remain false.
+    ``auction_completed_non_cancelled`` copies the opaque adapter's explicit
+    ``economic_cut_completed`` disposition. It is never inferred from receipt
+    text: a complete CASH-dominates result or successful actuation is true;
+    cancellation, supersession, preflight rejection, and batch failure are
+    false.
 
     BLOCKER FIX (2026-07-19 external review,
     ~/cgc-answers/2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md,
@@ -1510,6 +1520,24 @@ class OpportunityEventReactor:
                 and batch_result.winner_event_id not in claimed_ids
             ):
                 raise ValueError("global batch winner is not a claimed event")
+            economic_cut_completed = bool(
+                batch_result.economic_cut_completed
+                and batch_result.winner_event_id is None
+                and batch_result.venue_submit_count == 0
+                and batch_result.next_claim_event is None
+                and batch_result.continuation_event is None
+                and all(
+                    not receipt.submitted
+                    and not receipt.venue_call_started
+                    and receipt.side_effect_status == "NO_SUBMIT"
+                    for receipt in batch_result.receipts.values()
+                )
+            )
+            if batch_result.economic_cut_completed and not economic_cut_completed:
+                logging.getLogger("zeus.events.reactor").error(
+                    "global adapter economic-cut disposition rejected: "
+                    "batch is not wholly side-effect free"
+                )
             if batch_result.next_claim_event is not None:
                 next_claim_event = batch_result.next_claim_event
                 claim_lock_bounced = (
@@ -1561,7 +1589,18 @@ class OpportunityEventReactor:
         # The losers are retryable projections; they must not delay durable
         # ownership of an external side effect.
         finalization_events = list(claimed)
-        if batch_result.venue_submit_count == 1:
+        winner_receipt = batch_result.receipts.get(
+            str(batch_result.winner_event_id or "")
+        )
+        winner_side_effect_possible = bool(
+            winner_receipt is not None
+            and (
+                winner_receipt.submitted
+                or winner_receipt.venue_call_started
+                or winner_receipt.side_effect_status != "NO_SUBMIT"
+            )
+        )
+        if winner_side_effect_possible:
             finalization_events.sort(
                 key=lambda event: event.event_id != batch_result.winner_event_id
             )
@@ -1575,8 +1614,29 @@ class OpportunityEventReactor:
         # both returned True (no Window-B lock/requeue failure) AND did not
         # route through the unknown-exception dead-letter path.
         winner_finalized = True
+        all_claimed_finalized = True
         for event in finalization_events:
             receipt = batch_result.receipts[event.event_id]
+            if (
+                economic_cut_completed
+                and not _global_auction_economic_no_trade_is_terminal(
+                    str(receipt.reason or "")
+                )
+            ):
+                # The opaque adapter, not receipt text, owns whether the full
+                # current global action set reached a complete HOLD/CASH cut.
+                # Preserve the adapter's detailed exclusion reason behind the
+                # existing terminal economic verdict so Window B writes honest
+                # rejection/regret evidence and consumes this causal carrier.
+                # Fresh price/probability/fill/monitor events remain the reset.
+                receipt = dataclass_replace(
+                    receipt,
+                    reason=(
+                        "GLOBAL_AUCTION_NO_TRADE:"
+                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:"
+                        f"{receipt.reason or 'ECONOMIC_CUT_COMPLETE'}"
+                    ),
+                )
             side_effect_possible = bool(
                 receipt.submitted
                 or receipt.venue_call_started
@@ -1600,6 +1660,7 @@ class OpportunityEventReactor:
                 )
                 result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
                 result.retried += 1
+                all_claimed_finalized = False
                 continue
             is_winner = (
                 batch_result.venue_submit_count == 1
@@ -1620,6 +1681,7 @@ class OpportunityEventReactor:
             )
             if not finalized:
                 finalization_lock_busy = True
+                all_claimed_finalized = False
             if is_winner:
                 winner_finalized = (
                     finalized
@@ -1635,9 +1697,8 @@ class OpportunityEventReactor:
                 if winner_finalized and batch_result.continuation_event is not None
                 else frozenset()
             ),
-            auction_completed_non_cancelled=not any(
-                "GLOBAL_SELECTION_CANCELLED" in str(receipt.reason or "")
-                for receipt in batch_result.receipts.values()
+            auction_completed_non_cancelled=bool(
+                economic_cut_completed and all_claimed_finalized
             ),
         )
 
@@ -1945,7 +2006,12 @@ class OpportunityEventReactor:
                 )
                 if not should_submit:
                     self._finalize_disposition(
-                        event, pre_disposition, decision_time=decision_time, result=result
+                        event,
+                        pre_disposition,
+                        decision_time=decision_time,
+                        result=result,
+                        claim_generation=claim_generation,
+                        claim_attempt_count=claim_attempt_count,
                     )
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                     self._commit_event_unit()
@@ -2047,6 +2113,8 @@ class OpportunityEventReactor:
                         decision_time=decision_time,
                         result=result,
                         proof_emitted=result.proof_accepted > _accepted_before,
+                        claim_generation=claim_generation,
+                        claim_attempt_count=claim_attempt_count,
                     )
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                     self._commit_event_unit()
@@ -2280,6 +2348,8 @@ class OpportunityEventReactor:
                         decision_time=decision_time,
                         result=result,
                         proof_emitted=emitted,
+                        claim_generation=claim_generation,
+                        claim_attempt_count=claim_attempt_count,
                     )
                     if continuation_event is not None:
                         if not bool(submit_result.submitted):
@@ -2866,6 +2936,8 @@ class OpportunityEventReactor:
         decision_time: datetime,
         result: ReactorResult,
         proof_emitted: bool = False,
+        claim_generation: str | None = None,
+        claim_attempt_count: int | None = None,
     ) -> None:
         """Apply the terminal/retry book-keeping for a window disposition.
 
@@ -2949,11 +3021,20 @@ class OpportunityEventReactor:
                     )
                     else last_reason
                 )
-                self._store.requeue_pending(
-                    event.event_id,
-                    not_before=retry_not_before,
-                    last_error=processing_error,
-                )
+                if claim_generation and claim_attempt_count is not None:
+                    self._store.requeue_claim_if_current(
+                        event.event_id,
+                        claimed_at=claim_generation,
+                        attempt_count=claim_attempt_count,
+                        not_before=retry_not_before,
+                        last_error=processing_error,
+                    )
+                else:
+                    self._store.requeue_pending(
+                        event.event_id,
+                        not_before=retry_not_before,
+                        last_error=processing_error,
+                    )
                 result.retried += 1
                 result.rejection_reasons.append(last_reason or "EXECUTABLE_SNAPSHOT_PENDING")
             return
@@ -5449,6 +5530,137 @@ def _substrate_refresh_family_key(
     )
 
 
+def _current_local_day_families(
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+) -> set[tuple[str, str, str]]:
+    """Return wake families whose target is the city's current local day."""
+
+    from src.config import runtime_cities_by_name
+
+    city_map = runtime_cities_by_name()
+    decision_utc = decision_time.astimezone(timezone.utc)
+    current: set[tuple[str, str, str]] = set()
+    for city, target_date, metric in families:
+        city_cfg = city_map.get(city)
+        city_tz = str(getattr(city_cfg, "timezone", "") or "")
+        if not city_tz:
+            continue
+        try:
+            target = date.fromisoformat(target_date)
+            local_today = decision_utc.astimezone(ZoneInfo(city_tz)).date()
+        except (ValueError, TypeError, ZoneInfoNotFoundError):
+            continue
+        if target == local_today:
+            current.add((city, target_date, metric))
+    return current
+
+
+def _build_day0_posterior_redecision_events(
+    world_conn,
+    posterior_events: Iterable[OpportunityEvent],
+    *,
+    day0_families: set[tuple[str, str, str]],
+    received_at: str,
+) -> list[OpportunityEvent]:
+    """Bind a new Day0 probability clock to the latest immutable observation.
+
+    A posterior may advance after the latest ``DAY0_EXTREME_UPDATED`` event was
+    already consumed.  Reusing the old event would deduplicate and silently skip
+    re-decision; routing the posterior through the forecast lane would be rejected
+    by the settlement-day phase gate.  This bridge keeps the Day0 observation
+    payload unchanged and advances only the top-level availability/causal clock.
+    """
+
+    from src.events.event_priority import PRIORITY_DAY0
+    from src.events.triggers.day0_extreme_updated import Day0HardFactGate
+
+    out: list[OpportunityEvent] = []
+    for posterior_event in posterior_events:
+        try:
+            posterior_payload = json.loads(posterior_event.payload_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        family = (
+            str(posterior_payload.get("city") or ""),
+            str(posterior_payload.get("target_date") or ""),
+            str(posterior_payload.get("metric") or ""),
+        )
+        if family not in day0_families:
+            continue
+        row = world_conn.execute(
+            """
+            SELECT entity_key,
+                   observed_at,
+                   available_at,
+                   payload_json
+              FROM opportunity_events
+             WHERE event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(payload_json, '$.city') = ?
+               AND json_extract(payload_json, '$.target_date') = ?
+               AND json_extract(payload_json, '$.metric') = ?
+               AND julianday(available_at) <= julianday(?)
+             ORDER BY julianday(available_at) DESC, rowid DESC
+             LIMIT 1
+            """,
+            (*family, posterior_event.available_at),
+        ).fetchone()
+        if row is None:
+            continue
+        entity_key, observed_at, _available_at, payload_json = row
+        try:
+            observation_payload = json.loads(payload_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        gate = Day0HardFactGate(
+            source_match_status=str(
+                observation_payload.get("source_match_status") or ""
+            ),
+            local_date_status=str(
+                observation_payload.get("local_date_status") or ""
+            ),
+            station_match_status=str(
+                observation_payload.get("station_match_status") or ""
+            ),
+            dst_status=str(observation_payload.get("dst_status") or ""),
+            metric_match_status=str(
+                observation_payload.get("metric_match_status") or ""
+            ),
+            rounding_status=str(
+                observation_payload.get("rounding_status") or ""
+            ),
+            source_authorized_status=str(
+                observation_payload.get("source_authorized_status") or ""
+            ),
+            live_authority_status=str(
+                observation_payload.get("live_authority_status") or ""
+            ),
+        )
+        if not gate.live_eligible():
+            continue
+        observation_payload["posterior_redecision_identity"] = str(
+            posterior_event.causal_snapshot_id or ""
+        )
+        observation_payload["posterior_redecision_available_at"] = (
+            posterior_event.available_at
+        )
+        out.append(
+            make_opportunity_event(
+                event_type="DAY0_EXTREME_UPDATED",
+                entity_key=str(entity_key),
+                source="day0_posterior_advanced",
+                observed_at=str(observed_at),
+                available_at=posterior_event.available_at,
+                received_at=received_at,
+                payload=observation_payload,
+                causal_snapshot_id=posterior_event.causal_snapshot_id,
+                priority=PRIORITY_DAY0,
+            )
+        )
+    return out
+
+
 @dataclass(frozen=True)
 class _Day0LiveFamilyAdmission:
     admitted_families: frozenset[tuple[str, str, str]]
@@ -5960,16 +6172,85 @@ def _reactor_wake_cancellation_probe(
 _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE = threading.Event()
 
 
+def request_global_auction_completion(
+    *,
+    reason: str,
+    position_id: str,
+    family: tuple[str, str, str] | None = None,
+) -> None:
+    """Persistently reserve one complete global cut for a held SELL."""
+
+    already_due = _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    clean_family = tuple(
+        str(value or "").strip().lower()
+        if index == 2
+        else str(value or "").strip()
+        for index, value in enumerate(family or ())
+    )
+    wake_families: tuple[tuple[str, str, str], ...] = ()
+    if len(clean_family) == 3 and all(clean_family):
+        wake_families = (
+            (clean_family[0], clean_family[1], clean_family[2]),
+        )
+    try:
+        from src.runtime.reactor_wake import (
+            publish_reactor_wake,
+            reactor_wakes_since,
+        )
+
+        durable_wakes = tuple(
+            wake
+            for wake in reactor_wakes_since(None)
+            if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        )
+        durable_request_exists = (
+            any(wake_families[0] in wake.forecast_families for wake in durable_wakes)
+            if wake_families
+            else bool(durable_wakes)
+        )
+    except OSError:
+        durable_request_exists = False
+    if not already_due:
+        logger = logging.getLogger("zeus.events.reactor")
+        logger.warning(
+            "global auction completion requested by held SELL: "
+            "position_id=%s reason=%s",
+            str(position_id or "unknown"),
+            str(reason or "authority_unavailable"),
+        )
+    else:
+        logger = logging.getLogger("zeus.events.reactor")
+    if not durable_request_exists:
+        try:
+            publish_reactor_wake(
+                source="held_position_monitor",
+                reason=GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+                forecast_families=wake_families,
+            )
+        except OSError:
+            logger.exception(
+                "held SELL global-auction wake publish failed; "
+                "scheduled reactor remains the fallback"
+            )
+
+
 def _global_auction_monitor_cancellation_probe(
     monitor_pending: Callable[[], bool] | None,
+    *,
+    completion_due: bool = False,
 ) -> tuple[bool, Callable[[], bool]]:
     """Allow one periodic-monitor preemption, then reserve auction completion."""
 
-    completion_due_at_start = _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    completion_due_at_start = (
+        completion_due or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    )
+    if completion_due_at_start:
+        _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
     cancelled_this_cycle = False
     if completion_due_at_start:
         logging.getLogger("zeus.events.reactor").info(
-            "global auction completion reserved after periodic-monitor preemption"
+            "global auction economic-cut completion reserved"
         )
 
     def _cancelled() -> bool:
@@ -5990,7 +6271,10 @@ def _global_auction_monitor_cancellation_probe(
         # ignores ordinary monitor pressure until one global auction finishes.
         # RESET: _settle_global_auction_monitor_fairness clears the debt only
         # after a non-cancelled auction result; Day0 cancellation keeps it due.
-        _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+        request_global_auction_completion(
+            reason="periodic_monitor_preemption",
+            position_id="",
+        )
         cancelled_this_cycle = True
         logging.getLogger("zeus.events.reactor").info(
             "global auction yielded once to periodic held monitor; completion debt armed"
@@ -6002,22 +6286,22 @@ def _global_auction_monitor_cancellation_probe(
 
 def _settle_global_auction_monitor_fairness(
     *, completion_due_at_start: bool, result: object
-) -> None:
+) -> bool:
     """Clear a prior monitor preemption only after useful auction completion."""
 
     if not completion_due_at_start:
-        return
-    reasons = tuple(getattr(result, "rejection_reasons", ()) or ())
-    if any("GLOBAL_SELECTION_CANCELLED" in str(reason) for reason in reasons):
-        return
+        return False
     completed = int(
         getattr(result, "global_auction_completed_non_cancelled", 0) or 0
     )
     if completed > 0:
         _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
         logging.getLogger("zeus.events.reactor").info(
-            "global auction completion debt cleared after non-cancelled result"
+            "global auction completion debt cleared after economic cut"
         )
+        return True
+    _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    return False
 
 
 def run_edli_event_reactor_cycle(
@@ -6078,6 +6362,10 @@ def run_edli_event_reactor_cycle(
     _log = _logging.getLogger("zeus.events.reactor")
 
     edli_cfg = _settings_section("edli", {})
+    completion_wake = (
+        producer_wake_reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+    )
+    completion_wake_needs_retry = False
     committed_day0_wake = (
         producer_wake_reason == "day0_extreme_event_committed"
     )
@@ -6108,7 +6396,8 @@ def run_edli_event_reactor_cycle(
             forecast_wake_families.add(family)
             forecast_wake_family_order.append(family)
     targeted_forecast_wake = (
-        producer_wake_reason == "forecast_posterior_advanced"
+        producer_wake_reason
+        in {"forecast_posterior_advanced", GLOBAL_AUCTION_COMPLETION_WAKE_REASON}
         and bool(forecast_wake_families)
     )
     producer_fast_path = committed_event_wake or targeted_forecast_wake
@@ -6132,7 +6421,7 @@ def run_edli_event_reactor_cycle(
         _log.info(
             "EDLI reactor skipped before runtime DB setup: new entries are globally blocked"
         )
-        return True
+        return not completion_wake
     import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
@@ -6352,6 +6641,17 @@ def run_edli_event_reactor_cycle(
                         ),
                         cancelled=_urgent_wake_pending,
                     )
+                _day0_posterior_wake_families = (
+                    _current_local_day_families(
+                        forecast_wake_families,
+                        decision_time=now,
+                    )
+                    if producer_wake_reason == "forecast_posterior_advanced"
+                    else set()
+                )
+                _forecast_only_wake_families = (
+                    forecast_wake_families - _day0_posterior_wake_families
+                )
                 _fsr_events = _edli_build_forecast_snapshot_events(
                     conn,
                     decision_time=now,
@@ -6362,10 +6662,40 @@ def run_edli_event_reactor_cycle(
                     suppress_recent_no_value_refutations=True,
                     budget_seconds=_edli_forecast_snapshot_build_budget_seconds(edli_cfg),
                     restrict_to_families=(
-                        forecast_wake_families if targeted_forecast_wake else None
+                        _forecast_only_wake_families
+                        if targeted_forecast_wake
+                        else None
                     ),
                     cancelled=_urgent_wake_pending,
                 )
+                if _day0_posterior_wake_families:
+                    _day0_posterior_carriers = (
+                        _edli_build_forecast_snapshot_events(
+                            conn,
+                            decision_time=now,
+                            received_at=received_at,
+                            limit=None,
+                            source=_fair_source,
+                            already_pending_keys=None,
+                            suppress_recent_no_value_refutations=False,
+                            budget_seconds=_edli_forecast_snapshot_build_budget_seconds(
+                                edli_cfg
+                            ),
+                            restrict_to_families=_day0_posterior_wake_families,
+                            phase_filter_exempt_families=(
+                                _day0_posterior_wake_families
+                            ),
+                            cancelled=_urgent_wake_pending,
+                        )
+                    )
+                    _fsr_events.extend(
+                        _build_day0_posterior_redecision_events(
+                            conn,
+                            _day0_posterior_carriers,
+                            day0_families=_day0_posterior_wake_families,
+                            received_at=received_at,
+                        )
+                    )
                 if targeted_forecast_wake and _urgent_wake_pending():
                     _log.info(
                         "EDLI targeted forecast build superseded by a newer "
@@ -6645,7 +6975,8 @@ def run_edli_event_reactor_cycle(
             _monitor_completion_due_at_start,
             _monitor_selection_cancelled,
         ) = _global_auction_monitor_cancellation_probe(
-            held_position_monitor_pending
+            held_position_monitor_pending,
+            completion_due=completion_wake,
         )
         submit_adapter = event_bound_live_adapter_from_trade_conn(
             trade_conn,
@@ -6678,6 +7009,9 @@ def run_edli_event_reactor_cycle(
             producer_wake_ids=producer_wake_ids,
             producer_wake_published_at=producer_wake_published_at,
             selection_cancelled=_monitor_selection_cancelled,
+            selection_completion_reserved=(
+                _monitor_completion_due_at_start
+            ),
         )
 
         reactor = OpportunityEventReactor(
@@ -6724,9 +7058,12 @@ def run_edli_event_reactor_cycle(
                 urgent_day0_pending=urgent_day0_pending,
             ),
         )
-        _settle_global_auction_monitor_fairness(
+        completion_satisfied = _settle_global_auction_monitor_fairness(
             completion_due_at_start=_monitor_completion_due_at_start,
             result=_rr,
+        )
+        completion_wake_needs_retry = (
+            completion_wake and not completion_satisfied
         )
         _log_stage("process_pending")
         # Canonical event/finalization truth must commit before the derived status
@@ -6807,7 +7144,7 @@ def run_edli_event_reactor_cycle(
             # every later cycle into "previous cycle is still running".
             active_lock.release()
             _start_venue_background_maintenance_after_reactor_if_required()
-    return True
+    return not completion_wake_needs_retry
 
 def _edli_positive_int_or_unbounded(
     config: dict, key: str, *, default: int, maximum: int
@@ -8990,29 +9327,14 @@ def _edli_latest_pre_submit_book_row(
         LIMIT 1
         """
     try:
-        latest_row = book_evidence_conn.execute(
+        return book_evidence_conn.execute(
             latest_sql,
             (token_id, decision_time.isoformat()),
         ).fetchone()
     except sqlite3.OperationalError as exc:
         if "execution_feasibility_latest" not in str(exc):
             raise
-        latest_row = None
-    if latest_row is not None:
-        return latest_row
-    return book_evidence_conn.execute(
-        f"""
-        SELECT quote_seen_at, book_hash_before, best_bid_before, best_ask_before
-        FROM execution_feasibility_evidence
-        WHERE token_id = ?
-          AND quote_seen_at <= ?
-          {side_filter}
-          AND COALESCE(book_hash_before, '') != ''
-        ORDER BY quote_seen_at DESC
-        LIMIT 1
-        """,
-        (token_id, decision_time.isoformat()),
-    ).fetchone()
+        return None
 
 def _edli_heartbeat_authority_summary(order_type: str) -> dict[str, object]:
     from src.control.heartbeat_supervisor import summary as heartbeat_summary

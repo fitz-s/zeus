@@ -70,6 +70,7 @@ _LOG = logging.getLogger(__name__)
 _SLOW_BATCH_STAGE_SECONDS = 2.0
 _SLOW_BATCH_TOTAL_SECONDS = 5.0
 _WEALTH_REAUCTION_MAX_ATTEMPTS = 2
+_PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS = 1
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ class _GlobalAuctionPayloadRef:
     repair: _GlobalAuctionComponentRef
     holding: _GlobalAuctionComponentRef
     book: _GlobalAuctionComponentRef
+    audit_context: _GlobalAuctionComponentRef
 
 
 @dataclass(frozen=True)
@@ -156,11 +158,18 @@ _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY: str | None = None
 _GLOBAL_HOLDING_COVERAGE_GENERATION = 0
 _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS = frozenset(
     {
+        "audit_context_zlib_b64",
         "book_native_side_states_zlib_b64",
         "buy_minimum_marketable_repairs_zlib_b64",
         "candidate_evaluations_zlib_b64",
         "holding_auction_coverage_zlib_b64",
     }
+)
+_GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS = (
+    "probability_manifest",
+    "buy_disabled_reason_by_family",
+    "excluded_by_family",
+    "excluded_by_candidate",
 )
 
 
@@ -671,6 +680,7 @@ class GlobalWinnerPreflight:
             "STABLE",
             "CURVE_SUPERSEDED",
             "PROBABILITY_TIGHTENED",
+            "PROBABILITY_SUPERSEDED",
             "WEALTH_SUPERSEDED",
             "CANDIDATE_BLOCKED",
             "BLOCKED",
@@ -752,6 +762,15 @@ def _global_preflight_exhaustion_reason(
         f"{base}:{reason}:families={len(excluded_by_family)}:"
         f"candidates={len(excluded_by_candidate)}"
     )
+
+
+_COMPLETE_ECONOMIC_NO_TRADE_REASONS = frozenset(
+    {
+        "CASH_DOMINATES",
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        "ROBUST_MAJORITY_LOSS",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -1059,6 +1078,433 @@ def _apply_json_object_delta(
     return result
 
 
+_CANDIDATE_SEMANTIC_KEY_FIELDS = (
+    "action",
+    "family_key",
+    "bin_id",
+    "condition_id",
+    "side",
+    "token_id",
+    "position_id",
+)
+_BUY_CANDIDATE_INDEX_KEY_FIELDS = (
+    "family_key",
+    "bin_id",
+    "condition_id",
+    "side",
+    "token_id",
+)
+
+
+def _buy_candidate_index_map(
+    rows: object,
+) -> dict[tuple[str, ...], str]:
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+    mapped: dict[tuple[str, ...], str] = {}
+    candidate_ids: set[str] = set()
+    for raw_row in rows:
+        if (
+            not isinstance(raw_row, Sequence)
+            or isinstance(raw_row, (str, bytes))
+            or len(raw_row) != 6
+        ):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        candidate_id = str(raw_row[0] or "")
+        key = tuple(str(value or "") for value in raw_row[1:])
+        if (
+            not candidate_id
+            or candidate_id in candidate_ids
+            or not all(key)
+            or key[3] not in {"YES", "NO"}
+            or key in mapped
+        ):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        candidate_ids.add(candidate_id)
+        mapped[key] = candidate_id
+    return mapped
+
+
+def _condition_side_mask_map(rows: object) -> dict[str, int]:
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID")
+    mapped: dict[str, int] = {}
+    for raw_row in rows:
+        if (
+            not isinstance(raw_row, Sequence)
+            or isinstance(raw_row, (str, bytes))
+            or len(raw_row) != 2
+        ):
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+            )
+        condition_id = str(raw_row[0] or "")
+        try:
+            mask = int(raw_row[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+            ) from exc
+        if not condition_id or mask not in {1, 2, 3} or condition_id in mapped:
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+            )
+        mapped[condition_id] = mask
+    return mapped
+
+
+def _delta_key(raw_key: object, *, size: int, error: str) -> tuple[str, ...]:
+    if (
+        not isinstance(raw_key, Sequence)
+        or isinstance(raw_key, (str, bytes))
+        or len(raw_key) != size
+    ):
+        raise ValueError(error)
+    key = tuple(str(value or "") for value in raw_key)
+    if not all(key):
+        raise ValueError(error)
+    return key
+
+
+def _candidate_semantic_key(row: Mapping[str, object]) -> str:
+    """Identify one action slot without its per-epoch causal certificate."""
+
+    return json.dumps(
+        [str(row.get(field) or "") for field in _CANDIDATE_SEMANTIC_KEY_FIELDS],
+        separators=(",", ":"),
+    )
+
+
+def _candidate_detail_map(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, object]]:
+    mapped = {_candidate_semantic_key(row): dict(row) for row in rows}
+    if len(mapped) != len(rows):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_SEMANTIC_KEY_DUPLICATE")
+    return mapped
+
+
+def _apply_candidate_evaluations_delta(
+    base: Mapping[str, object],
+    delta: Mapping[str, object],
+) -> dict[str, object]:
+    """Reconstruct one complete candidate cut from a one-hop semantic delta."""
+
+    top_level = delta.get("top_level")
+    detail_delta = delta.get("detailed")
+    if not isinstance(top_level, Mapping) or not isinstance(detail_delta, Mapping):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    indexed_delta = delta.get("buy_candidate_index")
+    condition_delta = delta.get("buy_condition_side_masks")
+    indexed_v3 = indexed_delta is not None or condition_delta is not None
+    if indexed_v3 and (
+        not isinstance(indexed_delta, Mapping)
+        or not isinstance(condition_delta, Mapping)
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    excluded = {"detailed"}
+    if indexed_v3:
+        excluded.update(
+            {"buy_candidate_index", "buy_condition_side_masks"}
+        )
+    result = _apply_json_object_delta(
+        {key: value for key, value in base.items() if key not in excluded},
+        top_level,
+    )
+    if indexed_v3:
+        if indexed_delta.get("key_fields") != list(
+            _BUY_CANDIDATE_INDEX_KEY_FIELDS
+        ):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        buy_rows = _buy_candidate_index_map(base.get("buy_candidate_index"))
+        removed_buy_keys: set[tuple[str, ...]] = set()
+        removed_buy_values = indexed_delta.get("removed_keys", ())
+        if not isinstance(removed_buy_values, Sequence) or isinstance(
+            removed_buy_values,
+            (str, bytes),
+        ):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        for raw_key in removed_buy_values:
+            key = _delta_key(
+                raw_key,
+                size=5,
+                error="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
+            )
+            if key in removed_buy_keys:
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID"
+                )
+            removed_buy_keys.add(key)
+            buy_rows.pop(key, None)
+        patches = indexed_delta.get("patches", ())
+        if not isinstance(patches, Sequence) or isinstance(patches, (str, bytes)):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        patched_buy_keys: set[tuple[str, ...]] = set()
+        for patch in patches:
+            if not isinstance(patch, Mapping):
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID"
+                )
+            key = _delta_key(
+                patch.get("key"),
+                size=5,
+                error="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
+            )
+            candidate_id = str(patch.get("candidate_id") or "")
+            if not candidate_id or key in patched_buy_keys:
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID"
+                )
+            patched_buy_keys.add(key)
+            buy_rows[key] = candidate_id
+        reconstructed_buy_index = sorted(
+            [[candidate_id, *key] for key, candidate_id in buy_rows.items()]
+        )
+        _buy_candidate_index_map(reconstructed_buy_index)
+        result["buy_candidate_index"] = reconstructed_buy_index
+
+        condition_rows = _condition_side_mask_map(
+            base.get("buy_condition_side_masks")
+        )
+        removed_conditions: set[str] = set()
+        removed_condition_values = condition_delta.get("removed_keys", ())
+        if not isinstance(removed_condition_values, Sequence) or isinstance(
+            removed_condition_values,
+            (str, bytes),
+        ):
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+            )
+        for raw_condition_id in removed_condition_values:
+            condition_id = str(raw_condition_id or "")
+            if not condition_id or condition_id in removed_conditions:
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+                )
+            removed_conditions.add(condition_id)
+            condition_rows.pop(condition_id, None)
+        condition_patches = condition_delta.get("patches", ())
+        if not isinstance(condition_patches, Sequence) or isinstance(
+            condition_patches,
+            (str, bytes),
+        ):
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+            )
+        patched_conditions: set[str] = set()
+        for patch in condition_patches:
+            if not isinstance(patch, Mapping):
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+                )
+            condition_id = str(patch.get("condition_id") or "")
+            try:
+                mask = int(patch.get("side_mask"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+                ) from exc
+            if (
+                not condition_id
+                or mask not in {1, 2, 3}
+                or condition_id in patched_conditions
+            ):
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_CONDITION_MASK_DELTA_INVALID"
+                )
+            patched_conditions.add(condition_id)
+            condition_rows[condition_id] = mask
+        result["buy_condition_side_masks"] = sorted(condition_rows.items())
+    base_rows = base.get("detailed")
+    if not isinstance(base_rows, Sequence):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    rows = _candidate_detail_map(base_rows)
+    for key in detail_delta.get("removed_keys", ()):
+        rows.pop(str(key), None)
+    patches = detail_delta.get("patches", ())
+    if not isinstance(patches, Sequence):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    for patch in patches:
+        if not isinstance(patch, Mapping):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+        key = str(patch.get("key") or "")
+        if not key:
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+        inserted = patch.get("inserted_row")
+        if inserted is not None:
+            if not isinstance(inserted, Mapping) or key in rows:
+                raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+            row = dict(inserted)
+        else:
+            if key not in rows:
+                raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+            row = dict(rows[key])
+            for field in patch.get("removed_fields", ()):
+                row.pop(str(field), None)
+            replacements = patch.get("replacements", {})
+            if not isinstance(replacements, Mapping):
+                raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+            row.update(
+                (str(field), value) for field, value in replacements.items()
+            )
+        if _candidate_semantic_key(row) != key:
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_SEMANTIC_KEY_CHANGED")
+        rows[key] = row
+    result["detailed"] = [rows[key] for key in sorted(rows)]
+    return result
+
+
+def _candidate_evaluations_delta_receipt(
+    *,
+    base: Mapping[str, object],
+    current: Mapping[str, object],
+    expected_sha256: str,
+) -> dict[str, object]:
+    base_rows = base.get("detailed")
+    current_rows = current.get("detailed")
+    if not isinstance(base_rows, Sequence) or not isinstance(
+        current_rows, Sequence
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    base_details = _candidate_detail_map(base_rows)
+    current_details = _candidate_detail_map(current_rows)
+    base_buy_index = _buy_candidate_index_map(base.get("buy_candidate_index"))
+    current_buy_index = _buy_candidate_index_map(
+        current.get("buy_candidate_index")
+    )
+    base_condition_masks = _condition_side_mask_map(
+        base.get("buy_condition_side_masks")
+    )
+    current_condition_masks = _condition_side_mask_map(
+        current.get("buy_condition_side_masks")
+    )
+    patches: list[dict[str, object]] = []
+    for key in sorted(current_details):
+        row = current_details[key]
+        if key not in base_details:
+            patches.append({"key": key, "inserted_row": row})
+            continue
+        old = base_details[key]
+        replacements = {
+            field: row[field]
+            for field in sorted(row)
+            if field not in old or old[field] != row[field]
+        }
+        removed_fields = sorted(field for field in old if field not in row)
+        if replacements or removed_fields:
+            patches.append(
+                {
+                    "key": key,
+                    "removed_fields": removed_fields,
+                    "replacements": replacements,
+                }
+            )
+    indexed_fields = {
+        "detailed",
+        "buy_candidate_index",
+        "buy_condition_side_masks",
+    }
+    top_level_base = {
+        key: value for key, value in base.items() if key not in indexed_fields
+    }
+    top_level_current = {
+        key: value
+        for key, value in current.items()
+        if key not in indexed_fields
+    }
+    delta = {
+        "top_level": {
+            "removed_keys": sorted(
+                key for key in top_level_base if key not in top_level_current
+            ),
+            "replacements": {
+                key: top_level_current[key]
+                for key in sorted(top_level_current)
+                if key not in top_level_base
+                or top_level_base[key] != top_level_current[key]
+            },
+        },
+        "detailed": {
+            "semantic_key_fields": list(_CANDIDATE_SEMANTIC_KEY_FIELDS),
+            "removed_keys": sorted(
+                key for key in base_details if key not in current_details
+            ),
+            "patches": patches,
+        },
+        "buy_candidate_index": {
+            "key_fields": list(_BUY_CANDIDATE_INDEX_KEY_FIELDS),
+            "removed_keys": [
+                list(key)
+                for key in sorted(
+                    key for key in base_buy_index if key not in current_buy_index
+                )
+            ],
+            "patches": [
+                {
+                    "key": list(key),
+                    "candidate_id": current_buy_index[key],
+                }
+                for key in sorted(current_buy_index)
+                if key not in base_buy_index
+                or base_buy_index[key] != current_buy_index[key]
+            ],
+        },
+        "buy_condition_side_masks": {
+            "removed_keys": sorted(
+                key
+                for key in base_condition_masks
+                if key not in current_condition_masks
+            ),
+            "patches": [
+                {
+                    "condition_id": key,
+                    "side_mask": current_condition_masks[key],
+                }
+                for key in sorted(current_condition_masks)
+                if key not in base_condition_masks
+                or base_condition_masks[key] != current_condition_masks[key]
+            ],
+        },
+    }
+    reconstructed = _apply_candidate_evaluations_delta(base, delta)
+    if hashlib.sha256(_canonical_json_bytes(reconstructed)).hexdigest() != str(
+        expected_sha256
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_HASH_MISMATCH")
+    encoded = _canonical_json_bytes(delta)
+    return {
+        "candidate_evaluations_delta_encoding": (
+            "zlib+base64+semantic-keyed-canonical-json-delta-v3"
+        ),
+        "candidate_evaluations_delta_sha256": hashlib.sha256(encoded).hexdigest(),
+        "candidate_evaluations_delta_zlib_b64": base64.b64encode(
+            zlib.compress(encoded, level=9)
+        ).decode("ascii"),
+        "candidate_evaluations_delta_removed_key_count": len(
+            delta["top_level"]["removed_keys"]
+        ),
+        "candidate_evaluations_delta_replacement_count": len(
+            delta["top_level"]["replacements"]
+        ),
+        "candidate_evaluations_delta_detailed_removed_count": len(
+            delta["detailed"]["removed_keys"]
+        ),
+        "candidate_evaluations_delta_detailed_patch_count": len(patches),
+        "candidate_evaluations_delta_buy_index_removed_count": len(
+            delta["buy_candidate_index"]["removed_keys"]
+        ),
+        "candidate_evaluations_delta_buy_index_patch_count": len(
+            delta["buy_candidate_index"]["patches"]
+        ),
+        "candidate_evaluations_delta_condition_mask_removed_count": len(
+            delta["buy_condition_side_masks"]["removed_keys"]
+        ),
+        "candidate_evaluations_delta_condition_mask_patch_count": len(
+            delta["buy_condition_side_masks"]["patches"]
+        ),
+    }
+
+
 def _json_object_delta_receipt(
     *,
     prefix: str,
@@ -1253,6 +1699,12 @@ def _stored_global_auction_payload_ref(
         return None
     components = (
         (
+            ref.audit_context,
+            "audit_context_zlib_b64",
+            "audit_context_encoding",
+            "audit_context_sha256",
+        ),
+        (
             ref.candidate,
             "candidate_evaluations_zlib_b64",
             "candidate_evaluation_encoding",
@@ -1337,10 +1789,20 @@ def _compact_buy_rejection_group(
     side: str,
     reason: str,
     rows: Sequence[Mapping[str, object]],
+    buy_candidate_positions: Mapping[str, int],
 ) -> dict[str, object]:
     """Persist a truthful best rejected BUY frontier without widening admission."""
 
     candidate_ids = [str(row.get("candidate_id") or "") for row in rows]
+    try:
+        candidate_indexes = sorted(
+            int(buy_candidate_positions[candidate_id])
+            for candidate_id in candidate_ids
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "GLOBAL_AUCTION_RECEIPT_REJECTION_INDEX_MISSING"
+        ) from exc
     economic_rows: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
     for row in rows:
         economics = row.get("buy_rejection_economics")
@@ -1404,18 +1866,16 @@ def _compact_buy_rejection_group(
             if not str(key).startswith("_frontier_")
         }
         frontier = {
-            "candidate_id": str(row.get("candidate_id") or ""),
-            "family_key": str(row.get("family_key") or ""),
-            "bin_id": str(row.get("bin_id") or ""),
-            "condition_id": str(row.get("condition_id") or ""),
-            "token_id": str(row.get("token_id") or ""),
+            "candidate_index": int(
+                buy_candidate_positions[str(row.get("candidate_id") or "")]
+            ),
             "economics": economics,
         }
     return {
         "action": action,
         "side": side,
         "reason": reason,
-        "candidate_ids": candidate_ids,
+        "candidate_indexes": candidate_indexes,
         "economics_candidate_count": len(economic_rows),
         "frontier_complete": frontier_complete,
         "frontier": frontier,
@@ -1727,6 +2187,7 @@ def _store_global_auction_receipt(
         excluded_by_family=excluded_by_family or {},
         required=book_capture_complete,
     )
+    detailed_rows.sort(key=_candidate_semantic_key)
     compact_evaluations = {
         "rejected_groups": [
             _compact_buy_rejection_group(
@@ -1734,6 +2195,7 @@ def _store_global_auction_receipt(
                 side=side,
                 reason=reason,
                 rows=rows,
+                buy_candidate_positions=buy_candidate_positions,
             )
             for (action, side, reason), rows in sorted(
                 rejection_groups.items()
@@ -1802,7 +2264,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 18,
+        "schema_version": 19,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -1914,7 +2376,7 @@ def _store_global_auction_receipt(
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v11",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v12",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),
@@ -1936,6 +2398,22 @@ def _store_global_auction_receipt(
             minimum_repair_zlib
         ).decode("ascii"),
     }
+    audit_context = {
+        field: receipt[field]
+        for field in _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS
+    }
+    audit_context_json = _canonical_json_bytes(audit_context)
+    receipt.update(
+        {
+            "audit_context_encoding": "zlib+base64+canonical-json-object-v1",
+            "audit_context_sha256": hashlib.sha256(
+                audit_context_json
+            ).hexdigest(),
+            "audit_context_zlib_b64": base64.b64encode(
+                zlib.compress(audit_context_json, level=9)
+            ).decode("ascii"),
+        }
+    )
     encoded = json.dumps(
         receipt,
         default=str,
@@ -1977,6 +2455,60 @@ def _store_global_auction_receipt(
             reference_components: dict[str, dict[str, object]] = {}
             base_refs: dict[int, _GlobalAuctionComponentRef] = {}
             inline_fields: set[str] = set()
+            audit_context_exact_reference = False
+
+            audit_context_ref = payload_ref.audit_context
+            audit_context_identity = (
+                str(receipt["audit_context_encoding"]),
+                str(receipt["audit_context_sha256"]),
+            )
+            if audit_context_identity == (
+                audit_context_ref.encoding,
+                audit_context_ref.sha256,
+            ):
+                for field in _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS:
+                    compact_receipt.pop(field, None)
+                compact_receipt.update(
+                    {
+                        "audit_context_compacted": True,
+                        "audit_context_reference_decision_log_id": audit_context_ref.row_id,
+                        "audit_context_reference_mode": audit_context_ref.mode,
+                        "audit_context_reference_receipt_hash": audit_context_ref.receipt_hash,
+                        "audit_context_reference_sha256": audit_context_ref.sha256,
+                    }
+                )
+                base_refs[audit_context_ref.row_id] = audit_context_ref
+                audit_context_exact_reference = True
+            elif (
+                audit_context_identity[0] == audit_context_ref.encoding
+                and isinstance(audit_context_ref.payload, Mapping)
+            ):
+                audit_context_delta = _json_object_delta_receipt(
+                    prefix="audit_context",
+                    base=audit_context_ref.payload,
+                    current=audit_context,
+                    expected_sha256=audit_context_identity[1],
+                )
+                audit_context_delta_bytes = len(
+                    str(audit_context_delta["audit_context_delta_zlib_b64"])
+                )
+                audit_context_inline_bytes = len(
+                    _canonical_json_bytes(audit_context)
+                )
+                if audit_context_delta_bytes * 2 < audit_context_inline_bytes:
+                    for field in _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS:
+                        compact_receipt.pop(field, None)
+                    compact_receipt.update(audit_context_delta)
+                    compact_receipt.update(
+                        {
+                            "audit_context_compacted": True,
+                            "audit_context_base_decision_log_id": audit_context_ref.row_id,
+                            "audit_context_base_mode": audit_context_ref.mode,
+                            "audit_context_base_receipt_hash": audit_context_ref.receipt_hash,
+                            "audit_context_base_sha256": audit_context_ref.sha256,
+                        }
+                    )
+                    base_refs[audit_context_ref.row_id] = audit_context_ref
 
             candidate_field = "candidate_evaluations_zlib_b64"
             candidate_ref = payload_ref.candidate
@@ -2000,8 +2532,7 @@ def _store_global_auction_receipt(
                 candidate_ref.payload,
                 Mapping,
             ):
-                candidate_delta = _json_object_delta_receipt(
-                    prefix="candidate_evaluations",
+                candidate_delta = _candidate_evaluations_delta_receipt(
                     base=candidate_ref.payload,
                     current=compact_evaluations,
                     expected_sha256=candidate_identity[1],
@@ -2171,10 +2702,12 @@ def _store_global_auction_receipt(
             if compact_bytes < full_bytes:
                 exact_heavy_reference = set(reference_fields) == set(
                     _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS
+                    - {"audit_context_zlib_b64"}
                 )
                 mode = (
                     "global_single_order_auction_duplicate"
                     if exact_heavy_reference
+                    and audit_context_exact_reference
                     else "global_single_order_auction_delta"
                 )
                 row_id = store_artifact(
@@ -2242,6 +2775,11 @@ def _store_global_auction_receipt(
                             sha256=book_identity[1],
                             payload=current_book_rows,
                         ),
+                        # Audit-context deltas stay anchored to the last
+                        # self-contained full receipt. That bounds the
+                        # reconstruction chain to one hop and makes a restart
+                        # fall back to a fresh full anchor.
+                        audit_context=audit_context_ref,
                     )
                 )
                 _LOG.info(
@@ -2312,6 +2850,14 @@ def _store_global_auction_receipt(
                     encoding=str(receipt["book_native_side_encoding"]),
                     sha256=str(receipt["book_native_side_states_sha256"]),
                     payload=current_book_rows,
+                ),
+                audit_context=_GlobalAuctionComponentRef(
+                    row_id=row_id,
+                    mode=mode,
+                    receipt_hash=current_receipt_hash,
+                    encoding=str(receipt["audit_context_encoding"]),
+                    sha256=str(receipt["audit_context_sha256"]),
+                    payload=audit_context,
                 ),
             )
     if row_id is None:
@@ -3039,6 +3585,7 @@ def process_current_global_batch(
     epoch_superseded: Callable[[], bool] | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
     restrict_to_family_keys: frozenset[str] | None = None,
+    _probability_supersession_reauction_count: int = 0,
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
@@ -3060,7 +3607,9 @@ def process_current_global_batch(
         tuple[str, str], OpportunityEvent
     ] = {}
     scoped_rejection_by_event: dict[str, str] = {}
-    release_selection_snapshot: Callable[[], None] = lambda: None
+    selection_snapshot_release: Callable[[], None] | None = None
+    actuation_started = False
+    prepared_loser_receipts: dict[str, EventSubmissionReceipt] = {}
     batch_started = time.monotonic()
     stage_started = batch_started
 
@@ -3355,11 +3904,30 @@ def process_current_global_batch(
             claimed_target_by_scope_and_economics[target_key] = target
         return rebound(target)
 
+    deferred_claim_event: OpportunityEvent | None = None
+
+    def release_selection_snapshot() -> None:
+        """Detach and release exactly the snapshot generation owned by this cut."""
+
+        nonlocal selection_snapshot_release
+        release = selection_snapshot_release
+        selection_snapshot_release = None
+        if release is not None:
+            release()
+
     def reject(
         reason: str,
         *,
         next_claim_event: OpportunityEvent | None = None,
+        economic_cut_completed: bool = False,
     ) -> GlobalBatchSubmitResult:
+        effective_next_claim = next_claim_event or deferred_claim_event
+        if (
+            next_claim_event is not None
+            and deferred_claim_event is not None
+            and next_claim_event.event_id != deferred_claim_event.event_id
+        ):
+            raise ValueError("GLOBAL_DEFERRED_CLAIM_IDENTITY_CONFLICT")
         release_selection_snapshot()
         return GlobalBatchSubmitResult(
             receipts={
@@ -3376,18 +3944,23 @@ def process_current_global_batch(
             },
             winner_event_id=None,
             venue_submit_count=0,
-            next_claim_event=next_claim_event,
+            economic_cut_completed=(
+                economic_cut_completed and effective_next_claim is None
+            ),
+            next_claim_event=effective_next_claim,
         )
 
     try:
         selection_connections = tuple(selection_snapshot_connections)
         if isinstance(world_conn, sqlite3.Connection):
             selection_connections = (*selection_connections, world_conn)
-        release_selection_snapshot = _begin_selection_read_snapshot(
+        selection_snapshot_release = _begin_selection_read_snapshot(
             selection_connections
         )
         release_schema = prime_frozen_schema_reads(selection_connections)
-        release_snapshot_only = release_selection_snapshot
+        release_snapshot_only = selection_snapshot_release
+        if release_snapshot_only is None:
+            raise RuntimeError("GLOBAL_SELECTION_SNAPSHOT_RELEASE_MISSING")
         released_schema = False
 
         def release_schema_snapshot() -> None:
@@ -3400,7 +3973,7 @@ def process_current_global_batch(
             finally:
                 release_snapshot_only()
 
-        release_selection_snapshot = release_schema_snapshot
+        selection_snapshot_release = release_schema_snapshot
         log_stage("selection_snapshot")
         if cancelled("selection_snapshot"):
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
@@ -3575,7 +4148,9 @@ def process_current_global_batch(
             ),
             decision_time=scope_at,
         )
-        release_read_snapshot = release_selection_snapshot
+        release_read_snapshot = selection_snapshot_release
+        if release_read_snapshot is None:
+            raise RuntimeError("GLOBAL_SELECTION_SNAPSHOT_RELEASE_MISSING")
         released_hwm = False
 
         def release_primed_snapshot() -> None:
@@ -3588,7 +4163,7 @@ def process_current_global_batch(
             finally:
                 release_read_snapshot()
 
-        release_selection_snapshot = release_primed_snapshot
+        selection_snapshot_release = release_primed_snapshot
         wealth_age = timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS))
 
         def capture_selection_wealth():
@@ -3654,29 +4229,32 @@ def process_current_global_batch(
             prepared_receipt = prepare_event(scope_event, scope_at)
             prepared = prepared_receipt.prepared_global_family
             if prepared is None:
-                if _current_probability_ineligible(prepared_receipt):
-                    failure_receipt = prepared_receipt
-                    if (
-                        prepare_held_event is not None
-                        and family_key in held_obligation_family_keys
-                    ):
-                        held_receipt = prepare_held_event(scope_event, scope_at)
-                        prepared = held_receipt.prepared_global_family
-                        if prepared is not None:
-                            held_only_family_keys.add(family_key)
-                            held_only_buy_disabled_reasons[family_key] = str(
-                                prepared_receipt.reason
-                                or "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED"
-                            )
-                        else:
-                            failure_receipt = held_receipt
-                    if prepared is None:
-                        reason = str(failure_receipt.reason)
-                        ineligible_by_family[family_key] = reason
-                        if family_key in claimed_by_family:
-                            ineligible_by_event[owner.event_id] = reason
-                        continue
-                else:
+                failure_receipt = prepared_receipt
+                held_prepare_attempted = bool(
+                    prepare_held_event is not None
+                    and family_key in held_obligation_family_keys
+                )
+                if held_prepare_attempted:
+                    held_receipt = prepare_held_event(scope_event, scope_at)
+                    prepared = held_receipt.prepared_global_family
+                    if prepared is not None:
+                        held_only_family_keys.add(family_key)
+                        held_only_buy_disabled_reasons[family_key] = str(
+                            prepared_receipt.reason
+                            or "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED"
+                        )
+                    else:
+                        failure_receipt = held_receipt
+                if prepared is None and (
+                    held_prepare_attempted
+                    or _current_probability_ineligible(prepared_receipt)
+                ):
+                    reason = str(failure_receipt.reason)
+                    ineligible_by_family[family_key] = reason
+                    if family_key in claimed_by_family:
+                        ineligible_by_event[owner.event_id] = reason
+                    continue
+                if prepared is None:
                     return reject(
                         "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
                         f"{family_key}:{prepared_receipt.reason or 'missing'}"
@@ -4070,9 +4648,14 @@ def process_current_global_batch(
         log_stage(initial_select_stage, families=len(prepared_by_event))
         if selected.decision.candidate is None:
             log_no_trade(initial_select_stage, selected.decision)
+            no_trade_reason = str(
+                selected.decision.no_trade_reason or "unknown"
+            )
             return reject(
-                "GLOBAL_AUCTION_NO_TRADE:"
-                f"{selected.decision.no_trade_reason or 'unknown'}"
+                f"GLOBAL_AUCTION_NO_TRADE:{no_trade_reason}",
+                economic_cut_completed=(
+                    no_trade_reason in _COMPLETE_ECONOMIC_NO_TRADE_REASONS
+                ),
             )
         log_winner(initial_select_stage, selected, probabilities)
         if selected.actuation is None:
@@ -4109,18 +4692,10 @@ def process_current_global_batch(
             book_epoch_fence = book_epoch
             prepared_fence = prepared_by_event
             selected, winner, next_claim = bind_selected_winner(selected)
-            if winner is None:
-                if next_claim is None:
-                    return reject("GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING")
-                return reject(
-                    "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
-                    next_claim_event=next_claim,
-                )
             # Preflight has the opposite job from selection: re-read submit-time
             # probability truth and refute the immutable cut when a newer
             # posterior or Day0 observation landed during book/solve work. The
             # backing SQLite view released before the durable winner claim.
-            winner_id = winner.event_id
             attempt_book_epoch = book_epoch_fence
             auction_deadline = (
                 attempt_book_epoch.captured_at_utc + attempt_book_epoch.max_age
@@ -4133,6 +4708,139 @@ def process_current_global_batch(
                 tuple[str, str, str, str], float
             ] = dict(initial_payoff_q_lcb_by_candidate)
             wealth_reauction_count = 0
+            wealth_reauction_audit = None
+
+            def select_claimable_fallthrough() -> GlobalBatchSubmitResult | None:
+                nonlocal deferred_claim_event, selected, winner, winner_id
+                while True:
+                    fallthrough_epoch_identity = (
+                        _selection_epoch_identity_with_preflight_exclusions(
+                            selection_epoch_base_identity,
+                            excluded_by_family,
+                            excluded_by_candidate,
+                            payoff_q_lcb_by_candidate,
+                        )
+                        if (
+                            excluded_by_family
+                            or excluded_by_candidate
+                            or payoff_q_lcb_by_candidate
+                        )
+                        else selection_epoch_identity
+                    )
+                    selected = select_once(
+                        probabilities_fence,
+                        attempt_book_epoch,
+                        prepared_fence,
+                        attempt_selection_epoch_identity=(
+                            fallthrough_epoch_identity
+                        ),
+                        preflight_excluded_by_family=excluded_by_family,
+                        preflight_excluded_by_candidate=excluded_by_candidate,
+                        payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
+                        wealth_reauction_audit=wealth_reauction_audit,
+                    )
+                    log_stage(
+                        "select_preflight_fallthrough",
+                        families=len(prepared_by_event) - len(excluded_by_family),
+                    )
+                    if selected.decision.candidate is None:
+                        log_no_trade(
+                            "select_preflight_fallthrough",
+                            selected.decision,
+                        )
+                        exhaustion_reason = (
+                            _global_preflight_exhaustion_reason(
+                                selected.decision.no_trade_reason,
+                                excluded_by_family=excluded_by_family,
+                                excluded_by_candidate=excluded_by_candidate,
+                            )
+                        )
+                        return reject(
+                            exhaustion_reason,
+                            next_claim_event=deferred_claim_event,
+                            # A deferred claim proves the feasible action set was
+                            # incomplete, so this cut cannot terminalize as CASH.
+                            economic_cut_completed=(
+                                deferred_claim_event is None
+                                and exhaustion_reason.startswith(
+                                    (
+                                        "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL:",
+                                        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+                                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:",
+                                    )
+                                )
+                            ),
+                        )
+                    log_winner(
+                        "select_preflight_fallthrough",
+                        selected,
+                        probabilities_fence,
+                    )
+                    if selected.actuation is None:
+                        return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
+                    selected, winner, next_claim = bind_selected_winner(selected)
+                    if winner is not None:
+                        winner_id = winner.event_id
+                        return None
+                    if next_claim is None:
+                        return reject(
+                            "GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING"
+                        )
+                    candidate = selected.decision.candidate
+                    family_key = str(
+                        getattr(candidate, "family_key", "") or ""
+                    ).strip()
+                    if not family_key:
+                        return reject(
+                            "GLOBAL_REAUCTION_WINNER_FAMILY_MISSING"
+                        )
+                    claim_reason = (
+                        "GLOBAL_WINNER_CLAIM_UNAVAILABLE_THIS_EPOCH"
+                    )
+                    if family_key in excluded_by_family:
+                        return reject(
+                            "GLOBAL_REAUCTION_CLAIM_EXCLUSION_NO_PROGRESS"
+                        )
+                    if deferred_claim_event is None:
+                        deferred_claim_event = next_claim
+                    # SCOPE: only the selected family's causal carrier in this
+                    # immutable epoch. DRAIN: keep ranking the remaining
+                    # current q/book/wealth feasible set now, while preserving
+                    # the first (globally best) unclaimed carrier for the next
+                    # durable epoch. RESET: the exclusion map is epoch-local.
+                    excluded_by_family[family_key] = claim_reason
+                    preflight_ineligible_by_event[
+                        str(getattr(selected, "winner_event_id", "") or "")
+                    ] = claim_reason
+                    _LOG.info(
+                        "global batch claim-unavailable family excluded: "
+                        "family=%s event=%s reason=%s excluded=%d",
+                        family_key,
+                        getattr(selected, "winner_event_id", ""),
+                        claim_reason,
+                        len(excluded_by_family),
+                    )
+
+            if winner is None:
+                if next_claim is None:
+                    return reject("GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING")
+                initial_candidate = selected.decision.candidate
+                initial_family_key = str(
+                    getattr(initial_candidate, "family_key", "") or ""
+                ).strip()
+                if not initial_family_key:
+                    return reject("GLOBAL_REAUCTION_WINNER_FAMILY_MISSING")
+                deferred_claim_event = next_claim
+                excluded_by_family[initial_family_key] = (
+                    "GLOBAL_WINNER_CLAIM_UNAVAILABLE_THIS_EPOCH"
+                )
+                preflight_ineligible_by_event[
+                    str(getattr(selected, "winner_event_id", "") or "")
+                ] = "GLOBAL_WINNER_CLAIM_UNAVAILABLE_THIS_EPOCH"
+                fallthrough_result = select_claimable_fallthrough()
+                if fallthrough_result is not None:
+                    return fallthrough_result
+            winner_id = winner.event_id
             while True:
                 if cancelled("winner_preflight_start"):
                     return reject(
@@ -4286,6 +4994,65 @@ def process_current_global_batch(
                     return reject(
                         "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
                         f"{preflight.reason or preflight.status}"
+                    )
+                if preflight.status == "PROBABILITY_SUPERSEDED":
+                    if (
+                        _probability_supersession_reauction_count
+                        >= _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS
+                    ):
+                        return reject(
+                            "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:"
+                            f"{preflight.reason or preflight.status}"
+                        )
+                    # SCOPE: the old winner's q witness is invalid, and that
+                    # makes the frozen global objective incomparable. DRAIN:
+                    # one bounded recursive cut re-scans every family and
+                    # rebuilds q, book, wealth, BUY, SELL, HOLD, and CASH
+                    # before any venue call. RESET: only its fresh cut may
+                    # actuate; a second drift fails closed for the next wake.
+                    _LOG.warning(
+                        "global batch probability superseded; rebuilding full "
+                        "current-state auction: attempt=%d event=%s reason=%s",
+                        _probability_supersession_reauction_count + 1,
+                        winner_id,
+                        preflight.reason,
+                    )
+                    # Detach this cut's complete snapshot generation before the
+                    # child cut attempts BEGIN on the same SQLite connections.
+                    # The outer finally then sees no generation to roll back.
+                    release_selection_snapshot()
+                    return process_current_global_batch(
+                        event_tuple,
+                        decision_time=decision_time,
+                        world_conn=world_conn,
+                        forecast_conn=forecast_conn,
+                        trade_conn=trade_conn,
+                        payload_reader=payload_reader,
+                        prepare_event=prepare_event,
+                        prepare_held_event=prepare_held_event,
+                        actuate_winner=actuate_winner,
+                        preflight_winner=preflight_winner,
+                        actuate_preflighted_winner=actuate_preflighted_winner,
+                        stamp_receipt=stamp_receipt,
+                        venue_submit_count=venue_submit_count,
+                        current_execution=current_execution,
+                        current_time_provider=current_time_provider,
+                        portfolio_state_provider=portfolio_state_provider,
+                        current_book_epoch_provider=current_book_epoch_provider,
+                        selection_snapshot_connections=selection_snapshot_connections,
+                        current_capital_limit_resolver=current_capital_limit_resolver,
+                        candidate_policy_rejection_resolver=(
+                            candidate_policy_rejection_resolver
+                        ),
+                        buy_candidates_enabled=buy_candidates_enabled,
+                        fractional_kelly_multiplier=fractional_kelly_multiplier,
+                        claim_unpaged_winner=claim_unpaged_winner,
+                        epoch_superseded=epoch_superseded,
+                        selection_cancelled=selection_cancelled,
+                        restrict_to_family_keys=restrict_to_family_keys,
+                        _probability_supersession_reauction_count=(
+                            _probability_supersession_reauction_count + 1
+                        ),
                     )
                 if preflight.status == "CANDIDATE_BLOCKED":
                     candidate = selected.decision.candidate
@@ -4453,95 +5220,9 @@ def process_current_global_batch(
                         reason,
                         len(excluded_by_family),
                     )
-                while True:
-                    fallthrough_epoch_identity = (
-                        _selection_epoch_identity_with_preflight_exclusions(
-                            selection_epoch_base_identity,
-                            excluded_by_family,
-                            excluded_by_candidate,
-                            payoff_q_lcb_by_candidate,
-                        )
-                        if (
-                            excluded_by_family
-                            or excluded_by_candidate
-                            or payoff_q_lcb_by_candidate
-                        )
-                        else selection_epoch_identity
-                    )
-                    selected = select_once(
-                        probabilities_fence,
-                        attempt_book_epoch,
-                        prepared_fence,
-                        attempt_selection_epoch_identity=(
-                            fallthrough_epoch_identity
-                        ),
-                        preflight_excluded_by_family=excluded_by_family,
-                        preflight_excluded_by_candidate=excluded_by_candidate,
-                        payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
-                        wealth_reauction_audit=wealth_reauction_audit,
-                    )
-                    log_stage(
-                        "select_preflight_fallthrough",
-                        families=len(prepared_by_event) - len(excluded_by_family),
-                    )
-                    if selected.decision.candidate is None:
-                        log_no_trade(
-                            "select_preflight_fallthrough",
-                            selected.decision,
-                        )
-                        return reject(
-                            _global_preflight_exhaustion_reason(
-                                selected.decision.no_trade_reason,
-                                excluded_by_family=excluded_by_family,
-                                excluded_by_candidate=excluded_by_candidate,
-                            )
-                        )
-                    log_winner(
-                        "select_preflight_fallthrough",
-                        selected,
-                        probabilities_fence,
-                    )
-                    if selected.actuation is None:
-                        return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
-                    selected, winner, next_claim = bind_selected_winner(selected)
-                    if winner is not None:
-                        winner_id = winner.event_id
-                        break
-                    if next_claim is None:
-                        return reject(
-                            "GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING"
-                        )
-                    candidate = selected.decision.candidate
-                    family_key = str(
-                        getattr(candidate, "family_key", "") or ""
-                    ).strip()
-                    if not family_key:
-                        return reject(
-                            "GLOBAL_REAUCTION_WINNER_FAMILY_MISSING"
-                        )
-                    claim_reason = (
-                        "GLOBAL_WINNER_CLAIM_UNAVAILABLE_THIS_EPOCH"
-                    )
-                    if family_key in excluded_by_family:
-                        return reject(
-                            "GLOBAL_REAUCTION_CLAIM_EXCLUSION_NO_PROGRESS"
-                        )
-                    # SCOPE: only the selected family's causal carrier in this
-                    # immutable epoch. DRAIN: keep ranking the remaining
-                    # current q/book/wealth feasible set now. RESET: the map is
-                    # epoch-local, so the next complete cut retries the family.
-                    excluded_by_family[family_key] = claim_reason
-                    preflight_ineligible_by_event[
-                        str(getattr(selected, "winner_event_id", "") or "")
-                    ] = claim_reason
-                    _LOG.info(
-                        "global batch claim-unavailable family excluded: "
-                        "family=%s event=%s reason=%s excluded=%d",
-                        family_key,
-                        getattr(selected, "winner_event_id", ""),
-                        claim_reason,
-                        len(excluded_by_family),
-                    )
+                fallthrough_result = select_claimable_fallthrough()
+                if fallthrough_result is not None:
+                    return fallthrough_result
             binding_token = preflight.binding_token
 
         actuation_at = current_time()
@@ -4574,36 +5255,12 @@ def process_current_global_batch(
             ),
             payload=payload_reader(continuation_scope_event),
         )
-        before_calls = venue_submit_count()
-        release_selection_snapshot()
-        _invalidate_global_holding_coverage()
-        winner_receipt = (
-            actuate_preflighted_winner.consume(
-                winner,
-                selected.actuation,
-                actuation_at,
-                binding_token,
-                preflight_authority,
-            )
-            if preflight_winner is not None
-            else actuate_winner(winner, selected.actuation, actuation_at)
-        )
-        venue_delta = venue_submit_count() - before_calls
-        if venue_delta not in {0, 1}:
-            raise RuntimeError("GLOBAL_ACTUATION_VENUE_COUNT_INVALID")
-        continuation_event = (
-            prepared_continuation_event
-            if (
-                venue_delta == 1
-                and winner_receipt.submitted
-            )
-            else None
-        )
-        receipts = {
+        # Finish every potentially fallible loser receipt before venue I/O.
+        # Once the winner call starts, a later exception must never rewrite an
+        # observed external side effect as a side-effect-free batch rejection.
+        prepared_loser_receipts = {
             event.event_id: (
-                winner_receipt
-                if event.event_id == winner_id
-                else stamp_receipt(
+                stamp_receipt(
                     EventSubmissionReceipt(
                         False,
                         event.event_id,
@@ -4679,13 +5336,84 @@ def process_current_global_batch(
                 )
             )
             for event in event_tuple
+            if event.event_id != winner_id
         }
+        before_calls = venue_submit_count()
+        release_selection_snapshot()
+        _invalidate_global_holding_coverage()
+        actuation_started = True
+        winner_receipt = (
+            actuate_preflighted_winner.consume(
+                winner,
+                selected.actuation,
+                actuation_at,
+                binding_token,
+                preflight_authority,
+            )
+            if preflight_winner is not None
+            else actuate_winner(winner, selected.actuation, actuation_at)
+        )
+        venue_delta = venue_submit_count() - before_calls
+        if venue_delta not in {0, 1}:
+            raise RuntimeError("GLOBAL_ACTUATION_VENUE_COUNT_INVALID")
+        continuation_event = (
+            prepared_continuation_event
+            if (
+                venue_delta == 1
+                and winner_receipt.submitted
+            )
+            else None
+        )
+        receipts = dict(prepared_loser_receipts)
+        receipts[winner_id] = winner_receipt
         return GlobalBatchSubmitResult(
             receipts=receipts,
             winner_event_id=winner_id,
             venue_submit_count=venue_delta,
+            economic_cut_completed=bool(
+                venue_delta == 1 and winner_receipt.submitted
+            ),
+            # One durable frontier only. A successful submit's continuation
+            # immediately re-runs the complete global universe against fresh
+            # holdings/wealth/q/books, so it subsumes any unclaimed carrier
+            # discovered in the prior cut. Without a submit, preserve the
+            # highest-ranked deferred carrier explicitly.
+            next_claim_event=(
+                deferred_claim_event
+                if continuation_event is None and venue_delta == 0
+                else None
+            ),
             continuation_event=continuation_event,
         )
     except Exception as exc:  # noqa: BLE001 - one authority fault invalidates epoch
         _LOG.exception("global auction epoch failed closed")
+        if actuation_started:
+            # The durable command/outbox owns reconciliation once actuator I/O
+            # starts. Preserve an explicit unknown-side-effect winner, stop the
+            # multi-winner loop, and never requeue a deferred competitor until
+            # command recovery resolves the first order.
+            unknown_receipt = EventSubmissionReceipt(
+                submitted=False,
+                event_id=winner.event_id,
+                causal_snapshot_id=winner.causal_snapshot_id,
+                side_effect_status="POST_SUBMIT_UNKNOWN",
+                reason=(
+                    "POST_SUBMIT_UNKNOWN:GLOBAL_ACTUATION_EXCEPTION:"
+                    f"{type(exc).__name__}:{exc}"
+                ),
+                proof_accepted=False,
+                global_actuation=selected.actuation,
+                venue_call_started=True,
+                venue_ack_received=False,
+            )
+            receipts = dict(prepared_loser_receipts)
+            receipts[winner.event_id] = unknown_receipt
+            return GlobalBatchSubmitResult(
+                receipts=receipts,
+                winner_event_id=winner.event_id,
+                venue_submit_count=0,
+                economic_cut_completed=False,
+            )
         return reject(f"GLOBAL_AUCTION_FAILED:{type(exc).__name__}:{exc}")
+    finally:
+        release_selection_snapshot()

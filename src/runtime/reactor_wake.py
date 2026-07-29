@@ -19,6 +19,9 @@ REACTOR_WAKE_FILENAME = "edli-reactor-wake.json"
 REACTOR_WAKE_QUEUE_SUFFIX = ".d"
 REACTOR_WAKE_SOCKET_SUFFIX = ".sock"
 REACTOR_URGENT_WAKE_SUFFIX = ".urgent"
+GLOBAL_AUCTION_COMPLETION_WAKE_REASON = (
+    "held_sell_global_auction_completion_requested"
+)
 URGENT_WAKE_REASONS = frozenset(
     {
         "day0_extreme_event_committed",
@@ -323,9 +326,12 @@ def read_reactor_wake(
     """Read the queued fact with the shortest alpha clock first.
 
     Day0 observations can reverse value in milliseconds and always preempt.
-    A confirmed fill changes the actual portfolio endowment. Fill, price, and
-    probability are therefore joint material inputs; after Day0 their oldest
-    unconsumed input gets one turn, so no continuous stream can starve another.
+    A durable global-auction completion debt is next: it survives process
+    restart and ordinary fill, price, or probability streams cannot starve the
+    required capital cut. A confirmed fill changes the actual portfolio
+    endowment. Fill, price, and probability are otherwise joint material
+    inputs; their oldest unconsumed input gets one turn, so no continuous
+    stream can starve another.
     Forecast hints carry incremental family scopes; selecting the newest hint
     does not lose older scopes because same-reason wakes are coalesced and
     acknowledgement remains exact.
@@ -337,6 +343,9 @@ def read_reactor_wake(
     ]
     for _queue_file, wake in reversed(queued):
         if wake.reason == "day0_extreme_event_committed":
+            return wake
+    for _queue_file, wake in queued:
+        if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON:
             return wake
     for _queue_file, wake in queued:
         if wake.reason == "position_fill_projected":
@@ -439,6 +448,13 @@ def coalescible_reactor_wakes(
             wake
             for wake in queued
             if wake.wake_id != selected.wake_id and wake.reason == selected.reason
+        ]
+    elif selected.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON:
+        candidates = [
+            wake
+            for wake in queued
+            if wake.wake_id != selected.wake_id
+            and wake.reason == selected.reason
         ]
     else:
         for wake in queued[selected_index + 1 :]:

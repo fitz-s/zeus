@@ -505,6 +505,30 @@
         "2026-07-27T07:42:38.732852+00:00"
       ],
       "measurement_generated_at": "2026-07-27T07:42:51.664296+00:00"
+    },
+    "Karachi": {
+      "matched_pairs": 202,
+      "median_abs_raw_delta": 0.0,
+      "p95_abs_raw_delta": 0.0,
+      "p99_abs_raw_delta": 0.0,
+      "max_abs_raw_delta": 0.0,
+      "p95_abs_rounded_delta": 0.0,
+      "p99_abs_rounded_delta": 0.0,
+      "max_abs_rounded_delta": 0.0,
+      "disagree_rate_ge_1unit": 0.0,
+      "empirical_threshold": 1.0,
+      "threshold_provenance": "empirical",
+      "settlement_faithful": true,
+      "station_id": "OPKC",
+      "unit": "C",
+      "wu_pairs": 215,
+      "metar_reports": 333,
+      "measurement_window_days": 7,
+      "measurement_window": [
+        "2026-07-21T09:55:56.854853+00:00",
+        "2026-07-28T09:55:56.854853+00:00"
+      ],
+      "measurement_generated_at": "2026-07-28T09:56:19.807509+00:00"
     }
   }
 }

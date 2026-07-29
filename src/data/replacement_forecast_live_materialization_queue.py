@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -40,6 +41,23 @@ DEFAULT_MATERIALIZATION_MAX_WORKERS = 4
 MATERIALIZATION_INFLIGHT_DIR_NAME = "inflight"
 _CLAIM_METADATA_NAME = "_claim.json"
 _STALE_CLAIM_GRACE_SECONDS = 30.0
+_DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME = ".replacement-day0-enqueue.cursor"
+_DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER = 4
+_DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS = 8
+
+
+class _Day0EnqueueOwnership(str, Enum):
+    """Authoritative ownership state for a Day0 cycle-advance seed."""
+
+    CURRENT = "CURRENT"
+    STALE = "STALE"
+    INDETERMINATE = "INDETERMINATE"
+
+
+@dataclass(frozen=True)
+class _Day0EnqueueOwnershipCheck:
+    ownership: _Day0EnqueueOwnership
+    witness: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -286,13 +304,103 @@ def _receipt_name(path: Path) -> str:
     return f"{path.stem}.{stamp}.pid{os.getpid()}{path.suffix}"
 
 
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _ensure_directory_entry_durable(
+    directory: Path,
+    *,
+    durable_ancestor: Path,
+) -> None:
+    directory = directory.absolute()
+    durable_ancestor = durable_ancestor.absolute()
+    try:
+        relative = directory.relative_to(durable_ancestor)
+    except ValueError as exc:
+        raise ValueError(
+            f"{directory} is outside durable ancestor {durable_ancestor}"
+        ) from exc
+    if not durable_ancestor.is_dir():
+        raise FileNotFoundError(
+            f"durable directory ancestor missing: {durable_ancestor}"
+        )
+    parent = durable_ancestor
+    for part in relative.parts:
+        child = parent / part
+        child.mkdir(exist_ok=True)
+        if not child.is_dir():
+            raise NotADirectoryError(child)
+        # Repeat this even for an existing child: it repairs a prior attempt
+        # whose mkdir succeeded but parent fsync failed.
+        _fsync_directory(parent)
+        parent = child
+
+
 def _move_request(path: Path, destination_dir: Path) -> Path:
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    target = destination_dir / _receipt_name(path)
-    while target.exists():
+    source_dir = path.parent.absolute()
+    destination_dir = destination_dir.absolute()
+    common_ancestor = Path(
+        os.path.commonpath((source_dir, destination_dir))
+    )
+    _ensure_directory_entry_durable(
+        destination_dir,
+        durable_ancestor=common_ancestor.parent,
+    )
+    while True:
         target = destination_dir / _receipt_name(path)
-    os.replace(path, target)
+        try:
+            os.link(path, target)
+        except FileExistsError:
+            continue
+        break
+    # The destination receipt must be durable before the queue name disappears.
+    # A PUBLISH_PENDING owner may observe that disappearance and complete its
+    # SQLite marker immediately; hardlink-first makes every such observation
+    # imply a durable terminal receipt.
+    _fsync_directory(destination_dir)
+    path.unlink()
+    _fsync_directory(path.parent)
     return target
+
+
+def _publish_latest_seed(seed_path: Path, seed: Mapping[str, object]) -> Path:
+    """Atomically retain one zero-copy, source-clock-monotone family seed."""
+
+    city = str(seed["city"]).replace(" ", "_")
+    target_date = str(seed["target_date"])
+    metric = str(seed["temperature_metric"]).strip().lower()
+    latest_dir = seed_path.parent.parent / "seeds_latest"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    latest_path = latest_dir / f"{city}.{target_date}.{metric}.json"
+    candidate_cycle = _parse_utc_iso(seed.get("source_cycle_time"))
+    if latest_path.is_file() and candidate_cycle is not None:
+        try:
+            current_seed = json.loads(latest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            current_seed = None
+        current_cycle = (
+            _parse_utc_iso(current_seed.get("source_cycle_time"))
+            if isinstance(current_seed, Mapping)
+            else None
+        )
+        if current_cycle is not None and candidate_cycle < current_cycle:
+            return latest_path
+    temporary = latest_dir / f".{_receipt_name(latest_path)}.tmp"
+    try:
+        os.link(seed_path, temporary)
+        os.replace(temporary, latest_path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return latest_path
 
 
 def _write_sidecar(path: Path, payload: dict[str, object]) -> None:
@@ -420,28 +528,118 @@ def _day0_seed_matches_conditioning(
     conditioning: Mapping[str, object],
 ) -> bool:
     """Return whether a posterior consumed the seed's exact Day0 evidence."""
-
-    seed_time = _parse_utc_iso(seed.get("day0_observed_extreme_observation_time"))
-    posterior_time = _parse_utc_iso(conditioning.get("observation_time"))
-    if seed_time is None or posterior_time != seed_time:
-        return False
     seed_metric = str(seed.get("temperature_metric") or "").strip().lower()
     posterior_metric = str(conditioning.get("metric") or "").strip().lower()
-    seed_source = str(seed.get("day0_observed_extreme_source") or "").strip()
-    posterior_source = str(conditioning.get("source") or "").strip()
-    if (
-        seed_metric not in {"high", "low"}
-        or posterior_metric != seed_metric
-        or not seed_source
-        or posterior_source != seed_source
-    ):
+    if seed_metric not in {"high", "low"} or posterior_metric != seed_metric:
         return False
+    from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+        _day0_conditioning_identity,
+    )
+
+    seed_identity = _day0_conditioning_identity(
+        source=seed.get("day0_observed_extreme_source"),
+        observation_time=seed.get("day0_observed_extreme_observation_time"),
+        observed_extreme_c=seed.get("day0_observed_extreme_c"),
+        unit=seed.get("day0_observed_extreme_unit"),
+    )
+    conditioning_identity = _day0_conditioning_identity(
+        source=conditioning.get("source"),
+        observation_time=conditioning.get("observation_time"),
+        observed_extreme_c=conditioning.get("observed_extreme_c"),
+        unit=conditioning.get("unit"),
+    )
+    return (
+        seed_identity is not None
+        and conditioning_identity is not None
+        and seed_identity == conditioning_identity
+    )
+
+
+def _upgrade_day0_seed_has_current_enqueue_ownership(
+    *,
+    forecast_db: Path | str | None,
+    seed_file: Path,
+    seed: Mapping[str, object],
+) -> _Day0EnqueueOwnershipCheck:
+    """Classify Day0 marker ownership without consuming a seed on read uncertainty."""
+    if not seed.get("upgrade_trigger") or seed.get("day0_observed_extreme_observation_time") is None:
+        return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.CURRENT)
+    from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+        _day0_conditioning_identity,
+    )
+
+    identity = _day0_conditioning_identity(
+        source=seed.get("day0_observed_extreme_source"),
+        observation_time=seed.get("day0_observed_extreme_observation_time"),
+        observed_extreme_c=seed.get("day0_observed_extreme_c"),
+        unit=seed.get("day0_observed_extreme_unit"),
+    )
+    if identity is None or forecast_db is None:
+        return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
+    db_path = Path(forecast_db)
+    if not db_path.exists():
+        return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
+    from src.state.db import _connect  # noqa: PLC0415
+
     try:
-        seed_extreme_c = float(seed["day0_observed_extreme_c"])
-        posterior_extreme_c = float(conditioning["observed_extreme_c"])
-    except (KeyError, TypeError, ValueError):
-        return False
-    return abs(seed_extreme_c - posterior_extreme_c) <= 1e-9
+        conn = _connect(db_path, write_class="live")
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(cycle_advance_enqueues)").fetchall()
+            }
+            required = {
+                "city",
+                "target_date",
+                "metric",
+                "target_cycle_time",
+                "seed_file",
+                "day0_conditioning_identity_json",
+            }
+            if not required.issubset(columns):
+                return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
+            row = conn.execute(
+                """
+                SELECT seed_file, day0_conditioning_identity_json
+                FROM cycle_advance_enqueues
+                WHERE city = ?
+                  AND target_date = ?
+                  AND metric = ?
+                  AND target_cycle_time = ?
+                LIMIT 1
+                """,
+                (
+                    str(seed.get("city") or ""),
+                    str(seed.get("target_date") or ""),
+                    str(seed.get("temperature_metric") or ""),
+                    str(seed.get("source_cycle_time") or ""),
+                ),
+            ).fetchone()
+            if row is None:
+                return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
+            if str(row["seed_file"] or "") != str(seed_file):
+                return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.STALE)
+            recorded_identity = row["day0_conditioning_identity_json"]
+            if not isinstance(recorded_identity, str) or not recorded_identity.strip():
+                return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
+            if recorded_identity != identity:
+                return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.STALE)
+            return _Day0EnqueueOwnershipCheck(
+                _Day0EnqueueOwnership.CURRENT,
+                witness={
+                    "city": str(seed.get("city") or ""),
+                    "target_date": str(seed.get("target_date") or ""),
+                    "metric": str(seed.get("temperature_metric") or ""),
+                    "target_cycle_time": str(seed.get("source_cycle_time") or ""),
+                    "seed_file": str(seed_file),
+                    "conditioning_identity": identity,
+                },
+            )
+        finally:
+            conn.close()
+    except Exception:
+        return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
 
 
 def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, object]) -> bool:
@@ -514,12 +712,12 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
                 posterior_provenance = {}
             conditioning = None
             if isinstance(posterior_provenance, dict):
-                provisional = posterior_provenance.get("day0_provisional_observation")
-                conditioning = (
-                    provisional
-                    if isinstance(provisional, Mapping)
-                    and provisional.get("active") is True
-                    else posterior_provenance.get("day0_conditioning")
+                from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+                    _active_day0_provisional_or_conditioning,
+                )
+
+                conditioning = _active_day0_provisional_or_conditioning(
+                    posterior_provenance
                 )
             if not isinstance(conditioning, Mapping) or not _day0_seed_matches_conditioning(
                 seed,
@@ -855,6 +1053,7 @@ _REQUEST_DEDUP_KEY_FIELDS: tuple[str, ...] = (
     "baseline_source_run_id",
     "openmeteo_source_run_id",
 )
+_DAY0_CONDITIONING_IDENTITY_KEY = "day0_conditioning_identity"
 _UNCHANGED_BLOCKED_REASON = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
 _UNCHANGED_BLOCKED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
@@ -889,6 +1088,9 @@ def _source_clock_missing_configured_sources(
         from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
             scheme_for_city,
         )
+        from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+            provider_family_for_source,
+        )
 
         scheme = scheme_for_city(city, metric=metric)
         if scheme is None:
@@ -908,7 +1110,24 @@ def _source_clock_missing_configured_sources(
         for model in served
     ):
         return ()
-    return tuple(source for source in scheme.final_sources if source not in served)
+    missing = tuple(source for source in scheme.final_sources if source not in served)
+    configured_families = {
+        provider_family_for_source(source)
+        for source in scheme.final_sources
+        if source in served
+    }
+    current_families = {
+        provider_family_for_source(source)
+        for source in served
+    }
+    # SCOPE: this request's exact city/date/metric/carrier-cycle raw watermark.
+    # DRAIN: arrival of a second independent current provider makes the full raw
+    # watermark relevant, allowing one materializer retry through the same queue.
+    # RESET: once the retry marker records that watermark, unchanged raw facts are
+    # suppressed again. Same-family alias churn never opens the retry path.
+    if len(configured_families) < 2 and len(current_families) >= 2:
+        return ()
+    return missing
 
 
 def _validate_request_payload(path: Path) -> tuple[bool, str, str]:
@@ -974,6 +1193,38 @@ def _request_semantic_key(payload: Mapping[str, object]) -> tuple[str, ...] | No
                 return None
             value = parsed.isoformat()
         values.append(value)
+    day0_fields = (
+        "day0_observed_extreme_source",
+        "day0_observed_extreme_observation_time",
+        "day0_observed_extreme_c",
+        "day0_observed_extreme_unit",
+    )
+    if any(payload.get(field) is not None for field in day0_fields):
+        source = str(payload.get("day0_observed_extreme_source") or "").strip()
+        observation_time = _parse_utc_iso(
+            payload.get("day0_observed_extreme_observation_time")
+        )
+        unit = str(payload.get("day0_observed_extreme_unit") or "").strip().upper()
+        try:
+            observed_extreme_c = round(float(payload.get("day0_observed_extreme_c")), 9)
+        except (TypeError, ValueError):
+            return None
+        if not source or observation_time is None or not unit:
+            return None
+        values.append(
+            _DAY0_CONDITIONING_IDENTITY_KEY
+            + "="
+            + json.dumps(
+                {
+                    "observation_time": observation_time.isoformat(),
+                    "observed_extreme_c": observed_extreme_c,
+                    "source": source,
+                    "unit": unit,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
     return tuple(values)
 
 
@@ -1351,6 +1602,55 @@ def _new_claim_batch(inflight_path: Path, request_files: Sequence[Path]) -> Path
     return batch_path
 
 
+def _day0_enqueue_ownership_cursor_path(request_dir: Path) -> Path:
+    """Return the hidden, non-seed cursor co-located with queue state."""
+    return request_dir.parent / _DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME
+
+
+def _read_day0_enqueue_ownership_cursor(cursor_path: Path) -> str | None:
+    """Read a prior filename cursor; malformed sidecars safely restart the rotation."""
+    try:
+        value = cursor_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    return value if value and Path(value).name == value else None
+
+
+def _write_day0_enqueue_ownership_cursor(cursor_path: Path, filename: str) -> bool:
+    """Atomically persist the last inspected seed filename while the queue lock is held."""
+    temporary: Path | None = None
+    try:
+        cursor_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cursor_path.with_name(
+            f".{cursor_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        temporary.write_text(f"{filename}\n", encoding="utf-8")
+        os.replace(temporary, cursor_path)
+        return True
+    except OSError:
+        return False
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _rotate_seed_snapshot_after_cursor(seeds: Sequence[Path], cursor: str | None) -> tuple[Path, ...]:
+    """Visit each sorted snapshot seed at most once, beginning after the durable cursor."""
+    snapshot = tuple(seeds)
+    if not snapshot or cursor is None:
+        return snapshot
+    for index, path in enumerate(snapshot):
+        if path.name == cursor:
+            return snapshot[index + 1 :] + snapshot[: index + 1]
+    for index, path in enumerate(snapshot):
+        if path.name > cursor:
+            return snapshot[index:] + snapshot[:index]
+    return snapshot
+
+
 def _prepare_seed_requests(
     *,
     seed_dir: Path | str | None,
@@ -1368,13 +1668,6 @@ def _prepare_seed_requests(
     seed_files = tuple(path for path in seed_path.glob("*.json") if path.is_file())
     if not seed_files:
         return [], [], ["REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_EMPTY"]
-    priority = _cycle_advance_seed_priority_map(forecast_db, seed_files)
-    seeds = tuple(
-        sorted(
-            seed_files,
-            key=lambda path: _cycle_advance_file_sort_key(path, priority),
-        )
-    )
     if seed_processed_dir is None or seed_failed_dir is None:
         raise ValueError("seed_processed_dir and seed_failed_dir are required when seed_dir is set")
     processed_path = Path(seed_processed_dir)
@@ -1382,10 +1675,62 @@ def _prepare_seed_requests(
     processed: list[str] = []
     failed: list[str] = []
     reasons: list[str] = []
-    for seed_json in seeds[:limit]:
+    cursor_path = _day0_enqueue_ownership_cursor_path(request_dir)
+    raw_snapshot = tuple(sorted(seed_files, key=lambda path: path.name))
+    rotated_raw_snapshot = _rotate_seed_snapshot_after_cursor(
+        raw_snapshot,
+        _read_day0_enqueue_ownership_cursor(cursor_path),
+    )
+    # Cursor rotation and the inspection bound apply before JSON/DB priority work. The window's
+    # raw boundary advances even when priority/actionable work stops early, so retained entries
+    # make deterministic progress across passes without unbounded queue-lock I/O.
+    actionable_limit = max(int(limit), 0)
+    inspection_cap = max(
+        actionable_limit * _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER,
+        _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS,
+    )
+    raw_window = rotated_raw_snapshot[:inspection_cap]
+    priority = _cycle_advance_seed_priority_map(forecast_db, raw_window)
+    seeds = tuple(
+        sorted(
+            raw_window,
+            key=lambda path: _cycle_advance_file_sort_key(path, priority),
+        )
+    )
+    actionable_count = 0
+    inspected_count = 0
+    indeterminate_count = 0
+    for seed_json in seeds:
+        if actionable_count >= actionable_limit or inspected_count >= inspection_cap:
+            break
+        inspected_count += 1
         try:
             seed = _load_seed_json(seed_json)
             if not _looks_like_seed(seed):
+                continue
+            ownership_check = _upgrade_day0_seed_has_current_enqueue_ownership(
+                forecast_db=forecast_db,
+                seed_file=seed_json,
+                seed=seed,
+            )
+            ownership = ownership_check.ownership
+            if ownership is _Day0EnqueueOwnership.STALE:
+                moved = _move_request(seed_json, processed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "SKIPPED_STALE_DAY0_ENQUEUE_OWNER",
+                        "reason_codes": [
+                            "REPLACEMENT_MATERIALIZATION_STALE_DAY0_ENQUEUE_OWNER"
+                        ],
+                        "request_written": False,
+                    },
+                )
+                processed.append(str(moved))
+                actionable_count += 1
+                continue
+            if ownership is _Day0EnqueueOwnership.INDETERMINATE:
+                indeterminate_count += 1
                 continue
             # BOUNDARY CONTRACT (2026-06-10): the seed consumer half. _looks_like_seed
             # only discriminates "is this file a seed at all"; the full SEED schema is
@@ -1408,6 +1753,7 @@ def _prepare_seed_requests(
                     },
                 )
                 failed.append(str(moved))
+                actionable_count += 1
                 continue
             # UPGRADE RE-SEED BYPASS (Task #32, 2026-06-11): a seed written by the fusion-upgrade
             # trigger (upgrade_trigger="instrument_set_expansion") INTENTIONALLY re-materializes a
@@ -1417,20 +1763,6 @@ def _prepare_seed_requests(
             # fusion could never heal. The upgrade seed's idempotency authority is the
             # fusion_upgrade_enqueues marker (at most one enqueue per (scope, cycle,
             # capturable-family-superset) transition), NOT coverage — so this bypass cannot loop.
-            if not seed.get("upgrade_trigger") and _seed_already_covered(
-                forecast_db=forecast_db, seed=seed
-            ):
-                moved = _move_request(seed_json, processed_path)
-                _write_sidecar(
-                    moved,
-                    {
-                        "status": "SKIPPED_ALREADY_COVERED",
-                        "reason_codes": ["REPLACEMENT_MATERIALIZATION_SEED_ALREADY_COVERED"],
-                        "request_written": False,
-                    },
-                )
-                processed.append(str(moved))
-                continue
             if _seed_source_cycle_regresses_current_posterior(
                 forecast_db=forecast_db, seed=seed
             ):
@@ -1444,6 +1776,23 @@ def _prepare_seed_requests(
                     },
                 )
                 processed.append(str(moved))
+                actionable_count += 1
+                continue
+            if not seed.get("upgrade_trigger") and _seed_already_covered(
+                forecast_db=forecast_db, seed=seed
+            ):
+                moved = _move_request(seed_json, processed_path)
+                _publish_latest_seed(moved, seed)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "SKIPPED_ALREADY_COVERED",
+                        "reason_codes": ["REPLACEMENT_MATERIALIZATION_SEED_ALREADY_COVERED"],
+                        "request_written": False,
+                    },
+                )
+                processed.append(str(moved))
+                actionable_count += 1
                 continue
             result = build_replacement_forecast_materialization_request(seed, base_dir=seed_json.parent)
             if not result.ok or result.request is None:
@@ -1457,6 +1806,7 @@ def _prepare_seed_requests(
                     },
                 )
                 failed.append(str(moved))
+                actionable_count += 1
                 continue
             marker_path, _fingerprint, unchanged = _blocked_attempt_state(
                 marker_dir=request_dir.parent / "blocked_attempts",
@@ -1465,13 +1815,59 @@ def _prepare_seed_requests(
                 forecast_db=forecast_db,
             )
             if unchanged and marker_path is not None:
-                seed_json.unlink()
-                processed.append(str(marker_path))
+                # A fusion-upgrade publisher retains private staging until its
+                # enqueue marker is complete.  Moving this terminal seed keeps
+                # a durable hardlink witness even when latest/ already points
+                # at a newer cycle; unlinking the public queue path could leave
+                # staging at nlink=1 and make crash recovery republish it.
+                moved = _move_request(seed_json, processed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "SKIPPED_UNCHANGED_BLOCKED_INPUT",
+                        "reason_codes": [_UNCHANGED_BLOCKED_SEED_SKIP_REASON],
+                        "request_written": False,
+                        "attempt_fingerprint": _fingerprint,
+                        "blocked_attempt_marker": str(marker_path),
+                    },
+                )
+                _publish_latest_seed(moved, seed)
+                processed.append(str(moved))
                 reasons.append(_UNCHANGED_BLOCKED_SEED_SKIP_REASON)
+                actionable_count += 1
+                continue
+            ownership_check = _upgrade_day0_seed_has_current_enqueue_ownership(
+                forecast_db=forecast_db,
+                seed_file=seed_json,
+                seed=seed,
+            )
+            if ownership_check.ownership is _Day0EnqueueOwnership.STALE:
+                moved = _move_request(seed_json, processed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "SKIPPED_STALE_DAY0_ENQUEUE_OWNER",
+                        "reason_codes": [
+                            "REPLACEMENT_MATERIALIZATION_STALE_DAY0_ENQUEUE_OWNER"
+                        ],
+                        "request_written": False,
+                    },
+                )
+                processed.append(str(moved))
+                actionable_count += 1
+                continue
+            if ownership_check.ownership is _Day0EnqueueOwnership.INDETERMINATE:
+                indeterminate_count += 1
                 continue
             request_path = request_dir / seed_json.name
-            _write_request(request_path, dict(result.request))
+            request_payload = dict(result.request)
+            if ownership_check.witness is not None:
+                request_payload["day0_enqueue_owner_witness"] = dict(
+                    ownership_check.witness
+                )
+            _write_request(request_path, request_payload)
             moved = _move_request(seed_json, processed_path)
+            _publish_latest_seed(moved, seed)
             _write_sidecar(
                 moved,
                 {
@@ -1481,6 +1877,7 @@ def _prepare_seed_requests(
                 },
             )
             processed.append(str(moved))
+            actionable_count += 1
         except Exception as exc:
             moved = _move_request(seed_json, failed_path)
             _write_sidecar(
@@ -1493,11 +1890,18 @@ def _prepare_seed_requests(
                 },
             )
             failed.append(str(moved))
+            actionable_count += 1
+    if raw_window and not _write_day0_enqueue_ownership_cursor(
+        cursor_path, raw_window[-1].name
+    ):
+        reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_CURSOR_WRITE_FAILED")
+    if indeterminate_count:
+        reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE")
     if processed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_PROCESSED")
     if failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_SEED_FAILED")
-    if max(len(seeds) - limit, 0):
+    if inspected_count < len(raw_window) or len(raw_window) < len(raw_snapshot):
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_LIMIT_REACHED")
     return processed, failed, reasons
 
@@ -1534,6 +1938,8 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             forecast_db=forecast_db,
             raw_manifest_dir=raw_manifest_dir,
             seed_dir=seed_dir,
+            request_dir=request_path,
+            inflight_dir=inflight_path,
             limit=int(seed_discovery_limit or seed_limit or limit),
         )
     seed_batch_limit = limit if seed_limit is None else int(seed_limit)

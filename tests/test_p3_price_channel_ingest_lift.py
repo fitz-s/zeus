@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-27 (WORLD writer critical-section read cut)
+# Last reused or audited: 2026-07-28 (WORLD writer critical-section read cut)
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
 #   §8 Step 3 (lift the user-channel WS thread + market-channel + reconcile cycles),
 #   §9 (regression-unconstructable proof — failure-domain isolation).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P3 — lift the
 #   price-channel / CLOB-fact ingest (the persistent user/market WebSocket lifecycle)
 #   out of the order daemon into its own process (com.zeus.price-channel-ingest).
@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import fcntl
 import inspect
 import json
 import sqlite3
@@ -391,14 +392,11 @@ def test_no_regression_order_runtime_keeps_boot_fill_bridge_recovery():
     )
 
 
-def test_no_regression_order_runtime_still_reads_feasibility_evidence():
-    """P1's pre-submit witness MUST keep reading execution_feasibility_evidence (the I2 read side).
+def test_no_regression_order_runtime_reads_current_feasibility_projection():
+    """P1's pre-submit witness reads the current feasibility projection.
 
-    A WS outage surfaces to P1 ONLY as stale/absent execution_feasibility_evidence rows —
-    so the order runtime must still consume that table (the DB-mediated seam), independent
-    of where the WS producer lives. The retained reader now lives with the
-    global auction adapter after price-channel redecision was decoupled from
-    ``src.main``.
+    A WS outage surfaces as stale/absent current rows. Append history must not
+    silently restore executable authority after current projection is lost.
     """
     from src.engine import event_reactor_adapter as adapter
 
@@ -407,9 +405,11 @@ def test_no_regression_order_runtime_still_reads_feasibility_evidence():
         "(_latest_market_channel_book_rows) — the DB-mediated I2 read side P1 keeps."
     )
     reader_src = inspect.getsource(adapter._latest_market_channel_book_rows)
-    assert "execution_feasibility_evidence" in reader_src, (
-        "the order runtime's pre-submit witness must still SELECT "
-        "execution_feasibility_evidence — the DB-mediated I2 read side P1 keeps."
+    assert "execution_feasibility_latest" in reader_src, (
+        "the order runtime's pre-submit witness must SELECT the current projection."
+    )
+    assert "execution_feasibility_evidence" not in reader_src, (
+        "append history cannot restore current book authority."
     )
 
 
@@ -1332,6 +1332,7 @@ def test_price_channel_redecision_world_writer_is_bounded_and_preopened(monkeypa
     timeout_ms = pci.PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS
     assert order == [
         "open",
+        "sql:PRAGMA wal_autocheckpoint=0",
         f"busy:{timeout_ms}",
         f"acquire:{timeout_ms / 1000.0}",
         "sql:BEGIN IMMEDIATE",
@@ -1347,6 +1348,10 @@ def test_price_channel_redecision_world_writer_defers_without_waiting(monkeypatc
     from src.state import db
 
     class Connection:
+        def execute(self, sql: str):
+            self.sql.append(sql)
+            return self
+
         def close(self) -> None:
             self.closed = True
 
@@ -1357,6 +1362,7 @@ def test_price_channel_redecision_world_writer_defers_without_waiting(monkeypatc
 
     conn = Connection()
     conn.closed = False
+    conn.sql = []
     mutex = BusyMutex()
     monkeypatch.setattr(db, "get_world_connection", lambda **_kwargs: conn)
     monkeypatch.setattr(
@@ -1375,7 +1381,324 @@ def test_price_channel_redecision_world_writer_defers_without_waiting(monkeypatc
             raise AssertionError("busy producer must not enter the write unit")
 
     assert mutex.timeout == pci.PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS / 1000.0
+    assert conn.sql == ["PRAGMA wal_autocheckpoint=0"]
     assert conn.closed is True
+
+
+def _price_redecision_writer_events():
+    from src.events.opportunity_event import make_opportunity_event
+
+    return [
+        make_opportunity_event(
+            event_type="EDLI_REDECISION_PENDING",
+            entity_key=f"Paris|2026-07-28|{metric}|run-{index}",
+            source="market-price",
+            observed_at="2026-07-28T00:00:00+00:00",
+            available_at="2026-07-28T00:00:00+00:00",
+            received_at=f"2026-07-28T00:00:0{index}+00:00",
+            payload={
+                "city": "Paris",
+                "target_date": "2026-07-28",
+                "metric": metric,
+                "index": index,
+            },
+        )
+        for index, metric in enumerate(("high", "low", "high"), start=1)
+    ]
+
+
+def _file_backed_world_writer(monkeypatch, tmp_path, traces):
+    from src.state import db
+    from src.state.db import init_schema
+
+    world_path = tmp_path / "zeus-world.db"
+    monkeypatch.setattr(db, "ZEUS_WORLD_DB_PATH", world_path)
+    setup = db.get_world_connection()
+    init_schema(setup)
+    setup.commit()
+    setup.close()
+    open_world = db.get_world_connection
+
+    def traced_world(**kwargs):
+        conn = open_world(**kwargs)
+        conn.set_trace_callback(
+            lambda sql: traces.append(
+                (sql, db.world_mutex_is_held(), time.monotonic_ns())
+            )
+        )
+        return conn
+
+    monkeypatch.setattr(db, "get_world_connection", traced_world)
+    return db, world_path
+
+
+def _price_writer_phase_messages(caplog):
+    return [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("price_channel_world_writer")
+        and " over_budget " not in record.message
+    ]
+
+
+def _phase_name(message: str) -> str:
+    return message.split(" phase=", 1)[1].split(" ", 1)[0]
+
+
+def _telemetry_ms(message: str, field: str) -> float:
+    return float(message.split(f" {field}=", 1)[1].split(" ", 1)[0])
+
+
+def _telemetry_ns(message: str, field: str) -> int:
+    return int(message.split(f" {field}=", 1)[1].split(" ", 1)[0])
+
+
+def test_price_channel_redecision_real_flock_transaction_is_bounded_atomic_and_idempotent(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    """Real file-backed WORLD writes keep all metadata reads before the flock."""
+    from src.events.event_writer import EventWriter
+    from src.ingest import price_channel_ingest as pci
+
+    caplog.set_level("DEBUG", logger="zeus.price_channel_ingest")
+    traces: list[tuple[str, bool, int]] = []
+    db, world_path = _file_backed_world_writer(monkeypatch, tmp_path, traces)
+    events = _price_redecision_writer_events()
+    observer = sqlite3.connect(world_path)
+
+    with pci._edli_price_channel_world_write_connection(
+        owner="price_channel_redecision_emit"
+    ) as world:
+        assert db.world_mutex_is_held() is True
+        lock_path = world_path.with_name(world_path.name + ".writer-lock.live")
+        with lock_path.open("a+") as contender:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(
+                    contender.fileno(),
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+        first = EventWriter(world).write_many(events)
+        assert (
+            observer.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0]
+            == 0
+        )
+        assert (
+            observer.execute(
+                "SELECT COUNT(*) FROM opportunity_event_processing"
+            ).fetchone()[0]
+            == 0
+        )
+        world.commit()
+    observer.close()
+
+    assert [result.inserted for result in first] == [True, True, True]
+    assert db.world_write_mutex().locked() is False
+    assert lock_path.exists()
+
+    metadata_reads = [
+        (sql, held, at_ns)
+        for sql, held, at_ns in traces
+        if "database_list" in sql.lower() or "sqlite_master" in sql.lower()
+    ]
+    assert any("database_list" in sql.lower() for sql, _held, _at_ns in metadata_reads)
+    assert any("sqlite_master" in sql.lower() for sql, _held, _at_ns in metadata_reads)
+    assert all(held is False for _sql, held, _at_ns in metadata_reads)
+    locked_traces = [(sql, at_ns) for sql, held, at_ns in traces if held]
+    assert max(at_ns for _sql, _held, at_ns in metadata_reads) < min(
+        at_ns for _sql, at_ns in locked_traces
+    )
+    locked_sql = [sql for sql, _at_ns in locked_traces]
+    assert not any(
+        "database_list" in sql.lower() or "sqlite_master" in sql.lower()
+        for sql in locked_sql
+    )
+    assert sum(
+        "insert or ignore into opportunity_events" in sql.lower()
+        for sql in locked_sql
+    ) == 3
+    assert sum(
+        "insert or ignore into opportunity_event_processing" in sql.lower()
+        for sql in locked_sql
+    ) == 3
+    assert any(sql.lstrip().upper().startswith("BEGIN IMMEDIATE") for sql in locked_sql)
+    assert any(sql.lstrip().upper().startswith("COMMIT") for sql in locked_sql)
+
+    messages = _price_writer_phase_messages(caplog)
+    assert [_phase_name(message) for message in messages] == [
+        "acquire",
+        "begin",
+        "write",
+        "transaction_closed",
+        "release",
+    ]
+    assert [
+        _telemetry_ns(message, "monotonic_ns") for message in messages
+    ] == sorted(_telemetry_ns(message, "monotonic_ns") for message in messages)
+    assert _telemetry_ms(messages[-1], "hold_ms") < 750.0
+    assert "transaction=caller_closed" in messages[-1]
+
+    traces.clear()
+    caplog.clear()
+    with pci._edli_price_channel_world_write_connection(
+        owner="price_channel_redecision_emit"
+    ) as world:
+        duplicate = EventWriter(world).write_many(events)
+        world.commit()
+
+    assert [result.duplicate for result in duplicate] == [True, True, True]
+    verify = sqlite3.connect(world_path)
+    assert verify.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 3
+    assert (
+        verify.execute(
+            "SELECT COUNT(*) FROM opportunity_event_processing "
+            "WHERE processing_status = 'pending'"
+        ).fetchone()[0]
+        == 3
+    )
+    assert {
+        row[0]
+        for row in verify.execute(
+            "SELECT event_id FROM opportunity_event_processing"
+        ).fetchall()
+    } == {event.event_id for event in events}
+    verify.close()
+
+
+def test_price_channel_redecision_real_flock_active_rollback_retries_pending(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    from src.events.event_writer import EventWriter
+    from src.ingest import price_channel_ingest as pci
+
+    caplog.set_level("DEBUG", logger="zeus.price_channel_ingest")
+    traces: list[tuple[str, bool, int]] = []
+    _db, world_path = _file_backed_world_writer(monkeypatch, tmp_path, traces)
+    events = _price_redecision_writer_events()
+
+    with pytest.raises(RuntimeError, match="active rollback"):
+        with pci._edli_price_channel_world_write_connection(
+            owner="price_channel_redecision_emit"
+        ) as world:
+            assert all(
+                result.inserted for result in EventWriter(world).write_many(events)
+            )
+            raise RuntimeError("active rollback")
+
+    verify = sqlite3.connect(world_path)
+    assert verify.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    assert verify.execute(
+        "SELECT COUNT(*) FROM opportunity_event_processing"
+    ).fetchone()[0] == 0
+    verify.close()
+    messages = _price_writer_phase_messages(caplog)
+    assert [_phase_name(message) for message in messages] == [
+        "acquire",
+        "begin",
+        "write",
+        "rollback",
+        "transaction_closed",
+        "release",
+    ]
+    assert "transaction=rolled_back" in messages[-1]
+
+    caplog.clear()
+    with pci._edli_price_channel_world_write_connection(
+        owner="price_channel_redecision_emit"
+    ) as world:
+        retried = EventWriter(world).write_many(events)
+        world.commit()
+
+    assert all(result.inserted for result in retried)
+    verify = sqlite3.connect(world_path)
+    assert verify.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 3
+    assert (
+        verify.execute(
+            "SELECT COUNT(*) FROM opportunity_event_processing "
+            "WHERE processing_status = 'pending'"
+        ).fetchone()[0]
+        == 3
+    )
+    verify.close()
+
+
+def test_price_channel_redecision_sqlite_contention_reports_slow_phase_without_event_loss(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    from src.events.event_writer import EventWriter
+    from src.ingest import price_channel_ingest as pci
+
+    caplog.set_level("DEBUG", logger="zeus.price_channel_ingest")
+    traces: list[tuple[str, bool, int]] = []
+    db, world_path = _file_backed_world_writer(monkeypatch, tmp_path, traces)
+    events = _price_redecision_writer_events()
+    blocker = sqlite3.connect(world_path)
+    blocker.execute("BEGIN IMMEDIATE")
+
+    def injected_busy_timeout(conn, *, timeout_ms):
+        assert timeout_ms == pci.PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS == 25
+        conn.execute("PRAGMA busy_timeout=900")
+
+    monkeypatch.setattr(
+        pci,
+        "_bound_price_channel_sqlite_wait",
+        injected_busy_timeout,
+    )
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            with pci._edli_price_channel_world_write_connection(
+                owner="price_channel_redecision_emit"
+            ):
+                raise AssertionError("contended BEGIN must not yield a write connection")
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert db.world_write_mutex().locked() is False
+    phase_messages = _price_writer_phase_messages(caplog)
+    assert [_phase_name(message) for message in phase_messages] == [
+        "acquire",
+        "begin",
+        "transaction_closed",
+        "release",
+    ]
+    warning = next(
+        record.message
+        for record in caplog.records
+        if "price_channel_world_writer over_budget" in record.message
+    )
+    assert "phase=begin" in warning
+    assert _telemetry_ms(warning, "phase_ms") >= 750.0
+    assert _telemetry_ms(warning, "hold_ms") >= 750.0
+    assert "budget_ms=750" in warning
+    assert "transaction=begin_failed" in warning
+    verify = sqlite3.connect(world_path)
+    assert verify.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    verify.close()
+
+    caplog.clear()
+    with pci._edli_price_channel_world_write_connection(
+        owner="price_channel_redecision_emit"
+    ) as world:
+        retried = EventWriter(world).write_many(events)
+        world.commit()
+
+    assert all(result.inserted for result in retried)
+    verify = sqlite3.connect(world_path)
+    assert verify.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 3
+    assert (
+        verify.execute(
+            "SELECT COUNT(*) FROM opportunity_event_processing "
+            "WHERE processing_status = 'pending'"
+        ).fetchone()[0]
+        == 3
+    )
+    verify.close()
 
 
 def test_price_channel_redecision_coalesced_sink_does_not_block_ingest(
@@ -2583,7 +2906,7 @@ def test_held_quote_refresh_orders_missing_and_oldest_feasibility_first():
     ensure_table(conn)
     conn.execute(
         """
-        INSERT INTO execution_feasibility_evidence (
+        INSERT INTO execution_feasibility_latest (
             evidence_id, event_id, condition_id, token_id, outcome_label,
             direction, quote_seen_at, created_at, schema_version
         ) VALUES
@@ -2670,6 +2993,45 @@ def test_feasibility_age_reads_latest_state_without_append_scan():
     ]
     assert ordered == ["stale-token", "newer-token"]
     assert append_reads == []
+
+
+def test_feasibility_age_ignores_append_history():
+    from src.ingest.price_channel_ingest import _edli_order_token_ids_by_feasibility_age
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    conn.executemany(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label,
+            direction, quote_seen_at, created_at, schema_version
+        ) VALUES (?, ?, 'cond', ?, 'YES', 'buy_yes', ?, ?, 1)
+        """,
+        [
+            (
+                "append-newer",
+                "event-newer",
+                "newer-token",
+                "2026-06-24T08:00:00+00:00",
+                "2026-06-24T08:00:00+00:00",
+            ),
+            (
+                "append-stale",
+                "event-stale",
+                "stale-token",
+                "2026-06-24T07:30:00+00:00",
+                "2026-06-24T07:30:00+00:00",
+            ),
+        ],
+    )
+
+    ordered = _edli_order_token_ids_by_feasibility_age(
+        conn,
+        ["newer-token", "missing-token", "stale-token"],
+    )
+
+    assert ordered == ["newer-token", "missing-token", "stale-token"]
 
 
 def test_rest_quote_refresh_reuses_only_current_generation_full_depth(monkeypatch):
@@ -2889,7 +3251,7 @@ def test_pre_submit_book_reader_prefers_latest_without_append_scan():
     assert append_reads == []
 
 
-def test_pre_submit_book_reader_falls_back_to_append_when_latest_side_missing():
+def test_pre_submit_book_reader_rejects_append_when_latest_side_missing():
     from src.events.reactor import _edli_latest_pre_submit_book_row
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table
 
@@ -2922,6 +3284,8 @@ def test_pre_submit_book_reader_falls_back_to_append_when_latest_side_missing():
         """
     )
 
+    traces: list[str] = []
+    conn.set_trace_callback(traces.append)
     row = _edli_latest_pre_submit_book_row(
         conn,
         token_id="tok-fallback",
@@ -2929,8 +3293,8 @@ def test_pre_submit_book_reader_falls_back_to_append_when_latest_side_missing():
         decision_time=datetime.fromisoformat("2026-06-24T08:00:01+00:00"),
     )
 
-    assert row is not None
-    assert row[1] == "hash-append"
+    assert row is None
+    assert all("FROM execution_feasibility_evidence" not in sql for sql in traces)
 
 
 def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):

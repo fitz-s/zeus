@@ -18,6 +18,7 @@ Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_
 import logging
 import sqlite3
 import copy
+import hashlib
 import json
 import threading
 import time
@@ -95,6 +96,7 @@ _MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
 _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR = "_day0_zero_probability_exit_authority"
 _GLOBAL_MONITOR_SAMPLES_ATTR = "_current_global_held_probability_samples"
 _GLOBAL_MONITOR_ALPHA_ATTR = "_current_global_probability_band_alpha"
+_MONITOR_PROBABILITY_RECEIPT_ATTR = "_monitor_probability_receipt"
 _MONITOR_PREFETCHED_ORDERBOOKS_ATTR = "_zeus_monitor_prefetched_orderbooks"
 _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
     "_zeus_monitor_prefetch_attempted_tokens"
@@ -107,6 +109,7 @@ _DAY0_MATERIALIZATION_VISIBILITY_REASONS = frozenset(
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
         "GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING",
+        "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH",
     }
 )
 _WHALE_TOXICITY_PRICE_MARGIN = 0.05
@@ -252,6 +255,44 @@ def _monitor_receipt_vector(values) -> list[float | None]:
     if arr.ndim == 0:
         arr = arr.reshape(1)
     return [_monitor_receipt_float(item) for item in arr.tolist()]
+
+
+def _compact_monitor_probability_receipt(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Keep probability identity and clocks without copying the full evidence."""
+
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    compact = {
+        key: payload[key]
+        for key in (
+            "schema_version",
+            "selected_method",
+            "probability_authority",
+            "probability_functional",
+            "posterior_id",
+            "computed_at",
+            "source_cycle_time",
+            "source_id",
+            "posterior_method",
+            "latest_raw_cycle_time",
+            "probability_witness_identity",
+            "probability_content_identity",
+            "q_version",
+            "source_truth_identity",
+            "held_side_probability",
+        )
+        if payload.get(key) is not None
+    }
+    compact["evidence_content_hash"] = hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    return compact
 
 
 def _monitor_receipt_quantiles(values) -> dict[str, float | None]:
@@ -921,13 +962,13 @@ _HELD_BELIEF_PENDING_SEED_SCAN_LIMIT = 256
 
 
 def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):
-    """Return the freshest bounded pending seed for one held family, or None.
+    """Return the current durable seed or freshest bounded pending seed.
 
     This runs synchronously on the held-position monitor worker. Processed
     seed/request archive enumeration has no monitor-budget bound and can starve
-    every exit. Inspect only the live pending queue and cap directory entries.
-    A miss fails closed; the caller's asynchronous family reseed is the repair
-    lane.
+    every exit. Read the queue-published O(1) per-family hard-link cache first,
+    then inspect only the live pending queue with a bounded fallback. A miss
+    fails closed; the caller's asynchronous family reseed is the repair lane.
 
     The seed name is ``{city}.{target_date}.{metric}.{stamp}.json``; we pick the
     lexicographically-latest stamp (ISO-ordered) from the bounded pending slice.
@@ -954,6 +995,24 @@ def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):
     base = Path(str(seed_dir))
     if not base.exists():
         return None
+    latest_path = (
+        base.parent
+        / "seeds_latest"
+        / f"{city_seg}.{target_date}.{metric}.json"
+    )
+    if latest_path.is_file():
+        try:
+            payload = _json.loads(latest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and _seed_payload_covers_target_local_day(
+                seed_path=latest_path,
+                payload=payload,
+            )
+        ):
+            return latest_path, payload
     candidates: list[tuple[str, Path]] = []
     try:
         with _os.scandir(base) as entries:
@@ -2536,6 +2595,14 @@ def _apply_absorbing_floor_to_observed_extreme(
 def _day0_observed_extreme_reseed_payload(
     *, city: str, target_date: str, metric: str
 ) -> dict[str, object]:
+    """Read the exact Day0 conditioning identity used by seed discovery/current-global.
+
+    A monitor visibility repair must not compose a narrower local observation
+    view: it would enqueue a valid-but-stale identity after current-global has
+    advanced on a later causal ``observation_print``.  The shared producer
+    includes the canonical settlement fact, fast-station conditioning, and the
+    latest causal observation frontier under one identity contract.
+    """
     city_obj = cities_by_name.get(str(city))
     if city_obj is None or not _city_supports_executable_day0_observation(city_obj):
         return {}
@@ -2546,113 +2613,27 @@ def _day0_observed_extreme_reseed_payload(
     if not _is_position_target_local_day(None, city_obj, target_d):
         return {}
     try:
-        metric_id = MetricIdentity.from_raw(metric)
-    except Exception:
-        return {}
-    metric_is_low = metric_id.is_low()
-    unit = str(getattr(city_obj, "settlement_unit", "") or "").strip().upper()
+        from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+            _day0_observed_extreme_seed_payload,
+        )
 
-    # LIVE candidate: a validated live-provider reading (lowest latency when providers serve).
-    live: tuple[float, str, str, int] | None = None
-    obs = None
-    try:
-        obs = _fetch_day0_observation(city_obj, target_d)
-    except Exception as exc:
+        payload = _day0_observed_extreme_seed_payload(
+            city=str(city),
+            target_date=str(target_date),
+            metric=str(metric),
+            computed_at=datetime.now(timezone.utc),
+        )
+    except Exception as exc:  # noqa: BLE001 - monitor repair remains fail-soft
         logger.info(
-            "monitor belief reseed Day0 live observation unavailable city=%s target_date=%s "
-            "metric=%s exc=%s (composing with canonical surface)",
-            city, target_date, metric, exc,
-        )
-    if obs is not None and _day0_observation_field(obs, "observation_time"):
-        source_rejection = _day0_observation_source_rejection_reason(
-            city_obj,
-            obs,
-            consumer_label="replacement belief reseed",
-        )
-        if source_rejection is not None:
-            logger.info(
-                "monitor belief reseed Day0 live observation rejected city=%s target_date=%s "
-                "metric=%s reason=%s (composing with canonical surface)",
-                city, target_date, metric, source_rejection,
-            )
-        else:
-            live_native = _finite_day0_observation_float(
-                obs, "low_so_far" if metric_is_low else "high_so_far"
-            )
-            if live_native is not None:
-                try:
-                    live_sample = int(_day0_observation_field(obs, "sample_count", 0) or 0)
-                except Exception:
-                    live_sample = 0
-                live = (
-                    float(live_native),
-                    str(_day0_observation_field(obs, "observation_time", "") or ""),
-                    str(_day0_observation_field(obs, "source", "") or "live"),
-                    live_sample,
-                )
-
-    # CANONICAL candidate (ALWAYS read): preserve the selected source because the storage surface
-    # is not the evidence semantics. WU/Ogimet running extrema are absorbing bounds; HKO's current
-    # intraday accumulator is a revisable snapshot. See docs/evidence/same_day_exit_blindness/.
-    canonical = _day0_observed_extreme_from_canonical_surface(
-        city_name=str(getattr(city_obj, "name", "") or city),
-        target_date=str(target_date),
-        metric_is_low=metric_is_low,
-    )
-    source_type = str(
-        getattr(city_obj, "settlement_source_type", "") or ""
-    ).strip().lower()
-    if source_type == "hko":
-        # HKO may revise its official intraday snapshot. Choose the newest
-        # current fact and preserve its provisional source identity; MAX/MIN
-        # composition would resurrect a retracted value as a false hard bound.
-        from src.data.replacement_cycle_advance_trigger import (
-            normalize_observation_version,
-        )
-
-        hko_candidates: list[tuple[float, str, str, int]] = []
-        if live is not None:
-            hko_candidates.append(live)
-        if canonical is not None:
-            hko_candidates.append(
-                (
-                    float(canonical[0]),
-                    str(canonical[1]),
-                    str(canonical[2]),
-                    int(canonical[3]),
-                )
-            )
-        composed = (
-            max(
-                hko_candidates,
-                key=lambda candidate: normalize_observation_version(candidate[1]) or "",
-            )
-            if hko_candidates
-            else None
-        )
-    else:
-        composed = _compose_day0_observed_extreme(
-            live=live, canonical=canonical, metric_is_low=metric_is_low
-        )
-    if composed is None:
-        return {}
-    observed_native, observation_time, source_label, sample_count = composed
-    try:
-        observed_c = _temperature_native_value_to_c(observed_native, unit=unit)
-    except Exception as exc:
-        logger.info(
-            "monitor belief reseed Day0 observed-extreme unit conversion failed "
-            "city=%s target_date=%s metric=%s unit=%s exc=%s",
-            city, target_date, metric, unit, exc,
+            "monitor belief reseed Day0 canonical conditioning unavailable "
+            "city=%s target_date=%s metric=%s exc=%s",
+            city,
+            target_date,
+            metric,
+            exc,
         )
         return {}
-    return {
-        "day0_observed_extreme_c": float(observed_c),
-        "day0_observed_extreme_source": source_label,
-        "day0_observed_extreme_observation_time": observation_time,
-        "day0_observed_extreme_sample_count": sample_count,
-        "day0_observed_extreme_unit": unit,
-    }
+    return dict(payload or {})
 
 
 def _is_stale_day0_observation_quality_rejection(reason: str | None) -> bool:
@@ -5222,6 +5203,25 @@ def monitor_probability_refresh(
             f"probability_functional={POSTERIOR_PREDICTIVE_MEAN}",
         )
         _append_monitor_validation(fresh_pos, belief.freshness_validation())
+        setattr(
+            fresh_pos,
+            _MONITOR_PROBABILITY_RECEIPT_ATTR,
+            _compact_monitor_probability_receipt(
+                {
+                    "schema_version": 1,
+                    "selected_method": SELECTED_METHOD_REPLACEMENT_POSTERIOR,
+                    "probability_authority": belief.source_table,
+                    "probability_functional": belief.probability_functional,
+                    "posterior_id": belief.posterior_id,
+                    "computed_at": belief.computed_at,
+                    "source_cycle_time": belief.source_cycle_time,
+                    "source_id": belief.source_id,
+                    "posterior_method": belief.posterior_method,
+                    "latest_raw_cycle_time": belief.latest_raw_cycle_time,
+                    "held_side_probability": float(belief.held_side_prob),
+                }
+            ),
+        )
         _set_monitor_probability_fresh(fresh_pos, True)
         return float(belief.held_side_prob), fresh_pos, True
     if belief is not None:
@@ -5387,7 +5387,11 @@ def refresh_exact_zero_position(
     pos.last_monitor_market_vig = None
     pos.last_monitor_whale_toxicity = False
     pos.last_monitor_market_price_is_fresh = False
-    for attr in (_GLOBAL_MONITOR_SAMPLES_ATTR, _GLOBAL_MONITOR_ALPHA_ATTR):
+    for attr in (
+        _GLOBAL_MONITOR_SAMPLES_ATTR,
+        _GLOBAL_MONITOR_ALPHA_ATTR,
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+    ):
         try:
             delattr(pos, attr)
         except AttributeError:
@@ -5485,7 +5489,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         delattr(pos, "_day0_monitor_probability_receipt")
     except AttributeError:
         pass
-    for attr in (_GLOBAL_MONITOR_SAMPLES_ATTR, _GLOBAL_MONITOR_ALPHA_ATTR):
+    for attr in (
+        _GLOBAL_MONITOR_SAMPLES_ATTR,
+        _GLOBAL_MONITOR_ALPHA_ATTR,
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+    ):
         try:
             delattr(pos, attr)
         except AttributeError:
@@ -5539,6 +5547,21 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         _day0_receipt = getattr(refresh_pos, "_day0_monitor_probability_receipt", None)
         if _day0_receipt is not None:
             setattr(pos, "_day0_monitor_probability_receipt", _day0_receipt)
+        _probability_receipt = getattr(
+            refresh_pos,
+            _MONITOR_PROBABILITY_RECEIPT_ATTR,
+            None,
+        )
+        if _probability_receipt is None and isinstance(_day0_receipt, dict):
+            _probability_receipt = _compact_monitor_probability_receipt(
+                _day0_receipt
+            )
+        if _probability_receipt is not None:
+            setattr(
+                pos,
+                _MONITOR_PROBABILITY_RECEIPT_ATTR,
+                _probability_receipt,
+            )
         _global_samples = getattr(refresh_pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None)
         if _global_samples is not None:
             setattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, _global_samples)

@@ -24,6 +24,7 @@ schemas without stubs. It verifies:
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -208,6 +209,56 @@ class TestCrossDbSavepointAtomicity:
             f"Expected 1 row in world.data_coverage; got {cov_count}"
         )
 
+    def test_attach_conn_bypasses_main_data_coverage_ghost(
+        self, dual_db: tuple[Path, Path]
+    ):
+        """A deployed MAIN ghost must not shadow canonical world coverage."""
+        import src.state.db as db_module
+        from src.data.daily_obs_append import _write_atom_with_coverage
+
+        forecasts_path, world_path = dual_db
+        world_conn = sqlite3.connect(str(world_path))
+        coverage_ddl = world_conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='data_coverage'"
+        ).fetchone()[0]
+        world_conn.close()
+        forecasts_conn = sqlite3.connect(str(forecasts_path))
+        forecasts_conn.execute(coverage_ddl)
+        forecasts_conn.commit()
+        forecasts_conn.close()
+
+        orig_f = db_module.ZEUS_FORECASTS_DB_PATH
+        orig_w = db_module.ZEUS_WORLD_DB_PATH
+        try:
+            db_module.ZEUS_FORECASTS_DB_PATH = forecasts_path
+            db_module.ZEUS_WORLD_DB_PATH = world_path
+            high, low = _make_atom_pair(city="GhostShadowCity")
+            from src.state.db import get_forecasts_connection_with_world
+
+            with get_forecasts_connection_with_world(write_class="bulk") as conn:
+                _write_atom_with_coverage(conn, high, low, data_source="WU")
+                conn.commit()
+        finally:
+            db_module.ZEUS_FORECASTS_DB_PATH = orig_f
+            db_module.ZEUS_WORLD_DB_PATH = orig_w
+
+        forecasts_conn = sqlite3.connect(str(forecasts_path))
+        main_count = forecasts_conn.execute(
+            "SELECT COUNT(*) FROM data_coverage "
+            "WHERE city='GhostShadowCity'"
+        ).fetchone()[0]
+        forecasts_conn.close()
+        world_conn = sqlite3.connect(str(world_path))
+        world_count = world_conn.execute(
+            "SELECT COUNT(*) FROM data_coverage "
+            "WHERE city='GhostShadowCity'"
+        ).fetchone()[0]
+        world_conn.close()
+
+        assert main_count == 0
+        assert world_count == 1
+
     def test_savepoint_rollback_undoes_both_dbs(
         self, dual_db: tuple[Path, Path]
     ):
@@ -266,3 +317,60 @@ class TestCrossDbSavepointAtomicity:
         assert cov_count == 0, (
             f"SAVEPOINT rollback failed: {cov_count} rows in world.data_coverage"
         )
+
+
+def test_cross_db_helper_threads_nonblocking_policy_to_both_flocks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A retrying source clock must never block on either canonical flock."""
+    import src.state.db as db_module
+    import src.state.db_writer_lock as lock_module
+
+    forecasts_path = tmp_path / "zeus-forecasts.db"
+    world_path = tmp_path / "zeus-world.db"
+    lock_calls: list[tuple[Path, object, bool]] = []
+
+    @contextmanager
+    def fake_lock(path: Path, write_class, *, blocking: bool = True):
+        lock_calls.append((path, write_class, blocking))
+        yield
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.closed = False
+            self.attached = False
+
+        def execute(self, sql: str, _params=()):
+            if sql == "PRAGMA database_list":
+                return self
+            if sql.startswith("ATTACH DATABASE"):
+                self.attached = True
+                return self
+            raise AssertionError(sql)
+
+        def fetchall(self):
+            return [(0, "main", str(forecasts_path))]
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = FakeConnection()
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_path)
+    monkeypatch.setattr(lock_module, "db_writer_lock", fake_lock)
+    monkeypatch.setattr(db_module, "_connect", lambda *_args, **_kwargs: conn)
+
+    with db_module.get_forecasts_connection_with_world(
+        write_class="bulk",
+        blocking=False,
+    ) as yielded:
+        assert yielded is conn
+        assert conn.attached is True
+
+    assert [call[0] for call in lock_calls] == sorted(
+        (forecasts_path, world_path),
+        key=lambda path: str(path.resolve()),
+    )
+    assert all(call[2] is False for call in lock_calls)
+    assert conn.closed is True

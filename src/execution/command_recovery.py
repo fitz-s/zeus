@@ -77,10 +77,31 @@ logger = logging.getLogger(__name__)
 _RECOVERY_LOCK_RETRY_DELAYS = (2.0, 5.0, 10.0)
 _LIVE_TICK_DB_BUDGET_SECONDS = 0.1
 _LIVE_TICK_DB_PROGRESS_OPCODES = 1_000
+_RESTART_ACCOUNT_TRUTH_DEADLINE_ENV = (
+    "ZEUS_RESTART_RECOVERY_ACCOUNT_TRUTH_DEADLINE_SECONDS"
+)
+_RESTART_ACCOUNT_TRUTH_DEADLINE_SECONDS = 60.0
 
 
 class _LiveTickDBBudgetExhausted(RuntimeError):
     pass
+
+
+def _account_truth_snapshot_kwargs(scope: str) -> dict[str, object]:
+    if scope != "restart_preflight":
+        return {}
+    # SCOPE=deploy-time restart recovery only. DRAIN=one complete,
+    # authoritative account orders+trades pagination before the shared
+    # bounded deadline. RESET=the next restart attempt starts a new snapshot;
+    # an incomplete read still raises and leaves every daemon stopped. The
+    # larger budget changes patience, never truth semantics.
+    return {
+        "account_truth_deadline_seconds": os.environ.get(
+            _RESTART_ACCOUNT_TRUTH_DEADLINE_ENV,
+            str(_RESTART_ACCOUNT_TRUTH_DEADLINE_SECONDS),
+        )
+    }
+
 
 # Venue status strings that indicate an order is no longer active
 # (cancelled / expired at the venue).
@@ -2681,11 +2702,12 @@ def _append_exit_order_fill_projection(
     fill_price: str,
     observed_at: str,
     event_type: str,
-) -> None:
+    raise_on_error: bool = False,
+) -> bool:
     if event_type != CommandEventType.FILL_CONFIRMED.value:
-        return
+        return False
     if str(command.get("intent_kind") or "").upper() != "EXIT":
-        return
+        return False
     try:
         from src.execution.exchange_reconcile import _ensure_exit_fill_position_event
 
@@ -2713,12 +2735,16 @@ def _append_exit_order_fill_projection(
                 str(command.get("position_id") or ""),
             ),
         )
+        return True
     except Exception:
         logger.exception(
             "recovery: exit fill projection failed for command %s order %s",
             command.get("command_id"),
             venue_order_id,
         )
+        if raise_on_error:
+            raise
+        return False
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -10800,7 +10826,7 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
         command_id = str(command.get("command_id") or "")
         venue_order_id = str(command.get("venue_order_id") or "")
         try:
-            already_canceled_outcome = _review_required_cancel_failed_already_canceled_entry_fill_recovery(
+            already_canceled_outcome = _review_required_cancel_failed_already_canceled_fill_recovery(
                 conn,
                 VenueCommand.from_row(command),
             )
@@ -12429,7 +12455,11 @@ def _terminal_point_order_candidates(conn: sqlite3.Connection) -> list[dict]:
     return [_dict_row(row) for row in rows]
 
 
-def _phase_after_terminal_exit_no_fill(command: Mapping[str, object], *, observed_at: str) -> str:
+def _phase_after_terminal_exit_no_fill(
+    command: Mapping[str, object],
+    *,
+    observed_at: str,
+) -> str | None:
     city = str(command.get("position_city") or "").strip()
     target_date = str(command.get("position_target_date") or "").strip()
     try:
@@ -12438,17 +12468,29 @@ def _phase_after_terminal_exit_no_fill(command: Mapping[str, object], *, observe
 
         city_cfg = runtime_cities_by_name().get(city)
         tz_name = str(getattr(city_cfg, "timezone", "") or "")
-        as_of = _parse_utc(observed_at)
+        if city_cfg is None or not tz_name:
+            return None
+        as_of = _parse_ts(observed_at)
+        if as_of is None:
+            return None
         day0_start = settlement_day_entry_utc(
             target_local_date=date.fromisoformat(target_date),
             city_timezone=tz_name,
         )
         return "day0_window" if as_of >= day0_start else "active"
-    except Exception:
-        return "day0_window"
+    except Exception as exc:
+        logger.warning(
+            "recovery: cannot derive post-terminal-no-fill phase city=%r "
+            "target_date=%r observed_at=%r: %s",
+            city,
+            target_date,
+            observed_at,
+            exc,
+        )
+        return None
 
 
-def _release_pending_exit_after_terminal_no_fill(
+def _release_exit_after_terminal_no_fill(
     conn: sqlite3.Connection,
     *,
     command: Mapping[str, object],
@@ -12465,76 +12507,87 @@ def _release_pending_exit_after_terminal_no_fill(
         return False
     current = conn.execute(
         """
-        SELECT phase, strategy_key
+        SELECT phase, strategy_key, order_id
           FROM position_current
          WHERE position_id = ?
          LIMIT 1
         """,
         (position_id,),
     ).fetchone()
-    if current is None or str(current[0] or "") != "pending_exit":
+    if current is None:
         return False
-    phase_after = _phase_after_terminal_exit_no_fill(command, observed_at=observed_at)
+    phase_before = str(current[0] or "")
+    if phase_before not in {"active", "day0_window", "pending_exit"}:
+        return False
+    phase_after = (
+        _phase_after_terminal_exit_no_fill(command, observed_at=observed_at)
+        if phase_before == "pending_exit"
+        else phase_before
+    )
+    if phase_after is None:
+        return False
     event_key = f"{position_id}:exit_terminal_no_fill:{command_id}"
     existing = conn.execute(
         "SELECT 1 FROM position_events WHERE idempotency_key = ? LIMIT 1",
         (event_key,),
     ).fetchone()
+    if existing is None:
+        seq = _latest_position_sequence(conn, position_id) + 1
+        payload = {
+            "reason": "exit_order_terminal_no_fill_released_pending_exit",
+            "proof_class": "exit_point_order_terminal_no_fill_plus_open_trade_absence",
+            "command_id": command_id,
+            "venue_order_id": venue_order_id,
+            "venue_command_state": command.get("state"),
+            "venue_order_fact_id": order_fact_id,
+            "phase_before": phase_before,
+            "phase_after": phase_after,
+            "terminal_order_fact": dict(terminal_payload),
+        }
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES (?, ?, 1, ?, 'EXIT_ORDER_VOIDED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_key,
+                position_id,
+                seq,
+                observed_at,
+                phase_before,
+                phase_after,
+                str(command.get("position_strategy_key") or current[1] or "opening_inertia"),
+                str(command.get("decision_id") or ""),
+                str(command.get("snapshot_id") or ""),
+                venue_order_id,
+                command_id,
+                f"venue_command:{command_id}",
+                event_key,
+                "TERMINAL_NO_FILL",
+                "src.execution.command_recovery",
+                json.dumps(payload, sort_keys=True, default=str),
+                _latest_position_env(conn, position_id),
+            ),
+        )
     conn.execute(
         """
         UPDATE position_current
            SET phase = ?,
-               order_id = NULL,
+               order_id = CASE
+                   WHEN lower(COALESCE(order_id, '')) = lower(?) THEN NULL
+                   ELSE order_id
+               END,
                order_status = 'filled',
                exit_reason = 'EXIT_ORDER_TERMINAL_NO_FILL_RELEASED',
                updated_at = ?
          WHERE position_id = ?
-           AND phase = 'pending_exit'
+           AND phase = ?
         """,
-        (phase_after, observed_at, position_id),
-    )
-    if existing is not None:
-        return True
-    seq = _latest_position_sequence(conn, position_id) + 1
-    payload = {
-        "reason": "exit_order_terminal_no_fill_released_pending_exit",
-        "proof_class": "exit_point_order_terminal_no_fill_plus_open_trade_absence",
-        "command_id": command_id,
-        "venue_order_id": venue_order_id,
-        "venue_command_state": command.get("state"),
-        "venue_order_fact_id": order_fact_id,
-        "phase_before": "pending_exit",
-        "phase_after": phase_after,
-        "terminal_order_fact": dict(terminal_payload),
-    }
-    conn.execute(
-        """
-        INSERT INTO position_events (
-            event_id, position_id, event_version, sequence_no, event_type,
-            occurred_at, phase_before, phase_after, strategy_key, decision_id,
-            snapshot_id, order_id, command_id, caused_by, idempotency_key,
-            venue_status, source_module, payload_json, env
-        ) VALUES (?, ?, 1, ?, 'EXIT_ORDER_VOIDED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            event_key,
-            position_id,
-            seq,
-            observed_at,
-            "pending_exit",
-            phase_after,
-            str(command.get("position_strategy_key") or current[1] or "opening_inertia"),
-            str(command.get("decision_id") or ""),
-            str(command.get("snapshot_id") or ""),
-            venue_order_id,
-            command_id,
-            f"venue_command:{command_id}",
-            event_key,
-            "TERMINAL_NO_FILL",
-            "src.execution.command_recovery",
-            json.dumps(payload, sort_keys=True, default=str),
-            _latest_position_env(conn, position_id),
-        ),
+        (phase_after, venue_order_id, observed_at, position_id, phase_before),
     )
     return True
 
@@ -12713,7 +12766,7 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
                         "proof_class": "exit_terminal_no_fill_recovery",
                     },
                 )
-                _release_pending_exit_after_terminal_no_fill(
+                _release_exit_after_terminal_no_fill(
                     conn,
                     command=row,
                     observed_at=observed_at,
@@ -16318,46 +16371,16 @@ def _edli_reconciled_absence_for_decision(
 
 
 def _reconcile_venue_command_absence_sync(conn: sqlite3.Connection) -> dict:
-    """Discharge unresolved venue_commands rows already absence-proven by EDLI.
+    """Keep post-submit unknown venue commands fail-closed.
 
-    #123 / M2 gap: the EDLI event-sourced ledger (zeus-world.db) can
-    authenticated-absence-prove a stuck post-submit unknown (Reconciled +
-    CapTransitioned(RELEASED)), yet the matching venue_commands row
-    (zeus_trades.db) is never moved out of SUBMIT_UNKNOWN_SIDE_EFFECT /
-    UNKNOWN. The two systems are not synced, so the portfolio governor — which
-    counts venue_commands, not the EDLI ledger — stays latched forever.
-
-    For each venue_commands row in _UNRESOLVED_SIDE_EFFECT_STATES with no
-    venue_order_id, this pass reads the EDLI Reconciled authenticated absence
-    proof (READ-only, no venue re-query) and, ONLY when it proves
-    venue_order_exists=false AND venue_trade_exists=false with zero matching
-    open orders/trades, appends the canonical terminal
-    SUBMIT_UNKNOWN_SIDE_EFFECT -> SUBMIT_REJECTED event citing the proof hash.
-
-    FAIL-CLOSED: no proof, ambiguous link (>1 aggregate), any matching venue
-    exposure, or a present venue_order_id -> the row is left UNCHANGED. Absence
-    is NEVER inferred from local rows; only the authenticated EDLI proof can
-    discharge a row.
-
-    INV-37 (cross-DB): venue_commands lives in zeus_trades.db; the absence proof
-    lives in zeus-world.db. The world DB is ATTACHed onto the single trade
-    connection (_maybe_attach_world_for_recovery, never an independent
-    connection) and every row's terminal write is wrapped in its own SAVEPOINT,
-    matching the existing cross-DB discipline in this module.
+    An EDLI ``Reconciled`` absence event may come from an account snapshot taken
+    after the request returned unknown. That snapshot cannot prove that the
+    original submit will not appear later, so it cannot authorize replay or
+    release the command-side governor. Only a causal order/trade/submit fact may
+    terminalize these rows.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    events_ref = _edli_live_order_events_ref(conn)
-    if not events_ref:
-        return summary
-    # Scope to the post-submit-unknown states whose grammar exposes the direct
-    # SUBMIT_REJECTED terminal edge (venue_command_repo._TRANSITIONS). The third
-    # member of _UNRESOLVED_SIDE_EFFECT_STATES, REVIEW_REQUIRED, is an
-    # operator/recovery handoff with its OWN proof-gated clearance events
-    # (_review_required_cancel_unknown_live_order_recovery / the
-    # REVIEW_CLEARED_* helpers) and has NO SUBMIT_REJECTED edge — terminalizing
-    # it here would be both grammar-illegal and a domain violation, so it is
-    # deliberately left to its existing owner.
     states = tuple(
         state
         for state in sorted(UNRESOLVED_SIDE_EFFECT_STATES)
@@ -16380,115 +16403,14 @@ def _reconcile_venue_command_absence_sync(conn: sqlite3.Connection) -> dict:
         """,
         states,
     ).fetchall()
-    for row in rows:
-        command = _dict_row(row)
-        command_id = str(command.get("command_id") or "")
-        decision_id = str(command.get("decision_id") or "")
-        summary["scanned"] += 1
-        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
-        sp_name = f"sp_edli_absence_sync_{safe_command_id}"
-        conn.execute(f"SAVEPOINT {sp_name}")
-        try:
-            status, reconcile_payload = _edli_reconciled_absence_for_decision(
-                conn,
-                events_ref=events_ref,
-                decision_id=decision_id,
-            )
-            if status != "absent" or reconcile_payload is None:
-                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-                if status == "exposure":
-                    logger.warning(
-                        "recovery: command %s EDLI absence sync REFUSED — authenticated "
-                        "proof reports venue exposure; leaving %s (fail-closed)",
-                        command_id, command.get("state"),
-                    )
-                elif status == "ambiguous":
-                    logger.warning(
-                        "recovery: command %s EDLI absence sync skipped — ambiguous "
-                        "EDLI link for decision_id=%s; leaving %s",
-                        command_id, decision_id, command.get("state"),
-                    )
-                summary["stayed"] += 1
-                continue
-            proof = reconcile_payload.get("authenticated_absence_proof")
-            proof = proof if isinstance(proof, dict) else {}
-            proof_token = str(proof.get("token_id") or "")
-            command_token = str(command.get("token_id") or "")
-            if not proof_token or proof_token != command_token:
-                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-                logger.warning(
-                    "recovery: command %s EDLI absence sync skipped — proof token_id "
-                    "does not match command token_id; leaving %s (fail-closed)",
-                    command_id, command.get("state"),
-                )
-                summary["stayed"] += 1
-                continue
-            now = _now_iso()
-            payload = {
-                "schema_version": 1,
-                "reason": "edli_authenticated_absence_no_venue_order_or_trade",
-                "command_id": command_id,
-                "decision_id": decision_id,
-                "proof_class": "edli_authenticated_clob_absence",
-                "side_effect_boundary_crossed": "unknown",
-                "venue_order_created": False,
-                "safe_replay_permitted": True,
-                "previous_unknown_command_id": command_id,
-                "required_predicates": {
-                    "edli_reconcile_reason_authenticated_absence": True,
-                    "edli_venue_order_exists_false": True,
-                    "edli_venue_trade_exists_false": True,
-                    "edli_zero_matching_open_orders": True,
-                    "edli_zero_matching_trades": True,
-                    "edli_proof_token_matches_command": True,
-                    "command_has_no_venue_order_id": True,
-                },
-                "edli_absence_proof": {
-                    "aggregate_id": str(proof.get("aggregate_id") or ""),
-                    "execution_command_id": str(
-                        reconcile_payload.get("execution_command_id") or ""
-                    ),
-                    "reconcile_reason": str(reconcile_payload.get("reconcile_reason") or ""),
-                    "venue_order_exists": reconcile_payload.get("venue_order_exists"),
-                    "venue_trade_exists": reconcile_payload.get("venue_trade_exists"),
-                    "token_id": proof_token,
-                    "matching_open_order_count": int(proof.get("matching_open_order_count", 0)),
-                    "matching_trade_count": int(proof.get("matching_trade_count", 0)),
-                    "open_orders_query_complete": proof.get("open_orders_query_complete"),
-                    "trades_query_complete": proof.get("trades_query_complete"),
-                    "observed_at": proof.get("observed_at"),
-                    "proof_hash": str(proof.get("proof_hash") or ""),
-                },
-                "source_proof": {
-                    "source_commit": "runtime",
-                    "source_function": _EDLI_ABSENCE_SYNC_SOURCE_FUNCTION,
-                    "source_reason": "edli_authenticated_clob_absence",
-                },
-                "reviewed_by": "command_recovery",
-                "cleared_at": now,
-            }
-            append_event(
-                conn,
-                command_id=command_id,
-                event_type=CommandEventType.SUBMIT_REJECTED.value,
-                occurred_at=now,
-                payload=payload,
-            )
-            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-            summary["advanced"] += 1
-            logger.warning(
-                "recovery: command %s %s -> SUBMIT_REJECTED (EDLI authenticated "
-                "absence; proof_hash=%s; idempotency replay permitted)",
-                command_id, command.get("state"), proof.get("proof_hash"),
-            )
-        except Exception as exc:
-            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
-            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-            logger.error(
-                "recovery: command %s EDLI absence sync failed: %s; leaving row",
-                command_id, exc,
-            )
-            summary["errors"] += 1
+    summary["scanned"] = len(rows)
+    summary["stayed"] = len(rows)
+    if rows:
+        logger.warning(
+            "recovery: keeping %d post-submit unknown venue commands fail-closed; "
+            "EDLI account-snapshot absence is not causal side-effect proof",
+            len(rows),
+        )
     return summary
 
 
@@ -16921,6 +16843,8 @@ def _reconcile_edli_pre_venue_unknown_thresholds(conn: sqlite3.Connection) -> di
          AND unknown.event_type = 'SubmitUnknown'
         WHERE proj.pending_reconcile = 1
           AND COALESCE(proj.venue_order_id, '') = ''
+          AND COALESCE(json_extract(unknown.payload_json, '$.venue_call_started'), 0) = 0
+          AND COALESCE(json_extract(unknown.payload_json, '$.side_effect_known'), 0) = 0
           AND (
               json_extract(unknown.payload_json, '$.reason_code') = ?
               OR json_extract(unknown.payload_json, '$.reason_code') LIKE ?
@@ -17027,124 +16951,39 @@ def _apply_edli_post_submit_unknown_absence(
     open_read,
     trade_read,
 ) -> dict:
-    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    if not rows:
-        return summary
-    open_orders = [_raw_payload(item) for item in open_read.items]
-    trades = [_raw_payload(item) for item in trade_read.items]
-    if not (open_read.query_complete and trade_read.query_complete):
+    del conn, open_read, trade_read
+    # A complete account snapshot is still only a point-in-time observation.
+    # It cannot prove that an already-started submit will not become visible
+    # after NETWORK and before APPLY. Releasing duplicate/cap authority from
+    # token-level absence therefore creates a double-submit race. Only a
+    # command/order/trade fact causally bound to the original submit may clear
+    # this state.
+    count = len(rows)
+    if count:
         logger.warning(
-            "recovery: EDLI post-submit unknown absence read incomplete; leaving %d "
-            "pending aggregates fail-closed",
-            len(rows),
+            "recovery: keeping %d post-submit unknown aggregates fail-closed; "
+            "account snapshot absence is not causal side-effect proof",
+            count,
         )
-        summary["stayed"] += len(rows)
-        return summary
-
-    for row in rows:
-        record = dict(row)
-        aggregate_id = str(record.get("aggregate_id") or "")
-        execution_command_id = str(record.get("execution_command_id") or "")
-        token_id = str(record.get("token_id") or "")
-        summary["scanned"] += 1
-        if not aggregate_id or not execution_command_id or not token_id:
-            summary["stayed"] += 1
-            continue
-        matching_open = [raw for raw in open_orders if _raw_mentions_token(raw, token_id)]
-        matching_trades = [raw for raw in trades if _raw_mentions_token(raw, token_id)]
-        if matching_open or matching_trades:
-            logger.warning(
-                "recovery: EDLI post-submit unknown aggregate=%s refused absence "
-                "release; matching_open=%d matching_trades=%d",
-                aggregate_id,
-                len(matching_open),
-                len(matching_trades),
-            )
-            summary["stayed"] += 1
-            continue
-        sp_name = "sp_edli_post_submit_unknown_absence"
-        conn.execute(f"SAVEPOINT {sp_name}")
-        try:
-            advanced = _reconcile_edli_pending_no_order_if_proven(
-                conn,
-                execution_command_id=execution_command_id,
-                occurred_at=_now_iso(),
-                reason="edli_post_submit_unknown_authenticated_absence",
-                proof_class="authenticated_clob_absence_no_command_no_order",
-                command_id=None,
-                required_predicates={
-                    "pending_reconcile": True,
-                    "venue_call_started": True,
-                    "side_effect_known": False,
-                    "no_projection_venue_order_id": True,
-                    "no_venue_command": True,
-                    "no_ack_or_user_order_or_trade_event": True,
-                    "open_orders_query_complete": True,
-                    "trades_query_complete": True,
-                    "matching_open_order_count": len(matching_open),
-                    "matching_trade_count": len(matching_trades),
-                    "reason_code": str(record.get("reason_code") or ""),
-                    "open_order_count": len(open_orders),
-                    "trade_count": len(trades),
-                    "matching_open_orders": [
-                        _summarize_venue_match(raw) for raw in matching_open[:10]
-                    ],
-                    "matching_trades": [
-                        _summarize_venue_match(raw) for raw in matching_trades[:10]
-                    ],
-                    "pagination_scope": {
-                        "open_orders": open_read.pagination_scope,
-                        "trades": trade_read.pagination_scope,
-                    },
-                },
-            )
-            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-            if advanced:
-                summary["advanced"] += 1
-                logger.warning(
-                    "recovery: EDLI post-submit unknown aggregate=%s released by "
-                    "authenticated venue absence",
-                    aggregate_id,
-                )
-            else:
-                summary["stayed"] += 1
-        except Exception as exc:  # noqa: BLE001
-            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
-            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-            logger.error(
-                "recovery: EDLI post-submit unknown absence failed for aggregate=%s: %s",
-                aggregate_id,
-                exc,
-            )
-            summary["errors"] += 1
-    return summary
+    return {"scanned": count, "advanced": 0, "stayed": count, "errors": 0}
 
 
 def _reconcile_edli_post_submit_unknown_absence(
     conn: sqlite3.Connection,
     client,
 ) -> dict:
-    """Release EDLI post-submit unknowns only after authenticated venue absence.
+    """Keep EDLI post-submit unknowns fail-closed until causal proof arrives.
 
     This covers the no-venue-command gap: the live-order aggregate reached
     SubmitUnknown/PENDING_RECONCILE, but no venue_commands row was ever persisted
-    for the execution_command_id. Local absence is not enough. We require complete
-    account open-order and trade reads and refuse if either mentions the token.
+    for the execution_command_id. A point-in-time account absence snapshot is not
+    causal proof that the started submit cannot appear later, so this pass never
+    releases replay, duplicate-lock, or cap authority.
     """
 
+    del client
     rows = _edli_post_submit_unknown_absence_candidates(conn)
-    if not rows:
-        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    try:
-        open_read = _client_read_items(client, "get_open_orders")
-        trade_read = _client_read_items(client, "get_trades")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "recovery: EDLI post-submit unknown absence read unavailable: %s",
-            exc,
-        )
-        return {"scanned": 0, "advanced": 0, "stayed": len(rows), "errors": 0}
-    return _apply_edli_post_submit_unknown_absence(conn, rows, open_read, trade_read)
+    return _apply_edli_post_submit_unknown_absence(conn, rows, None, None)
 
 
 def _decision_log_pre_sdk_proof(conn: sqlite3.Connection, decision_id: str) -> dict | None:
@@ -17720,23 +17559,34 @@ def _review_required_no_venue_live_order_recovery(
     return "advanced"
 
 
-def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
+def _review_required_cancel_failed_already_canceled_fill_recovery(
     conn: sqlite3.Connection,
     cmd: VenueCommand,
 ) -> str:
-    """Clear a REVIEW_REQUIRED entry when cancel failed only because it already succeeded.
+    """Clear a REVIEW_REQUIRED command when cancel failed after venue finality.
 
-    This covers the post-live partial-fill race:
+    This covers the post-live partial/full-fill race:
       ACKED -> CANCEL_REQUESTED -> venue already canceled -> legacy parser wrote
       CANCEL_FAILED/REVIEW_REQUIRED, while a positive trade fact already proves
-      real exposure. The command should stop blocking redecision; the active
-      position remains the trade-fact matched size.
+      the exact venue side effect. ENTRY projects acquired exposure; EXIT
+      projects sale truth or keeps a partial sale pending until the remainder
+      is resolved.
     """
 
+    # SCOPE: only the exact bound ENTRY/BUY or EXIT/SELL command whose latest
+    # cancel result says the venue order is already canceled or matched.
+    # DRAIN: canonical positive trade facts bound to that command+order advance
+    # it to PARTIAL/FILLED; missing or contradictory truth stays REVIEW_REQUIRED.
+    # RESET: the command event transition removes REVIEW_REQUIRED once and the
+    # normal entry/exit projection lanes consume the durable fill facts.
+    intent_side = (cmd.intent_kind, str(cmd.side or "").upper())
     if (
         cmd.state != CommandState.REVIEW_REQUIRED
-        or cmd.intent_kind != IntentKind.ENTRY
-        or str(cmd.side or "").upper() != "BUY"
+        or intent_side
+        not in {
+            (IntentKind.ENTRY, "BUY"),
+            (IntentKind.EXIT, "SELL"),
+        }
         or not str(cmd.venue_order_id or "").strip()
     ):
         return "stayed"
@@ -17822,6 +17672,12 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
         if any(str(fact.get("source") or "").upper() == "REST" for fact in trade_facts)
         else "WS_USER"
     )
+    intent_name = str(cmd.intent_kind.value).lower()
+    event_type = (
+        CommandEventType.FILL_CONFIRMED.value
+        if complete
+        else CommandEventType.PARTIAL_FILL_OBSERVED.value
+    )
     payload = {
         "schema_version": 1,
         "reason": (
@@ -17881,13 +17737,15 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
         "source_proof": {
             "source_commit": "runtime",
             "source_function": "command_recovery._reconcile_row",
-            "source_reason": "cancel_failed_already_canceled_positive_entry_fill",
+            "source_reason": (
+                f"cancel_failed_already_canceled_positive_{intent_name}_fill"
+            ),
         },
         "reviewed_by": "command_recovery",
         "cleared_at": observed_at,
     }
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
-    sp_name = f"sp_already_cancelled_entry_fill_{safe_command_id}"
+    sp_name = f"sp_already_cancelled_{intent_name}_fill_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
         append_order_fact(
@@ -17906,23 +17764,31 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
         append_event(
             conn,
             command_id=cmd.command_id,
-            event_type=(
-                CommandEventType.FILL_CONFIRMED.value
-                if complete
-                else CommandEventType.PARTIAL_FILL_OBSERVED.value
-            ),
+            event_type=event_type,
             occurred_at=observed_at,
             payload=payload,
         )
-        _append_matched_order_fill_projection(
-            conn,
-            command={**command, "venue_order_id": venue_order_id},
-            venue_order_id=venue_order_id,
-            matched_size=filled_size,
-            fill_price=fill_price,
-            observed_at=observed_at,
-            order_fact_source=order_fact_source,
-        )
+        if cmd.intent_kind == IntentKind.ENTRY:
+            _append_matched_order_fill_projection(
+                conn,
+                command={**command, "venue_order_id": venue_order_id},
+                venue_order_id=venue_order_id,
+                matched_size=filled_size,
+                fill_price=fill_price,
+                observed_at=observed_at,
+                order_fact_source=order_fact_source,
+            )
+        else:
+            _append_exit_order_fill_projection(
+                conn,
+                command={**command, "venue_order_id": venue_order_id},
+                venue_order_id=venue_order_id,
+                matched_size=filled_size,
+                fill_price=fill_price,
+                observed_at=observed_at,
+                event_type=event_type,
+                raise_on_error=True,
+            )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
@@ -17940,17 +17806,27 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
     return "advanced"
 
 
-def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
+def _review_required_cancel_failed_already_canceled_no_fill_recovery(
     conn: sqlite3.Connection,
     cmd: VenueCommand,
     client,
 ) -> str:
-    """Expire a proven unfilled maker increment after an idempotent cancel race."""
+    """Expire a proven unfilled command after an idempotent cancel race."""
 
+    # SCOPE: only the exact bound ENTRY/BUY or EXIT/SELL command whose cancel
+    # response says already canceled/matched and whose authenticated account
+    # reads all prove zero exposure.
+    # DRAIN: terminal point-order zero fill + complete open-order/trade absence.
+    # RESET: EXPIRED releases the entry commitment or the held position back to
+    # continuous exit redecision; incomplete/ambiguous reads fail closed.
+    intent_side = (cmd.intent_kind, str(cmd.side or "").upper())
     if (
         cmd.state != CommandState.REVIEW_REQUIRED
-        or cmd.intent_kind != IntentKind.ENTRY
-        or str(cmd.side or "").upper() != "BUY"
+        or intent_side
+        not in {
+            (IntentKind.ENTRY, "BUY"),
+            (IntentKind.EXIT, "SELL"),
+        }
         or not str(cmd.venue_order_id or "").strip()
     ):
         return "stayed"
@@ -17978,9 +17854,32 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
             exc,
         )
         return "error"
-    if point_order is None or _extract_order_id(point_order) != venue_order_id:
+    if (
+        point_order is None
+        and getattr(client, "venue_reads_are_complete", False) is True
+    ):
+        point_order = {
+            "orderID": venue_order_id,
+            "status": "UNKNOWN",
+            "source_error": "complete_snapshot_point_order_absence",
+        }
+    point_order_no_live_record = _point_order_no_live_record(
+        point_order,
+        expected_order_id=venue_order_id,
+    )
+    point_order_absence_complete = (
+        getattr(client, "venue_reads_are_complete", False) is True
+    )
+    if (
+        point_order is None
+        or (
+            _extract_order_id(point_order) != venue_order_id
+            and not point_order_no_live_record
+        )
+    ):
         return "stayed"
     status = _order_status(point_order)
+    venue_resp_present_for_terminal_state = None
     fact_state = _terminal_fact_state_for_venue_status(
         status,
         venue_resp_present=True,
@@ -18000,12 +17899,31 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
         command,
         trades=trades,
     )
+    source_reason = "cancel_failed_already_canceled_point_order_terminal_no_fill"
+    fact_source_reason = source_reason
+    if (
+        point_order_no_live_record
+        and point_order_absence_complete
+        and not matching_open_orders
+        and not matching_trades
+        and _fill_trade_fact_count(conn, cmd.command_id) == 0
+    ):
+        no_fill_proven = True
+        fact_state = _terminal_fact_state_for_venue_status(
+            status,
+            venue_resp_present=False,
+        )
+        venue_resp_present_for_terminal_state = False
+        fact_source_reason = (
+            "cancel_failed_already_canceled_point_order_no_live_record_terminal_no_fill"
+        )
     if fact_state is None or not no_fill_proven or matching_open_orders or matching_trades:
         return "stayed"
 
     current = _dict_row(
         conn.execute(
-            "SELECT phase, shares, cost_basis_usd, order_id "
+            "SELECT phase, shares, cost_basis_usd, order_id, city, target_date, "
+            "strategy_key "
             "FROM position_current WHERE position_id = ? LIMIT 1",
             (str(command.get("position_id") or ""),),
         ).fetchone()
@@ -18022,18 +17940,25 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
         and cost_basis == 0
     )
     existing_position = (
-        phase in {"active", "day0_window", "pending_exit"}
+        cmd.intent_kind == IntentKind.ENTRY
+        and phase in {"active", "day0_window", "pending_exit"}
         and shares > 0
         and cost_basis > 0
         and str(current.get("order_id") or "") != venue_order_id
     )
-    if not (zero_pending or existing_position):
+    existing_exit = (
+        cmd.intent_kind == IntentKind.EXIT
+        and phase in {"active", "day0_window", "pending_exit"}
+        and shares > 0
+        and cost_basis >= 0
+    )
+    if not (zero_pending or existing_position or existing_exit):
         return "stayed"
 
     now = _now_iso()
-    source_reason = "cancel_failed_already_canceled_point_order_terminal_no_fill"
+    intent_name = str(cmd.intent_kind.value).lower()
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
-    sp_name = f"sp_already_cancelled_entry_no_fill_{safe_command_id}"
+    sp_name = f"sp_already_cancelled_{intent_name}_no_fill_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
         fact_id, fact_payload = _append_point_order_terminal_no_fill_fact(
@@ -18044,8 +17969,27 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
             point_order=point_order,
             matching_open_orders=matching_open_orders,
             matching_trades=matching_trades,
-            source_reason=source_reason,
+            source_reason=fact_source_reason,
+            venue_resp_present_for_terminal_state=venue_resp_present_for_terminal_state,
         )
+        if existing_exit:
+            released = _release_exit_after_terminal_no_fill(
+                conn,
+                command={
+                    **command,
+                    "position_city": current.get("city"),
+                    "position_target_date": current.get("target_date"),
+                    "position_strategy_key": current.get("strategy_key"),
+                },
+                observed_at=now,
+                order_fact_id=fact_id,
+                terminal_payload=fact_payload,
+            )
+            if not released:
+                raise RuntimeError(
+                    "exit terminal no-fill proof did not release redecision "
+                    f"for command {cmd.command_id}"
+                )
         payload = {
             "schema_version": 1,
             "reason": "review_cleared_no_venue_exposure",
@@ -18059,12 +18003,22 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
                 "cancel_failed_already_canceled": True,
                 "venue_order_id_present": True,
                 "venue_order_id_matches_point_read": True,
+                "point_order_no_live_record": point_order_no_live_record,
+                "point_order_absence_complete": point_order_absence_complete,
                 "point_order_terminal_no_fill": True,
                 "point_order_matched_size_zero": True,
                 "no_trade_facts": True,
                 "no_matching_open_orders": True,
                 "no_matching_trades": True,
                 "position_projection_not_bound_to_command": True,
+                **(
+                    {}
+                    if cmd.intent_kind == IntentKind.ENTRY
+                    else {
+                        "position_retains_positive_shares": True,
+                        "position_phase_allows_exit_redecision": True,
+                    }
+                ),
             },
             "terminal_order_fact_id": fact_id,
             "terminal_order_fact": fact_payload,
@@ -18096,7 +18050,7 @@ def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
             "source_proof": {
                 "source_commit": "runtime",
                 "source_function": "command_recovery._reconcile_row",
-                "source_reason": source_reason,
+                "source_reason": fact_source_reason,
             },
             "reviewed_by": "command_recovery",
             "cleared_at": now,
@@ -18173,7 +18127,11 @@ def _review_required_matched_submit_trade_fact_recovery(
         ).fetchone()
     )
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte() + """
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ", "
+        + _economic_trade_fact_cte()
+        + """
         SELECT trade_fact_id,
                trade_id,
                venue_order_id,
@@ -18184,7 +18142,7 @@ def _review_required_matched_submit_trade_fact_recovery(
                observed_at,
                venue_timestamp,
                tx_hash
-          FROM canonical_trade_fact
+          FROM economic_trade_fact
          WHERE command_id = ?
            AND venue_order_id = ?
            AND state = 'CONFIRMED'
@@ -19406,10 +19364,10 @@ def _reconcile_row(
         state = cmd.state
 
         if state == CommandState.REVIEW_REQUIRED:
-            outcome = _review_required_cancel_failed_already_canceled_entry_fill_recovery(conn, cmd)
+            outcome = _review_required_cancel_failed_already_canceled_fill_recovery(conn, cmd)
             if outcome != "stayed":
                 return outcome
-            outcome = _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
+            outcome = _review_required_cancel_failed_already_canceled_no_fill_recovery(
                 conn,
                 cmd,
                 client,
@@ -20754,6 +20712,7 @@ def _restart_no_venue_exit_retry_candidates(conn: sqlite3.Connection) -> list[di
     if not (
         _table_exists(conn, "venue_commands")
         and _table_exists(conn, "venue_command_events")
+        and _table_exists(conn, "venue_order_facts")
         and _table_exists(conn, "venue_trade_facts")
         and _table_exists(conn, "position_current")
     ):
@@ -20782,7 +20741,24 @@ def _restart_no_venue_exit_retry_candidates(conn: sqlite3.Connection) -> list[di
                AND evt.event_type = 'SUBMIT_REJECTED'
              WHERE cmd.intent_kind = 'EXIT'
                AND cmd.state IN ('REJECTED', 'SUBMIT_REJECTED')
-               AND COALESCE(cmd.venue_order_id, '') = ''
+               AND (
+                    COALESCE(cmd.venue_order_id, '') = ''
+                    OR (
+                        COALESCE(cmd.venue_order_id, '') != ''
+                        AND json_extract(
+                            evt.payload_json, '$.reason'
+                        ) = 'safe_replay_permitted_no_order_found'
+                        AND json_extract(
+                            evt.payload_json, '$.safe_replay_permitted'
+                        ) = 1
+                        AND NOT EXISTS (
+                            SELECT 1
+                              FROM venue_order_facts order_fact
+                             WHERE order_fact.command_id = cmd.command_id
+                                OR order_fact.venue_order_id = cmd.venue_order_id
+                        )
+                    )
+               )
                AND NOT EXISTS (
                    SELECT 1
                      FROM venue_trade_facts tf
@@ -20793,6 +20769,7 @@ def _restart_no_venue_exit_retry_candidates(conn: sqlite3.Connection) -> list[di
         )
         SELECT rejected.command_id,
                rejected.command_state,
+               rejected.venue_order_id,
                rejected.command_updated_at,
                rejected.command_price,
                rejected.command_size,
@@ -20804,118 +20781,125 @@ def _restart_no_venue_exit_retry_candidates(conn: sqlite3.Connection) -> list[di
             ON pc.position_id = rejected.position_id
          WHERE rejected.rn = 1
            AND pc.phase = 'pending_exit'
-           AND COALESCE(pc.next_exit_retry_at, '') = ''
          ORDER BY datetime(rejected.rejected_at), rejected.command_id
         """
     ).fetchall()
     return [_dict_row(row) for row in rows]
 
 
-def _retry_projection_position_from_candidate(candidate: dict, *, reason: str) -> SimpleNamespace:
+def _release_no_venue_exit_to_redecision(
+    conn: sqlite3.Connection,
+    candidate: Mapping[str, object],
+) -> bool:
+    """Release one proven no-side-effect EXIT from restart-blocking state.
+
+    SCOPE: one position selected by the exact command/fact proof above.
+    DRAIN: restart preflight projects the release before evaluating pending exits.
+    RESET: the position leaves ``pending_exit``; a future exit requires a new decision.
+    """
+
     current = {
         key.removeprefix("pc_"): value
         for key, value in candidate.items()
         if key.startswith("pc_")
     }
     position_id = str(current.get("position_id") or current.get("trade_id") or "")
-    shares = current.get("chain_shares")
-    if shares in (None, ""):
-        shares = current.get("shares") or 0.0
-    occurred_at = str(candidate.get("rejected_at") or current.get("updated_at") or _now_iso())
-    return SimpleNamespace(
-        **{
-            **current,
-            "trade_id": position_id,
-            "state": "pending_exit",
-            "pre_exit_state": "pending_exit",
-            "exit_state": "retry_pending",
-            "exit_reason": str(current.get("exit_reason") or reason),
-            "last_exit_error": reason,
-            "last_exit_order_id": "",
-            "order_id": current.get("order_id") or "",
-            "order_status": "retry_pending",
-            "effective_shares": shares,
-            "shares": current.get("shares") if current.get("shares") not in (None, "") else shares,
-            "chain_shares": current.get("chain_shares") if current.get("chain_shares") not in (None, "") else shares,
-            "env": current.get("env") or "live",
-            "market_id": current.get("market_id") or current.get("condition_id") or "",
-            "cluster": current.get("cluster") or current.get("city") or "",
-            "unit": current.get("unit") or "F",
-            "size_usd": current.get("size_usd") or current.get("cost_basis_usd") or 0.0,
-            "cost_basis_usd": current.get("cost_basis_usd") or current.get("chain_cost_basis_usd") or 0.0,
-            "entry_price": current.get("entry_price") or current.get("chain_avg_price") or 0.0,
-            "p_posterior": current.get("p_posterior") or 0.0,
-            "entry_ci_width": current.get("entry_ci_width") or 0.0,
-            "entry_method": current.get("entry_method") or "",
-            "strategy_key": current.get("strategy_key") or current.get("strategy") or "unknown_strategy",
-            "edge_source": current.get("edge_source") or "",
-            "discovery_mode": current.get("discovery_mode") or "",
-            "chain_state": current.get("chain_state") or "synced",
-            "token_id": current.get("token_id") or "",
-            "no_token_id": current.get("no_token_id") or "",
-            "condition_id": current.get("condition_id") or current.get("market_id") or "",
-            "updated_at": current.get("updated_at") or occurred_at,
-            "entered_at": current.get("entered_at") or current.get("updated_at") or occurred_at,
-            "order_posted_at": current.get("order_posted_at") or current.get("updated_at") or occurred_at,
-            "temperature_metric": current.get("temperature_metric") or "high",
-            "fill_authority": current.get("fill_authority") or "",
-            "recovery_authority": current.get("recovery_authority") or "",
-            "chain_avg_price": current.get("chain_avg_price"),
-            "chain_cost_basis_usd": current.get("chain_cost_basis_usd"),
-            "chain_verified_at": current.get("chain_seen_at") or current.get("chain_verified_at") or "",
-            "last_chain_absence_observed_at": current.get("chain_absence_at") or "",
-            "last_monitor_prob": current.get("last_monitor_prob"),
-            "last_monitor_prob_is_fresh": current.get("last_monitor_prob_is_fresh"),
-            "last_monitor_edge": current.get("last_monitor_edge"),
-            "last_monitor_market_price": current.get("last_monitor_market_price"),
-            "last_monitor_market_price_is_fresh": current.get("last_monitor_market_price_is_fresh"),
-            "decision_snapshot_id": current.get("decision_snapshot_id") or "",
-            "exit_retry_count": int(current.get("exit_retry_count") or 0),
-            "next_exit_retry_at": current.get("next_exit_retry_at") or "",
+    command_id = str(candidate.get("command_id") or "")
+    if not position_id or not command_id:
+        return False
+
+    occurred_at = _now_iso()
+    phase_after = _phase_after_terminal_exit_no_fill(
+        {
+            "position_city": current.get("city"),
+            "position_target_date": current.get("target_date"),
+        },
+        observed_at=occurred_at,
+    )
+    projection = dict(current)
+    projection.update(
+        {
+            "phase": phase_after,
+            "order_id": None,
+            "order_status": "filled",
+            "exit_reason": "EXIT_SUBMIT_NO_VENUE_SIDE_EFFECT_RELEASED",
+            "exit_retry_count": 0,
+            "next_exit_retry_at": None,
+            "updated_at": occurred_at,
         }
     )
+    event_key = f"{position_id}:exit_submit_absent_released:{command_id}"
+    from src.state.ledger import append_many_and_project
+    from src.state.projection import upsert_position_current
+
+    existing = conn.execute(
+        "SELECT 1 FROM position_events WHERE idempotency_key = ? LIMIT 1",
+        (event_key,),
+    ).fetchone()
+    if existing is not None:
+        upsert_position_current(conn, projection)
+        return True
+
+    event = {
+        "event_id": event_key,
+        "position_id": position_id,
+        "event_version": 1,
+        "sequence_no": _latest_position_sequence(conn, position_id) + 1,
+        "event_type": "EXIT_RETRY_RELEASED",
+        "occurred_at": occurred_at,
+        "phase_before": "pending_exit",
+        "phase_after": phase_after,
+        "strategy_key": current.get("strategy_key"),
+        "decision_id": current.get("decision_id"),
+        "snapshot_id": current.get("decision_snapshot_id"),
+        "order_id": candidate.get("venue_order_id"),
+        "command_id": command_id,
+        "caused_by": f"venue_command:{command_id}",
+        "idempotency_key": event_key,
+        "venue_status": candidate.get("command_state"),
+        "source_module": "src.execution.command_recovery",
+        "env": _latest_position_env(conn, position_id),
+        "payload_json": json.dumps(
+            {
+                "reason": "exit_submit_absence_returned_to_redecision",
+                "proof_class": "submit_rejected_plus_order_and_positive_trade_absence",
+                "command_state": candidate.get("command_state"),
+                "venue_order_id": candidate.get("venue_order_id"),
+                "rejected_at": candidate.get("rejected_at"),
+                "phase_after": phase_after,
+            },
+            sort_keys=True,
+            default=str,
+        ),
+    }
+    append_many_and_project(conn, [event], projection)
+    return True
 
 
 def reconcile_restart_no_venue_exit_retry_projections(conn: sqlite3.Connection) -> dict:
-    """Project proven no-side-effect EXIT submit failures into retry state."""
+    """Return proven no-side-effect EXIT submit failures to redecision."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     for candidate in _restart_no_venue_exit_retry_candidates(conn):
         summary["scanned"] += 1
         command_id = str(candidate.get("command_id") or "")
-        reason = "EXIT_SUBMIT_NO_VENUE_SIDE_EFFECT"
-        error = (
-            "command_recovery proved submit absence for exit command "
-            f"{command_id}; releasing pending_exit to retry/redecision"
-        )
         try:
-            from src.execution.exit_lifecycle import _mark_exit_retry
-
-            position = _retry_projection_position_from_candidate(candidate, reason=reason)
-            if not str(getattr(position, "trade_id", "") or ""):
-                summary["stayed"] += 1
-                continue
-            before_retry = int(getattr(position, "exit_retry_count", 0) or 0)
-            _mark_exit_retry(
-                position,
-                reason=reason,
-                error=error,
-                cooldown_seconds=0,
-                conn=conn,
-            )
+            released = _release_no_venue_exit_to_redecision(conn, candidate)
+            position_id = str(candidate.get("pc_position_id") or "")
             current = conn.execute(
                 """
                 SELECT phase, exit_retry_count, next_exit_retry_at
                   FROM position_current
                  WHERE position_id = ?
                 """,
-                (position.trade_id,),
+                (position_id,),
             ).fetchone()
             if (
-                current is None
-                or str(current["phase"] or "") != "pending_exit"
-                or int(current["exit_retry_count"] or 0) <= before_retry
-                or not str(current["next_exit_retry_at"] or "")
+                not released
+                or current is None
+                or str(current["phase"] or "") == "pending_exit"
+                or int(current["exit_retry_count"] or 0) != 0
+                or str(current["next_exit_retry_at"] or "")
             ):
                 summary["stayed"] += 1
                 continue
@@ -21051,25 +21035,20 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         )
 
     def _post_submit_unknown_absence_fast_pass():
-        """Release no-command post-submit unknowns before the broad venue snapshot.
+        """Record no-command post-submit unknowns as intentionally fail-closed.
 
         This pass is intentionally ahead of capture_venue_read_snapshot(). The
         aggregate it fixes has no venue_commands row, so the broad priming set
         has no order id to look up and can spend minutes on unrelated historical
-        order reads while the live duplicate lock remains active. The only venue
-        evidence this release needs is complete account open-order + trade
-        absence, read with no DB connection in scope.
+        order reads. It performs no network read and no mutation because account
+        snapshot absence cannot authorize replay after the submit boundary.
         """
 
         def _snapshot(conn):
             return _edli_post_submit_unknown_absence_candidates(conn)
 
         def _network(rows):
-            if not rows:
-                return rows, None, None
-            open_read = _client_read_items(client, "get_open_orders")
-            trade_read = _client_read_items(client, "get_trades")
-            return rows, open_read, trade_read
+            return rows, None, None
 
         def _apply(conn, payload):
             rows, open_read, trade_read = payload
@@ -21649,6 +21628,17 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _capital_recovery_fast_pass()
         _entry_posterior_recovery_fast_pass()
 
+    # A confirmed trade already persisted for a REVIEW_REQUIRED submit is the
+    # narrowest unresolved capital truth: it resolves known exposure and releases
+    # the allocator's systemic-unknown latch without venue I/O. Run it before the
+    # broader authenticated-entry projection scan; that scan can consume the
+    # whole live-tick DB budget on historical rows.
+    _db_pass(
+        "review_required_matched_submit_trade_fact",
+        reconcile_review_required_matched_submit_trade_facts,
+        "review_required_matched_submit_trade_fact",
+    )
+
     # Confirmed fills are current exposure truth. They outrank absence proofs:
     # if the bounded live-tick DB budget expires, an abandoned command may keep
     # one family reserved for another minute, but a filled command must not stay
@@ -21665,16 +21655,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_terminal_order_facts,
             "terminal_order_facts",
         )
-
-    # A confirmed trade already persisted for a REVIEW_REQUIRED submit is the
-    # narrowest capital truth: it resolves unknown exposure and can release the
-    # allocator's global reduce-only posture without venue I/O.  Run it before
-    # broad partial-order maintenance so the live-tick budget cannot starve it.
-    _db_pass(
-        "review_required_matched_submit_trade_fact",
-        reconcile_review_required_matched_submit_trade_facts,
-        "review_required_matched_submit_trade_fact",
-    )
 
     if scope == "live_tick":
         # An aggregate abandoned at ExecutionCommandCreated holds a RESERVED
@@ -21794,6 +21774,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         order_ids=priming["order_ids"],
         idempotency_keys=priming["idempotency_keys"],
         condition_ids=priming["condition_ids"],
+        **_account_truth_snapshot_kwargs(scope),
     )
 
     # -- PHASE 3: APPLY (each pass on its own short bounded write connection) ---

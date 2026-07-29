@@ -1,4 +1,4 @@
-# Last reused or audited: 2026-06-13
+# Last reused or audited: 2026-07-28
 # Authority basis: coverage SLUG-discovery fix / wiring verdict 2026-06-03;
 #   2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED root-cause fix — substrate refresh admits
 #   non-tradeable family-identity bins to capture + max_outcomes=0 UNLIMITED sentinel
@@ -48,18 +48,67 @@ from src.contracts.executable_market_snapshot import (
     canonicalize_fee_details,
     fee_details_from_gamma_fee_schedule,
 )
-from src.state.book_hash_transitions import write_transition as _write_book_hash_transition
-from src.state.snapshot_repo import insert_snapshot
+from src.state.snapshot_repo import insert_compact_snapshot, insert_snapshot
 from src.types import Bin
 from src.types.market import BinTopologyError, validate_bin_topology
 
 logger = logging.getLogger(__name__)
 
 # PR 6 (2026-05-19): process-local cache for raw_orderbook_hash transition delta.
-# key: condition_id, value: (hash_str, captured_at_unix_ts)
+# The selected token is the book identity. A condition alternates YES/NO books;
+# keying only by condition compared sibling books and fabricated transitions.
 _prev_orderbook_hash_by_market: dict[str, tuple[str, float]] = {}
+_discovery_captures_since_keyframe: dict[str, int] = {}
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
+
+
+def _capture_policy_trigger(
+    conn: Any,
+    *,
+    requested_trigger: str | None,
+    condition_id: str,
+    selected_token: str,
+) -> str | None:
+    """Route ordinary discovery to compact storage with periodic full keyframes."""
+
+    identity = f"{condition_id}|{selected_token}"
+    if requested_trigger != "DISCOVERY_SWEEP":
+        return requested_trigger
+
+    try:
+        has_full = conn.execute(
+            """
+            SELECT 1
+              FROM executable_market_snapshot_latest
+             WHERE condition_id = ?
+               AND selected_outcome_token_id = ?
+             LIMIT 1
+            """,
+            (condition_id, selected_token),
+        ).fetchone() is not None
+    except sqlite3.Error:
+        has_full = conn.execute(
+            """
+            SELECT 1
+              FROM executable_market_snapshots
+             WHERE condition_id = ?
+               AND selected_outcome_token_id = ?
+             LIMIT 1
+            """,
+            (condition_id, selected_token),
+        ).fetchone() is not None
+    if not has_full:
+        return "KEYFRAME"
+
+    interval = _positive_int_env(
+        "ZEUS_SUBSTRATE_CAPTURE_KEYFRAME_INTERVAL_CYCLES",
+        20,
+    )
+    captures = _discovery_captures_since_keyframe.get(identity, 0) + 1
+    if captures >= interval:
+        return "KEYFRAME"
+    return requested_trigger
 
 
 def _pragma_busy_timeout_ms(conn: sqlite3.Connection) -> int | None:
@@ -3317,34 +3366,42 @@ def capture_executable_market_snapshot(
         if persist_context_factory is not None
         else contextlib.nullcontext()
     )
+    resolved_capture_trigger = _capture_policy_trigger(
+        conn,
+        requested_trigger=capture_trigger,
+        condition_id=condition_id,
+        selected_token=selected_token,
+    )
+    hash_identity = f"{condition_id}|{selected_token}"
+    current_hash = snapshot.raw_orderbook_hash
+    now_ts = time.time()
+    hash_delta_ms: Optional[int] = None
+    prior_hash: str | None = None
+    prior = _prev_orderbook_hash_by_market.get(hash_identity)
+    if prior is not None:
+        prior_hash, prior_ts = prior
+        if current_hash != prior_hash:
+            hash_delta_ms = max(0, int((now_ts - prior_ts) * 1000))
     before_changes = int(conn.total_changes)
     with persist_context as write_lease:
         try:
-            insert_snapshot(conn, snapshot, capture_trigger=capture_trigger)
-            # PR 6 (2026-05-19): compute raw_orderbook_hash transition delta.
-            _current_hash = snapshot.raw_orderbook_hash
-            _now_ts = time.time()
-            _hash_delta_ms: Optional[int] = None
-            _prior = _prev_orderbook_hash_by_market.get(condition_id)
-            if _prior is not None:
-                _prior_hash, _prior_ts = _prior
-                if _current_hash != _prior_hash:
-                    # Clamp to 0: NTP/manual clock adjustments can produce negative
-                    # deltas; book_hash_transitions CHECK (delta_ms >= 0) would reject
-                    # a negative value causing snapshot capture to abort.
-                    _hash_delta_ms = max(0, int((_now_ts - _prior_ts) * 1000))
-                    # INV-37: conn is the trade substrate connection held by the caller
-                    # (same conn as insert_snapshot above). SAVEPOINT in write_transition
-                    # provides within-connection atomicity for transition_seq assignment.
-                    _write_book_hash_transition(
-                        market_slug=snapshot.event_slug,
-                        prev_hash=_prior_hash,
-                        new_hash=_current_hash,
-                        observed_at=datetime.fromtimestamp(_now_ts, tz=timezone.utc).isoformat(),
-                        delta_ms=_hash_delta_ms,
-                        cycle_id=None,
-                        conn=conn,
-                    )
+            if resolved_capture_trigger == "DISCOVERY_SWEEP":
+                persisted_id = insert_compact_snapshot(
+                    conn,
+                    snapshot,
+                    capture_trigger=resolved_capture_trigger,
+                    prev_hash=prior_hash,
+                    hash_delta_ms=hash_delta_ms,
+                )
+                persistence_tier = "compact"
+            else:
+                insert_snapshot(
+                    conn,
+                    snapshot,
+                    capture_trigger=resolved_capture_trigger,
+                )
+                persisted_id = snapshot.snapshot_id
+                persistence_tier = "full"
             if commit_after_persist:
                 commit_started = time.monotonic()
                 conn.commit()
@@ -3360,14 +3417,27 @@ def capture_executable_market_snapshot(
                 except Exception:  # noqa: BLE001 - preserve the original failure
                     pass
             raise
-    _prev_orderbook_hash_by_market[condition_id] = (_current_hash, _now_ts)
+    _prev_orderbook_hash_by_market[hash_identity] = (current_hash, now_ts)
+    if resolved_capture_trigger == "DISCOVERY_SWEEP":
+        _discovery_captures_since_keyframe[hash_identity] = (
+            _discovery_captures_since_keyframe.get(hash_identity, 0) + 1
+        )
+    elif resolved_capture_trigger is not None:
+        _discovery_captures_since_keyframe.pop(hash_identity, None)
     return {
-        "executable_snapshot_id": snapshot.snapshot_id,
+        "executable_snapshot_id": (
+            snapshot.snapshot_id if persistence_tier == "full" else ""
+        ),
+        "compact_snapshot_id": (
+            persisted_id if persistence_tier == "compact" else ""
+        ),
         "condition_id": snapshot.condition_id,
         "executable_snapshot_min_tick_size": str(snapshot.min_tick_size),
         "executable_snapshot_min_order_size": str(snapshot.min_order_size),
         "executable_snapshot_neg_risk": snapshot.neg_risk,
-        "raw_orderbook_hash_transition_delta_ms": _hash_delta_ms,
+        "raw_orderbook_hash_transition_delta_ms": hash_delta_ms,
+        "snapshot_persistence_tier": persistence_tier,
+        "capture_trigger": resolved_capture_trigger,
     }
 
 
@@ -4678,7 +4748,7 @@ def _prefetch_selected_orderbooks_from_feasibility(
 ) -> dict[str, dict]:
     """Use fresh live price-channel book evidence when direct CLOB batch misses.
 
-    ``execution_feasibility_evidence`` is the trade-class live quote witness table
+    ``execution_feasibility_latest`` is the trade-class current quote projection
     written by the price-channel daemon. This path does not create a second price
     authority; it reuses the same CLOB-derived book rows already required by the
     submit witness, and the reconstructed book still passes snapshot identity and
@@ -4686,8 +4756,7 @@ def _prefetch_selected_orderbooks_from_feasibility(
     """
 
     latest_available = _table_exists(conn, "execution_feasibility_latest")
-    history_available = _table_exists(conn, "execution_feasibility_evidence")
-    if not latest_available and not history_available:
+    if not latest_available:
         return {}
     already = set(already_prefetched or set())
     max_age_seconds = _positive_float_env(
@@ -4717,42 +4786,23 @@ def _prefetch_selected_orderbooks_from_feasibility(
                 continue
             book = None
             try:
-                if latest_available:
-                    row = conn.execute(
-                        """
-                        SELECT token_id, direction, quote_seen_at, book_hash_before,
-                               best_bid_before, best_ask_before, depth_before_json
-                          FROM execution_feasibility_latest
-                         WHERE token_id = ?
-                         ORDER BY CASE
-                                      WHEN direction = ? AND COALESCE(depth_before_json, '') != '' THEN 0
-                                      WHEN COALESCE(depth_before_json, '') != '' THEN 1
-                                      ELSE 2
-                                  END,
-                                  quote_seen_at DESC, created_at DESC
-                         LIMIT 1
-                        """,
-                        (token_id, str(direction)),
-                    ).fetchone()
-                    book = _fresh_book_from_row(row, outcome=outcome)
-                if book is None and history_available:
-                    row = conn.execute(
-                        """
-                        SELECT token_id, direction, quote_seen_at, book_hash_before,
-                               best_bid_before, best_ask_before, depth_before_json
-                          FROM execution_feasibility_evidence
-                         WHERE token_id = ?
-                         ORDER BY CASE
-                                      WHEN direction = ? AND COALESCE(depth_before_json, '') != '' THEN 0
-                                      WHEN COALESCE(depth_before_json, '') != '' THEN 1
-                                      ELSE 2
-                                  END,
-                                  quote_seen_at DESC, created_at DESC
-                         LIMIT 1
-                        """,
-                        (token_id, str(direction)),
-                    ).fetchone()
-                    book = _fresh_book_from_row(row, outcome=outcome)
+                row = conn.execute(
+                    """
+                    SELECT token_id, direction, quote_seen_at, book_hash_before,
+                           best_bid_before, best_ask_before, depth_before_json
+                      FROM execution_feasibility_latest
+                     WHERE token_id = ?
+                     ORDER BY CASE
+                                  WHEN direction = ? AND COALESCE(depth_before_json, '') != '' THEN 0
+                                  WHEN COALESCE(depth_before_json, '') != '' THEN 1
+                                  ELSE 2
+                              END,
+                              quote_seen_at DESC, created_at DESC
+                     LIMIT 1
+                    """,
+                    (token_id, str(direction)),
+                ).fetchone()
+                book = _fresh_book_from_row(row, outcome=outcome)
             except Exception as exc:
                 if _is_sqlite_locked_error(exc):
                     logger.info(

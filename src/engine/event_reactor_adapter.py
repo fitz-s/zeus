@@ -376,6 +376,7 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
+        "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE",
         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING",
         "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
         "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
@@ -398,6 +399,7 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
+        "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE",
         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING",
         "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
         "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
@@ -1440,7 +1442,7 @@ def _global_book_receipt_token_pairs(
             compressed_b64,
         ) = receipt_row
         if (
-            schema_version not in {12, 13, 14, 15, 16, 17, 18}
+            schema_version not in {12, 13, 14, 15, 16, 17, 18, 19}
             or coverage_status != "COMPLETE"
             or coverage_complete != 1
             or encoding != "zlib+base64+canonical-json-v1"
@@ -1903,6 +1905,7 @@ def _snapshot_projected_global_book_rows(
     *,
     checked_at: datetime,
     max_age: timedelta,
+    tick_invalidated_tokens: set[str] | None = None,
 ) -> dict[str, tuple[Mapping[str, object], datetime, str]] | None:
     """Read usable fresh token books with their durable projection identity."""
 
@@ -1959,6 +1962,16 @@ def _snapshot_projected_global_book_rows(
                     not isinstance(book, Mapping)
                     or str(book.get("asset_id") or "").strip() != token_id
                 ):
+                    continue
+                if not _book_levels_align_to_tick(book, row[5]):
+                    # A token may cross onto a finer grid before the durable
+                    # market snapshot refreshes its metadata.  The depth is
+                    # current evidence, but the paired tick is not executable
+                    # authority; discard the projection so prefetch obtains a
+                    # current REST book with its own tick instead of poisoning
+                    # the complete global epoch or rounding away price truth.
+                    if tick_invalidated_tokens is not None:
+                        tick_invalidated_tokens.add(token_id)
                     continue
                 book = dict(book)
                 book.update(
@@ -2095,78 +2108,31 @@ def _latest_market_channel_book_rows(
         for start in range(0, len(token_ids), 400):
             chunk = token_ids[start : start + 400]
             requested = ",".join("(?)" for _ in chunk)
-            try:
-                rows = trade_conn.execute(
-                    f"""
-                    WITH requested(token_id) AS (VALUES {requested})
-                    SELECT requested.token_id,
-                           latest_event.event_id,
-                           latest_event.quote_seen_at,
-                           latest_event.depth_before_json,
-                           latest_event.book_hash_before,
-                           snapshot.min_tick_size,
-                           snapshot.min_order_size,
-                           snapshot.neg_risk,
-                           latest.snapshot_id
-                      FROM requested
-                      JOIN execution_feasibility_latest AS latest_event
-                        ON latest_event.token_id = requested.token_id
-                       AND latest_event.direction IN ('buy_yes', 'buy_no')
-                      JOIN executable_market_snapshot_latest AS latest
-                           INDEXED BY idx_snapshot_latest_selected_token_captured
-                        ON latest.selected_outcome_token_id = requested.token_id
-                       AND latest.condition_id = latest_event.condition_id
-                      JOIN executable_market_snapshots AS snapshot
-                        ON snapshot.snapshot_id = latest.snapshot_id
-                    """,
-                    chunk,
-                ).fetchall()
-            except sqlite3.OperationalError as exc:
-                if "execution_feasibility_latest" not in str(exc):
-                    raise
-                rows = trade_conn.execute(
-                    f"""
-                    WITH requested(token_id) AS (VALUES {requested})
-                    SELECT requested.token_id,
-                           latest_event.event_id,
-                           latest_event.quote_seen_at,
-                           depth_event.depth_before_json,
-                           latest_event.book_hash_before,
-                           snapshot.min_tick_size,
-                           snapshot.min_order_size,
-                           snapshot.neg_risk,
-                           latest.snapshot_id
-                      FROM requested
-                      JOIN execution_feasibility_evidence AS latest_event
-                        ON latest_event.rowid = (
-                            SELECT rowid
-                              FROM execution_feasibility_evidence AS candidate
-                                   INDEXED BY idx_execution_feasibility_evidence_token_created
-                             WHERE candidate.token_id = requested.token_id
-                             ORDER BY candidate.created_at DESC
-                             LIMIT 1
-                        )
-                 LEFT JOIN execution_feasibility_evidence AS depth_event
-                        ON depth_event.rowid = (
-                            SELECT rowid
-                              FROM execution_feasibility_evidence AS candidate
-                                   INDEXED BY idx_execution_feasibility_evidence_token_created
-                             WHERE candidate.token_id = requested.token_id
-                               AND candidate.event_id = latest_event.event_id
-                               AND candidate.depth_before_json IS NOT NULL
-                               AND candidate.depth_before_json != ''
-                             ORDER BY candidate.created_at DESC
-                             LIMIT 1
-                        )
-                      JOIN executable_market_snapshot_latest AS latest
-                           INDEXED BY idx_snapshot_latest_selected_token_captured
-                        ON latest.selected_outcome_token_id = requested.token_id
-                       AND latest.condition_id = latest_event.condition_id
-                      JOIN executable_market_snapshots AS snapshot
-                        ON snapshot.snapshot_id = latest.snapshot_id
-                    """,
-                    chunk,
-                ).fetchall()
+            rows = trade_conn.execute(
+                f"""
+                WITH requested(token_id) AS (VALUES {requested})
+                SELECT requested.token_id,
+                       latest_event.event_id,
+                       latest_event.quote_seen_at,
+                       latest_event.depth_before_json,
+                       latest_event.book_hash_before,
+                       snapshot.min_tick_size,
+                       snapshot.min_order_size,
+                       snapshot.neg_risk,
+                       latest.snapshot_id
+                  FROM requested
+                  JOIN execution_feasibility_latest AS latest_event
+                    ON latest_event.token_id = requested.token_id
+                   AND latest_event.direction IN ('buy_yes', 'buy_no')
+                  JOIN executable_market_snapshot_latest AS latest
+                       INDEXED BY idx_snapshot_latest_selected_token_captured
+                    ON latest.selected_outcome_token_id = requested.token_id
+                   AND latest.condition_id = latest_event.condition_id
+                  JOIN executable_market_snapshots AS snapshot
+                    ON snapshot.snapshot_id = latest.snapshot_id
+                """,
+                chunk,
+            ).fetchall()
             for row in rows:
                 token_id = str(row[0] or "").strip()
                 event_id = str(row[1] or "").strip()
@@ -2243,11 +2209,13 @@ def _projected_global_book_rows(
 ) -> dict[str, tuple[Mapping[str, object], datetime, str]] | None:
     """Merge fresh snapshot and market-channel depth projections."""
 
+    tick_invalidated_tokens: set[str] = set()
     rows = _snapshot_projected_global_book_rows(
         trade_conn,
         tokens,
         checked_at=checked_at,
         max_age=max_age,
+        tick_invalidated_tokens=tick_invalidated_tokens,
     ) or {}
     for token, channel_row in _latest_market_channel_book_rows(
         trade_conn,
@@ -2255,6 +2223,13 @@ def _projected_global_book_rows(
         checked_at=checked_at.astimezone(timezone.utc),
         max_age=max_age,
     ).items():
+        if token in tick_invalidated_tokens:
+            # A channel row carries the same persisted tick metadata as the
+            # invalid snapshot.  Even an apparently aligned older ladder
+            # cannot prove the current grid, so only current REST authority may
+            # return this token to the complete action set.
+            rows.pop(token, None)
+            continue
         channel_book, channel_at, channel_id = channel_row
         snapshot_row = rows.get(token)
         if snapshot_row is not None and snapshot_row[1] > channel_at:
@@ -3440,7 +3415,11 @@ def _retain_transient_entry_suppressed_batch(
         for event_id, receipt in result.receipts.items()
     ):
         return result
-    return dataclass_replace(result, receipts=receipts)
+    return dataclass_replace(
+        result,
+        receipts=receipts,
+        economic_cut_completed=False,
+    )
 
 
 _DURABLE_LIVE_CAP_NO_EXPOSURE_TERMINAL_COMMAND_STATES = frozenset(
@@ -6257,6 +6236,7 @@ def event_bound_live_adapter_from_trade_conn(
     producer_wake_ids: tuple[str, ...] = (),
     producer_wake_published_at: str | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
+    selection_completion_reserved: bool = False,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -7150,6 +7130,30 @@ def event_bound_live_adapter_from_trade_conn(
                 _global_batch_wake_cutoff,
                 exclude_wake_ids=_global_batch_owned_wake_ids,
             )
+            if selection_completion_reserved:
+                # SCOPE: one global auction cut after a held SELL or periodic
+                # monitor proved that prior work lacked current handoff.
+                # DRAIN: complete selection publishes the globally comparable
+                # BUY/SELL/HOLD/CASH result; newer ordinary facts stay queued.
+                # RESET: reactor fairness clears the reservation only for a
+                # completed economic cut. A new Day0 physical fact still
+                # supersedes immediately and keeps the reservation armed.
+                if any(
+                    str(getattr(wake, "reason", "") or "")
+                    == "day0_extreme_event_committed"
+                    for wake in pending_wakes
+                ):
+                    return True
+                if not pending_wakes:
+                    marker = reactor_urgent_wake_identity()
+                    if (
+                        marker is not None
+                        and marker[0] not in _global_batch_owned_wake_ids
+                        and marker[1] == "day0_extreme_event_committed"
+                    ):
+                        return True
+                _global_batch_urgent_wake_revision[0] = current
+                return False
             if not pending_wakes:
                 marker = reactor_urgent_wake_identity()
                 if marker is None:
@@ -11010,6 +11014,12 @@ def _global_preflight_candidate_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
+    if reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
+        # The selected q is stale, so neither this SELL nor any runner-up can
+        # inherit the old global objective. The batch runtime evicts the stale
+        # family cache before this classification and rebuilds one complete
+        # current q/book/wealth auction without venue I/O.
+        return "PROBABILITY_SUPERSEDED"
     if (
         reason.startswith("GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:")
         or reason
@@ -21556,8 +21566,9 @@ def _source_clock_model_count_certificate(
     """Return the source-clock configured-source completeness certificate.
 
     Absence means the legacy posterior contract still requires three models.
-    Presence is fail-closed unless configured, used, and currently served sources
-    are the same complete set and the one-scheme walk-forward verdict is ready.
+    A frozen one-scheme route requires identical configured, used, and currently
+    served sets. A horizon fallback is separately typed and requires at least two
+    independent current provider families with identical used/weighted/served sets.
     """
     fusion = provenance.get("bayes_precision_fusion")
     if not isinstance(fusion, Mapping):
@@ -21594,6 +21605,60 @@ def _source_clock_model_count_certificate(
         observed = int(observed)
     except (TypeError, ValueError):
         return True, None
+    horizon_fallback = (
+        scheme.get("fallback_reason")
+        == "configured_current_provider_pair_unavailable"
+        and scheme.get("fallback_to") == "current_precision_fusion"
+    )
+    if horizon_fallback:
+        current_shape = scheme.get("current_evidence_shape")
+        try:
+            configured_family_count = int(
+                scheme.get("configured_current_provider_family_count")
+            )
+            shape_provider_count = int(
+                current_shape.get("provider_count")
+                if isinstance(current_shape, Mapping)
+                else 0
+            )
+            from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+                provider_family_for_source,
+            )
+
+            used_families = {
+                provider_family_for_source(source)
+                for source in used
+            }
+        except (TypeError, ValueError):
+            return True, None
+        if (
+            len(configured) < 2
+            or any(not value for value in configured)
+            or len(set(configured)) != len(configured)
+            or configured_family_count >= 2
+            or len(used) < 2
+            or any(not value for value in used)
+            or len(set(used)) != len(used)
+            or set(served) != set(used)
+            or set(weighted) != set(used)
+            or not set(missing).issubset(set(configured))
+            or len(used_families) < 2
+            or shape_provider_count < 2
+            or scheme.get("one_scheme_status") not in _SOURCE_CLOCK_READ_READY_STATUSES
+            or scheme.get("walkforward_pass") is not True
+        ):
+            return True, None
+        canonical = tuple(sorted(used))
+        return True, {
+            "posterior_model_count_basis": _SOURCE_CLOCK_MODEL_COUNT_BASIS,
+            "posterior_completeness_status": _SOURCE_CLOCK_READY_STATUS,
+            "posterior_configured_sources": canonical,
+            "posterior_served_sources": canonical,
+            "posterior_missing_sources": (),
+            "posterior_walkforward_pass": True,
+            "posterior_configured_model_count": len(canonical),
+            "posterior_served_model_count": len(canonical),
+        }
     if (
         len(configured) < 2
         or any(not value for value in configured)
@@ -29223,6 +29288,7 @@ def _global_day0_execution_payload(
     decision_time: datetime,
     posterior_id: object | None,
     probability_base_identity: object | None = None,
+    allow_equivalent_conditioning_clock_advance: bool = False,
 ) -> dict[str, object]:
     """Bind Day0 q to one current canonical observation state."""
 
@@ -29281,6 +29347,8 @@ def _global_day0_execution_payload(
     fast_residual_conditioning = (
         _validated_fast_residual_day0_conditioning(conditioning)
     )
+    conditioning_clock_lag_seconds: float | None = None
+    conditioning_observation_time: str | None = None
     if conditioning is not None:
         conditioned_metric = (
             str(conditioning.get("metric") or "").strip().lower()
@@ -29360,7 +29428,13 @@ def _global_day0_execution_payload(
                 conditioning_fact.get("observation_time"),
                 reason="GLOBAL_DAY0_CURRENT_OBSERVATION_TIME_INVALID",
             )
-            if conditioned_at != conditioning_at:
+            if (
+                conditioned_at != conditioning_at
+                and (
+                    not allow_equivalent_conditioning_clock_advance
+                    or conditioned_at > conditioning_at
+                )
+            ):
                 raise ValueError(
                     "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
                 )
@@ -29387,6 +29461,11 @@ def _global_day0_execution_payload(
                 or str(conditioning.get("unit") or "").strip().upper() != unit
             ):
                 raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
+            if conditioned_at < conditioning_at:
+                conditioning_observation_time = conditioned_at.isoformat()
+                conditioning_clock_lag_seconds = (
+                    conditioning_at - conditioned_at
+                ).total_seconds()
 
     station_id = str(fact.get("station_id") or "").strip().upper()
     observation_source = str(fact.get("observation_source") or "").strip()
@@ -29438,6 +29517,19 @@ def _global_day0_execution_payload(
         "settlement_unit": unit,
         "evidence_finality": evidence_finality,
     }
+    if conditioning_clock_lag_seconds is not None:
+        binding.update(
+            {
+                "probability_conditioning_observation_time": (
+                    conditioning_observation_time
+                ),
+                "current_observation_time": conditioning_at.isoformat(),
+                "conditioning_clock_lag_seconds": conditioning_clock_lag_seconds,
+                "conditioning_clock_role": (
+                    "same_extreme_newer_observation_clock"
+                ),
+            }
+        )
     if fast_residual_conditioning is not None:
         binding["statistical_probability_conditioning"] = dict(
             fast_residual_conditioning
@@ -30439,6 +30531,7 @@ def _prepare_current_global_probability_family(
     day0_snapshot: Mapping[str, object] | None = None
     day0_base_identity = ""
     provisional_day0_observation = False
+    post_local_provisional_monitor_authority = False
     provisional_day0_fact: Mapping[str, object] | None = None
     fast_residual_conditioning: Mapping[str, object] | None = None
     physical_frontier_requires_confirmation = False
@@ -30549,7 +30642,16 @@ def _prepare_current_global_probability_family(
                 raise ValueError(
                     "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY"
                 )
-            if local_target < local_now.date():
+            post_local_provisional_monitor_authority = bool(
+                provisional_day0_observation
+                and allow_provisional_day0_replacement
+                and not entry_authority
+                and local_target < local_now.date()
+            )
+            if (
+                local_target < local_now.date()
+                and not post_local_provisional_monitor_authority
+            ):
                 raise ValueError("POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
             observation_table = day0_observation_conn.execute(
                 "SELECT 1 FROM sqlite_master "
@@ -30796,6 +30898,7 @@ def _prepare_current_global_probability_family(
                     bundle.posterior_id if bundle is not None else None
                 ),
                 probability_base_identity=day0_base_identity,
+                allow_equivalent_conditioning_clock_advance=not entry_authority,
             )
             if provisional_day0_observation:
                 if bundle is None:
@@ -30828,6 +30931,17 @@ def _prepare_current_global_probability_family(
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
+        if (
+            provisional_day0_observation
+            and fast_residual_conditioning is None
+        ):
+            # SCOPE: this HKO family held-position q only. DRAIN: the final
+            # daily HKO fact or a validated revision likelihood becomes current
+            # probability evidence. RESET: the next family refresh consumes
+            # that evidence; other families and final-daily exact q are inert.
+            raise ValueError(
+                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+            )
     bindings = tuple(
         OutcomeTokenBinding(
             bin_id=outcome.bin_id,
@@ -30904,6 +31018,34 @@ def _prepare_current_global_probability_family(
                         "q_source": "day0_conditioned_replacement",
                         "_edli_q_source": "day0_conditioned_replacement",
                         "_edli_day0_q_mode": "fast_residual_conditioned_replacement",
+                    }
+                )
+            elif post_local_provisional_monitor_authority:
+                # Wall-clock completion does not make the information set
+                # complete.  The interval after the latest official HKO
+                # snapshot and before local midnight has happened physically,
+                # but remains unobserved by the settlement channel.  Price that
+                # causal tail with the same observation-conditioned Day0
+                # kernel used before midnight; the full-day replacement
+                # simplex ignores the provisional observation entirely.
+                components = _day0_remaining_global_probability_components(
+                    event,
+                    forecast_conn=forecast_conn,
+                    calibration_conn=day0_observation_conn,
+                    family=family,
+                    payload=payload,
+                    decision_time=decision_time,
+                    snapshot=day0_snapshot,
+                )
+                probability_authority = (
+                    "day0_remaining_day_global_probability_v1"
+                )
+                payload.update(
+                    {
+                        "probability_authority": probability_authority,
+                        "q_source": "day0_remaining_day",
+                        "_edli_q_source": "day0_remaining_day",
+                        "_edli_day0_q_mode": "post_local_provisional_tail",
                     }
                 )
             else:

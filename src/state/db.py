@@ -870,6 +870,7 @@ def checkpoint_wal(db_path: Path) -> tuple[int, int, int, int]:
 def get_forecasts_connection_with_world(
     *,
     write_class: WriteClass | str = "bulk",
+    blocking: bool = True,
 ):
     """Context manager: forecasts.db as MAIN with world.db ATTACHed.
 
@@ -877,16 +878,22 @@ def get_forecasts_connection_with_world(
     BOTH ``observations`` (forecasts-class) AND ``data_coverage``
     (world-class) in a single SAVEPOINT.  A bare ``get_forecasts_connection``
     cannot service the ``data_coverage`` write; this helper opens
-    forecasts.db as MAIN and ATTACHes world.db so both bare table names
-    resolve correctly within the SAVEPOINT:
+    forecasts.db as MAIN and ATTACHes world.db so both owners participate in
+    the SAVEPOINT:
 
       - ``observations``   → MAIN (forecasts.db)  ✓
-      - ``data_coverage``  → world (world.db via ATTACH)  ✓
+      - ``data_coverage``  → world (explicitly qualified by its state API)  ✓
       - ``daily_observation_revisions`` → world (world.db via ATTACH)  ✓
+
+    Explicit qualification is required for ``data_coverage`` because a
+    retired forecasts-db ghost table may still exist on deployed DBs; SQLite
+    resolves an unqualified duplicate to MAIN before attached ``world``.
 
     Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
     (``zeus-forecasts.db`` before ``zeus-world.db``) to prevent deadlocks
-    with other cross-DB writers (v4 §3.1.3 invariant).
+    with other cross-DB writers (v4 §3.1.3 invariant). Callers on a retrying
+    source clock may pass ``blocking=False`` and treat ``BlockingIOError`` as
+    local contention; the default preserves the historical blocking contract.
 
     Callers MUST use this as a context manager and MUST NOT close the
     connection themselves — the ``finally`` block handles it.
@@ -906,8 +913,8 @@ def get_forecasts_connection_with_world(
     ordered_paths = canonical_lock_order(
         [ZEUS_FORECASTS_DB_PATH, ZEUS_WORLD_DB_PATH]
     )
-    with db_writer_lock(ordered_paths[0], resolved):
-        with db_writer_lock(ordered_paths[1], resolved):
+    with db_writer_lock(ordered_paths[0], resolved, blocking=blocking):
+        with db_writer_lock(ordered_paths[1], resolved, blocking=blocking):
             conn = _connect(ZEUS_FORECASTS_DB_PATH, write_class=resolved)
             try:
                 attached = {
@@ -1860,7 +1867,7 @@ def assert_schema_epoch_not_mixed(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 43  # 2026-07-11 T2b (docs/rebuild/quarantine_excision_2026-07-11.md §T2b): settlements.authority + observations.authority CHECK literal QUARANTINED -> DISPUTED. Prior: 42 = position_current chain_avg_price/chain_cost_basis_usd (F1).
+SCHEMA_VERSION = 44  # 2026-07-28: registered compact discovery snapshot journal; full executable evidence remains unchanged. Prior: 43 = T2b settlement/observation authority literal repair.
 
 
 # ---------------------------------------------------------------------------
@@ -13872,6 +13879,7 @@ def transition_phase(
     error: str,
     source_module: str = "src.execution.exit_lifecycle",
     extra_payload: dict | None = None,
+    decision_id: str | None = None,
 ) -> bool:
     """Re-export shim — delegates to src.state.canonical_write.transition_phase.
 
@@ -13887,6 +13895,7 @@ def transition_phase(
         error=error,
         source_module=source_module,
         extra_payload=extra_payload,
+        decision_id=decision_id,
     )
 
 

@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-28
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -4959,6 +4959,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime, monitor_refresh
     from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.events import reactor as event_reactor
     from src.state.db import append_many_and_project, get_connection, init_schema
     from src.state.lifecycle_manager import LifecyclePhase
 
@@ -5090,6 +5091,12 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         lambda: invalidations.append("venue_side_effect"),
     )
     execute_calls = []
+    auction_completion_requests = []
+    monkeypatch.setattr(
+        event_reactor,
+        "request_global_auction_completion",
+        lambda **kwargs: auction_completion_requests.append(kwargs),
+    )
 
     def fake_execute_exit(*args, **kwargs):
         execute_calls.append(kwargs.get("position") or args[1])
@@ -5158,6 +5165,23 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             == "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
         )
         assert "local_statistical_sell_non_authoritative_record" in pos.applied_validations
+        assert "global_auction_completion_requested" in pos.applied_validations
+        assert summary[
+            "monitor_statistical_sell_auction_completion_requested"
+        ] == 1
+        assert auction_completion_requests == [
+            {
+                "reason": (
+                    "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+                ),
+                "position_id": pos.trade_id,
+                "family": (
+                    pos.city,
+                    pos.target_date,
+                    pos.temperature_metric,
+                ),
+            }
+        ]
         assert execute_calls == []
     else:
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
@@ -5168,6 +5192,8 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert results[0].should_exit is True
         assert results[0].exit_reason == trigger
         assert execute_calls == [pos]
+    if outcome != "blocked":
+        assert auction_completion_requests == []
     assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()
 
@@ -6025,7 +6051,7 @@ def test_holding_coverage_receipt_compresses_and_references_exact_payload(
     raw = zlib.decompress(
         base64.b64decode(first["holding_auction_coverage_zlib_b64"])
     )
-    assert first["schema_version"] == 18
+    assert first["schema_version"] == 19
     assert "holding_auction_coverage" not in first
     assert json.loads(raw) == [
         {
@@ -8894,6 +8920,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
         shares=13.5,
         cost_basis_usd=9.99,
         entry_price=0.74,
+        decision_snapshot_id="snap-monitor-preserve-chain",
     )
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
@@ -8925,6 +8952,9 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     pos.last_monitor_market_price = 0.735
     pos.last_monitor_market_price_is_fresh = True
     pos.last_monitor_at = "2026-06-17T20:53:17+00:00"
+    # Simulate a stale in-memory Position loaded before a deterministic
+    # command-to-position evidence repair completed.
+    pos.decision_snapshot_id = ""
     monitor_events, monitor_projection = build_monitor_refreshed_canonical_write(
         pos,
         sequence_no=4,
@@ -8937,7 +8967,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
         """
         SELECT size_usd, shares, cost_basis_usd, chain_state, chain_shares,
                chain_cost_basis_usd, last_monitor_prob, last_monitor_edge,
-               last_monitor_market_price, updated_at
+               last_monitor_market_price, decision_snapshot_id, updated_at
           FROM position_current
          WHERE position_id = ?
         """,
@@ -8952,6 +8982,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     assert current["last_monitor_prob"] == pytest.approx(0.869)
     assert current["last_monitor_edge"] == pytest.approx(0.133)
     assert current["last_monitor_market_price"] == pytest.approx(0.735)
+    assert current["decision_snapshot_id"] == "snap-monitor-preserve-chain"
     assert current["updated_at"] == "2026-06-17T20:53:17+00:00"
     conn.close()
 
@@ -9469,6 +9500,91 @@ def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monke
         "ci_overlap_hold",
     ]
     conn.close()
+
+
+def test_monitor_refreshed_omits_duplicate_exit_validation_vector():
+    """Identical monitor/exit validation evidence is stored exactly once."""
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="monitor-validation-dedup",
+        state="holding",
+        city="Chicago",
+        target_date="2026-07-28",
+        strategy_key="center_bin_buy",
+        bin_label="90-91°F",
+    )
+    pos.applied_validations = [
+        "replacement_posterior",
+        "ci_overlap_hold",
+    ]
+    pos.last_monitor_at = "2026-07-28T08:00:00+00:00"
+    exit_decision = ExitDecision(
+        False,
+        reason="CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        selected_method="replacement_posterior",
+        applied_validations=list(pos.applied_validations),
+    )
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=2,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        exit_decision=exit_decision,
+    )
+
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["applied_validations"] == pos.applied_validations
+    assert "exit_decision_applied_validations" not in payload
+
+
+def test_monitor_refreshed_indexes_exit_validation_subset():
+    """Exit-specific validation order is preserved without duplicate strings."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="monitor-validation-index",
+        state="holding",
+        city="Chicago",
+        target_date="2026-07-28",
+        strategy_key="center_bin_buy",
+        bin_label="90-91°F",
+    )
+    pos.applied_validations = [
+        "replacement_posterior",
+        "fresh_market_price",
+        "ci_overlap_hold",
+    ]
+    pos.last_monitor_at = "2026-07-28T08:00:00+00:00"
+    exit_decision = ExitDecision(
+        False,
+        reason="CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        selected_method="replacement_posterior",
+        applied_validations=[
+            "ci_overlap_hold",
+            "replacement_posterior",
+        ],
+    )
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=2,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        exit_decision=exit_decision,
+    )
+
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["exit_decision_validation_indexes"] == [2, 0]
+    assert "exit_decision_applied_validations" not in payload
+    assert cycle_runtime._monitor_event_applied_validations(payload) == [
+        "ci_overlap_hold",
+        "replacement_posterior",
+    ]
 
 
 def test_monitor_refreshed_persists_day0_probability_receipt():

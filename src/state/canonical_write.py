@@ -113,6 +113,7 @@ def transition_phase(
     error: str,
     source_module: str = "src.execution.exit_lifecycle",
     extra_payload: Mapping[str, object] | None = None,
+    decision_id: str | None = None,
 ) -> bool:
     """Atomically transition a position into pending_exit + emit canonical event.
 
@@ -233,7 +234,7 @@ def transition_phase(
             "strategy_key": str(
                 getattr(position, "strategy_key", "") or getattr(position, "strategy", "") or ""
             ),
-            "decision_id": None,
+            "decision_id": decision_id,
             "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
             "order_id": last_exit_order_id or None,
             "command_id": last_exit_command_id or None,

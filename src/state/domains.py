@@ -98,6 +98,7 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'entry_exposure_obligations': Domain.TRADE,
     'event_dead_letters': Domain.WORLD,
     'exchange_reconcile_findings': Domain.TRADE,
+    'executable_market_snapshot_compact': Domain.TRADE,
     'executable_market_snapshot_invalidations': Domain.TRADE,
     'executable_market_snapshot_latest': Domain.TRADE,
     'executable_market_snapshots': Domain.TRADE,

@@ -627,8 +627,10 @@ def test_batch_cycle_advance_enqueues_day0_with_observed_extreme(
 
     def _fake_build_seed(*args, **kwargs):
         built.update(kwargs)
-        seed_dir.mkdir(exist_ok=True)
-        seed_file = seed_dir / "Amsterdam.2026-07-04.high.json"
+        seed_file = Path(
+            kwargs.get("output_path") or seed_dir / "Amsterdam.2026-07-04.high.json"
+        )
+        seed_file.parent.mkdir(parents=True, exist_ok=True)
         seed_file.write_text("{}", encoding="utf-8")
         return seed_file
 
@@ -702,8 +704,10 @@ def test_scoped_source_commit_enqueues_missing_live_posterior(
 
     def _fake_build_seed(*args, **kwargs):
         built.update(kwargs)
-        seed_dir.mkdir(exist_ok=True)
-        seed_file = seed_dir / "Austin.2026-07-28.high.json"
+        seed_file = Path(
+            kwargs.get("output_path") or seed_dir / "Austin.2026-07-28.high.json"
+        )
+        seed_file.parent.mkdir(parents=True, exist_ok=True)
         seed_file.write_text("{}", encoding="utf-8")
         return seed_file
 
@@ -788,7 +792,19 @@ def test_scoped_source_commit_enqueues_missing_live_posterior(
     )
     assert retry["first_materialization_seeds_enqueued"] == 1
     assert retry["seeds_enqueued"] == 1
-    assert Path(marker["seed_file"]).exists()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        retried_marker = conn.execute(
+            """
+            SELECT seed_file FROM cycle_advance_enqueues
+            WHERE city='Austin' AND target_date='2026-07-28' AND metric='high'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert retried_marker is not None
+    assert Path(retried_marker["seed_file"]).exists()
 
 
 def test_held_marker_with_moved_seed_reheals_without_day0_optin(tmp_path) -> None:
@@ -942,7 +958,10 @@ def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypat
     )
 
     def _fake_build_seed(_conn_arg, **kwargs):
-        path = Path(kwargs["seed_path"]) / "Shanghai.2026-06-19.high.seed.json"
+        path = Path(
+            kwargs.get("output_path")
+            or Path(kwargs["seed_path"]) / "Shanghai.2026-06-19.high.seed.json"
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps({"upgrade_trigger": kwargs.get("upgrade_trigger")}),

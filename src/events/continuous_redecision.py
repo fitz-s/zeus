@@ -1707,10 +1707,12 @@ def _freshest_feasibility_quotes_by_condition(
     if quote_column not in {"bid", "ask"} or not token_sides:
         return {}
     try:
-        history_cols = {row[1] for row in trade_conn.execute(
-            "PRAGMA table_info(execution_feasibility_evidence)").fetchall()}
-        latest_cols = {row[1] for row in trade_conn.execute(
-            "PRAGMA table_info(execution_feasibility_latest)").fetchall()}
+        latest_cols = {
+            row[1]
+            for row in trade_conn.execute(
+                "PRAGMA table_info(execution_feasibility_latest)"
+            ).fetchall()
+        }
     except sqlite3.Error:
         return {}
     required = {
@@ -1722,9 +1724,8 @@ def _freshest_feasibility_quotes_by_condition(
         "best_bid_before",
         "best_ask_before",
     }
-    history_available = required.issubset(history_cols)
     latest_available = required.issubset(latest_cols)
-    if not history_available and not latest_available:
+    if not latest_available:
         return {}
     out: dict[tuple[str, str], PriceQuote] = {}
 
@@ -1768,43 +1769,23 @@ def _freshest_feasibility_quotes_by_condition(
         if not condition_id or not token_id or token_id in seen_tokens:
             continue
         seen_tokens.add(token_id)
-        if latest_available:
-            rows = trade_conn.execute(
-                """
-                SELECT condition_id,
-                       outcome_label,
-                       direction,
-                       quote_seen_at,
-                       created_at,
-                       best_bid_before,
-                       best_ask_before
-                  FROM execution_feasibility_latest
-                 WHERE token_id = ?
-                 ORDER BY created_at DESC
-                 LIMIT 4
-                """,
-                (token_id,),
-            ).fetchall()
-            if _merge_rows(rows, condition_id=condition_id, expected_side=expected_side):
-                continue
-        if history_available:
-            rows = trade_conn.execute(
-                """
-                SELECT condition_id,
-                       outcome_label,
-                       direction,
-                       quote_seen_at,
-                       created_at,
-                       best_bid_before,
-                       best_ask_before
-                  FROM execution_feasibility_evidence
-                 WHERE token_id = ?
-                 ORDER BY created_at DESC
-                 LIMIT 12
-                """,
-                (token_id,),
-            ).fetchall()
-            _merge_rows(rows, condition_id=condition_id, expected_side=expected_side)
+        rows = trade_conn.execute(
+            """
+            SELECT condition_id,
+                   outcome_label,
+                   direction,
+                   quote_seen_at,
+                   created_at,
+                   best_bid_before,
+                   best_ask_before
+              FROM execution_feasibility_latest
+             WHERE token_id = ?
+             ORDER BY created_at DESC
+             LIMIT 4
+            """,
+            (token_id,),
+        ).fetchall()
+        _merge_rows(rows, condition_id=condition_id, expected_side=expected_side)
     return out
 
 

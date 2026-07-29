@@ -54,6 +54,7 @@ REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_
 DAY0_METAR_POLL_SECONDS_ENV = "ZEUS_DAY0_METAR_POLL_SECONDS"
 DAY0_METAR_WRITE_BUDGET_MS_ENV = "ZEUS_DAY0_METAR_WRITE_BUDGET_MS"
 DAY0_HKO_POLL_SECONDS_ENV = "ZEUS_DAY0_HKO_POLL_SECONDS"
+HKO_DAILY_FINAL_POLL_SECONDS_ENV = "ZEUS_HKO_DAILY_FINAL_POLL_SECONDS"
 DAY0_METAR_COMMIT_RETRY_SECONDS = 0.25
 DAY0_METAR_COMMIT_RETRY_MAX_SECONDS = 5.0
 DAY0_METAR_COMMIT_RETRY_MAX_FAILURES = 6
@@ -123,6 +124,21 @@ def _day0_hko_poll_seconds() -> float:
             raw,
         )
         return 2.0
+
+
+def _hko_daily_final_poll_seconds() -> float:
+    raw = os.environ.get(HKO_DAILY_FINAL_POLL_SECONDS_ENV, "").strip()
+    if not raw:
+        return 300.0
+    try:
+        return max(60.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "invalid %s=%r; using 300s HKO final-daily cadence",
+            HKO_DAILY_FINAL_POLL_SECONDS_ENV,
+            raw,
+        )
+        return 300.0
 
 
 def _day0_metar_write_budget_seconds() -> float:
@@ -1309,6 +1325,107 @@ def _k2_daily_obs_tick():
     logger.info("K2 daily_obs_tick: %s", result)
 
 
+@_scheduler_job("ingest_k2_hko_daily_final")
+def _k2_hko_daily_final_tick():
+    """Poll HKO final extracts and repair recent publication gaps.
+
+    SCOPE: Hong Kong's bounded recent completed-date window only.
+    DRAIN: this dedicated source-clock job retries on its configured cadence
+    until the existing writer commits every source-correct VERIFIED row.
+    RESET: each present date leaves the missing set before network I/O;
+    unrelated WU cities and the realtime HKO accumulator never block it.
+    """
+
+    from src.data.daily_obs_append import (
+        HKO_DAILY_EXTRACT_CATCHUP_DAYS,
+        _fetch_hko_daily_extract_month,
+        append_hko_daily_extract_recent,
+        hko_daily_extract_recent_coverage_repair_dates,
+        hko_daily_extract_recent_missing_dates,
+        hko_daily_extract_recent_target_dates,
+    )
+    from src.data.job_lock import acquire_lock
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_forecasts_connection_with_world,
+        get_world_connection_read_only,
+    )
+
+    now = datetime.now(timezone.utc)
+    with acquire_lock("hko_daily_final") as acquired:
+        if not acquired:
+            logger.info("ingest k2_hko_daily_final_tick skipped_lock_held")
+            return {"status": "SOURCE_CONTENDED"}
+        read_conn = get_forecasts_connection_read_only()
+        world_read_conn = None
+        try:
+            world_read_conn = get_world_connection_read_only()
+            missing_dates = hko_daily_extract_recent_missing_dates(
+                read_conn,
+                now_utc=now,
+            )
+            missing_set = set(missing_dates)
+            present_dates = tuple(
+                target_d
+                for target_d in hko_daily_extract_recent_target_dates(
+                    now_utc=now,
+                )
+                if target_d not in missing_set
+            )
+            repair_dates = hko_daily_extract_recent_coverage_repair_dates(
+                world_read_conn,
+                present_dates=present_dates,
+            )
+            if not missing_dates and not repair_dates:
+                return {
+                    "inserted": 0,
+                    "already_present": HKO_DAILY_EXTRACT_CATCHUP_DAYS,
+                    "not_published": 0,
+                    "guard_rejected": 0,
+                    "fetch_errors": 0,
+                }
+        finally:
+            if world_read_conn is not None:
+                world_read_conn.close()
+            read_conn.close()
+        missing_months = {
+            (target_d.year, target_d.month) for target_d in missing_dates
+        }
+        prefetched_by_month = {}
+        prefetch_failures_by_month = {}
+        for month_key in missing_months:
+            try:
+                prefetched_by_month[month_key] = (
+                    _fetch_hko_daily_extract_month(*month_key)
+                )
+            except Exception as exc:  # noqa: BLE001 - persist below under writer
+                prefetch_failures_by_month[month_key] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+        try:
+            with get_forecasts_connection_with_world(
+                write_class="bulk",
+                blocking=False,
+            ) as conn:
+                result = append_hko_daily_extract_recent(
+                    conn,
+                    now_utc=now,
+                    rebuild_run_id=(
+                        "hko_daily_final_"
+                        f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                    ),
+                    prefetched_by_month=prefetched_by_month,
+                    prefetch_failures_by_month=prefetch_failures_by_month,
+                )
+        except BlockingIOError:
+            logger.info("ingest k2_hko_daily_final_tick skipped_writer_contended")
+            return {"status": "WRITE_CONTENDED"}
+    if result.get("fetch_errors") or result.get("guard_rejected"):
+        raise RuntimeError(f"HKO_DAILY_FINAL_POLL_FAILED:{result}")
+    logger.info("K2 hko_daily_final_tick: %s", result)
+    return result
+
+
 @_scheduler_job("ingest_k2_hourly_instants")
 def _k2_hourly_instants_tick():
     """K2 hourly Open-Meteo archive tick (ingest daemon copy).
@@ -2260,6 +2377,63 @@ def _harvester_truth_writer_tick():
     logger.info("harvester_truth_writer_tick: %s", result)
 
 
+_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES = frozenset(
+    {
+        "CURRENT_TARGET_SCOPED_DOWNLOAD_NO_TARGETS",
+        "CURRENT_TARGETS_ALREADY_COVERED",
+        "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+        "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+    }
+)
+_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_RETRYABLE_STATUSES = frozenset(
+    {
+        "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+        "CURRENT_TARGET_DOWNLOAD_INFLIGHT_SKIP",
+        "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+        "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
+        "CURRENT_TARGET_RAW_INPUTS_TRANSPORT_RETRYABLE",
+        "CYCLE_PROBE_UNRESOLVED_SKIP",
+    }
+)
+_REPLACEMENT_MAINTENANCE_EXTRAS_OK_STATUSES = frozenset(
+    {
+        "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",
+        "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+    }
+)
+_REPLACEMENT_MAINTENANCE_EXTRAS_RETRYABLE_STATUSES = frozenset(
+    {
+        "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
+        "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP",
+        "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
+        "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+    }
+)
+
+
+def _replacement_maintenance_lane_error(
+    lane: str,
+    report: object,
+    *,
+    ok_statuses: frozenset[str],
+    retryable_statuses: frozenset[str],
+) -> str | None:
+    """Classify one maintenance lane from an explicit, fail-closed status contract."""
+    if report is None:
+        return None
+    status = (
+        str(report.get("status") or "")
+        if isinstance(report, dict)
+        else ""
+    )
+    if status in ok_statuses:
+        return None
+    if status in retryable_statuses:
+        return f"{lane}:{status}"
+    return f"{lane}:UNRECOGNIZED_STATUS:{status or 'MISSING'}"
+
+
 @_scheduler_job("ingest_replacement_maintenance")
 def _replacement_maintenance_tick():
     """Repair unchanged replacement targets without blocking the source clock."""
@@ -2267,6 +2441,7 @@ def _replacement_maintenance_tick():
         bayes_precision_fusion_quota_cooldown_seconds,
     )
     from src.data.replacement_forecast_production import (  # noqa: PLC0415
+        _download_bayes_precision_fusion_extra_raw_inputs_if_needed,
         _download_replacement_forecast_current_targets_if_needed,
         _enqueue_cycle_advance_reseeds_if_needed,
         _enqueue_fusion_upgrade_reseeds_if_needed,
@@ -2275,39 +2450,59 @@ def _replacement_maintenance_tick():
 
     cfg = _replacement_forecast_live_materialization_queue_config()
     cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
-    if cooldown_seconds > 0:
-        _defer_replacement_maintenance(float(cooldown_seconds))
-        return {
-            "status": "REPLACEMENT_MAINTENANCE_QUOTA_COOLDOWN",
-            "cooldown_seconds": cooldown_seconds,
-        }
     if not _replacement_maintenance_due():
         return {"status": "REPLACEMENT_MAINTENANCE_NOT_DUE"}
 
     timeout_s = _replacement_current_target_poll_timeout_seconds(
         _replacement_availability_poll_seconds()
     )
-    try:
-        download_report = _download_replacement_forecast_current_targets_if_needed(
-            cfg,
-            max_wall_clock_seconds=timeout_s,
-        )
-    except TimeoutError as exc:
-        download_report = {
-            "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
-            "timeout_seconds": timeout_s,
-            "error": str(exc)[:240],
+    if cooldown_seconds > 0:
+        _defer_replacement_maintenance(float(cooldown_seconds))
+        download_report = None
+        extras_report = {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
+            "cooldown_seconds": cooldown_seconds,
         }
-    except Exception as exc:  # noqa: BLE001 - reseed catch-up remains independent
-        logger.warning(
-            "replacement maintenance current-target repair failed: %s",
-            exc,
-            exc_info=True,
-        )
-        download_report = {
-            "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
-            "error": f"{type(exc).__name__}: {str(exc)[:220]}",
-        }
+    else:
+        try:
+            download_report = _download_replacement_forecast_current_targets_if_needed(
+                cfg,
+                max_wall_clock_seconds=timeout_s,
+            )
+        except TimeoutError as exc:
+            download_report = {
+                "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+                "timeout_seconds": timeout_s,
+                "error": str(exc)[:240],
+            }
+        except Exception as exc:  # noqa: BLE001 - reseed catch-up remains independent
+            logger.warning(
+                "replacement maintenance current-target repair failed: %s",
+                exc,
+                exc_info=True,
+            )
+            download_report = {
+                "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+            }
+
+        try:
+            extras_report = (
+                _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+                    cfg,
+                    max_wall_clock_seconds=timeout_s,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - reseeds remain independent
+            logger.warning(
+                "replacement maintenance BPF-extra repair failed: %s",
+                exc,
+                exc_info=True,
+            )
+            extras_report = {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
+                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+            }
 
     report: dict[str, object] = {
         "status": "REPLACEMENT_MAINTENANCE_COMPLETED",
@@ -2315,17 +2510,35 @@ def _replacement_maintenance_tick():
             download_report
         ),
     }
-    maintenance_errors: list[str] = []
-    download_status = str(
-        download_report.get("status") or ""
-        if isinstance(download_report, dict)
-        else ""
-    )
-    if download_status in {
-        "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
-        "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
-    }:
-        maintenance_errors.append(f"current_target:{download_status}")
+    if extras_report is not None:
+        report["bayes_precision_fusion_extra_status"] = extras_report.get("status")
+        report["bayes_precision_fusion_extra_rows_written"] = extras_report.get(
+            "written_row_count"
+        )
+    if cooldown_seconds > 0:
+        report["cooldown_seconds"] = cooldown_seconds
+    maintenance_errors = [
+        error
+        for error in (
+            _replacement_maintenance_lane_error(
+                "current_target",
+                download_report,
+                ok_statuses=_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES,
+                retryable_statuses=(
+                    _REPLACEMENT_MAINTENANCE_CURRENT_TARGET_RETRYABLE_STATUSES
+                ),
+            ),
+            _replacement_maintenance_lane_error(
+                "bayes_precision_fusion_extra",
+                extras_report,
+                ok_statuses=_REPLACEMENT_MAINTENANCE_EXTRAS_OK_STATUSES,
+                retryable_statuses=(
+                    _REPLACEMENT_MAINTENANCE_EXTRAS_RETRYABLE_STATUSES
+                ),
+            ),
+        )
+        if error is not None
+    ]
     for prefix, reseed in (
         ("fusion_upgrade", _enqueue_fusion_upgrade_reseeds_if_needed),
         ("cycle_advance", _enqueue_cycle_advance_reseeds_if_needed),
@@ -2343,6 +2556,7 @@ def _replacement_maintenance_tick():
             report[f"{prefix}_seeds_enqueued"] = reseed_report.get("seeds_enqueued")
     if maintenance_errors:
         report["status"] = "REPLACEMENT_MAINTENANCE_PARTIAL"
+        report["retryable"] = True
         report["maintenance_errors"] = tuple(maintenance_errors)
     logger.info("replacement maintenance report: %s", report)
     return report
@@ -2765,15 +2979,38 @@ def _replacement_availability_poll_tick():
             report.get("source_commit_notifications_pending") or 0
         )
         if (
-            scoped_reseed_completed
-            or anchor_reseed_published
-            or pending_notifications > 0
-        ) and not notification_errors:
+            (scoped_reseed_completed or pending_notifications > 0)
+            and not notification_errors
+        ):
+            # A committed-source callback can only prove coverage for the scopes it
+            # received. It is not durable proof that every raw revision committed in
+            # this poll was in that callback, so retain one coalesced broad fusion
+            # catch-up. The trigger's durable transition marker makes the overlap
+            # idempotent per (scope, raw revision); do not duplicate the unrelated
+            # cycle-advance scan here.
+            broad_fusion_report: dict[str, object] = {}
+            _attach_reseed_reports(
+                broad_fusion_report,
+                include_cycle_advance=False,
+            )
+            for key in (
+                "fusion_upgrade_status",
+                "fusion_upgrade_seeds_enqueued",
+            ):
+                if key in broad_fusion_report:
+                    report[f"broad_{key}"] = broad_fusion_report[key]
             report["reseed_maintenance_status"] = (
                 "SOURCE_COMMIT_RESEEDS_DEFERRED"
                 if pending_notifications > 0
                 else "SOURCE_COMMIT_RESEEDS_PUBLISHED"
-                if scoped_reseed_completed
+            )
+        elif (
+            (anchor_reseed_published or pending_notifications > 0)
+            and not notification_errors
+        ):
+            report["reseed_maintenance_status"] = (
+                "SOURCE_COMMIT_RESEEDS_DEFERRED"
+                if pending_notifications > 0
                 else "SOURCE_ANCHOR_RESEEDS_PUBLISHED"
             )
         else:
@@ -3243,9 +3480,16 @@ def _ingest_main_job_specs() -> list[tuple]:
     replacement_availability_poll_seconds = _replacement_availability_poll_seconds()
     day0_metar_poll_seconds = _day0_metar_poll_seconds()
     day0_hko_poll_seconds = _day0_hko_poll_seconds()
+    hko_daily_final_poll_seconds = _hko_daily_final_poll_seconds()
     specs: list[tuple] = [
         (_k2_daily_obs_tick, "cron", dict(minute=5, id="ingest_k2_daily_obs",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
+        (_k2_hko_daily_final_tick, "interval", dict(
+            seconds=hko_daily_final_poll_seconds,
+            id="ingest_k2_hko_daily_final", max_instances=1, coalesce=True,
+            misfire_grace_time=max(60, int(hko_daily_final_poll_seconds * 2)),
+            next_run_time=now,
+        )),
         (_k2_hourly_instants_tick, "cron", dict(minute=7, id="ingest_k2_hourly_instants",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
         (_k2_solar_daily_tick, "cron", dict(hour=0, minute=30, id="ingest_k2_solar_daily",

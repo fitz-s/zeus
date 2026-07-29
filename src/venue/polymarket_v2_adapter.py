@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-28
 # Authority basis (2026-06-12): operator law 2026-06-10 ABSOLUTE — redeem submission
 #   FORBIDDEN. redeem() now raises REDEEM_SUBMISSION_FORBIDDEN unconditionally; the
 #   autonomous web3 broadcast body (eth_sendRawTransaction EOA path) was DELETED.
@@ -20,6 +20,7 @@ two-step SDK order submission shapes.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import hashlib
 import json
@@ -36,6 +37,8 @@ from decimal import Decimal, ROUND_FLOOR
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
+
+from py_clob_client_v2.exceptions import PolyApiException
 
 from src.contracts.execution_intent import ExecutionIntent
 from src.contracts.semantic_types import Direction
@@ -68,6 +71,7 @@ logger = logging.getLogger(__name__)
 _DERIVED_API_CREDS_CACHE: dict[tuple[str, int, str, int, str], Any] = {}
 _ABSOLUTE_LIVE_PRICE_MIN = Decimal("0.05")
 _ABSOLUTE_LIVE_PRICE_MAX = Decimal("0.95")
+_ACCOUNT_TRUTH_MAX_PAGES = 100
 
 
 def _assert_absolute_live_price_before_sdk(price: Decimal | str | float) -> Decimal:
@@ -273,6 +277,14 @@ class TradeFact:
 
 
 @dataclass(frozen=True)
+class AccountTruth:
+    """One complete, authenticated account snapshot captured under one deadline."""
+
+    open_orders: tuple[OrderState, ...]
+    trades: tuple[TradeFact, ...]
+
+
+@dataclass(frozen=True)
 class PositionFact:
     raw: dict[str, Any]
 
@@ -326,6 +338,13 @@ class PolymarketV2AdapterProtocol(Protocol):
 
     def get_order(self, order_id: str) -> OrderState: ...
 
+    def get_account_truth(
+        self,
+        *,
+        deadline_monotonic: float,
+        max_pages: int = _ACCOUNT_TRUTH_MAX_PAGES,
+    ) -> AccountTruth: ...
+
     def get_open_orders(self, filter: OpenOrdersFilter | None = None) -> list[OrderState]: ...
 
     def get_trades(self, since: Optional[str] = None) -> list[TradeFact]: ...
@@ -370,6 +389,12 @@ class V2AdapterError(RuntimeError):
 
 class V2ReadUnavailable(V2AdapterError):
     """Raised when a read surface is unavailable and absence cannot be proven."""
+
+
+class IncompleteAccountTruthError(V2ReadUnavailable):
+    """Typed fail-closed account-read failure; empty data is never inferred."""
+
+    code = "INCOMPLETE_ACCOUNT_TRUTH"
 
 
 class PolymarketV2Adapter:
@@ -827,6 +852,14 @@ class PolymarketV2Adapter:
                     signed_order=signed_order,
                     signed_order_hash=signed_hash,
                 )
+            if post_started and _is_polymarket_order_manager_not_ready_425_error(exc):
+                return _rejected_submit_result(
+                    envelope,
+                    error_code="venue_order_manager_not_ready_425",
+                    error_message=str(exc),
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                )
             if post_started and _is_polymarket_invalid_safe_signature_error(exc):
                 logger.error(
                     "VENUE_ORDER_SIGNATURE_REJECTED: deterministic invalid Safe "
@@ -948,12 +981,10 @@ class PolymarketV2Adapter:
         live-authority first (no SDK contact on a placeholder envelope). A
         signing failure (create_order) for ANY envelope aborts the WHOLE
         call before any network contact -- no partial submission of an
-        unsigned order. If the post_orders() HTTP call itself raises AFTER
-        all orders are signed, this method does NOT catch it (mirrors
-        submit()'s _submit_once: the exception propagates so the caller can
-        record the AMBIGUOUS side effect -- signing succeeded, the network
-        outcome is unknown -- as SUBMIT_TIMEOUT_UNKNOWN, matching the
-        single-order executor.py:4697-4759 pattern).
+        unsigned order. Transport and non-definitive server exceptions after
+        signing still propagate so the caller records the ambiguous side
+        effect. The exact synchronous 425 order-manager-not-ready response is
+        the sole deterministic whole-batch rejection handled here.
         """
         if not envelopes:
             return []
@@ -1081,12 +1112,27 @@ class PolymarketV2Adapter:
                 for i, e in enumerate(envelopes)
             ]
 
-        # Deliberately NOT wrapped in try/except: a post-signing exception
-        # here is an AMBIGUOUS side effect (venue may have received the
-        # request). Propagate so the caller records SUBMIT_TIMEOUT_UNKNOWN
-        # for every command in this chunk, mirroring executor.py's
-        # single-order post-submit exception handling.
-        raw_response = client.post_orders(post_orders_args, post_only=batch_post_only, defer_exec=False)
+        try:
+            raw_response = client.post_orders(
+                post_orders_args,
+                post_only=batch_post_only,
+                defer_exec=False,
+            )
+        except Exception as exc:
+            if not _is_polymarket_order_manager_not_ready_425_error(exc):
+                # Transport errors and non-definitive server failures remain
+                # ambiguous because the venue may have accepted a prefix.
+                raise
+            return [
+                _rejected_submit_result(
+                    envelope,
+                    error_code="venue_order_manager_not_ready_425",
+                    error_message=str(exc),
+                    signed_order=signed_orders[i],
+                    signed_order_hash=signed_hashes[i],
+                )
+                for i, envelope in enumerate(envelopes)
+            ]
 
         mapped = map_batch_items(
             raw_response,
@@ -1177,6 +1223,290 @@ class PolymarketV2Adapter:
         raw_dict["status"] = outcome.status
         raw_dict["_venue_order_status"] = outcome.status
         return OrderState(order_id=outcome.order_id, status=outcome.status, raw=raw_dict)
+
+    @staticmethod
+    def _account_truth_deadline_remaining(deadline_monotonic: float) -> float:
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if remaining <= 0.0:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: account snapshot deadline elapsed"
+            )
+        return remaining
+
+    async def _account_truth_json_get_async(
+        self,
+        http: Any,
+        endpoint: str,
+        *,
+        headers: dict[str, str] | None,
+        params: dict[str, str] | None,
+        deadline_monotonic: float,
+    ) -> Any:
+        """Issue one request inside the snapshot's shared end-to-end deadline."""
+        remaining = self._account_truth_deadline_remaining(deadline_monotonic)
+        try:
+            # ``httpx.Timeout`` bounds phases independently.  ``asyncio.timeout``
+            # cancels the entire await (DNS/connect/TLS/read/pool) at this
+            # snapshot's remaining monotonic budget instead.
+            async with asyncio.timeout(remaining):
+                response = await http.get(endpoint, headers=headers, params=params)
+            if response.status_code != 200:
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: authenticated account read returned "
+                    f"HTTP {response.status_code}"
+                )
+            decoded = response.json()
+        except IncompleteAccountTruthError:
+            raise
+        except TimeoutError as exc:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: account snapshot deadline elapsed"
+            ) from exc
+        except Exception as exc:  # TLS, timeout, decode, and transport faults are unknown truth.
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: authenticated account read failed"
+            ) from exc
+        self._account_truth_deadline_remaining(deadline_monotonic)
+        return decoded
+
+    async def _account_truth_headers_async(
+        self,
+        http: Any,
+        client: Any,
+        *,
+        request_path: str,
+        deadline_monotonic: float,
+        timestamp: int | None = None,
+    ) -> tuple[dict[str, str], int]:
+        """Build endpoint-specific headers from one snapshot server timestamp."""
+        try:
+            from py_clob_client_v2.clob_types import RequestArgs
+            from py_clob_client_v2.endpoints import TIME
+            from py_clob_client_v2.headers.headers import create_level_2_headers
+        except Exception as exc:  # pragma: no cover - installed SDK import surface
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: SDK authentication helpers unavailable"
+            ) from exc
+
+        if timestamp is None:
+            host = str(getattr(client, "host", self.host)).rstrip("/")
+            clock = await self._account_truth_json_get_async(
+                http,
+                f"{host}{TIME}",
+                headers=None,
+                params=None,
+                deadline_monotonic=deadline_monotonic,
+            )
+            if isinstance(clock, bool):
+                raw_timestamp = None
+            elif isinstance(clock, (int, float)):
+                raw_timestamp = clock
+            elif isinstance(clock, dict):
+                raw_timestamp = clock.get("time") or clock.get("timestamp")
+            else:
+                raw_timestamp = None
+            try:
+                timestamp = int(raw_timestamp)
+            except (OverflowError, TypeError, ValueError) as exc:
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: /time response lacks a valid timestamp"
+                ) from exc
+        try:
+            return (
+                create_level_2_headers(
+                    client.signer,
+                    client.creds,
+                    RequestArgs(method="GET", request_path=request_path),
+                    timestamp=timestamp,
+                ),
+                timestamp,
+            )
+        except Exception as exc:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: could not sign authenticated account read"
+            ) from exc
+
+    async def _account_truth_pages_async(
+        self,
+        http: Any,
+        client: Any,
+        *,
+        request_path: str,
+        headers: dict[str, str],
+        deadline_monotonic: float,
+        max_pages: int,
+    ) -> list[dict[str, Any]]:
+        try:
+            from py_clob_client_v2.constants import END_CURSOR, INITIAL_CURSOR
+        except Exception as exc:  # pragma: no cover - installed SDK import surface
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: SDK pagination constants unavailable"
+            ) from exc
+
+        host = str(getattr(client, "host", self.host)).rstrip("/")
+        cursor = INITIAL_CURSOR
+        seen_cursors: set[str] = set()
+        rows: list[dict[str, Any]] = []
+        for _page in range(max_pages):
+            cursor_text = str(cursor)
+            if not cursor_text or cursor_text in seen_cursors:
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: pagination cursor repeated or missing"
+                )
+            seen_cursors.add(cursor_text)
+            payload = await self._account_truth_json_get_async(
+                http,
+                f"{host}{request_path}",
+                headers=headers,
+                params={"next_cursor": cursor_text},
+                deadline_monotonic=deadline_monotonic,
+            )
+            if not isinstance(payload, dict):
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: pagination page returned non-object payload"
+                )
+            page_rows = payload.get("data")
+            if not isinstance(page_rows, list) or not all(
+                isinstance(row, dict) for row in page_rows
+            ):
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: pagination page lacks a list of object rows"
+                )
+            rows.extend(dict(row) for row in page_rows)
+            next_cursor = payload.get("next_cursor")
+            if next_cursor == END_CURSOR:
+                return rows
+            if not isinstance(next_cursor, str) or not next_cursor:
+                raise IncompleteAccountTruthError(
+                    "INCOMPLETE_ACCOUNT_TRUTH: pagination page lacks next_cursor"
+                )
+            cursor = next_cursor
+        raise IncompleteAccountTruthError(
+            "INCOMPLETE_ACCOUNT_TRUTH: pagination exceeded bounded page limit"
+        )
+
+    @staticmethod
+    def _open_order_states(raw_rows: list[dict[str, Any]]) -> list[OrderState]:
+        states: list[OrderState] = []
+        for item in raw_rows:
+            item_dict = _normalize_v2_amount_response(
+                dict(item),
+                endpoint="get_open_orders",
+            )
+            outcome = parse_order_status(item_dict, fallback_order_id="", endpoint="get_open_orders")
+            item_dict["_v2_wire_status"] = str(
+                item_dict.get("status") or item_dict.get("state") or ""
+            )
+            item_dict["status"] = outcome.status
+            item_dict["_venue_order_status"] = outcome.status
+            states.append(OrderState(order_id=outcome.order_id, status=outcome.status, raw=item_dict))
+        return states
+
+    @staticmethod
+    def _trade_facts(raw_rows: list[dict[str, Any]]) -> list[TradeFact]:
+        return [TradeFact(raw=dict(item)) for item in raw_rows]
+
+    async def _get_account_truth_async(
+        self,
+        *,
+        deadline_monotonic: float,
+        max_pages: int,
+    ) -> AccountTruth:
+        try:
+            import httpx
+            from py_clob_client_v2.endpoints import ORDERS, TRADES
+        except Exception as exc:  # pragma: no cover - installed SDK import surface
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: SDK account endpoints unavailable"
+            ) from exc
+
+        remaining = self._account_truth_deadline_remaining(deadline_monotonic)
+        client = self._sdk_client()
+        try:
+            # Keep one client for the entire account snapshot.  The outer timeout
+            # covers every phase and both surfaces; leaving the context closes all
+            # sockets after cancellation before the synchronous caller resumes.
+            async with httpx.AsyncClient(http2=False, timeout=None) as http:
+                async with asyncio.timeout(remaining):
+                    orders_headers, server_timestamp = (
+                        await self._account_truth_headers_async(
+                            http,
+                            client,
+                            request_path=ORDERS,
+                            deadline_monotonic=deadline_monotonic,
+                        )
+                    )
+                    trades_headers, _ = await self._account_truth_headers_async(
+                        http,
+                        client,
+                        request_path=TRADES,
+                        deadline_monotonic=deadline_monotonic,
+                        timestamp=server_timestamp,
+                    )
+                    open_orders = await self._account_truth_pages_async(
+                        http,
+                        client,
+                        request_path=ORDERS,
+                        headers=orders_headers,
+                        deadline_monotonic=deadline_monotonic,
+                        max_pages=max_pages,
+                    )
+                    trades = await self._account_truth_pages_async(
+                        http,
+                        client,
+                        request_path=TRADES,
+                        headers=trades_headers,
+                        deadline_monotonic=deadline_monotonic,
+                        max_pages=max_pages,
+                    )
+                    self._account_truth_deadline_remaining(deadline_monotonic)
+                    return AccountTruth(
+                        open_orders=tuple(self._open_order_states(open_orders)),
+                        trades=tuple(self._trade_facts(trades)),
+                    )
+        except IncompleteAccountTruthError:
+            raise
+        except TimeoutError as exc:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: account snapshot deadline elapsed"
+            ) from exc
+        except Exception as exc:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: authenticated account snapshot failed"
+            ) from exc
+
+    def get_account_truth(
+        self,
+        *,
+        deadline_monotonic: float,
+        max_pages: int = _ACCOUNT_TRUTH_MAX_PAGES,
+    ) -> AccountTruth:
+        """Read complete orders and trades under one wall-clock deadline.
+
+        SCOPE=trading account; DRAIN=the next cadence's complete snapshot;
+        RESET=a full orders+trades snapshot before its shared deadline.  Any
+        timeout, TLS failure, malformed page, repeated cursor, or page-limit
+        breach raises ``INCOMPLETE_ACCOUNT_TRUTH`` rather than returning a
+        partial list that a caller could mistake for absence.
+        """
+        _assert_no_world_mutex_held_for_io("venue.get_account_truth")
+        if max_pages <= 0:
+            raise ValueError("max_pages must be positive")
+        self._account_truth_deadline_remaining(deadline_monotonic)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: synchronous account read cannot nest in a running event loop"
+            )
+        return asyncio.run(
+            self._get_account_truth_async(
+                deadline_monotonic=deadline_monotonic,
+                max_pages=max_pages,
+            )
+        )
 
     def get_open_orders(self, filter: OpenOrdersFilter | None = None) -> list[OrderState]:
         _assert_no_world_mutex_held_for_io("venue.get_open_orders")
@@ -1292,6 +1622,71 @@ class PolymarketV2Adapter:
         if balance is None:
             raise V2AdapterError("balance allowance response missing balance")
         return balance
+
+    def get_chain_pusd_collateral_payload(self) -> dict[str, Any]:
+        """Read pUSD balance and both executable allowances in one chain snapshot.
+
+        The post-trade collateral heartbeat is a cold child process. Reusing one
+        JSON-RPC request for all three ERC-20 facts avoids three independent TLS
+        handshakes while preserving chain authority and one response boundary.
+        """
+
+        if not self.polygon_rpc_url:
+            raise V2ReadUnavailable("polygon RPC is required for chain pUSD collateral truth")
+        collateral, spenders = _collateral_allowance_contracts(self.chain_id)
+        calls = [
+            (
+                "eth_call",
+                [
+                    {
+                        "to": collateral,
+                        "data": "0x70a08231" + _abi_address(self.funder_address),
+                    },
+                    "latest",
+                ],
+            ),
+            *[
+                (
+                    "eth_call",
+                    [
+                        {
+                            "to": collateral,
+                            "data": (
+                                "0xdd62ed3e"
+                                + _abi_address(self.funder_address)
+                                + _abi_address(spender)
+                            ),
+                        },
+                        "latest",
+                    ],
+                )
+                for spender in spenders
+            ],
+        ]
+        values = _json_rpc_batch_call(
+            self.polygon_rpc_url,
+            calls,
+            timeout_seconds=self._network_timeout(20.0),
+        )
+        if len(values) != 3:
+            raise V2AdapterError(
+                f"polygon collateral batch returned {len(values)} results; expected 3"
+            )
+        balance, exchange_allowance, neg_risk_allowance = (
+            _uint256_hex_data_int(value, context="polygon collateral batch")
+            for value in values
+        )
+        return {
+            "pusd_balance_micro": balance,
+            "pusd_allowance_micro": min(exchange_allowance, neg_risk_allowance),
+            "usdc_e_legacy_balance_micro": 0,
+            "ctf_token_balances_units": {},
+            "ctf_token_allowances_units": {},
+            "authority_tier": "CHAIN",
+            "signature_type": self.signature_type,
+            "pusd_balance_source": "CHAIN",
+            "pusd_allowance_source": "chain_erc20_batch",
+        }
 
     def _pusd_collateral_payload_from_raw(
         self,
@@ -2562,6 +2957,19 @@ def _is_polymarket_geoblock_403_error(exc: BaseException) -> bool:
     )
 
 
+def _is_polymarket_order_manager_not_ready_425_error(
+    exc: BaseException,
+) -> bool:
+    """Recognize the venue's synchronous pre-order-manager rejection."""
+
+    return (
+        isinstance(exc, PolyApiException)
+        and exc.status_code == 425
+        and exc.error_msg
+        == {"error": "order manager not ready, please retry"}
+    )
+
+
 def _is_polymarket_fok_killed_error(exc: BaseException) -> bool:
     text = " ".join(f"{type(exc).__name__}:{exc}".split()).lower()
     return (
@@ -2766,6 +3174,84 @@ def _json_rpc_call(
     if "error" in decoded:
         raise V2AdapterError(f"polygon rpc error: {decoded['error']}")
     return decoded.get("result")
+
+
+def _json_rpc_batch_call(
+    rpc_url: str,
+    calls: list[tuple[str, list[Any]]],
+    *,
+    timeout_seconds: float = 20.0,
+) -> list[Any]:
+    """Execute one ordered JSON-RPC batch and reject partial/ambiguous truth."""
+
+    _assert_no_world_mutex_held_for_io("onchain.batch")
+    if not calls:
+        return []
+    payload = json.dumps(
+        [
+            {"jsonrpc": "2.0", "id": index, "method": method, "params": params}
+            for index, (method, params) in enumerate(calls, start=1)
+        ],
+        separators=(",", ":"),
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        rpc_url,
+        data=payload,
+        headers={
+            "content-type": "application/json",
+            "user-agent": "zeus-readonly/1.0",
+        },
+    )
+    with urllib.request.urlopen(
+        request,
+        timeout=max(0.01, float(timeout_seconds)),
+    ) as response:
+        decoded = json.loads(response.read())
+    if not isinstance(decoded, list):
+        raise V2AdapterError("polygon rpc batch returned non-list payload")
+    by_id: dict[int, Any] = {}
+    for item in decoded:
+        if not isinstance(item, dict):
+            raise V2AdapterError("polygon rpc batch returned non-object item")
+        if item.get("jsonrpc") != "2.0":
+            raise V2AdapterError("polygon rpc batch returned invalid jsonrpc version")
+        response_id = item.get("id")
+        if type(response_id) is not int or response_id in by_id:
+            raise V2AdapterError("polygon rpc batch returned invalid or duplicate id")
+        if "error" in item:
+            raise V2AdapterError(f"polygon rpc batch error id={response_id}: {item['error']}")
+        if "result" not in item:
+            raise V2AdapterError(f"polygon rpc batch missing result id={response_id}")
+        result = item["result"]
+        _hex_data_bytes(result, context=f"polygon rpc batch id={response_id}")
+        by_id[response_id] = result
+    expected_ids = set(range(1, len(calls) + 1))
+    if set(by_id) != expected_ids:
+        raise V2AdapterError(
+            f"polygon rpc batch incomplete ids={sorted(by_id)} expected={sorted(expected_ids)}"
+        )
+    return [by_id[index] for index in range(1, len(calls) + 1)]
+
+
+def _hex_data_bytes(value: Any, *, context: str) -> bytes:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("0x")
+        or len(value) <= 2
+        or len(value[2:]) % 2 != 0
+    ):
+        raise V2AdapterError(f"{context} invalid hex data")
+    try:
+        return bytes.fromhex(value[2:])
+    except ValueError as exc:
+        raise V2AdapterError(f"{context} invalid hex data") from exc
+
+
+def _uint256_hex_data_int(value: Any, *, context: str) -> int:
+    raw = _hex_data_bytes(value, context=context)
+    if len(raw) != 32:
+        raise V2AdapterError(f"{context} expected 32-byte uint256 result")
+    return int.from_bytes(raw, "big")
 
 
 def _normalize_condition_id_bytes32(condition_id: str) -> bytes:

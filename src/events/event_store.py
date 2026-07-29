@@ -2778,35 +2778,177 @@ class EventStore:
         *,
         claimed_at: str,
         attempt_count: int,
+        not_before: str | None = None,
         last_error: str | None = None,
     ) -> bool:
-        """Requeue only the exact processing generation owned by the caller."""
+        """Disposition only the exact processing generation owned by the caller.
+
+        A targeted global winner whose durable pointer was superseded is no
+        longer retryable. Expire that exact generation without rebinding the
+        pointer; otherwise preserve the targeted reason so the current pointer
+        remains discoverable. The transaction fences the read/decision/update
+        even when a caller reaches this method outside an existing write unit.
+        """
 
         self._require_world_event_tables()
-        cur = self.conn.execute(
+        owns_transaction = not self.conn.in_transaction
+        if owns_transaction:
+            self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                """
+                SELECT last_error
+                  FROM opportunity_event_processing
+                 WHERE consumer_name = ?
+                   AND event_id = ?
+                   AND processing_status = 'processing'
+                   AND claimed_at = ?
+                   AND attempt_count = ?
+                """,
+                (
+                    self.consumer_name,
+                    event_id,
+                    claimed_at,
+                    int(attempt_count),
+                ),
+            ).fetchone()
+            if row is None:
+                if owns_transaction:
+                    self.conn.commit()
+                return False
+            targeted = str(row[0] or "") == GLOBAL_WINNER_TARGETED_CLAIM
+            pointer_current = bool(
+                targeted
+                and self.conn.execute(
+                    """
+                    SELECT 1
+                      FROM opportunity_event_processing
+                     WHERE consumer_name = ?
+                       AND event_id = ?
+                       AND processing_status = 'pending'
+                     LIMIT 1
+                    """,
+                    (self._winner_pointer_consumer_name, event_id),
+                ).fetchone()
+            )
+            now = _utc_now()
+            if targeted and not pointer_current:
+                cur = self.conn.execute(
+                    """
+                    UPDATE opportunity_event_processing
+                       SET processing_status = 'expired',
+                           claimed_at = NULL,
+                           processed_at = ?,
+                           last_error = 'GLOBAL_WINNER_TARGET_SUPERSEDED',
+                           updated_at = ?
+                     WHERE consumer_name = ?
+                       AND event_id = ?
+                       AND processing_status = 'processing'
+                       AND claimed_at = ?
+                       AND attempt_count = ?
+                    """,
+                    (
+                        now,
+                        now,
+                        self.consumer_name,
+                        event_id,
+                        claimed_at,
+                        int(attempt_count),
+                    ),
+                )
+                self._forget_winner(event_id)
+            else:
+                cur = self.conn.execute(
+                    """
+                    UPDATE opportunity_event_processing
+                       SET processing_status = 'pending',
+                           claimed_at = ?,
+                           processed_at = NULL,
+                           last_error = ?,
+                           updated_at = ?
+                     WHERE consumer_name = ?
+                       AND event_id = ?
+                       AND processing_status = 'processing'
+                       AND claimed_at = ?
+                       AND attempt_count = ?
+                    """,
+                    (
+                        None if targeted else not_before,
+                        (
+                            GLOBAL_WINNER_TARGETED_CLAIM
+                            if targeted
+                            else last_error
+                        ),
+                        now,
+                        self.consumer_name,
+                        event_id,
+                        claimed_at,
+                        int(attempt_count),
+                    ),
+                )
+            if owns_transaction:
+                self.conn.commit()
+            return cur.rowcount == 1
+        except Exception:
+            if owns_transaction:
+                self.conn.rollback()
+            raise
+
+    def _reconcile_boot_winner_pointer(self, *, updated_at: str) -> None:
+        """Recover only winner claims whose process owner died before this boot."""
+
+        rows = self.conn.execute(
             """
-            UPDATE opportunity_event_processing
-               SET processing_status = 'pending',
-                   claimed_at = NULL,
-                   processed_at = NULL,
-                   last_error = ?,
-                   updated_at = ?
-             WHERE consumer_name = ?
-               AND event_id = ?
-               AND processing_status = 'processing'
-               AND claimed_at = ?
-               AND attempt_count = ?
+            SELECT p.event_id, e.received_at
+              FROM opportunity_event_processing p
+              JOIN opportunity_events e ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status = 'pending'
+               AND p.claimed_at IS NULL
+               AND p.last_error = ?
             """,
-            (
-                last_error,
-                _utc_now(),
-                self.consumer_name,
-                event_id,
-                claimed_at,
-                int(attempt_count),
-            ),
+            (self.consumer_name, GLOBAL_WINNER_TARGETED_CLAIM),
+        ).fetchall()
+        candidates = [
+            (str(row[0] or ""), str(row[1] or ""))
+            for row in rows
+            if row[0] and row[1]
+        ]
+        if not candidates:
+            self._bootstrap_legacy_winner_pointer(updated_at=updated_at)
+            return
+        winner_id, received_at = max(
+            candidates,
+            key=lambda row: (row[1], row[0]),
         )
-        return cur.rowcount == 1
+        loser_ids = sorted(
+            event_id for event_id, _ in candidates if event_id != winner_id
+        )
+        for start in range(0, len(loser_ids), 250):
+            chunk = loser_ids[start : start + 250]
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       last_error = 'GLOBAL_WINNER_TARGET_SUPERSEDED',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND processing_status = 'pending'
+                   AND last_error = ?
+                   AND event_id IN ({placeholders})
+                """,
+                (
+                    updated_at,
+                    updated_at,
+                    self.consumer_name,
+                    GLOBAL_WINNER_TARGETED_CLAIM,
+                    *chunk,
+                ),
+            )
+        self._bind_winner_pointer(winner_id, updated_at=updated_at)
+        self._set_winner(winner_id, received_at)
 
     def requeue_processing_before_boot(self, *, boot_at: str) -> int:
         """Recover claims whose process owner predates this runtime generation."""
@@ -2836,7 +2978,7 @@ class EventStore:
                 boundary,
             ),
         )
-        self._bootstrap_legacy_winner_pointer(updated_at=now)
+        self._reconcile_boot_winner_pointer(updated_at=now)
         return int(cur.rowcount)
 
     def prioritize_global_winner(

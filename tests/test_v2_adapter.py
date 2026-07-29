@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-28
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
@@ -11,15 +11,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib
+import json
 import sqlite3
 import sys
+import time
 import types
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -152,6 +156,18 @@ class FakeGeoblockClient(FakeTwoStepClient):
             "restricted in your region, please refer to available regions - "
             "https://docs.polymarket.com/developers/CLOB/geoblock'}]"
         )
+
+
+class FakeOrderManagerNotReady425Client(FakeTwoStepClient):
+    def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
+        from py_clob_client_v2.exceptions import PolyApiException
+
+        self.calls.append(("post_order", order, order_type, post_only, defer_exec))
+        response = SimpleNamespace(
+            status_code=425,
+            json=lambda: {"error": "order manager not ready, please retry"},
+        )
+        raise PolyApiException(response)
 
 
 class FakeFokKilledClient(FakeTwoStepClient):
@@ -944,6 +960,136 @@ def test_pusd_collateral_payload_can_skip_clob_update_and_use_chain_allowance(tm
     assert len(rpc_calls) == 2
 
 
+def test_chain_pusd_collateral_payload_batches_balance_and_both_allowances(
+    monkeypatch,
+    tmp_path,
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    observed = {}
+
+    def batch_call(url, calls, *, timeout_seconds):
+        observed.update(url=url, calls=calls, timeout_seconds=timeout_seconds)
+        return [
+            f"0x{123:064x}",
+            f"0x{((2**256) - 1):064x}",
+            f"0x{((2**256) - 2):064x}",
+        ]
+
+    monkeypatch.setattr(adapter_mod, "_json_rpc_batch_call", batch_call)
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        polygon_rpc_url="https://rpc.test",
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: pytest.fail("chain batch must not create a CLOB client"),
+        network_timeout_seconds=17,
+    )
+
+    payload = adapter.get_chain_pusd_collateral_payload()
+
+    assert payload["pusd_balance_micro"] == 123
+    assert payload["pusd_allowance_micro"] == (2**256) - 2
+    assert payload["authority_tier"] == "CHAIN"
+    assert payload["pusd_balance_source"] == "CHAIN"
+    assert payload["pusd_allowance_source"] == "chain_erc20_batch"
+    assert observed["url"] == "https://rpc.test"
+    assert observed["timeout_seconds"] == 17
+    assert len(observed["calls"]) == 3
+    assert {method for method, _params in observed["calls"]} == {"eth_call"}
+
+
+def test_json_rpc_batch_rejects_partial_chain_truth(monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                [{"jsonrpc": "2.0", "id": 1, "result": f"0x{1:064x}"}]
+            ).encode()
+
+    monkeypatch.setattr(adapter_mod.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response())
+
+    with pytest.raises(adapter_mod.V2AdapterError, match="batch incomplete"):
+        adapter_mod._json_rpc_batch_call(
+            "https://rpc.test",
+            [
+                ("eth_call", [{"to": "0x1"}, "latest"]),
+                ("eth_call", [{"to": "0x2"}, "latest"]),
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"jsonrpc": "2.0", "id": True, "result": "0x1"},
+        {"jsonrpc": "2.0", "id": 1, "result": None},
+        {"jsonrpc": "2.0", "id": 1, "result": ""},
+        {"jsonrpc": "2.0", "id": 1, "result": "0xwat0"},
+        {"id": 1, "result": "0x1"},
+    ],
+)
+def test_json_rpc_batch_rejects_invalid_identity_or_quantity(monkeypatch, item):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps([item]).encode()
+
+    monkeypatch.setattr(adapter_mod.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response())
+
+    with pytest.raises(adapter_mod.V2AdapterError):
+        adapter_mod._json_rpc_batch_call(
+            "https://rpc.test",
+            [("eth_call", [{"to": "0x1"}, "latest"])],
+        )
+
+
+@pytest.mark.parametrize("value", [None, "", "0xwat0", "0x00"])
+def test_chain_pusd_collateral_payload_rejects_invalid_batch_quantity(
+    monkeypatch,
+    tmp_path,
+    value,
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "_json_rpc_batch_call",
+        lambda *_args, **_kwargs: [value, "0x1", "0x1"],
+    )
+    adapter = PolymarketV2Adapter(
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        polygon_rpc_url="https://rpc.test",
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+    )
+
+    with pytest.raises(
+        adapter_mod.V2AdapterError,
+        match="invalid hex data|expected 32-byte uint256",
+    ):
+        adapter.get_chain_pusd_collateral_payload()
+
+
 def test_collateral_payload_rederives_once_when_runtime_l2_creds_are_stale(tmp_path):
     import src.venue.polymarket_v2_adapter as adapter_mod
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
@@ -1533,6 +1679,197 @@ def test_get_trades_requests_all_pages_from_sdk(tmp_path):
     assert trades[0].raw["id"] == "trade-open"
 
 
+def test_account_truth_reads_time_and_each_account_surface_with_one_deadline(tmp_path, monkeypatch):
+    import httpx
+    import py_clob_client_v2.headers.headers as headers_mod
+    from py_clob_client_v2.constants import END_CURSOR
+
+    class FakeAccountClient:
+        host = "https://clob-v2.polymarket.com"
+        signer = object()
+        creds = object()
+
+    adapter, _ = _adapter(tmp_path, FakeAccountClient())
+    calls = []
+    header_paths = []
+    http_clients = []
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    def fake_async_client(**kwargs):
+        client = FakeAsyncClient()
+        http_clients.append((client, kwargs))
+        return client
+
+    monkeypatch.setattr(
+        headers_mod,
+        "create_level_2_headers",
+        lambda _signer, _creds, args, timestamp: (
+            header_paths.append(args.request_path) or {"x-time": str(timestamp)}
+        ),
+    )
+    monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
+
+    async def fake_get(_http, endpoint, *, headers, params, deadline_monotonic):
+        calls.append((endpoint, headers, params, deadline_monotonic))
+        if endpoint.endswith("/time"):
+            return 1_700_000_000
+        if endpoint.endswith("/data/orders"):
+            if len([call for call in calls if call[0].endswith("/data/orders")]) == 1:
+                return {
+                    "data": [{
+                        "orderID": "ord-account",
+                        "status": "LIVE",
+                        "original_size": "10000000",
+                        "size_matched": "0",
+                    }],
+                    "next_cursor": "orders-page-2",
+                }
+            return {
+                "data": [{
+                    "orderID": "ord-account-2",
+                    "status": "LIVE",
+                    "original_size": "10000000",
+                    "size_matched": "0",
+                }],
+                "next_cursor": END_CURSOR,
+            }
+        if endpoint.endswith("/data/trades"):
+            return {
+                "data": [{"id": "trade-account", "status": "MATCHED"}],
+                "next_cursor": END_CURSOR,
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(adapter, "_account_truth_json_get_async", fake_get)
+    deadline = time.monotonic() + 5.0
+    truth = adapter.get_account_truth(deadline_monotonic=deadline)
+
+    assert [endpoint.rsplit("/", 1)[-1] for endpoint, *_rest in calls] == [
+        "time",
+        "orders",
+        "orders",
+        "trades",
+    ]
+    assert all(call[-1] == deadline for call in calls)
+    assert header_paths == ["/data/orders", "/data/trades"]
+    assert len(http_clients) == 1
+    assert http_clients[0][1] == {"http2": False, "timeout": None}
+    assert [state.order_id for state in truth.open_orders] == ["ord-account", "ord-account-2"]
+    assert [trade.raw["id"] for trade in truth.trades] == ["trade-account"]
+
+
+def test_account_truth_deadline_and_page_limit_fail_closed_with_bounded_calls(tmp_path, monkeypatch):
+    from src.venue.polymarket_v2_adapter import IncompleteAccountTruthError
+
+    class FakeAccountClient:
+        host = "https://clob-v2.polymarket.com"
+
+    adapter, _ = _adapter(tmp_path, FakeAccountClient())
+    calls = []
+
+    async def forbidden_get(*_args, **_kwargs):
+        calls.append("network")
+        raise AssertionError("expired deadline must prevent every network call")
+
+    monkeypatch.setattr(adapter, "_account_truth_json_get_async", forbidden_get)
+    with pytest.raises(IncompleteAccountTruthError, match="INCOMPLETE_ACCOUNT_TRUTH"):
+        adapter.get_account_truth(deadline_monotonic=time.monotonic() - 0.01)
+    assert calls == []
+
+    async def fake_headers(*_args, **_kwargs):
+        return {}, 1_700_000_000
+
+    async def incomplete_page(*_args, **_kwargs):
+        calls.append("page")
+        return {"data": [], "next_cursor": "more-pages"}
+
+    monkeypatch.setattr(adapter, "_account_truth_headers_async", fake_headers)
+    monkeypatch.setattr(
+        adapter,
+        "_account_truth_json_get_async",
+        incomplete_page,
+    )
+    with pytest.raises(IncompleteAccountTruthError, match="bounded page limit"):
+        adapter.get_account_truth(
+            deadline_monotonic=time.monotonic() + 5.0,
+            max_pages=1,
+        )
+    assert calls == ["page"]
+
+
+def test_account_truth_transport_deadline_covers_combined_request_phases(tmp_path):
+    from src.venue.polymarket_v2_adapter import IncompleteAccountTruthError
+
+    adapter, _ = _adapter(tmp_path, object())
+
+    class SlowTransport:
+        async def get(self, *_args, **_kwargs):
+            # Simulate two independent transport phases; a per-phase timeout
+            # could admit both waits even though their aggregate exceeds budget.
+            await asyncio.sleep(0.008)
+            await asyncio.sleep(0.008)
+            raise AssertionError("combined phases should have been cancelled")
+
+    started = time.monotonic()
+    with pytest.raises(IncompleteAccountTruthError, match="deadline elapsed"):
+        asyncio.run(
+            adapter._account_truth_json_get_async(
+                SlowTransport(),
+                "https://clob-v2.polymarket.com/data/orders",
+                headers=None,
+                params=None,
+                deadline_monotonic=started + 0.010,
+            )
+        )
+    assert time.monotonic() - started < 0.10
+
+
+def test_account_truth_shared_deadline_interrupts_cross_phase_wait(tmp_path, monkeypatch):
+    from src.venue.polymarket_v2_adapter import IncompleteAccountTruthError
+    import py_clob_client_v2.headers.headers as headers_mod
+    from py_clob_client_v2.constants import END_CURSOR
+
+    class FakeAccountClient:
+        host = "https://clob-v2.polymarket.com"
+        signer = object()
+        creds = object()
+
+    adapter, _ = _adapter(tmp_path, FakeAccountClient())
+    calls = []
+    monkeypatch.setattr(
+        headers_mod,
+        "create_level_2_headers",
+        lambda _signer, _creds, _args, timestamp: {"x-time": str(timestamp)},
+    )
+
+    async def slow_request(_http, endpoint, **_kwargs):
+        surface = endpoint.rsplit("/", 1)[-1]
+        calls.append(surface)
+        if surface == "time":
+            return 1_700_000_000
+        if surface == "orders":
+            await asyncio.sleep(0.008)
+            return {"data": [], "next_cursor": END_CURSOR}
+        if surface == "trades":
+            await asyncio.sleep(0.05)
+            return {"data": [], "next_cursor": END_CURSOR}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(adapter, "_account_truth_json_get_async", slow_request)
+    started = time.monotonic()
+    with pytest.raises(IncompleteAccountTruthError, match="deadline elapsed"):
+        adapter.get_account_truth(deadline_monotonic=started + 0.025)
+
+    assert calls == ["time", "orders", "trades"]
+    assert time.monotonic() - started < 0.10
+
+
 def test_submit_limit_order_rejects_before_sdk_submit_when_fee_bps_missing(tmp_path):
     class MissingFeeClient:
         def __init__(self):
@@ -1616,6 +1953,128 @@ def test_post_order_exception_carries_deterministic_order_identity(tmp_path, mon
     assert caught.value.envelope.signed_order == fake.signed_order
     assert caught.value.envelope.error_code == "V2_POST_SUBMIT_AMBIGUOUS"
     assert any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_order_manager_not_ready_425_is_deterministic_rejection(
+    tmp_path,
+    monkeypatch,
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeOrderManagerNotReady425Client()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(),
+        FakeSnapshot(),
+        order_type="FAK",
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_order_manager_not_ready_425"
+    assert result.envelope.error_code == "venue_order_manager_not_ready_425"
+    assert result.envelope.order_id is None
+    assert result.envelope.signed_order == fake.signed_order
+    assert any(call[0] == "post_order" for call in fake.calls)
+    from src.data.polymarket_client import _legacy_order_result_from_submit
+
+    legacy = _legacy_order_result_from_submit(result)
+    assert legacy["success"] is False
+    assert legacy["status"] == "rejected"
+    assert legacy["errorCode"] == "venue_order_manager_not_ready_425"
+
+
+def test_other_425_response_remains_ambiguous(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class Other425Client(FakeTwoStepClient):
+        def post_order(
+            self,
+            order,
+            order_type=None,
+            post_only=False,
+            defer_exec=False,
+        ):
+            self.calls.append(
+                ("post_order", order, order_type, post_only, defer_exec)
+            )
+            from py_clob_client_v2.exceptions import PolyApiException
+
+            response = SimpleNamespace(
+                status_code=425,
+                json=lambda: {"error": "request state unknown"},
+            )
+            raise PolyApiException(response)
+
+    fake = Other425Client()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(),
+        FakeSnapshot(),
+        order_type="FAK",
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    with pytest.raises(adapter_mod.AmbiguousSubmitError):
+        _submit(adapter, envelope)
+    from py_clob_client_v2.exceptions import PolyApiException
+
+    transport = PolyApiException(
+        error_msg={"error": "order manager not ready, please retry"}
+    )
+    assert transport.status_code is None
+    assert not adapter_mod._is_polymarket_order_manager_not_ready_425_error(
+        transport
+    )
+
+
+def test_runtime_error_cannot_impersonate_order_manager_425(
+    tmp_path,
+    monkeypatch,
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class Impostor425Client(FakeTwoStepClient):
+        def post_order(
+            self,
+            order,
+            order_type=None,
+            post_only=False,
+            defer_exec=False,
+        ):
+            self.calls.append(
+                ("post_order", order, order_type, post_only, defer_exec)
+            )
+            raise RuntimeError(
+                "PolyApiException[status_code=425, error_message={'error': "
+                "'order manager not ready, please retry'}]"
+            )
+
+    fake = Impostor425Client()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(),
+        FakeSnapshot(),
+        order_type="FAK",
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    with pytest.raises(adapter_mod.AmbiguousSubmitError):
+        _submit(adapter, envelope)
 
 
 def test_signed_identity_callback_runs_before_post(tmp_path, monkeypatch):
@@ -3096,6 +3555,18 @@ class FakePostOrdersExceptionClient(FakeBatchTwoStepClient):
         raise TimeoutError("post_orders timed out")
 
 
+class FakeBatchOrderManagerNotReady425Client(FakeBatchTwoStepClient):
+    def post_orders(self, args, post_only=False, defer_exec=False):
+        from py_clob_client_v2.exceptions import PolyApiException
+
+        self.calls.append(("post_orders", args, post_only, defer_exec))
+        response = SimpleNamespace(
+            status_code=425,
+            json=lambda: {"error": "order manager not ready, please retry"},
+        )
+        raise PolyApiException(response)
+
+
 class FakeCancelOrdersExceptionClient(FakeBatchTwoStepClient):
     def cancel_orders(self, order_ids):
         self.calls.append(("cancel_orders", order_ids))
@@ -3301,6 +3772,21 @@ class TestSubmitBatch:
             adapter.submit_batch(envelopes)
 
         assert any(c[0] == "post_orders" for c in fake.calls)
+
+    def test_order_manager_not_ready_425_rejects_entire_batch(self, tmp_path):
+        fake = FakeBatchOrderManagerNotReady425Client()
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 2)
+
+        results = adapter.submit_batch(envelopes)
+
+        assert [result.status for result in results] == ["rejected", "rejected"]
+        assert [result.error_code for result in results] == [
+            "venue_order_manager_not_ready_425",
+            "venue_order_manager_not_ready_425",
+        ]
+        assert all(result.envelope.order_id is None for result in results)
+        assert any(call[0] == "post_orders" for call in fake.calls)
 
 
 class TestCancelBatch:

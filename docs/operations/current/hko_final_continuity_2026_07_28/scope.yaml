@@ -1,0 +1,43 @@
+packet: current/hko_final_continuity_2026_07_28
+status: active
+owner: agent
+frontier: []
+in_scope:
+- docs/operations/current/hko_final_continuity_2026_07_28/**
+- src/ingest_main.py
+- src/data/source_job_registry.py
+- src/data/scheduler_adapter.py
+- src/data/daily_obs_append.py
+- src/state/db.py
+- tests/test_ingest_scheduler_jobs.py
+- tests/test_scheduler_adapter.py
+- tests/test_source_job_registry.py
+- tests/test_k2_live_ingestion_relationships.py
+- tests/state/test_daily_obs_cross_db_atomicity.py
+- architecture/source_rationale.yaml
+- architecture/test_topology.yaml
+allow_companions: []
+out_of_scope:
+- state/**
+- config/settings.json
+- docs/authority/**
+- src/engine/**
+- src/execution/**
+- src/main.py
+- src/control/**
+- src/supervisor_api/**
+- migrations/**
+- .github/workflows/**
+- architecture/db_table_ownership.yaml
+- architecture/invariants.yaml
+- architecture/kernel_manifest.yaml
+- architecture/module_manifest.yaml
+live_side_effects_allowed: false
+supersedes: null
+tests:
+- tests/test_ingest_scheduler_jobs.py
+- tests/test_scheduler_adapter.py
+- tests/test_source_job_registry.py
+- tests/test_step4_wu_daily_dedup.py
+- tests/state/test_daily_obs_cross_db_atomicity.py
+closeout_required: true

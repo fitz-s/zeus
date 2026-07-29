@@ -1776,9 +1776,12 @@ def _validate_terminal_partial_command_correction_payload(
     venue_order_id = str(payload.get("venue_order_id") or "")
     if command is None:
         raise ValueError("terminal partial command correction command is missing")
+    intent_side = (
+        str(command["intent_kind"] or "").upper(),
+        str(command["side"] or "").upper(),
+    )
     if (
-        str(command["intent_kind"] or "").upper() != "ENTRY"
-        or str(command["side"] or "").upper() != "BUY"
+        intent_side not in {("ENTRY", "BUY"), ("EXIT", "SELL")}
         or str(command["venue_order_id"] or "") != venue_order_id
     ):
         raise ValueError("terminal partial command correction command identity does not match")
@@ -2454,7 +2457,10 @@ def _validate_review_cancel_unknown_no_fill_payload(
         if not str(source.get(key) or "").strip():
             raise ValueError(f"cancel-unknown no-fill source_proof missing {key}")
     supported_source_reasons = (
-        {"cancel_failed_already_canceled_point_order_terminal_no_fill"}
+        {
+            "cancel_failed_already_canceled_point_order_terminal_no_fill",
+            "cancel_failed_already_canceled_point_order_no_live_record_terminal_no_fill",
+        }
         if already_canceled
         else {
             "cancel_unknown_point_order_terminal_no_fill",
@@ -3502,13 +3508,15 @@ def repair_command_position_link_if_orphaned(
     occurred_at: str,
     reason: str,
 ) -> bool:
-    """Relink a command journal row to an existing canonical position.
+    """Converge a filled command and its decision evidence on one position.
 
     This is intentionally narrower than a generic position_id edit. It only
     repairs the EDLI bridge shape where a command still points at a pre-bridge
-    short id that has no ``position_current`` row, while the canonical EDLI
-    ``position_current`` row already exists. If the command already points at a
-    different real position, the function refuses to overwrite it.
+    short id, or its command-created attribution still carries that temporary
+    id, while the canonical EDLI ``position_current`` row already exists. It
+    also restores a missing projection snapshot from the submit-gated command.
+    Certificate content remains immutable. Any conflicting real position or
+    snapshot makes the repair fail closed.
     """
 
     command_id = _require_nonempty("command_id", command_id)
@@ -3519,7 +3527,7 @@ def repair_command_position_link_if_orphaned(
     with _row_factory_as(conn, sqlite3.Row):
         command = conn.execute(
             """
-            SELECT command_id, position_id, state
+            SELECT command_id, position_id, state, snapshot_id
               FROM venue_commands
              WHERE command_id = ?
              LIMIT 1
@@ -3530,9 +3538,6 @@ def repair_command_position_link_if_orphaned(
             return False
 
         current_position_id = str(command["position_id"] or "")
-        if current_position_id == canonical_position_id:
-            return False
-
         canonical_exists = conn.execute(
             "SELECT 1 FROM position_current WHERE position_id = ? LIMIT 1",
             (canonical_position_id,),
@@ -3543,7 +3548,7 @@ def repair_command_position_link_if_orphaned(
             )
 
         current_exists = None
-        if current_position_id:
+        if current_position_id and current_position_id != canonical_position_id:
             current_exists = conn.execute(
                 "SELECT 1 FROM position_current WHERE position_id = ? LIMIT 1",
                 (current_position_id,),
@@ -3584,15 +3589,64 @@ def repair_command_position_link_if_orphaned(
             for row in execution_rows
             if str(row["position_id"] or "") == canonical_position_id
         ]
-        if len(orphan_execution_rows) > 1 or (
-            orphan_execution_rows and canonical_execution_rows
+        if current_position_id != canonical_position_id and (
+            len(orphan_execution_rows) > 1
+            or (orphan_execution_rows and canonical_execution_rows)
         ):
             raise ValueError(
                 "command position-link repair requires one command-deduped "
                 "execution fact"
             )
+
+        attribution_position_id: str | None = None
+        try:
+            attribution = conn.execute(
+                """
+                SELECT position_id
+                  FROM position_decision_attribution
+                 WHERE command_id = ?
+                 LIMIT 1
+                """,
+                (command_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            attribution = None
+        if attribution is not None:
+            attribution_position_id = str(attribution["position_id"] or "")
+            if attribution_position_id != canonical_position_id:
+                attribution_position_exists = conn.execute(
+                    "SELECT 1 FROM position_current WHERE position_id = ? LIMIT 1",
+                    (attribution_position_id,),
+                ).fetchone()
+                if attribution_position_exists is not None:
+                    raise ValueError(
+                        "command attribution-link repair refuses to overwrite "
+                        "an attribution owned by an existing position_current row"
+                    )
+
+        command_snapshot_id = str(command["snapshot_id"] or "").strip()
+        current_snapshot_id = ""
+        if command_snapshot_id:
+            position_snapshot = conn.execute(
+                """
+                SELECT decision_snapshot_id
+                  FROM position_current
+                 WHERE position_id = ?
+                 LIMIT 1
+                """,
+                (canonical_position_id,),
+            ).fetchone()
+            current_snapshot_id = str(
+                position_snapshot["decision_snapshot_id"] or ""
+            ).strip()
+            if current_snapshot_id and current_snapshot_id != command_snapshot_id:
+                raise ValueError(
+                    "command decision-snapshot repair found conflicting "
+                    "position_current decision_snapshot_id"
+                )
+
         rehomed_execution_intent: str | None = None
-        if orphan_execution_rows:
+        if current_position_id != canonical_position_id and orphan_execution_rows:
             execution = orphan_execution_rows[0]
             if str(execution["order_role"] or "") != "entry":
                 raise ValueError(
@@ -3648,36 +3702,77 @@ def repair_command_position_link_if_orphaned(
                     "command position-link repair execution-fact CAS failed"
                 )
 
-        updated = conn.execute(
-            """
-            UPDATE venue_commands
-               SET position_id = ?,
-                   updated_at = ?
-             WHERE command_id = ?
-               AND position_id = ?
-            """,
-            (
-                canonical_position_id,
-                occurred_at,
-                command_id,
-                current_position_id,
-            ),
-        ).rowcount
+        command_link_updated = 0
+        if current_position_id != canonical_position_id:
+            command_link_updated = conn.execute(
+                """
+                UPDATE venue_commands
+                   SET position_id = ?,
+                       updated_at = ?
+                 WHERE command_id = ?
+                   AND position_id = ?
+                """,
+                (
+                    canonical_position_id,
+                    occurred_at,
+                    command_id,
+                    current_position_id,
+                ),
+            ).rowcount
 
-    if not updated:
+        attribution_updated = 0
+        if (
+            attribution_position_id is not None
+            and attribution_position_id != canonical_position_id
+        ):
+            attribution_updated = conn.execute(
+                """
+                UPDATE position_decision_attribution
+                   SET position_id = ?
+                 WHERE command_id = ?
+                   AND position_id = ?
+                """,
+                (
+                    canonical_position_id,
+                    command_id,
+                    attribution_position_id,
+                ),
+            ).rowcount
+
+        snapshot_updated = 0
+        if command_snapshot_id and not current_snapshot_id:
+            snapshot_updated = conn.execute(
+                """
+                UPDATE position_current
+                   SET decision_snapshot_id = ?
+                 WHERE position_id = ?
+                   AND COALESCE(decision_snapshot_id, '') = ''
+                """,
+                (command_snapshot_id, canonical_position_id),
+            ).rowcount
+
+    if not (command_link_updated or attribution_updated or snapshot_updated):
         return False
 
+    event_type = (
+        "POSITION_LINK_REPAIRED"
+        if command_link_updated
+        else "POSITION_DECISION_EVIDENCE_REPAIRED"
+    )
     append_provenance_event(
         conn,
         subject_type="command",
         subject_id=command_id,
-        event_type="POSITION_LINK_REPAIRED",
+        event_type=event_type,
         payload_hash=_payload_hash(
             {
                 "canonical_position_id": canonical_position_id,
                 "previous_position_id": current_position_id,
                 "reason": reason,
                 "rehomed_execution_intent": rehomed_execution_intent,
+                "command_link_updated": bool(command_link_updated),
+                "attribution_updated": bool(attribution_updated),
+                "snapshot_updated": bool(snapshot_updated),
             }
         ),
         payload_json={
@@ -3685,6 +3780,9 @@ def repair_command_position_link_if_orphaned(
             "previous_position_id": current_position_id,
             "reason": reason,
             "rehomed_execution_intent": rehomed_execution_intent,
+            "command_link_updated": bool(command_link_updated),
+            "attribution_updated": bool(attribution_updated),
+            "snapshot_updated": bool(snapshot_updated),
         },
         source="WS_USER",
         observed_at=occurred_at,

@@ -63,13 +63,18 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import sqlite3
 import threading
-from typing import Callable, Optional, TypeVar
+import time
+from typing import Callable, TypeVar
 
+from src.venue.polymarket_v2_adapter import IncompleteAccountTruthError
 from src.venue.response_contracts import VenueResponseShapeError
 
 logger = logging.getLogger(__name__)
+
+_ACCOUNT_TRUTH_DEADLINE_SECONDS = 15.0
 
 S = TypeVar("S")
 R = TypeVar("R")
@@ -470,6 +475,7 @@ def capture_venue_read_snapshot(
     order_ids,
     idempotency_keys=(),
     condition_ids=(),
+    account_truth_deadline_seconds: float = _ACCOUNT_TRUTH_DEADLINE_SECONDS,
 ) -> VenueReadSnapshot:
     """NETWORK phase: capture every venue read the apply phase will need.
 
@@ -480,39 +486,46 @@ def capture_venue_read_snapshot(
     assert_no_open_connection("recovery.capture_venue_read_snapshot")
 
     venue_sources = [client]
+    account_source = client
     ensure_v2 = getattr(client, "_ensure_v2_adapter", None)
     if callable(ensure_v2):
         try:
             adapter = ensure_v2()
-        except Exception:  # noqa: BLE001 — fall back to the outer client surface.
-            logger.warning("venue_sync_contract: v2 adapter unavailable during snapshot", exc_info=True)
+        except Exception as exc:  # Account truth cannot fall back to a second client path.
+            raise IncompleteAccountTruthError(
+                "INCOMPLETE_ACCOUNT_TRUTH: authoritative V2 adapter unavailable"
+            ) from exc
         else:
             if adapter is not client:
                 venue_sources.append(adapter)
+            account_source = adapter
 
-    def _safe_account(method):
-        saw_callable = False
-        for source in venue_sources:
-            fn = getattr(source, method, None)
-            if not callable(fn):
-                continue
-            saw_callable = True
-            for attempt in range(2):
-                try:
-                    return list(fn() or [])
-                except Exception:  # noqa: BLE001 — retry once, then try the next source.
-                    logger.warning(
-                        "venue_sync_contract: account read %s unavailable attempt=%d/2",
-                        method,
-                        attempt + 1,
-                        exc_info=True,
-                    )
-        if saw_callable:
-            return None
-        return None
-
-    open_orders = _safe_account("get_open_orders")
-    trades = _safe_account("get_trades")
+    # SCOPE=trading account; DRAIN=the next cadence's complete snapshot;
+    # RESET=a full orders+trades snapshot before this shared deadline.  There is
+    # deliberately no outer-client fallback or retry: an empty list may prove
+    # absence only when the one authoritative account read completed in full.
+    try:
+        budget = float(account_truth_deadline_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("account_truth_deadline_seconds must be a positive number") from exc
+    if not math.isfinite(budget) or budget <= 0.0:
+        raise ValueError("account_truth_deadline_seconds must be finite and positive")
+    account_deadline = time.monotonic() + budget
+    account_reader = getattr(account_source, "get_account_truth", None)
+    if not callable(account_reader):
+        raise IncompleteAccountTruthError(
+            "INCOMPLETE_ACCOUNT_TRUTH: authoritative account reader unavailable"
+        )
+    try:
+        account_truth = account_reader(deadline_monotonic=account_deadline)
+    except IncompleteAccountTruthError:
+        raise
+    except Exception as exc:
+        raise IncompleteAccountTruthError(
+            "INCOMPLETE_ACCOUNT_TRUTH: authoritative account snapshot failed"
+        ) from exc
+    open_orders = list(account_truth.open_orders)
+    trades = list(account_truth.trades)
 
     orders: dict = {}
     get_order_source = next((getattr(source, "get_order", None) for source in venue_sources if callable(getattr(source, "get_order", None))), None)

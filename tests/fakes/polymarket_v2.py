@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-07-28
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
 """Fake Polymarket V2 venue used by T1 fake/live adapter parity tests.
 
@@ -14,11 +14,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
+import time
 from types import SimpleNamespace
 from typing import Any
 
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.venue.polymarket_v2_adapter import (
+    AccountTruth,
     CancelResult,
     ClobMarketInfo,
     HeartbeatAck,
@@ -254,6 +256,15 @@ class FakePolymarketVenue:
         order["status"] = "CANCEL_CONFIRMED"
         return CancelResult(status="accepted", order_id=order_id, raw_response_json='{"status":"CANCEL_CONFIRMED"}')
 
+    def submit_batch(
+        self,
+        envelopes: list[VenueSubmissionEnvelope],
+    ) -> list[SubmitResult]:
+        return [self.submit(envelope) for envelope in envelopes]
+
+    def cancel_batch(self, order_ids: list[str]) -> list[CancelResult]:
+        return [self.cancel(order_id) for order_id in order_ids]
+
     def get_order(self, order_id: str) -> OrderState:
         self._maybe_record_restart("get_order")
         order = self._require_order(order_id)
@@ -274,6 +285,20 @@ class FakePolymarketVenue:
                     continue
             states.append(OrderState(order_id=order_id, status=str(raw["status"]), raw=dict(raw)))
         return states
+
+    def get_account_truth(
+        self,
+        *,
+        deadline_monotonic: float,
+        max_pages: int = 100,
+    ) -> AccountTruth:
+        del max_pages
+        if deadline_monotonic <= time.monotonic():
+            raise TimeoutError("fake account truth deadline elapsed")
+        return AccountTruth(
+            open_orders=tuple(self.get_open_orders()),
+            trades=tuple(self.get_trades()),
+        )
 
     def get_trades(self, since: str | None = None) -> list[TradeFact]:
         self._maybe_record_restart("get_trades")

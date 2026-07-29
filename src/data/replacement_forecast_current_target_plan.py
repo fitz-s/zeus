@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from src.data.day0_fast_obs import (
     FAST_OBS_SOURCE_ID,
     latest_fast_station_conditioning,
+    metar_observation_time_from_raw,
 )
 from src.data.day0_observation_reader import _OBSERVATION_FACT_TIME_SQL
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
@@ -705,6 +706,12 @@ def _latest_authorized_day0_fact(
     ).strip().upper()
     decision_utc = decision_time.astimezone(timezone.utc)
     facts: list[dict[str, object]] = []
+    # A committed DAY0_EXTREME_UPDATED event owns the availability clock that
+    # the enqueue marker and posterior already bind.  The ledger may contain
+    # earlier/later duplicate renderings of that same raw METAR; retain this
+    # event clock when reducing the matching report below rather than moving a
+    # deployed marker backwards or forwards on a duplicate writer receipt.
+    event_availability_by_source_report: dict[tuple[str, str], str] = {}
     if "observation_instants" in _table_names(conn):
         extreme_col = "running_min" if metric == "low" else "running_max"
         extreme_order = "ASC" if metric == "low" else "DESC"
@@ -1050,6 +1057,14 @@ def _latest_authorized_day0_fact(
                     ),
                 }
             )
+            event_key = (
+                event_source,
+                observation_time.isoformat(),
+            )
+            existing_event_clock = event_availability_by_source_report.get(event_key)
+            event_clock = observation_available_at.isoformat()
+            if existing_event_clock is None or event_clock > existing_event_clock:
+                event_availability_by_source_report[event_key] = event_clock
             break
 
     # LEDGER FACT (day0 defect-ledger, 2026-07-16): a third candidate, over
@@ -1126,9 +1141,17 @@ def _latest_authorized_day0_fact(
                     ),
                 ).fetchall()
                 margin_by_channel: dict[str, float | None] = {}
-                best_value: float | None = None
-                best_channel = ""
-                latest_clock_by_channel: dict[str, tuple[str, str]] = {}
+                # AWC can render one source METAR twice (with and without a
+                # leading ``METAR `` token) and assign each fetch a distinct
+                # publication timestamp.  Those rows carry no second physical
+                # observation: collapse them on the report's source-issued
+                # valid time + channel + conditioned value, retaining the
+                # first causal publication.  This keeps the ledger's
+                # append-only audit trail intact while making every consumer
+                # share one conditioning identity with the Day0 event bridge.
+                canonical_prints: dict[
+                    tuple[str, str, float], tuple[str, str, float]
+                ] = {}
                 for print_row in print_rows:
                     channel = str(print_row["source_channel"])
                     print_unit = str(print_row["unit"] or "").strip().upper()
@@ -1182,6 +1205,49 @@ def _latest_authorized_day0_fact(
                         continue
                     publish_ts = str(print_row["publish_ts_utc"])
                     fetched_at = str(print_row["fetched_at_utc"])
+                    source_clock = publish_ts
+                    event_clock: str | None = None
+                    if channel == FAST_OBS_SOURCE_ID:
+                        try:
+                            published_at = datetime.fromisoformat(
+                                publish_ts.replace("Z", "+00:00")
+                            )
+                            if published_at.tzinfo is not None:
+                                report_time = metar_observation_time_from_raw(
+                                    str(print_row["raw_report"] or ""),
+                                    published_at=published_at,
+                                )
+                                if report_time is not None:
+                                    source_clock = report_time.astimezone(
+                                        timezone.utc
+                                    ).isoformat()
+                        except (TypeError, ValueError, OSError, OverflowError):
+                            pass
+                    event_clock = event_availability_by_source_report.get(
+                        (channel, source_clock)
+                    )
+                    canonical_publish_ts = event_clock or publish_ts
+                    canonical_fetched_at = event_clock or fetched_at
+                    print_identity = (channel, source_clock, float(value))
+                    previous = canonical_prints.get(print_identity)
+                    if previous is None or (
+                        canonical_publish_ts,
+                        canonical_fetched_at,
+                    ) < previous[:2]:
+                        canonical_prints[print_identity] = (
+                            canonical_publish_ts,
+                            canonical_fetched_at,
+                            float(value),
+                        )
+
+                best_value: float | None = None
+                best_channel = ""
+                latest_clock_by_channel: dict[str, tuple[str, str]] = {}
+                for (channel, _source_clock, _value), (
+                    publish_ts,
+                    fetched_at,
+                    value,
+                ) in canonical_prints.items():
                     previous_clock = latest_clock_by_channel.get(channel)
                     if previous_clock is None or (publish_ts, fetched_at) > previous_clock:
                         latest_clock_by_channel[channel] = (publish_ts, fetched_at)
@@ -1204,7 +1270,7 @@ def _latest_authorized_day0_fact(
                         {
                             "observed_extreme_native": best_value,
                             "observation_time": best_publish_ts,
-                            "sample_count": len(print_rows),
+                            "sample_count": len(canonical_prints),
                             "source": f"observation_prints:{best_channel}",
                             "observation_source": best_channel,
                             "station_id": expected_station or "",

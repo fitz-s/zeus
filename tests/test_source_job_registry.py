@@ -181,6 +181,10 @@ def test_job_registry_uses_canonical_source_ids() -> None:
 
     daily = JOB_REGISTRY["ingest_k2_daily_obs"]
     assert daily.source_id == "wu_icao_history"
+    assert JOB_REGISTRY["ingest_k2_hko_tick"].source_id == "hko_realtime_api"
+    hko_final = JOB_REGISTRY["ingest_k2_hko_daily_final"]
+    assert hko_final.source_id == "hko_daily_api"
+    assert hko_final.callable_ref == "_k2_hko_daily_final_tick"
     # no remaining short 'wu_icao' alias:
     assert not any(j.source_id == "wu_icao" for j in JOB_REGISTRY.values())
 

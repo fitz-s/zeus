@@ -1,7 +1,7 @@
 # Created: 2026-04-17
-# Last reused or audited: 2026-05-24
+# Last reused or audited: 2026-07-28
 # Authority basis: AGENTS.md money path; S1 market source-proof persistence via market_topology_state.
-# Lifecycle: created=2026-04-17; last_reviewed=2026-05-24; last_reused=2026-05-24
+# Lifecycle: created=2026-04-17; last_reviewed=2026-07-28; last_reused=2026-07-28
 # Purpose: Lock market_scanner provenance, source-contract drift behavior, and Venus diagnostic authority labels.
 # Reuse: Inspect src/data/market_scanner.py and scripts/watch_source_contract.py before relying on these assertions.
 # Authority basis: audit bug B017 (STILL_OPEN P1 SD-H), Fitz methodology constraint #4 "Data Provenance > Code Correctness"; Wave16 object-meaning diagnostic authority repair.
@@ -3315,7 +3315,7 @@ class TestExecutableConditionIdsForUserChannelWS:
 class TestForwardMarketSubstrateProducer:
     """Forward substrate writer is explicit, authority-gated, and idempotent."""
 
-    def test_snapshot_refresh_writes_book_hash_transition_on_same_trade_substrate(self):
+    def test_snapshot_refresh_keeps_hash_change_reconstructable_without_duplicate_append(self):
         conn = _make_persisted_substrate_conn()
         captured_at = datetime(2026, 5, 20, 12, 2, tzinfo=timezone.utc)
         ms._prev_orderbook_hash_by_market.pop("cond-transition", None)
@@ -3416,16 +3416,19 @@ class TestForwardMarketSubstrateProducer:
         assert conn.execute(
             "SELECT COUNT(*) FROM executable_market_snapshots WHERE condition_id = 'cond-transition'"
         ).fetchone()[0] == 2
-        transition = conn.execute(
+        snapshots = conn.execute(
             """
-            SELECT market_slug, prev_hash, new_hash, delta_ms
-              FROM book_hash_transitions
-             WHERE market_slug = 'highest-temperature-in-transition-on-may-22-2026'
+            SELECT captured_at, snapshot_id, raw_orderbook_hash
+              FROM executable_market_snapshots
+             WHERE condition_id = 'cond-transition'
+             ORDER BY captured_at, snapshot_id
             """
-        ).fetchone()
-        assert transition is not None
-        assert transition["prev_hash"] != transition["new_hash"]
-        assert transition["delta_ms"] >= 0
+        ).fetchall()
+        assert len(snapshots) == 2
+        assert snapshots[0]["raw_orderbook_hash"] != snapshots[1]["raw_orderbook_hash"]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM book_hash_transitions"
+        ).fetchone()[0] == 0
 
     def test_snapshot_refresh_budget_skips_closed_elapsed_child_markets(self):
         conn = _make_persisted_substrate_conn()

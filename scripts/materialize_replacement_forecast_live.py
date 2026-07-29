@@ -33,6 +33,7 @@ from src.data.replacement_forecast_materializer import (  # noqa: E402
     ReplacementForecastMaterializeRequest,
     ReplacementForecastMaterializeResult,
     _ensure_replacement_identity_columns,
+    day0_enqueue_ownership_witness_from_payload,
     prepare_replacement_forecast_live,
     write_prepared_replacement_forecast_live,
 )
@@ -436,6 +437,9 @@ def _materialize(
         ),
         upgrade_trigger=(
             str(payload["upgrade_trigger"]) if payload.get("upgrade_trigger") else None
+        ),
+        day0_enqueue_owner_witness=day0_enqueue_ownership_witness_from_payload(
+            payload
         ),
     )
     own_conn = conn is None

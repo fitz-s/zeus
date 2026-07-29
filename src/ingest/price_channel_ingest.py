@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-08
+# Last reused or audited: 2026-07-28
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row), §7 (I2 no-back-coupling:
 #   durable fill bridge + execution_feasibility_evidence), §8 Step 3 (lift the
@@ -79,6 +79,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -159,8 +160,10 @@ PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 25
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
 PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS = 250
 PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 25
+PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 2000
 PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS = 100
 PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS = 25
+PRICE_CHANNEL_REDECISION_WORLD_WRITE_BUDGET_MS = 750
 PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS = 25
 PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
 PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS = 0.25
@@ -187,6 +190,23 @@ def _bound_price_channel_sqlite_wait(
         else max(0, int(timeout_ms))
     )
     conn.execute(f"PRAGMA busy_timeout = {budget_ms}")
+
+
+def _bound_held_quote_sqlite_wait(
+    conn,
+    *,
+    deadline_monotonic: float,
+) -> None:
+    remaining = float(deadline_monotonic) - time.monotonic()
+    if remaining <= 0.0:
+        raise TimeoutError(
+            "price-channel held quote refresh deadline elapsed before DB write"
+        )
+    remaining_ms = int(remaining * 1000.0)
+    _bound_price_channel_sqlite_wait(
+        conn,
+        timeout_ms=min(PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS, remaining_ms),
+    )
 
 
 def _price_channel_clob_timeout(deadline_monotonic: float):
@@ -244,11 +264,15 @@ class _PriceChannelWriteGate:
         scope: str,
         deadline_ms: int = PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
         max_hold_ms: int = PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+        deadline_monotonic: float | None = None,
+        on_enter: Callable[[], None] | None = None,
     ) -> None:
         self._owner = owner
         self._scope = scope
         self._deadline_ms = max(0, int(deadline_ms))
         self._max_hold_ms = max(0, int(max_hold_ms))
+        self._deadline_monotonic = deadline_monotonic
+        self._on_enter = on_enter
         self._stack: contextlib.ExitStack | None = None
 
     def __enter__(self):
@@ -267,6 +291,8 @@ class _PriceChannelWriteGate:
             else:
                 raise ValueError(f"unsupported price-channel write scope {self._scope!r}")
             deadline = time.monotonic() + self._deadline_ms / 1000.0
+            if self._deadline_monotonic is not None:
+                deadline = min(deadline, self._deadline_monotonic)
             if DBIdentity.WORLD in dbs:
                 mutex = _world_write_mutex()
                 remaining = max(0.0, deadline - time.monotonic())
@@ -284,7 +310,7 @@ class _PriceChannelWriteGate:
                         int((deadline - time.monotonic()) * 1000.0),
                     ),
                 )
-                if DBIdentity.WORLD in dbs
+                if DBIdentity.WORLD in dbs or self._deadline_monotonic is not None
                 else self._deadline_ms
             )
             stack.enter_context(
@@ -296,6 +322,8 @@ class _PriceChannelWriteGate:
                     max_hold_ms=self._max_hold_ms,
                 )
             )
+            if self._on_enter is not None:
+                self._on_enter()
         except BaseException:
             stack.close()
             raise
@@ -327,12 +355,20 @@ def _edli_price_channel_world_write_gate(*, owner: str) -> _PriceChannelWriteGat
     )
 
 
-def _edli_price_channel_trade_write_gate(*, owner: str) -> _PriceChannelWriteGate:
+def _edli_price_channel_trade_write_gate(
+    *,
+    owner: str,
+    deadline_ms: int = PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
+    deadline_monotonic: float | None = None,
+    on_enter: Callable[[], None] | None = None,
+) -> _PriceChannelWriteGate:
     return _PriceChannelWriteGate(
         owner=owner,
         scope="trade",
-        deadline_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
+        deadline_ms=deadline_ms,
         max_hold_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS,
+        deadline_monotonic=deadline_monotonic,
+        on_enter=on_enter,
     )
 
 
@@ -345,34 +381,138 @@ def _edli_price_channel_world_write_connection(*, owner: str):
     producer ahead of the consumer that turns an existing event into an order.
     """
 
+    from src.events.event_writer import EventWriter
     from src.events.triggers.market_channel_ingestor import _world_write_mutex
     from src.state.db import get_world_connection
 
     conn = get_world_connection(write_class=None)
-    _bound_price_channel_sqlite_wait(
-        conn,
-        timeout_ms=PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS,
-    )
-    mutex = _world_write_mutex()
-    acquired = mutex.acquire(
-        timeout=PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS / 1000.0
-    )
-    if not acquired:
-        conn.close()
-        raise TimeoutError(
-            f"{owner} deferred: WORLD writer busy for "
-            f"{PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS}ms"
-        )
+    started_ns = time.monotonic_ns()
+    acquired_ns: int | None = None
+    phase = "open"
+    phase_started_ns = started_ns
+    phase_durations_ns: dict[str, int] = {}
+    transaction_outcome = "open"
+
+    def _telemetry(next_phase: str, *, outcome: str | None = None) -> None:
+        nonlocal phase, phase_started_ns, transaction_outcome
+        now_ns = time.monotonic_ns()
+        previous_phase = phase
+        previous_phase_ns = max(0, now_ns - phase_started_ns)
+        if acquired_ns is not None and previous_phase != "open":
+            phase_durations_ns[previous_phase] = (
+                phase_durations_ns.get(previous_phase, 0) + previous_phase_ns
+            )
+        phase = next_phase
+        phase_started_ns = now_ns
+        if outcome is not None:
+            transaction_outcome = outcome
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "price_channel_world_writer owner=%s phase=%s monotonic_ns=%d "
+                "elapsed_ms=%.3f hold_ms=%.3f previous_phase=%s "
+                "previous_phase_ms=%.3f transaction=%s",
+                owner,
+                phase,
+                now_ns,
+                (now_ns - started_ns) / 1_000_000,
+                (
+                    0.0
+                    if acquired_ns is None
+                    else (now_ns - acquired_ns) / 1_000_000
+                ),
+                previous_phase,
+                previous_phase_ns / 1_000_000,
+                transaction_outcome,
+            )
+
+    # The live scheduler owns WAL checkpoints on a dedicated PASSIVE
+    # connection. A commit-triggered auto-checkpoint here would run while this
+    # producer holds the global WORLD mutex, turning a small durable event write
+    # into a multi-writer outage on the append-heavy world DB.
     try:
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        _bound_price_channel_sqlite_wait(
+            conn,
+            timeout_ms=PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS,
+        )
+        if owner == "price_channel_redecision_emit":
+            # EventStore validates its tables through sqlite_master. Do that
+            # bounded metadata read before the cross-process flock, then reuse
+            # this exact store for the insert-only critical section below.
+            EventWriter.preflight_world_event_tables(conn)
+        mutex = _world_write_mutex()
+        acquired = mutex.acquire(
+            timeout=PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS / 1000.0
+        )
+        if not acquired:
+            raise TimeoutError(
+                f"{owner} deferred: WORLD writer busy for "
+                f"{PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS}ms"
+            )
+        acquired_ns = time.monotonic_ns()
+        _telemetry("acquire")
+        _telemetry("begin")
         conn.execute("BEGIN IMMEDIATE")
-        yield conn
+        with EventWriter.write_phase_telemetry(lambda: _telemetry("write")):
+            yield conn
+        if not conn.in_transaction:
+            _telemetry("transaction_closed", outcome="caller_closed")
     except BaseException:
-        conn.rollback()
+        if getattr(conn, "in_transaction", False):
+            _telemetry("rollback")
+            conn.rollback()
+            _telemetry("transaction_closed", outcome="rolled_back")
+        elif acquired_ns is not None and phase != "transaction_closed":
+            _telemetry("transaction_closed", outcome=f"{phase}_failed")
         raise
     finally:
-        if conn.in_transaction:
+        if getattr(conn, "in_transaction", False):
+            _telemetry("rollback")
             conn.rollback()
-        mutex.release()
+            _telemetry("transaction_closed", outcome="rolled_back")
+        if acquired_ns is not None:
+            release_started_ns = time.monotonic_ns()
+            previous_phase = phase
+            previous_phase_ns = max(0, release_started_ns - phase_started_ns)
+            if previous_phase != "open":
+                phase_durations_ns[previous_phase] = (
+                    phase_durations_ns.get(previous_phase, 0) + previous_phase_ns
+                )
+            mutex.release()
+            released_ns = time.monotonic_ns()
+            release_ns = max(0, released_ns - release_started_ns)
+            phase_durations_ns["release"] = release_ns
+            hold_ms = (released_ns - acquired_ns) / 1_000_000
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "price_channel_world_writer owner=%s phase=release "
+                    "monotonic_ns=%d elapsed_ms=%.3f hold_ms=%.3f "
+                    "previous_phase=%s previous_phase_ms=%.3f "
+                    "phase_ms=%.3f transaction=%s",
+                    owner,
+                    released_ns,
+                    (released_ns - started_ns) / 1_000_000,
+                    hold_ms,
+                    previous_phase,
+                    previous_phase_ns / 1_000_000,
+                    release_ns / 1_000_000,
+                    transaction_outcome,
+                )
+            if hold_ms > PRICE_CHANNEL_REDECISION_WORLD_WRITE_BUDGET_MS:
+                slow_phase, slow_ns = max(
+                    phase_durations_ns.items(), key=lambda item: item[1]
+                )
+                logger.warning(
+                    "price_channel_world_writer over_budget owner=%s phase=%s "
+                    "phase_ms=%.3f hold_ms=%.3f budget_ms=%d transaction=%s",
+                    owner,
+                    slow_phase,
+                    slow_ns / 1_000_000,
+                    hold_ms,
+                    PRICE_CHANNEL_REDECISION_WORLD_WRITE_BUDGET_MS,
+                    transaction_outcome,
+                )
+        EventWriter.forget_preflight_world_event_tables(conn)
         conn.close()
 
 
@@ -2355,23 +2495,20 @@ def _edli_order_token_ids_by_feasibility_age(
         return []
     priority_index = {token: idx for idx, token in enumerate(tokens)}
     try:
-        has_table = trade_conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_feasibility_evidence'"
-        ).fetchone()
+        if not _edli_table_exists(trade_conn, "execution_feasibility_latest"):
+            return tokens
     except Exception:
-        return tokens
-    if not has_table:
         return tokens
     latest_by_token: dict[str, str | None] = {token: None for token in tokens}
 
-    def _created_by_token_from(table: str, subset: list[str]) -> dict[str, str]:
+    def _latest_created_by_token(subset: list[str]) -> dict[str, str]:
         if not subset:
             return {}
         placeholders = ",".join("?" for _ in subset)
         rows = trade_conn.execute(
             f"""
             SELECT token_id, MAX(created_at) AS created_at
-              FROM {table}
+              FROM execution_feasibility_latest
              WHERE token_id IN ({placeholders})
              GROUP BY token_id
             """,
@@ -2384,20 +2521,7 @@ def _edli_order_token_ids_by_feasibility_age(
         }
 
     try:
-        if _edli_table_exists(trade_conn, "execution_feasibility_latest"):
-            latest_by_token.update(
-                _created_by_token_from("execution_feasibility_latest", tokens)
-            )
-        missing_from_latest = [
-            token for token in tokens if latest_by_token.get(token) is None
-        ]
-        if missing_from_latest:
-            latest_by_token.update(
-                _created_by_token_from(
-                    "execution_feasibility_evidence",
-                    missing_from_latest,
-                )
-            )
+        latest_by_token.update(_latest_created_by_token(tokens))
     except Exception:
         return tokens
     return sorted(
@@ -2800,7 +2924,7 @@ def _edli_refresh_held_position_quote_evidence(
         # Quote evidence is TRADE truth. Derived WORLD redecision events use the
         # independently coordinated sink after this transaction commits.
         conn = get_trade_connection(write_class="live")
-        _bound_price_channel_sqlite_wait(conn)
+        _bound_held_quote_sqlite_wait(conn, deadline_monotonic=deadline)
 
         def _commit_quote_evidence() -> None:
             conn.commit()
@@ -2834,7 +2958,15 @@ def _edli_refresh_held_position_quote_evidence(
                 token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
                 write_gate=_edli_price_channel_trade_write_gate(
-                    owner="price_channel_held_quote_refresh"
+                    owner="price_channel_held_quote_refresh",
+                    deadline_ms=(
+                        PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS
+                    ),
+                    deadline_monotonic=deadline,
+                    on_enter=lambda: _bound_held_quote_sqlite_wait(
+                        conn,
+                        deadline_monotonic=deadline,
+                    ),
                 ),
                 commit=_commit_quote_evidence,
                 logger=logger,

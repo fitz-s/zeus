@@ -96,6 +96,47 @@ REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT = "PARTIAL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY = "STALE_HISTORY_ONLY"
 REPLACEMENT_CAPTURE_STATUS_DB_READ_ERROR = "DB_READ_ERROR"
 REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
+STALE_DAY0_ENQUEUE_OWNER = "STALE_DAY0_ENQUEUE_OWNER"
+
+
+@dataclass(frozen=True)
+class Day0EnqueueOwnershipWitness:
+    """Exact durable owner binding carried by a Day0 cycle-advance request."""
+
+    city: str
+    target_date: str
+    metric: str
+    target_cycle_time: str
+    seed_file: str
+    conditioning_identity: str
+
+
+def day0_enqueue_ownership_witness_from_payload(
+    payload: Mapping[str, object],
+) -> Day0EnqueueOwnershipWitness | None:
+    """Parse a complete owner witness; partial owner-tagged requests fail closed."""
+    raw = payload.get("day0_enqueue_owner_witness")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("day0_enqueue_owner_witness must be an object")
+    fields = (
+        "city",
+        "target_date",
+        "metric",
+        "target_cycle_time",
+        "seed_file",
+        "conditioning_identity",
+    )
+    values = {field: str(raw.get(field) or "").strip() for field in fields}
+    missing = [field for field in fields if not values[field]]
+    if missing:
+        raise ValueError(
+            "day0_enqueue_owner_witness missing " + ",".join(missing)
+        )
+    if values["metric"] not in {"high", "low"}:
+        raise ValueError("day0_enqueue_owner_witness metric must be high or low")
+    return Day0EnqueueOwnershipWitness(**values)
 
 
 @dataclass(frozen=True)
@@ -132,6 +173,7 @@ class ReplacementForecastMaterializeRequest:
     # materialization. Threaded verbatim into provenance_json so the re-materialized posterior
     # records WHY it was produced.
     upgrade_trigger: str | None = None
+    day0_enqueue_owner_witness: Day0EnqueueOwnershipWitness | None = None
 
 
 @dataclass(frozen=True)
@@ -531,9 +573,11 @@ def _request_with_day0_physical_frontier(
     same-cycle re-materialization may improve model evidence, but it must not
     reopen support that an earlier absorbing observation already removed.  The
     reducer mirrors the canonical Day0 fact shape: HIGH takes MAX, LOW takes
-    MIN, and a plateau advances its observation clock only from the source
-    that owns the winning extreme.  Rows materialized after this request's
-    clock are excluded, so this guard cannot introduce look-ahead.
+    MIN. When the current request proves the same frontier, its independently
+    reproducible source/clock replaces a historical carrier identity; otherwise
+    the source that owns the winning extreme keeps its latest clock. Rows
+    materialized after this request's clock are excluded, so this guard cannot
+    introduce look-ahead.
     """
     if metric not in {"high", "low"}:
         return request
@@ -562,7 +606,9 @@ def _request_with_day0_physical_frontier(
         target_local_date=date.fromisoformat(_date_text(request.target_date)),
     ).start_utc
 
-    candidates: list[tuple[float, datetime | None, str, int | None, str | None]] = []
+    candidates: list[
+        tuple[float, datetime | None, str, int | None, str | None, bool]
+    ] = []
     request_observed_extreme = _day0_observed_extreme_c(request)
     request_observed_at = _day0_observed_extreme_time(request)
     if request_observed_extreme is not None:
@@ -583,6 +629,7 @@ def _request_with_day0_physical_frontier(
                 str(request.day0_observed_extreme_source or ""),
                 request.day0_observed_extreme_sample_count,
                 request.day0_observed_extreme_unit,
+                True,
             )
         )
 
@@ -685,6 +732,7 @@ def _request_with_day0_physical_frontier(
                 source,
                 sample_count,
                 None if unit_raw is None else str(unit_raw),
+                False,
             )
         )
 
@@ -692,13 +740,18 @@ def _request_with_day0_physical_frontier(
         return request
     frontier = min(item[0] for item in candidates) if metric == "low" else max(item[0] for item in candidates)
     dominant = [item for item in candidates if item[0] == frontier]
+    current_dominant = [item for item in dominant if item[5]]
     winner = (
         max(
-            (item for item in dominant if item[1] is not None),
+            (
+                item
+                for item in (current_dominant or dominant)
+                if item[1] is not None
+            ),
             key=lambda item: item[1],
         )
-        if any(item[1] is not None for item in dominant)
-        else dominant[0]
+        if any(item[1] is not None for item in (current_dominant or dominant))
+        else (current_dominant or dominant)[0]
     )
     winner_source = winner[2]
     source_frontier = [
@@ -1967,6 +2020,30 @@ class _CurrentEvidenceShape:
 BETWEEN_COHORT_WINDOW_HOURS = 3.0
 
 
+def _current_provider_family_count(
+    *,
+    configured_weights: Mapping[str, float],
+    values_c_by_source: Mapping[str, float],
+) -> int:
+    """Count distinct positively weighted provider families with a finite current value."""
+
+    from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+        provider_family_for_source,
+    )
+
+    families: set[str] = set()
+    for source, raw_weight in configured_weights.items():
+        try:
+            weight = float(raw_weight)
+            value = float(values_c_by_source[source])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if weight <= 0.0 or not math.isfinite(weight) or not math.isfinite(value):
+            continue
+        families.add(provider_family_for_source(str(source)))
+    return len(families)
+
+
 def _current_evidence_shape_from_values(
     *,
     snapshot_id: int,
@@ -2883,15 +2960,33 @@ def _replacement_bayes_precision_fusion_override(
                 str(_m).startswith(("cwa_", "hko_")) and str(_m) not in _scheme.weights
                 for _m in persisted_current
             )
-            if _scheme is not None and not _station_live_omitted:
-                _source_values: dict[str, float] = {
-                    _ANCHOR: float(anchor_value_corrected_c),
-                }
+            _source_values: dict[str, float] = {
+                _ANCHOR: float(anchor_value_corrected_c),
+            }
+            if _scheme is not None:
                 for _m, (_value, _rid) in persisted_current.items():
                     try:
                         _source_values[str(_m)] = float(_value)
                     except (TypeError, ValueError):
                         continue
+            _scheme_current_provider_count = (
+                0
+                if _scheme is None
+                else _current_provider_family_count(
+                    configured_weights=_scheme.weights,
+                    values_c_by_source=_source_values,
+                )
+            )
+            _scheme_current_pair_missing = (
+                _scheme is not None
+                and not _station_live_omitted
+                and _scheme_current_provider_count < 2
+            )
+            if (
+                _scheme is not None
+                and not _station_live_omitted
+                and not _scheme_current_pair_missing
+            ):
                 _entry_ineligible_sources = _registered_source_clock_entry_ineligible(
                     _scheme.final_sources
                 )
@@ -3048,10 +3143,53 @@ def _replacement_bayes_precision_fusion_override(
                         }
                     )
             else:
-                # A station-augmented center intentionally leaves frozen one-scheme
-                # weights; a city without such a scheme uses the current fusion weights.
-                # Both remain source-clock routes: build their width from the same
-                # current ENS + simultaneous provider values, never historical width.
+                # A station-augmented center, a city without a frozen scheme, or a frozen
+                # basket with fewer than two CURRENT provider families uses the existing
+                # current precision-fusion center. The last case is horizon-safe: regional
+                # sources selected on short-lead history (ICON-EU/D2) cannot cover every
+                # later target, while already-captured global sources remain current facts.
+                # This preserves the two-provider shape gate and never substitutes a
+                # historical width or treats missing between-spread as zero.
+                if _scheme_current_pair_missing:
+                    _missing_scheme_sources = [
+                        source
+                        for source in _scheme.final_sources
+                        if source not in _source_values
+                    ]
+                    _source_clock_payload = {
+                        "artifact": GRID_AWARE_ARTIFACT_NAME,
+                        "configured_sources": list(_scheme.final_sources),
+                        "configured_weights": dict(_scheme.weights),
+                        "used_weights": dict(_weights),
+                        "missing_sources": _missing_scheme_sources,
+                        "renormalized": False,
+                        "one_scheme_status": _scheme.one_scheme_status,
+                        "walkforward_pass": bool(_scheme.walkforward_pass),
+                        "sample_n": int(_scheme.sample_n),
+                        "fallback_reason": "configured_current_provider_pair_unavailable",
+                        "fallback_to": "current_precision_fusion",
+                        "configured_current_provider_family_count": (
+                            _scheme_current_provider_count
+                        ),
+                    }
+                    try:
+                        import logging  # noqa: PLC0415
+
+                        logging.getLogger(
+                            "zeus.replacement_bayes_precision_fusion"
+                        ).warning(
+                            "source-clock one-scheme current provider pair unavailable for "
+                            "%s %s %s: present_families=%d configured=%s missing=%s; "
+                            "using current precision fusion",
+                            request.city,
+                            metric,
+                            target_date,
+                            _scheme_current_provider_count,
+                            list(_scheme.final_sources),
+                            _missing_scheme_sources,
+                        )
+                    except Exception:
+                        pass
                 _source_clock_used_models = tuple(str(model) for model in _weights)
                 _source_clock_current_shape = _read_current_evidence_shape(
                     conn,
@@ -3081,6 +3219,21 @@ def _replacement_bayes_precision_fusion_override(
                     )
                     _source_clock_predictive_sigma_c = (
                         _source_clock_current_shape.predictive_sigma_c
+                    )
+                if _source_clock_payload is not None:
+                    _source_clock_payload.update(
+                        {
+                            "center_sigma_c": _source_clock_center_sigma_c,
+                            "predictive_sigma_c": _source_clock_predictive_sigma_c,
+                            "probability_shape_basis": (
+                                "decision_time_current_ensemble_within_plus_provider_between"
+                            ),
+                            "current_evidence_shape": (
+                                None
+                                if _source_clock_current_shape is None
+                                else _source_clock_current_shape.as_payload()
+                            ),
+                        }
                     )
                 for _m in _source_clock_used_models:
                     if _m in served_current:
@@ -3165,11 +3318,17 @@ def _replacement_bayes_precision_fusion_override(
         _decorrelated_complete = not _missing_providers
         if _source_clock_payload is not None and _source_clock_used_models is not None:
             _decorrelated_expected = len(_source_clock_payload.get("configured_sources", []) or [])
-            _decorrelated_served = len(_source_clock_used_models)
-            _decorrelated_complete = not bool(_source_clock_payload.get("missing_sources"))
+            _configured_missing = list(
+                _source_clock_payload.get("missing_sources", []) or []
+            )
+            _decorrelated_served = max(
+                0,
+                _decorrelated_expected - len(_configured_missing),
+            )
+            _decorrelated_complete = not _configured_missing
             _missing_providers = [
                 str(source)
-                for source in (_source_clock_payload.get("missing_sources", []) or [])
+                for source in _configured_missing
             ]
         if _missing_providers:
             try:
@@ -3281,7 +3440,15 @@ def _replacement_bayes_precision_fusion_override(
         return _BayesPrecisionFusionFusionOverride(
             anchor_value_c=_mu_diagonal,
             anchor_sigma_c=float(_source_clock_center_sigma_c if _source_clock_center_sigma_c is not None else fused.sd),
-            method="SOURCE_CLOCK_FIXED_WEIGHT" if _source_clock_payload is not None else fused.method,
+            method=(
+                "SOURCE_CLOCK_CURRENT_PRECISION_FUSION"
+                if _scheme_current_pair_missing
+                else (
+                    "SOURCE_CLOCK_FIXED_WEIGHT"
+                    if _source_clock_payload is not None
+                    else fused.method
+                )
+            ),
             used_models=used_models,
             model_set_hash=model_set_hash,
             resolution_mix_hash=resolution_mix_hash,
@@ -6058,6 +6225,78 @@ def compute_replacement_posterior_readonly(
     return _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
 
 
+def _day0_enqueue_owner_witness_is_current(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> bool:
+    """Check the exact enqueue owner while the final posterior writer lock is held."""
+    witness = request.day0_enqueue_owner_witness
+    if witness is None:
+        return True
+    from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+        _day0_conditioning_identity,
+    )
+
+    request_identity = _day0_conditioning_identity(
+        source=request.day0_observed_extreme_source,
+        observation_time=request.day0_observed_extreme_observation_time,
+        observed_extreme_c=request.day0_observed_extreme_c,
+        unit=request.day0_observed_extreme_unit,
+    )
+    if (
+        request_identity is None
+        or witness.city != request.city
+        or witness.target_date != _date_text(request.target_date)
+        or witness.metric != metric
+        or witness.target_cycle_time
+        != _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
+        or witness.conditioning_identity != request_identity
+    ):
+        return False
+    try:
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(cycle_advance_enqueues)").fetchall()
+        }
+        required = {
+            "city",
+            "target_date",
+            "metric",
+            "target_cycle_time",
+            "seed_file",
+            "day0_conditioning_identity_json",
+        }
+        if not required.issubset(columns):
+            return False
+        row = conn.execute(
+            """
+            SELECT seed_file, day0_conditioning_identity_json
+            FROM cycle_advance_enqueues
+            WHERE city = ?
+              AND target_date = ?
+              AND metric = ?
+              AND target_cycle_time = ?
+            LIMIT 1
+            """,
+            (
+                witness.city,
+                witness.target_date,
+                witness.metric,
+                witness.target_cycle_time,
+            ),
+        ).fetchone()
+        return (
+            row is not None
+            and str(row["seed_file"] or "") == witness.seed_file
+            and str(row["day0_conditioning_identity_json"] or "")
+            == witness.conditioning_identity
+        )
+    except sqlite3.Error:
+        return False
+
+
 def write_prepared_replacement_forecast_live(
     conn: sqlite3.Connection,
     prepared: PreparedReplacementForecastMaterialization,
@@ -6089,6 +6328,19 @@ def write_prepared_replacement_forecast_live(
                 (REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,)
                 + _posterior_block_sub_reason_codes(posterior)
             ),
+            posterior_id=None,
+            anchor_id=anchor_id,
+            readiness_id=None,
+        )
+    if (
+        request.day0_enqueue_owner_witness is not None
+        and not _day0_enqueue_owner_witness_is_current(
+            conn, request, metric=metric
+        )
+    ):
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=(STALE_DAY0_ENQUEUE_OWNER,),
             posterior_id=None,
             anchor_id=anchor_id,
             readiness_id=None,

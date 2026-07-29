@@ -1,5 +1,6 @@
-# Created: 2026-06-12
-# Last reused or audited: 2026-07-27
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Prove held-position probability authority, freshness, and compact decision lineage.
+# Reuse: pytest tests/engine/test_position_belief_authority.py
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
 #   719/719 monitor refreshes with last_monitor_prob_is_fresh=False while the
 #   entry authority forecast_posteriors was live and had re-ranked the held bin
@@ -855,6 +856,12 @@ class TestMonitorPrimaryAuthority:
             v.startswith("belief_source=forecast_posteriors")
             for v in refresh_pos.applied_validations
         )
+        receipt = refresh_pos._monitor_probability_receipt
+        assert receipt["posterior_id"] == "p9"
+        assert receipt["computed_at"] == "2026-06-12T10:00:00+00:00"
+        assert receipt["held_side_probability"] == pytest.approx(0.758)
+        assert len(receipt["evidence_content_hash"]) == 64
+        assert "q_json" not in receipt
 
     def test_refresh_uses_current_evidence_band_without_legacy_bootstrap(
         self, monkeypatch

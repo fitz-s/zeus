@@ -1,4 +1,4 @@
-<!-- Created: 2026-06-12 | Last reused or audited: 2026-06-12
+<!-- Created: 2026-06-12 | Last reused or audited: 2026-07-28
      Authority basis: operator directive 2026-06-12 (subagent worktree lifecycle
      redesign); /tmp/agent_report_worktree_lifecycle.md -->
 
@@ -23,29 +23,20 @@ The live Zeus daemons run from the MAIN checkout (`/Users/leofitz/zeus`).
 A `PreToolUse` guard (`maintree_git_state_guard`) **BLOCKS** these when the
 effective repo dir is the main tree (including `git -C /Users/leofitz/zeus …`):
 `git checkout`, `git switch`, `git branch -b/-B/-d/-D/-f/-m`, `git reset --hard`.
-Never run them against the main tree. (Deliberate operator override:
-`MAINTREE_GIT_BYPASS=1`.)
+Never run them against the main tree; agents have no bypass.
 
-## 4. Merge back as your LAST step
-From inside your worktree, run:
+## 4. Hand off the committed SHA as your LAST step
+Do not run a merge-back helper and do not change the live checkout. Report the
+committed SHA, branch, focused verification, and any residual risk to the
+landing authority. It independently verifies the current `live` tip and lands
+the work through exactly one lane: a reviewed hot-pick (`git cherry-pick`) or a
+merged PR into `live`.
 
-```
-python3 scripts/agent_worktree_merge.py
-```
+For a Codex-managed worktree, its completed clean owner archives its own thread
+only after landing verification and any PR monitoring obligation end; Codex then
+snapshots and reclaims that worktree. No worker raw-removes a Codex path.
 
-It fast-forwards the session branch to your commits **only** when that is a
-pure, conflict-free fast-forward and the main tree is clean — daemon-equivalent
-to a normal commit landing. Outcomes:
-
-- `MERGE_OK: … merged sha <sha>` — done. Report the sha.
-- `MERGE_NOOP` — nothing to merge (already on session tip).
-- `MERGE_PENDING: …` — session branch advanced (non-ff) or main tree busy;
-  the helper prints the exact orchestrator command. Report MERGE_PENDING and
-  that command; the orchestrator finishes the merge.
-- `MERGE_REFUSED: …` — you were dirty, not in a worktree, or ran it from the
-  main tree. Fix and retry.
-
-## 5. Report = summary + merged sha only
-The orchestrator never picks files out of your worktree. Your report is a short
-summary plus the merged sha (or MERGE_PENDING + the deferred command). Do not
-paste diffs or file contents.
+## 5. Report = summary + committed SHA only
+The landing authority never picks files out of your worktree. Your report is a
+short summary plus the committed SHA and evidence. Do not paste diffs or file
+contents.

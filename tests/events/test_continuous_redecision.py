@@ -476,7 +476,7 @@ def test_executable_price_reader_preserves_native_min_tick_size():
     assert quotes[("cid-1", "buy_yes")].tick_size == pytest.approx(0.001)
 
 
-def test_executable_price_reader_uses_fresh_feasibility_quote_when_snapshot_stale():
+def test_executable_price_reader_does_not_revive_append_history_when_projection_missing():
     trade = sqlite3.connect(":memory:")
     trade.row_factory = sqlite3.Row
     trade.execute(
@@ -538,13 +538,14 @@ def test_executable_price_reader_uses_fresh_feasibility_quote_when_snapshot_stal
         """
     )
 
+    traces: list[str] = []
+    trade.set_trace_callback(traces.append)
     asks = cr.read_freshest_executable_prices(trade, condition_ids={"cid-1"})
     bids = cr.read_freshest_resting_best_bids(trade, condition_ids={"cid-1"})
 
-    assert asks[("cid-1", "buy_no")].price == pytest.approx(0.75)
-    assert asks[("cid-1", "buy_no")].freshness_deadline == "2026-06-01T13:01:30+00:00"
-    assert bids[("cid-1", "buy_no")].price == pytest.approx(0.74)
-    assert bids[("cid-1", "buy_no")].freshness_deadline == "2026-06-01T13:01:30+00:00"
+    assert asks[("cid-1", "buy_no")].price == pytest.approx(0.71)
+    assert bids[("cid-1", "buy_no")].price == pytest.approx(0.70)
+    assert all("FROM execution_feasibility_evidence" not in sql for sql in traces)
 
 
 def test_executable_price_reader_prefers_feasibility_latest_without_history_scan():

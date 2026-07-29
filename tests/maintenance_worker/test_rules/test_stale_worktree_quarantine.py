@@ -1,5 +1,5 @@
 # Created: 2026-05-16
-# Last reused or audited: 2026-05-16
+# Last reused or audited: 2026-07-28
 # Authority basis: docs/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 1.5 STEP 2
 """
 Tests for maintenance_worker.rules.stale_worktree_quarantine.
@@ -22,6 +22,7 @@ import pytest
 
 from maintenance_worker.rules.stale_worktree_quarantine import (
     VERDICT_SKIP_CURRENT,
+    VERDICT_SKIP_CODEX_LIFECYCLE_OWNER,
     VERDICT_SKIP_OPEN_PR,
     VERDICT_SKIP_PR_CHECK_UNVERIFIED,
     VERDICT_SKIP_UNCOMMITTED,
@@ -252,6 +253,35 @@ def test_apply_always_dry_run_with_mock_diff(tmp_path: Path) -> None:
     assert result.task_id == "stale_worktree_quarantine"
     assert len(result.diff) > 0
     assert any("worktree remove" in line or "dry-run" in line for line in result.diff)
+
+
+def test_codex_managed_worktree_requires_thread_owner_closeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Codex path is never offered to generic cleanup, even as a dry-run."""
+    from maintenance_worker.rules import stale_worktree_quarantine as rule
+
+    ctx = _make_ctx(tmp_path)
+    entry = _make_entry(ttl_days=21)
+    codex_root = tmp_path / "codex" / "worktrees"
+    codex_wt = codex_root / "zeus-completed"
+    codex_wt.mkdir(parents=True)
+    monkeypatch.setattr(rule, "CODEX_MANAGED_WORKTREE_ROOT", codex_root)
+    porcelain = (
+        f"worktree {tmp_path}\nHEAD abc123\nbranch refs/heads/main\n\n"
+        f"worktree {codex_wt}\nHEAD def456\nbranch refs/heads/fix/completed\n\n"
+    )
+
+    with (
+        patch.object(rule, "_parse_worktree_list", return_value=_parse_porcelain_output(porcelain)),
+        patch.object(rule, "_get_current_branch", return_value="main"),
+    ):
+        results = enumerate(entry, ctx)
+
+    codex = next(candidate for candidate in results if candidate.path == codex_wt)
+    assert codex.verdict == VERDICT_SKIP_CODEX_LIFECYCLE_OWNER
+    assert "set_thread_archived" in codex.reason
+    assert "worktree remove" not in "\n".join(apply(codex, ctx).diff)
 
 
 # ---------------------------------------------------------------------------

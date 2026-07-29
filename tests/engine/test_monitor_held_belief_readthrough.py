@@ -396,6 +396,74 @@ def test_freshest_seed_skips_payload_without_target_local_day(tmp_path, monkeypa
     assert selected_payload["openmeteo_payload_json"].endswith("2026-06-26_low.json")
 
 
+def test_freshest_seed_reads_latest_cache_without_enumerating_archives(
+    tmp_path, monkeypatch
+):
+    import os
+    from pathlib import Path
+
+    import src.data.replacement_forecast_production as prod
+    import src.engine.monitor_refresh as mr
+
+    seed_dir = tmp_path / "seeds"
+    seed_processed_dir = tmp_path / "seeds_processed"
+    processed_dir = tmp_path / "processed"
+    for path in (seed_dir, seed_processed_dir, processed_dir):
+        path.mkdir()
+    latest_dir = tmp_path / "seeds_latest"
+    latest_dir.mkdir()
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {
+            "seed_dir": str(seed_dir),
+            "seed_processed_dir": str(seed_processed_dir),
+            "processed_dir": str(processed_dir),
+        },
+    )
+    payload_path = tmp_path / "current.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "hourly": {
+                    "time": ["2026-07-22T01:00"],
+                    "temperature_2m": [29.0],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    latest_seed = latest_dir / "Seoul.2026-07-22.high.json"
+    latest_seed.write_text(
+        json.dumps(
+            {
+                "city": "Seoul",
+                "target_date": "2026-07-22",
+                "temperature_metric": "high",
+                "city_timezone": "Asia/Seoul",
+                "openmeteo_payload_json": str(payload_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    real_scandir = os.scandir
+
+    def guarded_scandir(path):
+        raise AssertionError(f"unexpected directory enumeration: {Path(path)}")
+
+    monkeypatch.setattr(os, "scandir", guarded_scandir)
+
+    selected = mr._freshest_family_seed_on_disk(
+        city="Seoul",
+        target_date="2026-07-22",
+        metric="high",
+    )
+
+    assert selected is not None
+    assert selected[0] == latest_seed
+
+
 def test_freshest_seed_does_not_enumerate_processed_archives(tmp_path, monkeypatch):
     import os
     from pathlib import Path
