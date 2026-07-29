@@ -1743,30 +1743,128 @@ def _run_advisory_check_maintree_git_state_guard(
 
 
 # ---------------------------------------------------------------------------
-# RULE 1 guard — no-edge conclusion is OUR DEFECT (operator directive 2026-06-14)
+# Edge-claim guard — an UNSUPPORTED POSITIVE conclusion is worth a reminder,
+# not a suppressed null result (fixed 2026-07-28; replaces the deleted
+# no_edge_rule1_guard). ADVISORY ONLY — see authority-boundary note below.
 # ---------------------------------------------------------------------------
+#
+# History: this guard used to be `no_edge_rule1_guard`. It BLOCKED the
+# CONCLUSION "no edge" / "market efficient" via a ~35-phrase blocklist (two
+# languages) and forced the agent to keep searching until it found something.
+# That inverted the actual discipline: `loop/LEDGER.yaml` states plainly that
+# "'insufficient evidence' is a legitimate, required conclusion" — the guard
+# contradicted its own repo's law. It also ran one layer above the selection
+# calibrator's Wilson lower bound and the Benjamini-Hochberg FDR control and
+# cancelled them out: those exist specifically to let the null win when the
+# evidence doesn't clear the bar, and the guard vetoed that outcome by fiat.
+# On 2026-07-28 it fired on a session's own summary of the plan to fix it —
+# field proof the trigger was lexical (matched the string "no edge" wherever
+# it appeared) rather than structural (whether a conclusion was being drawn
+# at all). A meta-discussion ABOUT a phrase is not an instance of concluding
+# it. Deleting that guard is the actual fix; nothing below is a substitute
+# for it, only a mirror-shaped reminder for the opposite failure mode.
+#
+# The replacement inverts what gets challenged, not just the wording: it
+# fires on a POSITIVE edge/deploy/scale-up claim asserted without a settled
+# basis. The trigger is structural, not a blocklist of "we have edge"-style
+# phrases (that would just reproduce the original lexical fragility pointed
+# the other way) — it requires BOTH (a) language that reads as concluding
+# tradeable edge or a capital-deployment decision, AND (b) the absence of AT
+# LEAST ONE of: a settled-sample count, an interval/bound, or a settlement-
+# graded evidence reference — each of which must carry an actual numeric
+# value where one applies, not just the keyword — OR a stated sample count
+# under this codebase's own floor. That floor is not invented here:
+# `loop/LEDGER.yaml` requires min_n=30 per cell before a statistical
+# conclusion can leave `status: open`, and
+# `src/decision/selection_calibrator.py` (MIN_N = 30) enforces the same
+# number at the calibration layer.
+#
+# AUTHORITY BOUNDARY (why this is ADVISORY, never blocking): a regex over
+# unconstrained prose cannot verify a claim, only notice the SHAPE of one. A
+# hard block here would reproduce the original defect's shape — prose lexing
+# deciding what may be concluded — just pointed at positive claims instead of
+# negative ones, and would falsely advertise that edge claims are
+# mechanically governed. Prose can describe authority; prose must not
+# instantiate authority. The real floor lives in the ledger and the
+# calibrator (loop/LEDGER.yaml, src/decision/selection_calibrator.py); this
+# guard only reminds a message to show its work before concluding.
+#
+# KNOWN LIMITS (documented, not "fixed" — see tests):
+#   - Scope inference is best-effort: it looks for ANY number near ANY
+#     count/interval token in the whole message, not the number that
+#     actually backs THIS claim. An aggregate n=500 can mask a thin n=8
+#     cell; an unrelated n=12 elsewhere in the message can flag an otherwise
+#     well-supported claim. This cannot be fixed by better prose-parsing —
+#     it is why the guard is advisory and the calibrator/ledger, which see
+#     the real per-cell counts, remain the authority.
+#   - The meta-discussion exemption is a trivial bypass: any message
+#     containing a self-referential phrase ("the guard", "this hook", ...)
+#     is exempt even if it also contains an unsupported positive claim, e.g.
+#     "the guard is working; we have confirmed edge, scale up" never fires.
+#     Acceptable for an advisory lint whose job is to catch the common case
+#     without re-creating the lexical-block failure mode; not something a
+#     smarter regex can fully close.
 
-# Phrases that encode the forbidden "no edge / market efficient" CONCLUSION.
-# RULE 1 (operator, inviolable): a no-edge verdict is presumed OUR DEFECT until
-# settlement proves otherwise; tradeable alpha is ASSUMED to exist. The agent
-# does not get to stop on "no edge" — it must root-cause the suppression and try
-# other approaches.
-_NO_EDGE_PHRASES = (
-    "no edge", "no-edge", "no actionable edge", "no tradeable edge",
-    "no tradable edge", "no real edge", "no genuine edge", "no exploitable edge",
-    "no tradeable alpha", "no alpha", "lack edge", "lacks edge", "lacking edge",
-    "genuinely lack", "market is efficient", "market efficient",
-    "markets are efficient", "efficient market", "honest no-edge",
-    "honestly no edge", "honest no edge",
-    # Chinese equivalents — the operator's language law (converse in Chinese)
-    # means most conclusions land in Chinese; an English-only list never fires.
-    "无边", "没有边", "无真实边", "无可交易边", "无边可动", "边不存在",
-    "市场有效", "有效市场", "诚实无边",
-    # Structural paraphrases seen in practice: assistant avoids the literal
-    # "no edge" string while still concluding the substance of RULE 1.
-    "edge=0", "edge = 0", "0 过边闸", "0 可提交", "无 settled-ev 可动",
-    "无fill可能", "无 fill 可能", "边今日几乎不供给",
+MIN_SETTLED_N = 30  # loop/LEDGER.yaml min_n + src/decision/selection_calibrator.py MIN_N
+
+# Exempts meta-discussion of edges/guards/this mechanism from ever firing —
+# the 2026-07-28 self-demonstration (a summary of the fix plan was blocked
+# because its prose matched a phrase) is the regression case this guards.
+# Known trivial bypass — see KNOWN LIMITS above.
+_EDGE_GUARD_META_DISCUSSION_RE = (
+    r"no_edge_rule1_guard|unsupported_edge_claim_guard|_NO_EDGE_PHRASES|"
+    r"\bRULE 1\b|dispatch\.py|\bstop hook\b|\bthis guard\b|\bthe guard\b|"
+    r"\bthis hook\b|\bthe hook\b"
 )
+
+# A positive assertion that tradeable edge/alpha exists.
+_EDGE_ASSERTION_RE = (
+    r"\b(?:we have|there is|confirmed|found|verified)\s+(?:a\s+|the\s+)?"
+    r"(?:real\s+|genuine\s+|tradeable\s+|tradable\s+|exploitable\s+)?"
+    r"(?:edge|alpha)\b"
+    r"|\b(?:edge|alpha)\s+(?:exists|(?:is\s+)?confirmed|is real|is tradeable|is tradable)\b"
+)
+
+# A capital-deployment/scale-up decision (only counts as an edge claim when
+# paired with "edge"/"alpha" appearing anywhere in the same message — see
+# _EDGE_NOUN_RE below — so it doesn't fire on unrelated "deploy this code").
+_DEPLOY_ACTION_RE = (
+    r"\b(?:deploy|go(?:ing)? live|scal(?:e|ing) up|increase size|"
+    r"increase stake|increase capital|submit real capital|"
+    r"start live trading|turn on live trading|increase position size)\b"
+)
+_EDGE_NOUN_RE = r"\b(?:edge|alpha)\b"
+
+# Evidence categories. "Supported" requires ALL THREE present — count AND
+# interval AND settlement reference — matching the advisory text, which asks
+# for all three before treating a positive claim as backed. Count and
+# interval require an actual NUMBER near the token, not just the keyword
+# (a bare "Wilson" or "settled outcomes" with no digit does not count).
+_SAMPLE_COUNT_RE = (
+    r"\bn\s*=\s*\d+\b"                                     # n=42
+    r"|\b\d+\s+settled\b"                                  # 42 settled
+    r"|\bsettled\s+(?:rows?|outcomes?|trades?|samples?|markets?|fills?)"
+    r"\D{0,15}\d+\b"                                        # settled outcomes: 42
+)
+_INTERVAL_RE = (
+    r"\[\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\]"      # [0.5, 0.7]
+    r"|[±]\s*\d"                                            # ± 0.05
+    r"|\bCI\s*[:=]?\s*\[?\d"                                 # CI: 0.5 / CI[0.5
+    r"|\b(?:confidence interval|lower bound|upper bound|"
+    r"wilson(?:\s+lower\s+bound)?|bootstrap(?:ped)?|walk[- ]forward)\b"
+    r"\D{0,15}\d"                                           # "lower bound 0.61"
+)
+_SETTLEMENT_REF_RE = (
+    r"\bsettl(?:ed|ement)[- ]graded\b|\bsettlement chain\b|"
+    r"\bgraded (?:by|against) settlement\b|\breal settlement\b|"
+    r"\bsettled (?:evidence|data|outcomes?)\b"
+)
+
+# Extracts a stated sample count to compare against MIN_SETTLED_N even when
+# the message otherwise looks fully evidenced (e.g. cites "n=12" — a real
+# count, just below the calibrator's own floor). Best-effort global scope —
+# see KNOWN LIMITS above.
+_N_VALUE_RE = r"\bn\s*=\s*(\d+)\b|\b(\d+)\s+settled\b"
 
 
 def _last_assistant_text(transcript_path: str) -> str:
@@ -1800,46 +1898,86 @@ def _last_assistant_text(transcript_path: str) -> str:
     return ""
 
 
-def _run_advisory_check_no_edge_rule1_guard(
+def _run_advisory_check_unsupported_edge_claim_guard(
     payload: dict[str, Any],
 ) -> str | None:
-    """Stop: BLOCK + redirect when the final assistant message concludes 'no
-    edge' / 'market efficient'. RULE 1 (operator): no-edge is presumed OUR
-    DEFECT until settlement proves otherwise; tradeable alpha is assumed to
-    exist. Loop-safe: when already inside a stop-hook re-drive
-    (stop_hook_active) it degrades to a non-blocking reminder. Bypass:
-    ZEUS_NO_EDGE_GUARD_OFF=1 (operator deliberate override only)."""
-    if os.environ.get("ZEUS_NO_EDGE_GUARD_OFF", "").strip() == "1":
+    """Stop: ADVISORY (non-blocking) reminder when the final assistant message
+    concludes tradeable edge / a deploy-or-scale-up decision WITHOUT ALL
+    THREE of a settled-sample count, an interval/bound, and a settlement-
+    graded evidence reference (each requiring an actual number, not just the
+    keyword) — or states a sample count below this codebase's own floor
+    (MIN_SETTLED_N=30, matching loop/LEDGER.yaml's min_n and
+    selection_calibrator.py's MIN_N). A null result ("no edge", "insufficient
+    evidence") is never touched by this or any other guard — see
+    loop/LEDGER.yaml. Messages that merely discuss edges/guards/this
+    mechanism are exempt (regression case: 2026-07-28, the predecessor guard
+    fired on its own fix-plan summary) — a documented, accepted bypass for an
+    advisory lint, not a gap that needs closing (see KNOWN LIMITS above the
+    regex definitions). ADVISORY ONLY: never returns _BLOCK_SENTINEL — prose
+    can describe authority, prose must not instantiate authority; the real
+    floor lives in the ledger/calibrator, not in this regex. Bypass:
+    ZEUS_EDGE_CLAIM_GUARD_OFF=1 (operator deliberate override only, silences
+    the reminder)."""
+    if os.environ.get("ZEUS_EDGE_CLAIM_GUARD_OFF", "").strip() == "1":
         return None
     text = _last_assistant_text(payload.get("transcript_path", ""))
     if not text:
         return None
-    low = text.lower()
-    hit = next((p for p in _NO_EDGE_PHRASES if p in low), None)
-    if hit is None:
+    import re
+
+    if re.search(_EDGE_GUARD_META_DISCUSSION_RE, text, re.IGNORECASE):
         return None
-    msg = (
-        "RULE 1 VIOLATION — your message concluded with the forbidden framing "
-        f"(matched: {hit!r}).\n"
-        "RULE 1 (inviolable): a 'no edge' / 'market efficient' / 'honest no-edge' "
-        "verdict is PRESUMED OUR DEFECT until settlement proves otherwise. "
-        "Tradeable alpha is ASSUMED to exist; you do NOT get to conclude it is absent.\n"
-        "REDIRECT NOW — do not stop on this conclusion. Find OTHER approaches:\n"
-        "  - root-cause the SUPPRESSION (which gate / cap / q_lcb floor / metadata "
-        "pushed q_lcb below price?),\n"
-        "  - attack a DIFFERENT market / temperature band / horizon / mechanism,\n"
-        "  - a different data angle, microstructure, or mispricing source,\n"
-        "  - re-examine whether OUR forecast metadata (bin / station / representativeness "
-        "offset) is wrong (law 8).\n"
-        "Keep driving toward real settlement-graded alpha. Never present a no-edge "
-        "conclusion as the answer."
+    is_edge_claim = bool(re.search(_EDGE_ASSERTION_RE, text, re.IGNORECASE)) or (
+        re.search(_DEPLOY_ACTION_RE, text, re.IGNORECASE)
+        and re.search(_EDGE_NOUN_RE, text, re.IGNORECASE)
     )
-    if payload.get("stop_hook_active"):
-        # Already inside a stop-hook continuation — degrade to a non-blocking
-        # reminder so the guard cannot infinite-loop.
-        return msg
-    print(msg, file=sys.stderr)
-    return _BLOCK_SENTINEL
+    if not is_edge_claim:
+        return None
+
+    has_count = bool(re.search(_SAMPLE_COUNT_RE, text, re.IGNORECASE))
+    has_interval = bool(re.search(_INTERVAL_RE, text, re.IGNORECASE))
+    has_settlement_ref = bool(re.search(_SETTLEMENT_REF_RE, text, re.IGNORECASE))
+    unsupported = not (has_count and has_interval and has_settlement_ref)
+
+    below_floor = False
+    n_val: int | None = None
+    n_match = re.search(_N_VALUE_RE, text, re.IGNORECASE)
+    if n_match:
+        n_val = int(n_match.group(1) or n_match.group(2))
+        if n_val < MIN_SETTLED_N:
+            below_floor = True
+
+    if not (unsupported or below_floor):
+        return None
+
+    if below_floor:
+        reason = f"stated sample n={n_val} is below the floor n>={MIN_SETTLED_N}"
+    else:
+        missing = [
+            label
+            for label, present in (
+                ("a settled-sample count", has_count),
+                ("an interval/bound", has_interval),
+                ("a settlement-graded evidence reference", has_settlement_ref),
+            )
+            if not present
+        ]
+        reason = "missing " + ", ".join(missing)
+    msg = (
+        f"ADVISORY (unsupported_edge_claim_guard) — your message reads like a "
+        f"tradeable-edge / deploy-or-scale-up conclusion but is {reason}.\n"
+        "This is a reminder, not a block — a null result ('insufficient "
+        "evidence', 'no edge') is a legitimate, required conclusion "
+        "(loop/LEDGER.yaml) and this guard never blocks anything.\n"
+        "Before concluding edge, deploying, or scaling, consider stating: the "
+        f"settled-sample count (floor: n >= {MIN_SETTLED_N} settled rows per "
+        "cell — loop/LEDGER.yaml min_n, src/decision/selection_calibrator.py "
+        "MIN_N), the interval/bound on the estimate, and the settlement-graded "
+        "evidence it is drawn from. This check is a best-effort prose scan, "
+        "not an authority — the calibrator and ledger are.\n"
+        "Bypass: ZEUS_EDGE_CLAIM_GUARD_OFF=1 (silences this reminder)."
+    )
+    return msg
 
 
 # ---------------------------------------------------------------------------
@@ -1887,7 +2025,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     # from a cwd-overridden subagent, so the rule only restated harness behavior.
     "monitor_arm_overdue_advisor": _run_advisory_check_monitor_arm_overdue_advisor,
     "pr_monitor_arm_ack": _run_advisory_check_pr_monitor_arm_ack,
-    "no_edge_rule1_guard": _run_advisory_check_no_edge_rule1_guard,
+    "unsupported_edge_claim_guard": _run_advisory_check_unsupported_edge_claim_guard,
 }
 
 # External-module handlers registered conditionally (None if import failed → boot
