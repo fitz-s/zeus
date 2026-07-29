@@ -981,6 +981,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- redemption backlog + bankroll sensitivity operator tooling (2026-07-25) ---
         "scripts/report_redemption_backlog.py",  # read_only_ro_uri: opens zeus_trades.db via file:...?mode=ro uri; SELECT-only over settlement_commands/position_current/wallet_balance_head; Zeus never submits a redeem tx (operator law); writes stdout only
         "scripts/allocator_bankroll_sensitivity.py",  # read_only_ro_uri: opens zeus_trades.db via file:...?mode=ro uri; SELECT-only over decision_log/executable_market_snapshot_latest; non-authoritative offline Kelly-formula sensitivity probe; writes stdout only
+        # --- book_snapshot_persistence round-3 fix X2 (2026-07-29): telemetry spool DB ---
+        "src/events/family_book_telemetry_writer.py",  # not in the world-db BULK lock universe: the raw sqlite3.connect() opens a PRIVATE telemetry spool file (family_book_telemetry_spool.db) that is NEITHER zeus_trades.db NOR any other canonical DB -- no other writer ever touches it, so it needs no cutover lease / writer-class arbitration. The ONLY code in this file that touches a canonical DB (zeus_trades.db, via the periodic ingest pass) goes through get_trade_connection() (canonical _connect shim) wrapped in db_writer_lock(WriteClass.BULK, blocking=False).
     }
 )
 

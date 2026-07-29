@@ -1,9 +1,14 @@
 # Created: 2026-07-29
 # Last reused or audited: 2026-07-29
 # Authority basis: docs/operations/current/book_snapshot_persistence/PLAN.md --
-#   redesign after deep-review NO-GO. Covers the manifest builder, the
-#   timestamp-free content hash (the fix for the verified book_hash/dedup
-#   bug), and the tightened market_center_native coverage requirement.
+#   redesign after deep-review NO-GO, plus round-3 fixes: H1 (compact
+#   envelope -- project_observation_envelope runs on the decision thread and
+#   holds NO reference to the FamilyDecision/family/proofs graph), X3
+#   (per-observation provenance -- content_hash/canonical_payload carry ONLY
+#   content-identity fields; executable_snapshot_id/source_captured_at move
+#   to build_source_manifest, persisted per observation, never in the shared
+#   state row), M3 (market_center_and_status always excludes non-executable
+#   shoulder bins from its weighted sum, regardless of quoted status).
 """Tests for src/events/family_book_manifest.py."""
 from __future__ import annotations
 
@@ -16,12 +21,12 @@ from typing import Any, Optional
 
 from src.config import City
 from src.events.family_book_manifest import (
-    build_manifest,
+    build_source_manifest,
     compute_state_identity,
-    market_center_native,
-    market_center_status,
-    market_q_fields,
-    model_q_fields,
+    market_center_and_status,
+    market_q_json,
+    model_q_json,
+    project_observation_envelope,
 )
 from src.execution.family_book import ExecutableLadder, MarketBook, build_family_book
 from src.forecast.day0_conditioner import Day0ObservationState
@@ -35,6 +40,7 @@ from src.strategy.live_inference.executable_cost import QuoteLevel
 ISSUE = datetime(2026, 6, 14, 0, 0, 0)
 STATION = "RJTT"
 _CAPTURED = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+_DECISION_TIME = datetime(2026, 6, 14, 12, 5, 0, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +123,19 @@ def _quoted_market(bin_id: str, *, yes_ask: float, yes_bid: float, **kw) -> Mark
 def _all_quoted_family_book(case: ForecastCase, space: OutcomeSpace, **kw) -> "Any":
     """complete_book True, EVERY bin (incl. non-executable tail) two-sided quoted."""
     markets = {b.bin_id: _quoted_market(b.bin_id, yes_ask=0.30, yes_bid=0.20, **kw) for b in space.bins}
+    return build_family_book(omega=space, markets=markets, captured_at_utc=_CAPTURED)
+
+
+def _executable_only_quoted_family_book(case: ForecastCase, space: OutcomeSpace) -> "Any":
+    """complete_book True; every bin has a MarketBook, but ONLY the executable
+    (non-shoulder) bins are two-sided quoted -- shoulders are thin. This is
+    the coverage rule's intended OK case (shoulders exempt from coverage)."""
+    markets = {}
+    for b in space.bins:
+        if b.executable:
+            markets[b.bin_id] = _quoted_market(b.bin_id, yes_ask=0.30, yes_bid=0.20)
+        else:
+            markets[b.bin_id] = _thin_market(b.bin_id)
     return build_family_book(omega=space, markets=markets, captured_at_utc=_CAPTURED)
 
 
@@ -208,40 +227,104 @@ def _decision(case, space, family_book, *, joint_q=None, market_implied_q=None, 
     )
 
 
+def _family(case):
+    from src.events.candidate_binding import EventBoundCandidateFamily
+
+    return EventBoundCandidateFamily(
+        family_id=case.family_id, event_id="event-1", event_type="FORECAST_SNAPSHOT_READY",
+        city=case.city, target_date=case.target_local_date.isoformat(), metric=case.metric,
+        condition_ids=(), yes_token_ids=(), no_token_ids=(), bins=(), candidates=(),
+        causal_snapshot_id="snap-causal-1", market_topology_source="executable_market_snapshots",
+        binding_hash="binding-hash-1",
+    )
+
+
+def _envelope(case, space, book, *, proofs=None, decision=None, decision_time=_DECISION_TIME):
+    if decision is None:
+        decision = _decision(case, space, book)
+    if proofs is None:
+        proofs = _proofs_for(space)
+    return project_observation_envelope(
+        decision=decision, family=_family(case), active_proofs=proofs,
+        candidate_bin_id=_candidate_bin_id, decision_time=decision_time, causal_snapshot_id="causal-1",
+    )
+
+
 # ---------------------------------------------------------------------------
-# build_manifest: identity/hash/source-time from proofs, metadata from FamilyBook.
+# project_observation_envelope: identity/hash/source-time from proofs,
+# metadata from FamilyBook -- the compact H1 projection.
 # ---------------------------------------------------------------------------
 
-class TestBuildManifest:
-    def test_manifest_carries_snapshot_identity_from_proofs_and_metadata_from_book(self):
+class TestProjectObservationEnvelope:
+    def test_none_when_decision_is_none(self):
+        assert project_observation_envelope(
+            decision=None, family=_family(_case()), active_proofs=(),
+            candidate_bin_id=_candidate_bin_id, decision_time=_DECISION_TIME, causal_snapshot_id="c1",
+        ) is None
+
+    def test_none_when_family_book_is_none(self):
+        case = _case()
+        space = _outcome_space(case)
+        decision = _decision(case, space, family_book=None)
+        assert project_observation_envelope(
+            decision=decision, family=_family(case), active_proofs=(),
+            candidate_bin_id=_candidate_bin_id, decision_time=_DECISION_TIME, causal_snapshot_id="c1",
+        ) is None
+
+    def test_envelope_carries_snapshot_identity_from_proofs_and_metadata_from_book(self):
         case = _case()
         space = _outcome_space(case)
         book = _all_quoted_family_book(case, space, tick="0.01", min_order="5.0", fee=0.07)
-        proofs = _proofs_for(space)
-        manifest = build_manifest(_decision(case, space, book), active_proofs=proofs, candidate_bin_id=_candidate_bin_id)
+        envelope = _envelope(case, space, book, proofs=_proofs_for(space))
 
-        by_bin = {e["bin_id"]: e for e in manifest}
+        by_bin = {b.bin_id: b for b in envelope.bins}
         assert set(by_bin) == set(b.bin_id for b in space.bins)
         entry = by_bin["b25"]
-        assert entry["executable_snapshot_id"] == "snap-b25-1"
-        assert entry["raw_orderbook_hash"] == "hash-a"
-        assert entry["source_captured_at"] == "2026-06-14T12:01:00+00:00"
-        assert entry["condition_id"] == "cond-b25"
-        assert entry["min_tick_size"] == "0.01"
-        assert entry["min_order_size"] == "5.0"
-        assert entry["fee_rate"] == 0.07
-        assert entry["neg_risk"] is False
+        assert entry.executable_snapshot_id == "snap-b25-1"
+        assert entry.raw_orderbook_hash == "hash-a"
+        assert entry.source_captured_at == "2026-06-14T12:01:00+00:00"
+        assert entry.condition_id == "cond-b25"
+        assert entry.min_tick_size == "0.01"
+        assert entry.min_order_size == "5.0"
+        assert entry.fee_rate == 0.07
+        assert entry.neg_risk is False
+        assert entry.best_yes_ask == 0.30
+        assert entry.best_yes_bid == 0.20
 
     def test_bin_with_no_matching_proof_gets_null_identity_not_dropped(self):
         case = _case()
         space = _outcome_space(case)
         book = _all_quoted_family_book(case, space)
         proofs = tuple(p for p in _proofs_for(space) if p.bin_id != "b25")  # b25 missing
-        manifest = build_manifest(_decision(case, space, book), active_proofs=proofs, candidate_bin_id=_candidate_bin_id)
-        by_bin = {e["bin_id"]: e for e in manifest}
+        envelope = _envelope(case, space, book, proofs=proofs)
+        by_bin = {b.bin_id: b for b in envelope.bins}
         assert "b25" in by_bin  # bin present (from FamilyBook), just no identity
-        assert by_bin["b25"]["executable_snapshot_id"] is None
-        assert by_bin["b25"]["raw_orderbook_hash"] is None
+        assert by_bin["b25"].executable_snapshot_id is None
+        assert by_bin["b25"].raw_orderbook_hash is None
+
+    def test_envelope_extracts_model_and_market_q_without_retaining_source_objects(self):
+        import numpy as np
+
+        case = _case()
+        space = _outcome_space(case)
+        book = _all_quoted_family_book(case, space)
+        fake_joint_q = SimpleNamespace(
+            q_by_bin_id={b.bin_id: 1.0 / len(space.bins) for b in space.bins},
+            identity_hash="jq-hash-1",
+        )
+        n = len(space.bins)
+        fake_miq = SimpleNamespace(
+            q=np.full(n, 1.0 / n), basis="DEFRICTIONED_FAMILY_BOOK_MIDPOINT_PROJECTION_V1",
+            depth_score=0.9, spread_score=0.02, projection_error=0.001, book_hash="miq-book-hash",
+        )
+        decision = _decision(case, space, book, joint_q=fake_joint_q, market_implied_q=fake_miq)
+        envelope = _envelope(case, space, book, decision=decision)
+
+        assert envelope.model_q_identity_hash == "jq-hash-1"
+        assert set(envelope.model_q_by_bin_id) == set(b.bin_id for b in space.bins)
+        assert envelope.market_q_basis == "DEFRICTIONED_FAMILY_BOOK_MIDPOINT_PROJECTION_V1"
+        assert envelope.market_q_book_hash == "miq-book-hash"
+        assert set(envelope.market_q_by_bin_id) == set(b.bin_id for b in space.bins)
 
 
 # ---------------------------------------------------------------------------
@@ -260,21 +343,15 @@ class TestComputeStateIdentity:
         book = _all_quoted_family_book(case, space)
         decision = _decision(case, space, book)
 
-        manifest_t0 = build_manifest(decision, active_proofs=_proofs_for(space, snapshot_suffix="1"), candidate_bin_id=_candidate_bin_id)
-        manifest_t1 = build_manifest(decision, active_proofs=_proofs_for(space, snapshot_suffix="2"), candidate_bin_id=_candidate_bin_id)
+        env_t0 = _envelope(case, space, book, decision=decision, proofs=_proofs_for(space, snapshot_suffix="1"))
+        env_t1 = _envelope(case, space, book, decision=decision, proofs=_proofs_for(space, snapshot_suffix="2"))
 
-        # Fixture sanity: the two manifests really do differ in snapshot_id/time.
-        assert manifest_t0[0]["executable_snapshot_id"] != manifest_t1[0]["executable_snapshot_id"]
-        assert manifest_t0[0]["source_captured_at"] != manifest_t1[0]["source_captured_at"]
+        # Fixture sanity: the two envelopes really do differ in snapshot_id/time.
+        assert env_t0.bins[0].executable_snapshot_id != env_t1.bins[0].executable_snapshot_id
+        assert env_t0.bins[0].source_captured_at != env_t1.bins[0].source_captured_at
 
-        id0 = compute_state_identity(
-            family_id=case.family_id, topology_hash=space.topology_hash,
-            complete_book=book.complete_book, manifest=manifest_t0,
-        )
-        id1 = compute_state_identity(
-            family_id=case.family_id, topology_hash=space.topology_hash,
-            complete_book=book.complete_book, manifest=manifest_t1,
-        )
+        id0 = compute_state_identity(env_t0)
+        id1 = compute_state_identity(env_t1)
         assert id0[0] == id1[0]  # state_id
         assert id0[1] == id1[1]  # content_hash
 
@@ -283,10 +360,10 @@ class TestComputeStateIdentity:
         space = _outcome_space(case)
         book = _all_quoted_family_book(case, space)
         decision = _decision(case, space, book)
-        manifest_a = build_manifest(decision, active_proofs=_proofs_for(space, raw_hash="hash-a"), candidate_bin_id=_candidate_bin_id)
-        manifest_b = build_manifest(decision, active_proofs=_proofs_for(space, raw_hash="hash-b"), candidate_bin_id=_candidate_bin_id)
-        id_a = compute_state_identity(family_id=case.family_id, topology_hash=space.topology_hash, complete_book=True, manifest=manifest_a)
-        id_b = compute_state_identity(family_id=case.family_id, topology_hash=space.topology_hash, complete_book=True, manifest=manifest_b)
+        env_a = _envelope(case, space, book, decision=decision, proofs=_proofs_for(space, raw_hash="hash-a"))
+        env_b = _envelope(case, space, book, decision=decision, proofs=_proofs_for(space, raw_hash="hash-b"))
+        id_a = compute_state_identity(env_a)
+        id_b = compute_state_identity(env_b)
         assert id_a[1] != id_b[1]
 
     def test_changed_fee_or_tick_changes_content_hash(self):
@@ -294,28 +371,67 @@ class TestComputeStateIdentity:
         space = _outcome_space(case)
         book_a = _all_quoted_family_book(case, space, tick="0.01", fee=0.05)
         book_b = _all_quoted_family_book(case, space, tick="0.02", fee=0.05)
-        proofs = _proofs_for(space)
-        manifest_a = build_manifest(_decision(case, space, book_a), active_proofs=proofs, candidate_bin_id=_candidate_bin_id)
-        manifest_b = build_manifest(_decision(case, space, book_b), active_proofs=proofs, candidate_bin_id=_candidate_bin_id)
-        id_a = compute_state_identity(family_id=case.family_id, topology_hash=space.topology_hash, complete_book=True, manifest=manifest_a)
-        id_b = compute_state_identity(family_id=case.family_id, topology_hash=space.topology_hash, complete_book=True, manifest=manifest_b)
+        env_a = _envelope(case, space, book_a)
+        env_b = _envelope(case, space, book_b)
+        id_a = compute_state_identity(env_a)
+        id_b = compute_state_identity(env_b)
         assert id_a[1] != id_b[1]
 
-    def test_canonical_payload_is_valid_json_and_round_trips(self):
+    def test_canonical_payload_excludes_snapshot_identity_and_capture_time(self):
+        """X3: the STATE's stored payload must carry ONLY content fields --
+        no executable_snapshot_id/source_captured_at (those belong to each
+        OBSERVATION's own source_manifest_json, never the shared state)."""
         case = _case()
         space = _outcome_space(case)
         book = _all_quoted_family_book(case, space)
-        manifest = build_manifest(_decision(case, space, book), active_proofs=_proofs_for(space), candidate_bin_id=_candidate_bin_id)
-        _, _, payload = compute_state_identity(
-            family_id=case.family_id, topology_hash=space.topology_hash, complete_book=True, manifest=manifest,
-        )
+        envelope = _envelope(case, space, book)
+        _, _, payload = compute_state_identity(envelope)
         parsed = json.loads(payload)
         assert parsed["family_id"] == case.family_id
         assert len(parsed["bins"]) == len(space.bins)
+        for bin_entry in parsed["bins"]:
+            assert "executable_snapshot_id" not in bin_entry
+            assert "source_captured_at" not in bin_entry
 
 
 # ---------------------------------------------------------------------------
-# market_center_native / market_center_status -- tightened coverage rule.
+# X3: per-observation source provenance (moved OUT of the shared state).
+# ---------------------------------------------------------------------------
+
+class TestBuildSourceManifest:
+    def test_source_manifest_carries_this_capture_identity_per_bin(self):
+        case = _case()
+        space = _outcome_space(case)
+        book = _all_quoted_family_book(case, space)
+        envelope = _envelope(case, space, book, proofs=_proofs_for(space, snapshot_suffix="7", raw_hash="hash-x"))
+        parsed = json.loads(build_source_manifest(envelope))
+        assert set(parsed) == set(b.bin_id for b in space.bins)
+        assert parsed["b25"]["executable_snapshot_id"] == "snap-b25-7"
+        assert parsed["b25"]["source_captured_at"] == "2026-06-14T12:07:00+00:00"
+
+    def test_two_observations_of_identical_content_carry_distinct_source_manifests(self):
+        """The exact defect X3 fixes: content-identical books captured under
+        DIFFERENT snapshot IDs must not collapse to one shared (first-seen)
+        provenance -- each observation's own manifest must reflect ITS
+        capture, not the state's first occurrence."""
+        case = _case()
+        space = _outcome_space(case)
+        book = _all_quoted_family_book(case, space)
+        decision = _decision(case, space, book)
+        env_t0 = _envelope(case, space, book, decision=decision, proofs=_proofs_for(space, snapshot_suffix="1"))
+        env_t1 = _envelope(case, space, book, decision=decision, proofs=_proofs_for(space, snapshot_suffix="2"))
+
+        # Same state (content-only identity) ...
+        assert compute_state_identity(env_t0)[0] == compute_state_identity(env_t1)[0]
+        # ... but each observation's OWN source manifest differs.
+        manifest_t0 = json.loads(build_source_manifest(env_t0))
+        manifest_t1 = json.loads(build_source_manifest(env_t1))
+        assert manifest_t0["b25"]["executable_snapshot_id"] != manifest_t1["b25"]["executable_snapshot_id"]
+        assert manifest_t0["b25"]["source_captured_at"] != manifest_t1["b25"]["source_captured_at"]
+
+
+# ---------------------------------------------------------------------------
+# market_center_and_status -- tightened coverage rule + M3 shoulder exclusion.
 # ---------------------------------------------------------------------------
 
 class TestMarketCenter:
@@ -323,10 +439,25 @@ class TestMarketCenter:
         case = _case()
         space = _outcome_space(case)
         book = _all_quoted_family_book(case, space)  # every bin quoted identically 0.25 mid
-        value = market_center_native(book)
-        status = market_center_status(book)
+        envelope = _envelope(case, space, book)
+        value, status = market_center_and_status(envelope)
         assert status == "OK"
         assert value is not None
+
+    def test_shoulder_quoted_or_not_yields_the_same_center_m3(self):
+        """M3: two status=OK centers must use the SAME support -- a quoted
+        shoulder must not silently pull into the weighted sum while an
+        unquoted shoulder (same executable coverage) does not."""
+        case = _case()
+        space = _outcome_space(case)
+        book_shoulders_thin = _executable_only_quoted_family_book(case, space)
+        book_shoulders_quoted = _all_quoted_family_book(case, space)  # shoulders ALSO quoted 0.30/0.20
+        env_thin = _envelope(case, space, book_shoulders_thin)
+        env_quoted = _envelope(case, space, book_shoulders_quoted)
+        value_thin, status_thin = market_center_and_status(env_thin)
+        value_quoted, status_quoted = market_center_and_status(env_quoted)
+        assert status_thin == status_quoted == "OK"
+        assert value_thin == value_quoted
 
     def test_partial_coverage_on_complete_book_is_now_null_not_a_number(self):
         """Deep-review 2026-07-29 fix: a family where only 2 of 11 bins are
@@ -336,30 +467,34 @@ class TestMarketCenter:
         space = _outcome_space(case)
         book = _partially_quoted_family_book(case, space)
         assert book.complete_book is True  # every bin HAS a MarketBook (thin or quoted)
-        assert market_center_native(book) is None
-        assert market_center_status(book) == "INSUFFICIENT_COVERAGE"
+        envelope = _envelope(case, space, book)
+        value, status = market_center_and_status(envelope)
+        assert value is None
+        assert status == "INSUFFICIENT_COVERAGE"
 
     def test_incomplete_book_is_null(self):
         case = _case()
         space = _outcome_space(case)
         book = _incomplete_family_book(case, space)
-        assert market_center_native(book) is None
-        assert market_center_status(book) == "INCOMPLETE_BOOK"
+        envelope = _envelope(case, space, book)
+        value, status = market_center_and_status(envelope)
+        assert value is None
+        assert status == "INCOMPLETE_BOOK"
 
 
 # ---------------------------------------------------------------------------
-# model_q_fields / market_q_fields.
+# model_q_json / market_q_json.
 # ---------------------------------------------------------------------------
 
-class TestQFields:
-    def test_model_q_fields_none_when_joint_q_none(self):
+class TestQJson:
+    def test_model_q_json_none_when_joint_q_none(self):
         case = _case()
         space = _outcome_space(case)
         book = _all_quoted_family_book(case, space)
-        decision = _decision(case, space, book, joint_q=None)
-        assert model_q_fields(decision) == (None, None)
+        envelope = _envelope(case, space, book, decision=_decision(case, space, book, joint_q=None))
+        assert model_q_json(envelope) is None
 
-    def test_model_q_fields_populated_ordered_by_bin_id(self):
+    def test_model_q_json_populated_ordered_by_bin_id(self):
         case = _case()
         space = _outcome_space(case)
         book = _all_quoted_family_book(case, space)
@@ -368,34 +503,13 @@ class TestQFields:
             identity_hash="jq-hash-1",
         )
         decision = _decision(case, space, book, joint_q=fake_joint_q)
-        q_json, identity_hash = model_q_fields(decision)
-        assert identity_hash == "jq-hash-1"
-        parsed = json.loads(q_json)
+        envelope = _envelope(case, space, book, decision=decision)
+        parsed = json.loads(model_q_json(envelope))
         assert set(parsed) == set(b.bin_id for b in space.bins)
 
-    def test_market_q_fields_none_when_market_implied_q_none(self):
+    def test_market_q_json_none_when_market_implied_q_none(self):
         case = _case()
         space = _outcome_space(case)
         book = _all_quoted_family_book(case, space)
-        decision = _decision(case, space, book, market_implied_q=None)
-        fields = market_q_fields(decision)
-        assert fields["market_q_json"] is None
-        assert fields["market_q_basis"] is None
-
-    def test_market_q_fields_populated_aligned_to_omega_bins(self):
-        import numpy as np
-
-        case = _case()
-        space = _outcome_space(case)
-        book = _all_quoted_family_book(case, space)
-        n = len(space.bins)
-        fake_miq = SimpleNamespace(
-            q=np.full(n, 1.0 / n), basis="DEFRICTIONED_FAMILY_BOOK_MIDPOINT_PROJECTION_V1",
-            depth_score=0.9, spread_score=0.02, projection_error=0.001, book_hash="miq-book-hash",
-        )
-        decision = _decision(case, space, book, market_implied_q=fake_miq)
-        fields = market_q_fields(decision)
-        parsed = json.loads(fields["market_q_json"])
-        assert set(parsed) == set(b.bin_id for b in space.bins)
-        assert fields["market_q_basis"] == "DEFRICTIONED_FAMILY_BOOK_MIDPOINT_PROJECTION_V1"
-        assert fields["market_q_book_hash"] == "miq-book-hash"
+        envelope = _envelope(case, space, book, decision=_decision(case, space, book, market_implied_q=None))
+        assert market_q_json(envelope) is None

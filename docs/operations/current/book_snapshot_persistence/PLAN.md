@@ -47,6 +47,157 @@ findings. Everything below "Problem" that is unchanged from the original
 plan (the scout map, the hook site) is retained; everything about the table
 design, the writer, and the tests is new.
 
+## 2026-07-29 round-3 fixes -- CORRECT-BUT-NOT-YET-SAFE -> the remaining
+## transaction/admission/provenance blockers
+
+A second review of commit `69745d0cc` confirmed the redesign's data model
+(dedup identity, state/observation split, q-vector evidence authority, the
+tightened center estimator) as fully correct, but found three NEW blockers
+introduced or exposed by that redesign, plus a set of HIGH/MEDIUM findings.
+Verified each independently before fixing (same discipline as STEP 0):
+
+**X1 -- transaction poisoning after a partial write.** `_write_observation`
+did state INSERT -> observation INSERT -> COMMIT with no explicit rollback
+on failure. A failing observation INSERT (default SQLite ABORT policy backs
+out only the failing statement, not the whole transaction) or a failing
+COMMIT could leave `conn.in_transaction` True indefinitely -- the worker
+loops back to `queue.get()` still holding SQLite's sole writer lock.
+**Fix**: `_process_one` now wraps the whole state+observation write in a
+single try/except; on ANY failure it calls `_rollback_or_replace`, which
+tries `conn.rollback()` first and, only if THAT also fails, closes the
+connection and opens a fresh one (the only way to guarantee a clean slate).
+Counters and the sampling cache (`_last_state_by_family`) are updated ONLY
+after a durable `commit()` succeeds. Verified by
+`TestTransactionSafety.test_observation_insert_failure_rolls_back_state_insert_too`
+(asserts `conn.in_transaction is False`, zero durable rows, a separate
+connection can write immediately) and two commit-failure tests
+(`test_failed_commit_replaces_the_connection_and_no_later_observation_commits_stale_rows`
+-- rollback alone recovers when only `commit()` is poisoned;
+`test_rollback_failure_also_replaces_the_connection` -- when BOTH `commit()`
+and `rollback()` fail, the connection is replaced).
+
+**X2 -- writer admission (no real mutual exclusion with the primary).**
+Verified directly in `src/state/db_writer_lock.py`: `WriteClass.LIVE` and
+`WriteClass.BULK` are SEPARATE lock files (`.writer-lock.live` /
+`.writer-lock.bulk`); taking `db_writer_lock(path, WriteClass.BULK)` alone
+does not probe or yield to a LIVE holder by itself (only `BulkChunker`'s
+cooperative `yield_if_live_contended()` does that, and the primary
+`trade_conn` doesn't take `WriteClass.LIVE` at all -- confirmed with
+team-lead research, Phase 1+ of the same plan). So round-2's per-observation
+`db_writer_lock(BULK)` around the trade-DB write gave no real priority
+guarantee to the primary. **Fix (the review's preferred realization)**:
+ordinary observation writes no longer touch `zeus_trades.db` AT ALL. The
+writer thread writes every observation to a PRIVATE spool SQLite file
+(`family_book_telemetry_spool.db`, own file, own WAL, zero contention risk
+by construction -- nothing else ever opens it) via
+`_default_spool_conn_factory`. A periodic (every 30s, or forced via
+`force_ingest()`) batched ingest pass -- `_ingest_pass` -- is the ONLY code
+in the repo that opens a second connection to the trade DB; it copies spool
+rows into the durable `family_book_states`/`family_book_observations`
+tables under `db_writer_lock(trade_db_path, WriteClass.BULK,
+blocking=False)`; contention there just defers to the next cycle (typed
+counter `family_book_telemetry_ingest_contended_total`, no wait). This
+dissolves the auto-checkpoint concern too (the primary's WAL checkpoint
+cadence is no longer affected by continuous telemetry writes). Verified by
+`TestSpoolArchitecture` (writes land in the spool, never the trade DB,
+until an ingest pass runs; ingest is idempotent across repeated passes;
+ingest contention skips without blocking) and
+`TestNonblockingEnqueue.test_enqueue_never_blocks_under_held_wal_write_lock`
+(unaffected by construction now, since ordinary writes never touch a shared
+file at all).
+
+**X3 -- per-observation provenance (first-seen snapshot identity silently
+reused).** `family_book_states.canonical_payload` stored the FULL manifest
+including `executable_snapshot_id`/`source_captured_at`, so when identical
+content was captured under different snapshot IDs across cycles, the
+shared state row permanently retained only the FIRST capture's identity/
+time -- every later heartbeat or selected observation of that same content
+pointed at stale provenance. **Fix**: `family_book_states.canonical_payload`
+now carries ONLY content-identity fields (same subset as `content_hash`,
+`_HASH_FIELDS` in `src/events/family_book_manifest.py`); per-bin
+`executable_snapshot_id`/`source_captured_at` moved to a NEW
+`source_manifest_json` column on `family_book_observations` --
+`build_source_manifest(envelope)`, populated on EVERY observation from that
+observation's OWN capture. Verified by
+`TestComputeStateIdentity.test_canonical_payload_excludes_snapshot_identity_and_capture_time`,
+`TestBuildSourceManifest.test_two_observations_of_identical_content_carry_distinct_source_manifests`,
+and end-to-end by
+`TestPerObservationProvenance.test_heartbeat_reobservation_carries_its_own_source_manifest`
+(1 shared state, 2 observations 31 minutes apart with identical content but
+DISTINCT `source_manifest_json` per row).
+
+**H1 -- compact envelope (memory safety).** The original envelope held a
+reference to the WHOLE `FamilyDecision` (and therefore, transitively,
+`FamilyDecision.band.samples` -- a large NumPy draw matrix the writer never
+even reads) for as long as the item sat queued; at the default 2,048-item
+bound this is gigabytes of unrelated retained memory during writer
+degradation. **Fix**: `src/events/family_book_manifest.py`
+`project_observation_envelope` runs ON THE DECISION THREAD and extracts
+ONLY the small scalars/mappings the writer needs (per-bin condition/token
+ids, best bid/ask, tick/min-order/fee, snapshot identity; model/market q as
+plain dicts; predictive mu/sigma/identity_hash; selected bin/side) into a
+frozen `ObservationEnvelope` dataclass that holds NO reference back to
+`FamilyDecision`/`family`/the proofs. Benchmarked at 51 bins:
+`project_observation_envelope` p50=127us/p99=207us -- sub-millisecond, the
+entire decision-thread cost including this projection.
+
+**H2 -- hot-path purity.** `enqueue_family_book_observation` no longer
+calls `_ensure_worker_started()` (an OS-thread-creation check) on every
+call -- the worker is started ONCE, explicitly, by the daemon at init via
+`start_worker()`; a dead/never-started worker is never resurrected from the
+decision thread (items just queue up, bounded, until an operator restarts
+it). The success path (the common case) touches no lock at all -- not even
+the canonical counters sink; only the rare `queue.Full`/exception paths
+route through `src.observability.counters.increment`.
+
+**H3 -- sampling semantics.** `DECISION` renamed `PRE_VETO_SELECTED`
+(`family_book_observations.sampling_reason` CHECK constraint) -- a
+selection at the decision-production seam CAN still be vetoed by the three
+downstream actionability checks in the same cycle, so this was never a
+record of final/submitted status. Three new orthogonal boolean columns
+(`state_changed`, `heartbeat_due`, `pre_veto_selected`) are persisted on
+EVERY row regardless of which one "won" by sampling precedence (STATE_CHANGE
+> HEARTBEAT > PRE_VETO_SELECTED) -- selection-triggered sampling is not
+missing-at-random, so analysts must be able to stratify on it, not just see
+the winning reason. `selected_bin_id`/`selected_side` (nullable) record
+which candidate was pre-veto-selected, correlated from
+`decision.candidate_decisions` by `candidate_id`.
+
+**H4 -- capacity truth + kill switch.** See "Row-rate math" below for the
+corrected baseline/expected/hard-max table.
+`ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED` (default `"1"`) is checked FIRST in
+`enqueue_family_book_observation`, before any other work -- an operator
+rollout guard.
+
+**M1 -- shutdown lifecycle.** `shutdown()` now reserves sentinel capacity
+with a BLOCKING `put(_STOP, timeout=...)` (a full queue no longer makes
+shutdown silently no-op) and only clears `_worker_thread` after `join()`
+actually confirms the thread dead; `start_worker()` REFUSES (returns
+`False`) while a worker is already alive rather than silently starting a
+second one on top of it.
+
+**M2 -- restart continuity.** `_bootstrap_last_state_cache()` runs once at
+worker startup, seeding `_last_state_by_family` from each family's latest
+DURABLE observation in the trade DB (`MAX(decision_time)` grouped by
+`family_id`) -- a worker restart no longer falsely relabels an unchanged
+state `STATE_CHANGE` or resets the heartbeat clock. Best-effort: any
+failure just leaves the cache empty (matches pre-fix behavior).
+
+**M3 -- center diagnostic basis.** `market_center_and_status` now
+unconditionally excludes non-executable (shoulder) bins from the weighted
+sum, regardless of whether they happen to be quoted -- previously a quoted
+shoulder silently pulled into the average while an unquoted one (same
+executable coverage) did not, so two `status=OK` centers could rest on
+different support. Verified by
+`TestMarketCenter.test_shoulder_quoted_or_not_yields_the_same_center_m3`.
+
+**M4 -- orphan table cleanup.** Verified directly rather than assumed: the
+real trade DB (`state/zeus_trades.db`) was queried for any
+`family_book*`-prefixed table and returned none. No live/staging/dev
+database in this environment ever initialized the original (`d0f69d155`)
+`family_book_snapshots` schema, so no cleanup migration is needed -- the
+table name was never created outside this branch's own now-reverted commit.
+
 ## Problem
 
 Every decision cycle, `FamilyDecisionEngine.decide()` assembles the full
@@ -208,14 +359,19 @@ raises instead of masquerading as a dedup hit (the HIGH "integrity" finding).
 CREATE TABLE family_book_observations (
     observation_id            TEXT PRIMARY KEY,  -- sha256(family_id|receipt_hash|decision_time)
     family_id, city, target_date, temperature_metric,
-    decision_id, receipt_hash, state_id, decision_time, causal_snapshot_id,
+    decision_id, receipt_hash, state_id,
+    source_manifest_json,  -- X3: THIS observation's per-bin snapshot identity/capture time
+    decision_time, causal_snapshot_id,
     predictive_identity_hash, our_mu_native, our_sigma_native, measurement_unit,
     model_q_json, model_q_identity_hash,
     market_q_json, market_q_basis, market_q_depth_score, market_q_spread_score,
     market_q_projection_error, market_q_book_hash,
     market_center_native, market_center_status, market_center_version,
-    complete_book, sampling_reason, sampling_policy_version, capture_seam,
-    schema_version
+    complete_book,
+    sampling_reason,           -- STATE_CHANGE | HEARTBEAT | PRE_VETO_SELECTED | WORKER_BOOTSTRAP (H3)
+    state_changed, heartbeat_due, pre_veto_selected,  -- H3: orthogonal, always persisted
+    selected_bin_id, selected_side,                   -- H3: nullable identity of the pre-veto selection
+    sampling_policy_version, capture_seam, schema_version
 )
 ```
 
@@ -238,9 +394,15 @@ fixture that quoted only 2 of 11 bins and asserted a non-null center was
 deleted; `test_partial_coverage_on_complete_book_is_now_null_not_a_number`
 replaces it with the opposite assertion.
 
-`sampling_reason` (`STATE_CHANGE` | `HEARTBEAT` | `DECISION`) is the ACTUAL
-row-volume control (see "Capture plane / sampling policy" below) --
-`family_book_states`' content-hash dedup controls STATE row volume only.
+`sampling_reason` (`STATE_CHANGE` | `HEARTBEAT` | `PRE_VETO_SELECTED` |
+`WORKER_BOOTSTRAP`, H3 -- renamed from `DECISION`, which read as final/
+submitted status when it is only a pre-veto selection at the production
+seam) is the ACTUAL row-volume control (see "Capture plane / sampling
+policy" below) -- `family_book_states`' content-hash dedup controls STATE
+row volume only. `state_changed`/`heartbeat_due`/`pre_veto_selected` are
+persisted as three ORTHOGONAL booleans regardless of which one wins by
+precedence, since selection-triggered sampling is not missing-at-random and
+analysts must be able to stratify on it.
 
 `capture_seam = "DECISION_PRODUCTION"` documents where in the reactor's
 control flow capture happens (see "Hook site" above) -- the disposition
@@ -257,129 +419,147 @@ family's native settlement unit (`measurement_unit` column, `"C"` or
 `"F"`) -- renamed from the original `_c`-suffixed columns per the review's
 MEDIUM "units" finding (a name that lies about always being Celsius).
 
-## Capture plane -- nonblocking, off the live decision thread (fixes BLOCKER 1)
+## Capture plane -- nonblocking, off the live decision thread, two-stage (X1/X2/H1/H2)
 
-`src/events/family_book_telemetry_writer.py`. The decision thread calls
-ONLY `enqueue_family_book_observation(...)`: a bounded
-`queue.put_nowait()` of a small immutable envelope (object REFERENCES --
-`decision`, `family`, `active_proofs`, `candidate_bin_id`, `decision_time`,
-`causal_snapshot_id` -- no copying, no serialization). A full queue
-increments a `dropped_queue_full` counter and returns immediately; any other
-exception increments `enqueue_error` and is swallowed. Verified by
+`src/events/family_book_telemetry_writer.py`, current (round-3) design.
+
+**Stage 1 -- decision thread.** `enqueue_family_book_observation` calls
+`project_observation_envelope` (H1 -- `src/events/family_book_manifest.py`;
+extracts only the small scalars/mappings the writer needs into a frozen
+`ObservationEnvelope`, holding NO reference to `FamilyDecision`/`family`/
+the proofs graph, so `FamilyDecision.band.samples` and similar large
+objects are not kept alive by a queued item) and does a bounded
+`queue.put_nowait(envelope)`. That is the ENTIRE hot-path cost: no worker
+start/health-check (H2 -- the daemon starts the worker once at init via
+`start_worker()`; a dead worker is never resurrected from here), no
+counters-sink lock on the success path (only the rare `queue.Full`/
+exception paths touch `src.observability.counters.increment`). A full queue
+increments `telemetry_drop_total`; any other exception increments
+`family_book_telemetry_enqueue_error_total`. Verified by
 `test_enqueue_never_blocks_under_held_wal_write_lock` (a SEPARATE
-file-backed connection holds `BEGIN IMMEDIATE` on the trade DB for the
-whole test; 20 enqueue calls each complete in <50ms) and
-`test_full_queue_drops_and_increments_counter_without_blocking`.
+file-backed connection holds `BEGIN IMMEDIATE`; 20 enqueue calls each
+complete in <50ms -- now true by construction, since enqueue never touches
+any shared file at all) and `test_full_queue_drops_and_increments_counter_without_blocking`.
 
-All manifest-building, hashing, JSON serialization, sampling-policy
-evaluation, and SQLite I/O happen on a separate, owner-local writer thread
-(`daemon=True`) that opens its OWN connection via
-`get_trade_connection(busy_timeout_ms=250)` -- a short budget, not the
-live default 30s, so it yields to live writers rather than contending for
-the WAL write lock. Queue/worker lifecycle (sentinel-based shutdown pushed
-through the queue, `_ensure_worker_started`/`_stop_current_worker` guarding
-against orphaning a worker blocked on a since-reassigned queue object) is
-modeled on `src/data/replacement_cycle_advance_trigger.py`'s existing
+**Stage 2 -- writer thread.** A single owner-local thread (`daemon=True`,
+started explicitly by the daemon at init, never by the decision thread --
+H2/M1) does everything else:
+
+- Writes every envelope to a PRIVATE spool SQLite file
+  (`family_book_telemetry_spool.db`, own file, own WAL) -- X2's core fix.
+  Round-2 wrapped each trade-DB write in `db_writer_lock(WriteClass.BULK)`,
+  but a second review found `WriteClass.LIVE`/`BULK` are SEPARATE lock
+  files with no mutual exclusion by themselves (only `BulkChunker`'s
+  cooperative `yield_if_live_contended()` bridges them, and the primary
+  `trade_conn` doesn't take `WriteClass.LIVE` -- that retrofit is Phase 1+
+  of the same plan, out of scope here), so that gave no real priority
+  guarantee to the primary. Writing to a PRIVATE file removes the
+  contention question entirely: nothing else ever opens
+  `family_book_telemetry_spool.db`, so there is no writer to arbitrate
+  against.
+- Every spool write is transaction-safe (X1): state INSERT + observation
+  INSERT + COMMIT in one try/except; on ANY failure,
+  `_rollback_or_replace` tries `conn.rollback()` first and, only if that
+  ALSO fails, closes and reopens the connection -- the only way to
+  guarantee `conn.in_transaction` is False afterward. Counters and the
+  sampling cache are updated ONLY after a durable commit.
+- Periodically (every 30s, or immediately via the test/ops
+  `force_ingest()`), `_ingest_pass` -- the ONLY code in the repo that opens
+  a second connection to `zeus_trades.db` -- copies spool rows into the
+  durable `family_book_states`/`family_book_observations` tables via
+  `get_trade_connection(busy_timeout_ms=250)` wrapped in
+  `db_writer_lock(trade_db_path, WriteClass.BULK, blocking=False)`.
+  `WriteClass.BULK` is still the right class (telemetry always yields,
+  never contends to win) but now only gates the infrequent, batched
+  ingest window, not every observation -- a fundamentally smaller and
+  bounded exposure. Contention increments
+  `family_book_telemetry_ingest_contended_total` and simply defers to the
+  next cycle -- no wait, no partial writes (each of `_ingest_states`/
+  `_ingest_observations` is its own transaction with the same
+  rollback-on-failure discipline as the spool write).
+
+Queue/worker lifecycle (sentinel-based shutdown pushed through the queue,
+`shutdown()`/`start_worker()` guarding against orphaning a worker blocked
+on a since-reassigned queue object, `start_worker()` refusing a second
+worker while one is alive -- M1) is modeled on
+`src/data/replacement_cycle_advance_trigger.py`'s existing
 day0-materialization-bridge pattern (`_DAY0_BRIDGE_STOP` sentinel,
 `_day0_bridge_worker`/`_start_day0_bridge_workers_locked`) per team-lead
-research -- the worker blocks on `queue.get()` with no poll timeout, so
-shutdown is immediate rather than the up-to-500ms poll-loop latency an
-earlier revision of this module had.
+research -- the worker blocks on `queue.get(timeout=_INGEST_INTERVAL_SECONDS)`,
+reacting immediately to a pushed item or the stop sentinel while still
+polling the ingest cadence when idle.
 
 **INV-37, verified against the invariant text itself, not inferred:**
 `architecture/invariants.yaml:882-897` (INV-37): *"No Zeus write transaction
-may span more than one physical DB via independent connections."* Confirmed
-by team-lead research and independently re-read: this writer's connection
-touches ONLY `zeus_trades.db`, never world/forecasts in the same
-transaction -- outside INV-37's scope as written.
+may span more than one physical DB via independent connections."* This
+writer's connections touch, respectively, the private spool file only, or
+`zeus_trades.db` only (the ingest pass) -- never two physical DBs in one
+transaction -- outside INV-37's scope as written either way.
 
 **Second-connection safety, verified, not assumed:** `src/state/db.py`'s
 `_connect` docstring states explicitly: *"Callers doing optional derived
 publication may choose a shorter budget so they yield to live writers...
 Connection PRAGMA only — INV-37 / txn semantics unchanged."*
 `get_world_connection` already exposes `busy_timeout_ms` for exactly this
-precedent; this PR extends `get_trade_connection` to the same shape
-(`src/state/db.py`, ~8 line diff) rather than reaching into a private
-helper from `src/events/`. SQLite library version in this environment:
-`3.53.2` -- above the `3.51.3+`/backport threshold for the multi-connection
-WAL-reset fix, asserted defensively at worker startup
-(`_MIN_SQLITE_VERSION_INFO = (3, 51, 3)`; `sqlite3.sqlite_version_info` is
-checked before the worker ever connects -- below the floor, it logs one
-ERROR and refuses to start, verified by
-`test_worker_refuses_to_start_below_the_wal_reset_fix_floor`) since this
-module is the first thing in the repo to run a second live writer
-connection against the trade DB concurrently with the primary.
+precedent; `get_trade_connection` was extended to the same shape
+(`src/state/db.py`, ~8 line diff). SQLite library version in this
+environment: `3.53.2` -- above the `3.51.3+`/backport threshold for the
+multi-connection WAL-reset fix, asserted defensively at worker startup
+(`_MIN_SQLITE_VERSION_INFO = (3, 51, 3)`; checked before the worker ever
+connects -- below the floor, it logs one ERROR and refuses to start,
+verified by `test_worker_refuses_to_start_below_the_wal_reset_fix_floor`)
+since the ingest pass runs a second live writer connection against the
+trade DB.
 
-**`db_writer_lock` -- first production wiring, per team-lead research:**
-team-lead's research confirmed no production caller of
-`src/state/db_writer_lock.py`'s `db_writer_lock`/`WriteClass` exists today
-(Phase 0 of the v4 sqlite-contention plan landed the helper surface only).
-Each observation write here is wrapped in
-`db_writer_lock(trade_db_path, WriteClass.BULK, blocking=False)` --
-`WriteClass.BULK` because telemetry must always yield, never contend to
-win. Honest caveat, stated plainly rather than implied away: `WriteClass`
-arbitrates LIVE vs BULK via `BulkChunker.yield_if_live_contended()`
-cooperatively checking a SEPARATE `.writer-lock.live` file (LIVE and BULK
-are different lock files, not mutually exclusive at the flock() level by
-themselves), and the PRIMARY `trade_conn` does not yet take
-`WriteClass.LIVE` around its writes (that retrofit is explicitly Phase 1+
-of the same plan, out of this PR's scope). So taking `WriteClass.BULK` here
-does NOT yet provide direct arbitration against the primary connection
-specifically -- today's actual protection against blocking the primary is
-the short `busy_timeout` above plus SQLite's own WAL semantics, exactly as
-already documented. Taking the lock now is still correct and valuable: (1)
-it correctly self-classifies this writer so the moment the primary path IS
-retrofitted to `WriteClass.LIVE` (Phase 1+), this writer automatically
-yields via the existing cooperative mechanism with zero further changes;
-(2) it prevents two instances of this SAME writer (daemon restart race, or
-any future second `WriteClass.BULK` caller) from writing concurrently; (3)
-it establishes the first real precedent for a dormant mechanism the repo
-already built and intended for exactly this class of problem.
-`blocking=False`: contention is treated as a normal, benign, expected event
-for best-effort telemetry -- the write is skipped (typed counter, no wait,
-no retry), never blocked on. Verified by
-`test_external_bulk_lock_holder_causes_contended_skip_not_a_write` (an
-external `db_writer_lock(db_path, WriteClass.BULK)` held for the duration
-of an enqueue+drain; the write is skipped and counted, not silently lost
-nor blocking; a subsequent write after the external lock releases succeeds
-normally).
+**`db_writer_lock` -- first production wiring:** no production caller of
+`src/state/db_writer_lock.py`'s `db_writer_lock`/`WriteClass` existed
+before this PR (Phase 0 of the v4 sqlite-contention plan landed the helper
+surface only). `_ingest_pass` is now the first, scoped to the infrequent
+batched ingest window rather than every observation write. `SQLITE_CONNECT_ALLOWLIST`
+(`src/state/db_writer_lock.py`) gained an entry for this module's raw
+`sqlite3.connect()` on the private spool file -- outside the world-db BULK
+lock universe by construction (no other writer ever touches that file).
 
-**Counters -- canonical sink, not ad-hoc:** per team-lead research
-(`src/observability/counters.py` is "the canonical typed counter sink for
-Zeus telemetry"), all telemetry counters route through
-`increment`/`read` there instead of a bespoke in-module counter class:
-`telemetry_drop_total` (full-queue drops -- team lead's exact suggested
-name), `telemetry_queue_high_water_total` (incremented once per NEW queue
-high-water record -- the sink is documented monotonic-only, "NO... gauge
-semantics", so the raw peak value is tracked separately via
-`queue_high_water()` and the counter records the EVENT of a new record,
-matching the sink's own contract rather than forcing gauge semantics onto
-a counter primitive), plus `family_book_telemetry_{enqueued,enqueue_error,
-sampled_out,write_failures,write_contended,written_states,
-written_observations}_total` (repo convention favors specific,
-collision-safe names over a bare generic one, per existing counters like
-`db_write_lock_timeout_total`/`cost_basis_chain_mutation_blocked_total`).
-`reset_all()` is called from this module's `reset_for_test()`, matching
-the sink's own documented "test isolation only" contract.
+**Counters -- canonical sink, not ad-hoc:** all telemetry counters route
+through `src.observability.counters.increment`/`read` instead of a bespoke
+in-module class: `telemetry_drop_total` (full-queue drops), `telemetry_queue_high_water_total`
+(incremented once per NEW queue high-water record -- the sink is
+documented monotonic-only, so the raw peak value is tracked separately via
+`queue_high_water()` and the counter records the EVENT of a new record),
+plus `family_book_telemetry_{enqueue_error,sampled_out,write_failures,
+ingest_contended,ingest_failures,written_states,written_observations,
+ingested_states,ingested_observations}_total` (repo convention favors
+specific, collision-safe names, per existing counters like
+`db_write_lock_timeout_total`). `reset_all()` is called from this module's
+`reset_for_test()`, matching the sink's own documented "test isolation
+only" contract.
 
-### Sampling policy v1 -- the ACTUAL row-volume control
+### Sampling policy v2 -- the ACTUAL row-volume control (H3)
 
 Replaces the broken per-cycle-unique-hash "dedup" entirely. The writer
 thread keeps an in-memory `family_id -> (last_state_id, last_decision_time)`
-cache (single writer thread, no lock needed) and appends an observation iff:
+cache (single writer thread, no lock needed; seeded from the durable trade
+DB at worker startup -- M2, `_bootstrap_last_state_cache`) and computes
+three ORTHOGONAL booleans on every envelope, persisted regardless of which
+one wins by precedence:
 
-- `STATE_CHANGE` -- this family's `state_id` differs from the last one
-  recorded (or this is the first observation ever for the family), or
-- `HEARTBEAT` -- >= 30 minutes have elapsed since the last recorded
-  observation for this family with an unchanged state, or
-- `DECISION` -- `decision.selected is not None` (a trade was actually
-  chosen), regardless of state/heartbeat timing.
+- `state_changed` -- this family's `state_id` differs from the last one
+  recorded (or this is the first observation ever for the family);
+- `heartbeat_due` -- >= 30 minutes have elapsed since the last recorded
+  observation for this family with an unchanged state;
+- `pre_veto_selected` -- `decision.selected is not None` at the
+  decision-production seam (renamed from `DECISION` -- H3: this can still
+  be vetoed by a later actionability check in the SAME cycle, so it was
+  never a record of final/submitted status).
 
-Otherwise the observation is sampled OUT (counted via
+`sampling_reason` is `STATE_CHANGE` > `HEARTBEAT` > `PRE_VETO_SELECTED` by
+precedence; if none hold, the observation is sampled OUT (counted via
 `family_book_telemetry_sampled_out_total`, never written). Verified:
 `test_repeat_same_state_no_heartbeat_no_selection_is_sampled_out`,
 `test_heartbeat_fires_after_interval_even_without_change`,
-`test_selected_trade_forces_a_decision_observation`.
+`test_selected_trade_forces_a_pre_veto_selected_observation_with_identity`
+(also asserts `selected_bin_id`/`selected_side`, correlated from
+`decision.candidate_decisions` by `candidate_id`).
 
 ### Fault injection
 
@@ -389,71 +569,101 @@ enqueues; asserts `family_book_telemetry_write_failures_total == 5` (every
 failure counted) while the rate-limited logger (`_LOG_RATE_LIMIT_SECONDS =
 60`) emits at most one WARNING record for the whole burst (no log storm),
 and the worker thread survives (schema still present, no crash). Distinct
-from lock contention (`family_book_telemetry_write_contended_total`,
-`BlockingIOError` from `db_writer_lock`) which is counted separately and is
-NOT treated as a fault -- `test_external_bulk_lock_holder_causes_contended_skip_not_a_write`
-asserts `write_contended == 1` and `write_failures == 0` for the same
-attempt.
+from lock contention (`family_book_telemetry_ingest_contended_total`,
+`BlockingIOError` from `db_writer_lock`, now scoped to the ingest pass
+only) which is counted separately and is
+NOT treated as a fault -- `TestSpoolArchitecture.test_ingest_contention_skips_this_pass_without_blocking`
+asserts the ingest pass returns promptly (<1s) while an external
+`db_writer_lock(WriteClass.BULK)` holder is active, increments
+`family_book_telemetry_ingest_contended_total`, and succeeds normally once
+the external lock releases.
 
-## Row-rate math (revised)
+## Row-rate math (H4: baseline / expected / hard-max, not one "worst case")
 
-Scout figures: >=60 decision cycles/hour, 51 families. Per-cycle production
-call count depends on retry-loop iterations (>=1 per family per reactor
-invocation reaching the spine), so the STATE table's write rate is bounded
-by actual book-content-change frequency (order-book churn), not decision
-frequency -- exactly the property `UNIQUE(family_id, content_hash)` now
-correctly provides (verified fixed by
-`test_identical_content_at_different_capture_times_hashes_equal`). The
-OBSERVATION table's write rate is bounded by the sampling policy: worst
-case (a family's book never changes, no trade ever selected) is one
-`HEARTBEAT` row every 30 minutes per family = 2/hour x 51 families =
-102 rows/hour = 2,448 rows/day, plus real `STATE_CHANGE` rows (bounded by
-market activity) and real `DECISION` rows (bounded by actual trade
-frequency) -- roughly two orders of magnitude below the original design's
-73,440 rows/day, and this bound holds regardless of decision-cycle
-frequency (unlike the original, which scaled 1:1 with cycles).
+Scout figures: >=60 decision cycles/hour, 51 families.
+
+| Scenario | STATE rows | OBSERVATION rows | Basis |
+|---|---|---|---|
+| **Baseline** (no book ever changes, no trade ever selected) | ~0/day after first observation per family | 1 `HEARTBEAT`/30min x 51 families = 2,448/day | Sampling policy floor -- this is what the ORIGINAL plan mislabeled "worst case." |
+| **Expected** (realistic book churn + occasional selection) | bounded by actual `raw_orderbook_hash` change frequency (not measured in production yet) | baseline + real `STATE_CHANGE`/`PRE_VETO_SELECTED` rows | Requires production measurement (not yet available -- flagged, not fabricated). |
+| **Hard max** (every cycle changes content AND selects) | 60/hr x 51 = 3,060/hr = 73,440/day (state table, same content-hash-driven bound as observations at full churn) | 73,440/day | The scenario the ORIGINAL (round-1) design produced UNCONDITIONALLY; the redesign only reaches it if books genuinely change every single cycle. |
+
+At the measured 10,556-byte content-only `canonical_payload` (round-3; down
+from round-2's 14,784 bytes after X3 removed snapshot-identity fields from
+the state payload), the hard-max state-table scenario is approximately
+`73,440 * 10,556 bytes ~= 0.78 GB/day` of state JSON alone, before SQLite
+page/index overhead, WAL amplification, backups, and fragmentation -- a
+scenario bound requiring production measurement to rule in/out, not a
+prediction. The kill switch (`ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED`, H4) is
+the rollout guard while that measurement is gathered.
 
 ## Benchmark (production-shaped, N_BINS=51, n_iters=200; measured this
 environment, `tests/events/test_family_book_telemetry_benchmark.py -s`)
 
+Decision-thread cost (the entire hot-path -- H1's compact projection):
+
 ```
-canonical_payload bytes: mean=14784  p50=14784  p95=14784  p99=14784
-manifest+hash build (ms): p50=0.206  p95=0.228-0.346  p99=0.282-0.496
-state insert+commit (ms): p50=0.354-0.359  p95=0.457-0.575  p99=2.229-3.527
+project_observation_envelope (us): p50=122.8-130.0  p95=143.8-155.6  p99=201.6-225.0
+compute_state_identity (us):        p50=149.2-156.5  p95=170.5-187.0  p99=215.9-281.7
+canonical_payload bytes (content-only, X3): 10556 (constant -- fixed bin count/field set)
 ```
 
-All of this runs on the OFF-decision-thread writer, never the decision
-path -- these numbers bound the writer thread's own throughput headroom
-(sub-millisecond per observation at the median, low single-digit
-milliseconds at p99), not decision latency.
+Writer-thread cost, full `_process_one` (state+observation INSERT, explicit
+transaction, COMMIT) against a real file-backed WAL spool DB, worst case
+(every iteration has distinct content -- every write is a genuine insert,
+never the sampled-out fast path):
+
+```
+_process_one (ms): p50=0.333-0.340  p95=0.456-0.520  p99=2.202-2.454
+```
+
+Both benchmarks run OFF the decision thread except
+`project_observation_envelope`/`compute_state_identity`, which ARE the
+decision-thread cost and are sub-millisecond even at p99 (H1's whole point).
+The writer-thread numbers bound the spool's own throughput headroom, never
+decision latency, and never contend with the primary trade_conn (X2 -- the
+spool is a private file).
 
 ## Tests
 
-- `tests/events/test_family_book_manifest.py` (13): manifest identity
-  sourcing (proofs, not FamilyBook), the timestamp-free content-hash fix
-  (the core bug, proven both ways -- unchanged content hashes equal across
-  different capture times; changed `raw_orderbook_hash`/fee/tick hashes
-  different), the tightened `market_center_native` coverage rule (full
-  coverage -> value; partial coverage on a "complete" book -> NULL, proving
-  the reviewed defect is fixed; incomplete book -> NULL), `model_q_fields`/
-  `market_q_fields`.
-- `tests/events/test_family_book_telemetry_writer.py` (10): nonblocking
+- `tests/events/test_family_book_manifest.py` (18): the compact envelope
+  projection (H1 -- `project_observation_envelope` extracts only scalars/
+  small mappings, never retains `FamilyDecision`/`family`/proofs), the
+  timestamp-free content-hash fix (the round-1 core bug, proven both ways),
+  the tightened `market_center_and_status` coverage rule (full coverage ->
+  value; partial coverage on a "complete" book -> NULL; incomplete book ->
+  NULL) plus M3 (shoulder bins always excluded from the weighted sum
+  regardless of quoted status -- two `OK` centers must share the same
+  support), X3 (state payload excludes snapshot identity/capture time;
+  `build_source_manifest` carries THIS capture's identity per bin, and two
+  observations of identical content produce DISTINCT source manifests).
+- `tests/events/test_family_book_telemetry_writer.py` (21): nonblocking
   enqueue under real WAL writer contention + bounded latency; full-queue
-  drop counter; t-vs-t+1 live-rebuild state/observation cardinality (state
-  dedups to 1, observation correctly sampled-out per policy -- the direct
-  fix for BLOCKER 2/3); a genuine content change (fee) produces a second
-  state row; the three sampling-policy branches; commit-time fault
-  injection with typed counters and rate-limited logging; the SQLite
-  version guard refusing to start below the WAL-reset-fix floor; the
-  `db_writer_lock(WriteClass.BULK)` contention skip (typed counter, no
-  block, no silent write) and clean recovery once the external lock
-  releases.
-- `tests/events/test_family_book_telemetry_benchmark.py` (1): the
-  production-shaped serialization/insert benchmark above.
+  drop counter; the kill switch (H4); the spool architecture (X2 -- writes
+  never reach the trade DB until an ingest pass runs; ingest is idempotent;
+  ingest contention skips without blocking, verified via an EXTERNALLY held
+  `db_writer_lock(WriteClass.BULK)`); t-vs-t+1 live-rebuild state/
+  observation cardinality (the direct fix for the round-1 dedup bug); a
+  genuine content change producing a second state row; per-observation
+  provenance surviving a heartbeat re-observation (X3, end-to-end); the
+  sampling-policy v2 branches with orthogonal booleans and selected bin/
+  side identity (H3); transaction safety (X1 -- observation-INSERT failure
+  rolls back the state INSERT too and leaves `conn.in_transaction is
+  False`; a failed COMMIT recovers via rollback when rollback itself
+  succeeds, and via connection replacement when rollback ALSO fails, both
+  proven with dedicated `sqlite3.Connection` subclasses since `.commit`/
+  `.rollback` cannot be monkeypatched as instance attributes on the C
+  extension type); commit-time fault injection with typed counters and
+  rate-limited logging; the SQLite version guard; the M1 shutdown/second-
+  worker-refusal lifecycle; M2 restart continuity (the sampling cache is
+  seeded from durable observations on worker start, not reset to empty).
+- `tests/events/test_family_book_telemetry_benchmark.py` (2): the
+  decision-thread projection benchmark and the end-to-end spool-write
+  benchmark above.
 - `tests/engine/test_family_book_observation_hook_placement.py` (2):
   source-position proof that capture precedes all three veto-reset points
   and that it's wired to `_active_spine_entry_proofs` (not the full proof
-  set).
+  set) -- unchanged by round 3 (the hook call signature didn't change).
 
 ### Disclosed gap -- full dynamic three-branch reactor execution
 

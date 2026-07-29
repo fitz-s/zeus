@@ -3,10 +3,13 @@
 # Authority basis: docs/operations/current/book_snapshot_persistence/PLAN.md --
 #   deep-review NO-GO section 3 required validation: "production-shaped
 #   serialization benchmark: row bytes + insert latency p50/p95/p99 reported
-#   in PLAN.md." This test MEASURES and PRINTS those numbers (run with
-#   `-s` to see them); the numbers are copied into PLAN.md by hand after a run
-#   (not asserted as regression thresholds -- machine-dependent).
-"""Benchmark: family_book_telemetry_writer serialization + insert cost at a
+#   in PLAN.md," plus round-3 review 3.6 ("benchmark validity" -- benchmark
+#   the full state+observation transaction end-to-end on a file-backed WAL
+#   database, not just manifest/hash + state INSERT). This test MEASURES and
+#   PRINTS those numbers (run with `-s` to see them); the numbers are copied
+#   into PLAN.md by hand after a run (not asserted as regression thresholds
+#   -- machine-dependent).
+"""Benchmark: family_book_telemetry_writer end-to-end spool-write cost at a
 production-shaped family size (51 bins, matching the scout's family count)."""
 from __future__ import annotations
 
@@ -18,10 +21,11 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
+import src.events.family_book_telemetry_writer as writer
 from src.config import City
 from src.decision.family_decision_engine import FamilyDecision
 from src.events.candidate_binding import EventBoundCandidateFamily
-from src.events.family_book_manifest import build_manifest, compute_state_identity
+from src.events.family_book_manifest import compute_state_identity, project_observation_envelope
 from src.execution.family_book import ExecutableLadder, MarketBook, build_family_book
 from src.forecast.day0_conditioner import Day0ObservationState
 from src.forecast.debias_authority import DebiasAuthority
@@ -29,8 +33,8 @@ from src.forecast.predictive_distribution_builder import PredictiveDistributionB
 from src.forecast.types import ForecastCase, FreshModelSet, RawModelMember
 from src.probability.event_resolution import EventResolution, event_resolution_for_city
 from src.probability.outcome_space import OutcomeBin, OutcomeSpace, compute_topology_hash
-from src.state.schema.family_book_observations_schema import ensure_table as ensure_obs_table, insert_observation
-from src.state.schema.family_book_states_schema import ensure_table as ensure_states_table, insert_state
+from src.state.schema.family_book_observations_schema import ensure_table as ensure_obs_table
+from src.state.schema.family_book_states_schema import ensure_table as ensure_states_table
 from src.strategy.live_inference.executable_cost import QuoteLevel
 
 UTC = timezone.utc
@@ -66,7 +70,7 @@ def _ladder(side, levels=()) -> ExecutableLadder:
 
 
 def _market(bin_id: str) -> MarketBook:
-    levels = (QuoteLevel(Decimal("0.30"), Decimal("500")),) * 5  # top-5, matching production cap intent
+    levels = (QuoteLevel(Decimal("0.30"), Decimal("500")),)  # best-of-book only -- manifest never stores depth
     return MarketBook(condition_id=f"cond-{bin_id}", bin_id=bin_id, yes_token_id=f"yes-{bin_id}", no_token_id=f"no-{bin_id}", yes_asks=_ladder("ask", levels), yes_bids=_ladder("bid", levels), no_asks=_ladder("ask", levels), no_bids=_ladder("bid", levels), neg_risk=False)
 
 
@@ -82,8 +86,8 @@ def _candidate_bin_id(p: _FakeProof) -> str:
     return p.bin_id
 
 
-def _proofs(space: OutcomeSpace):
-    return tuple(_FakeProof(bin_id=b.bin_id, executable_snapshot_id=f"snap-{b.bin_id}", row={"raw_orderbook_hash": f"hash-{b.bin_id}", "captured_at": "2026-06-14T12:00:00+00:00"}) for b in space.bins)
+def _proofs(space: OutcomeSpace, *, variant: str = "1"):
+    return tuple(_FakeProof(bin_id=b.bin_id, executable_snapshot_id=f"snap-{b.bin_id}", row={"raw_orderbook_hash": f"hash-{b.bin_id}-{variant}", "captured_at": "2026-06-14T12:00:00+00:00"}) for b in space.bins)
 
 
 def _member(model_id, value_native, case) -> RawModelMember:
@@ -101,9 +105,9 @@ def _no_obs() -> Day0ObservationState:
     return Day0ObservationState(observed=False, station_id=STATION, source="none", samples_count=0, latest_observed_at_utc=None, observed_high_native=None, observed_low_native=None, observed_extreme_native=None, raw_observation_hash=None)
 
 
-def _decision(case, space, book) -> FamilyDecision:
+def _decision(case, space, book, *, receipt_hash="bench-hash") -> FamilyDecision:
     predictive = PredictiveDistributionBuilder(DebiasAuthority(())).build(case, _model_set([24.5, 25.0, 25.5], case), _no_obs(), has_fusion_capture=True)
-    return FamilyDecision(decision_id="bench-decision", case=case, predictive=predictive, omega=space, joint_q=None, band=None, family_book=book, market_coherence=None, candidates=(), selected=None, no_trade_reason="BENCH", receipt_hash="bench-hash")
+    return FamilyDecision(decision_id="bench-decision", case=case, predictive=predictive, omega=space, joint_q=None, band=None, family_book=book, market_coherence=None, candidates=(), selected=None, no_trade_reason="BENCH", receipt_hash=receipt_hash)
 
 
 def _family(case) -> EventBoundCandidateFamily:
@@ -116,7 +120,8 @@ def _percentile(values: list[float], pct: float) -> float:
     return values[idx]
 
 
-def test_benchmark_manifest_and_insert_latency(tmp_path, capsys):
+def test_benchmark_envelope_projection_and_hash(tmp_path, capsys):
+    """Decision-thread-side cost: project_observation_envelope + compute_state_identity."""
     case = _case()
     space = _wide_outcome_space(case)
     markets = {b.bin_id: _market(b.bin_id) for b in space.bins}
@@ -125,47 +130,80 @@ def test_benchmark_manifest_and_insert_latency(tmp_path, capsys):
     family = _family(case)
     proofs = _proofs(space)
 
-    conn = sqlite3.connect(str(tmp_path / "bench.db"))
+    n_iters = 200
+    project_latencies = []
+    hash_latencies = []
+    payload_bytes = []
+
+    for i in range(n_iters):
+        t0 = time.perf_counter()
+        envelope = project_observation_envelope(
+            decision=decision, family=family, active_proofs=proofs,
+            candidate_bin_id=_candidate_bin_id, decision_time=datetime(2026, 6, 14, 12, 0, tzinfo=UTC),
+            causal_snapshot_id="causal-1",
+        )
+        project_latencies.append(time.perf_counter() - t0)
+
+        t1 = time.perf_counter()
+        _, _, canonical_payload = compute_state_identity(envelope)
+        hash_latencies.append(time.perf_counter() - t1)
+        payload_bytes.append(len(canonical_payload.encode("utf-8")))
+
+    with capsys.disabled():
+        print("\n--- family_book_telemetry benchmark: decision-thread projection (N_BINS=%d, n_iters=%d) ---" % (N_BINS, n_iters))
+        print(f"project_observation_envelope (us): p50={_percentile(project_latencies, 0.50)*1e6:.1f} "
+              f"p95={_percentile(project_latencies, 0.95)*1e6:.1f} p99={_percentile(project_latencies, 0.99)*1e6:.1f}")
+        print(f"compute_state_identity (us): p50={_percentile(hash_latencies, 0.50)*1e6:.1f} "
+              f"p95={_percentile(hash_latencies, 0.95)*1e6:.1f} p99={_percentile(hash_latencies, 0.99)*1e6:.1f}")
+        print(f"canonical_payload bytes (content-only, X3): mean={statistics.mean(payload_bytes):.0f} "
+              f"p50={_percentile(payload_bytes, 0.50):.0f} p95={_percentile(payload_bytes, 0.95):.0f} "
+              f"p99={_percentile(payload_bytes, 0.99):.0f}")
+
+    assert _percentile(project_latencies, 0.99) < 0.005  # decision-thread cost must stay sub-millisecond
+
+
+def test_benchmark_end_to_end_spool_write(tmp_path, capsys):
+    """Writer-thread cost: the FULL _process_one path (state+observation
+    INSERT, explicit transaction, COMMIT) against a real file-backed WAL
+    spool database -- not merely the state INSERT in isolation."""
+    case = _case()
+    space = _wide_outcome_space(case)
+    markets = {b.bin_id: _market(b.bin_id) for b in space.bins}
+    book = build_family_book(omega=space, markets=markets, captured_at_utc=_CAPTURED)
+    family = _family(case)
+
+    spool_path = tmp_path / "bench_spool.db"
+    conn = sqlite3.connect(str(spool_path))
+    conn.execute("PRAGMA journal_mode=WAL")
     ensure_states_table(conn)
     ensure_obs_table(conn)
 
     n_iters = 200
-    manifest_latencies = []
-    payload_bytes = []
-    insert_latencies = []
-
+    write_latencies = []
     for i in range(n_iters):
+        # DISTINCT content every iteration (varying raw_orderbook_hash) so
+        # every write is a genuine STATE_CHANGE insert+commit, not the fast
+        # sampled-out path -- this measures the worst-case (every cycle
+        # writes) transaction cost, not the steady-state (mostly sampled
+        # out) cost.
+        decision = _decision(case, space, book, receipt_hash=f"bench-hash-{i}")
+        envelope = project_observation_envelope(
+            decision=decision, family=family, active_proofs=_proofs(space, variant=str(i)),
+            candidate_bin_id=_candidate_bin_id,
+            decision_time=datetime(2026, 6, 14, 12, 0, tzinfo=UTC) + timedelta(minutes=i),
+            causal_snapshot_id="causal-1",
+        )
         t0 = time.perf_counter()
-        manifest = build_manifest(decision, active_proofs=proofs, candidate_bin_id=_candidate_bin_id)
-        state_id, content_hash, canonical_payload = compute_state_identity(
-            family_id=case.family_id, topology_hash=space.topology_hash,
-            complete_book=book.complete_book, manifest=manifest,
-        )
-        manifest_latencies.append(time.perf_counter() - t0)
-        payload_bytes.append(len(canonical_payload.encode("utf-8")))
-
-        t1 = time.perf_counter()
-        insert_state(
-            conn, state_id=f"{state_id}-{i}", family_id=case.family_id, content_hash=f"{content_hash}-{i}",
-            topology_hash=space.topology_hash, complete_book=book.complete_book,
-            canonical_payload=canonical_payload, first_seen_decision_time="2026-06-14T12:00:00+00:00",
-        )
-        conn.commit()
-        insert_latencies.append(time.perf_counter() - t1)
+        conn = writer._process_one(conn, envelope)
+        write_latencies.append(time.perf_counter() - t0)
 
     with capsys.disabled():
-        print("\n--- family_book_telemetry benchmark (N_BINS=%d, n_iters=%d) ---" % (N_BINS, n_iters))
-        print(f"canonical_payload bytes: mean={statistics.mean(payload_bytes):.0f} "
-              f"p50={_percentile(payload_bytes, 0.50):.0f} p95={_percentile(payload_bytes, 0.95):.0f} "
-              f"p99={_percentile(payload_bytes, 0.99):.0f}")
-        print(f"manifest+hash build (ms): p50={_percentile(manifest_latencies, 0.50)*1000:.3f} "
-              f"p95={_percentile(manifest_latencies, 0.95)*1000:.3f} "
-              f"p99={_percentile(manifest_latencies, 0.99)*1000:.3f}")
-        print(f"state insert+commit (ms): p50={_percentile(insert_latencies, 0.50)*1000:.3f} "
-              f"p95={_percentile(insert_latencies, 0.95)*1000:.3f} "
-              f"p99={_percentile(insert_latencies, 0.99)*1000:.3f}")
+        print("\n--- family_book_telemetry benchmark: end-to-end spool write, worst-case every-cycle-changes (N_BINS=%d, n_iters=%d) ---" % (N_BINS, n_iters))
+        print(f"_process_one (state+observation INSERT+COMMIT, ms): p50={_percentile(write_latencies, 0.50)*1000:.3f} "
+              f"p95={_percentile(write_latencies, 0.95)*1000:.3f} p99={_percentile(write_latencies, 0.99)*1000:.3f}")
 
-    # Sanity bounds only (not tight perf assertions -- machine-dependent; the
-    # printed numbers above are what gets copied into PLAN.md).
-    assert _percentile(manifest_latencies, 0.99) < 0.05
-    assert _percentile(insert_latencies, 0.99) < 0.5
+    (state_count,) = conn.execute("SELECT COUNT(*) FROM family_book_states").fetchone()
+    (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
+    assert state_count == n_iters  # every iteration has distinct content -- n_iters state rows
+    assert obs_count == n_iters
+    assert _percentile(write_latencies, 0.99) < 0.5

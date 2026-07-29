@@ -21,8 +21,13 @@ actually changed (per-bin ``raw_orderbook_hash`` + venue identity/execution
 metadata) -- it deliberately EXCLUDES the per-bin ``executable_snapshot_id``
 and ``source_captured_at`` (those change on every fresh capture even when the
 book's content is byte-identical, which is exactly the failure this table
-replaces). ``canonical_payload`` stores the full manifest (identity fields
-included) for provenance; only a subset of it feeds the hash.
+replaces). ``canonical_payload`` stores ONLY those same content-identity
+fields (round-3 review X3: a first-seen ``executable_snapshot_id``/
+``source_captured_at`` here would be silently reused by every LATER
+observation of the same content, misrepresenting that observation's actual
+capture provenance) -- per-observation snapshot identity/capture time lives
+on EACH ``family_book_observations`` row instead
+(``source_manifest_json``), never here.
 
 EVIDENCE ONLY -- never decision authority.
 """
