@@ -10,10 +10,15 @@ This check is FAIL-CLOSED: if we can't verify collateral, we don't sell.
 import logging
 import sqlite3
 import time as _time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.state.collateral_ledger import CollateralInsufficient, assert_sell_preflight
+from src.state.collateral_ledger import (
+    CollateralInsufficient,
+    CollateralSnapshot,
+    assert_sell_preflight,
+)
 
 logger = logging.getLogger(__name__)
 SUBMIT_COLLATERAL_REFRESH_TIMEOUT_SECONDS = 20.0
@@ -73,6 +78,95 @@ class _TargetCtfCollateralAdapter:
         if callable(target_payload):
             return dict(target_payload(token_ids=self._token_ids) or {})
         return dict(self._adapter.get_collateral_payload() or {})
+
+
+@dataclass(frozen=True)
+class PreparedCollateralSnapshot:
+    """Venue-fetched collateral evidence awaiting canonical DB persistence."""
+
+    snapshot: CollateralSnapshot
+    persist: bool
+    action: str
+    adapter_error: str | None = None
+
+
+def initialize_collateral_schema_for_submit(conn: sqlite3.Connection) -> None:
+    """Initialize collateral schema before the leased submit transaction starts."""
+
+    from src.state.collateral_ledger import init_collateral_schema
+
+    if conn.in_transaction:
+        raise RuntimeError("collateral schema init requires no active transaction")
+    init_collateral_schema(conn)
+    if conn.in_transaction:
+        raise RuntimeError("collateral schema init left a transaction active")
+
+
+def prepare_collateral_snapshot_for_submit(
+    conn: sqlite3.Connection,
+    *,
+    action: str,
+    token_id: str | None = None,
+    shares: float | None = None,
+) -> PreparedCollateralSnapshot:
+    """Fetch submit collateral outside the DB writer lease, without DB writes."""
+
+    from src.data.polymarket_client import PolymarketClient
+    from src.state.collateral_ledger import (
+        CollateralLedger,
+        load_latest_collateral_snapshot_read_only,
+    )
+
+    fallback = load_latest_collateral_snapshot_read_only(conn)
+    client = PolymarketClient()
+    ensure_adapter = getattr(client, "_ensure_v2_adapter", None)
+    raw_adapter = ensure_adapter() if callable(ensure_adapter) else client
+    refresh_adapter = raw_adapter
+    if action == "exit_submit" and token_id:
+        refresh_adapter = _TargetCtfCollateralAdapter(raw_adapter, token_ids=[token_id])
+    adapter = _DeadlineCollateralAdapter(
+        refresh_adapter,
+        timeout_seconds=SUBMIT_COLLATERAL_REFRESH_TIMEOUT_SECONDS,
+    )
+    snapshot = CollateralLedger.prepare_snapshot_from_adapter(adapter, fallback=fallback)
+    return PreparedCollateralSnapshot(
+        snapshot=snapshot,
+        persist=snapshot is not fallback,
+        action=action,
+        adapter_error=adapter.last_error,
+    )
+
+
+def persist_prepared_collateral_snapshot_for_submit(
+    conn: sqlite3.Connection,
+    prepared: PreparedCollateralSnapshot,
+) -> dict:
+    """Persist prepared evidence on the caller's already-leased transaction."""
+
+    from src.state.collateral_ledger import (
+        CollateralLedger,
+        load_latest_collateral_snapshot_read_only,
+    )
+
+    snapshot = (
+        CollateralLedger.persist_prepared_snapshot_in_transaction(conn, prepared.snapshot)
+        if prepared.persist
+        else load_latest_collateral_snapshot_read_only(conn)
+    )
+    if snapshot is None:
+        raise CollateralInsufficient("collateral_snapshot_degraded")
+    if snapshot.authority_tier == "DEGRADED":
+        error = f": {prepared.adapter_error}" if prepared.adapter_error else ""
+        raise CollateralInsufficient(
+            f"collateral_snapshot_degraded: refreshed_before_{prepared.action}{error}"
+        )
+    return _capability_component(
+        "collateral_snapshot_refresh",
+        authority_tier=snapshot.authority_tier,
+        captured_at=snapshot.captured_at.isoformat(),
+        action=prepared.action,
+        **({"reused_fresh_snapshot": True} if not prepared.persist else {}),
+    )
 
 
 def refresh_collateral_snapshot_for_submit(

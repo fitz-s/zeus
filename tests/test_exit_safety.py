@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -3760,6 +3761,263 @@ def test_execute_exit_order_uses_snapshot_tick_for_sell_price_planning(conn, mon
 
         clear_global_allocator()
         configure_global_ledger(None)
+
+
+def test_exit_collateral_network_fetch_precedes_lease_and_persists_atomically(conn, monkeypatch):
+    from src.execution import executor
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    snapshot_id = _ensure_snapshot(conn, snapshot_id="snap-exit-prepared-collateral")
+    conn.commit()
+    events: list[str] = []
+    lease_transaction_states: list[bool] = []
+    submitted: list[dict] = []
+
+    class FakeClient:
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == [YES_TOKEN]
+            events.append("network")
+            return {
+                "authority_tier": "CHAIN",
+                "ctf_token_balances": {YES_TOKEN: 50},
+                "ctf_token_allowances": {YES_TOKEN: 50},
+            }
+
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.signed_identity_persister = persister
+
+        def place_limit_order(self, **kwargs):
+            submitted.append(kwargs)
+            return _fake_submit_result(self.bound_envelope, order_id="ord-prepared-collateral")
+
+    @contextmanager
+    def recording_lease(lease_conn, **_kwargs):
+        assert events == ["network"]
+        lease_transaction_states.append(lease_conn.in_transaction)
+        events.append("lease")
+        yield
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    monkeypatch.setattr(executor, "_trade_writer_lease_required", lambda _conn: True)
+    monkeypatch.setattr(executor, "_canonical_trade_write_lease", recording_lease)
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-prepared-collateral",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=snapshot_id,
+            ),
+            conn=conn,
+            decision_id="prepared-collateral",
+        )
+
+        assert result.status == "pending"
+        assert events == ["network", "lease"]
+        assert lease_transaction_states == [False]
+        assert submitted
+        assert conn.execute("SELECT COUNT(*) FROM collateral_ledger_snapshots").fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT command_id, reservation_type, token_id, amount FROM collateral_reservations"
+        ).fetchone()[1:] == ("CTF_SELL", YES_TOKEN, _ctf_units(5.0))
+        assert conn.in_transaction is False
+    finally:
+        _clear_exit_submit_prereqs()
+
+
+def test_exit_writer_lease_timeout_has_no_venue_call_or_partial_rows(conn, monkeypatch):
+    from src.execution import executor
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+    from src.state.write_coordinator import WriteLeaseTimeout
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    snapshot_id = _ensure_snapshot(conn, snapshot_id="snap-exit-lease-timeout")
+    conn.commit()
+    events: list[str] = []
+    initial_snapshot_rows = conn.execute("SELECT COUNT(*) FROM collateral_ledger_snapshots").fetchone()[0]
+
+    class FakeClient:
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == [YES_TOKEN]
+            events.append("network")
+            return {
+                "authority_tier": "CHAIN",
+                "ctf_token_balances": {YES_TOKEN: 50},
+                "ctf_token_allowances": {YES_TOKEN: 50},
+            }
+
+        def place_limit_order(self, **_kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("lease timeout must prevent venue submit")
+
+    @contextmanager
+    def timed_out_lease(*_args, **_kwargs):
+        raise WriteLeaseTimeout("test TRADE lease timeout")
+        yield  # pragma: no cover - contextmanager protocol
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    monkeypatch.setattr(executor, "_trade_writer_lease_required", lambda _conn: True)
+    monkeypatch.setattr(executor, "_canonical_trade_write_lease", timed_out_lease)
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-lease-timeout",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=snapshot_id,
+            ),
+            conn=conn,
+            decision_id="exit-lease-timeout",
+        )
+
+        assert result.status == "rejected"
+        assert result.reason and result.reason.startswith("pre_submit_db_locked_transient:")
+        assert events == ["network"]
+        assert conn.execute("SELECT COUNT(*) FROM collateral_ledger_snapshots").fetchone()[0] == initial_snapshot_rows
+        assert conn.execute("SELECT COUNT(*) FROM collateral_reservations").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+        assert conn.in_transaction is False
+    finally:
+        _clear_exit_submit_prereqs()
+
+
+def test_exit_ctf_reservation_failure_rolls_back_snapshot_command_event_and_reservation(conn, monkeypatch):
+    from src.execution import executor
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+    from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    snapshot_id = _ensure_snapshot(conn, snapshot_id="snap-exit-ctf-rollback")
+    conn.commit()
+    baseline = {
+        "snapshots": conn.execute("SELECT COUNT(*) FROM collateral_ledger_snapshots").fetchone()[0],
+        "commands": conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0],
+        "events": conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0],
+        "reservations": conn.execute("SELECT COUNT(*) FROM collateral_reservations").fetchone()[0],
+    }
+    trace: list[str] = []
+
+    class FakeClient:
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == [YES_TOKEN]
+            return {
+                "authority_tier": "CHAIN",
+                "ctf_token_balances": {YES_TOKEN: 50},
+                "ctf_token_allowances": {YES_TOKEN: 50},
+            }
+
+        def place_limit_order(self, **_kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("CTF reservation failure must prevent venue submit")
+
+    original_cas = CollateralLedger._cas_insert_ctf_reservation
+
+    def fail_after_ctf_insert(ledger_conn, command_id, token_id, amount, now):
+        original_cas(ledger_conn, command_id, token_id, amount, now)
+        raise CollateralInsufficient("injected CTF reservation failure")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    monkeypatch.setattr(executor, "_trade_writer_lease_required", lambda _conn: True)
+    monkeypatch.setattr(CollateralLedger, "_cas_insert_ctf_reservation", fail_after_ctf_insert)
+    conn.set_trace_callback(trace.append)
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-ctf-rollback",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=snapshot_id,
+            ),
+            conn=conn,
+            decision_id="exit-ctf-rollback",
+        )
+        trace_before_assertions = list(trace)
+
+        assert result.status == "rejected"
+        assert result.reason and result.reason.startswith("pre_submit_collateral_reservation_failed:")
+        assert conn.in_transaction is False
+        assert not any(statement.strip().upper() == "COMMIT" for statement in trace_before_assertions)
+        assert any(statement.strip().upper() == "ROLLBACK" for statement in trace_before_assertions)
+        assert conn.execute("SELECT COUNT(*) FROM collateral_ledger_snapshots").fetchone()[0] == baseline["snapshots"]
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == baseline["commands"]
+        assert conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0] == baseline["events"]
+        assert conn.execute("SELECT COUNT(*) FROM collateral_reservations").fetchone()[0] == baseline["reservations"]
+    finally:
+        conn.set_trace_callback(None)
+        _clear_exit_submit_prereqs()
+
+
+def test_exit_refuses_caller_transaction_before_lease_without_rollback(conn, monkeypatch):
+    from src.execution import executor
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    snapshot_id = _ensure_snapshot(conn, snapshot_id="snap-exit-caller-transaction")
+    conn.commit()
+    conn.execute(
+        """
+        INSERT INTO collateral_reservations (
+          command_id, reservation_type, token_id, amount, converted_amount, created_at
+        ) VALUES (?, 'CTF_SELL', ?, ?, 0, ?)
+        """,
+        ("caller-owned-reservation", YES_TOKEN, 1, datetime.now(timezone.utc).isoformat()),
+    )
+    assert conn.in_transaction is True
+
+    class ClientShouldNotBeConstructed:
+        def __init__(self, *_args, **_kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("caller transaction must fail before collateral network fetch")
+
+    @contextmanager
+    def lease_must_not_be_acquired(*_args, **_kwargs):
+        raise AssertionError("caller transaction must fail before writer lease")
+        yield  # pragma: no cover - contextmanager protocol
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", ClientShouldNotBeConstructed)
+    monkeypatch.setattr(executor, "_trade_writer_lease_required", lambda _conn: True)
+    monkeypatch.setattr(executor, "_canonical_trade_write_lease", lease_must_not_be_acquired)
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-caller-transaction",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=snapshot_id,
+            ),
+            conn=conn,
+            decision_id="exit-caller-transaction",
+        )
+
+        assert result.status == "rejected"
+        assert result.reason and result.reason.startswith("pre_submit_db_locked_transient:")
+        assert conn.in_transaction is True
+        assert conn.execute(
+            "SELECT command_id FROM collateral_reservations WHERE command_id = ?",
+            ("caller-owned-reservation",),
+        ).fetchone()[0] == "caller-owned-reservation"
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+    finally:
+        conn.rollback()
+        _clear_exit_submit_prereqs()
 
 
 def test_exit_authority_deadline_is_rechecked_at_final_venue_seam(conn, monkeypatch):
@@ -7722,7 +7980,7 @@ def test_exit_snapshot_capture_fails_closed_when_capture_returns_no_id(conn, mon
 
 def test_exit_preflight_uses_token_balance_not_pusd(conn, monkeypatch):
     from src.execution.executor import create_exit_order_intent, execute_exit_order
-    from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger, configure_global_ledger
+    from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
 
     ledger = CollateralLedger(conn)
     ledger.set_snapshot(_snapshot(pusd=1_000_000_000_000, ctf={YES_TOKEN: 0}))
@@ -7732,26 +7990,36 @@ def test_exit_preflight_uses_token_balance_not_pusd(conn, monkeypatch):
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
 
-    class ClientShouldNotBeConstructed:
-        def __init__(self, *args, **kwargs):  # pragma: no cover - tripwire
-            raise AssertionError("token preflight must run before SDK construction")
+    class ClientWithNoCtfInventory:
+        def _ensure_v2_adapter(self):
+            return self
 
-    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", ClientShouldNotBeConstructed)
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == [YES_TOKEN]
+            return {
+                "authority_tier": "CHAIN",
+                "ctf_token_balances": {YES_TOKEN: 0},
+                "ctf_token_allowances": {YES_TOKEN: 0},
+            }
+
+        def place_limit_order(self, **_kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("CTF preflight must block venue submit")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", ClientWithNoCtfInventory)
     try:
-        with pytest.raises(CollateralInsufficient) as exc:
-            execute_exit_order(
-                create_exit_order_intent(
-                    trade_id="pos-token-block",
-                    token_id=YES_TOKEN,
-                    shares=5.0,
-                    current_price=0.50,
-                    best_bid=0.49,
-                ),
-                conn=conn,
-                decision_id="token-block",
-            )
-        assert "ctf_tokens_insufficient" in str(exc.value)
-        assert "pusd" not in str(exc.value).lower()
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-token-block",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+            ),
+            conn=conn,
+            decision_id="token-block",
+        )
+        assert result.reason and "ctf_tokens_insufficient" in result.reason
+        assert "pusd" not in result.reason.lower()
         assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
     finally:
         from src.risk_allocator import clear_global_allocator
@@ -8687,6 +8955,10 @@ def test_exit_pre_submit_db_lock_retries_next_cycle_without_budget(conn, monkeyp
     )
     assert payload["status"] == "pre_submit_db_lock"
     assert payload["side_effect_boundary_crossed"] is False
+    assert exit_lifecycle._is_pre_submit_db_locked_error(
+        "pre_submit_db_locked_transient: database is locked "
+        "(writer lease timeout: DB write lease timed out)"
+    )
 
 
 def test_mutex_reacquire_released_row_fails_closed_on_stale_compare(conn):

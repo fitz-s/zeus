@@ -132,6 +132,8 @@ _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
 _HELD_POSITION_MONITOR_RESERVATION_MIN = 2
 _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
+_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS = 50
+_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 100
 
 
 def _held_position_monitor_reservation_count(position_count: int) -> int:
@@ -3203,6 +3205,40 @@ def _monitor_refreshed_phase_for_position(pos) -> str:
     return LifecyclePhase.ACTIVE.value
 
 
+def _canonical_trade_write_lease(conn, *, owner: str, deadline_ms: int, max_hold_ms: int):
+    """Serialize canonical live-trade writes without imposing the live lease on test DBs."""
+
+    from contextlib import nullcontext
+    from pathlib import Path
+
+    from src.state.db import _zeus_trade_db_path
+
+    try:
+        main_path = next(
+            (
+                Path(str(row[2])).resolve(strict=False)
+                for row in conn.execute("PRAGMA database_list").fetchall()
+                if str(row[1]) == "main" and str(row[2])
+            ),
+            None,
+        )
+    except Exception:
+        main_path = None
+    if main_path != _zeus_trade_db_path().resolve(strict=False):
+        return nullcontext()
+
+    from src.state.db_writer_lock import WriteClass
+    from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+
+    return default_runtime_write_coordinator().lease(
+        (DBIdentity.TRADE,),
+        owner=owner,
+        write_class=WriteClass.LIVE,
+        deadline_ms=deadline_ms,
+        max_hold_ms=max_hold_ms,
+    )
+
+
 def _emit_monitor_refreshed_canonical_if_available(
     conn,
     pos,
@@ -3218,34 +3254,49 @@ def _emit_monitor_refreshed_canonical_if_available(
 
     from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
     from src.state.db import append_many_and_project
+    from src.state.write_coordinator import WriteLeaseTimeout
 
     try:
-        row = conn.execute(
-            "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
-            (getattr(pos, "trade_id", ""),),
-        ).fetchone()
-        next_seq = int((row[0] if row else 0) or 0) + 1
-        monitor_occurred_at = (
-            deps._utcnow().isoformat()
-            if hasattr(deps, "_utcnow")
-            else (
-                str(getattr(pos, "last_monitor_at", "") or "").strip()
-                or datetime.now(timezone.utc).isoformat()
+        with _canonical_trade_write_lease(
+            conn,
+            owner="monitor_canonical_append",
+            deadline_ms=_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+        ):
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+                (getattr(pos, "trade_id", ""),),
+            ).fetchone()
+            next_seq = int((row[0] if row else 0) or 0) + 1
+            monitor_occurred_at = (
+                deps._utcnow().isoformat()
+                if hasattr(deps, "_utcnow")
+                else (
+                    str(getattr(pos, "last_monitor_at", "") or "").strip()
+                    or datetime.now(timezone.utc).isoformat()
+                )
             )
+            pos.last_monitor_at = monitor_occurred_at
+            events, projection = build_monitor_refreshed_canonical_write(
+                pos,
+                sequence_no=next_seq,
+                phase_after=_monitor_refreshed_phase_for_position(pos),
+                source_module="src.engine.cycle_runtime",
+                occurred_at=monitor_occurred_at,
+                exit_decision=exit_decision,
+                final_should_exit=final_should_exit,
+                final_exit_reason=final_exit_reason,
+                final_exit_trigger=final_exit_trigger,
+            )
+            append_many_and_project(conn, events, projection)
+            conn.commit()
+    except WriteLeaseTimeout as exc:
+        deps.logger.info(
+            "CANONICAL_MONITOR_REFRESHED_YIELDED trade_id=%s reason=%s",
+            getattr(pos, "trade_id", ""),
+            exc,
         )
-        pos.last_monitor_at = monitor_occurred_at
-        events, projection = build_monitor_refreshed_canonical_write(
-            pos,
-            sequence_no=next_seq,
-            phase_after=_monitor_refreshed_phase_for_position(pos),
-            source_module="src.engine.cycle_runtime",
-            occurred_at=monitor_occurred_at,
-            exit_decision=exit_decision,
-            final_should_exit=final_should_exit,
-            final_exit_reason=final_exit_reason,
-            final_exit_trigger=final_exit_trigger,
-        )
-        append_many_and_project(conn, events, projection)
+        return False
     except Exception as exc:
         deps.logger.warning(
             "CANONICAL_MONITOR_REFRESHED_EMIT_FAILED trade_id=%s reason=%s",

@@ -72,6 +72,9 @@ from src.state.lifecycle_manager import LifecyclePhase, TERMINAL_STATES
 
 logger = logging.getLogger(__name__)
 
+_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS = 250
+_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS = 500
+
 _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
 _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
 
@@ -3189,16 +3192,30 @@ def _refresh_exit_collateral_snapshot_for_submit(
     *,
     token_id: str | None = None,
     shares: float | None = None,
-) -> dict:
-    """Refresh CTF truth before preflight; periodic pUSD snapshots omit it."""
-    from src.execution.collateral import refresh_collateral_snapshot_for_submit
+) -> object:
+    """Fetch CTF truth before the writer lease; persistence follows under lease."""
+    from src.execution.collateral import prepare_collateral_snapshot_for_submit
 
-    return refresh_collateral_snapshot_for_submit(
+    return prepare_collateral_snapshot_for_submit(
         conn,
         action="exit_submit",
-        reuse_fresh_snapshot=False,
         token_id=token_id,
+        shares=shares,
     )
+
+
+def _persist_exit_collateral_snapshot_for_submit(conn: sqlite3.Connection, prepared: object) -> dict:
+    """Persist the prepared exit snapshot only while holding the TRADE writer lease."""
+    from src.execution.collateral import (
+        PreparedCollateralSnapshot,
+        persist_prepared_collateral_snapshot_for_submit,
+    )
+
+    if isinstance(prepared, PreparedCollateralSnapshot):
+        return persist_prepared_collateral_snapshot_for_submit(conn, prepared)
+    # Existing direct unit tests replace the fetch seam with its old capability
+    # component. Keep that seam while production uses PreparedCollateralSnapshot.
+    return prepared if isinstance(prepared, dict) else _capability_component("collateral_snapshot_refresh")
 
 
 def _assert_collateral_allows_sell(
@@ -3211,7 +3228,7 @@ def _assert_collateral_allows_sell(
     from src.state.collateral_ledger import CollateralLedger, assert_sell_preflight
 
     if conn is not None:
-        CollateralLedger(conn).sell_preflight(token_id=token_id, size=shares)
+        CollateralLedger.sell_preflight_in_transaction(conn, token_id=token_id, size=shares)
     else:
         assert_sell_preflight(token_id, shares)
     return _capability_component("collateral_ledger", collateral="CTF", token_id=token_id, shares=shares)
@@ -4000,10 +4017,65 @@ def _reserve_collateral_for_buy(
 def _reserve_collateral_for_sell(
     command_id: str, token_id: str, shares: float, conn: sqlite3.Connection
 ) -> None:
-    """Reserve CTF inventory on the same connection as the venue command row."""
+    """Reserve CTF inventory without DDL on the command transaction."""
     from src.state.collateral_ledger import CollateralLedger
 
-    CollateralLedger(conn).reserve_tokens_for_sell(command_id, token_id, shares)
+    CollateralLedger.reserve_tokens_for_sell_in_transaction(conn, command_id, token_id, shares)
+
+
+def _canonical_trade_write_lease(conn, *, owner: str, deadline_ms: int, max_hold_ms: int):
+    """Serialize canonical live-trade writes without imposing the live lease on test DBs."""
+
+    from contextlib import nullcontext
+    from pathlib import Path
+
+    from src.state.db import _zeus_trade_db_path
+
+    try:
+        main_path = next(
+            (
+                Path(str(row[2])).resolve(strict=False)
+                for row in conn.execute("PRAGMA database_list").fetchall()
+                if str(row[1]) == "main" and str(row[2])
+            ),
+            None,
+        )
+    except Exception:
+        main_path = None
+    if main_path != _zeus_trade_db_path().resolve(strict=False):
+        return nullcontext()
+
+    from src.state.db_writer_lock import WriteClass
+    from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+
+    return default_runtime_write_coordinator().lease(
+        (DBIdentity.TRADE,),
+        owner=owner,
+        write_class=WriteClass.LIVE,
+        deadline_ms=deadline_ms,
+        max_hold_ms=max_hold_ms,
+    )
+
+
+def _trade_writer_lease_required(conn: sqlite3.Connection) -> bool:
+    """Whether this connection is the canonical TRADE DB and enters the lease."""
+
+    try:
+        from pathlib import Path
+
+        from src.state.db import _zeus_trade_db_path
+
+        main_path = next(
+            (
+                Path(str(row[2])).resolve(strict=False)
+                for row in conn.execute("PRAGMA database_list").fetchall()
+                if str(row[1]) == "main" and str(row[2])
+            ),
+            None,
+        )
+        return main_path == _zeus_trade_db_path().resolve(strict=False)
+    except Exception:
+        return True
 
 
 def _open_entry_risk_reservation(
@@ -6242,116 +6314,201 @@ def execute_exit_order(
                 idempotency_key=idem.value,
             )
 
-        collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(
+        if _trade_writer_lease_required(conn) and conn.in_transaction:
+            logger.warning(
+                "execute_exit_order: caller transaction is active before TRADE lease "
+                "(command_id=%s trade_id=%s); refusing pre-venue write without rollback",
+                command_id,
+                intent.trade_id,
+            )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=(
+                    "pre_submit_db_locked_transient: database is locked "
+                    "(caller transaction active before writer lease)"
+                ),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
+
+        prepared_collateral_snapshot = _refresh_exit_collateral_snapshot_for_submit(
             conn,
             token_id=intent.token_id,
             shares=shares,
         )
-        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares, conn=conn)
+        if _trade_writer_lease_required(conn) and conn.in_transaction:
+            logger.warning(
+                "execute_exit_order: collateral fetch left caller transaction active before "
+                "TRADE lease (command_id=%s trade_id=%s); refusing pre-venue write without rollback",
+                command_id,
+                intent.trade_id,
+            )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=(
+                    "pre_submit_db_locked_transient: database is locked "
+                    "(caller transaction active before writer lease)"
+                ),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
+        from src.state.write_coordinator import WriteLeaseTimeout
 
         try:
-            pre_submit_envelope = _build_pre_submit_envelope(
+            with _canonical_trade_write_lease(
                 conn,
-                command_id=command_id,
-                snapshot_id=intent.executable_snapshot_id,
-                token_id=intent.token_id,
-                side="SELL",
-                price=limit_price,
-                size=shares,
-                order_type=order_type,
-                post_only=False,
-                captured_at=now_str,
-            )
-            envelope_id = _persist_prebuilt_submit_envelope(
-                conn,
-                pre_submit_envelope,
-                command_id=command_id,
-            )
-            insert_command(
-                conn,
-                command_id=command_id,
-                snapshot_id=intent.executable_snapshot_id,
-                envelope_id=envelope_id,
-                position_id=intent.trade_id,
-                decision_id=effective_decision_id,
-                idempotency_key=idem.value,
-                intent_kind=IntentKind.EXIT.value,
-                market_id=market_id_for_cmd,
-                token_id=intent.token_id,
-                side="SELL",
-                size=shares,
-                price=limit_price,
-                created_at=now_str,
-                q_version=q_version or None,
-                snapshot_checked_at=now_str,
-                expected_min_tick_size=intent.executable_snapshot_min_tick_size,
-                expected_min_order_size=intent.executable_snapshot_min_order_size,
-                expected_neg_risk=intent.executable_snapshot_neg_risk,
-            )
-            if not ExitMutex(conn).acquire(intent.trade_id, intent.token_id, command_id):
+                owner="exit_pre_submit_persist",
+                deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+                max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+            ):
+                if _trade_writer_lease_required(conn):
+                    from src.execution.collateral import initialize_collateral_schema_for_submit
+
+                    initialize_collateral_schema_for_submit(conn)
+                collateral_refresh_component = _persist_exit_collateral_snapshot_for_submit(
+                    conn,
+                    prepared_collateral_snapshot,
+                )
+                collateral_component = _assert_collateral_allows_sell(
+                    intent.token_id,
+                    shares,
+                    conn=conn,
+                )
+                pre_submit_envelope = _build_pre_submit_envelope(
+                    conn,
+                    command_id=command_id,
+                    snapshot_id=intent.executable_snapshot_id,
+                    token_id=intent.token_id,
+                    side="SELL",
+                    price=limit_price,
+                    size=shares,
+                    order_type=order_type,
+                    post_only=False,
+                    captured_at=now_str,
+                )
+                envelope_id = _persist_prebuilt_submit_envelope(
+                    conn,
+                    pre_submit_envelope,
+                    command_id=command_id,
+                )
+                insert_command(
+                    conn,
+                    command_id=command_id,
+                    snapshot_id=intent.executable_snapshot_id,
+                    envelope_id=envelope_id,
+                    position_id=intent.trade_id,
+                    decision_id=effective_decision_id,
+                    idempotency_key=idem.value,
+                    intent_kind=IntentKind.EXIT.value,
+                    market_id=market_id_for_cmd,
+                    token_id=intent.token_id,
+                    side="SELL",
+                    size=shares,
+                    price=limit_price,
+                    created_at=now_str,
+                    q_version=q_version or None,
+                    snapshot_checked_at=now_str,
+                    expected_min_tick_size=intent.executable_snapshot_min_tick_size,
+                    expected_min_order_size=intent.executable_snapshot_min_order_size,
+                    expected_neg_risk=intent.executable_snapshot_neg_risk,
+                )
+                if not ExitMutex(conn).acquire(intent.trade_id, intent.token_id, command_id):
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="REVIEW_REQUIRED",
+                        occurred_at=now_str,
+                        payload={"reason": "exit_mutex_held"},
+                    )
+                    conn.commit()
+                    return OrderResult(
+                        trade_id=intent.trade_id,
+                        status="rejected",
+                        reason="exit_mutex_held",
+                        submitted_price=limit_price,
+                        shares=shares,
+                        order_role="exit",
+                        intent_id=intent.intent_id,
+                        idempotency_key=idem.value,
+                        command_state="REVIEW_REQUIRED",
+                    )
                 append_event(
                     conn,
                     command_id=command_id,
-                    event_type="REVIEW_REQUIRED",
+                    event_type="SUBMIT_REQUESTED",
                     occurred_at=now_str,
-                    payload={"reason": "exit_mutex_held"},
+                    payload={
+                        "order_type": order_type,
+                        "execution_capability": _build_execution_capability(
+                            action="EXIT",
+                            command_id=command_id,
+                            intent_kind=IntentKind.EXIT.value,
+                            order_type=order_type,
+                            venue_order_type=order_type,
+                            risk_allocator_selected_order_type=selected_order_type,
+                            token_id=intent.token_id,
+                            snapshot_id=intent.executable_snapshot_id,
+                            freshness_time=now_str,
+                            components=[
+                                cutover_component,
+                                _component_from_result(
+                                    "risk_allocator",
+                                    risk_allocator_decision,
+                                    reduce_only=True,
+                                ),
+                                _capability_component(
+                                    "order_type_selection",
+                                    order_type=order_type,
+                                    selected_order_type=selected_order_type,
+                                ),
+                                heartbeat_component,
+                                ws_gap_component,
+                                collateral_refresh_component,
+                                collateral_component,
+                                _capability_component("replacement_sell_guard"),
+                                _exit_decision_source_component(),
+                                exit_snapshot_identity_component,
+                                _capability_component("executable_snapshot_gate"),
+                            ],
+                        ),
+                    },
                 )
+                _reserve_collateral_for_sell(command_id, intent.token_id, shares, conn)
                 conn.commit()
-                return OrderResult(
-                    trade_id=intent.trade_id,
-                    status="rejected",
-                    reason="exit_mutex_held",
-                    submitted_price=limit_price,
-                    shares=shares,
-                    order_role="exit",
-                    intent_id=intent.intent_id,
-                    idempotency_key=idem.value,
-                    command_state="REVIEW_REQUIRED",
-                )
-            append_event(
-                conn,
-                command_id=command_id,
-                event_type="SUBMIT_REQUESTED",
-                occurred_at=now_str,
-                payload={
-                    "order_type": order_type,
-                    "execution_capability": _build_execution_capability(
-                        action="EXIT",
-                        command_id=command_id,
-                        intent_kind=IntentKind.EXIT.value,
-                        order_type=order_type,
-                        venue_order_type=order_type,
-                        risk_allocator_selected_order_type=selected_order_type,
-                        token_id=intent.token_id,
-                        snapshot_id=intent.executable_snapshot_id,
-                        freshness_time=now_str,
-                        components=[
-                            cutover_component,
-                            _component_from_result(
-                                "risk_allocator",
-                                risk_allocator_decision,
-                                reduce_only=True,
-                            ),
-                            _capability_component(
-                                "order_type_selection",
-                                order_type=order_type,
-                                selected_order_type=selected_order_type,
-                            ),
-                            heartbeat_component,
-                            ws_gap_component,
-                            collateral_refresh_component,
-                            collateral_component,
-                            _capability_component("replacement_sell_guard"),
-                            _exit_decision_source_component(),
-                            exit_snapshot_identity_component,
-                            _capability_component("executable_snapshot_gate"),
-                        ],
-                    ),
-                },
+        except WriteLeaseTimeout as exc:
+            logger.warning(
+                "execute_exit_order: pre-venue TRADE lease timed out (command_id=%s "
+                "trade_id=%s) — no order placed; transient reject, retry next cycle: %s",
+                command_id,
+                intent.trade_id,
+                exc,
             )
-            _reserve_collateral_for_sell(command_id, intent.token_id, shares, conn)
-            conn.commit()
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=(
+                    "pre_submit_db_locked_transient: database is locked "
+                    f"(writer lease timeout: {exc})"
+                ),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
         except MarketSnapshotError as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             return OrderResult(
                 trade_id=intent.trade_id,
                 status="rejected",
@@ -6378,47 +6535,17 @@ def execute_exit_order(
                 idempotency_key=idem.value,
             )
         except CollateralInsufficient as exc:
-            rej_time = datetime.now(timezone.utc).isoformat()
-            if _venue_command_exists(conn, command_id):
-                try:
-                    append_event(
-                        conn,
-                        command_id=command_id,
-                        event_type="SUBMIT_REJECTED",
-                        occurred_at=rej_time,
-                        payload={
-                            "reason": "pre_submit_collateral_reservation_failed",
-                            "detail": str(exc),
-                            "exception_type": type(exc).__name__,
-                            "side_effect_boundary_crossed": False,
-                            "sdk_submit_attempted": False,
-                        },
-                    )
-                    if _own_conn:
-                        conn.commit()
-                except Exception as inner:
-                    logger.error(
-                        "execute_exit_order: SUBMIT_REJECTED append_event failed after "
-                        "pre-submit collateral reservation failure (command_id=%s "
-                        "trade_id=%s): inner=%s original=%s",
-                        command_id,
-                        intent.trade_id,
-                        inner,
-                        exc,
-                    )
-            else:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                logger.warning(
-                    "execute_exit_order: pre-command collateral rejection "
-                    "(command_id=%s trade_id=%s) — no venue command/event to append; "
-                    "no order placed: %s",
-                    command_id,
-                    intent.trade_id,
-                    exc,
-                )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(
+                "execute_exit_order: pre-venue collateral rejection rolled back "
+                "(command_id=%s trade_id=%s); no order placed: %s",
+                command_id,
+                intent.trade_id,
+                exc,
+            )
             return OrderResult(
                 trade_id=intent.trade_id,
                 status="rejected",
@@ -6438,6 +6565,10 @@ def execute_exit_order(
                 "execute_exit_order: idempotency key collision (race) for trade_id=%s idem=%s: %s",
                 intent.trade_id, idem.value, exc,
             )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             existing_row = find_command_by_idempotency_key(conn, idem.value)
             if existing_row is not None:
                 exit_existing_mismatch = _exit_existing_command_mismatch_reason(

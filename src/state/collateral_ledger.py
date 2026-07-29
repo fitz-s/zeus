@@ -375,6 +375,72 @@ class CollateralLedger:
         self._snapshot = snapshot
         return snapshot
 
+    @staticmethod
+    def prepare_snapshot_from_adapter(
+        adapter: Any,
+        *,
+        fallback: CollateralSnapshot | None = None,
+    ) -> CollateralSnapshot:
+        """Fetch collateral evidence without reading or writing the ledger DB."""
+
+        captured_at = datetime.now(timezone.utc)
+        try:
+            raw = _read_adapter_payload(adapter)
+            authority: AuthorityTier = str(raw.get("authority_tier") or "CHAIN").upper()  # type: ignore[assignment]
+            if authority not in {"CHAIN", "VENUE", "DEGRADED"}:
+                authority = "DEGRADED"
+        except Exception as exc:
+            if (
+                fallback is not None
+                and fallback.authority_tier != "DEGRADED"
+                and _snapshot_is_fresh_enough_for_cache(fallback)
+            ):
+                return fallback
+            raw = {"error": str(exc), "authority_tier": "DEGRADED"}
+            authority = "DEGRADED"
+
+        return CollateralSnapshot(
+            pusd_balance_micro=_sqlite_micro(raw.get("pusd_balance_micro", raw.get("pusd_balance", 0))),
+            pusd_allowance_micro=_sqlite_micro(raw.get("pusd_allowance_micro", raw.get("pusd_allowance", 0))),
+            usdc_e_legacy_balance_micro=_sqlite_micro(
+                raw.get("usdc_e_legacy_balance_micro", raw.get("usdc_e_legacy_balance", 0))
+            ),
+            ctf_token_balances=_ctf_units_dict_from_payload(raw, "ctf_token_balances"),
+            ctf_token_allowances=_ctf_units_dict_from_payload(raw, "ctf_token_allowances"),
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=captured_at,
+            authority_tier=authority,
+            raw_balance_payload_hash=_hash_payload(raw),
+        )
+
+    def persist_prepared_snapshot(self, snapshot: CollateralSnapshot) -> CollateralSnapshot:
+        """Persist previously fetched collateral evidence on this DB transaction."""
+
+        persisted = replace(
+            snapshot,
+            reserved_pusd_for_buys_micro=self._reserved_pusd(),
+            reserved_tokens_for_sells=self._reserved_tokens(),
+        )
+        self._persist_snapshot(persisted)
+        self._snapshot = persisted
+        return persisted
+
+    @staticmethod
+    def persist_prepared_snapshot_in_transaction(
+        conn: sqlite3.Connection,
+        snapshot: CollateralSnapshot,
+    ) -> CollateralSnapshot:
+        """Persist prepared evidence without schema initialization or a commit."""
+
+        persisted = replace(
+            snapshot,
+            reserved_pusd_for_buys_micro=_reserved_pusd_for_connection(conn),
+            reserved_tokens_for_sells=_reserved_tokens_for_connection(conn),
+        )
+        _persist_snapshot_on_connection(conn, persisted)
+        return persisted
+
     def set_snapshot(self, snapshot: CollateralSnapshot) -> None:
         self._persist_snapshot(snapshot)
         self._snapshot = snapshot
@@ -453,6 +519,43 @@ class CollateralLedger:
             )
         return True
 
+    @staticmethod
+    def sell_preflight_in_transaction(
+        conn: sqlite3.Connection,
+        *,
+        token_id: str,
+        size: int | float,
+    ) -> bool:
+        """Run CTF preflight without schema initialization or a commit."""
+
+        snapshot = load_latest_collateral_snapshot_read_only(conn)
+        if snapshot is None:
+            raise CollateralInsufficient("collateral_snapshot_degraded")
+        snapshot = replace(
+            snapshot,
+            reserved_pusd_for_buys_micro=_reserved_pusd_for_connection(conn),
+            reserved_tokens_for_sells=_reserved_tokens_for_connection(conn),
+        )
+        required = _token_required_units(size)
+        if snapshot.authority_tier == "DEGRADED":
+            raise CollateralInsufficient("collateral_snapshot_degraded")
+        _assert_snapshot_fresh(snapshot)
+        available = snapshot.available_tokens(token_id)
+        if available < required:
+            raise CollateralInsufficient(
+                f"ctf_tokens_insufficient: token_id={token_id} "
+                f"required={required} available={available}"
+            )
+        allowance = int(snapshot.ctf_token_allowances.get(token_id, 0))
+        available_allowance = snapshot.available_token_allowance(token_id)
+        if available_allowance < required:
+            raise CollateralInsufficient(
+                f"ctf_allowance_insufficient: token_id={token_id} "
+                f"required={required} available_allowance={available_allowance} "
+                f"allowance={allowance}"
+            )
+        return True
+
     def reserve_pusd_for_buy(self, command_id: str, micro: int) -> None:
         """Reserve pUSD via a guarded single-statement CAS insert.
 
@@ -493,6 +596,24 @@ class CollateralLedger:
             return
         now = datetime.now(timezone.utc).isoformat()
         self._run_cas(lambda conn: self._cas_insert_ctf_reservation(conn, command_id, token_id, amount, now))
+
+    @staticmethod
+    def reserve_tokens_for_sell_in_transaction(
+        conn: sqlite3.Connection,
+        command_id: str,
+        token_id: str,
+        size: int | float,
+    ) -> None:
+        """Reserve CTF on an initialized caller transaction without DDL."""
+
+        CollateralLedger.sell_preflight_in_transaction(conn, token_id=token_id, size=size)
+        CollateralLedger._cas_insert_ctf_reservation(
+            conn,
+            command_id,
+            token_id,
+            _token_required_units(size),
+            datetime.now(timezone.utc).isoformat(),
+        )
 
     def _run_cas(self, fn) -> None:
         """Dispatch a CAS body to the right connection-ownership mode.
@@ -767,58 +888,23 @@ class CollateralLedger:
     def _load_latest_snapshot(self) -> CollateralSnapshot | None:
         if self._conn is None and self._db_path is None:
             return None
-        try:
-            with self._connection_scope() as conn:
-                if conn is None:
-                    return None
-                rows = conn.execute(
-                    """
-                    SELECT *
-                      FROM collateral_ledger_snapshots
-                     ORDER BY id DESC
-                     LIMIT 32
-                    """
-                ).fetchall()
-                has_active_ctf_exposure = _has_active_ctf_exposure(conn)
-        except sqlite3.OperationalError as exc:
-            if "no such table" in str(exc):
+        with self._connection_scope() as conn:
+            if conn is None:
                 return None
-            raise
-        if not rows:
+            snapshot = load_latest_collateral_snapshot_read_only(conn)
+        if snapshot is None:
             return None
-
-        snapshots = [self._snapshot_from_row(row) for row in rows]
-        latest = snapshots[0]
-        for snapshot in snapshots:
-            if snapshot.authority_tier == "DEGRADED":
-                continue
-            if not _snapshot_is_fresh_enough_for_cache(snapshot):
-                continue
-            if has_active_ctf_exposure and not snapshot.ctf_token_balances:
-                continue
-            return snapshot
-        for snapshot in snapshots:
-            if snapshot.authority_tier != "DEGRADED" and _snapshot_is_fresh_enough_for_cache(snapshot):
-                return snapshot
-        return latest
-
-    def _snapshot_from_row(self, row: sqlite3.Row) -> CollateralSnapshot:
-        raw = dict(row)
-        try:
-            captured_at = datetime.fromisoformat(str(raw["captured_at"]).replace("Z", "+00:00"))
-        except Exception:
-            captured_at = datetime.fromtimestamp(0, timezone.utc)
-        return CollateralSnapshot(
-            pusd_balance_micro=int(raw["pusd_balance_micro"] or 0),
-            pusd_allowance_micro=int(raw["pusd_allowance_micro"] or 0),
-            usdc_e_legacy_balance_micro=int(raw["usdc_e_legacy_balance_micro"] or 0),
-            ctf_token_balances=_int_dict(json.loads(raw["ctf_token_balances_json"] or "{}")),
-            ctf_token_allowances=_int_dict(json.loads(raw["ctf_token_allowances_json"] or "{}")),
+        return replace(
+            snapshot,
             reserved_pusd_for_buys_micro=self._reserved_pusd(),
             reserved_tokens_for_sells=self._reserved_tokens(),
-            captured_at=captured_at,
-            authority_tier=str(raw["authority_tier"] or "DEGRADED"),  # type: ignore[arg-type]
-            raw_balance_payload_hash=raw.get("raw_balance_payload_hash"),
+        )
+
+    def _snapshot_from_row(self, row: sqlite3.Row) -> CollateralSnapshot:
+        return CollateralSnapshot(
+            **_snapshot_row_fields(row),
+            reserved_pusd_for_buys_micro=self._reserved_pusd(),
+            reserved_tokens_for_sells=self._reserved_tokens(),
         )
 
 
@@ -828,39 +914,73 @@ class CollateralLedger:
         with self._connection_scope() as conn:
             if conn is None:
                 return
-            if snapshot.authority_tier in {"CHAIN", "VENUE"}:
-                _clear_matured_unsettled_proceeds(
-                    conn,
-                    captured_at=_snapshot_time(snapshot),
-                )
-            conn.execute(
-                """
-                INSERT INTO collateral_ledger_snapshots (
-                  pusd_balance_micro,
-                  pusd_allowance_micro,
-                  usdc_e_legacy_balance_micro,
-                  ctf_token_balances_json,
-                  ctf_token_allowances_json,
-                  reserved_pusd_for_buys_micro,
-                  reserved_tokens_for_sells_json,
-                  captured_at,
-                  authority_tier,
-                  raw_balance_payload_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    _sqlite_micro(snapshot.pusd_balance_micro),
-                    _sqlite_micro(snapshot.pusd_allowance_micro),
-                    _sqlite_micro(snapshot.usdc_e_legacy_balance_micro),
-                    json.dumps(snapshot.ctf_token_balances, sort_keys=True),
-                    json.dumps(snapshot.ctf_token_allowances, sort_keys=True),
-                    snapshot.reserved_pusd_for_buys_micro,
-                    json.dumps(snapshot.reserved_tokens_for_sells, sort_keys=True),
-                    snapshot.captured_at.isoformat(),
-                    snapshot.authority_tier,
-                    snapshot.raw_balance_payload_hash,
-                ),
-            )
+            _persist_snapshot_on_connection(conn, snapshot)
+
+
+def _persist_snapshot_on_connection(conn: sqlite3.Connection, snapshot: CollateralSnapshot) -> None:
+    """DML-only snapshot persistence for an already-initialized connection."""
+
+    if snapshot.authority_tier in {"CHAIN", "VENUE"}:
+        _clear_matured_unsettled_proceeds(
+            conn,
+            captured_at=_snapshot_time(snapshot),
+        )
+    conn.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+          pusd_balance_micro,
+          pusd_allowance_micro,
+          usdc_e_legacy_balance_micro,
+          ctf_token_balances_json,
+          ctf_token_allowances_json,
+          reserved_pusd_for_buys_micro,
+          reserved_tokens_for_sells_json,
+          captured_at,
+          authority_tier,
+          raw_balance_payload_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _sqlite_micro(snapshot.pusd_balance_micro),
+            _sqlite_micro(snapshot.pusd_allowance_micro),
+            _sqlite_micro(snapshot.usdc_e_legacy_balance_micro),
+            json.dumps(snapshot.ctf_token_balances, sort_keys=True),
+            json.dumps(snapshot.ctf_token_allowances, sort_keys=True),
+            snapshot.reserved_pusd_for_buys_micro,
+            json.dumps(snapshot.reserved_tokens_for_sells, sort_keys=True),
+            snapshot.captured_at.isoformat(),
+            snapshot.authority_tier,
+            snapshot.raw_balance_payload_hash,
+        ),
+    )
+
+
+def _reserved_pusd_for_connection(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(amount), 0)
+          FROM collateral_reservations
+         WHERE reservation_type = 'PUSD_BUY' AND released_at IS NULL
+        """
+    ).fetchone()
+    return int(row[0] or 0)
+
+
+def _reserved_tokens_for_connection(conn: sqlite3.Connection) -> dict[str, int]:
+    rows = conn.execute(
+        """
+        SELECT token_id, COALESCE(SUM(amount), 0) AS amount
+          FROM collateral_reservations
+         WHERE reservation_type = 'CTF_SELL' AND released_at IS NULL
+         GROUP BY token_id
+        """
+    ).fetchall()
+    return {
+        str(row["token_id"] if isinstance(row, sqlite3.Row) else row[0]): int(
+            (row["amount"] if isinstance(row, sqlite3.Row) else row[1]) or 0
+        )
+        for row in rows
+    }
 
 
 _GLOBAL_LEDGER: CollateralLedger | None = None
@@ -900,6 +1020,69 @@ def _snapshot_time(snapshot: CollateralSnapshot) -> datetime:
 def _snapshot_is_fresh_enough_for_cache(snapshot: CollateralSnapshot) -> bool:
     age_seconds = (datetime.now(timezone.utc) - _snapshot_time(snapshot)).total_seconds()
     return age_seconds <= (COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS + COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS)
+
+
+def load_latest_collateral_snapshot_read_only(
+    conn: sqlite3.Connection,
+) -> CollateralSnapshot | None:
+    """Read a fallback snapshot without schema initialization or writes."""
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT *
+              FROM collateral_ledger_snapshots
+             ORDER BY id DESC
+             LIMIT 32
+            """
+        ).fetchall()
+        has_active_ctf_exposure = _has_active_ctf_exposure(conn)
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        raise
+    if not rows:
+        return None
+
+    snapshots = [
+        CollateralSnapshot(
+            **_snapshot_row_fields(row),
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+        )
+        for row in rows
+    ]
+    latest = snapshots[0]
+    for snapshot in snapshots:
+        if snapshot.authority_tier == "DEGRADED":
+            continue
+        if not _snapshot_is_fresh_enough_for_cache(snapshot):
+            continue
+        if has_active_ctf_exposure and not snapshot.ctf_token_balances:
+            continue
+        return snapshot
+    for snapshot in snapshots:
+        if snapshot.authority_tier != "DEGRADED" and _snapshot_is_fresh_enough_for_cache(snapshot):
+            return snapshot
+    return latest
+
+
+def _snapshot_row_fields(row: sqlite3.Row) -> dict[str, object]:
+    raw = dict(row)
+    try:
+        captured_at = datetime.fromisoformat(str(raw["captured_at"]).replace("Z", "+00:00"))
+    except Exception:
+        captured_at = datetime.fromtimestamp(0, timezone.utc)
+    return {
+        "pusd_balance_micro": int(raw["pusd_balance_micro"] or 0),
+        "pusd_allowance_micro": int(raw["pusd_allowance_micro"] or 0),
+        "usdc_e_legacy_balance_micro": int(raw["usdc_e_legacy_balance_micro"] or 0),
+        "ctf_token_balances": _int_dict(json.loads(raw["ctf_token_balances_json"] or "{}")),
+        "ctf_token_allowances": _int_dict(json.loads(raw["ctf_token_allowances_json"] or "{}")),
+        "captured_at": captured_at,
+        "authority_tier": str(raw["authority_tier"] or "DEGRADED"),
+        "raw_balance_payload_hash": raw.get("raw_balance_payload_hash"),
+    }
 
 
 def _has_active_ctf_exposure(conn: sqlite3.Connection) -> bool:
