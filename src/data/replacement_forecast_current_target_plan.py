@@ -16,7 +16,10 @@ from src.data.day0_fast_obs import (
     latest_fast_station_conditioning,
     metar_observation_time_from_raw,
 )
-from src.data.day0_observation_reader import _OBSERVATION_FACT_TIME_SQL
+from src.data.day0_observation_reader import (
+    _OBSERVATION_FACT_TIME_SQL,
+    hko_rollover_carryover_status,
+)
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_input_hwm import (
     prime_frozen_replacement_artifact_hwm,
@@ -1303,7 +1306,19 @@ def _latest_authorized_day0_fact(
                 == "hko_hourly_accumulator"
             )
         ]
-        return max(hko_facts, key=fact_time) if hko_facts else None
+        if not hko_facts:
+            return None
+        try:
+            rollover_status = hko_rollover_carryover_status(
+                conn,
+                target_date=target_date,
+                decision_time=decision_utc,
+            )
+        except ValueError:
+            return None
+        if rollover_status != "RESET_CONFIRMED":
+            return None
+        return max(hko_facts, key=fact_time)
     # ABSORBING-DIRECTION REDUCTION, not "most recent wins" (2026-07-14 Paris
     # regression): the day-so-far extreme is the max (high) / min (low) across
     # every authorized source seen so far. Picking the temporally freshest

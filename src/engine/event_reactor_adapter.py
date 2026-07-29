@@ -376,6 +376,7 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
+        "GLOBAL_DAY0_PROVISIONAL_ROLLOVER_UNCONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE",
         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING",
         "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
@@ -399,6 +400,7 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
+        "GLOBAL_DAY0_PROVISIONAL_ROLLOVER_UNCONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE",
         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING",
         "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
@@ -29784,6 +29786,14 @@ def _global_day0_probability_authority_payload(
                 "finite_evidence_absorbing_no_conditions",
                 "_edli_day0_finite_evidence_absorbing_no_conditions",
             ),
+            (
+                "provisional_revision_likelihood",
+                "_edli_day0_provisional_revision_likelihood",
+            ),
+            (
+                "provisional_boundary_survival_probability",
+                "_edli_day0_provisional_boundary_survival_probability",
+            ),
         ):
             value = current_observation_payload.get(source_key)
             if value not in (None, ""):
@@ -30935,13 +30945,45 @@ def _prepare_current_global_probability_family(
             provisional_day0_observation
             and fast_residual_conditioning is None
         ):
-            # SCOPE: this HKO family held-position q only. DRAIN: the final
-            # daily HKO fact or a validated revision likelihood becomes current
-            # probability evidence. RESET: the next family refresh consumes
-            # that evidence; other families and final-daily exact q are inert.
-            raise ValueError(
-                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+            from src.data.day0_observation_reader import (
+                hko_provisional_revision_likelihood,
             )
+
+            try:
+                revision_likelihood = hko_provisional_revision_likelihood(
+                    day0_observation_conn,
+                    target_date=str(family.target_date),
+                    temperature_metric=str(family.metric),
+                    decision_time=decision_time,
+                )
+            except ValueError as exc:
+                if str(exc) == "HKO_PROVISIONAL_ROLLOVER_UNCONFIRMED":
+                    # SCOPE: this HKO family only. DRAIN: a changed official
+                    # since-midnight pair proves the provider reset into the
+                    # new target date. RESET: the next source-clock row changes
+                    # world.data_version and rebuilds this family.
+                    raise ValueError(
+                        "GLOBAL_DAY0_PROVISIONAL_ROLLOVER_UNCONFIRMED"
+                    ) from exc
+                # SCOPE: this HKO family held-position q only. DRAIN: enough
+                # causal official snapshots establish the source-specific
+                # revision likelihood, or final Daily Extract becomes exact.
+                # RESET: the next family refresh consumes that evidence.
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+                ) from exc
+            revision_payload = {
+                "_edli_day0_provisional_revision_likelihood": (
+                    revision_likelihood
+                ),
+                "_edli_day0_provisional_boundary_survival_probability": (
+                    revision_likelihood["boundary_survival_probability"]
+                ),
+            }
+            payload.update(revision_payload)
+            current_day0_payload.update(revision_payload)
+            if day0_payload_out is not None:
+                day0_payload_out.update(revision_payload)
     bindings = tuple(
         OutcomeTokenBinding(
             bin_id=outcome.bin_id,
@@ -31492,6 +31534,8 @@ def _prepare_current_global_probability_family(
             "_edli_day0_source_clock_bound_posterior_identity",
             "_edli_day0_source_clock_bound_identity",
             "_edli_day0_source_clock_bound_basis",
+            "_edli_day0_provisional_revision_likelihood",
+            "_edli_day0_provisional_boundary_survival_probability",
         ):
             if key in payload:
                 day0_payload_out[key] = payload[key]
@@ -31529,6 +31573,12 @@ def _prepare_current_global_probability_family(
             ),
             "process_sigma_native": payload.get(
                 "_edli_day0_process_sigma_native"
+            ),
+            "provisional_revision_likelihood": payload.get(
+                "_edli_day0_provisional_revision_likelihood"
+            ),
+            "provisional_boundary_survival_probability": payload.get(
+                "_edli_day0_provisional_boundary_survival_probability"
             ),
             "source_clock_bound_identity": (
                 day0_source_clock_bound_identity or None
@@ -33690,19 +33740,32 @@ def _day0_extra_member_sigma_native(
 class _Day0BootstrapSampler:
     members: np.ndarray
     rounded: float | None
+    boundary_survival_probability: float
     metric: str
     sigma: float
     mask: np.ndarray
+
+    def _apply_probability_boundary(self, analysis, draws: np.ndarray) -> np.ndarray:
+        if self.rounded is None:
+            return draws
+        bounded = (
+            np.maximum(draws, self.rounded)
+            if self.metric == "high"
+            else np.minimum(draws, self.rounded)
+        )
+        if self.boundary_survival_probability >= 1.0:
+            return bounded
+        survives = (
+            analysis._rng.random(draws.shape)
+            < self.boundary_survival_probability
+        )
+        return np.where(survives, bounded, draws)
 
     def __call__(self, analysis, n_members):
         n = max(1, int(n_members))
         idx = analysis._rng.integers(0, self.members.size, n)
         draws = self.members[idx] + analysis._rng.normal(0.0, self.sigma, n)
-        if self.rounded is not None:
-            if self.metric == "high":
-                draws = np.maximum(draws, self.rounded)
-            else:
-                draws = np.minimum(draws, self.rounded)
+        draws = self._apply_probability_boundary(analysis, draws)
         measured = analysis._settle(draws)
         vec = bin_counts_from_array(measured, analysis.bins).astype(float)
         vec /= float(len(measured))
@@ -33725,6 +33788,10 @@ class _Day0BootstrapSampler:
             draws[row] = (
                 self.members[idx]
                 + analysis._rng.normal(0.0, self.sigma, members_per_row)
+            )
+            draws[row] = self._apply_probability_boundary(
+                analysis,
+                draws[row],
             )
         return self._probability_matrix(analysis, draws)
 
@@ -33750,16 +33817,15 @@ class _Day0BootstrapSampler:
                 self.members[idx]
                 + analysis._rng.normal(0.0, self.sigma, members_per_row)
             )
+            draws[row] = self._apply_probability_boundary(
+                analysis,
+                draws[row],
+            )
             noise[row] = analysis._rng.normal(0.0, normal_sigma, width)
         return self._probability_matrix(analysis, draws), noise
 
     def _probability_matrix(self, analysis, draws: np.ndarray) -> np.ndarray:
         members_per_row = draws.shape[1]
-        if self.rounded is not None:
-            if self.metric == "high":
-                draws = np.maximum(draws, self.rounded)
-            else:
-                draws = np.minimum(draws, self.rounded)
         measured = np.asarray(analysis._settle(draws), dtype=np.float64)
         lows = np.asarray(
             [float("-inf") if b.low is None else float(b.low) for b in analysis.bins],
@@ -33814,11 +33880,30 @@ def _make_day0_bootstrap_sampler(
         metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
         if metric not in {"high", "low"}:
             raise ValueError(f"unsupported day0 metric for bootstrap: {metric!r}")
-        probability_boundary = (
-            _day0_probability_boundary_native(payload, metric)
-            if day0_evidence_finality(payload) in DAY0_ABSORBING_FINALITIES
-            else None
-        )
+        finality = day0_evidence_finality(payload)
+        if finality in DAY0_ABSORBING_FINALITIES:
+            probability_boundary = _day0_probability_boundary_native(
+                payload,
+                metric,
+            )
+            boundary_survival_probability = 1.0
+        elif finality == "PROVISIONAL_CURRENT_SNAPSHOT":
+            probability_boundary = _day0_probability_boundary_native(
+                payload,
+                metric,
+            )
+            boundary_survival_probability = float(
+                payload[
+                    "_edli_day0_provisional_boundary_survival_probability"
+                ]
+            )
+            if not 0.0 < boundary_survival_probability < 1.0:
+                raise ValueError(
+                    "day0 provisional boundary survival probability invalid"
+                )
+        else:
+            probability_boundary = None
+            boundary_survival_probability = 0.0
         mask = _day0_absorbing_mask(payload=payload, family=family)
         sigma = _day0_process_sigma_native(
             payload=payload, family=family, unit=unit, decision_time=decision_time
@@ -33837,6 +33922,7 @@ def _make_day0_bootstrap_sampler(
     return _Day0BootstrapSampler(
         members=members,
         rounded=probability_boundary,
+        boundary_survival_probability=boundary_survival_probability,
         metric=metric,
         sigma=float(sigma),
         mask=np.asarray(mask, dtype=float),
@@ -33866,26 +33952,29 @@ def _day0_analysis_rng_seed(
     """
 
     member_values = _day0_probability_content_members(members)
-    return int(
-        stable_hash(
-            {
-                "schema": "day0_analysis_probability_content_v1",
-                "family_id": str(getattr(family, "family_id", "") or ""),
-                "observed_extreme": _day0_probability_boundary_native(
-                    payload,
-                    str(
-                        payload.get("metric")
-                        or payload.get("temperature_metric")
-                        or getattr(family, "metric", "")
-                        or ""
-                    ),
-                ),
-                "observation_time": payload.get("observation_time"),
-                "member_values": [float(value) for value in member_values],
-            }
-        )[:16],
-        16,
+    seed_payload: dict[str, object] = {
+        "schema": "day0_analysis_probability_content_v1",
+        "family_id": str(getattr(family, "family_id", "") or ""),
+        "observed_extreme": _day0_probability_boundary_native(
+            payload,
+            str(
+                payload.get("metric")
+                or payload.get("temperature_metric")
+                or getattr(family, "metric", "")
+                or ""
+            ),
+        ),
+        "observation_time": payload.get("observation_time"),
+        "member_values": [float(value) for value in member_values],
+    }
+    provisional_survival = payload.get(
+        "_edli_day0_provisional_boundary_survival_probability"
     )
+    if provisional_survival is not None:
+        seed_payload["provisional_boundary_survival_probability"] = (
+            provisional_survival
+        )
+    return int(stable_hash(seed_payload)[:16], 16)
 
 
 def _market_analysis_from_event_snapshot(
@@ -34926,7 +35015,9 @@ def _day0_remaining_p_raw_vector(
 
     Instrument/process uncertainty belongs to the still-unobserved trajectory,
     not to an already observed settlement-channel boundary. Applying noise
-    after clamping manufactures excursions from a completed plateau.
+    after clamping manufactures excursions from a completed plateau. A
+    provisional HKO boundary is a mixture component: its causal running
+    extreme constrains q only when the source snapshot survives later revision.
     """
 
     from src.config import ensemble_n_mc
@@ -34937,6 +35028,26 @@ def _day0_remaining_p_raw_vector(
         payload.get("metric") or payload.get("temperature_metric") or ""
     ).strip().lower()
     probability_boundary = _day0_probability_boundary_native(payload, metric)
+    from src.events.day0_authority import day0_evidence_finality
+
+    finality = day0_evidence_finality(payload)
+    if finality == "PROVISIONAL_CURRENT_SNAPSHOT":
+        try:
+            boundary_survival_probability = float(
+                payload[
+                    "_edli_day0_provisional_boundary_survival_probability"
+                ]
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+            ) from exc
+        if not 0.0 < boundary_survival_probability < 1.0:
+            raise ValueError(
+                "DAY0_PROVISIONAL_REVISION_LIKELIHOOD_INVALID"
+            )
+    else:
+        boundary_survival_probability = 1.0
     if (
         members.size == 0
         or not np.isfinite(members).all()
@@ -34953,28 +35064,36 @@ def _day0_remaining_p_raw_vector(
             extra_member_sigma,
         )
     )
-    seed = int(
-        stable_hash(
-            {
-                "operator": "day0_extreme_observed_then_noisy_future_v1",
-                "city": str(getattr(city, "name", "") or ""),
-                "metric": metric,
-                "probability_boundary": probability_boundary,
-                "future_extremes": sorted(float(v) for v in members.tolist()),
-                "sigma": sigma,
-                "n_mc": n_mc,
-                "bins": [str(bin_value) for bin_value in bins],
-            }
-        )[:16],
-        16,
-    )
+    seed_payload: dict[str, object] = {
+        "operator": "day0_extreme_observed_then_noisy_future_v1",
+        "city": str(getattr(city, "name", "") or ""),
+        "metric": metric,
+        "probability_boundary": probability_boundary,
+        "future_extremes": sorted(float(v) for v in members.tolist()),
+        "sigma": sigma,
+        "n_mc": n_mc,
+        "bins": [str(bin_value) for bin_value in bins],
+    }
+    if boundary_survival_probability < 1.0:
+        seed_payload["boundary_survival_probability"] = (
+            boundary_survival_probability
+        )
+    seed = int(stable_hash(seed_payload)[:16], 16)
     rng = np.random.default_rng(seed)
     future = members + rng.normal(0.0, sigma, (n_mc, members.size))
-    final = (
+    bounded = (
         np.maximum(future, probability_boundary)
         if metric == "high"
         else np.minimum(future, probability_boundary)
     )
+    if boundary_survival_probability < 1.0:
+        survives = (
+            rng.random((n_mc, members.size))
+            < boundary_survival_probability
+        )
+        final = np.where(survives, bounded, future)
+    else:
+        final = bounded
     measured = settlement_semantics.round_values(final)
     probabilities = bin_counts_from_array(measured.reshape(-1), bins).astype(float)
     probabilities /= float(n_mc * members.size)
@@ -34982,7 +35101,9 @@ def _day0_remaining_p_raw_vector(
     if total > 0.0:
         probabilities /= total
     payload["_edli_day0_probability_operator"] = (
-        "extreme_observed_then_noisy_future_v1"
+        "revision_mixture_extreme_observed_then_noisy_future_v2"
+        if boundary_survival_probability < 1.0
+        else "extreme_observed_then_noisy_future_v1"
     )
     return probabilities
 

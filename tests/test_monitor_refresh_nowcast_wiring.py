@@ -791,7 +791,7 @@ def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None
     assert maturity_reason in refreshed.applied_validations
 
 
-def test_provisional_day0_monitor_uses_replacement_probability_without_hard_fact_stamp() -> None:
+def test_provisional_day0_monitor_uses_revision_aware_remaining_probability() -> None:
     import numpy as np
 
     condition_id = "0x" + "74" * 32
@@ -818,15 +818,23 @@ def test_provisional_day0_monitor_uses_replacement_probability_without_hard_fact
         deterministic_condition_ids=frozenset(),
         day0_payload={
             "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "_edli_day0_finite_evidence_member_count": 400,
+            "_edli_day0_finite_evidence_hits_by_condition": {
+                condition_id: 260,
+            },
+            "_edli_day0_provisional_revision_likelihood": {
+                "semantics": (
+                    "hko_provisional_monotonic_survival_beta_jeffreys_v1"
+                ),
+                "boundary_survival_probability": 0.95,
+            },
             "_edli_day0_exit_authority_status": "mature",
             "_edli_day0_exit_authority_reason": (
                 "day0_low_extreme_terminal_window"
             ),
         },
         metric="low",
-        probability_authority=(
-            "replacement_provisional_day0_global_probability_v1"
-        ),
+        probability_authority="day0_remaining_day_global_probability_v1",
     )
     pos = _make_position()
     pos.condition_id = condition_id
@@ -843,12 +851,16 @@ def test_provisional_day0_monitor_uses_replacement_probability_without_hard_fact
 
     assert probability == pytest.approx(0.35)
     assert fresh is True
-    assert refreshed.selected_method == "replacement_posterior"
+    assert refreshed.selected_method == "day0_observation_remaining_window"
     receipt = refreshed._day0_monitor_probability_receipt
     assert receipt["probability_authority"] == (
-        "replacement_provisional_day0_global_probability_v1"
+        "day0_remaining_day_global_probability_v1"
     )
-    assert receipt["remaining_window"] is None
+    assert receipt["remaining_window"] == {
+        "source": "current_global_probability_builder",
+        "finite_evidence_member_count": 400,
+        "finite_evidence_hits_by_condition": {condition_id: 260},
+    }
     assert refreshed._day0_exit_authority_status == "mature"
     assert refreshed._day0_exit_authority_reason == (
         "day0_low_extreme_terminal_window"

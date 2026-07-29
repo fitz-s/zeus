@@ -49,6 +49,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -73,6 +74,9 @@ from src.data.observation_instants_writer import (  # noqa: E402
     InvalidObsV2RowError,
     ObsV2Row,
     insert_rows,
+)
+from src.data.day0_observation_reader import (  # noqa: E402
+    hko_rollover_carryover_status,
 )
 from src.config import STATE_DIR  # noqa: E402
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
@@ -201,6 +205,55 @@ def _append_log(log_path: Path, entry: dict) -> None:
         fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
+def _latest_unproven_rollover_probe(
+    log_path: Path,
+    *,
+    target_date: str,
+) -> dict[str, object] | None:
+    """Read the latest non-authoritative HKO rollover probe from the JSONL tail."""
+
+    try:
+        with log_path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 65_536))
+            lines = fh.read().splitlines()
+    except OSError:
+        return None
+    for raw in reversed(lines):
+        try:
+            row = json.loads(raw)
+            if (
+                row.get("reason") != "HKO_NEW_DAY_ROLLOVER_UNPROVEN"
+                or row.get("target_date") != target_date
+                or bool(row.get("dry_run"))
+            ):
+                continue
+            high_c = float(row["candidate_high_c"])
+            low_c = float(row["candidate_low_c"])
+            observed_at = str(row["candidate_observed_at_utc"])
+            fetched_at = str(row["candidate_fetched_at_utc"])
+            payload_hash = str(row["candidate_payload_hash"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            math.isfinite(high_c)
+            and math.isfinite(low_c)
+            and observed_at
+            and fetched_at
+            and payload_hash.startswith("sha256:")
+            and len(payload_hash) == 71
+        ):
+            return {
+                "high_c": high_c,
+                "low_c": low_c,
+                "observed_at_utc": observed_at,
+                "fetched_at_utc": fetched_at,
+                "payload_hash": payload_hash,
+            }
+    return None
+
+
 def _append_committed_log(log_path: Path, entry: dict) -> None:
     """Report a committed outcome without changing its canonical result."""
     try:
@@ -322,6 +375,7 @@ def _build_hko_extrema_row(
     accumulator_fetched_at: str | None,
     data_version: str,
     imported_at: str,
+    rollover_reset_confirmation: dict[str, object] | None = None,
 ) -> ObsV2Row:
     """Build one HKO row with source-typed official and observation fields.
 
@@ -349,34 +403,39 @@ def _build_hko_extrema_row(
     local_timestamp = hk_dt.isoformat()
     local_hour = float(hk_dt.hour) + float(hk_dt.minute) / 60.0
 
-    provenance = json.dumps(
-        {
-            "tier": "HKO_NATIVE",
-            "station_id": "HKO",
-            "source_table": "hko_hourly_accumulator",
-            "source_url": HKO_EXTREMA_URL,
-            "observation_basis": HKO_EXTREMA_BASIS,
-            "official_running_high_c": snapshot.high_c,
-            "official_running_low_c": snapshot.low_c,
-            "diagnostic_current_temperature_c": temperature_c,
-            "accumulator_fetched_at": accumulator_fetched_at,
-            "extrema_fetched_at": snapshot.fetched_at_utc,
-            "payload_hash": _sha256_json(
-                {
-                    "target_date": snapshot.target_date,
-                    "observed_at_utc": snapshot.observed_at_utc,
-                    "temperature_c": temperature_c,
-                    "running_max_c": snapshot.high_c,
-                    "running_min_c": snapshot.low_c,
-                    "observation_basis": HKO_EXTREMA_BASIS,
-                }
-            ),
-            "payload_scope": "hko_current_and_since_midnight_extrema",
-            "source_file": HKO_EXTREMA_URL,
-            "parser_version": HKO_EXTREMA_PARSER,
-        },
-        separators=(",", ":"),
-    )
+    identity_payload = {
+        "target_date": snapshot.target_date,
+        "observed_at_utc": snapshot.observed_at_utc,
+        "temperature_c": temperature_c,
+        "running_max_c": snapshot.high_c,
+        "running_min_c": snapshot.low_c,
+        "observation_basis": HKO_EXTREMA_BASIS,
+    }
+    provenance_payload: dict[str, object] = {
+        "tier": "HKO_NATIVE",
+        "station_id": "HKO",
+        "source_table": "hko_hourly_accumulator",
+        "source_url": HKO_EXTREMA_URL,
+        "observation_basis": HKO_EXTREMA_BASIS,
+        "official_running_high_c": snapshot.high_c,
+        "official_running_low_c": snapshot.low_c,
+        "diagnostic_current_temperature_c": temperature_c,
+        "accumulator_fetched_at": accumulator_fetched_at,
+        "extrema_fetched_at": snapshot.fetched_at_utc,
+        "payload_hash": "",
+        "payload_scope": "hko_current_and_since_midnight_extrema",
+        "source_file": HKO_EXTREMA_URL,
+        "parser_version": HKO_EXTREMA_PARSER,
+    }
+    if rollover_reset_confirmation is not None:
+        identity_payload["rollover_reset_confirmation"] = (
+            rollover_reset_confirmation
+        )
+        provenance_payload["rollover_reset_confirmation"] = (
+            rollover_reset_confirmation
+        )
+    provenance_payload["payload_hash"] = _sha256_json(identity_payload)
+    provenance = json.dumps(provenance_payload, separators=(",", ":"))
     return ObsV2Row(
         city=HK_CITY_NAME,
         target_date=snapshot.target_date,
@@ -415,6 +474,103 @@ def project_accumulator_to_v2(
     ts_now = proof_of_possession_available_at(datetime.now(timezone.utc))
     try:
         snapshot = snapshot or _fetch_hko_extrema()
+        try:
+            rollover_status = hko_rollover_carryover_status(
+                conn,
+                target_date=snapshot.target_date,
+                decision_time=datetime.fromisoformat(
+                    snapshot.fetched_at_utc.replace("Z", "+00:00")
+                ),
+                candidate_high_c=snapshot.high_c,
+                candidate_low_c=snapshot.low_c,
+            )
+        except ValueError:
+            rollover_status = "UNPROVEN"
+        rollover_reset_confirmation = None
+        if rollover_status == "UNPROVEN":
+            prior_probe = _latest_unproven_rollover_probe(
+                log_path,
+                target_date=snapshot.target_date,
+            )
+            current_pair = (float(snapshot.high_c), float(snapshot.low_c))
+            prior_pair = (
+                None
+                if prior_probe is None
+                else (
+                    float(prior_probe["high_c"]),
+                    float(prior_probe["low_c"]),
+                )
+            )
+            if prior_pair is not None and prior_pair != current_pair:
+                rollover_status = "RESET_CONFIRMED"
+                rollover_reset_confirmation = {
+                    "semantics": "hko_pair_change_reset_confirmation_v1",
+                    "target_date": snapshot.target_date,
+                    "first_probe_high_c": prior_pair[0],
+                    "first_probe_low_c": prior_pair[1],
+                    "first_probe_observed_at_utc": prior_probe[
+                        "observed_at_utc"
+                    ],
+                    "first_probe_fetched_at_utc": prior_probe[
+                        "fetched_at_utc"
+                    ],
+                    "first_probe_payload_hash": prior_probe["payload_hash"],
+                    "confirmed_high_c": current_pair[0],
+                    "confirmed_low_c": current_pair[1],
+                    "confirmed_observed_at_utc": snapshot.observed_at_utc,
+                    "confirmed_fetched_at_utc": snapshot.fetched_at_utc,
+                    "confirmed_payload_hash": _sha256_json(
+                        {
+                            "target_date": snapshot.target_date,
+                            "observed_at_utc": snapshot.observed_at_utc,
+                            "fetched_at_utc": snapshot.fetched_at_utc,
+                            "high_c": snapshot.high_c,
+                            "low_c": snapshot.low_c,
+                        }
+                    ),
+                }
+        if rollover_status != "RESET_CONFIRMED":
+            # The HKO endpoint can repeat yesterday's terminal pair for the
+            # first new-day publication, then reset minutes later. Persisting
+            # that carryover creates a physically impossible target-day q.
+            reason = (
+                "HKO_NEW_DAY_ROLLOVER_CARRYOVER"
+                if rollover_status == "CARRYOVER"
+                else "HKO_NEW_DAY_ROLLOVER_UNPROVEN"
+            )
+            log_entry = {
+                "ts": ts_now,
+                "phase": "project",
+                "candidates": 1,
+                "written": 0,
+                "build_errors": 0,
+                "source_not_ready": 1,
+                "reason": reason,
+                "target_date": snapshot.target_date,
+                "candidate_high_c": snapshot.high_c,
+                "candidate_low_c": snapshot.low_c,
+                "candidate_observed_at_utc": snapshot.observed_at_utc,
+                "candidate_fetched_at_utc": snapshot.fetched_at_utc,
+                "candidate_payload_hash": _sha256_json(
+                    {
+                        "target_date": snapshot.target_date,
+                        "observed_at_utc": snapshot.observed_at_utc,
+                        "fetched_at_utc": snapshot.fetched_at_utc,
+                        "high_c": snapshot.high_c,
+                        "low_c": snapshot.low_c,
+                    }
+                ),
+                "dry_run": dry_run,
+                "retired": 0,
+            }
+            _append_log(log_path, log_entry)
+            return {
+                "candidates": 1,
+                "written": 0,
+                "build_errors": 0,
+                "source_not_ready": 1,
+                "retired": 0,
+            }
         current = _latest_accumulator_temperature(
             conn,
             target_date=snapshot.target_date,
@@ -428,6 +584,7 @@ def project_accumulator_to_v2(
             accumulator_fetched_at=accumulator_fetched_at,
             data_version=data_version,
             imported_at=snapshot.fetched_at_utc,
+            rollover_reset_confirmation=rollover_reset_confirmation,
         )
     except (httpx.HTTPError, InvalidObsV2RowError, ValueError) as exc:
         logger.warning("HKO extrema build failed: %s", exc)

@@ -68,6 +68,18 @@ def _paris():
     )
 
 
+def _hong_kong():
+    return SimpleNamespace(
+        name="Hong Kong",
+        timezone="Asia/Hong_Kong",
+        settlement_unit="C",
+        settlement_source_type="hko",
+        wu_station=None,
+        lat=22.3022,
+        lon=114.1742,
+    )
+
+
 def _wellington():
     return SimpleNamespace(
         name="Wellington", timezone="Pacific/Auckland", settlement_unit="C",
@@ -1354,6 +1366,118 @@ class TestRemainingDayMembers:
         )
 
         assert q[2] > 0.99
+
+    @pytest.mark.parametrize(
+        ("metric", "future", "boundary_bin", "retracted_bin"),
+        (
+            ("high", [24.0, 25.0], 1, 0),
+            ("low", [31.0, 32.0], 1, 2),
+        ),
+    )
+    def test_provisional_boundary_is_revision_mixture_not_static_or_ignored(
+        self,
+        monkeypatch,
+        metric,
+        future,
+        boundary_bin,
+        retracted_bin,
+    ):
+        """7/24 HKO class: current extreme must dominate q without q=1."""
+        import src.engine.event_reactor_adapter as era
+        from src.contracts.settlement_semantics import SettlementSemantics
+
+        survival = 0.90
+        bins = [
+            Bin(None, 27, "C", "27C or below"),
+            Bin(28, 28, "C", "28C"),
+            Bin(29, None, "C", "29C or above"),
+        ]
+        payload = {
+            "metric": metric,
+            "raw_value": 28.1,
+            "rounded_value": 28,
+            "high_so_far": 28.1 if metric == "high" else None,
+            "low_so_far": 28.1 if metric == "low" else None,
+            "settlement_source": "hko_hourly_accumulator",
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "_edli_day0_probability_boundary_native": 28.1,
+            "_edli_day0_provisional_boundary_survival_probability": survival,
+        }
+
+        q = era._day0_remaining_p_raw_vector(
+            np.asarray(future, dtype=float),
+            city=_hong_kong(),
+            settlement_semantics=SettlementSemantics.for_city(_hong_kong()),
+            bins=bins,
+            payload=payload,
+            extra_member_sigma=0.0,
+        )
+
+        assert q[boundary_bin] == pytest.approx(survival, abs=0.03)
+        assert q[retracted_bin] == pytest.approx(1.0 - survival, abs=0.03)
+        assert payload["_edli_day0_probability_operator"] == (
+            "revision_mixture_extreme_observed_then_noisy_future_v2"
+        )
+
+        quoted_payload = {
+            **payload,
+            "best_bid": 0.001,
+            "best_ask": 0.999,
+            "entry_price": 0.338,
+            "unrealized_pnl": -7.13,
+        }
+        quoted_q = era._day0_remaining_p_raw_vector(
+            np.asarray(future, dtype=float),
+            city=_hong_kong(),
+            settlement_semantics=SettlementSemantics.for_city(_hong_kong()),
+            bins=bins,
+            payload=quoted_payload,
+            extra_member_sigma=0.0,
+        )
+        assert quoted_q.tolist() == pytest.approx(q.tolist())
+
+        monkeypatch.setattr(
+            era,
+            "_day0_process_sigma_native",
+            lambda **_kwargs: 0.0,
+        )
+        monkeypatch.setattr(
+            era,
+            "_day0_absorbing_mask",
+            lambda **_kwargs: np.ones(3, dtype=float),
+        )
+        sampler = era._make_day0_bootstrap_sampler(
+            members_native=np.asarray(future, dtype=float),
+            payload=payload,
+            family=SimpleNamespace(
+                city="Hong Kong",
+                target_date="2026-07-24",
+                metric=metric,
+            ),
+            unit="C",
+            decision_time=datetime(2026, 7, 24, 15, 50, tzinfo=UTC),
+        )
+        assert sampler is not None
+        assert sampler.rounded == pytest.approx(28.1)
+        assert sampler.boundary_survival_probability == pytest.approx(
+            survival
+        )
+        semantics = SettlementSemantics.for_city(_hong_kong())
+        analysis = SimpleNamespace(
+            _rng=np.random.default_rng(17),
+            _settle=semantics.round_values,
+            bins=bins,
+            p_cal=q,
+        )
+        sampled = sampler.sample_matrix(
+            analysis,
+            n_samples=4000,
+            n_members=1,
+        )
+        assert sampled.mean(axis=0).tolist() == pytest.approx(
+            q.tolist(),
+            abs=0.03,
+        )
 
     def test_members_use_observation_time_after_local_midnight(self, monkeypatch):
         import src.engine.event_reactor_adapter as era

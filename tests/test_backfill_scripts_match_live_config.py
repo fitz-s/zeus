@@ -27,7 +27,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -497,7 +497,8 @@ def test_hko_ingest_repeated_provider_snapshot_is_idempotent(hko_ingest_tick_mod
             running_max REAL,
             running_min REAL,
             causality_status TEXT,
-            provenance_json TEXT
+            provenance_json TEXT,
+            imported_at TEXT
         )
         """
     )
@@ -506,7 +507,8 @@ def test_hko_ingest_repeated_provider_snapshot_is_idempotent(hko_ingest_tick_mod
         INSERT INTO observation_instants VALUES (
             1, 'Hong Kong', 'hko_hourly_accumulator',
             '2026-07-13T15:50:00+00:00', 33.8, 29.0, 'OK',
-            '{"observation_basis":"hko_since_midnight_extrema_1min_mean","official_running_high_c":33.8,"official_running_low_c":29.0}'
+            '{"observation_basis":"hko_since_midnight_extrema_1min_mean","official_running_high_c":33.8,"official_running_low_c":29.0}',
+            '2026-07-13T15:51:00+00:00'
         )
         """
     )
@@ -551,7 +553,8 @@ def _hko_projection_transaction_conn() -> sqlite3.Connection:
             running_max REAL,
             running_min REAL,
             causality_status TEXT,
-            provenance_json TEXT
+            provenance_json TEXT,
+            imported_at TEXT
         );
         CREATE TABLE projection_probe (value TEXT NOT NULL);
         CREATE TABLE outer_probe (value TEXT NOT NULL);
@@ -560,7 +563,15 @@ def _hko_projection_transaction_conn() -> sqlite3.Connection:
         INSERT INTO observation_instants VALUES
             (1, 'Hong Kong', '2026-07-19', 'hko_hourly_accumulator',
              '2026-07-19T00:00:00+00:00', 30.0, 25.0, 'OK',
-             '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}');
+             '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}',
+             '2026-07-19T00:00:05+00:00');
+        INSERT INTO observation_instants VALUES
+            (2, 'Hong Kong', '2026-07-18', 'hko_hourly_accumulator',
+             '2026-07-18T15:50:00+00:00', 29.0, 24.0, 'OK',
+             '{"observation_basis":"hko_since_midnight_extrema_1min_mean",
+               "official_running_high_c":29.0,
+               "official_running_low_c":24.0}',
+             '2026-07-18T15:50:05+00:00');
         """
     )
     conn.commit()
@@ -575,6 +586,279 @@ def _hko_projection_snapshot(hko_ingest_tick_module):
         low_c=25.0,
         fetched_at_utc="2026-07-19T01:01:00+00:00",
     )
+
+
+def test_hko_projection_rejects_previous_day_rollover_carryover(
+    hko_ingest_tick_module,
+    monkeypatch,
+    tmp_path,
+):
+    conn = _hko_projection_transaction_conn()
+    conn.execute("DELETE FROM observation_instants")
+    conn.execute(
+        """
+        INSERT INTO observation_instants (
+            id, city, target_date, source, utc_timestamp,
+            running_max, running_min, causality_status, provenance_json,
+            imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            1,
+            "Hong Kong",
+            "2026-07-18",
+            "hko_hourly_accumulator",
+            "2026-07-18T15:50:00+00:00",
+            31.0,
+            25.0,
+            "OK",
+            json.dumps(
+                {
+                    "observation_basis": (
+                        "hko_since_midnight_extrema_1min_mean"
+                    ),
+                    "official_running_high_c": 31.0,
+                    "official_running_low_c": 25.0,
+                }
+            ),
+            "2026-07-18T15:51:00+00:00",
+        ),
+    )
+    conn.commit()
+    inserted = []
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "_fetch_hko_extrema",
+        lambda: _hko_projection_snapshot(hko_ingest_tick_module),
+    )
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "insert_rows",
+        lambda *_args, **_kwargs: inserted.append(True),
+    )
+    try:
+        result = hko_ingest_tick_module.project_accumulator_to_v2(
+            conn,
+            "v1.wu-native",
+            tmp_path / "hko.jsonl",
+        )
+        assert result == {
+            "candidates": 1,
+            "written": 0,
+            "build_errors": 0,
+            "source_not_ready": 1,
+            "retired": 0,
+        }
+        assert inserted == []
+        log = json.loads((tmp_path / "hko.jsonl").read_text().strip())
+        assert log["reason"] == "HKO_NEW_DAY_ROLLOVER_CARRYOVER"
+    finally:
+        conn.close()
+
+
+def test_hko_projection_rejects_unproven_rollover_schema(
+    hko_ingest_tick_module,
+    monkeypatch,
+    tmp_path,
+):
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT,
+            target_date TEXT,
+            source TEXT,
+            utc_timestamp TEXT
+        )
+        """
+    )
+    inserted = []
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "_fetch_hko_extrema",
+        lambda: _hko_projection_snapshot(hko_ingest_tick_module),
+    )
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "insert_rows",
+        lambda *_args, **_kwargs: inserted.append(True),
+    )
+    try:
+        result = hko_ingest_tick_module.project_accumulator_to_v2(
+            conn,
+            "v1.wu-native",
+            tmp_path / "hko.jsonl",
+        )
+        assert result["source_not_ready"] == 1
+        assert result["written"] == 0
+        assert inserted == []
+        log = json.loads((tmp_path / "hko.jsonl").read_text().strip())
+        assert log["reason"] == "HKO_NEW_DAY_ROLLOVER_UNPROVEN"
+    finally:
+        conn.close()
+
+
+def test_hko_projection_unproven_probe_drains_after_source_pair_changes(
+    hko_ingest_tick_module,
+    tmp_path,
+):
+    from src.data.day0_observation_reader import (
+        hko_provisional_revision_likelihood,
+        hko_rollover_carryover_status,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE hko_hourly_accumulator (
+            target_date TEXT NOT NULL,
+            hour_utc TEXT NOT NULL,
+            temperature REAL NOT NULL,
+            fetched_at TEXT NOT NULL
+        );
+        CREATE TABLE observation_instants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            timezone_name TEXT NOT NULL,
+            local_hour REAL,
+            local_timestamp TEXT NOT NULL,
+            utc_timestamp TEXT NOT NULL,
+            utc_offset_minutes INTEGER NOT NULL DEFAULT 0,
+            dst_active INTEGER NOT NULL DEFAULT 0,
+            is_ambiguous_local_hour INTEGER NOT NULL DEFAULT 0,
+            is_missing_local_hour INTEGER NOT NULL DEFAULT 0,
+            time_basis TEXT NOT NULL DEFAULT 'observation',
+            temp_current REAL,
+            running_max REAL,
+            running_min REAL,
+            delta_rate_per_h REAL,
+            temp_unit TEXT NOT NULL DEFAULT 'C',
+            station_id TEXT,
+            observation_count INTEGER,
+            raw_response TEXT,
+            source_file TEXT,
+            imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED',
+            data_version TEXT NOT NULL DEFAULT 'v1',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            training_allowed INTEGER DEFAULT 1,
+            causality_status TEXT DEFAULT 'OK',
+            source_role TEXT
+        );
+        INSERT INTO hko_hourly_accumulator VALUES
+            ('2026-07-19', '2026-07-19T01:00Z', 31.0,
+             '2026-07-19T01:01:00+00:00');
+        """
+    )
+    for target_date, observed_at, high_c, low_c in (
+        ("2026-07-16", "2026-07-16T01:00:00+00:00", 29.0, 25.0),
+        ("2026-07-16", "2026-07-16T01:10:00+00:00", 29.2, 24.9),
+        ("2026-07-17", "2026-07-17T01:00:00+00:00", 30.0, 25.5),
+        ("2026-07-17", "2026-07-17T01:10:00+00:00", 30.2, 25.4),
+    ):
+        conn.execute(
+            """
+            INSERT INTO observation_instants (
+                city, target_date, source, timezone_name, local_hour,
+                local_timestamp, utc_timestamp, temp_unit, station_id,
+                observation_count, imported_at, authority, data_version,
+                provenance_json, training_allowed, causality_status,
+                source_role
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Hong Kong",
+                target_date,
+                "hko_hourly_accumulator",
+                "Asia/Hong_Kong",
+                9.0,
+                datetime.fromisoformat(observed_at)
+                .astimezone(timezone(timedelta(hours=8)))
+                .isoformat(),
+                observed_at,
+                "C",
+                "HKO",
+                1,
+                observed_at,
+                "ICAO_STATION_NATIVE",
+                "v1.wu-native",
+                json.dumps(
+                    {
+                        "observation_basis": (
+                            "hko_since_midnight_extrema_1min_mean"
+                        ),
+                        "official_running_high_c": high_c,
+                        "official_running_low_c": low_c,
+                    }
+                ),
+                0,
+                "OK",
+                "runtime_monitoring",
+            ),
+        )
+    conn.commit()
+    log_path = tmp_path / "hko.jsonl"
+    try:
+        first = hko_ingest_tick_module.project_accumulator_to_v2(
+            conn,
+            "v1.wu-native",
+            log_path,
+            snapshot=_hko_projection_snapshot(hko_ingest_tick_module),
+        )
+        assert first["source_not_ready"] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM observation_instants "
+            "WHERE target_date = '2026-07-19'"
+        ).fetchone()[0] == 0
+
+        changed = hko_ingest_tick_module.HkoExtremaSnapshot(
+            target_date="2026-07-19",
+            observed_at_utc="2026-07-19T01:10:00+00:00",
+            high_c=31.2,
+            low_c=25.0,
+            fetched_at_utc="2026-07-19T01:11:00+00:00",
+        )
+        second = hko_ingest_tick_module.project_accumulator_to_v2(
+            conn,
+            "v1.wu-native",
+            log_path,
+            snapshot=changed,
+        )
+        assert second["written"] == 1, (second, log_path.read_text())
+        assert second.get("source_not_ready", 0) == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM observation_instants "
+            "WHERE target_date = '2026-07-19'"
+        ).fetchone()[0] == 1
+        decision_time = datetime(
+            2026,
+            7,
+            19,
+            1,
+            12,
+            tzinfo=timezone.utc,
+        )
+        assert hko_rollover_carryover_status(
+            conn,
+            target_date="2026-07-19",
+            decision_time=decision_time,
+        ) == "RESET_CONFIRMED"
+        likelihood = hko_provisional_revision_likelihood(
+            conn,
+            target_date="2026-07-19",
+            temperature_metric="high",
+            decision_time=decision_time,
+        )
+        assert likelihood["transition_count"] == 2
+        assert (
+            0.0
+            < likelihood["boundary_survival_probability"]
+            < 1.0
+        )
+    finally:
+        conn.close()
 
 
 def test_hko_projection_standalone_owns_atomic_transaction(

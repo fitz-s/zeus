@@ -53,7 +53,9 @@ the settlement-metric-aware verdict for the live entry/monitor lanes.
 """
 from __future__ import annotations
 
+import math
 import sqlite3
+import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from math import isfinite
@@ -198,6 +200,390 @@ _OBSERVATION_FACT_TIME_SQL = """
         ELSE utc_timestamp
     END
 """
+
+
+def _hko_official_snapshot_rows(
+    conn: sqlite3.Connection,
+    *,
+    start_date: date,
+    end_date: date,
+    decision_time: datetime,
+) -> tuple[tuple[date, datetime, float, float], ...]:
+    """Read causal HKO since-midnight snapshot pairs for one bounded window."""
+
+    if decision_time.tzinfo is None:
+        raise ValueError("HKO_PROVISIONAL_REVISION_DECISION_TIME_NAIVE")
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(observation_instants)").fetchall()
+    }
+    required = {
+        "target_date",
+        "source",
+        "utc_timestamp",
+        "imported_at",
+        "causality_status",
+        "provenance_json",
+    }
+    if not required <= columns:
+        raise ValueError("HKO_PROVISIONAL_REVISION_HISTORY_SCHEMA_INCOMPLETE")
+    decision_utc = decision_time.astimezone(timezone.utc)
+    rows = conn.execute(
+        f"""
+        SELECT target_date,
+               {_OBSERVATION_FACT_TIME_SQL} AS observation_fact_time,
+               CAST(json_extract(
+                    provenance_json, '$.official_running_high_c'
+               ) AS REAL) AS running_high_c,
+               CAST(json_extract(
+                    provenance_json, '$.official_running_low_c'
+               ) AS REAL) AS running_low_c
+          FROM observation_instants
+         WHERE city = 'Hong Kong'
+           AND target_date BETWEEN ? AND ?
+           AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
+           AND COALESCE(causality_status, 'OK') = 'OK'
+           AND datetime(imported_at) <= datetime(?)
+           AND datetime({_OBSERVATION_FACT_TIME_SQL}) <= datetime(?)
+           AND json_valid(COALESCE(provenance_json, ''))
+           AND json_extract(
+                provenance_json, '$.observation_basis'
+           ) = 'hko_since_midnight_extrema_1min_mean'
+           AND COALESCE(json_type(
+                provenance_json, '$.official_running_high_c'
+           ), '') IN ('integer', 'real')
+           AND COALESCE(json_type(
+                provenance_json, '$.official_running_low_c'
+           ), '') IN ('integer', 'real')
+         ORDER BY target_date, datetime(observation_fact_time), rowid
+        """,
+        (
+            start_date.isoformat(),
+            end_date.isoformat(),
+            decision_utc.isoformat(),
+            decision_utc.isoformat(),
+        ),
+    ).fetchall()
+    snapshots: list[tuple[date, datetime, float, float]] = []
+    for row in rows:
+        try:
+            target = date.fromisoformat(str(row[0]))
+            observed = datetime.fromisoformat(
+                str(row[1]).replace("Z", "+00:00")
+            )
+            high_c = float(row[2])
+            low_c = float(row[3])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "HKO_PROVISIONAL_REVISION_HISTORY_ROW_INVALID"
+            ) from exc
+        if (
+            observed.tzinfo is None
+            or not math.isfinite(high_c)
+            or not math.isfinite(low_c)
+            or high_c < low_c
+        ):
+            raise ValueError("HKO_PROVISIONAL_REVISION_HISTORY_ROW_INVALID")
+        snapshots.append(
+            (target, observed.astimezone(timezone.utc), high_c, low_c)
+        )
+    return tuple(snapshots)
+
+
+def _hko_rollover_reset_confirmation_present(
+    conn: sqlite3.Connection,
+    *,
+    target_date: date,
+    decision_time: datetime,
+) -> bool:
+    """Return whether a causal canonical row proves a cold-start pair change."""
+
+    decision_utc = decision_time.astimezone(timezone.utc).isoformat()
+    return (
+        conn.execute(
+            f"""
+            SELECT 1
+              FROM observation_instants
+             WHERE city = 'Hong Kong'
+               AND target_date = ?
+               AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
+               AND COALESCE(causality_status, 'OK') = 'OK'
+               AND datetime(imported_at) <= datetime(?)
+               AND datetime({_OBSERVATION_FACT_TIME_SQL}) <= datetime(?)
+               AND json_valid(COALESCE(provenance_json, ''))
+               AND json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.semantics'
+               ) = 'hko_pair_change_reset_confirmation_v1'
+               AND json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.target_date'
+               ) = target_date
+               AND COALESCE(json_type(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.first_probe_high_c'
+               ), '') IN ('integer', 'real')
+               AND COALESCE(json_type(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.first_probe_low_c'
+               ), '') IN ('integer', 'real')
+               AND COALESCE(json_type(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.confirmed_high_c'
+               ), '') IN ('integer', 'real')
+               AND COALESCE(json_type(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.confirmed_low_c'
+               ), '') IN ('integer', 'real')
+               AND (
+                    ABS(CAST(json_extract(
+                        provenance_json,
+                        '$.rollover_reset_confirmation.first_probe_high_c'
+                    ) AS REAL) - CAST(json_extract(
+                        provenance_json,
+                        '$.rollover_reset_confirmation.confirmed_high_c'
+                    ) AS REAL)) > 1e-9
+                    OR
+                    ABS(CAST(json_extract(
+                        provenance_json,
+                        '$.rollover_reset_confirmation.first_probe_low_c'
+                    ) AS REAL) - CAST(json_extract(
+                        provenance_json,
+                        '$.rollover_reset_confirmation.confirmed_low_c'
+                    ) AS REAL)) > 1e-9
+               )
+               AND ABS(CAST(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.confirmed_high_c'
+               ) AS REAL) - CAST(json_extract(
+                    provenance_json, '$.official_running_high_c'
+               ) AS REAL)) <= 1e-9
+               AND ABS(CAST(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.confirmed_low_c'
+               ) AS REAL) - CAST(json_extract(
+                    provenance_json, '$.official_running_low_c'
+               ) AS REAL)) <= 1e-9
+               AND datetime(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.first_probe_observed_at_utc'
+               )) < datetime(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.confirmed_observed_at_utc'
+               ))
+               AND datetime(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.confirmed_observed_at_utc'
+               )) = datetime({_OBSERVATION_FACT_TIME_SQL})
+               AND datetime(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.first_probe_fetched_at_utc'
+               )) <= datetime(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.confirmed_fetched_at_utc'
+               ))
+               AND datetime(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.confirmed_fetched_at_utc'
+               )) = datetime(imported_at)
+               AND datetime(imported_at) <= datetime(?)
+               AND json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.first_probe_payload_hash'
+               ) GLOB 'sha256:[0-9a-f]*'
+               AND LENGTH(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.first_probe_payload_hash'
+               )) = 71
+               AND SUBSTR(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.first_probe_payload_hash'
+               ), 8) NOT GLOB '*[^0-9a-f]*'
+               AND json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.confirmed_payload_hash'
+               ) GLOB 'sha256:[0-9a-f]*'
+               AND LENGTH(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.confirmed_payload_hash'
+               )) = 71
+               AND SUBSTR(json_extract(
+                    provenance_json,
+                    '$.rollover_reset_confirmation.confirmed_payload_hash'
+               ), 8) NOT GLOB '*[^0-9a-f]*'
+             LIMIT 1
+            """,
+            (
+                target_date.isoformat(),
+                decision_utc,
+                decision_utc,
+                decision_utc,
+            ),
+        ).fetchone()
+        is not None
+    )
+
+
+def hko_rollover_carryover_status(
+    conn: sqlite3.Connection,
+    *,
+    target_date: str,
+    decision_time: datetime,
+    candidate_high_c: float | None = None,
+    candidate_low_c: float | None = None,
+) -> str:
+    """Classify whether HKO has demonstrably reset into the target date."""
+
+    target = date.fromisoformat(str(target_date))
+    rows = _hko_official_snapshot_rows(
+        conn,
+        start_date=target - timedelta(days=1),
+        end_date=target,
+        decision_time=decision_time,
+    )
+    previous = tuple(row for row in rows if row[0] == target - timedelta(days=1))
+    current_pairs = [row[2:] for row in rows if row[0] == target]
+    if candidate_high_c is not None or candidate_low_c is not None:
+        if (
+            candidate_high_c is None
+            or candidate_low_c is None
+            or not math.isfinite(float(candidate_high_c))
+            or not math.isfinite(float(candidate_low_c))
+        ):
+            raise ValueError("HKO_PROVISIONAL_ROLLOVER_CANDIDATE_INVALID")
+        current_pairs.append((float(candidate_high_c), float(candidate_low_c)))
+    if not current_pairs:
+        return "UNPROVEN"
+    if previous:
+        previous_pair = previous[-1][2:]
+        return (
+            "CARRYOVER"
+            if all(pair == previous_pair for pair in current_pairs)
+            else "RESET_CONFIRMED"
+        )
+    if _hko_rollover_reset_confirmation_present(
+        conn,
+        target_date=target,
+        decision_time=decision_time,
+    ):
+        return "RESET_CONFIRMED"
+    return (
+        "RESET_CONFIRMED"
+        if len(set(current_pairs)) >= 2
+        else "UNPROVEN"
+    )
+
+
+def hko_provisional_revision_likelihood(
+    conn: sqlite3.Connection,
+    *,
+    target_date: str,
+    temperature_metric: str,
+    decision_time: datetime,
+) -> dict[str, object]:
+    """Estimate survival of the current HKO extreme through remaining updates.
+
+    The official endpoint is cumulative but can revise a provisional snapshot.
+    A Jeffreys-Beta posterior over observed monotonicity violations keeps that
+    uncertainty inside q. The repeated previous-day prefix is excluded as
+    source-clock rollover contamination, not counted as a weather revision.
+    """
+
+    metric = str(temperature_metric).strip().lower()
+    if metric not in {"high", "low"}:
+        raise ValueError("HKO_PROVISIONAL_REVISION_METRIC_INVALID")
+    target = date.fromisoformat(str(target_date))
+    rollover_status = hko_rollover_carryover_status(
+        conn,
+        target_date=target.isoformat(),
+        decision_time=decision_time,
+    )
+    if rollover_status == "CARRYOVER":
+        raise ValueError("HKO_PROVISIONAL_ROLLOVER_UNCONFIRMED")
+    if rollover_status != "RESET_CONFIRMED":
+        raise ValueError("HKO_PROVISIONAL_ROLLOVER_EVIDENCE_UNAVAILABLE")
+    rows = _hko_official_snapshot_rows(
+        conn,
+        start_date=target - timedelta(days=8),
+        end_date=target,
+        decision_time=decision_time,
+    )
+    by_date: dict[date, list[tuple[date, datetime, float, float]]] = {}
+    for row in rows:
+        by_date.setdefault(row[0], []).append(row)
+
+    valid_by_date: dict[date, tuple[tuple[date, datetime, float, float], ...]] = {}
+    previous_terminal: tuple[float, float] | None = None
+    previous_date: date | None = None
+    for day in sorted(by_date):
+        day_rows = by_date[day]
+        start = 0
+        if previous_date == day - timedelta(days=1) and previous_terminal is not None:
+            while start < len(day_rows) and day_rows[start][2:] == previous_terminal:
+                start += 1
+        valid = tuple(day_rows[start:])
+        valid_by_date[day] = valid
+        previous_terminal = (valid[-1] if valid else day_rows[-1])[2:]
+        previous_date = day
+
+    if not valid_by_date.get(target):
+        raise ValueError("HKO_PROVISIONAL_ROLLOVER_UNCONFIRMED")
+
+    transition_count = 0
+    retraction_count = 0
+    intervals: list[float] = []
+    lookback_start = target - timedelta(days=7)
+    for day, day_rows in valid_by_date.items():
+        if day < lookback_start:
+            continue
+        for previous, current in zip(day_rows, day_rows[1:], strict=False):
+            interval_seconds = (current[1] - previous[1]).total_seconds()
+            if interval_seconds <= 0.0:
+                raise ValueError("HKO_PROVISIONAL_REVISION_CLOCK_INVALID")
+            intervals.append(interval_seconds)
+            transition_count += 1
+            if (
+                metric == "high" and current[2] < previous[2] - 1e-9
+            ) or (
+                metric == "low" and current[3] > previous[3] + 1e-9
+            ):
+                retraction_count += 1
+    if transition_count <= 0 or not intervals:
+        raise ValueError("HKO_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
+    cadence_seconds = float(statistics.median(intervals))
+    if not math.isfinite(cadence_seconds) or cadence_seconds <= 0.0:
+        raise ValueError("HKO_PROVISIONAL_REVISION_CLOCK_INVALID")
+
+    decision_utc = decision_time.astimezone(timezone.utc)
+    target_end = datetime.combine(
+        target + timedelta(days=1),
+        datetime.min.time(),
+        tzinfo=ZoneInfo("Asia/Hong_Kong"),
+    ).astimezone(timezone.utc)
+    remaining_seconds = max(0.0, (target_end - decision_utc).total_seconds())
+    remaining_updates = max(1, int(math.ceil(remaining_seconds / cadence_seconds)))
+
+    alpha = float(retraction_count) + 0.5
+    beta = float(transition_count - retraction_count) + 0.5
+    log_survival = (
+        math.lgamma(beta + remaining_updates)
+        - math.lgamma(beta)
+        + math.lgamma(alpha + beta)
+        - math.lgamma(alpha + beta + remaining_updates)
+    )
+    survival_probability = float(math.exp(log_survival))
+    if not 0.0 < survival_probability < 1.0:
+        raise ValueError("HKO_PROVISIONAL_REVISION_LIKELIHOOD_INVALID")
+    return {
+        "semantics": "hko_provisional_monotonic_survival_beta_jeffreys_v1",
+        "lookback_start": lookback_start.isoformat(),
+        "lookback_end": target.isoformat(),
+        "transition_count": transition_count,
+        "retraction_count": retraction_count,
+        "median_update_seconds": cadence_seconds,
+        "projected_remaining_updates": remaining_updates,
+        "boundary_survival_probability": survival_probability,
+    }
 
 
 _EXTREMA_SQL = """

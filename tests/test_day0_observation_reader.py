@@ -21,6 +21,7 @@ Concrete case: Amsterdam 2026-05-22
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -32,6 +33,8 @@ from src.data.day0_observation_reader import (
     COVERAGE_NONE,
     COVERAGE_OK,
     Day0ObservedExtrema,
+    hko_provisional_revision_likelihood,
+    hko_rollover_carryover_status,
     read_day0_observation_context_from_instants,
     read_day0_observed_extrema,
 )
@@ -473,6 +476,210 @@ def test_reader_uses_latest_hko_cumulative_snapshot_not_cross_time_max():
     assert out.low_so_far == pytest.approx(29.0)
     assert out.provenance["running_max_semantics"] == "cumulative_snapshot_latest"
     assert out.provenance["aggregation"] == "latest qualifying HKO cumulative snapshot"
+
+
+def _insert_hko_official_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    target_date: str,
+    observed_at: str,
+    high_c: float,
+    low_c: float,
+) -> None:
+    local = datetime.fromisoformat(observed_at).astimezone(
+        timezone(timedelta(hours=8))
+    )
+    _insert(
+        conn,
+        city="Hong Kong",
+        target_date=target_date,
+        source="hko_hourly_accumulator",
+        timezone_name="Asia/Hong_Kong",
+        local_timestamp=local.isoformat(),
+        utc_timestamp=observed_at,
+        imported_at=(
+            datetime.fromisoformat(observed_at) + timedelta(seconds=5)
+        ).isoformat(),
+        running_max=high_c,
+        running_min=low_c,
+        station_id="HKO",
+        authority="ICAO_STATION_NATIVE",
+        training_allowed=0,
+        causality_status="OK",
+        source_role="runtime_monitoring",
+        provenance_json=(
+            '{"observation_basis":"hko_since_midnight_extrema_1min_mean",'
+            f'"official_running_high_c":{high_c},'
+            f'"official_running_low_c":{low_c}}}'
+        ),
+    )
+
+
+def test_hko_rollover_carryover_requires_new_target_day_pair() -> None:
+    conn = _make_conn()
+    _insert_hko_official_snapshot(
+        conn,
+        target_date="2026-07-27",
+        observed_at="2026-07-27T15:50:00+00:00",
+        high_c=28.7,
+        low_c=25.2,
+    )
+    _insert_hko_official_snapshot(
+        conn,
+        target_date="2026-07-28",
+        observed_at="2026-07-27T16:00:00+00:00",
+        high_c=28.7,
+        low_c=25.2,
+    )
+
+    assert hko_rollover_carryover_status(
+        conn,
+        target_date="2026-07-28",
+        decision_time=datetime(2026, 7, 27, 16, 9, tzinfo=timezone.utc),
+    ) == "CARRYOVER"
+
+    _insert_hko_official_snapshot(
+        conn,
+        target_date="2026-07-28",
+        observed_at="2026-07-27T16:10:00+00:00",
+        high_c=26.8,
+        low_c=26.7,
+    )
+    assert hko_rollover_carryover_status(
+        conn,
+        target_date="2026-07-28",
+        decision_time=datetime(2026, 7, 27, 16, 18, tzinfo=timezone.utc),
+    ) == "RESET_CONFIRMED"
+    conn.close()
+
+
+def test_hko_rollover_without_previous_terminal_is_unproven_until_change() -> None:
+    conn = _make_conn()
+    _insert_hko_official_snapshot(
+        conn,
+        target_date="2026-07-28",
+        observed_at="2026-07-27T16:00:00+00:00",
+        high_c=28.7,
+        low_c=25.2,
+    )
+    assert hko_rollover_carryover_status(
+        conn,
+        target_date="2026-07-28",
+        decision_time=datetime(2026, 7, 27, 16, 8, tzinfo=timezone.utc),
+    ) == "UNPROVEN"
+
+    _insert_hko_official_snapshot(
+        conn,
+        target_date="2026-07-28",
+        observed_at="2026-07-27T16:10:00+00:00",
+        high_c=26.8,
+        low_c=26.7,
+    )
+    assert hko_rollover_carryover_status(
+        conn,
+        target_date="2026-07-28",
+        decision_time=datetime(2026, 7, 27, 16, 18, tzinfo=timezone.utc),
+    ) == "RESET_CONFIRMED"
+    conn.close()
+
+
+def test_hko_rollover_same_pair_marker_remains_unproven() -> None:
+    conn = _make_conn()
+    observed_at = "2026-07-27T16:10:00+00:00"
+    imported_at = "2026-07-27T16:10:05+00:00"
+    _insert_hko_official_snapshot(
+        conn,
+        target_date="2026-07-28",
+        observed_at=observed_at,
+        high_c=28.7,
+        low_c=25.2,
+    )
+    provenance = {
+        "observation_basis": "hko_since_midnight_extrema_1min_mean",
+        "official_running_high_c": 28.7,
+        "official_running_low_c": 25.2,
+        "rollover_reset_confirmation": {
+            "semantics": "hko_pair_change_reset_confirmation_v1",
+            "target_date": "2026-07-28",
+            "first_probe_high_c": 28.7,
+            "first_probe_low_c": 25.2,
+            "first_probe_observed_at_utc": "2026-07-27T16:00:00+00:00",
+            "first_probe_fetched_at_utc": "2026-07-27T16:00:05+00:00",
+            "first_probe_payload_hash": "sha256:" + "a" * 64,
+            "confirmed_high_c": 28.7,
+            "confirmed_low_c": 25.2,
+            "confirmed_observed_at_utc": observed_at,
+            "confirmed_fetched_at_utc": imported_at,
+            "confirmed_payload_hash": "sha256:" + "b" * 64,
+        },
+    }
+    conn.execute(
+        """
+        UPDATE observation_instants
+           SET provenance_json = ?
+         WHERE target_date = '2026-07-28'
+        """,
+        (json.dumps(provenance),),
+    )
+    conn.commit()
+
+    assert hko_rollover_carryover_status(
+        conn,
+        target_date="2026-07-28",
+        decision_time=datetime(2026, 7, 27, 16, 12, tzinfo=timezone.utc),
+    ) == "UNPROVEN"
+    conn.close()
+
+
+def test_hko_revision_likelihood_excludes_rollover_and_is_metric_symmetric() -> None:
+    conn = _make_conn()
+    for observed_at, high_c, low_c in (
+        ("2026-07-26T16:10:00+00:00", 26.4, 26.3),
+        ("2026-07-26T16:20:00+00:00", 26.8, 26.1),
+        ("2026-07-26T16:30:00+00:00", 27.0, 26.0),
+    ):
+        _insert_hko_official_snapshot(
+            conn,
+            target_date="2026-07-27",
+            observed_at=observed_at,
+            high_c=high_c,
+            low_c=low_c,
+        )
+    for observed_at, high_c, low_c in (
+        ("2026-07-27T16:00:00+00:00", 27.0, 26.0),
+        ("2026-07-27T16:10:00+00:00", 26.8, 26.7),
+        ("2026-07-27T16:20:00+00:00", 27.1, 26.5),
+    ):
+        _insert_hko_official_snapshot(
+            conn,
+            target_date="2026-07-28",
+            observed_at=observed_at,
+            high_c=high_c,
+            low_c=low_c,
+        )
+
+    decision_time = datetime(2026, 7, 27, 16, 25, tzinfo=timezone.utc)
+    high = hko_provisional_revision_likelihood(
+        conn,
+        target_date="2026-07-28",
+        temperature_metric="high",
+        decision_time=decision_time,
+    )
+    low = hko_provisional_revision_likelihood(
+        conn,
+        target_date="2026-07-28",
+        temperature_metric="low",
+        decision_time=decision_time,
+    )
+
+    assert high["transition_count"] == 3
+    assert high["retraction_count"] == 0
+    assert high["median_update_seconds"] == pytest.approx(600.0)
+    assert 0.0 < high["boundary_survival_probability"] < 1.0
+    assert low["boundary_survival_probability"] == pytest.approx(
+        high["boundary_survival_probability"]
+    )
+    conn.close()
 
 
 def test_reader_rejects_legacy_hko_same_basis_without_official_extrema_witness():

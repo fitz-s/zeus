@@ -783,6 +783,34 @@ def test_hko_day0_fact_uses_latest_official_snapshot_not_cross_time_max() -> Non
     conn.execute(
         "ALTER TABLE observation_instants ADD COLUMN provenance_json TEXT"
     )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Hong Kong",
+            "2026-07-19",
+            "hko_hourly_accumulator",
+            "HKO",
+            "C",
+            "2026-07-19T15:50:10+00:00",
+            "2026-07-19T23:50:00+08:00",
+            "2026-07-19T15:50:00+00:00",
+            30.0,
+            29.5,
+            "ICAO_STATION_NATIVE",
+            0,
+            "OK",
+            "runtime_monitoring",
+            json.dumps(
+                {
+                    "observation_basis": (
+                        "hko_since_midnight_extrema_1min_mean"
+                    ),
+                    "official_running_high_c": 30.0,
+                    "official_running_low_c": 29.5,
+                }
+            ),
+        ),
+    )
     for local_ts, utc_ts, imported_at, high, low in (
         (
             "2026-07-20T00:20:00+08:00",
@@ -854,6 +882,24 @@ def test_hko_day0_fact_uses_latest_official_snapshot_not_cross_time_max() -> Non
             "2026-07-19T16:20:10+00:00",
             json.dumps(payload),
         ),
+    )
+
+    assert (
+        _latest_authorized_day0_fact(
+            conn,
+            city="Hong Kong",
+            target_date="2026-07-20",
+            temperature_metric="high",
+            decision_time=datetime(
+                2026,
+                7,
+                19,
+                17,
+                0,
+                tzinfo=timezone.utc,
+            ),
+        )
+        is None
     )
 
     fact = _latest_authorized_day0_fact(

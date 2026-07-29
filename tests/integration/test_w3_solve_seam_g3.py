@@ -5097,9 +5097,10 @@ def test_fast_residual_day0_bundle_drives_entry_and_held_redecision_q(
     observations.close()
 
 
-def test_provisional_hko_held_probability_requires_revision_likelihood(
+def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     monkeypatch,
 ):
+    import src.data.day0_observation_reader as day0_reader
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_current_target_plan as current_target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
@@ -5200,6 +5201,21 @@ def test_provisional_hko_held_probability_requires_revision_likelihood(
         current_target_plan,
         "_latest_authorized_day0_fact",
         lambda *_args, **_kwargs: provisional_fact,
+    )
+    revision_likelihood = {
+        "semantics": "hko_provisional_monotonic_survival_beta_jeffreys_v1",
+        "lookback_start": "2026-07-04",
+        "lookback_end": "2026-07-11",
+        "transition_count": 900,
+        "retraction_count": 0,
+        "median_update_seconds": 600.0,
+        "projected_remaining_updates": 51,
+        "boundary_survival_probability": 0.95,
+    }
+    monkeypatch.setattr(
+        day0_reader,
+        "hko_provisional_revision_likelihood",
+        lambda *_args, **_kwargs: revision_likelihood,
     )
 
     bundle = SimpleNamespace(
@@ -5377,27 +5393,68 @@ def test_provisional_hko_held_probability_requires_revision_likelihood(
     decision_at = _dt.datetime(
         2026, 7, 11, 7, 30, tzinfo=_dt.timezone.utc
     )
-    for held_decision_at in (
-        decision_at,
-        _dt.datetime(2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc),
-    ):
-        with pytest.raises(
-            ValueError,
-            match=(
-                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
-            ),
-        ):
-            era._prepare_current_global_probability_family(
-                event,
-                forecast_conn=forecast,
-                topology_conn=forecast,
-                observation_conn=observations,
-                decision_time=held_decision_at,
-                max_age=_dt.timedelta(seconds=30),
-                day0_payload_out={},
-                allow_provisional_day0_replacement=True,
-                entry_authority=False,
-            )
+    day0_payload: dict[str, object] = {}
+    prepared = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=day0_payload,
+        allow_provisional_day0_replacement=True,
+        entry_authority=False,
+    )
+
+    witness = prepared.probability_witness
+    assert witness.yes_point_q.tolist() == pytest.approx([0.2, 0.5, 0.3])
+    assert witness.yes_q_samples[0].tolist() == pytest.approx([0.2, 0.5, 0.3])
+    assert witness.band_basis == (
+        "current_coherent_day0_remaining_model_bootstrap_v3"
+    )
+    assert prepared.candidate_payoff_q_lcb_caps == ()
+    assert day0_payload["probability_authority"] == (
+        "day0_remaining_day_global_probability_v1"
+    )
+    assert day0_payload["q_source"] == "day0_remaining_day"
+    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
+    assert day0_payload["_edli_day0_provisional_revision_likelihood"] == (
+        revision_likelihood
+    )
+    assert day0_payload[
+        "_edli_day0_provisional_boundary_survival_probability"
+    ] == pytest.approx(0.95)
+    assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
+    assert day0_payload["_edli_day0_source_clock_bound_identity"]
+    assert day0_payload["_edli_global_day0_binding"][
+        "evidence_finality"
+    ] == "PROVISIONAL_CURRENT_SNAPSHOT"
+    assert "_edli_day0_exact_yes_payoffs" not in day0_payload
+
+    post_day_payload: dict[str, object] = {}
+    post_day = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(
+            2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=post_day_payload,
+        allow_provisional_day0_replacement=True,
+        entry_authority=False,
+    )
+    assert post_day.probability_witness.yes_point_q.tolist() == pytest.approx(
+        [0.2, 0.5, 0.3]
+    )
+    assert post_day_payload["probability_authority"] == (
+        "day0_remaining_day_global_probability_v1"
+    )
+    assert post_day_payload["q_source"] == "day0_remaining_day"
+    assert post_day_payload["_edli_day0_q_mode"] == (
+        "post_local_provisional_tail"
+    )
 
     with pytest.raises(
         ValueError,
@@ -5414,9 +5471,55 @@ def test_provisional_hko_held_probability_requires_revision_likelihood(
             entry_authority=True,
         )
 
-    assert remaining_calls == 0
-    assert replacement_calls == 0
+    assert remaining_calls == 2
+    assert replacement_calls == 2
     assert bundle_reads == 2
+
+    def unavailable_remaining_components(*_args, **_kwargs):
+        raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
+
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        unavailable_remaining_components,
+    )
+    with pytest.raises(
+        ValueError,
+        match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_provisional_day0_replacement=True,
+            entry_authority=False,
+        )
+
+    def unavailable_revision_likelihood(*_args, **_kwargs):
+        raise ValueError("HKO_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
+
+    monkeypatch.setattr(
+        day0_reader,
+        "hko_provisional_revision_likelihood",
+        unavailable_revision_likelihood,
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE",
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_provisional_day0_replacement=True,
+            entry_authority=False,
+        )
 
     forecast.close()
     observations.close()
