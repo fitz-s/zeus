@@ -104,19 +104,13 @@ DOCS_REGISTRY_PARENT_PATTERNS = (
     "docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/",
     # active operations package (file_arrangement.yaml canonical path)
     "docs/operations/current/",
-    "docs/operations/edli_v1/",
-    "docs/evidence/",
-    "docs/rebuild/",
-    "docs/lore/",
+    "docs/reference/lessons/",
     "docs/review/",
-    "docs/architecture/",
     "docs/methodology/",
     "docs/operations/",
-    "docs/operations/edli_v1/",
     "docs/operations/activation/",
     "docs/operations/live_egress/",
     "docs/operations/sd3_validation_evidence/",
-    "docs/operations/tribunal_verification_2026-05-29/",
     "docs/operations/before_after_fixture_2026-05-29/",
     "docs/reference/legacy/",
 )
@@ -172,6 +166,15 @@ def check_hidden_docs(api: Any, topology: dict[str, Any]) -> list[Any]:
             continue
         parts = Path(rel).parts
         subroot = "/".join(parts[:2]) if len(parts) > 1 else ""
+        # Prefer the longest declared subroot prefix over the naive 2-segment
+        # default, so nested subroots (e.g. docs/reference/lessons,
+        # docs/reference/legacy) get their own allow_non_markdown/requires_agents
+        # spec instead of silently inheriting their parent's.
+        for depth in range(len(parts) - 1, 1, -1):
+            candidate = "/".join(parts[:depth])
+            if candidate in subroots:
+                subroot = candidate
+                break
         if len(parts) > 1 and subroot not in subroots and rel not in allowed_root_files:
             issues.append(
                 api._issue(
@@ -325,7 +328,7 @@ def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
         for bool_field in ("may_live_in_reference", "contains_volatile_metrics", "current_tense_allowed"):
             if not isinstance(entry.get(bool_field), bool):
                 issues.append(api._issue("docs_registry_invalid_enum", path, f"{bool_field} must be boolean"))
-        if path.startswith("docs/reference/") and path not in ("docs/reference/AGENTS.md", "docs/reference/legacy/AGENTS.md") and not path.startswith("docs/reference/legacy/"):
+        if path.startswith("docs/reference/") and path not in ("docs/reference/AGENTS.md", "docs/reference/legacy/AGENTS.md") and not path.startswith("docs/reference/legacy/") and not path.startswith("docs/reference/lessons/"):
             if entry.get("truth_profile") != "durable_reference" or entry.get("may_live_in_reference") is not True:
                 issues.append(api._issue("docs_reference_not_canonical", path, "docs/reference may contain only durable canonical reference docs (exception: docs/reference/legacy/ for demoted evidence snapshots)"))
         if entry.get("coverage_scope") == "descendants":

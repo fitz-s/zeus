@@ -246,7 +246,7 @@ def test_apply_is_always_dry_run(tmp_path: Path) -> None:
 
 def test_stale_lore_topic_entry_surfaces(tmp_path: Path) -> None:
     """
-    A .md file in docs/lore/<topic>/ older than ttl_days without a REVIEWED
+    A .md file in docs/reference/lessons/<topic>/ older than ttl_days without a REVIEWED
     marker must surface as LORE_STALE_REVIEW.
     """
     ctx = _make_ctx(tmp_path)
@@ -274,7 +274,7 @@ def test_stale_lore_topic_entry_surfaces(tmp_path: Path) -> None:
     )
 
     # Create a stale unreviewed lore entry
-    lore_dir = tmp_path / "docs" / "lore" / "runtime"
+    lore_dir = tmp_path / "docs" / "reference" / "lessons" / "runtime"
     lore_dir.mkdir(parents=True)
     lore_file = lore_dir / "2026-01-10_timing_quirk.md"
     lore_file.write_text("# Timing Quirk\n\nSome runtime lore content.\n")

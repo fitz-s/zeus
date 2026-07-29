@@ -2,13 +2,13 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/LORE_EXTRACTION_PROTOCOL.md
-"""lore_indexer — walks docs/lore/**/*.md and builds a topic-keyed INDEX.json.
+"""lore_indexer — walks docs/reference/lessons/**/*.md and builds a topic-keyed INDEX.json.
 
 Usage:
     python3 scripts/lore_indexer.py [--output PATH] [--validate-only] [--lore-root PATH]
 
 Outputs:
-    docs/lore/INDEX.json  — topic-keyed mapping: {topic: [{id, title, status, ...}, ...]}
+    docs/reference/lessons/INDEX.json  — topic-keyed mapping: {topic: [{id, title, status, ...}, ...]}
 
 Validation rules (per LORE_EXTRACTION_PROTOCOL schema):
     Required frontmatter fields: id, title, topic, extracted_from, extracted_on,
@@ -46,7 +46,7 @@ else:
         yaml = None  # type: ignore[assignment]
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_LORE_ROOT = ROOT / "docs" / "lore"
+DEFAULT_LORE_ROOT = ROOT / "docs" / "reference" / "lessons"
 DEFAULT_OUTPUT = DEFAULT_LORE_ROOT / "INDEX.json"
 
 VALID_TOPICS = frozenset(
@@ -277,7 +277,7 @@ def build_index(cards: list[LoreCard]) -> dict[str, Any]:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Build docs/lore/INDEX.json from lore card frontmatter.",
+        description="Build docs/reference/lessons/INDEX.json from lore card frontmatter.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -289,12 +289,12 @@ Examples:
     p.add_argument(
         "--output",
         default=str(DEFAULT_OUTPUT),
-        help="Output path for INDEX.json (default: docs/lore/INDEX.json)",
+        help="Output path for INDEX.json (default: docs/reference/lessons/INDEX.json)",
     )
     p.add_argument(
         "--lore-root",
         default=str(DEFAULT_LORE_ROOT),
-        help="Root directory to walk for lore cards (default: docs/lore/)",
+        help="Root directory to walk for lore cards (default: docs/reference/lessons/)",
     )
     p.add_argument(
         "--validate-only",

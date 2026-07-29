@@ -53,7 +53,7 @@ else:
         yaml = None  # type: ignore[assignment]
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_LORE_ROOT = ROOT / "docs" / "lore"
+DEFAULT_LORE_ROOT = ROOT / "docs" / "reference" / "lessons"
 DEFAULT_TIMEOUT = 60
 EXCLUDED_DIRS = frozenset({"_drafts", "retired"})
 
@@ -338,7 +338,7 @@ Examples:
     p.add_argument(
         "--lore-root",
         default=str(DEFAULT_LORE_ROOT),
-        help="Root lore directory (default: docs/lore/)",
+        help="Root lore directory (default: docs/reference/lessons/)",
     )
     p.add_argument(
         "--timeout",
