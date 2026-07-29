@@ -18724,6 +18724,71 @@ def test_global_batch_isolates_missing_held_q_and_keeps_other_families(
     )
 
 
+def test_complete_holding_coverage_isolates_missing_held_book_state():
+    at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    obligation = global_batch_runtime._CurrentHeldObligation(
+        position_id="held-position",
+        family_key="held-family",
+        bin_label="21C",
+        condition_id="held-condition",
+        side="YES",
+        token_id="held-yes",
+        held_shares=Decimal("5"),
+    )
+    probability = SimpleNamespace(
+        witness_identity="held-q",
+        probability_content_identity="held-q-content",
+        bindings=(
+            SimpleNamespace(
+                bin_id="21C",
+                condition_id="held-condition",
+                yes_token_id="held-yes",
+                no_token_id="held-no",
+            ),
+        ),
+    )
+
+    coverage = global_batch_runtime._complete_holding_coverage(
+        (),
+        obligations=(obligation,),
+        probability_witnesses={"held-family": probability},
+        ineligible_by_family={},
+        unavailable_book_by_position={
+            obligation.position_id: "SELL_BOOK_WITNESS_UNAVAILABLE"
+        },
+        ledger_snapshot_id="ledger",
+        wealth_economic_identity="wealth",
+        selection_epoch_identity="selection",
+        book_epoch_identity="book",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        book_deadline_at_utc=at + _dt.timedelta(seconds=30),
+    )
+
+    assert len(coverage) == 1
+    assert coverage[0].status == "EXCLUDED"
+    assert coverage[0].reason == "SELL_BOOK_WITNESS_UNAVAILABLE"
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_HOLDING_COVERAGE_SCOPE_INCOMPLETE:held-position",
+    ):
+        global_batch_runtime._complete_holding_coverage(
+            (),
+            obligations=(obligation,),
+            probability_witnesses={"held-family": probability},
+            ineligible_by_family={},
+            unavailable_book_by_position={},
+            ledger_snapshot_id="ledger",
+            wealth_economic_identity="wealth",
+            selection_epoch_identity="selection",
+            book_epoch_identity="book",
+            selection_cut_at_utc=at,
+            decision_at_utc=at,
+            book_deadline_at_utc=at + _dt.timedelta(seconds=30),
+        )
+
+
 def test_global_batch_cancelled_selection_skips_holding_coverage_and_receipt(
     monkeypatch,
 ):

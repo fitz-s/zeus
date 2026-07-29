@@ -400,6 +400,7 @@ def _complete_holding_coverage(
     selection_cut_at_utc: datetime,
     decision_at_utc: datetime,
     book_deadline_at_utc: datetime,
+    unavailable_book_by_position: Mapping[str, str] | None = None,
 ) -> tuple[GlobalHoldingAuctionCoverage, ...]:
     """Build one typed row for every exact held obligation, never by id alone."""
 
@@ -415,9 +416,20 @@ def _complete_holding_coverage(
         )
         row = by_position.get(obligation.position_id)
         if row is None:
-            reason = str(
+            family_reason = str(
                 ineligible_by_family.get(obligation.family_key) or ""
             ).strip()
+            book_reason = str(
+                (unavailable_book_by_position or {}).get(
+                    obligation.position_id
+                )
+                or ""
+            ).strip()
+            reason = (
+                f"PROBABILITY_AUTHORITY_UNAVAILABLE:{family_reason}"
+                if family_reason
+                else book_reason
+            )
             if not reason:
                 raise ValueError(
                     "GLOBAL_HOLDING_COVERAGE_SCOPE_INCOMPLETE:"
@@ -441,7 +453,7 @@ def _complete_holding_coverage(
                 decision_at_utc=decision_at_utc,
                 book_deadline_at_utc=book_deadline_at_utc,
                 status="EXCLUDED",
-                reason=f"PROBABILITY_AUTHORITY_UNAVAILABLE:{reason}",
+                reason=reason,
                 bin_label=obligation.bin_label,
                 canonical_bin_identity=f"condition:{obligation.condition_id}",
             )
@@ -4563,6 +4575,33 @@ def process_current_global_batch(
             ):
                 return selected
             if holding_obligations:
+                book_state_keys = {
+                    (
+                        str(state[0]),
+                        str(state[2]),
+                        str(state[3]),
+                        str(state[4]),
+                    )
+                    for state in tuple(
+                        getattr(attempt_book_epoch, "asset_states", ()) or ()
+                    )
+                    if len(state) >= 5
+                }
+                unavailable_book_by_position = {
+                    obligation.position_id: "SELL_BOOK_WITNESS_UNAVAILABLE"
+                    for obligation in holding_obligations
+                    if (
+                        attempt_book_epoch is not None
+                        and obligation.family_key in attempt_probabilities
+                        and (
+                            obligation.family_key,
+                            obligation.condition_id,
+                            obligation.side,
+                            obligation.token_id,
+                        )
+                        not in book_state_keys
+                    )
+                }
                 selected = replace(
                     selected,
                     holding_coverage=_complete_holding_coverage(
@@ -4570,6 +4609,9 @@ def process_current_global_batch(
                         obligations=holding_obligations,
                         probability_witnesses=attempt_probabilities,
                         ineligible_by_family=ineligible_by_family,
+                        unavailable_book_by_position=(
+                            unavailable_book_by_position
+                        ),
                         ledger_snapshot_id=selection_wealth.ledger_snapshot_id,
                         wealth_economic_identity=selection_wealth.economic_identity,
                         selection_epoch_identity=attempt_selection_epoch_identity,
