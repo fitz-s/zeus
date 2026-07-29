@@ -328,6 +328,18 @@ def _materialize(
     publish_wake: bool = True,
     schema_ready: bool = False,
 ) -> tuple[int, dict[str, object]]:
+    if conn is None:
+        from src.state.db import get_forecasts_connection_with_world
+
+        with get_forecasts_connection_with_world(write_class="live") as owned_conn:
+            return _materialize(
+                input_json,
+                commit=commit,
+                init_schema=init_schema,
+                conn=owned_conn,
+                publish_wake=publish_wake,
+                schema_ready=schema_ready,
+            )
     payload = _load_json(input_json)
     if not isinstance(payload, Mapping):
         raise ValueError("input JSON must decode to an object")
@@ -442,12 +454,7 @@ def _materialize(
             payload
         ),
     )
-    own_conn = conn is None
     wake_published = False
-    if own_conn:
-        from src.state.db import get_forecasts_connection
-
-        conn = get_forecasts_connection(write_class="live")
     receipt: _DurablePreparationReceipt | None = None
     try:
         if commit:
@@ -484,9 +491,6 @@ def _materialize(
         if receipt is None:
             raise
         return 2, _error_response(exc, receipt)
-    finally:
-        if own_conn:
-            conn.close()
     response = {
         "status": result.status,
         "reason_codes": list(result.reason_codes),
@@ -612,10 +616,9 @@ def main(argv: list[str] | None = None) -> int:
             "--input-json or --batch-input-json is required unless --print-template is set"
         )
     if args.batch_input_json:
-        from src.state.db import get_forecasts_connection
+        from src.state.db import get_forecasts_connection_with_world
 
-        conn = get_forecasts_connection(write_class="live")
-        try:
+        with get_forecasts_connection_with_world(write_class="live") as conn:
             schema_ready = False
             if args.commit:
                 try:
@@ -644,8 +647,6 @@ def main(argv: list[str] | None = None) -> int:
                     schema_ready=schema_ready,
                 )
                 _print_batch_envelope(input_json, returncode, stdout, stderr)
-        finally:
-            conn.close()
         return 0
     returncode, stdout, stderr = _run_one(
         args.input_json,

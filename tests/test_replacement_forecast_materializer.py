@@ -12,6 +12,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -436,6 +437,138 @@ def test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier(
         provenance["day0_provisional_observation"]["source"]
         == "wu_api+same_station_fast_tail"
     )
+
+
+@pytest.mark.parametrize(
+    ("metric", "baseline_data_version", "absorbing_extreme", "fast_extreme", "bound"),
+    [
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 30.0, 31.0, None),
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 30.0, 31.0, float("nan")),
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 30.0, 31.0, 29.0),
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 30.0, 29.0, 30.0),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 21.0, 20.0, None),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 21.0, 20.0, float("nan")),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 21.0, 20.0, 22.0),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 21.0, 22.0, 21.0),
+    ],
+)
+def test_fast_residual_frontier_fails_closed_when_bound_cannot_cover_history(
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+    baseline_data_version: str,
+    absorbing_extreme: float,
+    fast_extreme: float,
+    bound: float | None,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    absorbing = replace(
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=absorbing_extreme,
+            day0_observed_extreme_source="wu_icao_history",
+            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        ),
+        temperature_metric=metric,
+        baseline_data_version=baseline_data_version,
+    )
+    assert materialize_replacement_forecast_live(conn, absorbing).ok is True
+    provisional = replace(
+        absorbing,
+        computed_at=_dt(18, 10),
+        day0_observed_extreme_c=fast_extreme,
+        day0_observed_extreme_source="wu_api+same_station_fast_tail",
+        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+    )
+    likelihood = (
+        None if bound is None else SimpleNamespace(settlement_extreme_c=bound)
+    )
+    monkeypatch.setattr(
+        "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
+        lambda *args, **kwargs: likelihood,
+    )
+
+    reduced = materializer_mod._request_with_day0_physical_frontier(
+        conn,
+        provisional,
+        metric=metric,
+    )
+
+    assert isinstance(reduced, ReplacementForecastMaterializeRequest)
+    assert reduced.day0_observed_extreme_c == absorbing_extreme
+    assert reduced.day0_observed_extreme_source == "wu_icao_history"
+    assert reduced.day0_observed_extreme_observation_time == _dt(17, 55).isoformat()
+
+
+def test_stronger_absorbing_frontier_after_prepare_invalidates_fast_owner(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final writer revalidation rejects a fast request superseded after prepare."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    prior = replace(
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=21.0,
+            day0_observed_extreme_source="wu_icao_history",
+            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        ),
+        temperature_metric="low",
+        baseline_data_version="ecmwf_opendata_mn2t3_local_calendar_day_min",
+    )
+    assert materialize_replacement_forecast_live(conn, prior).ok is True
+    current = replace(
+        prior,
+        computed_at=_dt(18, 10),
+        day0_observed_extreme_c=20.0,
+        day0_observed_extreme_source="wu_api+same_station_fast_tail",
+        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+    )
+    likelihood_bound = {"value": 21.0}
+    likelihood = SimpleNamespace(
+        residual_weights_c=((0.0, 1.0),),
+        unknown_weight=0.0,
+        settlement_extreme_c=21.0,
+        identity_hash="2" * 64,
+        as_payload=lambda: {
+            "identity_hash": "2" * 64,
+            "settlement_extreme_c": likelihood_bound["value"],
+        },
+    )
+
+    def _likelihood(*_args, **_kwargs):
+        likelihood.settlement_extreme_c = likelihood_bound["value"]
+        return likelihood
+
+    monkeypatch.setattr(
+        "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
+        _likelihood,
+    )
+    witness = _day0_owner_witness(current, seed_file=tmp_path / "fast-owner.json")
+    _record_day0_owner(conn, current, witness)
+    prepared = _prepare_for_final_write(
+        conn, replace(current, day0_enqueue_owner_witness=witness)
+    )
+
+    stronger = replace(
+        prior,
+        computed_at=_dt(18, 8),
+        day0_observed_extreme_c=19.0,
+        day0_observed_extreme_observation_time=_dt(18, 7).isoformat(),
+    )
+    assert materialize_replacement_forecast_live(conn, stronger).ok is True
+    conn.commit()
+    likelihood_bound["value"] = 19.0
+
+    conn.execute("BEGIN IMMEDIATE")
+    result = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    conn.commit()
+
+    assert result.status == "BLOCKED"
+    assert result.reason_codes == (STALE_DAY0_ENQUEUE_OWNER,)
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 2
 
 
 def test_day0_owner_witness_blocks_swapped_owner_before_posterior_insert(
@@ -1730,7 +1863,18 @@ def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
             self.closed = True
 
     conn = _Connection()
-    monkeypatch.setattr(state_db, "get_forecasts_connection", lambda **_: conn)
+    @contextmanager
+    def _connection_with_world(**_kwargs):
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_with_world",
+        _connection_with_world,
+    )
     monkeypatch.setattr(
         cli,
         "_prepare_live_schema_and_manifest",
@@ -1792,7 +1936,18 @@ def test_materialize_script_batch_prepares_schema_before_first_input_error(
             return None
 
     conn = _Connection()
-    monkeypatch.setattr(state_db, "get_forecasts_connection", lambda **_: conn)
+    @contextmanager
+    def _connection_with_world(**_kwargs):
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_with_world",
+        _connection_with_world,
+    )
 
     def _prepare(*args, **kwargs):
         preparations.append(kwargs)
