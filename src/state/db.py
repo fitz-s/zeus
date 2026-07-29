@@ -382,10 +382,21 @@ def _connect_read_only(db_path: Path) -> sqlite3.Connection:
 
 
 def get_trade_connection(
-    *, write_class: WriteClass | str | None = None,
+    *,
+    write_class: WriteClass | str | None = None,
+    busy_timeout_ms: int | None = None,
 ) -> sqlite3.Connection:
-    """Trade DB connection (zeus_trades.db)."""
-    return _connect(_zeus_trade_db_path(), write_class=write_class)
+    """Trade DB connection (zeus_trades.db).
+
+    ``busy_timeout_ms`` mirrors ``get_world_connection``'s parameter: optional
+    derived/telemetry publication (e.g. the family-book observation writer
+    thread, src/events/family_book_telemetry_writer.py) may choose a shorter
+    budget so it yields to live writers instead of holding the default
+    30-second wait. Connection PRAGMA only -- INV-37 / txn semantics unchanged.
+    """
+    return _connect(
+        _zeus_trade_db_path(), write_class=write_class, busy_timeout_ms=busy_timeout_ms
+    )
 
 
 def get_trade_connection_read_only() -> sqlite3.Connection:
@@ -5554,10 +5565,12 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "execution_fact",
     "execution_feasibility_evidence",
     "executable_market_snapshots",
-    # book_snapshot_persistence (2026-07-29): decision-time family book ladder
-    # history for the center-evidence campaign (market-implied center vs our
-    # mu). Executable-market substrate, co-located with executable_market_snapshots.
-    "family_book_snapshots",
+    # book_snapshot_persistence (2026-07-29): decision-time family book
+    # manifest + observation history for the center-evidence campaign
+    # (market-implied center vs our mu). Executable-market substrate,
+    # co-located with executable_market_snapshots.
+    "family_book_states",
+    "family_book_observations",
     # Repoint 2 (fix/prearm-fill-exit-readiness 2026-06-03): outcome_fact
     # corrected to trade_class. The live writer (harvester.py log_settlement_event)
     # has always written to zeus_trades.db via trade_conn (18 live rows confirmed,
@@ -6556,10 +6569,16 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     init_snapshot_schema(conn)
     from src.state.schema.book_hash_transitions_schema import ensure_table as _ensure_book_hash_transitions_table
     _ensure_book_hash_transitions_table(conn)
-    # book_snapshot_persistence (2026-07-29): decision-time family book ladder
-    # history, evidence-only (see src/state/schema/family_book_snapshots_schema.py).
-    from src.state.schema.family_book_snapshots_schema import ensure_table as _ensure_family_book_snapshots_table
-    _ensure_family_book_snapshots_table(conn)
+    # book_snapshot_persistence (2026-07-29): decision-time family book
+    # manifest + append-only observation history, evidence-only. Two tables:
+    # immutable content-addressed state (family_book_states) and the sampled
+    # decision time series referencing it (family_book_observations). See
+    # src/state/schema/family_book_states_schema.py and
+    # family_book_observations_schema.py.
+    from src.state.schema.family_book_states_schema import ensure_table as _ensure_family_book_states_table
+    from src.state.schema.family_book_observations_schema import ensure_table as _ensure_family_book_observations_table
+    _ensure_family_book_states_table(conn)
+    _ensure_family_book_observations_table(conn)
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
     _ensure_execution_feasibility_evidence_table(conn)
     # W0.2 blind-window metric (architecture/invariants.yaml
