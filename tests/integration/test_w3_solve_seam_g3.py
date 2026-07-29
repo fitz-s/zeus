@@ -9496,10 +9496,71 @@ def test_global_book_cached_token_reuse_accepts_equal_scope(monkeypatch):
     rebound, reason = era._reuse_global_book_superset_token_bindings(
         conn,
         probability,
+        checked_at=at,
     )
 
     assert rebound == probability
     assert reason == "hit"
+
+    monkeypatch.setattr(
+        era,
+        "_GLOBAL_BOOK_EPOCH_CACHE",
+        replace(
+            era._GLOBAL_BOOK_EPOCH_CACHE,
+            epoch=SimpleNamespace(current_identity=lambda _checked_at: None),
+        ),
+    )
+    rebound, reason = era._reuse_global_book_superset_token_bindings(
+        conn,
+        probability,
+        checked_at=at,
+    )
+    assert rebound is None
+    assert reason == "expired"
+
+
+def test_global_book_cached_token_reuse_rejects_invalidated_family(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    at = _dt.datetime.now(_dt.timezone.utc)
+    probability = {
+        "family": SimpleNamespace(
+            family_key="family",
+            witness_identity="probability-current",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin",
+                    condition_id="condition",
+                    yes_token_id="yes-token",
+                    no_token_id="no-token",
+                ),
+            ),
+        )
+    }
+    epoch = SimpleNamespace(
+        witness_identity="book-current",
+        current_identity=lambda _checked_at: "book-current",
+    )
+    assert era._store_global_book_epoch(
+        conn,
+        probability,
+        epoch,
+        checked_at=at,
+    ) == "stored"
+    monkeypatch.setattr(
+        era,
+        "_global_book_metadata_refresh_family_keys",
+        lambda *_args, **_kwargs: frozenset({"family"}),
+    )
+
+    rebound, reason = era._reuse_global_book_superset_token_bindings(
+        conn,
+        probability,
+        checked_at=at,
+    )
+
+    assert rebound is None
+    assert reason == "metadata_invalidated:1"
 
 
 def test_global_book_epoch_cache_serves_exact_scoped_subset(monkeypatch):

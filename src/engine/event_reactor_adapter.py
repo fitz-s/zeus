@@ -909,9 +909,13 @@ def _reuse_global_book_token_bindings_for_batch(
 def _reuse_global_book_superset_token_bindings(
     trade_conn: sqlite3.Connection,
     probabilities: Mapping[str, object],
+    *,
+    checked_at: datetime,
 ) -> tuple[dict[str, object] | None, str]:
-    """Reuse immutable token identity when the current scope is stable or narrows."""
+    """Reuse current, non-invalidated token identity for a stable/narrower scope."""
 
+    if checked_at.tzinfo is None:
+        return None, "checked_at_naive"
     namespace = _global_book_epoch_cache_namespace(trade_conn)
     if namespace is None:
         return None, "namespace_unavailable"
@@ -921,6 +925,14 @@ def _reuse_global_book_superset_token_bindings(
         return None, "cache_empty"
     if entry.namespace != namespace:
         return None, "namespace_changed"
+    current_identity = getattr(entry.epoch, "current_identity", None)
+    if not callable(current_identity):
+        return None, "current_identity_missing"
+    try:
+        if current_identity(checked_at.astimezone(UTC)) is None:
+            return None, "expired"
+    except (TypeError, ValueError) as exc:
+        return None, f"current_identity_invalid:{type(exc).__name__}"
     cached = dict(entry.bound_probabilities)
     if not set(probabilities) <= set(cached):
         return None, "not_cached_superset"
@@ -928,14 +940,22 @@ def _reuse_global_book_superset_token_bindings(
         cached_slice = {
             family_key: cached[family_key] for family_key in probabilities
         }
-        return (
-            _reuse_global_book_token_bindings(
-                probabilities,
-                cached_slice,
-            ),
-            "hit",
+        rebound = _reuse_global_book_token_bindings(
+            probabilities,
+            cached_slice,
         )
-    except (KeyError, TypeError, ValueError) as exc:
+        invalidated = _global_book_metadata_refresh_family_keys(
+            trade_conn,
+            rebound,
+            checked_at=checked_at,
+            refreshed_at_by_family=_global_book_metadata_refresh_hwm(
+                trade_conn
+            ),
+        )
+        if invalidated:
+            return None, f"metadata_invalidated:{len(invalidated)}"
+        return rebound, "hit"
+    except (KeyError, TypeError, ValueError, sqlite3.Error) as exc:
         return None, f"token_reuse_invalid:{type(exc).__name__}"
 
 
@@ -8337,6 +8357,7 @@ def event_bound_live_adapter_from_trade_conn(
                 ) = _reuse_global_book_superset_token_bindings(
                     trade_conn,
                     probabilities,
+                    checked_at=cache_checked_at,
                 )
                 if cached_bound_probabilities is not None:
                     probabilities = cached_bound_probabilities
@@ -8420,6 +8441,7 @@ def event_bound_live_adapter_from_trade_conn(
                 ) = _reuse_global_book_superset_token_bindings(
                     trade_conn,
                     probabilities,
+                    checked_at=cache_checked_at,
                 )
                 if superset_bound_probabilities is not None:
                     logging.getLogger(__name__).info(
