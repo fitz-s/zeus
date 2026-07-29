@@ -17,12 +17,13 @@
   / exit-SUBMIT phase (which posts real sell orders) — §8 Step 2.
 
   ZEUS_REPO_PLACEHOLDER is substituted with the repo's absolute path at
-  install time (same convention as bindings/zeus/launchd_plist.plist) —
+  install time via scripts/install_launchd_plist.py (plistlib-based —
+  parses the plist, substitutes inside string values only, refuses to
+  write if any placeholder survives, plutil -lints, writes atomically) —
   this file never names an operator's machine.
 
   INSTALL (operator, NOT performed by the refactor; run from the repo root):
-    sed "s#ZEUS_REPO_PLACEHOLDER#$(pwd)#g" deploy/launchd/com.zeus.post-trade-capital.plist \
-      > ~/Library/LaunchAgents/com.zeus.post-trade-capital.plist
+    python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.post-trade-capital.plist
     launchctl load ~/Library/LaunchAgents/com.zeus.post-trade-capital.plist
 -->
 <plist version="1.0">

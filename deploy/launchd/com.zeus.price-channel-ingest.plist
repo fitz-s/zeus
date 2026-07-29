@@ -31,14 +31,15 @@
   (config/edli_v1) — no extra env beyond ZEUS_MODE=live is required for it here.
 
   ZEUS_REPO_PLACEHOLDER is substituted with the repo's absolute path at
-  install time (same convention as bindings/zeus/launchd_plist.plist) —
+  install time via scripts/install_launchd_plist.py (plistlib-based —
+  parses the plist, substitutes inside string values only, refuses to
+  write if any placeholder survives, plutil -lints, writes atomically) —
   this file never names an operator's machine.
 
   INSTALL (operator, NOT performed by the refactor; run from the repo root):
     # 1) substitute the three POLYMARKET_API_* REPLACE_ME values with the real L2 creds
     #    (same as com.zeus.live-trading), then:
-    sed "s#ZEUS_REPO_PLACEHOLDER#$(pwd)#g" deploy/launchd/com.zeus.price-channel-ingest.plist \
-      > ~/Library/LaunchAgents/com.zeus.price-channel-ingest.plist
+    python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.price-channel-ingest.plist
     launchctl load ~/Library/LaunchAgents/com.zeus.price-channel-ingest.plist
 -->
 <plist version="1.0">

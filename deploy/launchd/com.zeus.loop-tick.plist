@@ -4,7 +4,8 @@
   Zeus 24/7 improvement loop v3 — single tick trigger.
   Authority: docs/operations/current/plans/allday_improvement_loop_v3_codex_2026-07-09.md.
 
-  TEMPLATE ONLY — not installed by any script in this repo. No secrets.
+  TEMPLATE ONLY — not auto-loaded by any script in this repo (install is an
+  explicit operator step; see INSTALL below). No secrets.
 
   Fires loop/tick.sh hourly at :17 — the FINEST granularity, not the
   effective cadence. loop/INTERVAL (a number of hours, operator-edited,
@@ -17,14 +18,15 @@
   see loop/tick.sh.
 
   ZEUS_REPO_PLACEHOLDER and ZEUS_HOME_PLACEHOLDER are substituted with the
-  repo's absolute path and $HOME respectively at install time (same
-  convention as bindings/zeus/launchd_plist.plist) — this file never names
-  an operator's machine.
+  repo's absolute path and $HOME respectively at install time via
+  scripts/install_launchd_plist.py (plistlib-based — parses the plist,
+  substitutes inside string values only, refuses to write if any
+  placeholder survives, plutil -lints, writes atomically) — this file
+  never names an operator's machine.
 
   INSTALL (operator, after scripts/ops/loop_enable.sh preflight passes;
   run from the repo root):
-    1. sed -e "s#ZEUS_REPO_PLACEHOLDER#$(pwd)#g" -e "s#ZEUS_HOME_PLACEHOLDER#$HOME#g" \
-         deploy/launchd/com.zeus.loop-tick.plist > ~/Library/LaunchAgents/com.zeus.loop-tick.plist
+    1. python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.loop-tick.plist
     2. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.loop-tick.plist
 
   DISABLE: `touch <repo>/loop/HALT` (soft — daemon stays loaded, next fire

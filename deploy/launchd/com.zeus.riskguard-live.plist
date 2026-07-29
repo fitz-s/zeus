@@ -4,12 +4,13 @@
   ARTIFACT ONLY. Risk-guard money-path sidecar (src.riskguard.riskguard).
 
   ZEUS_REPO_PLACEHOLDER is substituted with the repo's absolute path at
-  install time (same convention as bindings/zeus/launchd_plist.plist) —
+  install time via scripts/install_launchd_plist.py (plistlib-based —
+  parses the plist, substitutes inside string values only, refuses to
+  write if any placeholder survives, plutil -lints, writes atomically) —
   this file never names an operator's machine.
 
   INSTALL (operator, run from the repo root):
-    sed "s#ZEUS_REPO_PLACEHOLDER#$(pwd)#g" deploy/launchd/com.zeus.riskguard-live.plist \
-      > ~/Library/LaunchAgents/com.zeus.riskguard-live.plist
+    python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.riskguard-live.plist
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.riskguard-live.plist
 -->
 <plist version="1.0">

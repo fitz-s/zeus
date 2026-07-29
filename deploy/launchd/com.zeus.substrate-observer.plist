@@ -16,12 +16,13 @@
   The order daemon (com.zeus.live-trading) no longer schedules these two jobs.
 
   ZEUS_REPO_PLACEHOLDER is substituted with the repo's absolute path at
-  install time (same convention as bindings/zeus/launchd_plist.plist) —
+  install time via scripts/install_launchd_plist.py (plistlib-based —
+  parses the plist, substitutes inside string values only, refuses to
+  write if any placeholder survives, plutil -lints, writes atomically) —
   this file never names an operator's machine.
 
   INSTALL (operator, NOT performed by the refactor; run from the repo root):
-    sed "s#ZEUS_REPO_PLACEHOLDER#$(pwd)#g" deploy/launchd/com.zeus.substrate-observer.plist \
-      > ~/Library/LaunchAgents/com.zeus.substrate-observer.plist
+    python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.substrate-observer.plist
     launchctl load ~/Library/LaunchAgents/com.zeus.substrate-observer.plist
 -->
 <plist version="1.0">

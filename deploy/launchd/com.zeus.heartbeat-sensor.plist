@@ -18,14 +18,14 @@
   accordingly before install.
 
   ZEUS_REPO_PLACEHOLDER and ZEUS_HOME_PLACEHOLDER are substituted with the
-  repo's absolute path and $HOME respectively at install time (same
-  convention as bindings/zeus/launchd_plist.plist) — this file never names
-  an operator's machine.
+  repo's absolute path and $HOME respectively at install time via
+  scripts/install_launchd_plist.py (plistlib-based — parses the plist,
+  substitutes inside string values only, refuses to write if any
+  placeholder survives, plutil -lints, writes atomically) — this file
+  never names an operator's machine.
 
   INSTALL (operator, run from the repo root):
-    sed -e "s#ZEUS_REPO_PLACEHOLDER#$(pwd)#g" -e "s#ZEUS_HOME_PLACEHOLDER#$HOME#g" \
-      deploy/launchd/com.zeus.heartbeat-sensor.plist \
-      > ~/Library/LaunchAgents/com.zeus.heartbeat-sensor.plist
+    python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.heartbeat-sensor.plist
     launchctl bootout gui/$(id -u)/com.zeus.heartbeat-sensor 2>/dev/null || true
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.heartbeat-sensor.plist
 -->
