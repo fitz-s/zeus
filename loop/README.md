@@ -1,4 +1,8 @@
-# The 24/7 improvement loop
+# The unattended improvement loop
+
+**Status:** implemented; installation and current runtime are not claimed
+by this repository snapshot. When enabled, launchd schedules one
+sandboxed tick at the configured interval.
 
 In one sentence: this is scientific-method discipline — preregistration,
 minimum sample sizes, refutation kept on the record — imposed on an
@@ -29,7 +33,3 @@ system's behavior gets a SQL query preregistered *before* the data is
 looked at, statistical conclusions require `min_n=30` per cell, refuted
 claims are never deleted, and "insufficient evidence" is treated as a
 legitimate, required conclusion rather than a failure to report.
-
-This README describes the mechanism as implemented in the scripts and
-prompts below — it makes no claim about whether the launchd job is
-currently installed or running on any host.

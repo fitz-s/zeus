@@ -6,10 +6,10 @@ worker (config load → guard checks → candidate enumeration → dry-run
 proposal → apply → summary report), not a component of the trading
 system itself.
 
-Its modules (`cli/`, `core/`, `rules/`, `types/`) are stdlib-only and
-carry zero Zeus-specific identifiers or directory assumptions — Zeus
-wiring (paths, install metadata, launchd plist) is injected from
-`bindings/` rather than hardcoded here. That separation is deliberate:
+Its modules (`cli/`, `core/`, `rules/`, `types/`) are designed to remain
+stdlib-only and free of Zeus-specific wiring; Zeus integration (paths,
+install metadata, launchd plist) is injected through `bindings/` rather
+than hardcoded here. That separation is deliberate:
 `maintenance_worker` can be reasoned about, tested, and audited on its
 own, without pulling in the trading machine's state or risk posture, and
 its own guard/kill-switch layer (`core/guards.py`, `core/kill_switch.py`)
