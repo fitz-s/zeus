@@ -4668,7 +4668,11 @@ def process_current_global_batch(
                     )
                 ),
                 probability_ineligible_by_family=ineligible_by_family,
-                buy_disabled_reason_by_family=held_only_buy_disabled_reasons,
+                buy_disabled_reason_by_family={
+                    family_key: reason
+                    for family_key, reason in held_only_buy_disabled_reasons.items()
+                    if family_key in attempt_probabilities
+                },
                 book_epoch_identity=venue_identity,
                 book_asset_count=(
                     sum(

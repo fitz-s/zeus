@@ -18521,6 +18521,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
     assert result.economic_cut_completed is True
 
     selected_kwargs.clear()
+    stored_kwargs.clear()
     global_batch_runtime.process_current_global_batch(
         (event,),
         decision_time=decision_at,
@@ -18552,6 +18553,10 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
     )
 
     assert selected_kwargs["buy_disabled_family_keys"] == frozenset()
+    assert stored_kwargs["buy_disabled_reason_by_family"] == {}
+    assert stored_kwargs["probability_ineligible_by_family"] == {
+        family_key: "GLOBAL_CURRENT_BOOK_FAMILY_UNAVAILABLE"
+    }
 
     held_failure_reason = (
         "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
