@@ -37,13 +37,15 @@ not by design foresight — see `AI_ASSISTANCE.md` for two of them in detail.
 
 **(c) Statistical evaluation discipline.** Trade outcomes are graded against
 their frozen pre-trade decision record using a six-category attribution
-taxonomy (SKILL_WIN / LUCKY_WIN-recorded-as-MISS / SKILL_LOSS / UNLUCKY_LOSS
-/ NO_EDGE / INSUFFICIENT), with walk-forward calibration rather than
-in-sample fitting (`src/decision/selection_calibrator.py`). Only SKILL_WIN
-supports an edge claim; "insufficient evidence" is treated as a legitimate,
-required conclusion rather than a failure to explain away. A full
-calibration report against this taxonomy is forthcoming and not part of
-this snapshot — this card claims the discipline exists, not a specific
+taxonomy — SKILL_WIN / LUCKY_WIN / SKILL_LOSS / MISCALIBRATED_LOSS /
+STALE_DECISION / UNATTRIBUTABLE_Q_MISSING
+(`src/analysis/settlement_skill_attribution.py`) — with walk-forward
+calibration rather than in-sample fitting (`src/decision/selection_calibrator.py`).
+"SKILL_WIN is evidence, LUCKY_WIN is recorded as MISS, not a win"
+(`loop/LEDGER.yaml:47-48`); "insufficient evidence" is treated as a
+legitimate, required conclusion rather than a failure to explain away. A
+full calibration report against this taxonomy is forthcoming and not part
+of this snapshot — this card claims the discipline exists, not a specific
 result.
 
 ## Claim, evidence, limit

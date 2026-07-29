@@ -62,7 +62,12 @@ motivated it, not just its trigger condition. Three representative examples:
 The governance in this directory has failed at least twice in ways worth
 reading in full: the no-edge guard (a `Stop`-hook blocklist that suppressed
 the legitimate conclusion "insufficient evidence," deleted rather than
-patched — PR #452, merged 2026-07-29) and the shared-ref incident (a
-subagent worktree able to reach the main tree's own branch state before
-`maintree_git_state_guard` existed). Both are described with citations in
-`AI_ASSISTANCE.md`.
+patched — PR #452, merged 2026-07-29) and the shared-ref incident (on
+2026-07-29, a worktree agent's `git update-ref refs/heads/live` momentarily
+retargeted the main tree's checked-out branch, because linked worktrees
+share the repo's ref store and `live_tree_write_guard`/`maintree_git_state_guard`
+are organized around specific commands and working trees, not ref mutation
+as a class; caught immediately, restored exactly, verified via reflog — a
+gap `maintree_git_state_guard`, added 2026-06-12 for the narrower
+checkout/switch/branch/reset case, did not close). Both are described with
+citations in `AI_ASSISTANCE.md`.
