@@ -2931,17 +2931,17 @@ def test_global_day0_fast_fact_is_statistical_and_causal(
             local_timestamp TEXT, utc_timestamp TEXT, imported_at TEXT,
             temp_unit TEXT, running_max REAL, running_min REAL,
             authority TEXT, training_allowed INTEGER, causality_status TEXT,
-            source_role TEXT
+            source_role TEXT, raw_response TEXT
         )
         """
     )
     conn.execute(
-        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             "Paris", "2026-07-14", "wu_icao_history", "LFPB",
             "2026-07-14T16:00:00+02:00", "2026-07-14T14:00:00+00:00",
             "2026-07-14T14:05:00+00:00", "C", 35.0, 25.0,
-            "VERIFIED", 1, "OK", "historical_hourly",
+            "VERIFIED", 1, "OK", "historical_hourly", "METAR LFPB 141400Z 35/14",
         ),
     )
     ensure_table(conn)
