@@ -1,5 +1,6 @@
 # Created: 2026-07-25
-# Last reused or audited: 2026-07-25
+# Last reused or audited: 2026-07-29
+# Lifecycle: created=2026-07-25; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Authority basis: 7-day production block-event audit -- one stuck EDLI order
 #   was blocking new-entry BUY admission for every family (32,763 blocking
 #   instances, 20.97h/7d). This narrows the adapter-level gate
@@ -140,3 +141,82 @@ def test_global_sell_candidate_check_precedes_family_block_in_source_order():
     family_block_at = source.index("if entry_submit_family_block_reasons:")
 
     assert sell_at < global_block_at < family_block_at
+
+
+def test_family_blocked_buy_is_removed_before_global_capital_ranking():
+    blocked = {
+        FAMILY_A: "EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:1",
+    }
+    matching_buy = SimpleNamespace(
+        action="BUY",
+        family_key=FAMILY_A,
+    )
+    sibling_buy = SimpleNamespace(
+        action="BUY",
+        family_key=FAMILY_B,
+    )
+    matching_sell = SimpleNamespace(
+        action="SELL",
+        family_key=FAMILY_A,
+    )
+
+    assert era._entry_family_blocked_candidate_reason(
+        matching_buy,
+        blocked,
+    ) == (
+        "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
+        "EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:1"
+    )
+    assert era._entry_family_blocked_candidate_reason(sibling_buy, blocked) is None
+    assert era._entry_family_blocked_candidate_reason(matching_sell, blocked) is None
+
+
+def test_live_global_batch_wires_family_block_into_selection_policy(monkeypatch):
+    from src.engine import global_batch_runtime
+
+    captured = {}
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            events=tuple(events),
+            winner_event_id=None,
+            receipts={},
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_entry_global_submit_suppression_reason",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    trade_conn = sqlite3.connect(":memory:")
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade_conn,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        auction_capital_authority=SimpleNamespace(),
+        entry_submit_family_block_reasons={
+            FAMILY_A: "EDLI_STAGE_LIVE_CAP_RESERVED:1",
+        },
+    )
+    event = _make_event(
+        city="Dallas",
+        target_date="2026-07-25",
+        metric="high",
+    )
+
+    adapter.process_global_batch((event,), NOW)
+    policy = captured["candidate_policy_rejection_resolver"]
+
+    assert policy(SimpleNamespace(action="BUY", family_key=FAMILY_A)) == (
+        "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
+        "EDLI_STAGE_LIVE_CAP_RESERVED:1"
+    )
+    assert policy(SimpleNamespace(action="SELL", family_key=FAMILY_A)) is None

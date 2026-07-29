@@ -1,5 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-07-29
+# Lifecycle: created=2026-07-03; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -1615,6 +1616,77 @@ def test_global_single_order_entry_pause_blocks_buy_but_preserves_sell_and_cash(
         "ENTRY_ACTION_PAUSED:external:operator"
     )
     assert decision.candidate_input_count == len(evaluations) == 2
+
+
+def test_family_entry_block_removes_higher_growth_buy_before_same_family_sell():
+    from src.engine.event_reactor_adapter import (
+        _entry_family_blocked_candidate_reason,
+    )
+
+    family = "family-readiness-block-with-sell"
+    sell = _global_sell_candidate(
+        candidate_id="sell-preserved-by-family-block",
+        family=family,
+        side="YES",
+        held_q=0.90,
+        bids=(("0.95", "10"),),
+        shares="10",
+    )
+    probability_witness = _global_probability_witness(sell)
+    buy_curve = _global_curve(
+        side=sell.side,
+        token=sell.token_id,
+        levels=(("0.10", "20"),),
+    )
+    buy = S.GlobalSingleOrderCandidate(
+        candidate_id="buy-removed-by-family-block",
+        family_key=family,
+        bin_id=sell.bin_id,
+        condition_id=sell.condition_id,
+        side=sell.side,
+        token_id=sell.token_id,
+        probability_witness_identity=probability_witness.witness_identity,
+        book_snapshot_id=buy_curve.snapshot_id,
+        book_captured_at_utc=sell.book_captured_at_utc,
+        execution_curve_identity=S.executable_curve_identity(buy_curve),
+        ledger_snapshot_id="ledger-current",
+        executable_cost_curve=buy_curve,
+        resolution_identity=sell.resolution_identity,
+    )
+    unblocked = _global_select(
+        (sell, buy),
+        floor="100",
+        ceiling="110",
+        cash="100",
+        cap="5",
+    )
+    assert unblocked.candidate is buy
+
+    blocked = _global_select(
+        (sell, buy),
+        floor="100",
+        ceiling="110",
+        cash="100",
+        cap="5",
+        candidate_policy_rejection_resolver=lambda candidate: (
+            _entry_family_blocked_candidate_reason(
+                candidate,
+                {family: "EDLI_STAGE_LIVE_CAP_RESERVED:1"},
+            )
+        ),
+    )
+
+    assert blocked.candidate is sell
+    assert blocked.rejection_reasons[buy.candidate_id] == (
+        "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
+        "EDLI_STAGE_LIVE_CAP_RESERVED:1"
+    )
+    evaluations = {
+        evaluation.candidate_id: evaluation
+        for evaluation in blocked.candidate_evaluations
+    }
+    assert evaluations[buy.candidate_id].status == "REJECTED"
+    assert evaluations[sell.candidate_id].status == "SELECTED"
 
 
 def test_global_single_order_zero_buy_capacity_preserves_sell_and_cash():

@@ -6216,6 +6216,27 @@ def _stamp_live_adapter_lane(receipt: EventSubmissionReceipt) -> EventSubmission
     return dataclass_replace(receipt, submit_lane=SUBMIT_LANE_LIVE)
 
 
+def _entry_family_blocked_candidate_reason(
+    candidate: object,
+    entry_submit_family_block_reasons: Mapping[str, str] | None,
+) -> str | None:
+    """Reject an impossible BUY before it competes with executable SELLs."""
+
+    if (
+        str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
+        == "SELL"
+        or not entry_submit_family_block_reasons
+    ):
+        return None
+    family_key = str(getattr(candidate, "family_key", "") or "").strip()
+    if not family_key:
+        return None
+    block_reason = entry_submit_family_block_reasons.get(family_key)
+    if block_reason is None:
+        return None
+    return f"LIVE_ENTRY_BLOCKED:entry_readiness_family:{block_reason}"
+
+
 def event_bound_live_adapter_from_trade_conn(
     trade_conn: sqlite3.Connection,
     *,
@@ -8801,6 +8822,12 @@ def event_bound_live_adapter_from_trade_conn(
                 return None
             if entry_submit_suppression_reason is not None:
                 return entry_submit_suppression_reason
+            family_block_reason = _entry_family_blocked_candidate_reason(
+                candidate,
+                entry_submit_family_block_reasons,
+            )
+            if family_block_reason is not None:
+                return family_block_reason
             family_key = str(getattr(candidate, "family_key", "") or "").strip()
             owner = _global_entry_policy_by_family.get(family_key)
             side = str(getattr(candidate, "side", "") or "").strip().upper()
