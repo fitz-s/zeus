@@ -253,8 +253,12 @@ def _conda_python() -> str:
       2. ~/miniconda3/bin/python (conda default install location, portable
          across machines/usernames via Path.home()), ACCEPTED ONLY if it is
          executable and can import ecmwfapi.
-      3. `python` resolved on PATH (covers non-default conda install dirs),
-         same executability + dependency-import validation.
+      3. `python3`, then `python`, resolved on PATH (covers non-default
+         conda install dirs) — `python3` first because a bare `python` can
+         resolve to Python 2 on some systems; same executability +
+         dependency-import validation either way (belt-and-suspenders: the
+         import probe alone already rejects a Python 2 interpreter, since
+         these deps aren't installed there).
       4. sys.executable, with a logged warning — no candidate proved it has
          ecmwfapi, so the MARS download subprocess launched under it is
          expected to fail; this keeps the daemon alive to log the failure
@@ -267,15 +271,16 @@ def _conda_python() -> str:
     candidate = str(Path.home() / "miniconda3" / "bin" / "python")
     if _interpreter_has_dependency(candidate, probe_module=_CONDA_PYTHON_PROBE_MODULE):
         return candidate
-    which_python = shutil.which("python")
-    if which_python and _interpreter_has_dependency(
-        which_python, probe_module=_CONDA_PYTHON_PROBE_MODULE
-    ):
-        return which_python
+    for path_candidate in (shutil.which("python3"), shutil.which("python")):
+        if path_candidate and _interpreter_has_dependency(
+            path_candidate, probe_module=_CONDA_PYTHON_PROBE_MODULE
+        ):
+            return path_candidate
     logger.warning(
         "_conda_python: no interpreter with '%s' importable found (checked "
-        "ZEUS_CONDA_PYTHON, %s, PATH `python`); falling back to sys.executable "
-        "(%s) — the MARS download subprocess will fail if it lacks ecmwfapi.",
+        "ZEUS_CONDA_PYTHON, %s, PATH `python3`/`python`); falling back to "
+        "sys.executable (%s) — the MARS download subprocess will fail if it "
+        "lacks ecmwfapi.",
         _CONDA_PYTHON_PROBE_MODULE,
         candidate,
         sys.executable,

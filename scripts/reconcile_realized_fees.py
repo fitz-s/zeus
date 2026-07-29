@@ -27,7 +27,9 @@ import sys
 from datetime import datetime, timezone
 
 # ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
-_MAIN_TREE = os.environ.get("ZEUS_MAIN_TREE") or os.path.join(os.path.expanduser("~"), "zeus")
+# expanduser() so ZEUS_MAIN_TREE=~/zeus (the shell does NOT expand '~' inside
+# os.environ.get) resolves correctly instead of leaving a literal '~' segment.
+_MAIN_TREE = os.path.expanduser(os.environ.get("ZEUS_MAIN_TREE") or "~/zeus")
 TRADES_DB = os.path.join(_MAIN_TREE, "state", "zeus_trades.db")
 OUT_DEFAULT = os.path.join(_MAIN_TREE, "state", "fee_reconciliation.json")
 

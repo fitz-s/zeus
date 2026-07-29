@@ -60,8 +60,10 @@ if _ROOT not in sys.path:
 
 # --- live DBs: ALWAYS the main tree (worktree ships only stubs) -------------
 # ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
+# expanduser() so ZEUS_MAIN_TREE=~/zeus (the shell does NOT expand '~' inside
+# os.environ.get) resolves correctly instead of leaving a literal '~' segment.
 _LIVE_STATE = os.path.join(
-    os.environ.get("ZEUS_MAIN_TREE") or os.path.join(os.path.expanduser("~"), "zeus"),
+    os.path.expanduser(os.environ.get("ZEUS_MAIN_TREE") or "~/zeus"),
     "state",
 )
 FORECASTS_DB = os.path.join(_LIVE_STATE, "zeus-forecasts.db")

@@ -34,7 +34,9 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 # ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
-_MAIN_TREE = os.environ.get("ZEUS_MAIN_TREE") or os.path.join(os.path.expanduser("~"), "zeus")
+# expanduser() so ZEUS_MAIN_TREE=~/zeus (the shell does NOT expand '~' inside
+# os.environ.get) resolves correctly instead of leaving a literal '~' segment.
+_MAIN_TREE = os.path.expanduser(os.environ.get("ZEUS_MAIN_TREE") or "~/zeus")
 ZEUS = os.path.join(_MAIN_TREE, "state")
 WORLD = f"{ZEUS}/zeus-world.db"
 TRADES = f"{ZEUS}/zeus_trades.db"
