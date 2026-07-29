@@ -479,7 +479,7 @@ def needs_global_sell_snapshot_reauction(
             """,
             (trade_id,),
         ).fetchone()
-    except sqlite3.Error:
+    except (sqlite3.Error, AttributeError):
         return False
     if row is None or str(row[0]) != "EXIT_RETRY_RELEASED":
         return False
@@ -6986,7 +6986,7 @@ def check_pending_retries(
     if str(getattr(position, "order_status", "") or "") == "retry_pending":
         position.order_status = "filled"
     _release_pending_exit(position)
-    release_persisted = conn is None
+    release_persisted = conn is None and not global_snapshot_reauction
     if conn is not None:
         release_persisted = _dual_write_exit_retry_released_if_available(
             conn,
@@ -7009,17 +7009,9 @@ def check_pending_retries(
         for field, value in previous_runtime.items():
             setattr(position, field, value)
         return False
-    if global_snapshot_reauction:
-        # The release projection deliberately retains the typed error as a
-        # durable fresh-cut debt. Publish a NEW generation after that projection
-        # is canonical; an old in-flight same-family wake cannot satisfy it. If
-        # publish fails or the process dies here, the next monitor reloads the
-        # debt and republishes before local statistical redecision.
-        if (
-            global_sell_reauction_requester(position, True)
-            and record_global_sell_reauction_reserved(conn, position)
-        ):
-            position.last_exit_error = ""
+    # A global snapshot release deliberately retains the typed error as a
+    # canonical fresh-cut debt. The caller must commit this release before
+    # recover_global_sell_snapshot_reauction_debt() may publish any wake.
     return True
 
 
@@ -7213,9 +7205,11 @@ def recover_global_sell_snapshot_reauction_debt(
     conn: sqlite3.Connection | None,
     requester: Callable[[Position, bool], bool],
 ) -> bool:
-    """Drain one canonical released-without-reservation debt."""
+    """Publish and acknowledge one already-committed canonical release debt."""
 
     if not needs_global_sell_snapshot_reauction(position, conn):
+        return False
+    if conn is None or conn.in_transaction:
         return False
     raw_state = getattr(position, "state", "")
     runtime_state = str(getattr(raw_state, "value", raw_state) or "")
@@ -7224,6 +7218,19 @@ def recover_global_sell_snapshot_reauction_debt(
     if not requester(position, True):
         return False
     if not record_global_sell_reauction_reserved(conn, position):
+        return False
+    try:
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 - an uncommitted ack is not durable.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - preserve the original commit failure.
+            pass
+        logger.warning(
+            "GLOBAL_SELL_REAUCTION_RESERVED commit failed for %s: %s",
+            getattr(position, "trade_id", ""),
+            exc,
+        )
         return False
     position.last_exit_error = ""
     return True

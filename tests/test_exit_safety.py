@@ -7136,6 +7136,17 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
         global_sell_reauction_requester=request_reauction,
     ) is True
 
+    assert requested == []
+    assert position.last_exit_error == (
+        "global_sell_exit_executable_snapshot_unavailable"
+    )
+    if conn.in_transaction:
+        conn.commit()
+    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=request_reauction,
+    ) is True
     assert requested == [position.trade_id]
     released_event = conn.execute(
         """
@@ -7212,6 +7223,7 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
         conn=conn,
         global_sell_reauction_requester=lambda _released, _force_new: False,
     ) is True
+    conn.commit()
     assert failed_wake.state == "holding"
     assert failed_wake.last_exit_error == (
         "global_sell_exit_executable_snapshot_unavailable"

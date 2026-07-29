@@ -1958,6 +1958,209 @@ def test_monitoring_phase_commit_failure_defers_network_without_getter(monkeypat
     assert summary["held_monitor_positions_deferred_for_commit_failure"] == 1
 
 
+def test_global_sell_reauction_waits_for_outer_commit_before_network(monkeypatch):
+    """A staged release cannot publish a wake before its outer commit."""
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    pos = _make_position(
+        trade_id="global-sell-reauction-outer-commit",
+        token_id="global-sell-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    pos.exit_state = "retry_pending"
+    pos.state = "pending_exit"
+    pos.order_status = "retry_pending"
+    pos.next_exit_retry_at = "2026-01-01T00:00:00+00:00"
+    pos.last_exit_error = "global_sell_exit_executable_snapshot_unavailable"
+    events: list[str] = []
+
+    class Conn:
+        in_transaction = True
+
+        def commit(self):
+            events.append("commit")
+            self.in_transaction = False
+
+        def rollback(self):
+            events.append("rollback")
+            self.in_transaction = False
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_dual_write_exit_retry_released_if_available",
+        lambda *_args, **_kwargs: events.append("release_write") or True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_snapshot_min_order_dust_error",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "needs_global_sell_snapshot_reauction",
+        lambda position, _conn=None: (
+            position.last_exit_error.startswith(
+                "global_sell_exit_executable_snapshot"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "needs_global_sell_snapshot_reauction",
+        exit_lifecycle.needs_global_sell_snapshot_reauction,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.events.reactor.request_global_auction_completion",
+        lambda **_kwargs: events.append("network_publish") or True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "record_global_sell_reauction_reserved",
+        lambda *_args, **_kwargs: events.append("ack_write") or True,
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.check_pending_exits",
+        lambda *_args, **kwargs: (
+            exit_lifecycle.check_pending_retries(
+                pos,
+                conn=kwargs["conn"],
+                global_sell_reauction_requester=kwargs[
+                    "global_sell_reauction_requester"
+                ],
+            ),
+            {
+                "filled": 0,
+                "retried": 1,
+                "unchanged": 0,
+                "filled_positions": [],
+            },
+        )[1],
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [],
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        Conn(),
+        object(),
+        _make_portfolio(pos),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_reauction_outer_commit"),
+    )
+
+    assert events == [
+        "release_write",
+        "commit",
+        "network_publish",
+        "ack_write",
+        "commit",
+        "commit",
+    ]
+
+
+def test_global_sell_reauction_commit_failure_restores_runtime_without_network(
+    monkeypatch,
+):
+    """A rolled-back release keeps pending_exit and never publishes a wake."""
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    pos = _make_position(
+        trade_id="global-sell-reauction-commit-failure",
+        token_id="global-sell-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    pos.exit_state = "retry_pending"
+    pos.state = "pending_exit"
+    pos.order_status = "retry_pending"
+    pos.next_exit_retry_at = "2026-01-01T00:00:00+00:00"
+    pos.last_exit_error = "global_sell_exit_executable_snapshot_unavailable"
+    events: list[str] = []
+
+    class Conn:
+        in_transaction = True
+
+        def commit(self):
+            events.append("commit_failed")
+            raise RuntimeError("commit unavailable")
+
+        def rollback(self):
+            events.append("rollback")
+            self.in_transaction = False
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_dual_write_exit_retry_released_if_available",
+        lambda *_args, **_kwargs: events.append("release_write") or True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_snapshot_min_order_dust_error",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "needs_global_sell_snapshot_reauction",
+        lambda position, _conn=None: (
+            position.last_exit_error.startswith(
+                "global_sell_exit_executable_snapshot"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "src.events.reactor.request_global_auction_completion",
+        lambda **_kwargs: events.append("network_publish") or True,
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.check_pending_exits",
+        lambda *_args, **kwargs: (
+            exit_lifecycle.check_pending_retries(
+                pos,
+                conn=kwargs["conn"],
+                global_sell_reauction_requester=kwargs[
+                    "global_sell_reauction_requester"
+                ],
+            ),
+            {
+                "filled": 0,
+                "retried": 1,
+                "unchanged": 0,
+                "filled_positions": [],
+            },
+        )[1],
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        Conn(),
+        object(),
+        _make_portfolio(pos),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_reauction_commit_failure"),
+    )
+
+    assert events == ["release_write", "commit_failed", "rollback"]
+    assert pos.state == "pending_exit"
+    assert pos.exit_state == "retry_pending"
+    assert pos.order_status == "retry_pending"
+    assert pos.last_exit_error == (
+        "global_sell_exit_executable_snapshot_unavailable"
+    )
+
+
 def test_monitoring_phase_urgent_wake_counts_only_unvisited_tail(monkeypatch):
     """A wake after the batch cannot count the already-scanned position twice."""
     from src.engine import cycle_runtime

@@ -5307,6 +5307,10 @@ def _release_monitor_write_lock_boundary(conn, summary: dict, deps, *, boundary:
     try:
         conn.commit()
     except Exception as exc:  # noqa: BLE001
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - report the commit failure as primary.
+            pass
         summary["monitor_write_lock_release_failed"] = (
             summary.get("monitor_write_lock_release_failed", 0) + 1
         )
@@ -5420,30 +5424,62 @@ def execute_monitoring_phase(
         )
         return True
 
-    for position in tuple(getattr(portfolio, "positions", ()) or ()):
-        if not needs_global_sell_snapshot_reauction(position, conn):
-            continue
-        if recover_global_sell_snapshot_reauction_debt(
-            position,
-            conn=conn,
-            requester=request_global_sell_snapshot_reauction,
-        ):
-            portfolio_dirty = True
-            summary["global_sell_snapshot_reauction_debts_recovered"] = (
-                summary.get(
-                    "global_sell_snapshot_reauction_debts_recovered",
-                    0,
+    def drain_committed_global_sell_snapshot_reauction_debts() -> None:
+        nonlocal portfolio_dirty
+        for position in tuple(getattr(portfolio, "positions", ()) or ()):
+            if not needs_global_sell_snapshot_reauction(position, conn):
+                continue
+            if recover_global_sell_snapshot_reauction_debt(
+                position,
+                conn=conn,
+                requester=request_global_sell_snapshot_reauction,
+            ):
+                portfolio_dirty = True
+                summary["global_sell_snapshot_reauction_debts_recovered"] = (
+                    summary.get(
+                        "global_sell_snapshot_reauction_debts_recovered",
+                        0,
+                    )
+                    + 1
                 )
-                + 1
-            )
-        else:
-            summary["global_sell_snapshot_reauction_debts_pending"] = (
-                summary.get(
-                    "global_sell_snapshot_reauction_debts_pending",
-                    0,
+            else:
+                summary["global_sell_snapshot_reauction_debts_pending"] = (
+                    summary.get(
+                        "global_sell_snapshot_reauction_debts_pending",
+                        0,
+                    )
+                    + 1
                 )
-                + 1
-            )
+
+    global_retry_runtime_fields = (
+        "state",
+        "pre_exit_state",
+        "exit_state",
+        "next_exit_retry_at",
+        "exit_retry_count",
+        "order_status",
+        "last_exit_error",
+    )
+
+    def snapshot_global_retry_runtime() -> dict[int, dict[str, object]]:
+        return {
+            id(position): {
+                field: getattr(position, field, "")
+                for field in global_retry_runtime_fields
+            }
+            for position in tuple(getattr(portfolio, "positions", ()) or ())
+            if needs_global_sell_snapshot_reauction(position, conn)
+        }
+
+    def restore_global_retry_runtime(
+        snapshots: dict[int, dict[str, object]],
+    ) -> None:
+        for position in tuple(getattr(portfolio, "positions", ()) or ()):
+            snapshot = snapshots.get(id(position))
+            if snapshot is None:
+                continue
+            for field, value in snapshot.items():
+                setattr(position, field, value)
 
     def urgent_preemption_requested() -> bool:
         if should_preempt_for_urgent_day0 is None:
@@ -5463,6 +5499,7 @@ def execute_monitoring_phase(
         return portfolio_dirty, tracker_dirty
 
     if run_exit_preflight:
+        global_retry_runtime_before_preflight = snapshot_global_retry_runtime()
         try:
             exit_stats = check_pending_exits(
                 portfolio,
@@ -5517,14 +5554,40 @@ def execute_monitoring_phase(
                 "pending_exit_defer_reason",
                 "",
             )
-        _release_monitor_write_lock_boundary(
+        if not _release_monitor_write_lock_boundary(
             conn,
             summary,
             deps,
             boundary="exit_preflight",
-        )
+        ):
+            restore_global_retry_runtime(global_retry_runtime_before_preflight)
+            summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+                "MONITOR_WRITE_COMMIT_FAILED"
+            )
+            summary["held_monitor_positions_deferred_for_commit_failure"] = len(
+                tuple(getattr(portfolio, "positions", ()) or ())
+            )
+            return portfolio_dirty, tracker_dirty
     else:
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
+
+    committed_debts = any(
+        needs_global_sell_snapshot_reauction(position, conn)
+        for position in tuple(getattr(portfolio, "positions", ()) or ())
+    )
+    if committed_debts:
+        if conn is not None and conn.in_transaction and not _release_monitor_write_lock_boundary(
+            conn,
+            summary,
+            deps,
+            boundary="before_global_sell_snapshot_reauction",
+        ):
+            summary["global_sell_snapshot_reauction_debts_pending"] = (
+                summary.get("global_sell_snapshot_reauction_debts_pending", 0)
+                + 1
+            )
+        else:
+            drain_committed_global_sell_snapshot_reauction_debts()
 
     try:
         monitor_now_utc = deps._utcnow() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc)
