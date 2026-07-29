@@ -8118,12 +8118,33 @@ def event_bound_live_adapter_from_trade_conn(
                     if prefetched is not None and prefetched[2] is not None
                     else None
                 )
-                expected_tokens = _reduce_only_tokens(
-                    _global_book_prefetch_tokens(bound_probabilities)
+                expected_tokens = (
+                    tuple(
+                        sorted(
+                            {
+                                token_id
+                                for witness in bound_probabilities.values()
+                                for binding in tuple(
+                                    getattr(witness, "bindings", ()) or ()
+                                )
+                                for token_id in (
+                                    str(
+                                        getattr(binding, "yes_token_id", "") or ""
+                                    ).strip(),
+                                    str(
+                                        getattr(binding, "no_token_id", "") or ""
+                                    ).strip(),
+                                )
+                                if token_id in reduce_only_book_tokens
+                            }
+                        )
+                    )
+                    if reduce_only_book_tokens is not None
+                    else _global_book_prefetch_tokens(bound_probabilities)
                 )
                 capture_required_tokens = (
                     frozenset(expected_tokens)
-                    if reduce_only_book_tokens is not None and expected_tokens
+                    if reduce_only_book_tokens is not None
                     else None
                 )
                 matching_prefetch = (
@@ -8743,6 +8764,21 @@ def event_bound_live_adapter_from_trade_conn(
                 return probabilities, None
             bound_probabilities = dict(retained_bound_probabilities)
             bound_probabilities.update(rebound_probabilities)
+            if reduce_only_book_tokens is not None:
+                bound_probabilities = {
+                    family_key: witness
+                    for family_key, witness in bound_probabilities.items()
+                    if any(
+                        str(token_id or "").strip() in reduce_only_book_tokens
+                        for binding in tuple(
+                            getattr(witness, "bindings", ()) or ()
+                        )
+                        for token_id in (
+                            getattr(binding, "yes_token_id", ""),
+                            getattr(binding, "no_token_id", ""),
+                        )
+                    )
+                }
             if reduce_only_book_tokens is not None and not bound_probabilities:
                 logging.getLogger(__name__).warning(
                     "global reduce-only book metadata unavailable for every "

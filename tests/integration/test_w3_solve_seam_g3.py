@@ -13420,6 +13420,64 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
         )
 
 
+def test_current_global_book_epoch_reduce_only_ignores_unheld_missing_side():
+    probability = _current_global_book_probability()
+    binding = probability.bindings[0]
+    held_token = binding.yes_token_id
+    reduce_only_probability = SimpleNamespace(
+        family_key=probability.family_key,
+        bindings=(
+            replace(binding, no_token_id=None),
+            *probability.bindings[1:],
+        ),
+    )
+    conn = _global_book_metadata_conn(probability)
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    requested = []
+
+    epoch = capture_current_global_book_epoch(
+        conn,
+        probability_witnesses={
+            reduce_only_probability.family_key: reduce_only_probability
+        },
+        get_books=lambda tokens: requested.extend(tokens)
+        or {
+            token: {
+                "asset_id": token,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "bids": [{"price": "0.20", "size": "100"}],
+                "asks": [{"price": "0.30", "size": "100"}],
+            }
+            for token in tokens
+        },
+        clock=lambda: at,
+        max_age=_dt.timedelta(seconds=30),
+        required_token_ids=frozenset({held_token}),
+    )
+
+    assert requested == [held_token]
+    assert {state[4] for state in epoch.asset_states} == {held_token}
+    assert {asset.token_id for asset in epoch.sell_assets} == {held_token}
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_REQUIRED_BOOK_TOKEN_MISSING:not-witnessed",
+    ):
+        capture_current_global_book_epoch(
+            conn,
+            probability_witnesses={
+                reduce_only_probability.family_key: reduce_only_probability
+            },
+            get_books=lambda _tokens: pytest.fail(
+                "missing required identity must fail before book I/O"
+            ),
+            clock=lambda: at,
+            max_age=_dt.timedelta(seconds=30),
+            required_token_ids=frozenset({"not-witnessed"}),
+        )
+
+
 def test_current_global_book_epoch_batches_snapshot_invalidation_truth():
     probability = _current_global_book_probability()
     conn = _global_book_metadata_conn(probability)

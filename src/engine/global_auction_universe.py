@@ -796,10 +796,19 @@ def capture_current_global_book_epoch(
 ) -> CurrentGlobalBookEpoch:
     """Fetch current books for the economically feasible token set."""
 
+    required_tokens = (
+        frozenset(str(token or "").strip() for token in required_token_ids)
+        if required_token_ids is not None
+        else None
+    )
     if (
         max_age <= timedelta(0)
         or not 1 <= batch_size <= 500
         or not 1 <= book_fetch_workers <= 4
+        or (
+            required_tokens is not None
+            and (not required_tokens or "" in required_tokens)
+        )
     ):
         raise ValueError("GLOBAL_BOOK_FETCH_CONTRACT_INVALID")
     bindings: list[tuple[str, str, str, str, str]] = []
@@ -813,14 +822,13 @@ def capture_current_global_book_epoch(
             ):
                 token_id = str(raw_token or "").strip()
                 if not token_id:
+                    if required_tokens is not None:
+                        continue
                     raise ValueError(
                         "GLOBAL_TOKEN_IDENTITY_INCOMPLETE:"
                         f"{family_key}:{binding.bin_id}:{side}"
                     )
-                if (
-                    required_token_ids is not None
-                    and token_id not in required_token_ids
-                ):
+                if required_tokens is not None and token_id not in required_tokens:
                     continue
                 bindings.append(
                     (
@@ -831,6 +839,12 @@ def capture_current_global_book_epoch(
                         token_id,
                     )
                 )
+    captured_tokens = frozenset(row[4] for row in bindings)
+    if required_tokens is not None and captured_tokens != required_tokens:
+        raise ValueError(
+            "GLOBAL_REQUIRED_BOOK_TOKEN_MISSING:"
+            + ",".join(sorted(required_tokens.difference(captured_tokens)))
+        )
     if not bindings or len({row[4] for row in bindings}) != len(bindings):
         raise ValueError("GLOBAL_TOKEN_UNIVERSE_AMBIGUOUS")
 
