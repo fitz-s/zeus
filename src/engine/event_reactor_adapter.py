@@ -8121,6 +8121,11 @@ def event_bound_live_adapter_from_trade_conn(
                 expected_tokens = _reduce_only_tokens(
                     _global_book_prefetch_tokens(bound_probabilities)
                 )
+                capture_required_tokens = (
+                    frozenset(expected_tokens)
+                    if reduce_only_book_tokens is not None and expected_tokens
+                    else None
+                )
                 matching_prefetch = (
                     prefetched
                     if prefetched is not None
@@ -8154,7 +8159,7 @@ def event_bound_live_adapter_from_trade_conn(
                             batch_size=batch_size,
                             book_fetch_workers=4,
                             metadata_overrides=book_metadata_by_key,
-                            required_token_ids=reduce_only_book_tokens,
+                            required_token_ids=capture_required_tokens,
                         )
                 else:
                     _, books, captured_at = matching_prefetch
@@ -8169,7 +8174,7 @@ def event_bound_live_adapter_from_trade_conn(
                         metadata_overrides=book_metadata_by_key,
                         prefetched_books=books,
                         prefetched_at_utc=captured_at,
-                        required_token_ids=reduce_only_book_tokens,
+                        required_token_ids=capture_required_tokens,
                     )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
@@ -8738,6 +8743,12 @@ def event_bound_live_adapter_from_trade_conn(
                 return probabilities, None
             bound_probabilities = dict(retained_bound_probabilities)
             bound_probabilities.update(rebound_probabilities)
+            if reduce_only_book_tokens is not None and not bound_probabilities:
+                logging.getLogger(__name__).warning(
+                    "global reduce-only book metadata unavailable for every "
+                    "held family; returning an empty executable cut"
+                )
+                return {}, None
             cache_checked_at = datetime.now(UTC)
             cached, cache_after_reason = _probe_global_book_epoch_cache(
                 trade_conn,

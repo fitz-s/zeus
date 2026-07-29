@@ -6539,6 +6539,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     bind_calls = []
     bind_required_tokens = []
     capture_required_tokens = []
+    omitted_bind_families = set()
     metadata_keys = (
         ("condition", "yes-token"),
         ("condition", "no-token"),
@@ -6573,7 +6574,11 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         if metadata_sink is not None:
             for metadata_key in metadata_keys:
                 metadata_sink[metadata_key] = metadata
-        return dict(probability_witnesses)
+        return {
+            family_key: witness
+            for family_key, witness in probability_witnesses.items()
+            if family_key not in omitted_bind_families
+        }
 
     def fake_capture(_trade_conn, *, metadata_overrides, **_):
         metadata_calls.append(dict(metadata_overrides))
@@ -6607,6 +6612,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
             family_key="family",
             bindings=(
                 SimpleNamespace(
+                    bin_id="bin",
                     condition_id="condition",
                     yes_token_id="yes-token",
                     no_token_id="no-token",
@@ -6662,6 +6668,50 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         _dt.datetime.now(_dt.timezone.utc),
     )
     assert capture_required_tokens[-1] == frozenset({"no-token"})
+
+    trade.execute(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?)",
+        (
+            "buy_no",
+            "failed-yes-token",
+            "failed-no-token",
+            "day0_window",
+            5.0,
+            5.0,
+        ),
+    )
+    omitted_bind_families.add("failed-family")
+    returned_probabilities, _ = captured["current_book_epoch_provider"](
+        {
+            **probabilities,
+            "failed-family": SimpleNamespace(
+                family_key="failed-family",
+                bindings=(
+                    SimpleNamespace(
+                        bin_id="failed-bin",
+                        condition_id="failed-condition",
+                        yes_token_id="failed-yes-token",
+                        no_token_id="failed-no-token",
+                    ),
+                ),
+            ),
+        },
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    assert set(returned_probabilities) == {"family"}
+    assert capture_required_tokens[-1] == frozenset({"no-token"})
+
+    capture_count = len(capture_required_tokens)
+    omitted_bind_families.add("family")
+    returned_probabilities, returned_epoch = captured[
+        "current_book_epoch_provider"
+    ](
+        probabilities,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    assert returned_probabilities == {}
+    assert returned_epoch is None
+    assert len(capture_required_tokens) == capture_count
 
     urgent_revision["value"] = (7, 8, 9)
     urgent_reason["value"] = "market_price_advanced"
@@ -19235,6 +19285,125 @@ def test_global_batch_preempts_after_book_capture_before_selection(
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
     )
+
+
+def test_global_batch_isolates_family_omitted_by_current_book_provider(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b),
+        captured_at_utc=decision_at,
+    )
+    family_a, family_b = scope.family_keys
+
+    def witness(family_key, suffix):
+        return SimpleNamespace(
+            family_key=family_key,
+            captured_at_utc=decision_at,
+            posterior_identity_hash=f"run-{suffix}",
+            witness_identity=f"q-{suffix}",
+            q_version=f"q-version-{suffix}",
+            family_binding_identity=f"binding-{suffix}",
+            sample_matrix_identity=f"samples-{suffix}",
+            band_alpha=0.05,
+            band_basis="lower-tail",
+        )
+
+    witness_by_event = {
+        event_a.event_id: witness(family_a, "a"),
+        event_b.event_id: witness(family_b, "b"),
+    }
+    selected_families = []
+    stored = {}
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth",
+            economic_identity="wealth-economic",
+            ledger_snapshot_id="ledger",
+        ),
+    )
+
+    def select(prepared, **_kwargs):
+        selected_families.append(
+            {
+                item.probability_witness.family_key
+                for item in prepared.values()
+            }
+        )
+        return PreparedGlobalAuctionResult(
+            decision=GlobalSingleOrderDecision(
+                shares=Decimal("0"),
+                cost_usd=Decimal("0"),
+                robust_delta_log_wealth=0.0,
+                robust_ev_usd=0.0,
+                capital_efficiency=0.0,
+                candidate=None,
+                no_trade_reason="CASH_DOMINATES",
+                rejection_reasons={},
+                candidate_evaluations=(),
+            ),
+            winner_event_id=None,
+            actuation=None,
+            holding_coverage=(),
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        select,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_args, **kwargs: stored.update(kwargs),
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a, event_b),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=lambda item, _at: EventSubmissionReceipt(
+            False,
+            item.event_id,
+            item.causal_snapshot_id,
+            prepared_global_family=SimpleNamespace(
+                probability_witness=witness_by_event[item.event_id]
+            ),
+        ),
+        actuate_winner=lambda *_: pytest.fail("cash-dominant cut must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=lambda probabilities, _at: (
+            {family_a: probabilities[family_a]},
+            _global_test_book("book-a", price="0.40"),
+        ),
+    )
+
+    assert selected_families == [{family_a}]
+    assert stored["probability_ineligible_by_family"][family_b] == (
+        "GLOBAL_CURRENT_BOOK_FAMILY_UNAVAILABLE"
+    )
+    assert result.winner_event_id is None
+    assert result.venue_submit_count == 0
 
 
 def test_global_batch_preempts_after_preflight_before_actuation(monkeypatch):

@@ -4327,17 +4327,49 @@ def process_current_global_batch(
         if current_book_epoch_provider is not None and probabilities:
             if cancelled("book_epoch_start"):
                 return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
+            requested_probability_family_keys = frozenset(probabilities)
             probabilities, book_epoch = current_book_epoch_provider(
                 probabilities,
                 current_time(),
             )
+            unexpected_probability_family_keys = frozenset(probabilities).difference(
+                requested_probability_family_keys
+            )
+            if unexpected_probability_family_keys:
+                return reject(
+                    "GLOBAL_CURRENT_BOOK_FAMILY_UNEXPECTED:"
+                    + ",".join(sorted(unexpected_probability_family_keys))
+                )
+            unavailable_book_family_keys = requested_probability_family_keys.difference(
+                probabilities
+            )
+            for family_key in unavailable_book_family_keys:
+                ineligible_by_family[family_key] = (
+                    "GLOBAL_CURRENT_BOOK_FAMILY_UNAVAILABLE"
+                )
             prepared_by_event = {
                 event_id: _rebind_prepared_probability(
                     prepared,
                     probabilities[prepared.probability_witness.family_key],
                 )
                 for event_id, prepared in prepared_by_event.items()
+                if prepared.probability_witness.family_key in probabilities
             }
+            eligible_family_keys = frozenset(
+                prepared.probability_witness.family_key
+                for prepared in prepared_by_event.values()
+            )
+            scope = (
+                current_global_auction_scope_from_events(
+                    tuple(
+                        full_scope_event_by_family[family_key]
+                        for family_key in sorted(eligible_family_keys)
+                    ),
+                    captured_at_utc=scope_at,
+                )
+                if eligible_family_keys
+                else decision_scope
+            )
         selection_epoch_base_identity = _selection_epoch_identity(
             full_scope=decision_scope,
             eligible_scope=(scope if eligible_family_keys else None),
