@@ -1,5 +1,5 @@
 # Created: 2026-05-26
-# Last reused or audited: 2026-07-03
+# Last reused or audited: 2026-07-29
 # Authority basis: PR332 user-channel/reconcile authority substrate.
 #   2026-06-08 (system_decomposition_plan §8 Step 3, P3 lift): the user-channel/reconcile
 #   cycle was lifted from src.main to src.ingest.price_channel_ingest. The four
@@ -598,15 +598,15 @@ def test_reconcile_wrapper_keeps_fill_commit_and_reports_redecision_failure(
         ),
     )
 
-    wrapped = daemon._scheduler_job("edli_user_channel_reconcile")(
+    m5_wrapped = daemon._scheduler_job("edli_user_channel_reconcile")(
         lane._edli_user_channel_reconcile_cycle
     )
-    result = wrapped()
+    m5_result = m5_wrapped()
 
-    assert result["scheduler_failed"] is False
-    assert "fill wake unavailable" in result["scheduler_failure_reason"]
+    assert m5_result["scheduler_failed"] is False
+    assert m5_result["status"] == "m5_authority_proof_complete"
     assert health_writes[-1]["failed"] is False
-    assert health_writes[-1]["extra"] == result
+    assert health_writes[-1]["extra"] == m5_result
     durable = _conn(db_path).execute(
         """
         SELECT payload_json
@@ -616,6 +616,16 @@ def test_reconcile_wrapper_keeps_fill_commit_and_reports_redecision_failure(
     ).fetchone()
     assert durable is not None
     assert json.loads(durable["payload_json"])["fill_authority_state"] == "FILL_CONFIRMED"
+
+    repair_result = daemon._scheduler_job("edli_fill_bridge_repair")(
+        lane._edli_fill_bridge_repair_cycle
+    )()
+
+    assert repair_result["scheduler_failed"] is False
+    assert "fill wake unavailable" in repair_result["scheduler_failure_reason"]
+    assert health_writes[-1]["job_name"] == "edli_fill_bridge_repair"
+    assert health_writes[-1]["failed"] is False
+    assert health_writes[-1]["extra"] == repair_result
 
 
 def test_user_channel_reconcile_cycle_recovers_rest_filled_orphan(monkeypatch, tmp_path):
@@ -687,6 +697,7 @@ def test_user_channel_reconcile_cycle_recovers_rest_filled_orphan(monkeypatch, t
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
     main._edli_user_channel_reconcile_cycle()
+    main._edli_fill_bridge_repair_cycle()
 
     check_ledger = LiveOrderAggregateLedger(_conn(db_path))
     projection = check_ledger.get_projection("event-1:intent-1")
@@ -1076,7 +1087,7 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
 
     def _open_world(*args, **kwargs):
         phase_transactions.append(("world_open", conn.in_transaction, gate_depth))
-        return conn
+        return _conn(db_path)
 
     def _open_trade(*args, **kwargs):
         phase_transactions.append(("trade_open", False, gate_depth))
@@ -1131,11 +1142,13 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
     main._edli_user_channel_reconcile_cycle()
+    main._edli_fill_bridge_repair_cycle()
 
     assert phase_transactions == [
         ("user_poll", False, 0),
         ("world_open", False, 1),
         ("external_reconcile", False, 0),
+        ("world_open", False, 1),
         ("confirmed_scan", False, 1),
         ("rest_scan", False, 1),
         ("trade_open", False, 1),
@@ -1143,6 +1156,7 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
     assert gate_owners == [
         "price_channel_user_inbox",
         "price_channel_venue_reconcile",
+        "price_channel_fill_bridge_reconcile",
         "price_channel_fill_bridge",
     ]
     assert gate_depth == 0
@@ -1150,7 +1164,6 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
     assert projection.current_state == "RECONCILED"
     assert projection.pending_reconcile is False
 
-    conn = _conn(db_path)
     phase_transactions.clear()
     gate_owners.clear()
     monkeypatch.setattr(
@@ -1169,11 +1182,13 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
     )
 
     main._edli_user_channel_reconcile_cycle()
+    main._edli_fill_bridge_repair_cycle()
 
     assert "price_channel_fill_bridge" not in gate_owners
     assert gate_owners == [
         "price_channel_user_inbox",
         "price_channel_venue_reconcile",
+        "price_channel_fill_bridge_reconcile",
     ]
 
 

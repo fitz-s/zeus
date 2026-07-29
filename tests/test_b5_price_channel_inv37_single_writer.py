@@ -1,6 +1,6 @@
 # Created: 2026-06-20
-# Last audited: 2026-07-28
-# Last reused/audited: 2026-07-28
+# Last audited: 2026-07-29
+# Last reused/audited: 2026-07-29
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). Quote projection
 #   writes TRADE only; derived redecision and NEW_MARKET_DISCOVERED facts write WORLD
 #   through independently coordinated lanes. TRADE quote refresh must never acquire
@@ -444,18 +444,29 @@ def test_forever_ingestor_uses_owner_connections_not_attached_connection():
 def test_user_channel_reconcile_uses_world_main_with_trades_attached():
     """EDLI ledger writes must resolve to canonical world MAIN while authenticated
     command/trade facts resolve through the attached ``trades`` schema."""
-    node = _func_node("_edli_user_channel_reconcile_cycle")
-    assigned_openers = {
+    m5_node = _func_node("_edli_user_channel_reconcile_cycle")
+    m5_openers = {
         target.id: sub.value.func.id
-        for sub in ast.walk(node)
+        for sub in ast.walk(m5_node)
         if isinstance(sub, ast.Assign)
         and isinstance(sub.value, ast.Call)
         and isinstance(sub.value.func, ast.Name)
         for target in sub.targets
         if isinstance(target, ast.Name)
     }
-    assert assigned_openers["conn"] == "get_world_connection_with_trades_required"
-    assert assigned_openers["bridge_conn"] == "get_trade_connection_with_world_required"
+    assert m5_openers["conn"] == "get_world_connection_with_trades_required"
+
+    repair_node = _func_node("_edli_fill_bridge_repair_cycle")
+    repair_openers = {
+        target.id: sub.value.func.id
+        for sub in ast.walk(repair_node)
+        if isinstance(sub, ast.Assign)
+        and isinstance(sub.value, ast.Call)
+        and isinstance(sub.value.func, ast.Name)
+        for target in sub.targets
+        if isinstance(target, ast.Name)
+    }
+    assert repair_openers["bridge_conn"] == "get_trade_connection_with_world_required"
 
 
 def test_forever_ingestor_passes_independent_trade_and_world_gates():

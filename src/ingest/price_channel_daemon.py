@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-07-29
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision:
 #   a persistent WS thread is a distinct lifecycle → own service),
@@ -16,7 +16,8 @@ bridges fills + book facts into the tables the order runtime only READS (interfa
     persistent WebSocket lifecycle, which is WHY P3 is its own service (§6 co-location:
     distinct from cron-tick daemons),
   - ``edli_market_channel_ingestor``  (market-channel online-service bootstrap, 1-min),
-  - ``edli_user_channel_reconcile``   (user-channel/reconcile + durable fill bridge, 1-min).
+  - ``edli_user_channel_reconcile``   (bounded user-channel/reconcile M5 proof, 30-sec),
+  - ``edli_fill_bridge_repair``       (durable fill bridge + derived redecision repair, 1-min).
 
 All producer bodies live in ``src.ingest.price_channel_ingest`` (a trading-lane-free
 module). The order runtime reads the durable fill bridge + ``execution_feasibility_evidence``
@@ -252,6 +253,8 @@ def main() -> None:
     # The lifted producers from the trading-lane-free module. Importing this module does
     # NOT pull in src.main / src.engine — failure-domain isolation (criterion 3).
     from src.ingest.price_channel_ingest import (
+        M5_AUTHORITY_PROOF_CADENCE_SECONDS,
+        _edli_fill_bridge_repair_cycle,
         _edli_held_quote_refresh_cycle,
         _edli_market_channel_ingestor_cycle,
         _edli_user_channel_reconcile_cycle,
@@ -294,6 +297,8 @@ def main() -> None:
         timezone=timezone.utc,
         executors={
             "default": APSchedulerThreadPoolExecutor(max_workers=2),
+            "m5_authority": APSchedulerThreadPoolExecutor(max_workers=1),
+            "fill_bridge": APSchedulerThreadPoolExecutor(max_workers=1),
             "held_quote": APSchedulerThreadPoolExecutor(max_workers=1),
             "heartbeat": APSchedulerThreadPoolExecutor(max_workers=1),
         },
@@ -342,14 +347,29 @@ def main() -> None:
         executor="held_quote",
         next_run_time=datetime.now(timezone.utc),
     )
-    # PRODUCER 3: user-channel/reconcile + durable fill bridge (1-min).
+    # PRODUCER 3: bounded M5 authority proof. SCOPE: only WS submit-latch
+    # recovery evidence; DRAIN: one completed user-channel/reconcile sweep;
+    # RESET: scheduler health expires at the existing 180s guard boundary.
     _scheduler.add_job(
         _scheduler_job("edli_user_channel_reconcile")(_edli_user_channel_reconcile_cycle),
         "interval",
-        minutes=1,
+        seconds=M5_AUTHORITY_PROOF_CADENCE_SECONDS,
         id="edli_user_channel_reconcile",
         max_instances=1,
         coalesce=True,
+        executor="m5_authority",
+    )
+    # PRODUCER 3A: durable fill bridge and derived fill-redecision repair. It
+    # remains single-instance and uses the existing canonical writer gates, but
+    # a long repair pass can no longer consume M5's proof cadence.
+    _scheduler.add_job(
+        _scheduler_job("edli_fill_bridge_repair")(_edli_fill_bridge_repair_cycle),
+        "interval",
+        minutes=1,
+        id="edli_fill_bridge_repair",
+        max_instances=1,
+        coalesce=True,
+        executor="fill_bridge",
     )
     # PRODUCER 4: continuous fill synchronizer (LX-T4, docs/rebuild/
     # local_ledger_excision_2026-07-12.md). Independent of WS health/findings
