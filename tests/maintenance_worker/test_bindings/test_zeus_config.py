@@ -2,15 +2,15 @@
 # Last reused or audited: 2026-05-15
 # Authority basis:
 #   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/05_execution_packets/PACKET_INDEX.md §P6
-#   bindings/zeus/config.yaml
-#   bindings/zeus/safety_overrides.yaml
+#   deploy/agent_safety/zeus/config.yaml
+#   deploy/agent_safety/zeus/safety_overrides.yaml
 #   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
 """
 test_zeus_config.py — Verify Zeus binding configs load correctly.
 
 Tests:
-- bindings/zeus/config.yaml: valid YAML, required keys present, values correct
-- bindings/zeus/safety_overrides.yaml: valid YAML, additive structure
+- deploy/agent_safety/zeus/config.yaml: valid YAML, required keys present, values correct
+- deploy/agent_safety/zeus/safety_overrides.yaml: valid YAML, additive structure
 - Allowlist paths reference valid TASK_CATALOG task IDs
 - Dry-run floor settings match hardcoded FLOOR_EXEMPT_TASK_IDS
 - Safety overrides are ADDITIVE (do not reduce the universal set)
@@ -28,7 +28,7 @@ import yaml
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # test_bindings/ -> maintenance_worker/ -> tests/ -> repo root
-BINDINGS_DIR = REPO_ROOT / "bindings" / "zeus"
+BINDINGS_DIR = REPO_ROOT / "deploy" / "agent_safety" / "zeus"
 TASK_CATALOG_PATH = (
     REPO_ROOT
     / "docs/operations/task_2026-05-15_runtime_improvement_engineering_package"
@@ -62,7 +62,7 @@ def task_catalog() -> dict:
 
 
 def test_config_yaml_exists():
-    assert (BINDINGS_DIR / "config.yaml").is_file(), "bindings/zeus/config.yaml missing"
+    assert (BINDINGS_DIR / "config.yaml").is_file(), "deploy/agent_safety/zeus/config.yaml missing"
 
 
 def test_config_has_required_top_level_keys(zeus_config):

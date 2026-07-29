@@ -3,16 +3,16 @@
 # Authority basis:
 #   docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
 #   §"Forbidden Targets" Groups 1–6
-#   bindings/universal/safety_defaults.yaml (universal rules)
-#   bindings/zeus/safety_overrides.yaml (project-specific additive rules)
+#   deploy/agent_safety/universal/safety_defaults.yaml (universal rules)
+#   deploy/agent_safety/zeus/safety_overrides.yaml (project-specific additive rules)
 """
 forbidden_rules_loader — Load forbidden-path rules from binding YAML files.
 
 load_forbidden_rules(bindings_dir: Path) -> list[ForbiddenRule]
 
 Reads:
-  1. bindings/universal/safety_defaults.yaml  — REQUIRED; HARD FAIL if absent
-  2. bindings/<project>/safety_overrides.yaml — UNION (additive only)
+  1. deploy/agent_safety/universal/safety_defaults.yaml  — REQUIRED; HARD FAIL if absent
+  2. deploy/agent_safety/<project>/safety_overrides.yaml — UNION (additive only)
 
 Rules from safety_defaults are prepended; safety_overrides are appended.
 Missing universal-defaults → raises ConfigurationError (fail-closed).
@@ -147,7 +147,7 @@ def load_forbidden_rules(bindings_dir: str) -> list:
     Load and return the merged forbidden-rule list for the given bindings directory.
 
     Args:
-        bindings_dir: string path to the bindings/ root directory
+        bindings_dir: string path to the deploy/agent_safety/ root directory
                       (keyed as string for functools.cache hashability).
 
     Returns:

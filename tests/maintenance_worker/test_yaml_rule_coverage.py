@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-16
 # Authority basis:
 #   maintenance_worker/core/validator.py _FORBIDDEN_RULES (hardcoded reference)
-#   bindings/universal/safety_defaults.yaml + bindings/zeus/safety_overrides.yaml
+#   deploy/agent_safety/universal/safety_defaults.yaml + deploy/agent_safety/zeus/safety_overrides.yaml
 """
 Regression test: YAML-loaded rules must be a superset of the hardcoded _FORBIDDEN_RULES.
 
@@ -23,7 +23,7 @@ from maintenance_worker.core.forbidden_rules_loader import load_forbidden_rules
 # test lives at tests/maintenance_worker/test_yaml_rule_coverage.py
 # parents[0]=tests/maintenance_worker, parents[1]=tests, parents[2]=repo_root
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_BINDINGS_DIR = _REPO_ROOT / "bindings"
+_BINDINGS_DIR = _REPO_ROOT / "deploy" / "agent_safety"
 
 
 class TestYamlRuleCoverage:

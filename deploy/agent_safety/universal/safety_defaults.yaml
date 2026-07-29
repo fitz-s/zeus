@@ -1,4 +1,4 @@
-# bindings/universal/safety_defaults.yaml
+# deploy/agent_safety/universal/safety_defaults.yaml
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
 # Authority basis:
@@ -7,7 +7,7 @@
 #
 # These rules are project-agnostic. They apply to ALL maintenance_worker
 # deployments regardless of binding (zeus, neptune, etc.).
-# Project-specific overrides live in bindings/<project>/safety_overrides.yaml.
+# Project-specific overrides live in deploy/agent_safety/<project>/safety_overrides.yaml.
 #
 # Note: /.openclaw/ is OMC-specific (not universal). It appears in
 # safety_overrides.yaml for zeus, not here.

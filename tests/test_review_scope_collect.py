@@ -64,7 +64,7 @@ class TestClassify:
         assert classify("migrations/0042_add_column.sql") == 0
 
     def test_safety_overrides_is_tier0(self):
-        assert classify("bindings/zeus/safety_overrides.yaml") == 0
+        assert classify("deploy/agent_safety/zeus/safety_overrides.yaml") == 0
 
     # Tier 1 surfaces
     def test_calibration_is_tier1(self):

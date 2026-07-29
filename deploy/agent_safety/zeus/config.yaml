@@ -27,7 +27,7 @@ paths:
   # Safety contract (core; augmented by safety_overrides.yaml)
   safety_contract: "${ZEUS_REPO}/docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md"
   # Safety overrides (Zeus-specific additions to the universal forbidden list)
-  safety_overrides: "${ZEUS_REPO}/bindings/zeus/safety_overrides.yaml"
+  safety_overrides: "${ZEUS_REPO}/deploy/agent_safety/zeus/safety_overrides.yaml"
 
 # ------------------------------------------------------------------
 # Scheduler configuration

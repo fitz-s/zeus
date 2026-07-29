@@ -70,14 +70,14 @@ additional_forbidden_paths:
       LIVE_TRADING_LOCKED_2026-05-04.md governs live mode activation.
       The maintenance worker must never touch this file.
 
-  # ── REVIEW.md and SECURITY-FALSE-POSITIVES.md (project authority) ────────
+  # ── REVIEW.md and docs/reference/security_false_positives.md (project authority) ──
   - pattern: "*REVIEW.md"
     group: zeus_authority
     description: >
       REVIEW.md is a project-authority doc. Maintenance worker must not modify it.
       (AGENTS.md and CLAUDE.md are already forbidden by the universal contract.)
 
-  - pattern: "*SECURITY-FALSE-POSITIVES.md"
+  - pattern: "*docs/reference/security_false_positives.md"
     group: zeus_authority
     description: Security false-positive register; authority surface.
 
@@ -94,8 +94,8 @@ additional_forbidden_paths:
       All files under config/ are live-trading governance surfaces.
       No maintenance action may modify them.
 
-  # ── plist install targets (maintenance-owned plist is in bindings, not LaunchAgents)
-  - pattern: "*/bindings/zeus/launchd_plist.plist"
+  # ── plist install targets (maintenance-owned plist is in deploy/agent_safety, not LaunchAgents)
+  - pattern: "*/deploy/agent_safety/zeus/launchd_plist.plist"
     group: zeus_binding_integrity
     description: >
       The generated plist source file. The maintenance worker must not
