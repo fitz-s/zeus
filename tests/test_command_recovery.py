@@ -10232,6 +10232,174 @@ class TestRecoveryResolutionTable:
             }
         ]
 
+    def test_live_tick_projects_recorded_matched_full_exit(self, tmp_path, monkeypatch):
+        """A durable full EXIT match must not wait for the full recovery sweep."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema, init_schema_trade_only
+        from src.state.venue_command_repo import append_event, append_order_fact
+
+        db_path = tmp_path / "live-tick-matched-exit.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        _insert(seed, command_id="cmd-entry", position_id="pos-001", size=8.25, price=0.56)
+        _advance_to_acked(seed, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(seed, command_id="cmd-entry", order_id="ord-entry")
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'day0_window',
+                   shares = 8.25,
+                   chain_shares = 8.25,
+                   cost_basis_usd = 4.62,
+                   entry_price = 0.56,
+                   order_status = 'filled'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _seed_full_exit_intent(seed, position_id="pos-001", shares=8.25)
+        _insert(
+            seed,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=8.25,
+            price=0.95,
+            token_id="tok-001",
+            created_at="2026-04-26T00:04:30Z",
+        )
+        _advance_to_acked(seed, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            seed,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="0xexitfill",
+            state="MATCHED",
+            filled_size="8.25",
+            fill_price="0.95",
+            tx_hash="0xexitfill",
+        )
+        append_order_fact(
+            seed,
+            venue_order_id="ord-exit",
+            command_id="cmd-exit",
+            state="MATCHED",
+            remaining_size="0",
+            matched_size="8.25",
+            source="REST",
+            observed_at="2026-04-26T00:05:00Z",
+            venue_timestamp="2026-04-26T00:05:00Z",
+            raw_payload_hash="e" * 64,
+            raw_payload_json={
+                "submit_result": {
+                    "orderID": "ord-exit",
+                    "status": "matched",
+                    "side": "SELL",
+                    "makingAmount": "8.25",
+                    "takingAmount": "7.8375",
+                    "transactionsHashes": ["0xexitfill"],
+                }
+            },
+        )
+        append_event(
+            seed,
+            command_id="cmd-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "venue_order_id": "ord-exit",
+                "filled_size": "8.25",
+                "fill_price": "0.95",
+                "trade_id": "0xexitfill",
+            },
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        _conn_factory.supports_nonblocking_flocks = True
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        alignment = []
+        real_alignment = command_recovery.reconcile_exit_lifecycle_alignment_repairs
+
+        def _alignment_pass(conn):
+            result = real_alignment(conn)
+            alignment.append(result)
+            return result
+
+        def _stop_after_local_passes(*_args, **_kwargs):
+            raise RuntimeError("stop after local recovery passes")
+
+        monkeypatch.setattr(
+            command_recovery,
+            "reconcile_exit_lifecycle_alignment_repairs",
+            _alignment_pass,
+        )
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "capture_venue_read_snapshot",
+            _stop_after_local_passes,
+        )
+        client = MagicMock(
+            spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        with pytest.raises(RuntimeError, match="stop after local recovery passes"):
+            command_recovery.reconcile_unresolved_commands(
+                client=client,
+                scope="live_tick",
+            )
+
+        check = _conn_factory()
+        try:
+            current = check.execute(
+                """
+                SELECT phase, order_status, exit_price, realized_pnl_usd
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+            event = check.execute(
+                """
+                SELECT event_type, phase_before, phase_after, order_id, command_id
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                   AND event_type = 'EXIT_ORDER_FILLED'
+                """
+            ).fetchone()
+        finally:
+            check.close()
+
+        assert alignment == [{
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }]
+        assert dict(current) == {
+            "phase": "economically_closed",
+            "order_status": "sell_filled",
+            "exit_price": pytest.approx(0.95),
+            "realized_pnl_usd": pytest.approx(3.22),
+        }
+        assert dict(event) == {
+            "event_type": "EXIT_ORDER_FILLED",
+            "phase_before": "pending_exit",
+            "phase_after": "economically_closed",
+            "order_id": "ord-exit",
+            "command_id": "cmd-exit",
+        }
+
     def test_partial_entry_uses_canonical_order_truth_over_later_weaker_fact(
         self,
         conn,

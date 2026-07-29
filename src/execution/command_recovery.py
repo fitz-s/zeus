@@ -56,6 +56,7 @@ from src.execution.command_bus import (
     VenueCommand,
 )
 from src.execution.exit_safety import reconcile_review_required_exit_mutex_releases
+from src.execution.exchange_reconcile import _ensure_exit_fill_position_event
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
 from src.contracts.venue_submission_envelope import (
     LIVE_ORDER_MAX_UNIT_PRICE,
@@ -2709,8 +2710,6 @@ def _append_exit_order_fill_projection(
     if str(command.get("intent_kind") or "").upper() != "EXIT":
         return False
     try:
-        from src.execution.exchange_reconcile import _ensure_exit_fill_position_event
-
         _ensure_exit_fill_position_event(
             conn,
             command=command,
@@ -10298,7 +10297,7 @@ def _exit_lifecycle_alignment_candidates(conn: sqlite3.Connection) -> list[dict]
            AND (
                 cmd.state != 'FILLED'
                 OR (
-                    pc.phase = 'pending_exit'
+                    pc.phase IN ('active', 'day0_window', 'pending_exit')
                     AND UPPER(COALESCE(latest_order.state, '')) IN ('MATCHED', 'FILLED')
                     AND NOT EXISTS (
                         SELECT 1
@@ -21674,6 +21673,17 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         reconcile_authenticated_entry_trade_facts,
         "authenticated_entry_trade_fact",
     )
+
+    if scope == "live_tick":
+        # Submit-time MATCHED facts are durable current exit truth, but the
+        # recorded-fill pass correctly reserves MATCHED/MINED for already
+        # closed projections. Reconcile command-bound full EXIT fills before
+        # lower-priority maintenance so they cannot wait for a full sweep.
+        _db_pass(
+            "exit_lifecycle_alignment_repair",
+            reconcile_exit_lifecycle_alignment_repairs,
+            "exit_lifecycle_alignment_repair",
+        )
 
     if scope == "restart_preflight":
         _db_pass(
