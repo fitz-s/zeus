@@ -28,6 +28,10 @@ address associated with the account.
   secrets being committed.
 - `config/settings.json` is operator-local and not tracked in version
   control. See `config/settings.example.json` for the safe template.
+- Scanner rulings for known false positives (identifiers that pattern-match
+  as secrets but are not) are recorded in
+  [`docs/reference/security_false_positives.md`](docs/reference/security_false_positives.md),
+  the companion registry to `.gitleaks.toml`.
 
 ### Disclosed incident
 
