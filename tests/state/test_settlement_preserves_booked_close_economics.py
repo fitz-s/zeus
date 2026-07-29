@@ -184,6 +184,9 @@ class TestBookedCloseEconomicsSurviveSettlementReload:
         assert closed.exit_price == pytest.approx(0.27), (
             f"in-memory settled Position must keep booked exit_price 0.27, got {closed.exit_price}"
         )
+        from src.engine.lifecycle_events import build_position_current_projection
+
+        assert build_position_current_projection(closed)["settlement_price"] is None
 
         events, projection = build_settlement_canonical_write(
             closed,
@@ -196,10 +199,16 @@ class TestBookedCloseEconomicsSurviveSettlementReload:
             phase_before="economically_closed",
             settlement_value=1.0,
         )
+        assert projection["settlement_price"] == pytest.approx(1.0), (
+            "settlement_price must come from the held-position outcome, not "
+            "the preserved pre-settlement exit price"
+        )
+        assert projection["exit_price"] == pytest.approx(0.27)
         append_many_and_project(conn, events, projection)
 
         row = conn.execute(
-            "SELECT phase, realized_pnl_usd, exit_price FROM position_current WHERE position_id = ?",
+            "SELECT phase, realized_pnl_usd, exit_price, settlement_price "
+            "FROM position_current WHERE position_id = ?",
             ("pos-eco-settle",),
         ).fetchone()
         assert row is not None
@@ -212,6 +221,7 @@ class TestBookedCloseEconomicsSurviveSettlementReload:
             "BUG B: settlement reprojection clobbered booked exit_price "
             f"0.27 -> {row['exit_price']}"
         )
+        assert row["settlement_price"] == pytest.approx(1.0)
 
         settled_events = [e for e in events if e["event_type"] == "SETTLED"]
         assert len(settled_events) == 1
@@ -224,6 +234,103 @@ class TestBookedCloseEconomicsSurviveSettlementReload:
         )
         assert settled_payload["exit_price"] == pytest.approx(0.27)
 
+        conn.close()
+
+    def test_economically_closed_loser_keeps_fill_and_projects_zero_payout(self):
+        from src.engine.lifecycle_events import build_settlement_canonical_write
+        from src.state.portfolio import PortfolioState, compute_settlement_close
+
+        conn = _world_conn()
+        _insert_position_current_row(
+            conn,
+            position_id="pos-eco-settle-loser",
+            phase="economically_closed",
+            direction="buy_no",
+            shares=12.0,
+            cost_basis_usd=7.56,
+            entry_price=0.63,
+            realized_pnl_usd=1.32,
+            exit_price=0.74,
+        )
+        pos = _load_single_position(conn, "pos-eco-settle-loser")
+        portfolio = PortfolioState(positions=[pos])
+        closed = compute_settlement_close(
+            portfolio,
+            "pos-eco-settle-loser",
+            0.0,
+            "SETTLEMENT",
+        )
+
+        events, projection = build_settlement_canonical_write(
+            closed,
+            winning_bin=closed.bin_label,
+            won=True,
+            outcome=0,
+            sequence_no=2,
+            phase_before="economically_closed",
+            settlement_value=0.0,
+        )
+
+        assert projection["exit_price"] == pytest.approx(0.74)
+        assert projection["realized_pnl_usd"] == pytest.approx(1.32)
+        assert projection["settlement_price"] == pytest.approx(0.0)
+        assert events[0]["phase_after"] == "settled"
+        conn.close()
+
+    def test_projection_boundary_rejects_nonbinary_settlement_price(self):
+        from src.engine.lifecycle_events import build_settlement_canonical_write
+        from src.state.db import append_many_and_project
+        from src.state.portfolio import PortfolioState, compute_settlement_close
+        from src.state.projection import InvalidSettlementPriceError
+
+        conn = _world_conn()
+        _insert_position_current_row(
+            conn,
+            position_id="pos-nonbinary-settlement",
+            phase="economically_closed",
+            direction="buy_no",
+            shares=12.0,
+            cost_basis_usd=7.56,
+            entry_price=0.63,
+            realized_pnl_usd=1.32,
+            exit_price=0.74,
+        )
+        pos = _load_single_position(conn, "pos-nonbinary-settlement")
+        closed = compute_settlement_close(
+            PortfolioState(positions=[pos]),
+            pos.trade_id,
+            1.0,
+            "SETTLEMENT",
+        )
+        events, projection = build_settlement_canonical_write(
+            closed,
+            winning_bin=closed.bin_label,
+            won=False,
+            outcome=1,
+            sequence_no=2,
+            phase_before="economically_closed",
+            settlement_value=1.0,
+        )
+        projection["settlement_price"] = 0.74
+
+        with pytest.raises(InvalidSettlementPriceError):
+            append_many_and_project(conn, events, projection)
+
+        from src.state.projection import upsert_position_current
+
+        projection["phase"] = "economically_closed"
+        projection["settlement_price"] = 1.0
+        with pytest.raises(InvalidSettlementPriceError):
+            upsert_position_current(conn, projection)
+
+        row = conn.execute(
+            "SELECT phase, settlement_price FROM position_current WHERE position_id = ?",
+            (pos.trade_id,),
+        ).fetchone()
+        assert dict(row) == {
+            "phase": "economically_closed",
+            "settlement_price": None,
+        }
         conn.close()
 
     def test_direct_settlement_from_active_still_computes_from_settlement_price(self):
@@ -267,14 +374,17 @@ class TestBookedCloseEconomicsSurviveSettlementReload:
             phase_before="active",
             settlement_value=1.0,
         )
+        assert projection["settlement_price"] == pytest.approx(1.0)
         append_many_and_project(conn, events, projection)
 
         row = conn.execute(
-            "SELECT realized_pnl_usd, exit_price FROM position_current WHERE position_id = ?",
+            "SELECT realized_pnl_usd, exit_price, settlement_price "
+            "FROM position_current WHERE position_id = ?",
             ("pos-active-settle",),
         ).fetchone()
         assert row["realized_pnl_usd"] == pytest.approx(5.40)
         assert row["exit_price"] == pytest.approx(1.0)
+        assert row["settlement_price"] == pytest.approx(1.0)
         conn.close()
 
     def test_open_position_still_projects_null_economics(self):
@@ -309,4 +419,5 @@ class TestBookedCloseEconomicsSurviveSettlementReload:
             f"got {projection['realized_pnl_usd']}"
         )
         assert projection["exit_price"] is None
+        assert projection["settlement_price"] is None
         conn.close()

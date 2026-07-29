@@ -306,6 +306,28 @@ class MissingRealizedPnlOnCloseError(ValueError):
         self.phase = phase
 
 
+class InvalidSettlementPriceError(ValueError):
+    """Raised when a projection collapses settlement payout into another price axis."""
+
+    def __init__(
+        self,
+        *,
+        position_id: str,
+        phase: str,
+        settlement_price: object,
+    ) -> None:
+        super().__init__(
+            "InvalidSettlementPrice: "
+            f"position_id={position_id!r} phase={phase!r} "
+            f"settlement_price={settlement_price!r}; "
+            "settled positions require binary payout 0.0 or 1.0 and "
+            "non-settled positions require NULL"
+        )
+        self.position_id = position_id
+        self.phase = phase
+        self.settlement_price = settlement_price
+
+
 # Phases that require a non-empty condition_id. These are the phases where
 # the position is still active and CTF operations may be needed.
 _CONDITION_ID_REQUIRED_PHASES = frozenset(_F109_OPEN_PHASES)
@@ -665,6 +687,26 @@ def upsert_position_current(
     candidate_phase = str(projection.get("phase") or "")
     candidate_tokens = _projection_held_tokens(projection)
     candidate_position_id = str(projection.get("position_id") or "")
+    candidate_settlement_price = projection.get("settlement_price")
+    try:
+        normalized_settlement_price = (
+            None
+            if candidate_settlement_price is None
+            else float(candidate_settlement_price)
+        )
+    except (TypeError, ValueError):
+        normalized_settlement_price = None
+    settlement_price_valid = (
+        normalized_settlement_price in {0.0, 1.0}
+        if candidate_phase == LifecyclePhase.SETTLED.value
+        else candidate_settlement_price is None
+    )
+    if not settlement_price_valid:
+        raise InvalidSettlementPriceError(
+            position_id=candidate_position_id,
+            phase=candidate_phase,
+            settlement_price=candidate_settlement_price,
+        )
     if candidate_position_id and candidate_phase not in _ABSORBING_POSITION_PHASES:
         existing_phase_row = conn.execute(
             f"SELECT phase FROM {table_name} WHERE position_id = ?",

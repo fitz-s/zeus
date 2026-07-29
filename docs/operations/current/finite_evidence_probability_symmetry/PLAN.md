@@ -2325,3 +2325,44 @@ Acceptance requires:
   canonical event/monitor-freshness evidence are green;
 - a held family with canonical target-day observation can no longer remain
   eventless solely because its global freshness rank exceeds the emit limit.
+
+## 2026-07-29 Settlement payout and exit-price axis separation
+
+The loss audit found settled rows whose `settlement_price` equals a
+pre-settlement SELL fill such as 0.74 or 0.75. The held position had already
+locked its realized PnL at that fill, but the later harvester settlement fold
+reused `Position.exit_price` as the binary settlement payout. This collapses
+two independent facts: execution price answers what Zeus sold for, while
+settlement payout answers whether the held token resolved to 0 or 1. The
+chain-mirror settlement writer already preserves this distinction; the
+canonical lifecycle builder does not.
+
+The correction makes the settlement builder author `settlement_price`
+exclusively from its validated held-position `outcome` and makes the generic
+position projection leave that field unset because a runtime `Position` alone
+does not carry an independent settlement outcome. `exit_price` and previously
+booked `realized_pnl_usd` remain unchanged for economically closed positions.
+Direct-to-settlement positions still compute their PnL and exit price from the
+binary payout before the canonical write.
+
+SCOPE is the canonical settlement event/projection pair. DRAIN is the next
+harvester or chain-mirror settlement fold. RESET is one SETTLED event whose
+validated `outcome` projects the same binary `settlement_price`. No probability,
+entry/exit decision, sizing, venue action, lifecycle grammar, source authority,
+or settlement winner rule changes.
+
+Allowed files are `src/engine/lifecycle_events.py`,
+`src/state/projection.py`, the hard-terminal projection recovery twin,
+focused settlement antibodies, and this plan.
+Acceptance requires:
+
+- an economically closed winner preserves its real 0.27 exit and booked PnL
+  while projecting `settlement_price=1.0`;
+- an economically closed loser preserves its real fill while projecting
+  `settlement_price=0.0`;
+- the generic projection cannot invent settlement payout from `exit_price`;
+- the canonical projection boundary rejects non-binary settled payout and any
+  settlement payout attached to a non-settled phase;
+- direct active/day0 settlement remains binary and its PnL is unchanged;
+- planning-lock, targeted settlement/state tests, compile, diff, evidence-based
+  review, standard hot-fix landing, and post-restart settled-row evidence pass.

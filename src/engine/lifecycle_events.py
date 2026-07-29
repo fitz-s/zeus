@@ -312,14 +312,11 @@ def build_position_current_projection(position: Any) -> dict:
         # NULL (pnl/exit_price default 0.0 with no close → coerced to NULL below).
         "realized_pnl_usd": _settled_economics_value(position, "pnl"),
         "exit_price": _settled_economics_value(position, "exit_price"),
-        # settlement_price is the resolved settlement value, meaningful ONLY for a
-        # settled position. compute_settlement_close sets pos.exit_price =
-        # settlement_price, so it equals exit_price on settled rows; NULL otherwise.
-        "settlement_price": (
-            _settled_economics_value(position, "exit_price")
-            if _is_settled_runtime_state(position)
-            else None
-        ),
+        # A runtime Position owns execution economics, not the independent
+        # binary settlement outcome.  The settlement builder below is the only
+        # generic lifecycle writer with validated held-position outcome
+        # authority, so only it may populate settlement_price.
+        "settlement_price": None,
         "settled_at": (
             _nullable(getattr(position, "last_exit_at", ""))
             if _is_settled_runtime_state(position)
@@ -923,6 +920,9 @@ def build_settlement_canonical_write(
         )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
+    # settlement_price is the held token's binary payout.  It is independent
+    # of exit_price when the position was sold before resolution.
+    projection["settlement_price"] = float(outcome)
 
     occurred_at = _non_empty(
         getattr(position, "last_exit_at", ""),

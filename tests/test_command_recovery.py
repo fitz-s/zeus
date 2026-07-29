@@ -14972,7 +14972,8 @@ class TestRecoveryResolutionTable:
                 '2026-07-02T11:45:30+00:00', 'pending_exit', 'settled',
                 'edli', 'dec-1', 'snap-1', NULL, 'cmd-1',
                 'harvester', 'idem-settled-drift', NULL,
-                'src.execution.harvester', '{"pnl": 3.5, "exit_price": 1.0}', 'live'
+                'src.execution.harvester',
+                '{"pnl": 3.5, "exit_price": 1.0, "outcome": 1}', 'live'
             )
             """
         )
@@ -14985,10 +14986,12 @@ class TestRecoveryResolutionTable:
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         row = conn.execute(
-            "SELECT phase, realized_pnl_usd FROM position_current WHERE position_id = 'pos-settled-drift'"
+            "SELECT phase, realized_pnl_usd, settlement_price "
+            "FROM position_current WHERE position_id = 'pos-settled-drift'"
         ).fetchone()
         assert row["phase"] == "settled"
         assert row["realized_pnl_usd"] == 3.5
+        assert row["settlement_price"] == 1.0
 
     def test_hard_terminal_settled_repair_fails_closed_without_pnl_evidence(
         self,
@@ -15037,10 +15040,10 @@ class TestRecoveryResolutionTable:
 
         summary = reconcile_hard_terminal_position_projection_repairs(conn)
 
-        # Fail-closed: no pnl/exit_price evidence in the terminal event's own
-        # payload means upsert_position_current's MissingRealizedPnlOnCloseError
-        # backstop fires -- caught by this function's own try/except, counted
-        # as an error, and the phase is NOT silently advanced with a NULL pnl.
+        # Fail-closed: no payout or pnl/exit-price evidence in the terminal
+        # event means the canonical projection guards fire -- caught by this
+        # function's own try/except, counted as an error, and the phase is not
+        # silently advanced with invented settlement economics.
         assert summary == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
         row = conn.execute(
             "SELECT phase, realized_pnl_usd FROM position_current WHERE position_id = 'pos-settled-no-pnl'"

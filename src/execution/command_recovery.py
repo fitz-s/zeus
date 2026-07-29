@@ -7001,6 +7001,13 @@ def reconcile_hard_terminal_position_projection_repairs(conn: sqlite3.Connection
             projection["phase"] = terminal_phase
             projection["updated_at"] = _now_iso()
 
+            if terminal_phase == "settled":
+                payload = _json_dict(candidate.get("payload_json"))
+                outcome = _float_or_none(payload.get("outcome"))
+                projection["settlement_price"] = (
+                    outcome if outcome in {0.0, 1.0} else None
+                )
+
             if (
                 terminal_phase in _HARD_TERMINAL_REPAIR_REALIZED_PNL_PHASES
                 and projection.get("realized_pnl_usd") is None
