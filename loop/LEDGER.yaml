@@ -1,3 +1,6 @@
+# New here? Read loop/README.md first — it explains the loop this ledger belongs to.
+# This file: the falsifiable-claim ledger and work queue for the loop's ticks.
+#
 # Loop hypothesis ledger + improvement queue (24/7 improvement loop v2).
 #
 # WHO WRITES: loop/tick.sh tick invocations, via the sandboxed codex exec

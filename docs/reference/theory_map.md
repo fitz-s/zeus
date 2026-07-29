@@ -112,6 +112,18 @@ Key books: `state.md`, `engine.md`, `data.md`, `execution.md`, `venue.md`, `inge
 
 ---
 
+## 8 · Code Anchors
+
+This map indexes docs; the entries below are executable sources the docs above describe, for when the doc alone isn't enough.
+
+| File | What it is | Status |
+|------|------------|--------|
+| [`src/analysis/settlement_skill_attribution.py`](../../src/analysis/settlement_skill_attribution.py) | Six-category settlement attribution grader — only skill outcomes (SKILL_WIN/SKILL_LOSS) train calibration; luck and stale decisions are excluded. | `[ref]` code |
+| [`src/decision/selection_calibrator.py`](../../src/decision/selection_calibrator.py) | Wilson / empirical-Bayes selection lower bound; from-scratch regularized incomplete beta implementation at ~L298–395 (no SciPy dependency). | `[ref]` code |
+| [`src/execution/command_bus.py`](../../src/execution/command_bus.py) | `IdempotencyKey` (~L145–233): factory-only deterministic key construction for venue commands. | `[ref]` code |
+
+---
+
 ## Reading paths
 
 **New to Zeus?** `zeus_domain_model.md` → `README.md` §Methodology → `zeus_math_spec.md` §0–2

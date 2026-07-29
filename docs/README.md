@@ -1,72 +1,31 @@
 # Docs Index
 
-All docs use `lower_snake_case.md` naming unless a date prefix is required.
+Router into the tracked `docs/` mesh. See `AGENTS.md` in this directory for
+placement rules; this file just says what's where.
 
-## Design principle
+## Subroots
 
-The docs surface is a tracked active mesh, not "active subdirectories plus
-archives."
+| Directory | Purpose |
+|-----------|---------|
+| `authority/` | Durable architecture and delivery law. |
+| `reference/` | Canonical theory, math, and system reference. Entry point: `reference/theory_map.md`. |
+| `operations/` | Live control pointer, current-state docs, and active work packets. |
+| `review/` | Review process and scope docs. |
+| `methodology/` | Cross-cutting methodology (e.g. adversarial debate evaluation). |
+| `evidence/` | Internal investigation record — dated probes, audits, and consult reports. Slated to migrate off the default branch; not authority. |
+| `rebuild/` | Active rebuild-effort design docs and implementation packets. |
+| `lore/` | Recorded topology/authority-drift hypotheses. |
+| `architecture/` | Dated system-decomposition design docs. |
 
-- active tracked docs live in declared subroots
-- visible history is routed through `archive_registry.md`
-- raw archive bodies are historical cold storage outside the default read path
+## Other tracked files here
 
-## Tracked docs subroots
-
-| Directory | Purpose | Notes |
-|-----------|---------|-------|
-| `authority/` | Durable architecture and delivery law only | No packet docs, ADRs, or historical governance evidence |
-| `reference/` | Canonical durable references only | Concepts, system references, and routing into dense module books |
-| `reference/modules/` | Dense module books | Module cognition layer; reference only, not law |
-| `operations/` | Live control pointer, current fact surfaces, active packets, package inputs | Current work routing |
-| `runbooks/` | Operator runbooks | Runtime support |
-| `reports/` | Generated diagnostic reports | Evidence only |
-| `to-do-list/` | Active known-gap worklist, checklist workbooks, and audit queues | Never authority |
-| `artifacts/` | Active evidence artifacts and inventories | Never authority |
-
-Historical governance files demoted from authority live under
-`reports/authority_history/` as evidence only.
-
-## Active top-level docs
-
-- `../AGENTS.md` - root operating brief
-- `archive_registry.md` - visible historical interface and promotion guardrails
-- `authority/zeus_current_architecture.md` - current architecture law
-- `authority/zeus_current_delivery.md` - current delivery law
-- `reference/zeus_domain_model.md` - short domain model
-- `reference/modules/AGENTS.md` - router for dense module books
-- `reference/modules/ingest.md` - dense ingest module book for R3 user-channel event-stream routing
-- `reference/zeus_architecture_reference.md` - canonical architecture reference anchor
-- `reference/zeus_market_settlement_reference.md` - canonical market/settlement reference anchor
-- `reference/zeus_data_and_replay_reference.md` - canonical data/replay reference anchor
-- `reference/zeus_failure_modes_reference.md` - canonical failure modes reference anchor
-- `operations/current_state.md` - live control pointer
-- `operations/current_data_state.md` - current audited data posture
-- `operations/current_source_validity.md` - current audited source-validity posture
-- `runbooks/live_operation.md` - day-to-day live daemon runbook
-- `to-do-list/known_gaps.md` - active known-gap worklist
-- `to-do-list/known_gaps_archive.md` - closed known-gap antibody archive
-- `operations/task_2026-04-23_midstream_remediation/` - midstream remediation package; phase evidence lives under `phases/`
-- `operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` - R3 Z0 packet-local live-money invariant summary for CLOB V2
-- `operations/task_2026-04-29_design_simplification_audit/` - first-principles audit plus phased repair evidence; not live-deploy authority
-- `artifacts/tigge_data_training_handoff_2026-04-23.md` - dated TIGGE asset + Zeus training handoff snapshot
-- `../workspace_map.md` - repo visibility and routing guide
-
-## Historical interface
-
-Raw historical bodies are not part of the default tracked boot surface.
-
-Use `archive_registry.md` first. Only open archive bodies or bundles when the
-task explicitly needs historical evidence, and label archive-derived claims as
-`[Archive evidence]`.
+- `AGENTS.md` — placement rules and taxonomy for this directory
+- `archive_registry.md` — visible historical interface into retired docs
+- `polyweather_city_source_overlay_verified.csv` — verified city/source overlay data
 
 ## Naming rules
 
 - All `.md` files use `lower_snake_case.md`
 - Exceptions: `AGENTS.md`, `README.md`
-- New independent packages use `task_YYYY-MM-DD_name.md` or
-  `task_YYYY-MM-DD_name/`
-- Multi-phase work stays inside one package folder, normally under
-  `task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/`
-- Avoid generic top-level names such as `plan.md` or `progress.md` outside an
-  active task folder
+- Dated or packet-scoped docs use a `YYYY-MM-DD` or `task_YYYY-MM-DD_name`
+  prefix within their subroot
