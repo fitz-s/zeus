@@ -65,25 +65,35 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
             decision_certificate_hash=None):
     from src.state.venue_command_repo import insert_command
     snapshot_id = _ensure_snapshot(c, token_id=token_id)
-    envelope_id = _ensure_envelope(
-        c,
+    envelope = _make_envelope(
         token_id=token_id,
         side=side,
         price=price,
         size=size,
     )
+    envelope_id = f"env-{command_id}"
+    submission_envelope = envelope if intent_kind == "ENTRY" else None
+    if submission_envelope is None:
+        envelope_id = _ensure_envelope(
+            c,
+            token_id=token_id,
+            side=side,
+            price=price,
+            size=size,
+        )
     if intent_kind == "ENTRY":
         decision_certificate_hash = decision_certificate_hash or f"cert-{command_id}"
         _ensure_entry_certificate(
             c,
             certificate_hash=decision_certificate_hash,
-            envelope_id=envelope_id,
+            envelope=envelope,
         )
     insert_command(
         c,
         command_id=command_id,
         snapshot_id=snapshot_id,
         envelope_id=envelope_id,
+        submission_envelope=submission_envelope,
         position_id=position_id,
         decision_id=decision_id,
         idempotency_key=idempotency_key,
@@ -184,11 +194,21 @@ def _valid_execution_capability_payload() -> dict:
     }
 
 
-def _ensure_snapshot(c, *, token_id: str, snapshot_id: str | None = None) -> str:
+def _ensure_snapshot(
+    c,
+    *,
+    token_id: str,
+    snapshot_id: str | None = None,
+    yes_token_id: str | None = None,
+    no_token_id: str | None = None,
+) -> str:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     snapshot_id = snapshot_id or f"snap-{token_id}"
+    yes_token_id = yes_token_id or token_id
+    no_token_id = no_token_id or f"{token_id}-no"
+    outcome_label = "YES" if token_id == yes_token_id else "NO"
     if get_snapshot(c, snapshot_id) is not None:
         return snapshot_id
     insert_snapshot(
@@ -200,10 +220,10 @@ def _ensure_snapshot(c, *, token_id: str, snapshot_id: str | None = None) -> str
             event_slug="event-test",
             condition_id="condition-test",
             question_id="question-test",
-            yes_token_id=token_id,
-            no_token_id=f"{token_id}-no",
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
             selected_outcome_token_id=token_id,
-            outcome_label="YES",
+            outcome_label=outcome_label,
             enable_orderbook=True,
             active=True,
             closed=False,
@@ -215,7 +235,7 @@ def _ensure_snapshot(c, *, token_id: str, snapshot_id: str | None = None) -> str
             min_tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
             fee_details={},
-            token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+            token_map_raw={"YES": yes_token_id, "NO": no_token_id},
             rfqe=None,
             neg_risk=False,
             orderbook_top_bid=Decimal("0.49"),
@@ -241,12 +261,15 @@ def _ensure_envelope(
     price: float | Decimal = 0.5,
     size: float | Decimal = 10.0,
 ) -> str:
-    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.venue_command_repo import insert_submission_envelope
 
-    price_dec = Decimal(str(price))
-    size_dec = Decimal(str(size))
-    envelope_id = envelope_id or f"env-{token_id}-{side}-{price_dec}-{size_dec}"
+    envelope = _make_envelope(
+        token_id=token_id,
+        side=side,
+        price=price,
+        size=size,
+    )
+    envelope_id = envelope_id or f"env-{token_id}-{side}-{envelope.price}-{envelope.size}"
     if c.execute(
         "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
         (envelope_id,),
@@ -254,55 +277,72 @@ def _ensure_envelope(
         return envelope_id
     insert_submission_envelope(
         c,
-        VenueSubmissionEnvelope(
-            sdk_package="py-clob-client-v2",
-            sdk_version="test",
-            host="https://clob-v2.polymarket.com",
-            chain_id=137,
-            funder_address="0xfunder",
-            condition_id="condition-test",
-            question_id="question-test",
-            yes_token_id=token_id,
-            no_token_id=f"{token_id}-no",
-            selected_outcome_token_id=token_id,
-            outcome_label="YES",
-            side=side,
-            price=price_dec,
-            size=size_dec,
-            order_type="GTC",
-            post_only=False,
-            tick_size=Decimal("0.01"),
-            min_order_size=Decimal("0.01"),
-            neg_risk=False,
-            fee_details={},
-            canonical_pre_sign_payload_hash="d" * 64,
-            signed_order=None,
-            signed_order_hash=None,
-            raw_request_hash="e" * 64,
-            raw_response_json=None,
-            order_id=None,
-            trade_ids=(),
-            transaction_hashes=(),
-            error_code=None,
-            error_message=None,
-            captured_at=_NOW.isoformat(),
-        ),
+        envelope,
         envelope_id=envelope_id,
     )
     return envelope_id
 
 
-def _ensure_entry_certificate(c, *, certificate_hash: str, envelope_id: str) -> None:
-    envelope = c.execute(
-        """
-        SELECT condition_id, yes_token_id, no_token_id, selected_outcome_token_id
-          FROM venue_submission_envelopes WHERE envelope_id = ?
-        """,
-        (envelope_id,),
-    ).fetchone()
-    assert envelope is not None
-    token_id = str(envelope["selected_outcome_token_id"])
-    direction = "buy_yes" if token_id == str(envelope["yes_token_id"]) else "buy_no"
+def _make_envelope(
+    *,
+    token_id: str,
+    side: str = "BUY",
+    price: float | Decimal = 0.5,
+    size: float | Decimal = 10.0,
+    yes_token_id: str | None = None,
+    no_token_id: str | None = None,
+):
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    yes_token_id = yes_token_id or token_id
+    no_token_id = no_token_id or f"{token_id}-no"
+    outcome_label = "YES" if token_id == yes_token_id else "NO"
+    return VenueSubmissionEnvelope(
+        sdk_package="py-clob-client-v2",
+        sdk_version="test",
+        host="https://clob-v2.polymarket.com",
+        chain_id=137,
+        funder_address="0xfunder",
+        condition_id="condition-test",
+        question_id="question-test",
+        yes_token_id=yes_token_id,
+        no_token_id=no_token_id,
+        selected_outcome_token_id=token_id,
+        outcome_label=outcome_label,
+        side=side,
+        price=Decimal(str(price)),
+        size=Decimal(str(size)),
+        order_type="GTC",
+        post_only=False,
+        tick_size=Decimal("0.01"),
+        min_order_size=Decimal("0.01"),
+        neg_risk=False,
+        fee_details={},
+        canonical_pre_sign_payload_hash="d" * 64,
+        signed_order=None,
+        signed_order_hash=None,
+        raw_request_hash="e" * 64,
+        raw_response_json=None,
+        order_id=None,
+        trade_ids=(),
+        transaction_hashes=(),
+        error_code=None,
+        error_message=None,
+        captured_at=_NOW.isoformat(),
+    )
+
+
+def _ensure_entry_certificate(
+    c,
+    *,
+    certificate_hash: str,
+    envelope,
+    direction: str | None = None,
+) -> None:
+    token_id = str(envelope.selected_outcome_token_id)
+    direction = direction or (
+        "buy_yes" if token_id == str(envelope.yes_token_id) else "buy_no"
+    )
     c.execute(
         """
         INSERT OR REPLACE INTO world.decision_certificates(
@@ -313,7 +353,7 @@ def _ensure_entry_certificate(c, *, certificate_hash: str, envelope_id: str) -> 
             certificate_hash,
             json.dumps(
                 {
-                    "condition_id": str(envelope["condition_id"]),
+                    "condition_id": str(envelope.condition_id),
                     "token_id": token_id,
                     "direction": direction,
                 }
@@ -717,15 +757,16 @@ class TestInsertCommandAtomicWithIntentCreatedEvent:
 
         with pytest.raises(Exception):
             snapshot_id = _ensure_snapshot(conn, token_id="tok-001")
-            envelope_id = _ensure_envelope(conn, token_id="tok-001", price=0.5, size=10.0)
+            envelope = _make_envelope(token_id="tok-001", price=0.5, size=10.0)
             _ensure_entry_certificate(
-                conn, certificate_hash="cert-fail", envelope_id=envelope_id
+                conn, certificate_hash="cert-fail", envelope=envelope
             )
             insert_command(
                 conn,
                 command_id="cmd-fail",
                 snapshot_id=snapshot_id,
-                envelope_id=envelope_id,
+                envelope_id="env-fail",
+                submission_envelope=envelope,
                 position_id="pos-001",
                 decision_id="dec-001",
                 idempotency_key="idem-fail",
@@ -848,17 +889,18 @@ class TestPositionDecisionAttributionAppendHook:
 
         with pytest.raises(Exception):
             snapshot_id = _ensure_snapshot(conn, token_id="tok-attr-4")
-            envelope_id = _ensure_envelope(conn, token_id="tok-attr-4", price=0.5, size=10.0)
+            envelope = _make_envelope(token_id="tok-attr-4", price=0.5, size=10.0)
             _ensure_entry_certificate(
                 conn,
                 certificate_hash="cert-should-not-survive",
-                envelope_id=envelope_id,
+                envelope=envelope,
             )
             insert_command(
                 conn,
                 command_id="cmd-attr-4",
                 snapshot_id=snapshot_id,
-                envelope_id=envelope_id,
+                envelope_id="env-attr-4",
+                submission_envelope=envelope,
                 position_id="pos-attr-4",
                 decision_id="dec-001",
                 idempotency_key="idem-attr-4",
@@ -878,17 +920,129 @@ class TestPositionDecisionAttributionAppendHook:
 
 
 class TestEntryCertificateReferentialClosure:
-    def test_dangling_hash_rejects_without_command_or_attribution(self, conn):
+    def test_no_token_entry_persists_with_buy_no_certificate(self, conn):
+        from src.state.venue_command_repo import insert_command
+
+        yes_token_id = "tok-real-yes"
+        no_token_id = "tok-real-no"
+        snapshot_id = _ensure_snapshot(
+            conn,
+            token_id=no_token_id,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+        )
+        envelope = _make_envelope(
+            token_id=no_token_id,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+        )
+        _ensure_entry_certificate(
+            conn,
+            certificate_hash="cert-real-no",
+            envelope=envelope,
+        )
+
+        insert_command(
+            conn,
+            command_id="cmd-real-no",
+            snapshot_id=snapshot_id,
+            envelope_id="env-real-no",
+            submission_envelope=envelope,
+            position_id="pos-real-no",
+            decision_id="dec-real-no",
+            idempotency_key="idem-real-no",
+            intent_kind="ENTRY",
+            market_id="mkt-real-no",
+            token_id=no_token_id,
+            side="BUY",
+            size=10.0,
+            price=0.5,
+            created_at="2026-07-29T00:00:00Z",
+            decision_certificate_hash="cert-real-no",
+        )
+
+        command = conn.execute(
+            "SELECT token_id, envelope_id FROM venue_commands "
+            "WHERE command_id='cmd-real-no'"
+        ).fetchone()
+        assert tuple(command) == (no_token_id, "env-real-no")
+        attribution = _attribution_row(conn, "pos-real-no")
+        assert attribution["decision_certificate_hash"] == "cert-real-no"
+
+    @pytest.mark.parametrize(
+        ("selected_token_id", "certificate_direction"),
+        (
+            ("tok-pair-yes", "buy_no"),
+            ("tok-pair-no", "buy_yes"),
+        ),
+    )
+    def test_yes_no_direction_mismatch_rejects(
+        self,
+        conn,
+        selected_token_id,
+        certificate_direction,
+    ):
+        from src.state.venue_command_repo import insert_command
+
+        yes_token_id = "tok-pair-yes"
+        no_token_id = "tok-pair-no"
+        snapshot_id = _ensure_snapshot(
+            conn,
+            token_id=selected_token_id,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+        )
+        envelope = _make_envelope(
+            token_id=selected_token_id,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+        )
+        certificate_hash = f"cert-mismatch-{selected_token_id}"
+        _ensure_entry_certificate(
+            conn,
+            certificate_hash=certificate_hash,
+            envelope=envelope,
+            direction=certificate_direction,
+        )
+
+        with pytest.raises(ValueError, match="identity does not match"):
+            insert_command(
+                conn,
+                command_id=f"cmd-mismatch-{selected_token_id}",
+                snapshot_id=snapshot_id,
+                envelope_id=f"env-mismatch-{selected_token_id}",
+                submission_envelope=envelope,
+                position_id=f"pos-mismatch-{selected_token_id}",
+                decision_id=f"dec-mismatch-{selected_token_id}",
+                idempotency_key=f"idem-mismatch-{selected_token_id}",
+                intent_kind="ENTRY",
+                market_id="mkt-pair",
+                token_id=selected_token_id,
+                side="BUY",
+                size=10.0,
+                price=0.5,
+                created_at="2026-07-29T00:00:00Z",
+                decision_certificate_hash=certificate_hash,
+            )
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_submission_envelopes "
+            "WHERE envelope_id = ?",
+            (f"env-mismatch-{selected_token_id}",),
+        ).fetchone()[0] == 0
+
+    def test_dangling_hash_rolls_back_entire_admission(self, conn):
         from src.state.venue_command_repo import insert_command
 
         snapshot_id = _ensure_snapshot(conn, token_id="tok-dangling")
-        envelope_id = _ensure_envelope(conn, token_id="tok-dangling")
+        envelope = _make_envelope(token_id="tok-dangling")
         with pytest.raises(ValueError, match="exact LIVE VERIFIED"):
             insert_command(
                 conn,
                 command_id="cmd-dangling",
                 snapshot_id=snapshot_id,
-                envelope_id=envelope_id,
+                envelope_id="env-dangling",
+                submission_envelope=envelope,
                 position_id="pos-dangling",
                 decision_id="dec-dangling",
                 idempotency_key="idem-dangling",
@@ -905,17 +1059,25 @@ class TestEntryCertificateReferentialClosure:
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE command_id='cmd-dangling'"
         ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_submission_envelopes "
+            "WHERE envelope_id='env-dangling'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events "
+            "WHERE command_id='cmd-dangling'"
+        ).fetchone()[0] == 0
         assert _attribution_row(conn, "pos-dangling") is None
 
     def test_identity_mismatch_rejects_without_command_or_attribution(self, conn):
         from src.state.venue_command_repo import insert_command
 
         snapshot_id = _ensure_snapshot(conn, token_id="tok-identity")
-        envelope_id = _ensure_envelope(conn, token_id="tok-identity")
+        envelope = _make_envelope(token_id="tok-identity")
         _ensure_entry_certificate(
             conn,
             certificate_hash="cert-identity-mismatch",
-            envelope_id=envelope_id,
+            envelope=envelope,
         )
         conn.execute(
             """
@@ -930,7 +1092,8 @@ class TestEntryCertificateReferentialClosure:
                 conn,
                 command_id="cmd-identity-mismatch",
                 snapshot_id=snapshot_id,
-                envelope_id=envelope_id,
+                envelope_id="env-identity-mismatch",
+                submission_envelope=envelope,
                 position_id="pos-identity-mismatch",
                 decision_id="dec-identity-mismatch",
                 idempotency_key="idem-identity-mismatch",
@@ -947,7 +1110,100 @@ class TestEntryCertificateReferentialClosure:
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE command_id='cmd-identity-mismatch'"
         ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_submission_envelopes "
+            "WHERE envelope_id='env-identity-mismatch'"
+        ).fetchone()[0] == 0
         assert _attribution_row(conn, "pos-identity-mismatch") is None
+
+    def test_fresh_admission_reads_certificate_committed_after_stale_trade_snapshot(
+        self,
+        tmp_path,
+    ):
+        from src.state.db import init_schema, init_schema_trade_only
+        from src.state.venue_command_repo import (
+            begin_fresh_entry_admission,
+            insert_command,
+        )
+
+        world_path = tmp_path / "zeus-world.db"
+        trade_path = tmp_path / "zeus_trades.db"
+        world_writer = sqlite3.connect(world_path)
+        world_writer.execute("PRAGMA journal_mode=WAL")
+        world_writer.execute(
+            """
+            CREATE TABLE decision_certificates (
+                certificate_hash TEXT PRIMARY KEY,
+                certificate_type TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                verifier_status TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        world_writer.commit()
+
+        trade_conn = sqlite3.connect(trade_path)
+        trade_conn.row_factory = sqlite3.Row
+        init_schema(trade_conn)
+        init_schema_trade_only(trade_conn)
+        trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+        snapshot_id = _ensure_snapshot(trade_conn, token_id="tok-fresh-entry")
+        envelope = _make_envelope(token_id="tok-fresh-entry")
+        trade_conn.commit()
+
+        trade_conn.execute("BEGIN")
+        assert trade_conn.execute(
+            "SELECT COUNT(*) FROM world.decision_certificates"
+        ).fetchone()[0] == 0
+        world_writer.execute(
+            """
+            INSERT INTO decision_certificates(
+                certificate_hash, certificate_type, mode, verifier_status, payload_json
+            ) VALUES (
+                'cert-after-snapshot', 'ActionableTradeCertificate',
+                'LIVE', 'VERIFIED', ?
+            )
+            """,
+            (
+                json.dumps(
+                    {
+                        "condition_id": envelope.condition_id,
+                        "token_id": envelope.selected_outcome_token_id,
+                        "direction": "buy_yes",
+                    }
+                ),
+            ),
+        )
+        world_writer.commit()
+
+        begin_fresh_entry_admission(trade_conn)
+        insert_command(
+            trade_conn,
+            command_id="cmd-after-snapshot",
+            snapshot_id=snapshot_id,
+            envelope_id="env-after-snapshot",
+            submission_envelope=envelope,
+            position_id="pos-after-snapshot",
+            decision_id="dec-after-snapshot",
+            idempotency_key="idem-after-snapshot",
+            intent_kind="ENTRY",
+            market_id="mkt-after-snapshot",
+            token_id="tok-fresh-entry",
+            side="BUY",
+            size=10.0,
+            price=0.5,
+            created_at="2026-07-29T00:00:00Z",
+            decision_certificate_hash="cert-after-snapshot",
+        )
+        trade_conn.commit()
+
+        assert trade_conn.execute(
+            "SELECT COUNT(*) FROM venue_commands "
+            "WHERE command_id='cmd-after-snapshot'"
+        ).fetchone()[0] == 1
+        trade_conn.close()
+        world_writer.close()
 
 
 class TestInsertCommandQVersionStamp:
@@ -976,13 +1232,15 @@ class TestInsertCommandQVersionStamp:
 
         monkeypatch.setenv("ZEUS_ENTRY_Q_VERSION_STRICT", "1")
         snapshot_id = _ensure_snapshot(conn, token_id="tok-live-qv")
+        envelope = _make_envelope(token_id="tok-live-qv")
 
         with pytest.raises(ValueError, match="ENTRY venue command requires non-empty q_version"):
             insert_command(
                 conn,
                 command_id="cmd-live-no-qv",
                 snapshot_id=snapshot_id,
-                envelope_id=_ensure_envelope(conn, token_id="tok-live-qv"),
+                envelope_id="env-live-no-qv",
+                submission_envelope=envelope,
                 position_id="pos-live-no-qv",
                 decision_id="dec-live-no-qv",
                 idempotency_key="idem-live-no-qv",
@@ -1006,13 +1264,15 @@ class TestInsertCommandQVersionStamp:
         monkeypatch.delenv("ZEUS_ENTRY_Q_VERSION_STRICT", raising=False)
         monkeypatch.setenv("XPC_SERVICE_NAME", "com.zeus.live-trading")
         snapshot_id = _ensure_snapshot(conn, token_id="tok-xpc-live-qv")
+        envelope = _make_envelope(token_id="tok-xpc-live-qv")
 
         with pytest.raises(ValueError, match="ENTRY venue command requires non-empty q_version"):
             insert_command(
                 conn,
                 command_id="cmd-xpc-live-no-qv",
                 snapshot_id=snapshot_id,
-                envelope_id=_ensure_envelope(conn, token_id="tok-xpc-live-qv"),
+                envelope_id="env-xpc-live-no-qv",
+                submission_envelope=envelope,
                 position_id="pos-xpc-live-no-qv",
                 decision_id="dec-xpc-live-no-qv",
                 idempotency_key="idem-xpc-live-no-qv",
@@ -1037,13 +1297,15 @@ class TestInsertCommandQVersionStamp:
         monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
         monkeypatch.setenv("ZEUS_MODE", "live")
         snapshot_id = _ensure_snapshot(conn, token_id="tok-mode-live-qv")
+        envelope = _make_envelope(token_id="tok-mode-live-qv")
 
         with pytest.raises(ValueError, match="ENTRY venue command requires non-empty q_version"):
             insert_command(
                 conn,
                 command_id="cmd-mode-live-no-qv",
                 snapshot_id=snapshot_id,
-                envelope_id=_ensure_envelope(conn, token_id="tok-mode-live-qv"),
+                envelope_id="env-mode-live-no-qv",
+                submission_envelope=envelope,
                 position_id="pos-mode-live-no-qv",
                 decision_id="dec-mode-live-no-qv",
                 idempotency_key="idem-mode-live-no-qv",
@@ -1368,15 +1630,16 @@ class TestIdempotencyKeyUniquenessEnforced:
 
         with pytest.raises(sqlite3.IntegrityError):
             snapshot_id = _ensure_snapshot(conn, token_id="tok-001")
-            envelope_id = _ensure_envelope(conn, token_id="tok-001", price=0.6, size=5.0)
+            envelope = _make_envelope(token_id="tok-001", price=0.6, size=5.0)
             _ensure_entry_certificate(
-                conn, certificate_hash="cert-cmd-002", envelope_id=envelope_id
+                conn, certificate_hash="cert-cmd-002", envelope=envelope
             )
             insert_command(
                 conn,
                 command_id="cmd-002",
                 snapshot_id=snapshot_id,
-                envelope_id=envelope_id,
+                envelope_id="env-cmd-002",
+                submission_envelope=envelope,
                 position_id="pos-002",
                 decision_id="dec-002",
                 idempotency_key="same-key",  # same key
@@ -1688,13 +1951,14 @@ class TestSavepointComposability:
 
         conn.execute("SAVEPOINT outer_test")
         snapshot_id = _ensure_snapshot(conn, token_id="t1")
-        envelope_id = _ensure_envelope(conn, token_id="t1", price=0.5, size=10.0)
-        _ensure_entry_certificate(conn, certificate_hash="cert-cmp", envelope_id=envelope_id)
+        envelope = _make_envelope(token_id="t1", price=0.5, size=10.0)
+        _ensure_entry_certificate(conn, certificate_hash="cert-cmp", envelope=envelope)
         insert_command(
             conn,
             command_id="cmp-001",
             snapshot_id=snapshot_id,
-            envelope_id=envelope_id,
+            envelope_id="env-cmp",
+            submission_envelope=envelope,
             position_id="pos-1",
             decision_id="dec-1",
             idempotency_key="idem-cmp-001",

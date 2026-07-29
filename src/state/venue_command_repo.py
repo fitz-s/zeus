@@ -7,6 +7,7 @@
 """Durable command journal — append-only repo API for venue_commands / venue_command_events.
 
 Public API:
+  begin_fresh_entry_admission(conn) -> None
   insert_command(conn, *, ...) -> None
   bind_signed_submission_identity(conn, *, command_id, envelope) -> str
   append_event(conn, *, command_id, event_type, occurred_at, payload=None) -> str
@@ -826,6 +827,34 @@ def _row_factory_as(conn: sqlite3.Connection, factory) -> Iterator[None]:
 # Public API
 # ---------------------------------------------------------------------------
 
+def begin_fresh_entry_admission(conn: sqlite3.Connection) -> None:
+    """Restart the caller-owned ENTRY admission on a fresh attached snapshot.
+
+    The live executor can receive a long-lived trade connection with an
+    explicit transaction whose attached WORLD snapshot predates the separately
+    committed actionable certificate.  The executor owns this admission
+    transaction even when the connection is supplied by the reactor, so finish
+    any pre-admission collateral/schema work and restart before the first
+    admission read or write.
+
+    SCOPE: one ENTRY admission. DRAIN: synchronous commit of pre-admission work.
+    RESET: ``BEGIN IMMEDIATE`` establishes the post-certificate attached
+    snapshot used through certificate closure and command persistence.
+    """
+    attached = {
+        str(row[1]).strip()
+        for row in conn.execute("PRAGMA database_list").fetchall()
+        if len(row) > 1 and str(row[1]).strip()
+    }
+    if "world" not in attached:
+        raise ValueError(
+            "ENTRY admission requires sanctioned attached world authority"
+        )
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+
+
 def insert_submission_envelope(
     conn: sqlite3.Connection,
     envelope,
@@ -1166,6 +1195,7 @@ def insert_command(
     *,
     command_id: str,
     envelope_id: str | None = None,
+    submission_envelope=None,
     position_id: str,
     decision_id: str,
     idempotency_key: str,
@@ -1253,19 +1283,41 @@ def insert_command(
         expected_min_order_size=expected_min_order_size,
         expected_neg_risk=expected_neg_risk,
     )
-    envelope_id_value = _assert_envelope_gate(
-        conn,
-        envelope_id=envelope_id,
-        snapshot_id=snapshot_id_value,
-        token_id=token_id,
-        side=side,
-        price=price,
-        size=size,
+    envelope_id_value = (
+        _require_nonempty("envelope_id", envelope_id)
+        if submission_envelope is not None
+        else _assert_envelope_gate(
+            conn,
+            envelope_id=envelope_id,
+            snapshot_id=snapshot_id_value,
+            token_id=token_id,
+            side=side,
+            price=price,
+            size=size,
+        )
     )
+    if intent_kind == _IntentKind.ENTRY.value and submission_envelope is None:
+        raise ValueError(
+            "ENTRY venue command requires an unpersisted submission envelope"
+        )
+    if intent_kind != _IntentKind.ENTRY.value and submission_envelope is not None:
+        raise ValueError(
+            "unpersisted submission envelope is reserved for atomic ENTRY admission"
+        )
 
     event_id = _new_id()
 
     with _savepoint_atomic(conn):
+        if submission_envelope is not None:
+            _assert_in_memory_envelope_gate(
+                conn,
+                envelope=submission_envelope,
+                snapshot_id=snapshot_id_value,
+                token_id=token_id,
+                side=side,
+                price=price,
+                size=size,
+            )
         resolved_certificate_hash = (
             str(decision_certificate_hash or "").strip() or None
         )
@@ -1302,6 +1354,12 @@ def insert_command(
             _assert_entry_certificate_closure(
                 conn,
                 decision_certificate_hash=resolved_certificate_hash,
+                envelope=submission_envelope,
+            )
+        if submission_envelope is not None:
+            insert_submission_envelope(
+                conn,
+                submission_envelope,
                 envelope_id=envelope_id_value,
             )
         conn.execute(
@@ -1452,11 +1510,54 @@ def _assert_envelope_gate(
     return envelope_id
 
 
+def _assert_in_memory_envelope_gate(
+    conn: sqlite3.Connection,
+    *,
+    envelope,
+    snapshot_id: str | None,
+    token_id: str,
+    side: str,
+    price: float,
+    size: float,
+) -> None:
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    if not isinstance(envelope, VenueSubmissionEnvelope):
+        raise TypeError("submission_envelope must be a VenueSubmissionEnvelope")
+    envelope.assert_live_submit_bound()
+    if envelope.selected_outcome_token_id != str(token_id):
+        raise ValueError(
+            "venue command token_id does not match in-memory envelope selected token"
+        )
+    if envelope.side != str(side):
+        raise ValueError("venue command side does not match in-memory envelope side")
+    if _decimal(envelope.price) != _decimal(price):
+        raise ValueError("venue command price does not match in-memory envelope price")
+    if _decimal(envelope.size) != _decimal(size):
+        raise ValueError("venue command size does not match in-memory envelope size")
+    if isinstance(snapshot_id, str) and snapshot_id.strip():
+        with _row_factory_as(conn, sqlite3.Row):
+            snapshot_row = conn.execute(
+                """
+                SELECT condition_id, question_id, yes_token_id, no_token_id
+                  FROM executable_market_snapshots
+                 WHERE snapshot_id = ?
+                """,
+                (snapshot_id.strip(),),
+            ).fetchone()
+        if snapshot_row is not None:
+            for field in ("condition_id", "question_id", "yes_token_id", "no_token_id"):
+                if str(getattr(envelope, field)) != str(snapshot_row[field]):
+                    raise ValueError(
+                        f"in-memory envelope {field} does not match executable snapshot"
+                    )
+
+
 def _assert_entry_certificate_closure(
     conn: sqlite3.Connection,
     *,
     decision_certificate_hash: str,
-    envelope_id: str,
+    envelope,
 ) -> None:
     """Require an ENTRY's exact, live certificate in the attached WORLD ledger.
 
@@ -1477,15 +1578,6 @@ def _assert_entry_certificate_closure(
         )
     try:
         with _row_factory_as(conn, sqlite3.Row):
-            envelope = conn.execute(
-                """
-                SELECT condition_id, yes_token_id, no_token_id,
-                       selected_outcome_token_id, side
-                  FROM venue_submission_envelopes
-                 WHERE envelope_id = ?
-                """,
-                (envelope_id,),
-            ).fetchone()
             certificate = conn.execute(
                 """
                 SELECT payload_json
@@ -1500,8 +1592,6 @@ def _assert_entry_certificate_closure(
             ).fetchone()
     except sqlite3.Error as exc:
         raise ValueError("ENTRY certificate closure authority is unavailable") from exc
-    if envelope is None:
-        raise ValueError("ENTRY certificate closure envelope is unavailable")
     if certificate is None:
         raise ValueError(
             "ENTRY certificate closure requires exact LIVE VERIFIED "
@@ -1514,11 +1604,11 @@ def _assert_entry_certificate_closure(
     if not isinstance(payload, dict):
         raise ValueError("ENTRY certificate closure payload must be an object")
 
-    token_id = str(envelope["selected_outcome_token_id"] or "").strip()
-    condition_id = str(envelope["condition_id"] or "").strip()
-    yes_token_id = str(envelope["yes_token_id"] or "").strip()
-    no_token_id = str(envelope["no_token_id"] or "").strip()
-    side = str(envelope["side"] or "").strip().upper()
+    token_id = str(envelope.selected_outcome_token_id or "").strip()
+    condition_id = str(envelope.condition_id or "").strip()
+    yes_token_id = str(envelope.yes_token_id or "").strip()
+    no_token_id = str(envelope.no_token_id or "").strip()
+    side = str(envelope.side or "").strip().upper()
     if token_id == yes_token_id:
         expected_direction = "buy_yes"
     elif token_id == no_token_id:

@@ -7148,7 +7148,13 @@ def _live_order(
     _gate_runtime_check("on_chain_mutation")
     from src.data.polymarket_client import PolymarketClient, V2PreflightError
     from src.execution.command_bus import IdempotencyKey, IntentKind
-    from src.state.venue_command_repo import append_order_fact, append_trade_fact, insert_command, append_event
+    from src.state.venue_command_repo import (
+        append_event,
+        append_order_fact,
+        append_trade_fact,
+        begin_fresh_entry_admission,
+        insert_command,
+    )
     from src.contracts.executable_market_snapshot import MarketSnapshotError
     from src.state.collateral_ledger import CollateralInsufficient
 
@@ -7740,6 +7746,11 @@ def _live_order(
             )
 
         try:
+            # The fresh owner-local certificate check above proves the commit
+            # exists without disturbing the reactor's caller transaction.
+            # Restart the sanctioned attached admission now so the closure
+            # read and every admission write share a post-commit snapshot.
+            begin_fresh_entry_admission(conn)
             collateral_component = _assert_collateral_allows_buy(
                 intent,
                 spend_micro=required_pusd_micro,
@@ -7761,23 +7772,11 @@ def _live_order(
                 post_only=submit_post_only,
                 captured_at=now_str,
             )
-            # Admission is one durable fact: envelope + command journal +
-            # collateral/risk reservations. Ledger preflight above may run
-            # executescript(), whose SQLite contract commits any open
-            # transaction. Acquire the writer only after that schema/read
-            # phase and before the first admission write. The reservation
-            # helper below performs CAS DML without another schema touch.
-            if not conn.in_transaction:
-                conn.execute("BEGIN IMMEDIATE")
             try:
-                # The envelope insert acquires SQLite's single-writer lock.  The
+                # The fresh admission holds SQLite's single-writer lock. The
                 # exact position generation and wealth endowment are re-read
-                # after that boundary and remain stable through command insert.
-                envelope_id = _persist_prebuilt_submit_envelope(
-                    conn,
-                    pre_submit_envelope,
-                    command_id=command_id,
-                )
+                # after that boundary and remain stable through the repo's
+                # atomic envelope+certificate+command write.
                 if increment_position_id:
                     locked_duplicate = _entry_duplicate_same_token_component(
                         conn,
@@ -7862,7 +7861,8 @@ def _live_order(
                 conn,
                 command_id=command_id,
                 snapshot_id=intent.executable_snapshot_id,
-                envelope_id=envelope_id,
+                envelope_id=f"pre-submit:{command_id}",
+                submission_envelope=pre_submit_envelope,
                 position_id=increment_position_id or trade_id,
                 decision_id=effective_decision_id,
                 idempotency_key=idem.value,

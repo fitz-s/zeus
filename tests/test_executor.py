@@ -968,7 +968,10 @@ class TestExecutor:
         ("failure_site", "failure_kind"),
         (
             ("src.state.venue_command_repo.append_event", "locked"),
-            ("src.execution.executor._persist_prebuilt_submit_envelope", "snapshot"),
+            (
+                "src.state.venue_command_repo._assert_entry_certificate_closure",
+                "closure",
+            ),
             ("src.execution.executor._reserve_collateral_for_buy", "collateral"),
             ("src.state.venue_command_repo.insert_command", "integrity"),
             ("src.state.venue_command_repo.append_event", "operational"),
@@ -983,7 +986,6 @@ class TestExecutor:
         failure_kind,
     ):
         """Every pre-venue failure must release the writer and erase admission."""
-        from src.contracts.executable_market_snapshot import MarketSnapshotError
         from src.engine.event_bound_final_intent import PreVenueSubmitError
         from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
         from src.state.schema.entry_exposure_obligations_schema import ensure_table
@@ -995,6 +997,10 @@ class TestExecutor:
             token_id="yes-token-pre-venue-lock",
             final_limit_price=Decimal("0.33"),
             size_value=Decimal("3.30"),
+        )
+        final_intent = replace(
+            final_intent,
+            actionable_certificate_hash="cert-pre-venue-lock",
         )
 
         class ClientShouldNotBeConstructed:
@@ -1065,9 +1071,21 @@ class TestExecutor:
             "src.state.venue_command_repo._validate_entry_submit_payload",
             lambda **_kwargs: None,
         )
+        def begin_test_admission(conn):
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+
+        monkeypatch.setattr(
+            "src.state.venue_command_repo.begin_fresh_entry_admission",
+            begin_test_admission,
+        )
+        monkeypatch.setattr(
+            "src.state.venue_command_repo._assert_entry_certificate_closure",
+            lambda *args, **kwargs: None,
+        )
         failure = {
             "locked": sqlite3.OperationalError("database is locked"),
-            "snapshot": MarketSnapshotError("snapshot changed"),
+            "closure": ValueError("certificate closure failed"),
             "collateral": CollateralInsufficient("collateral changed"),
             "integrity": sqlite3.IntegrityError("idempotency race"),
             "operational": sqlite3.OperationalError("disk I/O error"),
@@ -1119,6 +1137,7 @@ class TestExecutor:
         _TEST_CONN.commit()
 
         if failure_kind in {
+            "closure",
             "integrity",
             "operational",
             "unexpected",
