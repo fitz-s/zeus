@@ -19,7 +19,11 @@ from types import SimpleNamespace
 import pytest
 
 from src.decision_kernel import claims
-from src.events.event_store import EventStore, GLOBAL_WINNER_TARGETED_CLAIM
+from src.events.event_store import (
+    EventStore,
+    GLOBAL_WINNER_SUBMIT_FENCED,
+    GLOBAL_WINNER_TARGETED_CLAIM,
+)
 from src.events.opportunity_event import (
     Day0ExtremeUpdatedPayload,
     ForecastSnapshotReadyPayload,
@@ -1686,9 +1690,18 @@ def test_targeted_forecast_supersession_aborts_cycle_before_ack_boundary():
 def _global_batch_probe_reactor(
     store, observations, *, incomplete=False, next_claim_event=None
 ):
+    bound_claims = {"generations": {}, "attempt_counts": {}}
+
     def _direct_submit(*_args, **_kwargs):
         observations["direct_submit_calls"] += 1
         raise AssertionError("global batch path must not invoke per-event submit")
+
+    def _bind_global_claim_generations(generations, attempt_counts):
+        bound_claims["generations"] = generations or {}
+        bound_claims["attempt_counts"] = attempt_counts or {}
+        observations.setdefault("claim_bind_calls", []).append(
+            (generations is not None, attempt_counts is not None)
+        )
 
     def _process_global_batch(
         events,
@@ -1702,6 +1715,12 @@ def _global_batch_probe_reactor(
         observations["world_conn_in_txn_at_batch"] = bool(store.conn.in_transaction)
         observations["claimed_statuses_at_batch"] = tuple(
             _processing_status(store.conn, event.event_id) for event in events
+        )
+        observations["claim_generations_at_batch"] = dict(
+            bound_claims["generations"]
+        )
+        observations["claim_attempt_counts_at_batch"] = dict(
+            bound_claims["attempt_counts"]
         )
         receipts = {
             event.event_id: EventSubmissionReceipt(
@@ -1724,6 +1743,9 @@ def _global_batch_probe_reactor(
 
     observations.update(direct_submit_calls=0, batch_calls=0)
     _direct_submit.process_global_batch = _process_global_batch  # type: ignore[attr-defined]
+    _direct_submit.bind_global_claim_generations = (  # type: ignore[attr-defined]
+        _bind_global_claim_generations
+    )
     return OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: True,
@@ -1825,6 +1847,13 @@ def test_global_batch_claims_epoch_then_calls_one_lock_free_batch_seam():
     assert observations["mutex_locked_at_batch"] is False
     assert observations["world_conn_in_txn_at_batch"] is False
     assert observations["claimed_statuses_at_batch"] == ("processing", "processing")
+    assert observations["claim_generations_at_batch"] == {
+        event.event_id: _DT_VENUE_OPEN.isoformat() for event in events
+    }
+    assert observations["claim_attempt_counts_at_batch"] == {
+        event.event_id: 1 for event in events
+    }
+    assert observations["claim_bind_calls"] == [(True, True), (False, False)]
     assert result.retried == 2
     assert all(_processing_status(conn, event.event_id) == "pending" for event in events)
     assert {
@@ -3938,6 +3967,595 @@ def test_global_target_processing_lease_blocks_new_target_materialization():
     ).fetchone() is None
 
 
+def test_superseded_global_target_without_venue_attempt_cannot_starve_redecision(
+    monkeypatch,
+):
+    import src.events.event_store as event_store
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("stale-target-source", target_date="2026-05-25")
+    stale_target = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="stale-target-economics",
+        payload=json.loads(source.payload_json),
+    )
+    current_target = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=11),
+        economic_identity="current-target-economics",
+        payload=json.loads(source.payload_json),
+    )
+    other_source = _forecast_event("other-family-source", target_date="2026-05-25")
+    other_payload = json.loads(other_source.payload_json)
+    other_payload["city"] = "Seattle"
+    other_target = _next_claim_carrier(
+        other_source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=1),
+        economic_identity="other-family-economics",
+        payload=other_payload,
+    )
+
+    assert store.prioritize_global_winner(stale_target)
+    assert store.claim(stale_target.event_id, claimed_at=clock[0])
+    clock[0] = "2026-05-24T18:00:01+00:00"
+    assert store.prioritize_global_winner(other_target)
+
+    clock[0] = "2026-05-24T18:00:02+00:00"
+    recovered = store.prioritized_global_winner_event(current_target)
+
+    assert recovered == current_target
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, stale_target.event_id),
+        ).fetchone()
+    ) == (
+        "expired",
+        None,
+        "GLOBAL_WINNER_TARGET_SUPERSEDED",
+    )
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store._winner_pointer_consumer_name, current_target.event_id),
+        ).fetchone()
+    ) == ("pending", GLOBAL_WINNER_TARGETED_CLAIM)
+
+
+@pytest.mark.parametrize(
+    "fence_event_type",
+    ("ExecutionCommandCreated", "VenueSubmitAttempted"),
+)
+def test_superseded_global_target_with_command_fence_remains_recovery_owned(
+    monkeypatch,
+    fence_event_type,
+):
+    import src.events.event_store as event_store
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("attempted-target-source", target_date="2026-05-25")
+    attempted = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="attempted-target-economics",
+        payload=json.loads(source.payload_json),
+    )
+    current = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=20),
+        economic_identity="current-target-economics",
+        payload=json.loads(source.payload_json),
+    )
+    other_source = _forecast_event("attempted-other-source", target_date="2026-05-25")
+    other_payload = json.loads(other_source.payload_json)
+    other_payload["city"] = "Seattle"
+    other = _next_claim_carrier(
+        other_source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=1),
+        economic_identity="attempted-other-economics",
+        payload=other_payload,
+    )
+
+    assert store.prioritize_global_winner(attempted)
+    assert store.claim(attempted.event_id, claimed_at=clock[0])
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "attempted-target-event",
+            f"{attempted.event_id}:final-intent",
+            1,
+            fence_event_type,
+            "attempted-target-hash",
+            "{}",
+            "attempted-target-payload-hash",
+            "engine_adapter",
+            clock[0],
+            clock[0],
+        ),
+    )
+    clock[0] = "2026-05-24T18:00:01+00:00"
+    assert store.prioritize_global_winner(other)
+
+    clock[0] = "2026-05-24T18:00:20+00:00"
+    assert store.prioritized_global_winner_event(current) is None
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, attempted.event_id),
+        ).fetchone()
+    ) == ("processing", GLOBAL_WINNER_TARGETED_CLAIM)
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+        (current.event_id,),
+    ).fetchone() is None
+
+
+def test_global_target_command_fence_rejects_superseded_claim(monkeypatch):
+    import src.events.event_store as event_store
+    from src.engine.event_reactor_adapter import (
+        _LiveOpportunityAlreadyLocked,
+        _fence_global_target_claim_before_command,
+    )
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("fenced-old-source", target_date="2026-05-25")
+    old = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="fenced-old-economics",
+        payload=json.loads(source.payload_json),
+    )
+    other_source = _forecast_event("fenced-other-source", target_date="2026-05-25")
+    other_payload = json.loads(other_source.payload_json)
+    other_payload["city"] = "Seattle"
+    other = _next_claim_carrier(
+        other_source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=1),
+        economic_identity="fenced-other-economics",
+        payload=other_payload,
+    )
+
+    assert store.prioritize_global_winner(old)
+    assert store.claim(old.event_id, claimed_at=clock[0])
+    old_attempt = store.attempt_count(old.event_id)
+    clock[0] = "2026-05-24T18:00:01+00:00"
+    assert store.prioritize_global_winner(other)
+
+    with pytest.raises(
+        _LiveOpportunityAlreadyLocked,
+        match="GLOBAL_WINNER_CLAIM_FENCE_LOST",
+    ):
+        _fence_global_target_claim_before_command(
+            conn,
+            old,
+            claimed_at="2026-05-24T18:00:00+00:00",
+            attempt_count=old_attempt,
+        )
+
+
+def test_global_target_command_fence_serializes_before_pointer_supersession(
+    monkeypatch,
+):
+    import src.events.event_store as event_store
+    from src.engine.event_reactor_adapter import (
+        _fence_global_target_claim_before_command,
+    )
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("fenced-command-source", target_date="2026-05-25")
+    old = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="fenced-command-economics",
+        payload=json.loads(source.payload_json),
+    )
+    current = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=2),
+        economic_identity="fenced-command-current-economics",
+        payload=json.loads(source.payload_json),
+    )
+    other_source = _forecast_event("fenced-command-other", target_date="2026-05-25")
+    other_payload = json.loads(other_source.payload_json)
+    other_payload["city"] = "Seattle"
+    other = _next_claim_carrier(
+        other_source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=1),
+        economic_identity="fenced-command-other-economics",
+        payload=other_payload,
+    )
+
+    assert store.prioritize_global_winner(old)
+    assert store.claim(old.event_id, claimed_at=clock[0])
+    old_attempt = store.attempt_count(old.event_id)
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    _fence_global_target_claim_before_command(
+        conn,
+        old,
+        claimed_at=clock[0],
+        attempt_count=old_attempt,
+    )
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "fenced-command-event",
+            f"{old.event_id}:final-intent",
+            1,
+            "ExecutionCommandCreated",
+            "fenced-command-hash",
+            "{}",
+            "fenced-command-payload-hash",
+            "engine_adapter",
+            clock[0],
+            clock[0],
+        ),
+    )
+    conn.commit()
+
+    clock[0] = "2026-05-24T18:00:01+00:00"
+    conn.execute("BEGIN IMMEDIATE")
+    assert store.prioritize_global_winner(other)
+    conn.commit()
+
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, old.event_id),
+        ).fetchone()
+    ) == ("processing", "2026-05-24T18:00:00+00:00", GLOBAL_WINNER_SUBMIT_FENCED)
+    assert store.prioritized_global_winner_event(current) is None
+
+
+def test_global_target_command_fence_rejects_reclaimed_old_generation(
+    monkeypatch,
+):
+    import src.events.event_store as event_store
+    from src.engine.event_reactor_adapter import (
+        _LiveOpportunityAlreadyLocked,
+        _fence_global_target_claim_before_command,
+    )
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("reclaimed-fence-source", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="reclaimed-fence-economics",
+        payload=json.loads(source.payload_json),
+    )
+
+    assert store.prioritize_global_winner(target)
+    first_generation = clock[0]
+    assert store.claim(target.event_id, claimed_at=first_generation)
+    first_attempt = store.attempt_count(target.event_id)
+    clock[0] = "2026-05-24T18:00:11+00:00"
+    second_generation = clock[0]
+    assert store.claim(target.event_id, claimed_at=second_generation)
+    second_attempt = store.attempt_count(target.event_id)
+
+    with pytest.raises(
+        _LiveOpportunityAlreadyLocked,
+        match="GLOBAL_WINNER_CLAIM_FENCE_LOST",
+    ):
+        _fence_global_target_claim_before_command(
+            conn,
+            target,
+            claimed_at=first_generation,
+            attempt_count=first_attempt,
+        )
+    _fence_global_target_claim_before_command(
+        conn,
+        target,
+        claimed_at=second_generation,
+        attempt_count=second_attempt,
+    )
+    assert tuple(
+        conn.execute(
+            "SELECT claimed_at, attempt_count, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, target.event_id),
+        ).fetchone()
+    ) == (second_generation, second_attempt, GLOBAL_WINNER_SUBMIT_FENCED)
+    clock[0] = "2026-05-24T18:00:22+00:00"
+    assert not store.claim(target.event_id, claimed_at=clock[0])
+
+
+def test_stale_global_target_with_venue_attempt_cannot_reclaim_or_refence(
+    monkeypatch,
+):
+    import src.events.event_store as event_store
+    from src.engine.event_reactor_adapter import (
+        _LiveOpportunityAlreadyLocked,
+        _fence_global_target_claim_before_command,
+    )
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("attempted-reclaim-source", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="attempted-reclaim-economics",
+        payload=json.loads(source.payload_json),
+    )
+
+    assert store.prioritize_global_winner(target)
+    first_generation = clock[0]
+    assert store.claim(target.event_id, claimed_at=first_generation)
+    first_attempt = store.attempt_count(target.event_id)
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "attempted-reclaim-event",
+            f"{target.event_id}:final-intent",
+            1,
+            "VenueSubmitAttempted",
+            "attempted-reclaim-hash",
+            "{}",
+            "attempted-reclaim-payload-hash",
+            "engine_adapter",
+            clock[0],
+            clock[0],
+        ),
+    )
+    clock[0] = "2026-05-24T18:01:11+00:00"
+
+    assert store.fetch_pending(decision_time=clock[0], limit=1) == [target]
+    assert not store.claim(target.event_id, claimed_at=clock[0])
+    with pytest.raises(
+        _LiveOpportunityAlreadyLocked,
+        match="GLOBAL_WINNER_CLAIM_FENCE_LOST",
+    ):
+        _fence_global_target_claim_before_command(
+            conn,
+            target,
+            claimed_at=first_generation,
+            attempt_count=first_attempt,
+        )
+    assert tuple(
+        conn.execute(
+            "SELECT claimed_at, attempt_count, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, target.event_id),
+        ).fetchone()
+    ) == (first_generation, first_attempt, GLOBAL_WINNER_TARGETED_CLAIM)
+
+
+def test_fenced_global_target_without_command_requeues_for_retry_and_boot():
+    from src.engine.event_reactor_adapter import (
+        _fence_global_target_claim_before_command,
+    )
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    conn, store = _store()
+    source = _forecast_event("fenced-no-command-source", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat("2026-05-24T18:00:00+00:00"),
+        economic_identity="fenced-no-command-economics",
+        payload=json.loads(source.payload_json),
+    )
+    claimed_at = "2026-05-24T18:00:00+00:00"
+    assert store.prioritize_global_winner(target)
+    assert store.claim(target.event_id, claimed_at=claimed_at)
+    attempt_count = store.attempt_count(target.event_id)
+    _fence_global_target_claim_before_command(
+        conn,
+        target,
+        claimed_at=claimed_at,
+        attempt_count=attempt_count,
+    )
+
+    assert store.requeue_claim_if_current(
+        target.event_id,
+        claimed_at=claimed_at,
+        attempt_count=attempt_count,
+        last_error="GLOBAL_SELL_EXECUTION_FAILED",
+    )
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, target.event_id),
+        ).fetchone()
+    ) == ("pending", None, GLOBAL_WINNER_TARGETED_CLAIM)
+
+    assert store.claim(
+        target.event_id,
+        claimed_at="2026-05-24T18:01:00+00:00",
+    )
+    second_attempt = store.attempt_count(target.event_id)
+    _fence_global_target_claim_before_command(
+        conn,
+        target,
+        claimed_at="2026-05-24T18:01:00+00:00",
+        attempt_count=second_attempt,
+    )
+    assert (
+        store.requeue_processing_before_boot(
+            boot_at="2026-05-24T18:02:00+00:00"
+        )
+        == 1
+    )
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, target.event_id),
+        ).fetchone()
+    ) == ("pending", None, GLOBAL_WINNER_TARGETED_CLAIM)
+
+
+@pytest.mark.parametrize("inject_venue_attempt_during_expiry", (False, True))
+def test_legacy_orphaned_global_target_expiry_is_atomic_with_venue_attempt(
+    monkeypatch,
+    inject_venue_attempt_during_expiry,
+):
+    import src.events.event_store as event_store
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("legacy-orphan-source", target_date="2026-05-25")
+    orphan = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="legacy-orphan-economics",
+        payload=json.loads(source.payload_json),
+    )
+    current = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=11),
+        economic_identity="legacy-current-economics",
+        payload=json.loads(source.payload_json),
+    )
+
+    assert store.prioritize_global_winner(orphan)
+    assert store.claim(orphan.event_id, claimed_at=clock[0])
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "legacy-orphan-proof-event",
+            f"{orphan.event_id}:final-intent",
+            1,
+            "DecisionProofAccepted",
+            "legacy-orphan-proof-hash",
+            "{}",
+            "legacy-orphan-proof-payload-hash",
+            "decision_kernel",
+            clock[0],
+            clock[0],
+        ),
+    )
+    conn.execute(
+        "UPDATE opportunity_event_processing "
+        "SET processing_status='expired', processed_at=?, "
+        "last_error='GLOBAL_WINNER_TARGET_SUPERSEDED', updated_at=? "
+        "WHERE consumer_name=? AND event_id=?",
+        (
+            clock[0],
+            clock[0],
+            store._winner_pointer_consumer_name,
+            orphan.event_id,
+        ),
+    )
+
+    clock[0] = "2026-05-24T18:00:05+00:00"
+    assert store.prioritized_global_winner_event(current) is None
+    if inject_venue_attempt_during_expiry:
+        original_table_exists = event_store._table_exists
+        injected = False
+
+        def _inject_attempt_after_ledger_check(connection, table):
+            nonlocal injected
+            exists = original_table_exists(connection, table)
+            if table == "edli_live_order_events" and exists and not injected:
+                injected = True
+                connection.execute(
+                    "INSERT INTO edli_live_order_events ("
+                    "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+                    "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+                    "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+                    (
+                        "legacy-orphan-attempt-event",
+                        f"{orphan.event_id}:final-intent",
+                        2,
+                        "VenueSubmitAttempted",
+                        "legacy-orphan-attempt-hash",
+                        "{}",
+                        "legacy-orphan-attempt-payload-hash",
+                        "engine_adapter",
+                        clock[0],
+                        clock[0],
+                    ),
+                )
+            return exists
+
+        monkeypatch.setattr(
+            event_store,
+            "_table_exists",
+            _inject_attempt_after_ledger_check,
+        )
+    clock[0] = "2026-05-24T18:00:11+00:00"
+    recovered = store.prioritized_global_winner_event(current)
+
+    assert recovered == (None if inject_venue_attempt_during_expiry else current)
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, orphan.event_id),
+        ).fetchone()
+    ) == (
+        (
+            "processing",
+            GLOBAL_WINNER_TARGETED_CLAIM,
+        )
+        if inject_venue_attempt_during_expiry
+        else (
+            "expired",
+            "GLOBAL_WINNER_TARGET_SUPERSEDED",
+        )
+    )
+
+
 def test_boot_recovers_targeted_claim_only_after_prior_owner_died():
     conn, store = _store()
     target = _forecast_event("boot-orphan-target", target_date="2026-05-25")
@@ -3999,7 +4617,7 @@ def test_late_targeted_requeue_cannot_replace_newer_winner_pointer():
     )
     conn.commit()
 
-    assert store.requeue_claim_if_current(
+    assert not store.requeue_claim_if_current(
         old.event_id,
         claimed_at=claimed_at,
         attempt_count=attempt_count,

@@ -1505,11 +1505,25 @@ class OpportunityEventReactor:
             return max(decision_time, claimed_at.astimezone(UTC))
 
         try:
-            batch_result = process_batch(
-                tuple(claimed),
-                decision_time.astimezone(UTC),
-                claim_unpaged_winner=_claim_unpaged_winner,
+            bind_claim_generations = getattr(
+                self._submit,
+                "bind_global_claim_generations",
+                None,
             )
+            if callable(bind_claim_generations):
+                bind_claim_generations(
+                    claim_generations,
+                    claim_attempt_counts,
+                )
+            try:
+                batch_result = process_batch(
+                    tuple(claimed),
+                    decision_time.astimezone(UTC),
+                    claim_unpaged_winner=_claim_unpaged_winner,
+                )
+            finally:
+                if callable(bind_claim_generations):
+                    bind_claim_generations(None, None)
             if not isinstance(batch_result, GlobalBatchSubmitResult):
                 raise TypeError("global batch adapter returned an invalid result")
             claimed_ids = frozenset(event.event_id for event in claimed)

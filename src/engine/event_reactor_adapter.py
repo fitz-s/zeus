@@ -258,7 +258,7 @@ from src.state.snapshot_repo import (
 from src.events.candidate_binding import MarketTopologyCandidate, weather_family_id
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
-from src.events.event_store import EventStore
+from src.events.event_store import EventStore, GLOBAL_WINNER_SUBMIT_FENCED
 from src.events.forecast_completeness import ForecastCompletenessStatus
 from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
 from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_kelly, evaluate_riskguard
@@ -3345,6 +3345,80 @@ class _LiveOpportunityAlreadyLocked(RuntimeError):
     """Raised when continuous redecision rediscovers an already-locked opportunity."""
 
 
+def _fence_global_target_claim_before_command(
+    conn: sqlite3.Connection,
+    event: OpportunityEvent,
+    *,
+    claimed_at: str | None,
+    attempt_count: int | None,
+) -> None:
+    """Bind a global-winner claim to command creation under one writer lock.
+
+    A winner pointer may be superseded while an older carrier is still building
+    its final command.  The guarded no-op UPDATE is deliberately the first write
+    in the live-order savepoint: it serializes against pointer supersession and
+    proves that this exact carrier still owns both the main claim and pointer.
+    Once ``ExecutionCommandCreated`` is appended later in the same transaction,
+    supersession leaves the carrier recovery-owned.
+    """
+
+    if not str(event.source or "").startswith("global_auction_winner_target:"):
+        return
+    generation = str(claimed_at or "").strip()
+    if not generation or attempt_count is None:
+        raise _LiveOpportunityAlreadyLocked(
+            "GLOBAL_WINNER_CLAIM_GENERATION_MISSING:"
+            f"event_id={event.event_id}"
+        )
+    # SCOPE: this exact global-winner carrier. DRAIN: a superseded carrier with
+    # no durable command loses the fence immediately; a command-owning carrier
+    # drains through normal submit/recovery. RESET: a fresh carrier has a new
+    # event_id and can acquire the fence after the prior carrier is terminal.
+    cursor = conn.execute(
+        """
+        UPDATE opportunity_event_processing AS main
+           SET last_error = ?,
+               updated_at = ?
+         WHERE main.consumer_name = 'edli_reactor_v1'
+           AND main.event_id = ?
+           AND main.processing_status = 'processing'
+           AND main.claimed_at = ?
+           AND main.attempt_count = ?
+           AND main.last_error = 'GLOBAL_WINNER_TARGETED_CLAIM'
+           AND EXISTS (
+                SELECT 1
+                  FROM opportunity_event_processing AS pointer
+                 WHERE pointer.consumer_name =
+                           main.consumer_name || ':global_winner_v1'
+                   AND pointer.event_id = main.event_id
+                   AND pointer.processing_status = 'pending'
+                   AND pointer.last_error = 'GLOBAL_WINNER_TARGETED_CLAIM'
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM edli_live_order_events AS order_event
+                 WHERE order_event.event_type IN (
+                           'ExecutionCommandCreated',
+                           'VenueSubmitAttempted'
+                       )
+                   AND order_event.aggregate_id GLOB main.event_id || ':*'
+           )
+        """,
+        (
+            GLOBAL_WINNER_SUBMIT_FENCED,
+            datetime.now(UTC).isoformat(),
+            event.event_id,
+            generation,
+            int(attempt_count),
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise _LiveOpportunityAlreadyLocked(
+            "GLOBAL_WINNER_CLAIM_FENCE_LOST:"
+            f"event_id={event.event_id}"
+        )
+
+
 _DURABLE_LIVE_CAP_UNKNOWN_CITY = "__unknown_live_cap_city__"
 
 
@@ -6317,6 +6391,8 @@ def event_bound_live_adapter_from_trade_conn(
         str,
         tuple[str, str, dict[tuple[str, str], str | None]],
     ] = {}
+    _global_claim_generations: Mapping[str, str] = {}
+    _global_claim_attempt_counts: Mapping[str, int] = {}
     from src.runtime.reactor_wake import (
         reactor_urgent_wake_identity,
         reactor_urgent_wake_reason,
@@ -6366,6 +6442,10 @@ def event_bound_live_adapter_from_trade_conn(
             calibration_conn=calibration_conn,
             preflight_only=preflight_only,
             preflight_receipt=preflight_receipt,
+            global_claimed_at=_global_claim_generations.get(event.event_id),
+            global_claim_attempt_count=_global_claim_attempt_counts.get(
+                event.event_id
+            ),
         )
         if not preflight_only and receipt.venue_call_started:
             _live_submit_count[0] += 1
@@ -6767,6 +6847,10 @@ def event_bound_live_adapter_from_trade_conn(
                     trade_conn=trade_conn,
                     pre_submit_authority_provider=pre_submit_authority_provider,
                     live_order_schema_initialized=live_order_schema_initialized,
+                    global_claimed_at=_global_claim_generations.get(event.event_id),
+                    global_claim_attempt_count=_global_claim_attempt_counts.get(
+                        event.event_id
+                    ),
                 )
                 _live_order_build_phase = "live_order_certificates_built"
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
@@ -9265,6 +9349,16 @@ def event_bound_live_adapter_from_trade_conn(
             except Exception:  # noqa: BLE001 - commit is a lock-release boundary; never mask the real result/raise
                 pass
 
+    def _bind_global_claim_generations(
+        generations: Mapping[str, str] | None,
+        attempt_counts: Mapping[str, int] | None,
+    ) -> None:
+        nonlocal _global_claim_generations, _global_claim_attempt_counts
+        _global_claim_generations = generations if generations is not None else {}
+        _global_claim_attempt_counts = (
+            attempt_counts if attempt_counts is not None else {}
+        )
+
     # FIX B: expose the per-cycle ledger so the reactor commits/rolls back
     # provisional reservations in its post-submit phase.
     _submit.reservation_ledger = portfolio_reservation  # type: ignore[attr-defined]
@@ -9275,6 +9369,9 @@ def event_bound_live_adapter_from_trade_conn(
     _submit._live_ack_count = _live_ack_count  # type: ignore[attr-defined]
     _submit.prepare_global_event = _prepare_global_event  # type: ignore[attr-defined]
     _submit.process_global_batch = _process_global_batch  # type: ignore[attr-defined]
+    _submit.bind_global_claim_generations = (  # type: ignore[attr-defined]
+        _bind_global_claim_generations
+    )
     return _submit
 
 
@@ -10827,6 +10924,8 @@ def _submit_current_global_sell(
     calibration_conn: sqlite3.Connection | None,
     preflight_only: bool,
     preflight_receipt: EventSubmissionReceipt | None,
+    global_claimed_at: str | None = None,
+    global_claim_attempt_count: int | None = None,
 ) -> EventSubmissionReceipt:
     """Preflight or actuate one exact global SELL through reduce-only exit law."""
 
@@ -11159,6 +11258,12 @@ def _submit_current_global_sell(
                 },
             )
             exit_evidence = ExitExecutionEvidence()
+            _fence_global_target_claim_before_command(
+                trade_conn,
+                event,
+                claimed_at=global_claimed_at,
+                attempt_count=global_claim_attempt_count,
+            )
             outcome = execute_exit(
                 portfolio,
                 position,
@@ -17464,6 +17569,8 @@ def _build_live_execution_command_certificates(
     trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     live_order_schema_initialized: bool = False,
+    global_claimed_at: str | None = None,
+    global_claim_attempt_count: int | None = None,
 ) -> tuple[DecisionCertificate, ...]:
     global_actuation = receipt.global_actuation
     global_decision = (
@@ -18143,6 +18250,12 @@ def _build_live_execution_command_certificates(
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
 
         def _append_live_order_state() -> tuple[DecisionCertificate, DecisionCertificate, DecisionCertificate]:
+            _fence_global_target_claim_before_command(
+                live_cap_conn,
+                event,
+                claimed_at=global_claimed_at,
+                attempt_count=global_claim_attempt_count,
+            )
             aggregate_ledger = LiveOrderAggregateLedger(
                 live_cap_conn,
                 initialize_schema=False,
