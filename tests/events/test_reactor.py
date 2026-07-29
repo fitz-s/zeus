@@ -2054,7 +2054,7 @@ def test_monitor_does_not_preempt_when_completion_wake_is_not_durable(
     assert cancellation_probe() is False
 
 
-def test_held_sell_completion_request_deduplicates_durable_family(monkeypatch):
+def test_held_sell_completion_request_persists_position_q_and_bid_witness(monkeypatch):
     from types import SimpleNamespace
 
     from src.events import reactor
@@ -2078,6 +2078,9 @@ def test_held_sell_completion_request_deduplicates_durable_family(monkeypatch):
             SimpleNamespace(
                 reason=wake["reason"],
                 forecast_families=wake["forecast_families"],
+                held_sell_reauction_requests=wake.get(
+                    "held_sell_reauction_requests", ()
+                ),
             )
             for wake in wakes
         ),
@@ -2087,40 +2090,37 @@ def test_held_sell_completion_request_deduplicates_durable_family(monkeypatch):
         assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
             position_id="position-1",
-        ) is True
-        assert reactor.request_global_auction_completion(
-            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
-            position_id="position-2",
-        ) is True
-        assert reactor.request_global_auction_completion(
-            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
-            position_id="position-3",
             family=("Paris", "2026-07-28", "LOW"),
+            probability_content_identity="q-content-1",
+            held_token_id="token-no-1",
+            held_best_bid=0.12,
+            bid_observed_at="2026-07-28T08:00:00+00:00",
         ) is True
         assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
-            position_id="position-4",
+            position_id="position-1",
             family=("Paris", "2026-07-28", "low"),
+            probability_content_identity="q-content-1",
+            held_token_id="token-no-1",
+            held_best_bid=0.12,
+            bid_observed_at="2026-07-28T08:00:00+00:00",
         ) is True
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
-        assert wakes == [
-            {
-                "source": "held_position_monitor",
-                "reason": (
-                    "held_sell_global_auction_completion_requested"
-                ),
-                "forecast_families": (),
-            },
-            {
-                "source": "held_position_monitor",
-                "reason": (
-                    "held_sell_global_auction_completion_requested"
-                ),
-                "forecast_families": (
-                    ("Paris", "2026-07-28", "low"),
-                ),
-            },
-        ]
+        assert len(wakes) == 1
+        assert wakes[0]["source"] == "held_position_monitor"
+        assert wakes[0]["reason"] == (
+            "held_sell_global_auction_completion_requested"
+        )
+        assert wakes[0]["forecast_families"] == (
+            ("Paris", "2026-07-28", "low"),
+        )
+        request = wakes[0]["held_sell_reauction_requests"][0]
+        assert request.position_id == "position-1"
+        assert request.family == ("Paris", "2026-07-28", "low")
+        assert request.probability_content_identity == "q-content-1"
+        assert request.held_token_id == "token-no-1"
+        assert request.held_best_bid == 0.12
+        assert request.bid_observed_at == "2026-07-28T08:00:00+00:00"
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
@@ -2170,6 +2170,130 @@ def test_held_sell_completion_request_survives_wake_io_failure(monkeypatch):
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
+def test_held_sell_reauction_typed_reject_receipt_completes_request(tmp_path):
+    from src.runtime.reactor_wake import (
+        HeldSellReauctionReceipt,
+        held_sell_reauction_requests_completed,
+        make_held_sell_reauction_request,
+        persist_held_sell_reauction_receipts,
+    )
+
+    request = make_held_sell_reauction_request(
+        position_id="position-reject",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-reject",
+        held_token_id="token-no-reject",
+        held_best_bid=0.09,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+
+    assert persist_held_sell_reauction_receipts(
+        (
+            HeldSellReauctionReceipt(
+                request_id=request.request_id,
+                status="REJECTED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+            ),
+        ),
+        path=tmp_path / "wake.json",
+    ) is True
+    assert held_sell_reauction_requests_completed(
+        (request,), path=tmp_path / "wake.json"
+    ) is True
+
+
+def test_held_sell_reauction_request_round_trips_through_durable_wake(tmp_path):
+    from src.runtime import reactor_wake
+
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="position-durable",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-durable",
+        held_token_id="token-no-durable",
+        held_best_bid=0.13,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        held_sell_reauction_requests=(request,),
+    )
+
+    stored = reactor_wake.reactor_wakes_since(None, path=path)
+
+    assert len(stored) == 1
+    assert stored[0].held_sell_reauction_requests == (request,)
+
+
+def test_held_sell_reauction_current_coverage_emits_actuation_receipt(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="position-covered",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-covered",
+        held_token_id="token-no-covered",
+        held_best_bid=0.11,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(
+            status="EVALUATED",
+            selection_epoch_identity="selection-epoch-covered",
+            sell_book_witness_identity="book-witness-covered",
+        ),
+    )
+
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].request_id == request.request_id
+    assert receipts[0].status == "ACTUATED"
+    assert receipts[0].selection_epoch_identity == "selection-epoch-covered"
+    assert receipts[0].sell_book_witness_identity == "book-witness-covered"
+
+
+def test_held_sell_reauction_global_no_trade_emits_typed_reject(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="position-no-trade",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-no-trade",
+        held_token_id="token-no-no-trade",
+        held_best_bid=0.11,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(status="EVALUATED"),
+    )
+
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=reactor.ReactorResult(
+            global_auction_completed_non_cancelled=1,
+            rejection_reasons=["GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"],
+        ),
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].status == "REJECTED"
+    assert receipts[0].reason.endswith("GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES")
+
+
 def test_snapshot_reauction_forces_new_wake_generation(monkeypatch):
     from types import SimpleNamespace
 
@@ -2203,6 +2327,7 @@ def test_snapshot_reauction_forces_new_wake_generation(monkeypatch):
             "source": "held_position_monitor",
             "reason": reactor.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
             "forecast_families": (("Paris", "2026-07-28", "low"),),
+            "held_sell_reauction_requests": (),
         }
     ]
 

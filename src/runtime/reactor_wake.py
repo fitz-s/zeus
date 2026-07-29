@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import socket
 import tempfile
@@ -19,6 +20,7 @@ REACTOR_WAKE_FILENAME = "edli-reactor-wake.json"
 REACTOR_WAKE_QUEUE_SUFFIX = ".d"
 REACTOR_WAKE_SOCKET_SUFFIX = ".sock"
 REACTOR_URGENT_WAKE_SUFFIX = ".urgent"
+HELD_SELL_REAUCTION_RECEIPT_SUFFIX = ".held-sell-reauction-receipts"
 GLOBAL_AUCTION_COMPLETION_WAKE_REASON = (
     "held_sell_global_auction_completion_requested"
 )
@@ -36,6 +38,30 @@ _WAKE_QUEUE_REVISIONS: dict[Path, tuple[int, ...]] = {}
 
 
 @dataclass(frozen=True)
+class HeldSellReauctionRequest:
+    """One held statistical-SELL obligation that requires a global reauction."""
+
+    request_id: str
+    position_id: str
+    family: tuple[str, str, str]
+    probability_content_identity: str
+    held_token_id: str
+    held_best_bid: float
+    bid_observed_at: str
+
+
+@dataclass(frozen=True)
+class HeldSellReauctionReceipt:
+    """Durable terminal result for one held reauction obligation."""
+
+    request_id: str
+    status: str
+    reason: str
+    selection_epoch_identity: str = ""
+    sell_book_witness_identity: str = ""
+
+
+@dataclass(frozen=True)
 class ReactorWake:
     wake_id: str
     published_at: str
@@ -43,6 +69,7 @@ class ReactorWake:
     reason: str
     event_ids: tuple[str, ...] = ()
     forecast_families: tuple[tuple[str, str, str], ...] = ()
+    held_sell_reauction_requests: tuple[HeldSellReauctionRequest, ...] = ()
 
 
 def _wake_path(path: Path | None) -> Path:
@@ -70,6 +97,11 @@ def _wake_socket_path(path: Path | None) -> Path:
 def _urgent_wake_path(path: Path | None) -> Path:
     target = _wake_path(path)
     return target.with_name(f"{target.name}{REACTOR_URGENT_WAKE_SUFFIX}")
+
+
+def _held_sell_reauction_receipt_dir(path: Path | None) -> Path:
+    target = _wake_path(path)
+    return target.with_name(f"{target.name}{HELD_SELL_REAUCTION_RECEIPT_SUFFIX}")
 
 
 def _notify_reactor_wake(path: Path | None) -> None:
@@ -162,6 +194,89 @@ def _clean_forecast_families(
     return tuple(families)
 
 
+def make_held_sell_reauction_request(
+    *,
+    position_id: str,
+    family: tuple[str, str, str],
+    probability_content_identity: str,
+    held_token_id: str,
+    held_best_bid: float,
+    bid_observed_at: str,
+) -> HeldSellReauctionRequest:
+    """Bind one monitor witness to the exact global reauction it requires."""
+
+    clean_family = _clean_forecast_families((family,))
+    clean_position_id = str(position_id or "").strip()
+    clean_q_identity = str(probability_content_identity or "").strip()
+    clean_token_id = str(held_token_id or "").strip()
+    clean_observed_at = str(bid_observed_at or "").strip()
+    try:
+        clean_bid = float(held_best_bid)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("HELD_SELL_REAUCTION_BID_INVALID") from exc
+    if (
+        len(clean_family) != 1
+        or not all(
+            (
+                clean_position_id,
+                clean_q_identity,
+                clean_token_id,
+                clean_observed_at,
+            )
+        )
+        or not math.isfinite(clean_bid)
+        or not 0.05 <= clean_bid <= 0.95
+    ):
+        raise ValueError("HELD_SELL_REAUCTION_REQUEST_INVALID")
+    material = {
+        "position_id": clean_position_id,
+        "family": clean_family[0],
+        "probability_content_identity": clean_q_identity,
+        "held_token_id": clean_token_id,
+        "held_best_bid": clean_bid,
+        "bid_observed_at": clean_observed_at,
+    }
+    request_id = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return HeldSellReauctionRequest(request_id=request_id, **material)
+
+
+def _clean_held_sell_reauction_requests(
+    values: object,
+) -> tuple[HeldSellReauctionRequest, ...]:
+    if not isinstance(values, (list, tuple)):
+        return ()
+    requests: list[HeldSellReauctionRequest] = []
+    seen: set[str] = set()
+    for raw in values:
+        if isinstance(raw, HeldSellReauctionRequest):
+            material = raw
+        elif isinstance(raw, dict):
+            try:
+                material = make_held_sell_reauction_request(
+                    position_id=str(raw.get("position_id") or ""),
+                    family=tuple(raw.get("family") or ()),
+                    probability_content_identity=str(
+                        raw.get("probability_content_identity") or ""
+                    ),
+                    held_token_id=str(raw.get("held_token_id") or ""),
+                    held_best_bid=raw.get("held_best_bid"),
+                    bid_observed_at=str(raw.get("bid_observed_at") or ""),
+                )
+            except (TypeError, ValueError):
+                continue
+        else:
+            continue
+        if material.request_id in seen:
+            continue
+        seen.add(material.request_id)
+        requests.append(material)
+        if len(requests) == 100:
+            break
+    return tuple(requests)
+
+
 def publish_reactor_wake(
     *,
     source: str,
@@ -171,6 +286,7 @@ def publish_reactor_wake(
     published_at: datetime | None = None,
     event_ids: tuple[str, ...] = (),
     forecast_families: tuple[tuple[str, str, str], ...] = (),
+    held_sell_reauction_requests: tuple[HeldSellReauctionRequest, ...] = (),
 ) -> ReactorWake:
     """Atomically publish a non-authoritative wake hint after durable truth commits."""
 
@@ -186,6 +302,9 @@ def publish_reactor_wake(
         )
     )[:100]
     clean_forecast_families = _clean_forecast_families(forecast_families)
+    clean_held_sell_reauction_requests = _clean_held_sell_reauction_requests(
+        held_sell_reauction_requests
+    )
     wake = ReactorWake(
         wake_id=str(wake_id or uuid.uuid4().hex),
         published_at=(published_at or datetime.now(timezone.utc))
@@ -195,6 +314,7 @@ def publish_reactor_wake(
         reason=clean_reason,
         event_ids=clean_event_ids,
         forecast_families=clean_forecast_families,
+        held_sell_reauction_requests=clean_held_sell_reauction_requests,
     )
     target = _wake_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -213,7 +333,17 @@ def _atomic_write_wake(target: Path, wake: ReactorWake) -> None:
     temp = target.with_name(f".{target.name}.{os.getpid()}.{wake.wake_id}.tmp")
     try:
         temp.write_text(
-            json.dumps(wake.__dict__, sort_keys=True, separators=(",", ":")),
+            json.dumps(
+                {
+                    **wake.__dict__,
+                    "held_sell_reauction_requests": [
+                        request.__dict__
+                        for request in wake.held_sell_reauction_requests
+                    ],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             encoding="utf-8",
         )
         os.replace(temp, target)
@@ -247,6 +377,9 @@ def _read_reactor_wake_path(path: Path) -> ReactorWake | None:
             )[:100],
             forecast_families=_clean_forecast_families(
                 payload.get("forecast_families", ())
+            ),
+            held_sell_reauction_requests=_clean_held_sell_reauction_requests(
+                payload.get("held_sell_reauction_requests", ())
             ),
         )
     except (FileNotFoundError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -483,6 +616,114 @@ def coalescible_reactor_wakes(
         event_ids = next_event_ids
         families = next_families
     return tuple(wakes)
+
+
+def _held_sell_reauction_receipt_path(
+    request_id: str,
+    *,
+    path: Path | None = None,
+) -> Path:
+    return _held_sell_reauction_receipt_dir(path) / f"{request_id}.json"
+
+
+def _read_held_sell_reauction_receipt(
+    request_id: str,
+    *,
+    path: Path | None = None,
+) -> HeldSellReauctionReceipt | None:
+    try:
+        payload = json.loads(
+            _held_sell_reauction_receipt_path(request_id, path=path).read_text(
+                encoding="utf-8"
+            )
+        )
+        receipt = HeldSellReauctionReceipt(
+            request_id=str(payload["request_id"]).strip(),
+            status=str(payload["status"]).strip(),
+            reason=str(payload["reason"]).strip(),
+            selection_epoch_identity=str(
+                payload.get("selection_epoch_identity") or ""
+            ).strip(),
+            sell_book_witness_identity=str(
+                payload.get("sell_book_witness_identity") or ""
+            ).strip(),
+        )
+    except (FileNotFoundError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        receipt.request_id != str(request_id or "").strip()
+        or receipt.status not in {"ACTUATED", "REJECTED"}
+        or not receipt.reason
+    ):
+        return None
+    if receipt.status == "ACTUATED" and not all(
+        (
+            receipt.selection_epoch_identity,
+            receipt.sell_book_witness_identity,
+        )
+    ):
+        return None
+    return receipt
+
+
+def persist_held_sell_reauction_receipts(
+    receipts: tuple[HeldSellReauctionReceipt, ...],
+    *,
+    path: Path | None = None,
+) -> bool:
+    """Durably record terminal global-auction outcomes before wake acknowledgement."""
+
+    try:
+        directory = _held_sell_reauction_receipt_dir(path)
+        directory.mkdir(parents=True, exist_ok=True)
+        for receipt in receipts:
+            if (
+                not isinstance(receipt, HeldSellReauctionReceipt)
+                or receipt.status not in {"ACTUATED", "REJECTED"}
+                or not receipt.request_id
+                or not receipt.reason
+                or (
+                    receipt.status == "ACTUATED"
+                    and not (
+                        receipt.selection_epoch_identity
+                        and receipt.sell_book_witness_identity
+                    )
+                )
+            ):
+                raise ValueError("HELD_SELL_REAUCTION_RECEIPT_INVALID")
+            target = _held_sell_reauction_receipt_path(receipt.request_id, path=path)
+            temp = target.with_name(
+                f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                temp.write_text(
+                    json.dumps(
+                        receipt.__dict__, sort_keys=True, separators=(",", ":")
+                    ),
+                    encoding="utf-8",
+                )
+                os.replace(temp, target)
+            finally:
+                try:
+                    temp.unlink()
+                except FileNotFoundError:
+                    pass
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def held_sell_reauction_requests_completed(
+    requests: tuple[HeldSellReauctionRequest, ...],
+    *,
+    path: Path | None = None,
+) -> bool:
+    """A request completes only with its own durable actuation/reject receipt."""
+
+    return bool(requests) and all(
+        _read_held_sell_reauction_receipt(request.request_id, path=path) is not None
+        for request in requests
+    )
 
 
 def acknowledge_reactor_wake(

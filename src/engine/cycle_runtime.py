@@ -6700,6 +6700,23 @@ def execute_monitoring_phase(
                     exit_reason,
                 )
             )
+            probability_receipt = getattr(
+                pos,
+                "_day0_monitor_probability_receipt",
+                None,
+            )
+            probability_content_identity = _monitor_probability_content_identity(
+                probability_receipt
+            )
+            held_token_id = str(
+                (
+                    getattr(pos, "no_token_id", "")
+                    if str(getattr(pos, "direction", "") or "").strip().lower()
+                    == "buy_no"
+                    else getattr(pos, "token_id", "")
+                )
+                or ""
+            ).strip()
             global_holding_coverage = None
             if (
                 should_exit
@@ -6707,16 +6724,6 @@ def execute_monitoring_phase(
                 and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
                 and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
             ):
-                probability_receipt = getattr(
-                    pos,
-                    "_day0_monitor_probability_receipt",
-                    None,
-                )
-                probability_content_identity = (
-                    _monitor_probability_content_identity(
-                        probability_receipt
-                    )
-                )
                 if probability_content_identity:
                     def coverage_time() -> datetime:
                         try:
@@ -6802,6 +6809,10 @@ def execute_monitoring_phase(
                             getattr(pos, "temperature_metric", "") or ""
                         ).strip().lower(),
                     ),
+                    probability_content_identity=probability_content_identity,
+                    held_token_id=held_token_id,
+                    held_best_bid=exit_context.best_bid,
+                    bid_observed_at=str(getattr(pos, "last_monitor_at", "") or ""),
                 )
                 should_exit = False
                 exit_reason = (

@@ -6199,6 +6199,10 @@ def request_global_auction_completion(
     reason: str,
     position_id: str,
     family: tuple[str, str, str] | None = None,
+    probability_content_identity: str = "",
+    held_token_id: str = "",
+    held_best_bid: float | None = None,
+    bid_observed_at: str = "",
     force_new_generation: bool = False,
 ) -> bool:
     """Persistently reserve one complete global cut for a held SELL.
@@ -6221,9 +6225,28 @@ def request_global_auction_completion(
         )
     try:
         from src.runtime.reactor_wake import (
+            make_held_sell_reauction_request,
             publish_reactor_wake,
             reactor_wakes_since,
         )
+
+        held_request = None
+        if any(
+            (
+                probability_content_identity,
+                held_token_id,
+                held_best_bid is not None,
+                bid_observed_at,
+            )
+        ):
+            held_request = make_held_sell_reauction_request(
+                position_id=str(position_id or ""),
+                family=clean_family,
+                probability_content_identity=probability_content_identity,
+                held_token_id=held_token_id,
+                held_best_bid=held_best_bid,
+                bid_observed_at=bid_observed_at,
+            )
 
         durable_wakes = tuple(
             wake
@@ -6231,12 +6254,32 @@ def request_global_auction_completion(
             if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
         )
         durable_request_exists = (
-            any(wake_families[0] in wake.forecast_families for wake in durable_wakes)
-            if wake_families
-            else bool(durable_wakes)
+            any(
+                held_request.request_id
+                in {
+                    request.request_id
+                    for request in wake.held_sell_reauction_requests
+                }
+                for wake in durable_wakes
+            )
+            if held_request is not None
+            else (
+                any(wake_families[0] in wake.forecast_families for wake in durable_wakes)
+                if wake_families
+                else bool(durable_wakes)
+            )
         )
+    except ValueError:
+        logging.getLogger("zeus.events.reactor").error(
+            "held SELL reauction request rejected before durable publish: "
+            "position_id=%s reason=%s",
+            str(position_id or "unknown"),
+            str(reason or "authority_unavailable"),
+        )
+        return False
     except OSError:
         durable_request_exists = False
+        held_request = None
     if not already_due:
         logger = logging.getLogger("zeus.events.reactor")
         logger.warning(
@@ -6255,6 +6298,9 @@ def request_global_auction_completion(
                 source="held_position_monitor",
                 reason=GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
                 forecast_families=wake_families,
+                held_sell_reauction_requests=(held_request,)
+                if held_request is not None
+                else (),
             )
         except OSError:
             logger.exception(
@@ -6263,6 +6309,85 @@ def request_global_auction_completion(
             )
             return False
     return True
+
+
+def _held_sell_reauction_receipts_from_global_cut(
+    *,
+    requests: tuple[object, ...],
+    result: object,
+) -> tuple[object, ...]:
+    """Bind each durable held request to the exact global cut that answered it."""
+
+    if int(getattr(result, "global_auction_completed_non_cancelled", 0) or 0) <= 0:
+        return ()
+    from src.engine.global_batch_runtime import held_sell_reauction_coverage
+    from src.runtime.reactor_wake import HeldSellReauctionReceipt
+
+    receipts: list[HeldSellReauctionReceipt] = []
+    global_no_trade_reason = next(
+        (
+            str(reason)
+            for reason in getattr(result, "rejection_reasons", ())
+            if str(reason).startswith(
+                ("GLOBAL_AUCTION_NO_TRADE:", "GLOBAL_PREFLIGHT_")
+            )
+        ),
+        "",
+    )
+    for request in requests:
+        coverage = held_sell_reauction_coverage(
+            position_id=str(getattr(request, "position_id", "") or ""),
+            probability_content_identity=str(
+                getattr(request, "probability_content_identity", "") or ""
+            ),
+            token_id=str(getattr(request, "held_token_id", "") or ""),
+        )
+        if coverage is None:
+            continue
+        if coverage.status == "EVALUATED":
+            if global_no_trade_reason:
+                receipts.append(
+                    HeldSellReauctionReceipt(
+                        request_id=str(
+                            getattr(request, "request_id", "") or ""
+                        ),
+                        status="REJECTED",
+                        reason=(
+                            "GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:"
+                            f"{global_no_trade_reason}"
+                        ),
+                    )
+                )
+                continue
+            selection_epoch_identity = str(
+                getattr(coverage, "selection_epoch_identity", "") or ""
+            )
+            sell_book_witness_identity = str(
+                getattr(coverage, "sell_book_witness_identity", "") or ""
+            )
+            if not selection_epoch_identity or not sell_book_witness_identity:
+                continue
+            receipts.append(
+                HeldSellReauctionReceipt(
+                    request_id=str(getattr(request, "request_id", "") or ""),
+                    status="ACTUATED",
+                    reason="GLOBAL_AUCTION_CURRENT_HOLDING_COVERAGE_ACTUATED",
+                    selection_epoch_identity=selection_epoch_identity,
+                    sell_book_witness_identity=sell_book_witness_identity,
+                )
+            )
+        elif coverage.status == "EXCLUDED":
+            receipts.append(
+                HeldSellReauctionReceipt(
+                    request_id=str(getattr(request, "request_id", "") or ""),
+                    status="REJECTED",
+                    reason=(
+                        "GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:"
+                        f"{str(getattr(coverage, 'reason', '') or 'unspecified')}"
+                    ),
+                )
+            )
+    return tuple(receipts)
 
 
 def _global_auction_monitor_cancellation_probe(
@@ -6348,6 +6473,7 @@ def run_edli_event_reactor_cycle(
     producer_wake_published_at: str | None = None,
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
+    producer_held_sell_reauction_requests: tuple[object, ...] = (),
     urgent_day0_pending: Callable[[], bool] | None = None,
     held_position_monitor_pending: Callable[[], bool] | None = None,
     live_entry_block_reason: str | None = None,
@@ -7072,6 +7198,17 @@ def run_edli_event_reactor_cycle(
                 urgent_day0_pending=urgent_day0_pending,
             ),
         )
+        if producer_held_sell_reauction_requests:
+            from src.runtime.reactor_wake import persist_held_sell_reauction_receipts
+
+            held_sell_reauction_receipts = _held_sell_reauction_receipts_from_global_cut(
+                requests=producer_held_sell_reauction_requests,
+                result=_rr,
+            )
+            if held_sell_reauction_receipts and not persist_held_sell_reauction_receipts(
+                held_sell_reauction_receipts
+            ):
+                completion_wake_needs_retry = True
         completion_satisfied = _settle_global_auction_monitor_fairness(
             completion_due_at_start=_monitor_completion_due_at_start,
             result=_rr,

@@ -3827,6 +3827,7 @@ def _edli_event_reactor_cycle(
     producer_wake_published_at: str | None = None,
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
+    producer_held_sell_reauction_requests: tuple[object, ...] = (),
 ) -> bool:
     """Scheduler hook -- body owned by src.events.reactor (R4-b3 reactor+prune
     cluster extraction, 2026-07-08) as ``run_edli_event_reactor_cycle``. See
@@ -3854,6 +3855,9 @@ def _edli_event_reactor_cycle(
         producer_wake_published_at=producer_wake_published_at,
         producer_wake_event_ids=producer_wake_event_ids,
         producer_wake_families=producer_wake_families,
+        producer_held_sell_reauction_requests=(
+            producer_held_sell_reauction_requests
+        ),
         urgent_day0_pending=_unowned_day0_urgent_wake_pending,
         held_position_monitor_pending=(
             _periodic_held_position_monitor_handoff_pending.is_set
@@ -4529,6 +4533,7 @@ def _edli_reactor_wake_poll_once() -> bool:
 
     from src.runtime.reactor_wake import (
         coalescible_reactor_wakes,
+        held_sell_reauction_requests_completed,
         read_reactor_wake,
     )
 
@@ -4565,6 +4570,13 @@ def _edli_reactor_wake_poll_once() -> bool:
     wake_families = tuple(
         dict.fromkeys(
             family for queued in wakes for family in queued.forecast_families
+        )
+    )
+    held_sell_reauction_requests = tuple(
+        dict.fromkeys(
+            request
+            for queued in wakes
+            for request in queued.held_sell_reauction_requests
         )
     )
     day0_wake = wake.reason == "day0_extreme_event_committed"
@@ -4694,16 +4706,27 @@ def _edli_reactor_wake_poll_once() -> bool:
             )
             return True
     if not substrate_refresh_wake:
+        reactor_kwargs = {
+            "producer_wake_reason": wake.reason,
+            "producer_wake_ids": tuple(queued.wake_id for queued in wakes),
+            "producer_wake_published_at": wake.published_at,
+            "producer_wake_event_ids": wake_event_ids,
+            "producer_wake_families": wake_families,
+        }
+        if held_sell_reauction_requests:
+            reactor_kwargs["producer_held_sell_reauction_requests"] = (
+                held_sell_reauction_requests
+            )
         ran = _edli_event_reactor_cycle(
-            producer_wake_reason=wake.reason,
-            producer_wake_ids=tuple(queued.wake_id for queued in wakes),
-            producer_wake_published_at=wake.published_at,
-            producer_wake_event_ids=wake_event_ids,
-            producer_wake_families=wake_families,
+            **reactor_kwargs,
         )
     if ran is not True:
         return False
     if wake_event_ids and not _reactor_wake_events_finished(wake_event_ids):
+        return False
+    if held_sell_reauction_requests and not held_sell_reauction_requests_completed(
+        held_sell_reauction_requests
+    ):
         return False
     if day0_wake and day0_requires_exit_monitor:
         _started, result = _day0_exit_monitor_attempt_state(wake.wake_id)

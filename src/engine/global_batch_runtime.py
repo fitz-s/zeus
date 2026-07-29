@@ -687,6 +687,29 @@ def current_global_holding_coverage(
     return row, lease.decision_log_id
 
 
+def held_sell_reauction_coverage(
+    *,
+    position_id: str,
+    probability_content_identity: str,
+    token_id: str,
+) -> GlobalHoldingAuctionCoverage | None:
+    """Expose the committed global cut that answered one held-sell request."""
+
+    with _GLOBAL_HOLDING_COVERAGE_LOCK:
+        lease = _GLOBAL_HOLDING_COVERAGE_BY_POSITION.get(str(position_id or ""))
+        generation = _GLOBAL_HOLDING_COVERAGE_GENERATION
+    if lease is None or lease.generation != generation:
+        return None
+    row = lease.row
+    if (
+        row.probability_content_identity
+        != str(probability_content_identity or "")
+        or row.token_id != str(token_id or "")
+    ):
+        return None
+    return row
+
+
 @dataclass(frozen=True)
 class GlobalWinnerPreflight:
     """Typed, venue-side-effect-free binding of one selected winner."""
