@@ -1360,7 +1360,7 @@ categories:
   # packet (docs/archives/packets/task_2026-04-23_midstream_remediation/plan.md).
   # Enforced in CI via scripts/test_currency_audit.py.
   #
-  # Per operator directive and /Users/leofitz/CLAUDE.md §"File-header
+  # Per operator directive and ~/CLAUDE.md §"File-header
   # provenance rule": a test in this panel without a dated provenance
   # header AND recent passing-run evidence is UNTRUSTED and cannot be
   # cited as protection for any invariant. T1.a (commit 67b5908) landed

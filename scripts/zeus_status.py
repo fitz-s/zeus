@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sqlite3
 import subprocess
 import sys
@@ -45,8 +46,12 @@ from pathlib import Path
 
 # --------------------------------------------------------------------------
 # Live DB paths (absolute; read-only). These are the K1-split canonical DBs.
+# ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
+# expanduser() so ZEUS_MAIN_TREE=~/zeus (the shell does NOT expand '~' inside
+# os.environ.get) resolves correctly instead of leaving a literal '~' segment.
 # --------------------------------------------------------------------------
-STATE = "/Users/leofitz/zeus/state"
+_MAIN_TREE = os.path.expanduser(os.environ.get("ZEUS_MAIN_TREE") or "~/zeus")
+STATE = os.path.join(_MAIN_TREE, "state")
 WORLD_DB = f"{STATE}/zeus-world.db"
 TRADES_DB = f"{STATE}/zeus_trades.db"
 FORECASTS_DB = f"{STATE}/zeus-forecasts.db"

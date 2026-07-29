@@ -9,7 +9,7 @@
 # Venue truth: NO real order exists at Polymarket (no venue_command row,
 # no venue_order_id).  This clears local state only.
 #
-# Run from /Users/leofitz/zeus (the main repo, NOT a worktree):
+# Run from the main repo checkout (NOT a worktree):
 #   python3 scripts/reconcile_wellington_zombie_2026_06_22.py [--dry-run]
 #
 # Requires: venv active (same one the live daemon uses).

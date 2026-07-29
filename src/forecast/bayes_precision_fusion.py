@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-06-09
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §1 observation model, §2 T2 fusion, §4 algorithm,
 #   §6 F5 (bayes_precision_fusion). PORTED VERBATIM from the proven proof engine
-#   /Users/leofitz/zeus/.omc/research/polyweather_eval/scripts/run_bayes_precision_fusion.py
+#   .omc/research/polyweather_eval/scripts/run_bayes_precision_fusion.py (repo-relative)
 #   (commit 658275e33b "BAYES_PRECISION_FUSION-Bayes forecast core: spec + settlement proof"). Verdict:
 #   BAYES_PRECISION_FUSION_PROOF_RESULT.md (core PROMOTE ~15% Brier; regional lead-1-only evidence).
 """BAYES_PRECISION_FUSION-Bayes settlement fusion — the production port of the proven C1 posterior.

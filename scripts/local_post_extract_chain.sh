@@ -2,7 +2,7 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
 # Authority basis: docs/operations/task_2026-05-04_tigge_ingest_resilience/POSTDOWNLOAD_CHAIN.md
-#                  + plan /Users/leofitz/.claude/plans/golden-knitting-wand.md
+#                  + plan ~/.claude/plans/golden-knitting-wand.md
 #                  Pairs with cloud-side scripts/cloud_tigge_autochain.sh.
 #
 # local_post_extract_chain.sh — runs ON operator laptop. Polls cloud

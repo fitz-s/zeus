@@ -125,7 +125,7 @@ entries:
       topology_doctor boot order and review behavior for all sessions.
 
   - path: ~/.openclaw/CLAUDE.md
-    # cross-repo: file lives at /Users/leofitz/.openclaw/CLAUDE.md outside zeus git tree.
+    # cross-repo: file lives at ~/.openclaw/CLAUDE.md outside zeus git tree.
     # Zeus-repo file-existence checks will fail; treat as advisory reference only.
     # Open question for WAVE 1.9 critic: whether cross-repo entries should be scoped
     # to a separate cross_repo_entries block or filtered by tooling.

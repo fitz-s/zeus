@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -215,17 +216,75 @@ def determine_catch_up_dates(
 # ---------------------------------------------------------------------------
 
 
+_CONDA_PYTHON_PROBE_MODULE = "ecmwfapi"
+_CONDA_PYTHON_PROBE_TIMEOUT_SECONDS = 8.0
+
+
+def _interpreter_has_dependency(candidate: str, *, probe_module: str) -> bool:
+    """Return True iff `candidate` is executable and can `import probe_module`.
+
+    Existence alone does not prove the interpreter is the right one — a
+    ~/miniconda3/bin/python that exists but predates ecmwfapi (or belongs to
+    an unrelated env) would otherwise be silently accepted and every MARS
+    download subprocess launched under it would fail. A dependency probe is
+    the only cheap proof that matters.
+    """
+    path = Path(candidate)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        return False
+    try:
+        result = subprocess.run(
+            [candidate, "-c", f"import {probe_module}"],
+            capture_output=True,
+            timeout=_CONDA_PYTHON_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def _conda_python() -> str:
     """Return the python interpreter the legacy 51 scripts expect.
 
     The 51-source-data scripts were written against the conda base python
-    (where ``ecmwfapi`` is installed). Falls back to ``sys.executable`` if
-    conda is missing — tests and dry-runs won't actually invoke MARS so the
-    fallback is safe.
+    (where ``ecmwfapi`` is installed). Resolution order:
+      1. ZEUS_CONDA_PYTHON env var (explicit deployment config; trusted
+         as-is — an operator who sets this is asserting it is correct).
+      2. ~/miniconda3/bin/python (conda default install location, portable
+         across machines/usernames via Path.home()), ACCEPTED ONLY if it is
+         executable and can import ecmwfapi.
+      3. `python3`, then `python`, resolved on PATH (covers non-default
+         conda install dirs) — `python3` first because a bare `python` can
+         resolve to Python 2 on some systems; same executability +
+         dependency-import validation either way (belt-and-suspenders: the
+         import probe alone already rejects a Python 2 interpreter, since
+         these deps aren't installed there).
+      4. sys.executable, with a logged warning — no candidate proved it has
+         ecmwfapi, so the MARS download subprocess launched under it is
+         expected to fail; this keeps the daemon alive to log the failure
+         rather than crash outright, and test/dry-run environments never
+         actually invoke MARS so this fallback is safe there.
     """
-    candidate = Path("/Users/leofitz/miniconda3/bin/python")
-    if candidate.exists():
-        return str(candidate)
+    from_env = os.environ.get("ZEUS_CONDA_PYTHON")
+    if from_env:
+        return from_env
+    candidate = str(Path.home() / "miniconda3" / "bin" / "python")
+    if _interpreter_has_dependency(candidate, probe_module=_CONDA_PYTHON_PROBE_MODULE):
+        return candidate
+    for path_candidate in (shutil.which("python3"), shutil.which("python")):
+        if path_candidate and _interpreter_has_dependency(
+            path_candidate, probe_module=_CONDA_PYTHON_PROBE_MODULE
+        ):
+            return path_candidate
+    logger.warning(
+        "_conda_python: no interpreter with '%s' importable found (checked "
+        "ZEUS_CONDA_PYTHON, %s, PATH `python3`/`python`); falling back to "
+        "sys.executable (%s) — the MARS download subprocess will fail if it "
+        "lacks ecmwfapi.",
+        _CONDA_PYTHON_PROBE_MODULE,
+        candidate,
+        sys.executable,
+    )
     return sys.executable
 
 

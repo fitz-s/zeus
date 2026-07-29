@@ -6701,7 +6701,7 @@ def test_process_code_started_before_runtime_source_mtime_yields_degraded(
     monkeypatch.setattr(
         live_health,
         "_process_command_line",
-        lambda _pid: "/Users/leofitz/zeus/.venv/bin/python -m src.main",
+        lambda _pid: "/srv/zeus/.venv/bin/python -m src.main",
     )
     monkeypatch.setattr(live_health, "_process_start_epoch", lambda _pid: 1000.0)
     monkeypatch.setattr(

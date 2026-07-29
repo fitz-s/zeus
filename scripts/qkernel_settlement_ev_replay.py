@@ -46,8 +46,7 @@ Join methodology:
   no_trade_regret_events         → condition_id + bin_label (--strict: 1:1, no ambiguity)
   executable_market_snapshots    → DECISION-TIME book (via executable_snapshot_id)
 
-Run:  /Users/leofitz/zeus/.venv/bin/python \\
-        /Users/leofitz/zeus/.claude/worktrees/qkernel-rebuild/scripts/qkernel_settlement_ev_replay.py
+Run:  .venv/bin/python scripts/qkernel_settlement_ev_replay.py
 
 Writes docs/evidence/qkernel_rebuild/settlement_ev_verdict_2026-06-16.md
 """
@@ -73,7 +72,13 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 # --- live DBs: ALWAYS the main tree ------------------------------------------
-_LIVE_STATE = "/Users/leofitz/zeus/state"
+# ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
+# expanduser() so ZEUS_MAIN_TREE=~/zeus (the shell does NOT expand '~' inside
+# os.environ.get) resolves correctly instead of leaving a literal '~' segment.
+_LIVE_STATE = os.path.join(
+    os.path.expanduser(os.environ.get("ZEUS_MAIN_TREE") or "~/zeus"),
+    "state",
+)
 FORECASTS_DB = os.path.join(_LIVE_STATE, "zeus-forecasts.db")
 TRADES_DB = os.path.join(_LIVE_STATE, "zeus_trades.db")
 WORLD_DB = os.path.join(_LIVE_STATE, "zeus-world.db")

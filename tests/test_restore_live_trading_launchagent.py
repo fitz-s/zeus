@@ -29,7 +29,7 @@ def _write_plist(path: Path, *, label: str = "com.zeus.live-trading", module: st
 <key>ProgramArguments</key><array>
 <string>/usr/bin/python3</string><string>-m</string><string>{module}</string>
 </array>
-<key>WorkingDirectory</key><string>/Users/leofitz/zeus</string>
+<key>WorkingDirectory</key><string>/opt/zeus</string>
 </dict></plist>
 """.encode()
     )

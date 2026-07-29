@@ -1,27 +1,40 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ARTIFACT ONLY. Risk-guard money-path sidecar (src.riskguard.riskguard).
+
+  ZEUS_REPO_PLACEHOLDER is substituted with the repo's absolute path at
+  install time via scripts/install_launchd_plist.py (plistlib-based —
+  parses the plist, substitutes inside string values only, refuses to
+  write if any placeholder survives, plutil -lints, writes atomically) —
+  this file never names an operator's machine.
+
+  INSTALL (operator, run from the repo root):
+    python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.riskguard-live.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.riskguard-live.plist
+-->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
 	<string>com.zeus.riskguard-live</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/leofitz/zeus/.venv/bin/python</string>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin/python</string>
 		<string>-m</string>
 		<string>src.riskguard.riskguard</string>
 	</array>
 	<key>WorkingDirectory</key>
-	<string>/Users/leofitz/zeus</string>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PYTHONPATH</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 		<key>PYTHONSAFEPATH</key>
 		<string>1</string>
 		<key>ZEUS_MODE</key>
 		<string>live</string>
 		<key>ZEUS_PRIMARY_ROOT</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -30,8 +43,8 @@
 	<key>ThrottleInterval</key>
 	<integer>30</integer>
 	<key>StandardOutPath</key>
-	<string>/Users/leofitz/zeus/logs/riskguard-live.log</string>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/riskguard-live.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/leofitz/zeus/logs/riskguard-live.err</string>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/riskguard-live.err</string>
 </dict>
 </plist>

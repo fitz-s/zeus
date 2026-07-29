@@ -10,13 +10,22 @@
 # Lifecycle: created=2026-05-28; last_reviewed=2026-05-29; last_reused=never
 # Reuse: Inspect CSV path constants (hardcoded) and confirm evidence ledger was built with cycle-strict extraction before interpreting OOS results.
 import csv
+import os
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 
-CSV = "/Users/leofitz/.claude/jobs/866db2ea/ENS_RESIDUAL_EVIDENCE_12CITY_HIGH.csv"
-OUT = "/Users/leofitz/.claude/jobs/866db2ea/phase2_oos_bias_high.csv"
+ROOT = Path(__file__).resolve().parents[1]
+CSV = os.environ.get(
+    "ZEUS_OOS_BIAS_CROSSFIT_CSV",
+    str(ROOT / "docs" / "operations" / "sd3_validation_evidence" / "ENS_RESIDUAL_EVIDENCE_12CITY_HIGH.csv"),
+)
+OUT = os.environ.get(
+    "ZEUS_OOS_BIAS_CROSSFIT_OUT",
+    str(ROOT / "docs" / "operations" / "sd3_validation_evidence" / "phase2_oos_bias_high.csv"),
+)
 RNG = np.random.default_rng(20260528)
 MIN_FOR_5FOLD = 20
 MIN_FOR_3FOLD = 9

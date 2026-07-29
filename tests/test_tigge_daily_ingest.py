@@ -327,7 +327,7 @@ def test_run_subprocess_injects_51_scripts_dir_on_pythonpath(monkeypatch):
         captured["env"] = kwargs.get("env")
         return _FakeCompleted()
 
-    monkeypatch.setenv("PYTHONPATH", "/Users/leofitz/zeus-live-main")
+    monkeypatch.setenv("PYTHONPATH", "/opt/zeus-live-main")
     monkeypatch.setattr(tigge_pipeline.subprocess, "run", fake_run)
 
     tigge_pipeline._run_subprocess(
@@ -341,7 +341,7 @@ def test_run_subprocess_injects_51_scripts_dir_on_pythonpath(monkeypatch):
     pythonpath = env.get("PYTHONPATH", "")
     parts = [os.path.normpath(p) for p in pythonpath.split(os.pathsep)]
     assert parts[0] == os.path.normpath(str(tigge_pipeline.SCRIPTS_DIR_51))
-    assert os.path.normpath("/Users/leofitz/zeus-live-main") in parts
+    assert os.path.normpath("/opt/zeus-live-main") in parts
 
 
 # ---------------------------------------------------------------------------

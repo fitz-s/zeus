@@ -37,13 +37,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from src.config import STATE_DIR
 from src.state.db_writer_lock import (
     WriteClass,
     connect_with_cutover_lease,
     db_writer_lock,
 )
 
-DEFAULT_DB = "/Users/leofitz/zeus/state/zeus-world.db"
+DEFAULT_DB = str(STATE_DIR / "zeus-world.db")
 LIVE_STATUSES = ("pending", "processing", "claimed")
 
 

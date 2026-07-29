@@ -8,6 +8,8 @@ Replaces the old zeus-heartbeat cron job that woke a full agent session every 30
 just to check health (wasting ~150k tokens per run × 48 runs/day).
 """
 import json
+import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -15,8 +17,12 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
 HEALTHCHECK = PROJECT_ROOT / "scripts" / "healthcheck.py"
-OPENCLAW = "/Users/leofitz/.npm-global/bin/openclaw"
-HEARTBEAT_LOG = Path("/Users/leofitz/.openclaw/logs/zeus-heartbeat-dispatch.log")
+# OPENCLAW_HOME override matches src/data/polymarket_client.py's convention.
+_OPENCLAW_HOME = Path(os.environ.get("OPENCLAW_HOME", os.path.expanduser("~/.openclaw")))
+OPENCLAW = os.environ.get("OPENCLAW_BIN") or shutil.which("openclaw") or str(
+    Path.home() / ".npm-global" / "bin" / "openclaw"
+)
+HEARTBEAT_LOG = _OPENCLAW_HOME / "logs" / "zeus-heartbeat-dispatch.log"
 VENV_PYTHON = str(PROJECT_ROOT / ".venv" / "bin" / "python")
 
 # The original venus heartbeat cron job ID — only triggered on failure

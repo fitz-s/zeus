@@ -1,6 +1,6 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: /Users/leofitz/Downloads/codereview-may19-2.md P0-2
+# Authority basis: ~/Downloads/codereview-may19-2.md P0-2
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
 # Purpose: Antibody — executable forecast reader must enforce
 #          source-clock causality: source_available_at and captured_at

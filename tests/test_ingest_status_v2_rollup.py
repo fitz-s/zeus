@@ -1,6 +1,6 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-29
-# Authority basis: /Users/leofitz/.claude/jobs/9ea6f95c/briefs/f44_recurrence_prevention.md §Slice 3
+# Authority basis: ~/.claude/jobs/9ea6f95c/briefs/f44_recurrence_prevention.md §Slice 3
 #   + OBS_V2_CONSOLIDATION_PLAN.md (observation_instants_v2 merged into observation_instants)
 """Tests for the observation_instants freshness lane in write_ingest_status.
 

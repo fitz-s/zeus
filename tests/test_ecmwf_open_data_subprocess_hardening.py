@@ -252,7 +252,7 @@ def test_run_subprocess_injects_script_dir_on_pythonpath(monkeypatch) -> None:
 
     monkeypatch.setattr(_mod.subprocess, "run", fake_run)
 
-    script_dir = "/Users/leofitz/zeus-live-main/51 source data/scripts"
+    script_dir = "/opt/zeus-live-main/51 source data/scripts"
     script = f"{script_dir}/extract_open_ens_localday.py"
     _mod._run_subprocess(
         [sys.executable, script, "--track", "mx2t6_high"],
@@ -289,10 +289,10 @@ def test_run_subprocess_preserves_existing_pythonpath(monkeypatch) -> None:
         captured["env"] = kwargs.get("env")
         return _FakeCompleted()
 
-    monkeypatch.setenv("PYTHONPATH", "/Users/leofitz/zeus-live-main")
+    monkeypatch.setenv("PYTHONPATH", "/opt/zeus-live-main")
     monkeypatch.setattr(_mod.subprocess, "run", fake_run)
 
-    script_dir = "/Users/leofitz/zeus-live-main/51 source data/scripts"
+    script_dir = "/opt/zeus-live-main/51 source data/scripts"
     _mod._run_subprocess(
         [sys.executable, f"{script_dir}/extract_open_ens_localday.py"],
         label="extract_antibody2",
@@ -301,6 +301,6 @@ def test_run_subprocess_preserves_existing_pythonpath(monkeypatch) -> None:
     pp = captured["env"].get("PYTHONPATH", "")
     parts = [os.path.normpath(p) for p in pp.split(os.pathsep)]
     assert parts[0] == os.path.normpath(script_dir), f"script dir must be first; got {pp!r}"
-    assert os.path.normpath("/Users/leofitz/zeus-live-main") in parts, (
+    assert os.path.normpath("/opt/zeus-live-main") in parts, (
         f"existing PYTHONPATH entry must be preserved; got {pp!r}"
     )

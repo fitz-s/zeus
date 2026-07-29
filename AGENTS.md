@@ -1,6 +1,6 @@
 # Zeus AGENTS
 
-Root operating contract for `/Users/leofitz/zeus`: durable law, money-path mental models, evidence gates, routing. Never store runtime snapshots here (branches, SHAs, PIDs, bankrolls, receipts, packet diaries). Nested `AGENTS.md` govern their subtrees; direct instructions override all AGENTS files.
+Root operating contract for this repo: durable law, money-path mental models, evidence gates, routing. Never store runtime snapshots here (branches, SHAs, PIDs, bankrolls, receipts, packet diaries). Nested `AGENTS.md` govern their subtrees; direct instructions override all AGENTS files.
 
 ## Boot Digest (SessionStart injection slice — NOT a reading surface)
 

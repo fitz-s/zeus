@@ -36,7 +36,13 @@ _ROOT = os.path.dirname(_SCRIPT_DIR)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-_LIVE_STATE = "/Users/leofitz/zeus/state"
+# ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
+# expanduser() so ZEUS_MAIN_TREE=~/zeus (the shell does NOT expand '~' inside
+# os.environ.get) resolves correctly instead of leaving a literal '~' segment.
+_LIVE_STATE = os.path.join(
+    os.path.expanduser(os.environ.get("ZEUS_MAIN_TREE") or "~/zeus"),
+    "state",
+)
 FORECASTS_DB = os.path.join(_LIVE_STATE, "zeus-forecasts.db")
 TRADES_DB    = os.path.join(_LIVE_STATE, "zeus_trades.db")
 WORLD_DB     = os.path.join(_LIVE_STATE, "zeus-world.db")
