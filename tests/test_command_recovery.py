@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-07-29
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -1940,11 +1940,66 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         outcome_label=outcome_label,
         event_slug=event_slug,
     )
-    insert_command(
-        conn,
-        command_id=command_id,
-        snapshot_id=snapshot_id,
-        envelope_id=_ensure_envelope(
+    decision_certificate_hash = hashlib.sha256(
+        f"test-certificate:{command_id}".encode()
+    ).hexdigest()
+    submission_envelope = None
+    attached_world_for_admission = False
+    if intent_kind == "ENTRY":
+        schemas = {
+            str(row[1]).strip()
+            for row in conn.execute("PRAGMA database_list").fetchall()
+            if len(row) > 1 and str(row[1]).strip()
+        }
+        if "world" not in schemas:
+            conn.execute("ATTACH DATABASE ':memory:' AS world")
+            attached_world_for_admission = True
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS world.decision_certificates (
+                certificate_hash TEXT PRIMARY KEY,
+                certificate_type TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                verifier_status TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        submission_envelope = _make_envelope(
+            token_id=token_id,
+            condition_id=condition_id,
+            no_token_id=no_token_id,
+            selected_outcome_token_id=selected_token_id,
+            outcome_label=outcome_label,
+            side=side,
+            order_type=order_type,
+            price=price,
+            size=size,
+        )
+        direction = "buy_no" if selected_token_id == no_token_id else "buy_yes"
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO world.decision_certificates(
+                certificate_hash, certificate_type, mode,
+                verifier_status, payload_json
+            ) VALUES (?, 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', ?)
+            """,
+            (
+                decision_certificate_hash,
+                json.dumps(
+                    {
+                        "condition_id": condition_id,
+                        "token_id": selected_token_id,
+                        "direction": direction,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+    persisted_envelope_id = (
+        envelope_id or f"env-{command_id}"
+        if submission_envelope is not None
+        else _ensure_envelope(
             conn,
             token_id=token_id,
             condition_id=condition_id,
@@ -1956,7 +2011,14 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
             price=price,
             size=size,
             envelope_id=envelope_id,
-        ),
+        )
+    )
+    insert_command(
+        conn,
+        command_id=command_id,
+        snapshot_id=snapshot_id,
+        envelope_id=persisted_envelope_id,
+        submission_envelope=submission_envelope,
         position_id=position_id,
         decision_id=decision_id,
         idempotency_key=idempotency_key,
@@ -1968,10 +2030,11 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         price=price,
         created_at=created_at,
         q_version="test-q-version",
-        decision_certificate_hash=hashlib.sha256(
-            f"test-certificate:{command_id}".encode()
-        ).hexdigest(),
+        decision_certificate_hash=decision_certificate_hash,
     )
+    if attached_world_for_admission:
+        conn.commit()
+        conn.execute("DETACH DATABASE world")
     return command_id
 
 
@@ -2649,14 +2712,29 @@ def _ensure_envelope(
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> str:
-    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.venue_command_repo import insert_submission_envelope
 
-    price_dec = Decimal(str(price))
-    size_dec = Decimal(str(size))
-    no_token_id = no_token_id or f"{token_id}-no"
-    selected_outcome_token_id = selected_outcome_token_id or token_id
-    envelope_id = envelope_id or f"env-{selected_outcome_token_id}-{side}-{price_dec}-{size_dec}"
+    envelope = _make_envelope(
+        token_id=token_id,
+        condition_id=condition_id,
+        no_token_id=no_token_id,
+        selected_outcome_token_id=selected_outcome_token_id,
+        outcome_label=outcome_label,
+        side=side,
+        order_type=order_type,
+        price=price,
+        size=size,
+        raw_response_json=raw_response_json,
+        order_id=order_id,
+        transaction_hashes=transaction_hashes,
+        signed_order=signed_order,
+        signed_order_hash=signed_order_hash,
+        error_code=error_code,
+        error_message=error_message,
+    )
+    envelope_id = envelope_id or (
+        f"env-{envelope.selected_outcome_token_id}-{side}-{envelope.price}-{envelope.size}"
+    )
     if conn.execute(
         "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
         (envelope_id,),
@@ -2664,42 +2742,68 @@ def _ensure_envelope(
         return envelope_id
     insert_submission_envelope(
         conn,
-        VenueSubmissionEnvelope(
-            sdk_package="py-clob-client-v2",
-            sdk_version="test",
-            host="https://clob-v2.polymarket.com",
-            chain_id=137,
-            funder_address="0xfunder",
-            condition_id=condition_id,
-            question_id="question-test",
-            yes_token_id=token_id,
-            no_token_id=no_token_id,
-            selected_outcome_token_id=selected_outcome_token_id,
-            outcome_label=outcome_label,
-            side=side,
-            price=price_dec,
-            size=size_dec,
-            order_type=order_type,
-            post_only=False,
-            tick_size=Decimal("0.01"),
-            min_order_size=Decimal("0.01"),
-            neg_risk=False,
-            fee_details={},
-            canonical_pre_sign_payload_hash="d" * 64,
-            signed_order=signed_order,
-            signed_order_hash=signed_order_hash,
-            raw_request_hash="e" * 64,
-            raw_response_json=raw_response_json,
-            order_id=order_id,
-            trade_ids=(),
-            transaction_hashes=transaction_hashes,
-            error_code=error_code,
-            error_message=error_message,
-            captured_at=_NOW.isoformat(),
-        ),
+        envelope,
         envelope_id=envelope_id,
     )
     return envelope_id
+
+
+def _make_envelope(
+    *,
+    token_id: str,
+    condition_id: str = "condition-test",
+    no_token_id: str | None = None,
+    selected_outcome_token_id: str | None = None,
+    outcome_label: str = "YES",
+    side: str = "BUY",
+    order_type: str = "GTC",
+    price: float | Decimal = 0.5,
+    size: float | Decimal = 10.0,
+    raw_response_json: str | None = None,
+    order_id: str | None = None,
+    transaction_hashes: tuple[str, ...] = (),
+    signed_order: bytes | None = None,
+    signed_order_hash: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+):
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    no_token_id = no_token_id or f"{token_id}-no"
+    selected_outcome_token_id = selected_outcome_token_id or token_id
+    return VenueSubmissionEnvelope(
+        sdk_package="py-clob-client-v2",
+        sdk_version="test",
+        host="https://clob-v2.polymarket.com",
+        chain_id=137,
+        funder_address="0xfunder",
+        condition_id=condition_id,
+        question_id="question-test",
+        yes_token_id=token_id,
+        no_token_id=no_token_id,
+        selected_outcome_token_id=selected_outcome_token_id,
+        outcome_label=outcome_label,
+        side=side,
+        price=Decimal(str(price)),
+        size=Decimal(str(size)),
+        order_type=order_type,
+        post_only=False,
+        tick_size=Decimal("0.01"),
+        min_order_size=Decimal("0.01"),
+        neg_risk=False,
+        fee_details={},
+        canonical_pre_sign_payload_hash="d" * 64,
+        signed_order=signed_order,
+        signed_order_hash=signed_order_hash,
+        raw_request_hash="e" * 64,
+        raw_response_json=raw_response_json,
+        order_id=order_id,
+        trade_ids=(),
+        transaction_hashes=transaction_hashes,
+        error_code=error_code,
+        error_message=error_message,
+        captured_at=_NOW.isoformat(),
+    )
 
 
 def _advance_to_submitting(conn, command_id="cmd-001", venue_order_id=None):
