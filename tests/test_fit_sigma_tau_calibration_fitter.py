@@ -28,7 +28,9 @@ Covers the 2026-07-28 corrections:
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
+import math
 import sqlite3
 from pathlib import Path
 
@@ -48,6 +50,7 @@ def _mk_db(path: Path) -> None:
             temperature_metric TEXT NOT NULL,
             computed_at TEXT NOT NULL,
             source_cycle_time TEXT NOT NULL,
+            posterior_config_hash TEXT,
             provenance_json TEXT NOT NULL
         );
         CREATE TABLE settlement_outcomes (
@@ -65,16 +68,31 @@ def _mk_db(path: Path) -> None:
     conn.close()
 
 
-def _insert_post(conn, *, city, target_date, metric, computed_at, source_cycle_time, mu, sig, current_evidence_shape=True) -> None:
+def _insert_post(
+    conn, *, city, target_date, metric, computed_at, source_cycle_time, mu, sig, current_evidence_shape=True,
+    day0_observed_extreme_c=None, day0_center_delta_c=None, config_hash=None,
+) -> None:
     bpf: dict = {"anchor_value_c": mu, "predictive_sigma_c": sig}
     if current_evidence_shape:
         bpf["current_evidence_shape"] = {"snapshot_id": 1}  # FIX 5: presence is the fence signal
-    prov = json.dumps({"bayes_precision_fusion": bpf})
+    prov: dict = {"bayes_precision_fusion": bpf}
+    if day0_observed_extreme_c is not None:
+        # B1: mirrors the exact provenance shape _compute_posterior_payload stamps.
+        prov["day0_conditioning"] = {"active": True, "metric": metric, "observed_extreme_c": day0_observed_extreme_c}
+        if day0_center_delta_c is not None:
+            prov["day0_remaining_center_delta_c"] = day0_center_delta_c
+    prov_json = json.dumps(prov)
+    # MEDIUM: mirrors the real posterior_config_hash column -- a hash of the numeric identity that
+    # actually produced this row (anchor/sigma here), unless the caller supplies an explicit hash to
+    # model a genuinely distinct config (e.g. a distinct current-evidence snapshot) at the same
+    # (mu, sig) by coincidence.
+    if config_hash is None:
+        config_hash = hashlib.sha256(f"{mu}:{sig}".encode()).hexdigest()
     conn.execute(
         "INSERT INTO forecast_posteriors"
-        " (city, target_date, temperature_metric, computed_at, source_cycle_time, provenance_json)"
-        " VALUES (?,?,?,?,?,?)",
-        (city, target_date, metric, computed_at, source_cycle_time, prov),
+        " (city, target_date, temperature_metric, computed_at, source_cycle_time, posterior_config_hash, provenance_json)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (city, target_date, metric, computed_at, source_cycle_time, config_hash, prov_json),
     )
 
 
@@ -119,6 +137,7 @@ def _add_series(
         _insert_post(
             conn, city=city, target_date=target_date, metric=metric,
             computed_at=source_cycle_time, source_cycle_time=source_cycle_time, mu=mu, sig=sig,
+            config_hash=f"{city}:{target_date}:{metric}:recompute0",
         )
         if i == 0:
             max_extra_hours = max(0, int(lead_h) - 1)  # stay strictly inside the FIX-5 fence
@@ -126,9 +145,16 @@ def _add_series(
                 later_computed_at = (
                     _dt.datetime.fromisoformat(source_cycle_time) + _dt.timedelta(hours=r)
                 ).isoformat()
+                # Each recompute gets its OWN config_hash (MEDIUM: dedup is now keyed on
+                # posterior_config_hash, not an hour floor) -- these rows model the live "same
+                # source_cycle_time, many computed_at" pathology, i.e. genuinely distinct config
+                # instances (e.g. a fresh current-evidence snapshot each recompute), not idempotent
+                # retries of one config, so they must survive dedup distinctly for event-weighting to
+                # have anything to weight down.
                 _insert_post(
                     conn, city=city, target_date=target_date, metric=metric,
                     computed_at=later_computed_at, source_cycle_time=source_cycle_time, mu=mu, sig=sig,
+                    config_hash=f"{city}:{target_date}:{metric}:recompute{r}",
                 )
 
 
@@ -436,14 +462,18 @@ def test_bound_pinned_optimum_raises_fit_failure() -> None:
     """Data whose true optimum lies below K_BOUNDS[0] must PIN there and raise FitFailure, not
     silently ship the pinned value."""
     import numpy as np
+    import pandas as pd
 
     n = 200
     lo = np.full(n, -0.001)
     hi = np.full(n, 0.001)  # an absurdly tight true bin relative to sigma_base
     sigma_base = np.full(n, 100.0)  # huge sigma_base forces scale toward the LOWER bound
     w = np.ones(n)
+    # B1: fit_interval_censored_scale now takes the row frame (day0-awareness); day0_active=False
+    # for every row means none of the day0-only columns are ever read.
+    g = pd.DataFrame({"l": lo, "u": hi, "day0_active": [False] * n})
     with pytest.raises(fitter.FitFailure):
-        fitter.fit_interval_censored_scale(lo, hi, sigma_base, w, fitter.K_BOUNDS)
+        fitter.fit_interval_censored_scale(g, sigma_base, w, fitter.K_BOUNDS)
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +506,7 @@ def test_gate_ships_train_coefficients_unchanged_no_refit(tmp_path: Path) -> Non
     assert gated["fitted"] is True
     assert gated["global_k"] == train_only_group["global_k"], "shipped global_k must equal the TRAIN-only fit, not a full-data refit"
     assert gated["n_events"] == train_only_group["n_events"], "shipped n_events must be the TRAIN count, not train+holdout"
+    assert gated["model_type"] in (fitter.MODEL_TYPE_GLOBAL_K_V1, fitter.MODEL_TYPE_BUCKET_CITY_K_V1)
 
 
 def test_oos_gate_reports_global_k_only_comparison_rung(tmp_path: Path) -> None:
@@ -501,6 +532,50 @@ def test_oos_gate_accepts_a_genuine_correction(tmp_path: Path) -> None:
     assert group["oos_gate"]["passed"] is True
     assert group["oos_gate"]["censored_delta"] > fitter.OOS_MARGIN_NATS
     assert group["global_k"] > 1.3
+    # B2: a single-bucket fixture has NO genuine bucket/city variation to exploit -- the full model
+    # cannot beat the flat one by more than the margin, so the simpler GLOBAL_K_V1 model must win.
+    assert group["model_type"] == fitter.MODEL_TYPE_GLOBAL_K_V1
+    assert group["cities"] == {}
+    assert len({b["k"] for b in group["buckets"].values()}) == 1, "global_k_v1 must apply ONE k uniformly to every bucket"
+
+
+def test_model_selection_ships_bucket_city_when_it_earns_its_complexity(tmp_path: Path) -> None:
+    """B2: when two tau buckets have GENUINELY different true dispersion, the full bucket-indexed
+    model must beat the flat global-k model by more than the margin and be selected."""
+    import numpy as np
+
+    path = tmp_path / "bucket_city_wins.db"
+    _mk_db(path)
+    conn = sqlite3.connect(str(path))
+    rng = np.random.default_rng(19)
+    settled = 25.0
+    # Bucket A (lead=18h, [12,24)): true_k=1.0 (well-calibrated). Bucket B (lead=30h, [24,36)):
+    # true_k=3.0 (badly under-dispersed) -- a flat global k averaging the two is a poor fit for
+    # EITHER bucket individually, so the bucket-indexed model should earn its keep.
+    for i in range(220):
+        target_date = (_dt.date(2026, 1, 1) + _dt.timedelta(days=i)).isoformat()
+        lead_h, true_k = (18.0, 1.0) if i % 2 == 0 else (30.0, 3.0)
+        target_end = fitter._local_target_end_utc(target_date, "Asia/Shanghai")
+        source_cycle_time = (target_end - _dt.timedelta(hours=lead_h)).isoformat()
+        z = float(rng.normal(0.0, true_k * 1.0))
+        mu = settled - z
+        _insert_sett(conn, city="Shanghai", target_date=target_date, metric="high", value=settled, unit="C")
+        _insert_post(conn, city="Shanghai", target_date=target_date, metric="high", computed_at=source_cycle_time, source_cycle_time=source_cycle_time, mu=mu, sig=1.0)
+    conn.commit()
+    conn.close()
+
+    d, _stats = fitter.prep(str(path), since="2020-01-01")
+    sub = d[(d["unit_family"] == "C") & (d["temperature_metric"] == "high")]
+    train_sub, holdout_sub = fitter._split_holdout_by_target_date(sub)
+    group = fitter.gate_group(train_sub, holdout_sub, gate_method="test")
+    assert group["fitted"] is True
+    assert group["model_type"] == fitter.MODEL_TYPE_BUCKET_CITY_K_V1, (
+        f"a genuine 3x dispersion difference between two tau buckets must beat the flat global-k "
+        f"model by more than the margin: oos_gate={group['oos_gate']}"
+    )
+    assert group["oos_gate"]["full_beats_global_by"] > fitter.OOS_MARGIN_NATS
+    bucket_ks = {b["k"] for b in group["buckets"].values() if b["fitted"]}
+    assert len(bucket_ks) >= 2, "the two genuinely different buckets must be fitted to DIFFERENT k's"
 
 
 def test_oos_gate_rejects_a_spurious_correction(tmp_path: Path) -> None:
@@ -511,9 +586,10 @@ def test_oos_gate_rejects_a_spurious_correction(tmp_path: Path) -> None:
     train_sub, holdout_sub = fitter._split_holdout_by_target_date(sub)
     group = fitter.gate_group(train_sub, holdout_sub, gate_method="internal_holdout_last_25pct_dates_by_target_date")
     assert group["fitted"] is False
+    assert group["model_type"] == fitter.MODEL_TYPE_NEUTRAL
     assert group["global_k"] == 1.0
     assert group["oos_gate"]["passed"] is False
-    assert "OOS_GATE_FAILED" in group["refusal_reason"]
+    assert "NEUTRAL" in group["refusal_reason"]
 
 
 def test_oos_gate_requires_margin_not_merely_positive(tmp_path: Path) -> None:
@@ -723,3 +799,88 @@ def test_external_validate_cutoff_governs_the_shipped_gate(fixture_db: Path, tmp
     artifact = json.loads(out_path.read_text())
     assert artifact["_meta"]["oos_acceptance_gate"] == "external_validate_cutoff:2026-04-01"
     assert artifact["families"]["C"]["high"]["oos_gate"]["method"] == "external_validate_cutoff:2026-04-01"
+
+
+# ---------------------------------------------------------------------------
+# B1 (deep-review 2026-07-28): fit/serve parity -- Day0 rows join the causal provenance and score
+# through the SAME served_settlement_log_probability the live materializer serves through.
+# ---------------------------------------------------------------------------
+
+def test_build_frame_joins_day0_provenance_fields(fixture_db: Path) -> None:
+    conn = sqlite3.connect(str(fixture_db))
+    target_date = "2027-06-15"  # well outside _build_fixture's date ranges -- no collision
+    _insert_sett(conn, city="Shanghai", target_date=target_date, metric="high", value=25.0, unit="C")
+    _insert_post(
+        conn, city="Shanghai", target_date=target_date, metric="high",
+        computed_at="2026-02-28T20:00:00+00:00", source_cycle_time="2026-02-28T20:00:00+00:00",
+        mu=24.0, sig=1.5, day0_observed_extreme_c=26.0, day0_center_delta_c=0.4,
+    )
+    conn.commit()
+    conn.close()
+
+    d, _stats = fitter.prep(str(fixture_db), since="2020-01-01")
+    row = d[(d["city"] == "Shanghai") & (d["target_date"] == target_date)].iloc[0]
+    assert bool(row["day0_active"]) is True
+    assert row["day0_observed_extreme_c"] == pytest.approx(26.0)
+    assert row["day0_center_delta_c"] == pytest.approx(0.4)
+
+
+def test_build_frame_non_day0_row_has_inert_day0_columns(fixture_db: Path) -> None:
+    """A row with no day0_conditioning in provenance must join to day0_active=False,
+    day0_observed_extreme_c=NaN, day0_center_delta_c=0.0 -- never a stray default that could make a
+    non-Day0 row silently score through the day0 branch."""
+    import numpy as np
+
+    d, _stats = fitter.prep(str(fixture_db), since="2020-01-01")
+    assert len(d) > 0
+    assert not d["day0_active"].any()
+    assert d["day0_observed_extreme_c"].isna().all()
+    assert (d["day0_center_delta_c"] == 0.0).all()
+    assert np.array_equal(fitter._censored_log_prob(d, d["sig"].values), fitter._log_interval_prob(d["l"].values, d["u"].values, d["sig"].values))
+
+
+def test_censored_log_prob_day0_row_matches_served_settlement_log_probability() -> None:
+    """The fitter's scoring of a Day0-active row must be numerically IDENTICAL to the materializer's
+    served kernel -- this IS the B1 parity claim, checked directly against the shared function."""
+    import numpy as np
+    import pandas as pd
+
+    from src.data.replacement_forecast_materializer import served_settlement_log_probability
+
+    row = pd.DataFrame([{
+        "l": -1.5, "u": -0.5,
+        "mu": 24.0, "temperature_metric": "high",
+        "bin_lower_c": 24.5, "bin_upper_c": 25.5,
+        "rounding_rule": "wmo_half_up",
+        "day0_active": True, "day0_observed_extreme_c": 26.0, "day0_center_delta_c": 0.4,
+    }])
+    sigma = np.array([1.5 * 1.2])  # already-final sigma (sigma_base * trial k), as every caller passes it
+    got = fitter._censored_log_prob(row, sigma)[0]
+    expected = served_settlement_log_probability(
+        anchor_value_c=24.0, predictive_sigma_c=1.5 * 1.2, k=1.0, metric="high",
+        bin_low_c=24.5, bin_high_c=25.5, half_step=0.5, rounding_rule="wmo_half_up",
+        day0_observed_extreme_c=26.0, day0_center_delta_c=0.4,
+    )
+    assert got == expected
+
+
+def test_censored_log_prob_day0_row_differs_from_plain_normal() -> None:
+    """A day0-active row must NOT be scored as if it were plain Normal -- the absorbing max/min
+    transform changes the answer whenever the observed extreme actually constrains the bin."""
+    import numpy as np
+    import pandas as pd
+
+    row = pd.DataFrame([{
+        "l": -1.5, "u": -0.5,
+        "mu": 24.0, "temperature_metric": "high",
+        "bin_lower_c": 24.5, "bin_upper_c": 25.5,
+        "rounding_rule": "wmo_half_up",
+        "day0_active": True, "day0_observed_extreme_c": 26.0, "day0_center_delta_c": 0.0,
+    }])
+    sigma = np.array([1.5])
+    day0_log_p = fitter._censored_log_prob(row, sigma)[0]
+    plain_log_p = fitter._log_interval_prob(row["l"].values, row["u"].values, sigma)[0]
+    # observed_extreme_c=26.0 is ABOVE this bin's upper bound (25.5) -> the day0 transform collapses
+    # the bin's mass to exactly 0.0 (log -> the -1e300 floor), while plain Normal would not.
+    assert day0_log_p < plain_log_p
+    assert day0_log_p == pytest.approx(math.log(1e-300))

@@ -88,8 +88,12 @@ def _valid_group(**overrides) -> dict:
     global_k = overrides.pop("global_k", 1.08)
     bucket_k = overrides.pop("bucket_k", 1.30)
     cities = overrides.pop("cities", {"Seoul": {"c_shrunk": 1.01}, "Ankara": {"c_shrunk": 0.73}})
+    # Varying bucket k + non-empty cities -> this fixture's NATURAL model_type is bucket_city_k_v1
+    # (a global_k_v1 declaration would fail the B2 shape-mismatch check against this shape).
+    model_type = overrides.pop("model_type", mod._SIGMA_TAU_MODEL_TYPE_BUCKET_CITY_K_V1)
     group = {
         "fitted": True,
+        "model_type": model_type,
         "global_k": global_k,
         "oos_gate": {"passed": True, "censored_delta": 0.05},
         "buckets": _valid_buckets(bucket_k=bucket_k, global_k=global_k),
@@ -125,7 +129,7 @@ def test_malformed_artifact_is_inert(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
     k, w, floor, artifact_hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")
     assert (k, w, floor) == (1.0, 0.0, 0.0)
-    assert artifact_hash is not None, "bytes were read successfully -- hash must still be reported"
+    assert artifact_hash is None, "B5: a rejected artifact must never surface a hash, even though its bytes were read -- the rejection is logged instead"
 
 
 # ---------------------------------------------------------------------------
@@ -141,11 +145,11 @@ def test_none_tau_bucket_is_inert(monkeypatch, tmp_path) -> None:
 # 4. Top-level authority / schema_version / tau_clock mismatch -> WHOLE artifact inert
 # ---------------------------------------------------------------------------
 
-def test_wrong_authority_is_inert_but_hash_reported(monkeypatch, tmp_path) -> None:
+def test_wrong_authority_is_inert_with_no_hash(monkeypatch, tmp_path) -> None:
     _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high(), meta_overrides={"authority": "some_other_authority"}))
     k, w, floor, artifact_hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")
     assert (k, w, floor) == (1.0, 0.0, 0.0)
-    assert artifact_hash is not None
+    assert artifact_hash is None  # B5: rejected -> no hash, rejection logged instead
 
 
 def test_wrong_schema_version_is_inert(monkeypatch, tmp_path) -> None:
@@ -172,7 +176,7 @@ def test_group_fitted_false_is_inert(monkeypatch, tmp_path) -> None:
     _write_artifact(tmp_path, monkeypatch, _artifact(families))
     k, w, floor, artifact_hash = mod._sigma_tau_calibration_lookup("F", "low", "[12,24)", None)
     assert (k, w, floor) == (1.0, 0.0, 0.0)
-    assert artifact_hash is not None
+    assert artifact_hash is None  # B5: rejected -> no hash, rejection logged instead
 
 
 def test_group_missing_oos_gate_is_rejected_even_when_fitted_true(monkeypatch, tmp_path) -> None:
@@ -226,19 +230,30 @@ def test_global_k_too_small_is_rejected(monkeypatch, tmp_path) -> None:
     assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
 
 
-def test_bucket_k_as_bool_falls_back_to_global(monkeypatch, tmp_path) -> None:
-    """A single malformed bucket entry does not invalidate the whole group -- it inherits global_k
-    (same posture as an unfitted bucket)."""
+def test_bucket_k_as_bool_invalidates_whole_group(monkeypatch, tmp_path) -> None:
+    """B6 (deep-review): a malformed bucket subtree (fitted=True with a bool used as k) INVALIDATES
+    THE WHOLE GROUP -- it is treated as corruption, not as "unfitted", so it must NOT silently fall
+    back to inheriting global_k."""
     group = _valid_group(global_k=1.08)
     group["buckets"]["[24,36)"] = {"k": True, "fitted": True}
     _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
-    k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)
-    assert k == 1.08
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
 
 
-def test_bucket_k_out_of_range_falls_back_to_global(monkeypatch, tmp_path) -> None:
+def test_bucket_k_out_of_range_invalidates_whole_group(monkeypatch, tmp_path) -> None:
+    """B6: fitted=True with an out-of-range k is corruption, not "unfitted" -- invalidates the
+    whole group rather than silently inheriting global_k."""
     group = _valid_group(global_k=1.08)
     group["buckets"]["[24,36)"] = {"k": 9.9, "fitted": True}
+    _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)[:3] == (1.0, 0.0, 0.0)
+
+
+def test_schema_valid_unfitted_bucket_still_inherits_global(monkeypatch, tmp_path) -> None:
+    """The ONLY legitimate inherit-global case: a bucket entry that is fully schema-valid with
+    fitted EXACTLY False (the fitter's honest "not enough events" signal, not corruption)."""
+    group = _valid_group(global_k=1.08)
+    group["buckets"]["[24,36)"] = {"k": None, "fitted": False}
     _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
     k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", None)
     assert k == 1.08
@@ -303,17 +318,25 @@ def test_no_city_argument_contributes_no_adjustment(monkeypatch, tmp_path) -> No
     assert k == 1.30
 
 
-def test_out_of_range_city_c_shrunk_is_ignored(monkeypatch, tmp_path) -> None:
+def test_out_of_range_city_c_shrunk_invalidates_whole_group(monkeypatch, tmp_path) -> None:
+    """B6: a PRESENT city entry with an out-of-range c_shrunk is corruption -- invalidates the
+    whole group (unlike an ABSENT city, which safely contributes c=1.0 via .get(city, 1.0))."""
     group = _valid_group(cities={"Seoul": {"c_shrunk": 9.9}})
     _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
-    k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")
-    assert k == 1.30, "an out-of-range c_shrunk must fall back to c=1.0, never propagate"
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")[:3] == (1.0, 0.0, 0.0)
 
 
-def test_city_c_shrunk_as_bool_is_ignored(monkeypatch, tmp_path) -> None:
+def test_city_c_shrunk_as_bool_invalidates_whole_group(monkeypatch, tmp_path) -> None:
     group = _valid_group(cities={"Seoul": {"c_shrunk": True}})
     _write_artifact(tmp_path, monkeypatch, _artifact({"C": {"high": group}}))
-    k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")
+    assert mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "Seoul")[:3] == (1.0, 0.0, 0.0)
+
+
+def test_absent_city_still_safe_when_group_otherwise_valid(monkeypatch, tmp_path) -> None:
+    """Contrast with the invalidation cases above: a city simply NOT present as a key at all is
+    the only legitimate "no adjustment" case -- it does not touch group validity."""
+    _write_artifact(tmp_path, monkeypatch, _artifact(_fitted_c_high()))
+    k, _w, _floor, _hash = mod._sigma_tau_calibration_lookup("C", "high", "[24,36)", "SomeAbsentCity")
     assert k == 1.30
 
 

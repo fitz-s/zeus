@@ -126,6 +126,10 @@ def _fitted_artifact_for_default_request() -> dict:
             "C": {
                 "high": {
                     "fitted": True,
+                    # Varying bucket k + a non-empty city correction -> this fixture's shape is
+                    # bucket_city_k_v1 (B2); a global_k_v1 declaration would fail the loader's
+                    # shape-mismatch check against this shape.
+                    "model_type": materializer_mod._SIGMA_TAU_MODEL_TYPE_BUCKET_CITY_K_V1,
                     "global_k": global_k,
                     "oos_gate": {"passed": True, "censored_delta": 0.05},
                     "n": 5000,
@@ -240,14 +244,14 @@ def test_current_evidence_path_applies_fitted_artifact(monkeypatch: pytest.Monke
 
 def test_current_evidence_path_rejects_artifact_missing_oos_gate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A group with fitted=True but NO oos_gate is a FIX-6 schema violation -- must resolve to
-    neutral, exactly as if the artifact were absent, with the hash still reported (bytes were
-    read)."""
+    neutral, exactly as if the artifact were absent. B5 (deep-review): a REJECTED artifact must
+    never surface a hash in provenance -- the key is OMITTED entirely, matching the true-absent
+    case, not merely null."""
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
     artifact = _fitted_artifact_for_default_request()
     del artifact["families"]["C"]["high"]["oos_gate"]
     artifact_bytes = json.dumps(artifact).encode("utf-8")
     (tmp_path / "sigma_tau_calibration.json").write_bytes(artifact_bytes)
-    expected_hash = hashlib.sha256(artifact_bytes).hexdigest()
 
     conn = _conn()
     _install_current_evidence_fusion(monkeypatch)
@@ -256,7 +260,10 @@ def test_current_evidence_path_rejects_artifact_missing_oos_gate(monkeypatch: py
     prov = _full_row(conn)["provenance"]
 
     assert prov["sigma_scale_k_applied"] is None
-    assert prov["sigma_tau_artifact_hash"] == expected_hash
+    assert "sigma_tau_artifact_hash" not in prov, (
+        "B5: a rejected artifact (missing oos_gate) must never surface a hash -- the rejection is "
+        "logged instead of stamped into provenance"
+    )
 
 
 def test_current_evidence_path_rejects_wrong_tau_clock_declaration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -141,6 +141,7 @@ import os
 import sqlite3
 import sys
 import urllib.parse
+import uuid
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -155,6 +156,10 @@ if str(_ROOT) not in sys.path:
 
 from src.config import load_cities  # noqa: E402
 from src.contracts.settlement_semantics import SettlementSemantics, settlement_preimage_offsets  # noqa: E402
+# B1 (deep-review 2026-07-28) fit/serve parity: score Day0-active rows through the EXACT function
+# the live serving path integrates through -- never a second reimplementation of the day0
+# absorbing-observed-extreme transform.
+from src.data.replacement_forecast_materializer import served_settlement_log_probability  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FCST_DEFAULT = os.path.join(REPO, "state", "zeus-forecasts.db")
@@ -194,10 +199,29 @@ MIN_HOLDOUT_EVENTS = 10     # below this, the gate cannot be evaluated reliably 
 OOS_MARGIN_NATS = 0.01      # FIX 3: the gate requires a PREDECLARED margin, not merely delta > 0 --
                              # protects against a razor-thin, noise-driven "pass".
 
+# MODEL SELECTION LAW (B2, deep-review 2026-07-28): the global-k-only comparison rung (previously
+# REPORTED only) is now AUTHORITATIVE. Three outcomes, in order:
+#   1. NEUTRAL      if global_delta <= OOS_MARGIN_NATS       (even the simplest flat correction
+#                    doesn't clear the margin -- ship k=1.0, fitted=False).
+#   2. GLOBAL_K_V1   if (full_delta - global_delta) <= OOS_MARGIN_NATS (the bucket+city structure
+#                    does not meaningfully beat a single flat k for the whole group -- ship ONE
+#                    k applied uniformly to every bucket, no city variation; simpler model wins
+#                    on a tie or a non-meaningful edge).
+#   3. BUCKET_CITY_K_V1 otherwise (the full lead-bucket + per-city structure earns its complexity
+#                    by beating the flat model by more than the margin).
+# This prevents shipping bucket/city granularity that is indistinguishable from noise relative to
+# the simpler model -- Occam's razor enforced by evidence, not by fiat.
+MODEL_TYPE_NEUTRAL = "neutral"
+MODEL_TYPE_GLOBAL_K_V1 = "global_k_v1"
+MODEL_TYPE_BUCKET_CITY_K_V1 = "bucket_city_k_v1"
+
 _POST_QUERY = """
-    SELECT city, target_date, temperature_metric, computed_at, source_cycle_time,
+    SELECT city, target_date, temperature_metric, computed_at, source_cycle_time, posterior_config_hash,
            json_extract(provenance_json,'$.bayes_precision_fusion.anchor_value_c') AS mu,
-           json_extract(provenance_json,'$.bayes_precision_fusion.predictive_sigma_c') AS sig
+           json_extract(provenance_json,'$.bayes_precision_fusion.predictive_sigma_c') AS sig,
+           json_extract(provenance_json,'$.day0_conditioning.active') AS day0_active,
+           json_extract(provenance_json,'$.day0_conditioning.observed_extreme_c') AS day0_observed_extreme_c,
+           json_extract(provenance_json,'$.day0_remaining_center_delta_c') AS day0_center_delta_c
     FROM forecast_posteriors
     WHERE computed_at >= ?
       AND json_extract(provenance_json,'$.bayes_precision_fusion.anchor_value_c') IS NOT NULL
@@ -310,7 +334,14 @@ def build_frame(post: "pd.DataFrame", sett: "pd.DataFrame", city_meta: dict[str,
     post["sig"] = post["sig"].astype(float)
     post["computed_at_dt"] = pd.to_datetime(post["computed_at"], utc=True)
     post["source_cycle_time_dt"] = pd.to_datetime(post["source_cycle_time"], utc=True)
-    post["hour_key"] = post["computed_at_dt"].dt.floor("h")
+    # MEDIUM (deep-review 2026-07-28): dedup identity is (source_cycle_time, posterior_config_hash),
+    # not a wall-clock hour floor -- config_hash already changes whenever the anchor/sigma/current-
+    # evidence-shape inputs that PRODUCED the row change, so it collapses only truly-redundant
+    # re-materializations (idempotent retries), never a genuine recompute. A row with no config_hash
+    # (older data) falls back to its exact computed_at -- never silently collapsed with a neighbor.
+    post["dedup_key"] = post["posterior_config_hash"].where(
+        post["posterior_config_hash"].notna(), post["computed_at"]
+    )
 
     df = post.merge(sett, on=["city", "target_date", "temperature_metric"], how="inner")
     n_joined_raw = len(df)
@@ -357,6 +388,14 @@ def build_frame(post: "pd.DataFrame", sett: "pd.DataFrame", city_meta: dict[str,
     df["unit_family"] = df["unit"]
     df["event_key"] = df["city"].astype(str) + "|" + df["target_date"].astype(str)
 
+    # B1 (deep-review 2026-07-28) fit/serve parity: join the causal Day0 state stamped on the
+    # posterior itself (never re-derived) -- a row where Day0 was active must be scored under the
+    # max/min absorbing-observed-extreme transform, not raw Normal (served_settlement_log_probability
+    # below dispatches on these exact columns, matching _compute_posterior_payload's own dispatch).
+    df["day0_active"] = df["day0_active"].eq(1)
+    df["day0_observed_extreme_c"] = pd.to_numeric(df["day0_observed_extreme_c"], errors="coerce")
+    df["day0_center_delta_c"] = pd.to_numeric(df["day0_center_delta_c"], errors="coerce").fillna(0.0)
+
     # FIX 5 (second half): the CURRENT-EVIDENCE serving population never materializes a posterior
     # after the local target day already ended -- fence training rows to the same population.
     n_before_fence = len(df)
@@ -373,9 +412,16 @@ def build_frame(post: "pd.DataFrame", sett: "pd.DataFrame", city_meta: dict[str,
 
 
 def dedup(df: "pd.DataFrame") -> "pd.DataFrame":
-    """Keep only the LAST posterior per (city, target_date, temperature_metric, hour_key)."""
+    """Keep only the LAST posterior per INFORMATION IDENTITY -- (city, target_date,
+    temperature_metric, source_cycle_time, dedup_key), not a wall-clock hour floor (MEDIUM,
+    deep-review 2026-07-28). ``dedup_key`` is ``posterior_config_hash`` (falls back to the exact
+    ``computed_at`` when absent) -- see ``build_frame``. An hour-floor key both under-counts (two
+    genuinely different source_cycle_time issues whose computed_at happens to land in the same wall
+    hour get wrongly merged -- source_cycle_time was never even part of the old key) and over-counts
+    (an idempotent re-materialization retry that straddles an hour boundary wrongly survives as two
+    rows)."""
     return df.sort_values("computed_at_dt").drop_duplicates(
-        subset=["city", "target_date", "temperature_metric", "hour_key"], keep="last"
+        subset=["city", "target_date", "temperature_metric", "source_cycle_time", "dedup_key"], keep="last"
     )
 
 
@@ -458,13 +504,49 @@ def _log_interval_prob(lo: "np.ndarray", hi: "np.ndarray", sigma: "np.ndarray") 
     return np.where(use_sf, sf_branch, cdf_branch)
 
 
+def _censored_log_prob(g: "pd.DataFrame", sigma: "np.ndarray") -> "np.ndarray":
+    """Per-row log P(settlement in bin) at the given FINAL predictive sigma (``sigma_base * scale``,
+    already scale-applied by the caller) -- B1 (deep-review 2026-07-28) fit/serve parity.
+
+    ``g`` must carry ``l``/``u`` (mu-centered bin offsets), plus the joined Day0 causal state
+    (``day0_active``, ``day0_observed_extreme_c``, ``day0_center_delta_c``) and the absolute fields
+    needed to score those rows (``mu``, ``temperature_metric``, ``bin_lower_c``, ``bin_upper_c``,
+    ``rounding_rule``) -- see ``build_frame``. Non-Day0 rows score through the fast vectorized
+    ``_log_interval_prob``; Day0-active rows score through ``served_settlement_log_probability``
+    (the SAME max/min absorbing-observed-extreme transform serving applies), one row at a time --
+    Day0-active rows are a narrow lead-time slice, so the scalar path costs nothing at corpus scale."""
+    log_p = _log_interval_prob(g["l"].values, g["u"].values, sigma)
+    day0_mask = g["day0_active"].values
+    if day0_mask.any():
+        log_p = log_p.copy()
+        sigma_arr = np.asarray(sigma, dtype=float)
+        if sigma_arr.ndim == 0:
+            sigma_arr = np.full(len(g), float(sigma_arr))
+        for pos in np.flatnonzero(day0_mask):
+            row = g.iloc[pos]
+            day0_obs = row["day0_observed_extreme_c"]
+            log_p[pos] = served_settlement_log_probability(
+                anchor_value_c=float(row["mu"]),
+                predictive_sigma_c=float(sigma_arr[pos]),
+                k=1.0,
+                metric=str(row["temperature_metric"]),
+                bin_low_c=float(row["bin_lower_c"]),
+                bin_high_c=float(row["bin_upper_c"]),
+                half_step=0.5,
+                rounding_rule=str(row["rounding_rule"]),
+                day0_observed_extreme_c=None if pd.isna(day0_obs) else float(day0_obs),
+                day0_center_delta_c=float(row["day0_center_delta_c"]),
+            )
+    return log_p
+
+
 def _interval_censored_negloglik(
-    scale: float, lo: "np.ndarray", hi: "np.ndarray", sigma_base: "np.ndarray", w: "np.ndarray"
+    scale: float, g: "pd.DataFrame", sigma_base: "np.ndarray", w: "np.ndarray"
 ) -> float:
     sigma = scale * sigma_base
     if not np.all(np.isfinite(sigma)) or np.any(sigma <= 0.0):
         return math.inf
-    log_p = _log_interval_prob(lo, hi, sigma)
+    log_p = _censored_log_prob(g, sigma)
     if not np.all(np.isfinite(log_p)):
         # FIX 3: no clip -- a row whose log-probability is non-finite makes the objective explicitly
         # undefined for this scale, rather than silently masquerading as a small finite penalty.
@@ -473,14 +555,14 @@ def _interval_censored_negloglik(
 
 
 def fit_interval_censored_scale(
-    lo: "np.ndarray", hi: "np.ndarray", sigma_base: "np.ndarray", w: "np.ndarray", bounds: tuple[float, float]
+    g: "pd.DataFrame", sigma_base: "np.ndarray", w: "np.ndarray", bounds: tuple[float, float]
 ) -> float:
     """argmax_scale of the (weighted) interval-censored bin likelihood -- the PRIMARY estimator.
     A 1-D bounded MLE (no closed form); cheap even at corpus scale (single scalar optimization).
     Raises FitFailure (FIX 3) on optimizer non-convergence, a non-finite result, or a result pinned
     at a search bound (the true optimum would be outside the physically sane range)."""
     res = minimize_scalar(
-        _interval_censored_negloglik, bounds=bounds, method="bounded", args=(lo, hi, sigma_base, w)
+        _interval_censored_negloglik, bounds=bounds, method="bounded", args=(g, sigma_base, w)
     )
     if not res.success:
         raise FitFailure(f"optimizer did not converge: {res.message}")
@@ -492,11 +574,6 @@ def fit_interval_censored_scale(
     return float(res.x)
 
 
-def _interval_censored_loglik_per_row(lo, hi, sigma):
-    """Per-row log-likelihood under the stable log-domain interval probability (FIX 3)."""
-    return _log_interval_prob(lo, hi, sigma)
-
-
 def fit_k_by_tau(sub: "pd.DataFrame") -> dict:
     """PRIMARY k(tau) = interval-censored MLE scale per tau bucket (event-weighted); a bucket with
     n_events < MIN_BUCKET_N is UNFITTED and inherits the group-global pooled k. A bucket whose own
@@ -506,7 +583,7 @@ def fit_k_by_tau(sub: "pd.DataFrame") -> dict:
     "n_events_group", "buckets"}."""
     w = sub["event_weight"].values
     try:
-        global_k = fit_interval_censored_scale(sub["l"].values, sub["u"].values, sub["sig"].values, w, K_BOUNDS)
+        global_k = fit_interval_censored_scale(sub, sub["sig"].values, w, K_BOUNDS)
     except FitFailure as exc:
         return {"ok": False, "reason": f"GLOBAL_FIT_FAILED:{exc}"}
     global_k_normal = weighted_spread_skill_k(sub["z"].values, sub["sig"].values, w)
@@ -518,7 +595,7 @@ def fit_k_by_tau(sub: "pd.DataFrame") -> dict:
         n_events = g["event_key"].nunique()
         if n_events >= MIN_BUCKET_N:
             try:
-                k = fit_interval_censored_scale(g["l"].values, g["u"].values, g["sig"].values, g["event_weight"].values, K_BOUNDS)
+                k = fit_interval_censored_scale(g, g["sig"].values, g["event_weight"].values, K_BOUNDS)
                 k_normal = weighted_spread_skill_k(g["z"].values, g["sig"].values, g["event_weight"].values)
                 buckets[label] = {"k": k, "k_normal_crosscheck": k_normal, "n": int(n_rows), "n_events": int(n_events), "fitted": True}
             except FitFailure as exc:
@@ -538,12 +615,20 @@ def fit_city_shrinkage(sub: "pd.DataFrame", k_by_bucket: dict) -> dict:
     """c_raw = interval-censored MLE scale on top of the (already-fitted) k(tau)*sig, per city
     (n_events >= MIN_CITY_N, pooled over tau), shrunk toward 1 via
     c_shrunk^2 = (n_e*c_raw^2 + N0) / (n_e + N0). A city whose fit raises FitFailure is SKIPPED
-    (not included in the returned map -- same fail-soft posture as insufficient events)."""
+    (not included in the returned map -- same fail-soft posture as insufficient events).
+
+    COMPOSED BOUND (deep-review, 2026-07-28): the SERVED k_eff = k(tau) * c_shrunk must itself lie
+    in [0.25, 4.0] -- each factor individually passing its own [0.25, 4.0] range does NOT guarantee
+    the PRODUCT does (e.g. 4.0 * 4.0 = 16.0). A city is REJECTED (omitted, same as insufficient
+    events) if its c_shrunk, composed with ANY of the group's bucket k values (all 7, including
+    inherited-global ones), would escape [K_BOUNDS[0], K_BOUNDS[1]] -- the fitter must never emit a
+    city correction the strict loader (which enforces the SAME composed bound) would reject anyway."""
     k_row = sub["taut"].map(lambda lab: (k_by_bucket.get(lab) or {}).get("k")).astype(float)
     valid = k_row.notna() & (k_row > 0.0)
     tmp = sub[valid].copy()
     tmp["k_row"] = k_row[valid]
     tmp["sigma_base"] = tmp["k_row"] * tmp["sig"]
+    all_bucket_ks = [b.get("k") for b in k_by_bucket.values() if isinstance(b.get("k"), (int, float))]
     cities: dict = {}
     for city, g in tmp.groupby("city"):
         n_events = g["event_key"].nunique()
@@ -551,16 +636,20 @@ def fit_city_shrinkage(sub: "pd.DataFrame", k_by_bucket: dict) -> dict:
             continue
         w = g["event_weight"].values
         try:
-            c_raw = fit_interval_censored_scale(g["l"].values, g["u"].values, g["sigma_base"].values, w, C_BOUNDS)
+            c_raw = fit_interval_censored_scale(g, g["sigma_base"].values, w, C_BOUNDS)
         except FitFailure:
             continue
         c_raw_normal = weighted_spread_skill_k(g["z"].values, g["sigma_base"].values, w)
         c_raw2 = c_raw ** 2
         c_shrunk2 = (n_events * c_raw2 + CITY_SHRINKAGE_N0) / (n_events + CITY_SHRINKAGE_N0)
+        c_shrunk = math.sqrt(c_shrunk2)
+        composed = [bk * c_shrunk for bk in all_bucket_ks]
+        if any(not (K_BOUNDS[0] <= comp <= K_BOUNDS[1]) for comp in composed):
+            continue  # a composed k_eff would escape the served range -- reject this city
         cities[str(city)] = {
             "c_raw": round(c_raw, 6),
             "c_raw_normal_crosscheck": round(c_raw_normal, 6) if math.isfinite(c_raw_normal) else None,
-            "c_shrunk": round(math.sqrt(c_shrunk2), 6),
+            "c_shrunk": round(c_shrunk, 6),
             "n": int(len(g)),
             "n_events": int(n_events),
         }
@@ -574,6 +663,7 @@ def fit_group(sub_raw: "pd.DataFrame") -> dict:
     if n_events_group < MIN_GROUP_N:
         return {
             "fitted": False,
+            "model_type": MODEL_TYPE_NEUTRAL,
             "global_k": 1.0,
             "global_k_normal_crosscheck": None,
             "n": int(n_rows_group),
@@ -586,6 +676,7 @@ def fit_group(sub_raw: "pd.DataFrame") -> dict:
     if not fit_result["ok"]:
         return {
             "fitted": False,
+            "model_type": MODEL_TYPE_NEUTRAL,
             "global_k": 1.0,
             "global_k_normal_crosscheck": None,
             "n": int(n_rows_group),
@@ -643,8 +734,8 @@ def _censored_oos_delta(group: dict, holdout_sub: "pd.DataFrame") -> tuple[float
     if not np.all(np.isfinite(k_eff)) or np.any(k_eff <= 0.0):
         return float("nan"), float("nan"), float("nan"), float("nan"), n_holdout_events
 
-    ll_censored_base = _interval_censored_loglik_per_row(val["l"].values, val["u"].values, val["sig"].values)
-    ll_censored_fit = _interval_censored_loglik_per_row(val["l"].values, val["u"].values, k_eff * val["sig"].values)
+    ll_censored_base = _censored_log_prob(val, val["sig"].values)
+    ll_censored_fit = _censored_log_prob(val, k_eff * val["sig"].values)
     ll_normal_base = normal_logpdf(val["z"].values, val["sig"].values)
     ll_normal_fit = normal_logpdf(val["z"].values, k_eff * val["sig"].values)
     if not (
@@ -671,8 +762,8 @@ def _censored_oos_delta_flat_k(flat_k: float, holdout_sub: "pd.DataFrame") -> fl
     w = val["event_weight"].values
     if not (math.isfinite(flat_k) and flat_k > 0.0):
         return float("nan")
-    ll_base = _interval_censored_loglik_per_row(val["l"].values, val["u"].values, val["sig"].values)
-    ll_flat = _interval_censored_loglik_per_row(val["l"].values, val["u"].values, flat_k * val["sig"].values)
+    ll_base = _censored_log_prob(val, val["sig"].values)
+    ll_flat = _censored_log_prob(val, flat_k * val["sig"].values)
     if not (np.all(np.isfinite(ll_base)) and np.all(np.isfinite(ll_flat))):
         return float("nan")
 
@@ -695,15 +786,43 @@ def _split_holdout_by_target_date(sub: "pd.DataFrame", frac: float = HOLDOUT_FRA
     return sub[~is_holdout].copy(), sub[is_holdout].copy()
 
 
+def _flatten_to_global_k_v1(train_group: dict) -> dict:
+    """Rebuild a fitted group as the GLOBAL_K_V1 shape: every bucket carries the SAME global_k
+    (fitted=True uniformly), cities is empty. Achieves "one flat k for the whole group" using the
+    EXISTING bucket-lookup mechanism (no special-case logic needed at the serving site) -- a
+    lookup for ANY bucket or ANY city on this group resolves to exactly global_k."""
+    global_k = train_group["global_k"]
+    global_k_normal = train_group.get("global_k_normal_crosscheck")
+    flat_buckets = {
+        lab: {
+            "k": global_k,
+            "k_normal_crosscheck": global_k_normal,
+            "n": (b.get("n", 0) if isinstance(b, dict) else 0),
+            "n_events": (b.get("n_events", 0) if isinstance(b, dict) else 0),
+            "fitted": True,
+        }
+        for lab, b in train_group["buckets"].items()
+    }
+    result = dict(train_group)
+    result["buckets"] = flat_buckets
+    result["cities"] = {}
+    return result
+
+
 def gate_group(train_sub: "pd.DataFrame", holdout_sub: "pd.DataFrame", *, gate_method: str) -> dict:
-    """Fit on train_sub, then require the PRIMARY (censored) event-weighted OOS mean log-lik delta
-    on holdout_sub to be FINITE and exceed OOS_MARGIN_NATS (FIX 3 -- not merely > 0, and NaN is
-    REJECTED explicitly rather than falling through a `<= 0` check that NaN always fails) before
-    shipping any k != 1.0 for this group -- the fail-closed principle applied to the fit itself. A
-    group that already refused for insufficient TRAIN events, or that has too few HOLDOUT events to
-    gate reliably, or that fails the gate, is returned fitted=False with the exact reason recorded.
-    A group that PASSES ships the TRAIN split's coefficients UNCHANGED (FIX 4 -- no full-data
-    refit, which could activate buckets/cities never actually OOS-scored)."""
+    """Fit on train_sub, then apply the THREE-WAY model selection law (B2, deep-review 2026-07-28):
+      1. NEUTRAL if the flat global-k-only OOS delta doesn't itself clear OOS_MARGIN_NATS -- even
+         the simplest correction has no evidence.
+      2. GLOBAL_K_V1 if the full bucket+city model does not beat the flat global-k model by more
+         than OOS_MARGIN_NATS -- ships ONE k applied uniformly (see _flatten_to_global_k_v1).
+      3. BUCKET_CITY_K_V1 otherwise -- the full lead-bucket + per-city structure earns its
+         complexity by evidence, not by default.
+    NaN deltas are REJECTED explicitly (FIX 3 -- `NaN <= margin` is always False in Python, so a
+    naive `<=` check would fail OPEN for NaN). A group that already refused for insufficient TRAIN
+    events, a fit failure, or too few HOLDOUT events to gate reliably, is returned fitted=False
+    with the exact reason recorded. A group that ships (either model type) uses the TRAIN split's
+    coefficients UNCHANGED (FIX 4 -- no full-data refit, which could activate buckets/cities never
+    actually OOS-scored)."""
     train_group = fit_group(train_sub)
     if not train_group["fitted"]:
         return train_group  # insufficient TRAIN events or a fit failure -- reason already set
@@ -711,6 +830,7 @@ def gate_group(train_sub: "pd.DataFrame", holdout_sub: "pd.DataFrame", *, gate_m
     if n_holdout_events < MIN_HOLDOUT_EVENTS:
         return {
             "fitted": False,
+            "model_type": MODEL_TYPE_NEUTRAL,
             "global_k": 1.0,
             "global_k_normal_crosscheck": None,
             "n": int(len(train_sub)),
@@ -720,17 +840,19 @@ def gate_group(train_sub: "pd.DataFrame", holdout_sub: "pd.DataFrame", *, gate_m
             "cities": {},
             "oos_gate": {"passed": False, "method": gate_method, "n_holdout_events": int(n_holdout_events)},
         }
-    censored_delta, normal_delta, cov_base, cov_fit, n_ho = _censored_oos_delta(train_group, holdout_sub)
-    flat_delta = _censored_oos_delta_flat_k(train_group["global_k"], holdout_sub)
-    passed = math.isfinite(censored_delta) and censored_delta > OOS_MARGIN_NATS
-    if not passed:
+    full_delta, normal_delta, cov_base, cov_fit, n_ho = _censored_oos_delta(train_group, holdout_sub)
+    global_delta = _censored_oos_delta_flat_k(train_group["global_k"], holdout_sub)
+
+    global_ok = math.isfinite(global_delta) and global_delta > OOS_MARGIN_NATS
+    if not global_ok:
         reason = (
-            f"OOS_GATE_FAILED:censored_delta={censored_delta:.5f}<=margin({OOS_MARGIN_NATS})"
-            if math.isfinite(censored_delta)
-            else "OOS_GATE_FAILED:non_finite_censored_delta"
+            f"NEUTRAL:global_delta={global_delta:.5f}<=margin({OOS_MARGIN_NATS})"
+            if math.isfinite(global_delta)
+            else "NEUTRAL:non_finite_global_delta"
         )
         return {
             "fitted": False,
+            "model_type": MODEL_TYPE_NEUTRAL,
             "global_k": 1.0,
             "global_k_normal_crosscheck": None,
             "n": int(len(train_sub)),
@@ -740,22 +862,33 @@ def gate_group(train_sub: "pd.DataFrame", holdout_sub: "pd.DataFrame", *, gate_m
             "cities": {},
             "oos_gate": {
                 "passed": False, "method": gate_method,
-                "censored_delta": round(censored_delta, 6) if math.isfinite(censored_delta) else None,
+                "censored_delta": round(full_delta, 6) if math.isfinite(full_delta) else None,
                 "normal_delta_crosscheck": round(normal_delta, 6) if math.isfinite(normal_delta) else None,
-                "global_k_only_censored_delta": round(flat_delta, 6) if math.isfinite(flat_delta) else None,
+                "global_k_only_censored_delta": round(global_delta, 6) if math.isfinite(global_delta) else None,
                 "n_holdout_events": int(n_ho), "margin_required_nats": OOS_MARGIN_NATS,
             },
         }
-    # FIX 4: ship the TRAIN split's coefficients UNCHANGED -- no full-data refit.
-    final_group = dict(train_group)
-    final_group["oos_gate"] = {
+
+    beats_global_by = (full_delta - global_delta) if math.isfinite(full_delta) else -math.inf
+    bucket_city_earns_it = math.isfinite(beats_global_by) and beats_global_by > OOS_MARGIN_NATS
+
+    oos_gate = {
         "passed": True, "method": gate_method,
-        "censored_delta": round(censored_delta, 6),
+        "censored_delta": round(full_delta, 6) if math.isfinite(full_delta) else None,
         "normal_delta_crosscheck": round(normal_delta, 6) if math.isfinite(normal_delta) else None,
-        "global_k_only_censored_delta": round(flat_delta, 6) if math.isfinite(flat_delta) else None,
+        "global_k_only_censored_delta": round(global_delta, 6),
+        "full_beats_global_by": round(beats_global_by, 6) if math.isfinite(beats_global_by) else None,
         "n_holdout_events": int(n_ho), "margin_required_nats": OOS_MARGIN_NATS,
         "coverage_68_3_base": round(cov_base, 4), "coverage_68_3_fitted": round(cov_fit, 4),
     }
+    if bucket_city_earns_it:
+        # FIX 4: ship the TRAIN split's full bucket+city coefficients UNCHANGED -- no full-data refit.
+        final_group = dict(train_group)
+        final_group["model_type"] = MODEL_TYPE_BUCKET_CITY_K_V1
+    else:
+        final_group = _flatten_to_global_k_v1(train_group)
+        final_group["model_type"] = MODEL_TYPE_GLOBAL_K_V1
+    final_group["oos_gate"] = oos_gate
     return final_group
 
 
@@ -881,9 +1014,15 @@ def main() -> int:
         "families": families,
     }
 
-    tmp_path = args.out + ".tmp"
+    # MEDIUM (deep-review 2026-07-28): a unique tmp filename (pid+uuid) so two concurrent fitter
+    # runs against the same --out never clobber each other's in-progress write; allow_nan=False so a
+    # NaN/Infinity that slipped through the gates fails the write loudly instead of shipping invalid
+    # JSON; fsync so the artifact is durable before the atomic rename, not just buffered.
+    tmp_path = f"{args.out}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as fh:
-        json.dump(artifact, fh, indent=2, sort_keys=True, default=str)
+        json.dump(artifact, fh, indent=2, sort_keys=True, default=str, allow_nan=False)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp_path, args.out)
     print(f"[sigma-tau] wrote {args.out}")
     return 0
