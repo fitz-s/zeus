@@ -92,6 +92,7 @@ def _fast_residual_conditioning(
     *,
     observed_extreme_c: float = 28.0,
     observation_time: str = "2026-06-09T10:00:00+00:00",
+    source: str = "aviationweather_metar",
 ) -> dict[str, object]:
     residual_weights = ((0.0, 0.9),)
     identity = {
@@ -118,7 +119,7 @@ def _fast_residual_conditioning(
         "active": True,
         "metric": "high",
         "observed_extreme_c": observed_extreme_c,
-        "source": "aviationweather_metar",
+        "source": source,
         "observation_time": observation_time,
         "sample_count": 21,
         "unit": "C",
@@ -139,7 +140,13 @@ def _fast_residual_conditioning(
     }
 
 
-def test_fast_residual_bundle_is_one_conditioned_day0_probability_world() -> None:
+@pytest.mark.parametrize(
+    "conditioning_source",
+    ("aviationweather_metar", "wu_api+same_station_fast_tail"),
+)
+def test_fast_residual_bundle_is_one_conditioned_day0_probability_world(
+    conditioning_source: str,
+) -> None:
     family = _family()
     bindings = tuple(
         OutcomeTokenBinding(
@@ -156,7 +163,9 @@ def test_fast_residual_bundle_is_one_conditioned_day0_probability_world() -> Non
             "q_bootstrap_samples_basis": (
                 "day0_fast_residual_joint_simplex_v1"
             ),
-            "day0_provisional_observation": _fast_residual_conditioning(),
+            "day0_provisional_observation": _fast_residual_conditioning(
+                source=conditioning_source,
+            ),
         }
     )
 

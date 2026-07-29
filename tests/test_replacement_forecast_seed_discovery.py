@@ -288,7 +288,9 @@ def test_seed_prefers_raw_fast_extreme_only_when_residual_likelihood_exists(
 
     assert payload == {
         "day0_observed_extreme_c": 31.0,
-        "day0_observed_extreme_source": fast_obs.FAST_OBS_SOURCE_ID,
+        "day0_observed_extreme_source": (
+            fast_obs.FAST_RESIDUAL_CONDITIONING_SOURCE_ID
+        ),
         "day0_observed_extreme_observation_time": "2026-07-27T03:04:27+00:00",
         "day0_observed_extreme_sample_count": 50,
         "day0_observed_extreme_unit": "C",

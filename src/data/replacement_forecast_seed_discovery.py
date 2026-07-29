@@ -205,7 +205,7 @@ def _day0_observed_extreme_seed_payload(
             except (KeyError, TypeError, ValueError):
                 return None
         from src.data.day0_fast_obs import (
-            FAST_OBS_SOURCE_ID,
+            FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
             latest_fast_station_conditioning,
         )
 
@@ -221,7 +221,9 @@ def _day0_observed_extreme_seed_payload(
         if fast is not None:
             return {
                 "day0_observed_extreme_c": fast.observed_extreme_c,
-                "day0_observed_extreme_source": FAST_OBS_SOURCE_ID,
+                "day0_observed_extreme_source": (
+                    FAST_RESIDUAL_CONDITIONING_SOURCE_ID
+                ),
                 "day0_observed_extreme_observation_time": fast.observation_time,
                 "day0_observed_extreme_sample_count": fast.sample_count,
                 "day0_observed_extreme_unit": fast.unit,

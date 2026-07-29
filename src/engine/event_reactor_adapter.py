@@ -28239,6 +28239,7 @@ def _validated_fast_residual_day0_conditioning(
 
     from src.data.day0_fast_obs import (
         FAST_OBS_SOURCE_ID,
+        FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
         FAST_RESIDUAL_LIKELIHOOD_REVISION,
         FAST_RESIDUAL_MIN_PAIRS,
     )
@@ -28315,7 +28316,11 @@ def _validated_fast_residual_day0_conditioning(
         conditioning.get("active") is not True
         or bool(conditioning.get("support_truncation"))
         or bool(likelihood.get("support_truncation"))
-        or source != FAST_OBS_SOURCE_ID
+        or source
+        not in {
+            FAST_OBS_SOURCE_ID,
+            FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+        }
         or str(likelihood.get("fast_channel") or "").strip()
         != FAST_OBS_SOURCE_ID
         or str(likelihood.get("settlement_channel") or "").strip()

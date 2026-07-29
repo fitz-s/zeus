@@ -59,6 +59,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
+from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
 logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
@@ -73,6 +75,11 @@ NOAA_METAR_STATION_ENDPOINT = (
 
 #: Canonical source id carried in event payload provenance.
 FAST_OBS_SOURCE_ID = "aviationweather_metar"
+#: Probability-conditioning identity for a WU settlement bound plus a noisy
+#: same-station fast print. This must remain distinct from the raw feed id:
+#: ``aviationweather_metar`` is itself settlement authority for NOAA cities,
+#: while this composite is provisional evidence for WU-settled cities.
+FAST_RESIDUAL_CONDITIONING_SOURCE_ID = DAY0_WU_FAST_RESIDUAL_SOURCE
 
 
 class Day0PublicationLedgerUnavailable(RuntimeError):
@@ -426,7 +433,10 @@ def build_fast_station_residual_likelihood(
     settlement channel and the fast METAR stream remains a noisy observation.
     """
 
-    if str(observed_source or "").strip() != FAST_OBS_SOURCE_ID:
+    if str(observed_source or "").strip() not in {
+        FAST_OBS_SOURCE_ID,
+        FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+    }:
         return None
     normalized_metric = str(metric or "").strip().lower()
     if normalized_metric not in {"high", "low"}:

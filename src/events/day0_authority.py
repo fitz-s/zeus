@@ -62,6 +62,7 @@ DAY0_PROVISIONAL_CURRENT_SNAPSHOT = "PROVISIONAL_CURRENT_SNAPSHOT"
 DAY0_MONOTONE_SETTLEMENT_BOUND = "MONOTONE_SETTLEMENT_BOUND"
 DAY0_FINAL_DAILY_SETTLEMENT = "FINAL_DAILY_SETTLEMENT"
 DAY0_UNKNOWN_FINALITY = "UNKNOWN"
+DAY0_WU_FAST_RESIDUAL_SOURCE = "wu_api+same_station_fast_tail"
 DAY0_ABSORBING_FINALITIES = frozenset(
     {DAY0_MONOTONE_SETTLEMENT_BOUND, DAY0_FINAL_DAILY_SETTLEMENT}
 )
@@ -80,6 +81,11 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     # Source-impossible rules outrank a declaration carried by an old or
     # contaminated payload. HKO explicitly revises intraday snapshots.
     if source.startswith("hko_hourly_accumulator"):
+        return DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+    # This composite names WU settlement truth plus a noisy same-station fast
+    # print. The broad ``wu_*`` rule below must not turn that statistical
+    # residual likelihood into a deterministic settlement boundary.
+    if source == DAY0_WU_FAST_RESIDUAL_SOURCE:
         return DAY0_PROVISIONAL_CURRENT_SNAPSHOT
     if source == "hko_daily_api" or source.startswith("hko_daily_api_"):
         return DAY0_FINAL_DAILY_SETTLEMENT

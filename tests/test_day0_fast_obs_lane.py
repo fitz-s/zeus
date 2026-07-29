@@ -42,6 +42,7 @@ from src.data.day0_fast_obs import (
     Day0PublicationLedgerUnavailable,
     FastObsSource,
     FAST_OBS_SOURCE_ID,
+    FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
     MetarReport,
     NoaaMetarCycleCursor,
     build_fast_station_residual_likelihood,
@@ -238,6 +239,17 @@ def test_fast_station_residual_likelihood_is_causal_station_local_and_thin_inert
     assert likelihood.residual_weights_c == ((0.0, 1.0 - expected_unknown),)
     assert likelihood.unknown_weight == expected_unknown
     assert likelihood.settlement_extreme_c == 14.0
+    composite_likelihood = build_fast_station_residual_likelihood(
+        conn,
+        city="Residual City",
+        target_date="2026-07-27",
+        metric="high",
+        observed_source=FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+        observation_time=post_peak_time,
+        decision_time=decision_time,
+    )
+    assert composite_likelihood is not None
+    assert composite_likelihood.identity_hash == likelihood.identity_hash
     conditioning = latest_fast_station_conditioning(
         conn,
         city="Residual City",

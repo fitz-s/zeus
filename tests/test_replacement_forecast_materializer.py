@@ -1393,6 +1393,23 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
     assert len({row["posterior_config_hash"] for row in hashes}) == 2
 
 
+def test_wu_fast_residual_is_provisional_while_direct_noaa_fast_is_absorbing() -> None:
+    composite = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=31.0,
+        day0_observed_extreme_source="wu_api+same_station_fast_tail",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+    )
+    direct = replace(
+        composite,
+        day0_observed_extreme_source="aviationweather_metar",
+    )
+
+    assert materializer_mod._day0_absorbing_observed_extreme_c(composite) is None
+    assert materializer_mod._day0_absorbing_observed_extreme_c(direct) == 31.0
+
+
 def test_materializer_day0_allows_elapsed_om9_hours_covered_by_observed_extreme(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -4,6 +4,27 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-29 WU fast evidence keeps provisional probability semantics
+
+The Seoul Jul-29 HIGH posterior labeled a qualified same-station
+`aviationweather_metar` print as the probability source. The generic Day0
+finality classifier also uses that raw source id for NOAA-settled cities, so
+the WU-settled Seoul certificate incorrectly treated the raw 30C print as an
+absorbing settlement bound. The live monitor independently reconstructed the
+margin-adjusted 29C physical boundary and correctly rejected the inconsistent
+certificate, leaving every held Seoul position without fresh q.
+
+Seed discovery now names the already-defined composite evidence
+`wu_api+same_station_fast_tail` when a strictly causal seven-day residual
+likelihood qualifies. The materializer accepts that composite identity only
+for the same WU-city residual builder, keeps it provisional, and applies the
+residual scenarios to point q and the identical bootstrap simplex. Direct
+`aviationweather_metar` remains absorbing authority for NOAA-settled cities.
+SCOPE is the exact WU city/date/metric/station posterior. DRAIN is the next
+source-clock materialization. RESET is a newer settlement or fast print, which
+creates a new residual and posterior identity. No source fallback, entry veto,
+market-price belief, exit threshold, or NOAA authority is changed.
+
 ## 2026-07-27 Same-station fast residual likelihood
 
 The Seoul Jul-27 31C NO loss exposed a category error and a missing probability

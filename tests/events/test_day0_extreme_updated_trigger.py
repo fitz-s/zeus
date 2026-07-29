@@ -13,7 +13,12 @@ import pytest
 
 from src.data.day0_observation_reader import read_day0_observed_extrema
 from src.events.event_writer import EventWriter
-from src.events.day0_authority import day0_evidence_finality
+from src.events.day0_authority import (
+    DAY0_MONOTONE_SETTLEMENT_BOUND,
+    DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
+    DAY0_WU_FAST_RESIDUAL_SOURCE,
+    day0_evidence_finality,
+)
 from src.events.triggers.day0_extreme_updated import (
     Day0ExtremeUpdatedTrigger,
     authority_row_to_observation,
@@ -58,6 +63,19 @@ def _observation(**overrides):
     }
     base.update(overrides)
     return base
+
+
+def test_wu_fast_residual_source_is_statistical_not_absorbing() -> None:
+    assert (
+        day0_evidence_finality({"settlement_source": "aviationweather_metar"})
+        == DAY0_MONOTONE_SETTLEMENT_BOUND
+    )
+    assert (
+        day0_evidence_finality(
+            {"settlement_source": DAY0_WU_FAST_RESIDUAL_SOURCE}
+        )
+        == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+    )
 
 
 def test_day0_online_hook_is_trigger_local_not_cycle_runtime_side_effect():
