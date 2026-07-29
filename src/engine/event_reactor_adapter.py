@@ -36062,10 +36062,17 @@ def _record_day0_remaining_day_exit_authority(
                 "day0_extreme_maturity_unavailable:no_intraday_extreme"
             )
             return
-        if classification == BoundClassification.DETERMINISTIC:
-            payload["_edli_day0_model_bound_classification"] = "deterministic"
+        if classification == BoundClassification.MODEL_SUPPORT_COLLAPSED:
+            payload["_edli_day0_model_bound_classification"] = (
+                "model_support_collapsed"
+            )
             payload["_edli_day0_model_bound_classification_role"] = (
                 "forecast_remaining_window_evidence_only"
+            )
+        elif classification == BoundClassification.DETERMINISTIC:
+            payload["_edli_day0_model_bound_classification"] = "deterministic"
+            payload["_edli_day0_model_bound_classification_role"] = (
+                "final_settlement_witness"
             )
         _record_day0_temporal_exit_authority(
             payload=payload,

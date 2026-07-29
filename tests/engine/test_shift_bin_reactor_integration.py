@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-29
 # Authority basis: 2026-06-22 lifecycle design consult REQ-20260622-060011 (Pro
 #   Extended) — D2 shift-bin reactor wiring. Pins the ADDITIVE integration points in
 #   src/engine/event_reactor_adapter.py:
@@ -273,7 +273,7 @@ def test_sibling_live_old_leg_is_exit_old_leg_no_entry():
     assert plan.old_token_id == "tok-A"
 
 
-def test_day0_remaining_day_forecast_determinism_does_not_mature_exit_authority(monkeypatch):
+def test_day0_remaining_day_model_support_collapse_does_not_mature_exit_authority(monkeypatch):
     payload = {
         "metric": "high",
         "rounded_value": 31,
@@ -302,7 +302,10 @@ def test_day0_remaining_day_forecast_determinism_does_not_mature_exit_authority(
     assert payload["_edli_day0_exit_authority_reason"] == (
         "day0_high_extreme_not_mature:daypart=morning,post_peak_confidence=0.000"
     )
-    assert payload["_edli_day0_bound_classification"] == "DETERMINISTIC"
+    assert payload["_edli_day0_bound_classification"] == "MODEL_SUPPORT_COLLAPSED"
+    assert payload["_edli_day0_model_bound_classification"] == (
+        "model_support_collapsed"
+    )
     assert payload["_edli_day0_model_bound_classification_role"] == (
         "forecast_remaining_window_evidence_only"
     )
