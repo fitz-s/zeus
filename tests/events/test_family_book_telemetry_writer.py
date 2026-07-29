@@ -210,7 +210,10 @@ class TestNonblockingEnqueue:
         blocker_conn.execute("BEGIN IMMEDIATE")
         blocker_conn.execute("INSERT INTO t VALUES (1)")  # write txn held open, never committed
 
-        writer.start_worker(conn_factory=lambda: sqlite3.connect(str(db_path), timeout=0.05))
+        writer.start_worker(
+            conn_factory=lambda: sqlite3.connect(str(db_path), timeout=0.05),
+            trade_db_path_factory=lambda: db_path,
+        )
 
         case = _case()
         space = _outcome_space(case)
@@ -235,7 +238,7 @@ class TestNonblockingEnqueue:
 
         assert max(latencies) < 0.05, f"enqueue must never block on DB contention; max={max(latencies)}s"
 
-    def test_full_queue_drops_and_increments_counter_without_blocking(self):
+    def test_full_queue_drops_and_increments_counter_without_blocking(self, tmp_path):
         # A conn_factory gated on an Event this test controls guarantees the
         # worker never reaches its queue.get() loop until released -- nothing
         # races to drain the queue, so maxsize=1 fills deterministically on
@@ -246,7 +249,10 @@ class TestNonblockingEnqueue:
             release.wait(timeout=5.0)
             return sqlite3.connect(":memory:")
 
-        writer.start_worker(conn_factory=_gated_connect, maxsize=1)
+        writer.start_worker(
+            conn_factory=_gated_connect, maxsize=1,
+            trade_db_path_factory=lambda: tmp_path / "unused.db",
+        )
 
         case = _case()
         space = _outcome_space(case)
@@ -266,8 +272,7 @@ class TestNonblockingEnqueue:
                 )
                 assert time.monotonic() - t0 < 0.05
 
-            counters = writer.COUNTERS.snapshot()
-            assert counters.get("dropped_queue_full", 0) >= 4  # only the first of 5 fits in maxsize=1
+            assert writer.counter("telemetry_drop_total") >= 4  # only the first of 5 fits in maxsize=1
         finally:
             release.set()  # let the gated worker thread proceed so teardown's shutdown() joins cleanly
 
@@ -288,7 +293,10 @@ class TestLiveRebuildCardinality:
         BLOCKER 2/3 required. (A THIRD rebuild past the heartbeat interval, or
         with a selected trade, WOULD append -- see TestSamplingPolicy.)"""
         db_path = tmp_path / "trade.db"
-        writer.start_worker(conn_factory=lambda: sqlite3.connect(str(db_path)))
+        writer.start_worker(
+            conn_factory=lambda: sqlite3.connect(str(db_path)),
+            trade_db_path_factory=lambda: db_path,
+        )
 
         case = _case()
         space = _outcome_space(case)
@@ -321,7 +329,10 @@ class TestLiveRebuildCardinality:
 
     def test_changed_content_creates_a_second_state_row(self, tmp_path):
         db_path = tmp_path / "trade.db"
-        writer.start_worker(conn_factory=lambda: sqlite3.connect(str(db_path)))
+        writer.start_worker(
+            conn_factory=lambda: sqlite3.connect(str(db_path)),
+            trade_db_path_factory=lambda: db_path,
+        )
 
         case = _case()
         space = _outcome_space(case)
@@ -355,7 +366,10 @@ class TestLiveRebuildCardinality:
 class TestSamplingPolicy:
     def test_repeat_same_state_no_heartbeat_no_selection_is_sampled_out(self, tmp_path):
         db_path = tmp_path / "trade.db"
-        writer.start_worker(conn_factory=lambda: sqlite3.connect(str(db_path)))
+        writer.start_worker(
+            conn_factory=lambda: sqlite3.connect(str(db_path)),
+            trade_db_path_factory=lambda: db_path,
+        )
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
@@ -372,11 +386,14 @@ class TestSamplingPolicy:
         conn = sqlite3.connect(str(db_path))
         (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
         assert obs_count == 1  # only the first (STATE_CHANGE); the next 2 sampled out
-        assert writer.COUNTERS.snapshot().get("sampled_out", 0) == 2
+        assert writer.counter("family_book_telemetry_sampled_out_total") == 2
 
     def test_heartbeat_fires_after_interval_even_without_change(self, tmp_path):
         db_path = tmp_path / "trade.db"
-        writer.start_worker(conn_factory=lambda: sqlite3.connect(str(db_path)))
+        writer.start_worker(
+            conn_factory=lambda: sqlite3.connect(str(db_path)),
+            trade_db_path_factory=lambda: db_path,
+        )
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
@@ -401,7 +418,10 @@ class TestSamplingPolicy:
 
     def test_selected_trade_forces_a_decision_observation(self, tmp_path):
         db_path = tmp_path / "trade.db"
-        writer.start_worker(conn_factory=lambda: sqlite3.connect(str(db_path)))
+        writer.start_worker(
+            conn_factory=lambda: sqlite3.connect(str(db_path)),
+            trade_db_path_factory=lambda: db_path,
+        )
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
@@ -433,7 +453,10 @@ class TestSamplingPolicy:
 class TestFaultInjection:
     def test_write_exception_increments_counter_and_does_not_crash_worker(self, tmp_path, monkeypatch, caplog):
         db_path = tmp_path / "trade.db"
-        writer.start_worker(conn_factory=lambda: sqlite3.connect(str(db_path)))
+        writer.start_worker(
+            conn_factory=lambda: sqlite3.connect(str(db_path)),
+            trade_db_path_factory=lambda: db_path,
+        )
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
@@ -454,7 +477,7 @@ class TestFaultInjection:
             )
         assert writer.drain(timeout=3.0)
 
-        assert writer.COUNTERS.snapshot().get("write_failures", 0) == 5  # every failure counted
+        assert writer.counter("family_book_telemetry_write_failures_total") == 5  # every failure counted
         # Rate-limited: 5 failures within the 60s window must not produce 5 log records.
         warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warning_records) <= 1, "log storm: fault must be rate-limited, not logged every occurrence"
@@ -464,3 +487,78 @@ class TestFaultInjection:
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='family_book_states'"
         ).fetchone()
         assert count == 1  # schema still intact; worker didn't die mid-init
+
+
+# ---------------------------------------------------------------------------
+# SQLite multi-connection WAL-reset-fix version guard (team-lead follow-up:
+# this module is the first in the repo to run a second live writer
+# connection against the trade DB concurrently with the primary).
+# ---------------------------------------------------------------------------
+
+class TestSqliteVersionGuard:
+    def test_worker_refuses_to_start_below_the_wal_reset_fix_floor(self, tmp_path, monkeypatch, caplog):
+        import logging
+
+        monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 40, 0))
+        db_path = tmp_path / "trade.db"
+        caplog.set_level(logging.ERROR, logger="src.events.family_book_telemetry_writer")
+
+        writer.start_worker(
+            conn_factory=lambda: sqlite3.connect(str(db_path)),
+            trade_db_path_factory=lambda: db_path,
+        )
+        assert _wait_until(lambda: not writer._worker_thread.is_alive(), timeout=2.0)
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(error_records) == 1
+        assert "sqlite" in error_records[0].message.lower()
+        # The worker exited before ever connecting/creating schema.
+        assert not db_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# db_writer_lock (WriteClass.BULK) -- first production wiring. Contention
+# with an external holder of the SAME lock class must be non-blocking and
+# typed, never a wait or a crash.
+# ---------------------------------------------------------------------------
+
+class TestWriterLockContention:
+    def test_external_bulk_lock_holder_causes_contended_skip_not_a_write(self, tmp_path):
+        from src.state.db_writer_lock import WriteClass, db_writer_lock
+
+        db_path = tmp_path / "trade.db"
+        writer.start_worker(
+            conn_factory=lambda: sqlite3.connect(str(db_path)),
+            trade_db_path_factory=lambda: db_path,
+        )
+        # Let the worker connect and create schema before contending it.
+        assert _wait_until(lambda: db_path.exists(), timeout=2.0)
+
+        case = _case()
+        space = _outcome_space(case)
+        book = _family_book(case, space)
+        family = _family(case)
+
+        with db_writer_lock(db_path, WriteClass.BULK):  # held by THIS thread
+            writer.enqueue_family_book_observation(
+                decision=_decision(case, space, book, receipt_hash="r-contended"), family=family,
+                active_proofs=_proofs_for(space), candidate_bin_id=_candidate_bin_id,
+                decision_time=datetime(2026, 6, 14, 12, 0, tzinfo=UTC), causal_snapshot_id="c0",
+            )
+            assert writer.drain(timeout=3.0)
+
+        assert writer.counter("family_book_telemetry_write_contended_total") == 1
+        assert writer.counter("family_book_telemetry_write_failures_total") == 0  # contention != a fault
+        conn = sqlite3.connect(str(db_path))
+        (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
+        assert obs_count == 0  # the contended write never happened, not a silent success
+
+        # Once the external lock is released, the SAME decision writes normally.
+        writer.enqueue_family_book_observation(
+            decision=_decision(case, space, book, receipt_hash="r-clear"), family=family,
+            active_proofs=_proofs_for(space), candidate_bin_id=_candidate_bin_id,
+            decision_time=datetime(2026, 6, 14, 12, 1, tzinfo=UTC), causal_snapshot_id="c1",
+        )
+        assert writer.drain(timeout=3.0)
+        (obs_count,) = conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()
+        assert obs_count == 1

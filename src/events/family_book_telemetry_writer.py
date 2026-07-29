@@ -4,7 +4,11 @@
 #   redesign after deep-review NO-GO (BLOCKER 1: synchronous JSON+SQLite on the
 #   live decision thread cannot bound latency -- an exception handler cannot
 #   undo elapsed WAL-writer-lock wait time; the repository's default busy
-#   timeout is 30s and SQLite WAL permits only one writer at a time).
+#   timeout is 30s and SQLite WAL permits only one writer at a time) plus the
+#   team-lead follow-up research (INV-37 scope confirmed via
+#   architecture/invariants.yaml:882-897; db_writer_lock/WriteClass wiring;
+#   canonical counters sink; queue/worker shape modeled on
+#   src/data/replacement_cycle_advance_trigger.py's day0-bridge pattern).
 """Nonblocking capture plane for family_book_states / family_book_observations.
 
 The decision thread calls ONLY ``enqueue_family_book_observation`` -- a bounded
@@ -15,9 +19,21 @@ hashing, JSON serialization, sampling-policy evaluation, and SQLite I/O happen
 on a separate owner-local writer thread that opens its OWN trade-DB connection
 with a short busy_timeout (``get_trade_connection(busy_timeout_ms=...)`` --
 the repo's sanctioned "optional derived publication yields to live writers"
-carve-out; see src/state/db.py ``_connect`` docstring. Connection PRAGMA only,
-INV-37 / transaction semantics unchanged -- no ATTACH, no shared transaction
-with the live trade_conn).
+carve-out; see src/state/db.py ``_connect`` docstring).
+
+INV-37 (architecture/invariants.yaml:882-897): "No Zeus write transaction may
+span more than one physical DB via independent connections." This writer's
+connection touches ONLY zeus_trades.db, never world/forecasts in the same
+transaction -- outside INV-37's scope as written, confirmed by reading the
+invariant text directly (not assumed).
+
+Writer-lock arbitration (first production caller of
+src/state/db_writer_lock.py's ``db_writer_lock`` -- Phase 0 landed the helper,
+no caller existed until this): each batch commit is wrapped in
+``db_writer_lock(trade_db_path, WriteClass.BULK, blocking=False)``. BULK is
+correct because telemetry must always yield, never contend to win -- see
+"Writer-class rationale" below for why this does not (yet) provide direct
+arbitration against the primary trade_conn specifically.
 
 Sampling policy v1 (replaces the broken per-cycle-unique timestamped hash as
 the volume control): append on book-content STATE_CHANGE, on a HEARTBEAT
@@ -48,6 +64,9 @@ from src.events.family_book_manifest import (
     model_q_fields,
 )
 from src.events.idempotency import sha256_text
+from src.observability.counters import increment as _cnt_inc
+from src.observability.counters import read as _cnt_read
+from src.state.db_writer_lock import WriteClass, db_writer_lock
 from src.state.schema.family_book_observations_schema import (
     MARKET_CENTER_VERSION,
     SAMPLING_POLICY_VERSION,
@@ -69,6 +88,29 @@ _HEARTBEAT_INTERVAL = timedelta(minutes=30)
 # 30-second default.
 _WRITER_BUSY_TIMEOUT_MS = 250
 _LOG_RATE_LIMIT_SECONDS = 60.0
+# SQLite's multi-connection WAL-reset fix landed in 3.51.3 (and backports
+# 3.50.7/3.44.6) -- asserted once at worker startup per the deep review,
+# since this module is the first thing in the repo to run a SECOND live
+# writer connection against the trade DB concurrently with the primary.
+_MIN_SQLITE_VERSION_INFO = (3, 51, 3)
+
+# Canonical counter names (src/observability/counters.py sink).
+_CNT_ENQUEUED = "family_book_telemetry_enqueued_total"
+_CNT_DROP = "telemetry_drop_total"
+_CNT_ENQUEUE_ERROR = "family_book_telemetry_enqueue_error_total"
+_CNT_QUEUE_HIGH_WATER = "telemetry_queue_high_water_total"
+_CNT_SAMPLED_OUT = "family_book_telemetry_sampled_out_total"
+_CNT_WRITE_FAILURES = "family_book_telemetry_write_failures_total"
+_CNT_WRITE_CONTENDED = "family_book_telemetry_write_contended_total"
+_CNT_WRITTEN_STATES = "family_book_telemetry_written_states_total"
+_CNT_WRITTEN_OBSERVATIONS = "family_book_telemetry_written_observations_total"
+
+# Sentinel pushed onto the queue to stop the worker -- matches the
+# day0-materialization-bridge shape (src/data/replacement_cycle_advance_trigger.py
+# _DAY0_BRIDGE_STOP): the worker blocks on queue.get() with no poll timeout,
+# so shutdown is immediate (no up-to-500ms poll latency) rather than a
+# threading.Event checked on a timed loop.
+_STOP = object()
 
 
 @dataclass(frozen=True)
@@ -83,33 +125,11 @@ class _ObservationEnvelope:
     causal_snapshot_id: Optional[str]
 
 
-class _Counters:
-    """Thread-safe named counters (drop/write/sample telemetry, never the DB)."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._values: dict[str, int] = {}
-
-    def increment(self, name: str, by: int = 1) -> None:
-        with self._lock:
-            self._values[name] = self._values.get(name, 0) + by
-
-    def snapshot(self) -> dict[str, int]:
-        with self._lock:
-            return dict(self._values)
-
-    def reset(self) -> None:
-        with self._lock:
-            self._values.clear()
-
-
-COUNTERS = _Counters()
-
 _queue_lock = threading.Lock()
-_obs_queue: "queue.Queue[_ObservationEnvelope]" = queue.Queue(maxsize=_QUEUE_MAXSIZE_DEFAULT)
+_obs_queue: "queue.Queue[object]" = queue.Queue(maxsize=_QUEUE_MAXSIZE_DEFAULT)
+_queue_high_water = 0  # raw gauge (not a counters.py monotonic sink value)
 _worker_thread: Optional[threading.Thread] = None
 _worker_started_lock = threading.Lock()
-_shutdown_event = threading.Event()
 _last_state_by_family: dict[str, tuple[str, datetime]] = {}
 _last_log_monotonic = 0.0
 
@@ -120,7 +140,19 @@ def _default_conn_factory() -> sqlite3.Connection:
     return get_trade_connection(busy_timeout_ms=_WRITER_BUSY_TIMEOUT_MS)
 
 
+def _default_trade_db_path():
+    from src.state.db import _zeus_trade_db_path
+
+    return _zeus_trade_db_path()
+
+
 _conn_factory: Callable[[], sqlite3.Connection] = _default_conn_factory
+_trade_db_path_factory: Callable[[], Any] = _default_trade_db_path
+
+
+def queue_high_water() -> int:
+    """Peak queue occupancy observed since the last reset (test/ops introspection)."""
+    return _queue_high_water
 
 
 def enqueue_family_book_observation(
@@ -139,6 +171,7 @@ def enqueue_family_book_observation(
     counter and returns. Any other exception is swallowed the same way --
     telemetry must never affect the decision it is called from.
     """
+    global _queue_high_water
     try:
         if decision is None or decision.family_book is None:
             return
@@ -152,27 +185,36 @@ def enqueue_family_book_observation(
             causal_snapshot_id=causal_snapshot_id,
         )
         _obs_queue.put_nowait(envelope)
-        COUNTERS.increment("enqueued")
+        _cnt_inc(_CNT_ENQUEUED)
+        size = _obs_queue.qsize()
+        if size > _queue_high_water:
+            _queue_high_water = size
+            _cnt_inc(_CNT_QUEUE_HIGH_WATER)
     except queue.Full:
-        COUNTERS.increment("dropped_queue_full")
+        _cnt_inc(_CNT_DROP)
     except Exception:  # noqa: BLE001 -- must never affect the decision thread
-        COUNTERS.increment("enqueue_error")
+        _cnt_inc(_CNT_ENQUEUE_ERROR)
 
 
 def start_worker(
     *,
     conn_factory: Optional[Callable[[], sqlite3.Connection]] = None,
+    trade_db_path_factory: Optional[Callable[[], Any]] = None,
     maxsize: Optional[int] = None,
 ) -> None:
     """Explicitly (re)start the writer thread. Idempotent if already running
-    with no override. Tests pass ``conn_factory`` pointing at an isolated
-    file-backed DB; production leaves both args unset (real trade DB)."""
-    global _conn_factory
+    with no override. Tests pass ``conn_factory``/``trade_db_path_factory``
+    pointing at an isolated file-backed DB; production leaves all args unset
+    (real trade DB)."""
+    global _conn_factory, _trade_db_path_factory
     if conn_factory is not None:
         _conn_factory = conn_factory
+    if trade_db_path_factory is not None:
+        _trade_db_path_factory = trade_db_path_factory
+    _stop_current_worker()
     if maxsize is not None:
         _configure_queue(maxsize)
-    _ensure_worker_started(force=True)
+    _ensure_worker_started()
 
 
 def _configure_queue(maxsize: int) -> None:
@@ -181,17 +223,28 @@ def _configure_queue(maxsize: int) -> None:
         _obs_queue = queue.Queue(maxsize=maxsize)
 
 
-def _ensure_worker_started(*, force: bool = False) -> None:
+def _stop_current_worker(timeout: float = 5.0) -> None:
+    """Stop whichever worker is currently reading the CURRENT ``_obs_queue``,
+    using that exact queue object -- reassigning ``_obs_queue`` (via
+    ``_configure_queue``) before stopping would orphan a running worker
+    blocked on the old queue's ``get()`` forever."""
     global _worker_thread
-    if not force and _worker_thread is not None and _worker_thread.is_alive():
+    thread = _worker_thread
+    if thread is None or not thread.is_alive():
+        _worker_thread = None
+        return
+    _obs_queue.put(_STOP)  # blocking put: control-plane, not the decision path
+    thread.join(timeout=timeout)
+    _worker_thread = None
+
+
+def _ensure_worker_started() -> None:
+    global _worker_thread
+    if _worker_thread is not None and _worker_thread.is_alive():
         return
     with _worker_started_lock:
-        if not force and _worker_thread is not None and _worker_thread.is_alive():
+        if _worker_thread is not None and _worker_thread.is_alive():
             return
-        if force and _worker_thread is not None and _worker_thread.is_alive():
-            _shutdown_event.set()
-            _worker_thread.join(timeout=5.0)
-        _shutdown_event.clear()
         thread = threading.Thread(
             target=_worker_loop, name="family-book-telemetry-writer", daemon=True
         )
@@ -201,11 +254,7 @@ def _ensure_worker_started(*, force: bool = False) -> None:
 
 def shutdown(timeout: float = 5.0) -> None:
     """Stop the writer thread (test/ops lifecycle helper)."""
-    global _worker_thread
-    _shutdown_event.set()
-    if _worker_thread is not None:
-        _worker_thread.join(timeout=timeout)
-        _worker_thread = None
+    _stop_current_worker(timeout=timeout)
 
 
 def drain(timeout: float = 5.0) -> bool:
@@ -215,9 +264,10 @@ def drain(timeout: float = 5.0) -> bool:
     Returns True iff the queue fully drained within ``timeout``.
     """
     done = threading.Event()
+    current_queue = _obs_queue
 
     def _joiner() -> None:
-        _obs_queue.join()
+        current_queue.join()
         done.set()
 
     threading.Thread(target=_joiner, daemon=True).start()
@@ -225,18 +275,35 @@ def drain(timeout: float = 5.0) -> bool:
 
 
 def reset_for_test() -> None:
-    """Full reset: stop worker, clear queue/counters/sampling cache, restore
-    the default connection factory. Test-only."""
-    shutdown()
-    global _conn_factory
+    """Full reset: stop worker, clear queue/sampling cache, restore default
+    factories, reset the canonical counters sink. Test-only (``reset_all()``
+    is documented in src/observability/counters.py as test-support-only)."""
+    global _conn_factory, _trade_db_path_factory, _queue_high_water
+    _stop_current_worker()
     _conn_factory = _default_conn_factory
+    _trade_db_path_factory = _default_trade_db_path
     _configure_queue(_QUEUE_MAXSIZE_DEFAULT)
-    COUNTERS.reset()
     _last_state_by_family.clear()
-    _shutdown_event.clear()
+    _queue_high_water = 0
+    from src.observability.counters import reset_all
+
+    reset_all()
+
+
+def counter(name: str) -> int:
+    """Read back a named counter via the canonical sink (test/ops helper)."""
+    return _cnt_read(name)
 
 
 def _worker_loop() -> None:
+    if sqlite3.sqlite_version_info < _MIN_SQLITE_VERSION_INFO:
+        logger.error(
+            "family_book_telemetry: refusing to start a second trade-DB writer "
+            "connection -- sqlite3 %s is below the multi-connection WAL-reset "
+            "fix floor %s",
+            sqlite3.sqlite_version, _MIN_SQLITE_VERSION_INFO,
+        )
+        return
     try:
         conn = _conn_factory()
     except Exception:
@@ -249,14 +316,16 @@ def _worker_loop() -> None:
         logger.warning("family_book_telemetry: schema init failed", exc_info=True)
         conn.close()
         return
+    trade_db_path = _trade_db_path_factory()
     try:
-        while not _shutdown_event.is_set():
+        while True:
+            item = _obs_queue.get()
             try:
-                envelope = _obs_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            _process_one(conn, envelope)
-            _obs_queue.task_done()
+                if item is _STOP:
+                    return
+                _process_one(conn, trade_db_path, item)
+            finally:
+                _obs_queue.task_done()
     finally:
         conn.close()
 
@@ -269,11 +338,25 @@ def _rate_limited_warning(msg: str) -> None:
         logger.warning(msg, exc_info=True)
 
 
-def _process_one(conn: sqlite3.Connection, envelope: _ObservationEnvelope) -> None:
+def _process_one(conn: sqlite3.Connection, trade_db_path: Any, envelope: _ObservationEnvelope) -> None:
     try:
-        _write_observation(conn, envelope)
+        # Writer-class rationale: BULK always yields, never contends to win.
+        # The primary trade_conn does not YET take WriteClass.LIVE (Phase 0
+        # of db_writer_lock landed the helper with no production caller --
+        # this is the first). Taking BULK here therefore does not yet
+        # arbitrate against the primary specifically; it (a) correctly
+        # self-classifies this writer as non-critical/yielding so a future
+        # LIVE retrofit of the primary path needs zero changes on this side,
+        # and (b) prevents two instances of THIS writer (or any other
+        # future BULK-classified caller) from writing concurrently.
+        # Non-blocking: contention is a normal, expected, benign event for
+        # best-effort telemetry -- skip this observation, never wait.
+        with db_writer_lock(trade_db_path, WriteClass.BULK, blocking=False):
+            _write_observation(conn, envelope)
+    except BlockingIOError:
+        _cnt_inc(_CNT_WRITE_CONTENDED)
     except Exception:
-        COUNTERS.increment("write_failures")
+        _cnt_inc(_CNT_WRITE_FAILURES)
         _rate_limited_warning("family_book_telemetry: observation write failed")
 
 
@@ -309,7 +392,7 @@ def _write_observation(conn: sqlite3.Connection, envelope: _ObservationEnvelope)
 
     sampling_reason = _sampling_reason(family.family_id, state_id, envelope.decision_time, decision)
     if sampling_reason is None:
-        COUNTERS.increment("sampled_out")
+        _cnt_inc(_CNT_SAMPLED_OUT)
         return
 
     if insert_state(
@@ -322,7 +405,7 @@ def _write_observation(conn: sqlite3.Connection, envelope: _ObservationEnvelope)
         canonical_payload=canonical_payload,
         first_seen_decision_time=decision_time_iso,
     ):
-        COUNTERS.increment("written_states")
+        _cnt_inc(_CNT_WRITTEN_STATES)
 
     model_q_json, model_q_identity_hash = model_q_fields(decision)
     row = {
@@ -355,6 +438,6 @@ def _write_observation(conn: sqlite3.Connection, envelope: _ObservationEnvelope)
         **market_q_fields(decision),
     }
     if insert_observation(conn, row):
-        COUNTERS.increment("written_observations")
+        _cnt_inc(_CNT_WRITTEN_OBSERVATIONS)
     conn.commit()
     _last_state_by_family[family.family_id] = (state_id, envelope.decision_time)

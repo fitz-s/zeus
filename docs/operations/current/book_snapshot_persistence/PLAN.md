@@ -276,20 +276,91 @@ evaluation, and SQLite I/O happen on a separate, owner-local writer thread
 (`daemon=True`) that opens its OWN connection via
 `get_trade_connection(busy_timeout_ms=250)` -- a short budget, not the
 live default 30s, so it yields to live writers rather than contending for
-the WAL write lock.
+the WAL write lock. Queue/worker lifecycle (sentinel-based shutdown pushed
+through the queue, `_ensure_worker_started`/`_stop_current_worker` guarding
+against orphaning a worker blocked on a since-reassigned queue object) is
+modeled on `src/data/replacement_cycle_advance_trigger.py`'s existing
+day0-materialization-bridge pattern (`_DAY0_BRIDGE_STOP` sentinel,
+`_day0_bridge_worker`/`_start_day0_bridge_workers_locked`) per team-lead
+research -- the worker blocks on `queue.get()` with no poll timeout, so
+shutdown is immediate rather than the up-to-500ms poll-loop latency an
+earlier revision of this module had.
 
-**INV-37 / second-connection safety, verified, not assumed:**
-`src/state/db.py`'s `_connect` docstring states explicitly: *"Callers doing
-optional derived publication may choose a shorter budget so they yield to
-live writers... Connection PRAGMA only — INV-37 / txn semantics
-unchanged."* `get_world_connection` already exposes `busy_timeout_ms` for
-exactly this precedent; this PR extends `get_trade_connection` to the same
-shape (`src/state/db.py`, ~8 line diff) rather than reaching into a private
-helper from `src/events/`. This is a SANCTIONED, EXISTING pattern for an
-owner-local second connection with a reduced busy budget, not new machinery
-invented for this feature. SQLite library version in this environment:
-`3.53.2` -- above the `3.51.3+`/backport threshold the review cited for the
-multi-connection WAL-reset fix.
+**INV-37, verified against the invariant text itself, not inferred:**
+`architecture/invariants.yaml:882-897` (INV-37): *"No Zeus write transaction
+may span more than one physical DB via independent connections."* Confirmed
+by team-lead research and independently re-read: this writer's connection
+touches ONLY `zeus_trades.db`, never world/forecasts in the same
+transaction -- outside INV-37's scope as written.
+
+**Second-connection safety, verified, not assumed:** `src/state/db.py`'s
+`_connect` docstring states explicitly: *"Callers doing optional derived
+publication may choose a shorter budget so they yield to live writers...
+Connection PRAGMA only — INV-37 / txn semantics unchanged."*
+`get_world_connection` already exposes `busy_timeout_ms` for exactly this
+precedent; this PR extends `get_trade_connection` to the same shape
+(`src/state/db.py`, ~8 line diff) rather than reaching into a private
+helper from `src/events/`. SQLite library version in this environment:
+`3.53.2` -- above the `3.51.3+`/backport threshold for the multi-connection
+WAL-reset fix, asserted defensively at worker startup
+(`_MIN_SQLITE_VERSION_INFO = (3, 51, 3)`; `sqlite3.sqlite_version_info` is
+checked before the worker ever connects -- below the floor, it logs one
+ERROR and refuses to start, verified by
+`test_worker_refuses_to_start_below_the_wal_reset_fix_floor`) since this
+module is the first thing in the repo to run a second live writer
+connection against the trade DB concurrently with the primary.
+
+**`db_writer_lock` -- first production wiring, per team-lead research:**
+team-lead's research confirmed no production caller of
+`src/state/db_writer_lock.py`'s `db_writer_lock`/`WriteClass` exists today
+(Phase 0 of the v4 sqlite-contention plan landed the helper surface only).
+Each observation write here is wrapped in
+`db_writer_lock(trade_db_path, WriteClass.BULK, blocking=False)` --
+`WriteClass.BULK` because telemetry must always yield, never contend to
+win. Honest caveat, stated plainly rather than implied away: `WriteClass`
+arbitrates LIVE vs BULK via `BulkChunker.yield_if_live_contended()`
+cooperatively checking a SEPARATE `.writer-lock.live` file (LIVE and BULK
+are different lock files, not mutually exclusive at the flock() level by
+themselves), and the PRIMARY `trade_conn` does not yet take
+`WriteClass.LIVE` around its writes (that retrofit is explicitly Phase 1+
+of the same plan, out of this PR's scope). So taking `WriteClass.BULK` here
+does NOT yet provide direct arbitration against the primary connection
+specifically -- today's actual protection against blocking the primary is
+the short `busy_timeout` above plus SQLite's own WAL semantics, exactly as
+already documented. Taking the lock now is still correct and valuable: (1)
+it correctly self-classifies this writer so the moment the primary path IS
+retrofitted to `WriteClass.LIVE` (Phase 1+), this writer automatically
+yields via the existing cooperative mechanism with zero further changes;
+(2) it prevents two instances of this SAME writer (daemon restart race, or
+any future second `WriteClass.BULK` caller) from writing concurrently; (3)
+it establishes the first real precedent for a dormant mechanism the repo
+already built and intended for exactly this class of problem.
+`blocking=False`: contention is treated as a normal, benign, expected event
+for best-effort telemetry -- the write is skipped (typed counter, no wait,
+no retry), never blocked on. Verified by
+`test_external_bulk_lock_holder_causes_contended_skip_not_a_write` (an
+external `db_writer_lock(db_path, WriteClass.BULK)` held for the duration
+of an enqueue+drain; the write is skipped and counted, not silently lost
+nor blocking; a subsequent write after the external lock releases succeeds
+normally).
+
+**Counters -- canonical sink, not ad-hoc:** per team-lead research
+(`src/observability/counters.py` is "the canonical typed counter sink for
+Zeus telemetry"), all telemetry counters route through
+`increment`/`read` there instead of a bespoke in-module counter class:
+`telemetry_drop_total` (full-queue drops -- team lead's exact suggested
+name), `telemetry_queue_high_water_total` (incremented once per NEW queue
+high-water record -- the sink is documented monotonic-only, "NO... gauge
+semantics", so the raw peak value is tracked separately via
+`queue_high_water()` and the counter records the EVENT of a new record,
+matching the sink's own contract rather than forcing gauge semantics onto
+a counter primitive), plus `family_book_telemetry_{enqueued,enqueue_error,
+sampled_out,write_failures,write_contended,written_states,
+written_observations}_total` (repo convention favors specific,
+collision-safe names over a bare generic one, per existing counters like
+`db_write_lock_timeout_total`/`cost_basis_chain_mutation_blocked_total`).
+`reset_all()` is called from this module's `reset_for_test()`, matching
+the sink's own documented "test isolation only" contract.
 
 ### Sampling policy v1 -- the ACTUAL row-volume control
 
@@ -304,8 +375,9 @@ cache (single writer thread, no lock needed) and appends an observation iff:
 - `DECISION` -- `decision.selected is not None` (a trade was actually
   chosen), regardless of state/heartbeat timing.
 
-Otherwise the observation is sampled OUT (counted via `sampled_out`, never
-written). Verified: `test_repeat_same_state_no_heartbeat_no_selection_is_sampled_out`,
+Otherwise the observation is sampled OUT (counted via
+`family_book_telemetry_sampled_out_total`, never written). Verified:
+`test_repeat_same_state_no_heartbeat_no_selection_is_sampled_out`,
 `test_heartbeat_fires_after_interval_even_without_change`,
 `test_selected_trade_forces_a_decision_observation`.
 
@@ -313,10 +385,15 @@ written). Verified: `test_repeat_same_state_no_heartbeat_no_selection_is_sampled
 
 `test_write_exception_increments_counter_and_does_not_crash_worker`:
 monkeypatches the state-insert call to raise on every attempt across 5
-enqueues; asserts `write_failures == 5` (every failure counted) while the
-rate-limited logger (`_LOG_RATE_LIMIT_SECONDS = 60`) emits at most one
-WARNING record for the whole burst (no log storm), and the worker thread
-survives (schema still present, no crash).
+enqueues; asserts `family_book_telemetry_write_failures_total == 5` (every
+failure counted) while the rate-limited logger (`_LOG_RATE_LIMIT_SECONDS =
+60`) emits at most one WARNING record for the whole burst (no log storm),
+and the worker thread survives (schema still present, no crash). Distinct
+from lock contention (`family_book_telemetry_write_contended_total`,
+`BlockingIOError` from `db_writer_lock`) which is counted separately and is
+NOT treated as a fault -- `test_external_bulk_lock_holder_causes_contended_skip_not_a_write`
+asserts `write_contended == 1` and `write_failures == 0` for the same
+attempt.
 
 ## Row-rate math (revised)
 
@@ -360,13 +437,17 @@ milliseconds at p99), not decision latency.
   coverage -> value; partial coverage on a "complete" book -> NULL, proving
   the reviewed defect is fixed; incomplete book -> NULL), `model_q_fields`/
   `market_q_fields`.
-- `tests/events/test_family_book_telemetry_writer.py` (8): nonblocking
+- `tests/events/test_family_book_telemetry_writer.py` (10): nonblocking
   enqueue under real WAL writer contention + bounded latency; full-queue
   drop counter; t-vs-t+1 live-rebuild state/observation cardinality (state
   dedups to 1, observation correctly sampled-out per policy -- the direct
   fix for BLOCKER 2/3); a genuine content change (fee) produces a second
   state row; the three sampling-policy branches; commit-time fault
-  injection with typed counters and rate-limited logging.
+  injection with typed counters and rate-limited logging; the SQLite
+  version guard refusing to start below the WAL-reset-fix floor; the
+  `db_writer_lock(WriteClass.BULK)` contention skip (typed counter, no
+  block, no silent write) and clean recovery once the external lock
+  releases.
 - `tests/events/test_family_book_telemetry_benchmark.py` (1): the
   production-shaped serialization/insert benchmark above.
 - `tests/engine/test_family_book_observation_hook_placement.py` (2):
