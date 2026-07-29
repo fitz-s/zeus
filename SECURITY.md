@@ -23,10 +23,24 @@ address associated with the account.
 
 - Live trading credentials (API keys, wallet private keys, venue tokens)
   are sourced exclusively from environment variables or the system keychain.
-- No secrets are committed to this repository. The `.gitleaks.toml`
-  configuration enforces this on every push.
+- `.gitleaks.toml`, enforced by `.github/workflows/secrets-scan.yml` on every
+  push and pull request to `live`, is the server-side control against new
+  secrets being committed.
 - `config/settings.json` is operator-local and not tracked in version
   control. See `config/settings.example.json` for the safe template.
+
+### Disclosed incident
+
+A Weather Underground API key (fingerprint `6532d645…`, 32 hex chars) was
+committed to this repository starting 2026-03-30, and by 2026-04-16 was
+present across multiple tracked files, including `docs/zeus-system-constitution.md`
+and files under `src/data/`. It was removed from the tracked tree on
+2026-05-23 (commit `98708567e`). History was not rewritten, so the value
+remains retrievable from public git history by anyone who already holds
+it — confirmable with `git log -S` against the full value, which is
+deliberately not reproduced here. Rotation of this credential is pending
+as of this writing; this document will be updated with the rotation date
+once it happens.
 
 ## Scope
 

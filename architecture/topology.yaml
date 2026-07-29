@@ -216,12 +216,6 @@ root_governed_files:
     zone: root
     authority_role: orientation
     orientation_note: Private vulnerability-disclosure path and credential discipline; not runtime authority.
-  - path: "CHANGELOG.md"
-    status: active
-    scope: global
-    zone: root
-    authority_role: orientation
-    orientation_note: Operational milestone log; the authoritative history is git, not this file.
   - path: "REVIEW.md"
     status: active
     scope: global
