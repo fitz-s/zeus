@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-07-29
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -4938,14 +4938,15 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
 
 
 @pytest.mark.parametrize(
-    ("trigger", "has_position_coverage", "outcome"),
+    ("trigger", "has_position_coverage", "request_accepted", "outcome"),
     (
-        ("EDGE_REVERSAL", True, "delegated"),
-        ("EDGE_REVERSAL", False, "blocked"),
-        ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, "blocked"),
-        ("SETTLEMENT_IMMINENT", False, "blocked"),
-        ("DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES", False, "direct"),
-        ("RED_FORCE_EXIT", True, "direct"),
+        ("EDGE_REVERSAL", True, True, "delegated"),
+        ("EDGE_REVERSAL", False, True, "blocked"),
+        ("EDGE_REVERSAL", False, False, "request_failed"),
+        ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, True, "blocked"),
+        ("SETTLEMENT_IMMINENT", False, True, "blocked"),
+        ("DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES", False, True, "direct"),
+        ("RED_FORCE_EXIT", True, True, "direct"),
     ),
 )
 def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_red(
@@ -4953,6 +4954,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     monkeypatch,
     trigger,
     has_position_coverage,
+    request_accepted,
     outcome,
 ):
     """Statistical SELL is global-only; missing authority holds while RED acts."""
@@ -5092,10 +5094,14 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     )
     execute_calls = []
     auction_completion_requests = []
+    def request_global_completion(**kwargs):
+        auction_completion_requests.append(kwargs)
+        return request_accepted
+
     monkeypatch.setattr(
         event_reactor,
         "request_global_auction_completion",
-        lambda **kwargs: auction_completion_requests.append(kwargs),
+        request_global_completion,
     )
 
     def fake_execute_exit(*args, **kwargs):
@@ -5152,7 +5158,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
         ).fetchone()[0] == 0
-    elif outcome == "blocked":
+    elif outcome in {"blocked", "request_failed"}:
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
         assert (
             summary["monitor_statistical_sells_blocked_without_global_authority"]
@@ -5165,10 +5171,18 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             == "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
         )
         assert "local_statistical_sell_non_authoritative_record" in pos.applied_validations
-        assert "global_auction_completion_requested" in pos.applied_validations
-        assert summary[
+        request_status = (
+            "global_auction_completion_requested"
+            if request_accepted
+            else "global_auction_completion_request_failed"
+        )
+        assert request_status in pos.applied_validations
+        request_summary_key = (
             "monitor_statistical_sell_auction_completion_requested"
-        ] == 1
+            if request_accepted
+            else "monitor_statistical_sell_auction_completion_request_failed"
+        )
+        assert summary[request_summary_key] == 1
         assert auction_completion_requests == [
             {
                 "reason": (
@@ -5183,6 +5197,43 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             }
         ]
         assert execute_calls == []
+        if outcome == "request_failed":
+            pos.last_exit_error = (
+                "global_sell_exit_executable_snapshot_unavailable"
+            )
+            auction_completion_requests.clear()
+
+            def recover_global_completion(**kwargs):
+                auction_completion_requests.append(kwargs)
+                return True
+
+            monkeypatch.setattr(
+                event_reactor,
+                "request_global_auction_completion",
+                recover_global_completion,
+            )
+            recovery_summary = {"monitors": 0, "exits": 0}
+            cycle_runtime.execute_monitoring_phase(
+                conn,
+                object(),
+                portfolio,
+                artifact,
+                type(
+                    "Tracker",
+                    (),
+                    {"record_exit": lambda self, position: None},
+                )(),
+                recovery_summary,
+                deps=deps,
+                run_exit_preflight=False,
+            )
+            assert recovery_summary[
+                "global_sell_snapshot_reauction_debts_recovered"
+            ] == 1
+            assert auction_completion_requests[0][
+                "force_new_generation"
+            ] is True
+            assert pos.last_exit_error == ""
     else:
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
         assert summary.get(
@@ -5192,7 +5243,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert results[0].should_exit is True
         assert results[0].exit_reason == trigger
         assert execute_calls == [pos]
-    if outcome != "blocked":
+    if outcome not in {"blocked", "request_failed"}:
         assert auction_completion_requests == []
     assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()

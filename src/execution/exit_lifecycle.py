@@ -441,6 +441,64 @@ def _is_pre_submit_db_locked_error(error: str) -> bool:
     )
 
 
+def _is_global_sell_snapshot_reauction_error(error: object) -> bool:
+    """True when a global SELL stopped before command persistence for snapshot I/O."""
+
+    return str(error or "").lower().startswith(
+        (
+            "global_sell_exit_executable_snapshot_unavailable",
+            "global_sell_exit_executable_snapshot_error:",
+        )
+    )
+
+
+def needs_global_sell_snapshot_reauction(
+    position: Position,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Whether canonical runtime state carries an unserved fresh-cut debt."""
+
+    if _is_global_sell_snapshot_reauction_error(
+        getattr(position, "last_exit_error", "")
+    ):
+        return True
+    if conn is None:
+        return False
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT event_type, payload_json
+             FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_RETRY_RELEASED'
+             ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+             LIMIT 1
+            """,
+            (trade_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None or str(row[0]) != "EXIT_RETRY_RELEASED":
+        return False
+    try:
+        payload = json.loads(str(row[1] or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if (
+        payload.get("global_sell_reauction_status")
+        == "durable_wake_reserved"
+    ):
+        return False
+    return (
+        payload.get("release_reason")
+        == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+        and _is_global_sell_snapshot_reauction_error(payload.get("error"))
+    )
+
+
 def _is_runtime_submit_gate_block_error(error: str) -> bool:
     """True for deterministic runtime/code-plane blocks before venue submit."""
 
@@ -3948,7 +4006,12 @@ def _execute_live_exit(
     except Exception as exc:  # noqa: BLE001
         snapshot_reason = f"{exit_context.exit_reason} [EXECUTABLE_SNAPSHOT_ERROR]"
         snapshot_error = (
-            f"exit_executable_snapshot_error:{type(exc).__name__}:{str(exc)[:400]}"
+            (
+                "global_sell_exit_executable_snapshot_error:"
+                if global_authorized
+                else "exit_executable_snapshot_error:"
+            )
+            + f"{type(exc).__name__}:{str(exc)[:400]}"
         )
         _mark_exit_retry(
             position,
@@ -4019,7 +4082,11 @@ def _execute_live_exit(
 
     if conn is not None and not str(snapshot_context.get("executable_snapshot_id") or "").strip():
         snapshot_reason = f"{exit_context.exit_reason} [EXECUTABLE_SNAPSHOT_UNAVAILABLE]"
-        snapshot_error = "exit_executable_snapshot_unavailable"
+        snapshot_error = (
+            "global_sell_exit_executable_snapshot_unavailable"
+            if global_authorized
+            else "exit_executable_snapshot_unavailable"
+        )
         _mark_exit_retry(
             position,
             reason=snapshot_reason,
@@ -6256,6 +6323,7 @@ def check_pending_exits(
     *,
     max_positions: int | None = None,
     cycle_budget_seconds: float | None = None,
+    global_sell_reauction_requester: Callable[[Position, bool], bool] | None = None,
 ) -> dict:
     """Check fill status for positions with pending sell orders.
 
@@ -6368,7 +6436,11 @@ def check_pending_exits(
         if exit_state == "retry_pending":
             if (
                 str(getattr(pos, "next_exit_retry_at", "") or "").strip()
-                and check_pending_retries(pos, conn=conn)
+                and check_pending_retries(
+                    pos,
+                    conn=conn,
+                    global_sell_reauction_requester=global_sell_reauction_requester,
+                )
             ):
                 stats["retried"] += 1
                 stats["released_retry"] = stats.get("released_retry", 0) + 1
@@ -6799,7 +6871,12 @@ def check_pending_exits(
     return stats
 
 
-def check_pending_retries(position: Position, conn: sqlite3.Connection | None = None) -> bool:
+def check_pending_retries(
+    position: Position,
+    conn: sqlite3.Connection | None = None,
+    *,
+    global_sell_reauction_requester: Callable[[Position, bool], bool] | None = None,
+) -> bool:
     """Check if a retry-pending position's cooldown has expired.
 
     Returns True if position is ready for a new exit attempt.
@@ -6812,6 +6889,9 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
     previous_error = str(getattr(position, "last_exit_error", "") or "")
     if not previous_error:
         previous_error = _latest_exit_reject_error(conn, position)
+    global_snapshot_reauction = _is_global_sell_snapshot_reauction_error(
+        previous_error
+    )
 
     if position.exit_state == "backoff_exhausted":
         if not _is_sub_floor_exit_price_error(previous_error):
@@ -6872,6 +6952,13 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
     if not runtime_gate_block and is_exit_cooldown_active(position):
         return False  # Still cooling down
 
+    # A statistical SELL owned by the global auction may only leave pending_exit
+    # when its caller can immediately request a fresh q/book/wealth cut. Releasing
+    # without that route would strand it in local monitor redecision, which has no
+    # authority to reconstruct the global SELL certificate.
+    if global_snapshot_reauction and global_sell_reauction_requester is None:
+        return False
+
     if _is_exit_liquidity_wait_error(previous_error):
         snapshot = _latest_exit_snapshot_context(
             conn,
@@ -6884,21 +6971,55 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
         if snapshot_bid is None or snapshot_bid < LIVE_ORDER_MIN_UNIT_PRICE:
             return False
 
-    # Cooldown expired — position is eligible for exit re-evaluation
+    # Cooldown expired — position is eligible for exit re-evaluation.
+    previous_runtime = {
+        "state": position.state,
+        "pre_exit_state": getattr(position, "pre_exit_state", ""),
+        "exit_state": position.exit_state,
+        "next_exit_retry_at": getattr(position, "next_exit_retry_at", ""),
+        "exit_retry_count": getattr(position, "exit_retry_count", 0),
+        "order_status": getattr(position, "order_status", ""),
+    }
     position.exit_state = ""  # Reset to allow new exit attempt
     position.next_exit_retry_at = ""
     position.exit_retry_count = 0
     if str(getattr(position, "order_status", "") or "") == "retry_pending":
         position.order_status = "filled"
     _release_pending_exit(position)
+    release_persisted = conn is None
     if conn is not None:
-        _dual_write_exit_retry_released_if_available(
+        release_persisted = _dual_write_exit_retry_released_if_available(
             conn,
             position,
             previous_next_retry_at=previous_next_retry_at,
             previous_retry_count=previous_retry_count,
             previous_error=previous_error,
+            release_reason=(
+                "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+                if global_snapshot_reauction
+                else "EXIT_RETRY_COOLDOWN_EXPIRED"
+            ),
+            caused_by=(
+                "global_sell_snapshot_reauction"
+                if global_snapshot_reauction
+                else "exit_retry_cooldown_expired"
+            ),
         )
+    if not release_persisted:
+        for field, value in previous_runtime.items():
+            setattr(position, field, value)
+        return False
+    if global_snapshot_reauction:
+        # The release projection deliberately retains the typed error as a
+        # durable fresh-cut debt. Publish a NEW generation after that projection
+        # is canonical; an old in-flight same-family wake cannot satisfy it. If
+        # publish fails or the process dies here, the next monitor reloads the
+        # debt and republishes before local statistical redecision.
+        if (
+            global_sell_reauction_requester(position, True)
+            and record_global_sell_reauction_reserved(conn, position)
+        ):
+            position.last_exit_error = ""
     return True
 
 
@@ -7008,6 +7129,104 @@ def _dual_write_exit_retry_released_if_available(
             exc,
         )
         return False
+
+
+def record_global_sell_reauction_reserved(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> bool:
+    """Acknowledge that a fresh wake generation now owns the released debt."""
+
+    if conn is None:
+        return False
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        return False
+    try:
+        from src.engine.lifecycle_events import build_position_current_projection
+        from src.state.db import append_many_and_project
+        from src.state.lifecycle_manager import phase_for_runtime_position
+
+        phase = phase_for_runtime_position(
+            state=getattr(position, "state", ""),
+            exit_state=getattr(position, "exit_state", ""),
+            chain_state=getattr(position, "chain_state", ""),
+        ).value
+        if phase == LifecyclePhase.PENDING_EXIT.value:
+            return False
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        occurred_at = datetime.now(timezone.utc).isoformat()
+        projection = build_position_current_projection(position)
+        projection["phase"] = phase
+        projection["updated_at"] = occurred_at
+        event_type = "EXIT_RETRY_RELEASED"
+        event = {
+            "event_id": f"{trade_id}:{event_type.lower()}:{sequence_no}",
+            "position_id": trade_id,
+            "event_version": 1,
+            "sequence_no": sequence_no,
+            "event_type": event_type,
+            "occurred_at": occurred_at,
+            "phase_before": phase,
+            "phase_after": phase,
+            "strategy_key": str(
+                getattr(position, "strategy_key", "")
+                or getattr(position, "strategy", "")
+                or ""
+            ),
+            "decision_id": None,
+            "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+            "order_id": None,
+            "command_id": None,
+            "caused_by": "global_sell_snapshot_reauction",
+            "idempotency_key": (
+                f"{trade_id}:{event_type.lower()}:{sequence_no}"
+            ),
+            "venue_status": "durable_wake_reserved",
+            "source_module": "src.execution.exit_lifecycle",
+            "env": str(getattr(position, "env", "") or "live"),
+            "payload_json": json.dumps(
+                {
+                    "status": "durable_wake_reserved",
+                    "global_sell_reauction_status": "durable_wake_reserved",
+                    "release_reason": (
+                        "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+                    ),
+                },
+                sort_keys=True,
+            ),
+        }
+        append_many_and_project(conn, [event], projection)
+        return True
+    except Exception as exc:  # noqa: BLE001 - unacked debt must retry.
+        logger.warning(
+            "GLOBAL_SELL_REAUCTION_RESERVED write failed for %s: %s",
+            trade_id,
+            exc,
+        )
+        return False
+
+
+def recover_global_sell_snapshot_reauction_debt(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+    requester: Callable[[Position, bool], bool],
+) -> bool:
+    """Drain one canonical released-without-reservation debt."""
+
+    if not needs_global_sell_snapshot_reauction(position, conn):
+        return False
+    raw_state = getattr(position, "state", "")
+    runtime_state = str(getattr(raw_state, "value", raw_state) or "")
+    if runtime_state == "pending_exit":
+        return False
+    if not requester(position, True):
+        return False
+    if not record_global_sell_reauction_reserved(conn, position):
+        return False
+    position.last_exit_error = ""
+    return True
 
 
 def release_pending_exit_without_order_if_retryable(
@@ -7376,6 +7595,40 @@ def _mark_exit_retry(
 ) -> None:
     """Transition position to retry_pending with exponential backoff."""
     _mark_pending_exit(position)
+
+    if _is_global_sell_snapshot_reauction_error(error):
+        # The global auction owns this statistical SELL. Snapshot capture stopped
+        # before command persistence, so no venue side effect exists and the old
+        # q/book/wealth certificate must not be replayed. Make the position
+        # immediately releasable; the monitor commits that release and requests
+        # a new complete global auction through the injected orchestration hook.
+        position.last_exit_error = error[:500]
+        position.exit_state = "retry_pending"
+        position.order_status = "retry_pending"
+        position.next_exit_retry_at = _utcnow().isoformat()
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=reason,
+            error=error,
+            event_type="EXIT_ORDER_REJECTED",
+            extra_payload={
+                "status": "global_sell_snapshot_reauction_pending",
+                "side_effect_boundary_crossed": False,
+                "retry_count": int(
+                    getattr(position, "exit_retry_count", 0) or 0
+                ),
+                "next_retry_at": position.next_exit_retry_at,
+            },
+        )
+        logger.info(
+            "GLOBAL SELL SNAPSHOT REAUCTION %s: %s "
+            "(budget NOT consumed; eligible immediately at %s)",
+            position.trade_id,
+            reason,
+            position.next_exit_retry_at,
+        )
+        return
 
     if _is_channel_not_ready_error(error):
         # Transient channel gap: do NOT consume the bounded retry budget toward

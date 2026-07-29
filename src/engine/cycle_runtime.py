@@ -5355,6 +5355,8 @@ def execute_monitoring_phase(
         execute_exit,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
+        needs_global_sell_snapshot_reauction,
+        recover_global_sell_snapshot_reauction_debt,
         release_backoff_exhausted_pending_exit_for_redecision,
         release_pending_exit_without_order_if_retryable,
         release_market_closed_pending_exit_hold,
@@ -5362,6 +5364,86 @@ def execute_monitoring_phase(
 
     portfolio_dirty = False
     tracker_dirty = False
+
+    def request_global_sell_snapshot_reauction(
+        position,
+        force_new_generation: bool = False,
+    ) -> bool:
+        """Reserve a durable global cut for a canonical reauction debt."""
+
+        try:
+            from src.events.reactor import request_global_auction_completion
+
+            durable_request_accepted = request_global_auction_completion(
+                reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+                position_id=str(
+                    getattr(position, "position_id", "")
+                    or getattr(position, "trade_id", "")
+                    or ""
+                ),
+                family=(
+                    str(getattr(position, "city", "") or "").strip(),
+                    str(getattr(position, "target_date", "") or "").strip(),
+                    str(
+                        getattr(position, "temperature_metric", "") or ""
+                    ).strip().lower(),
+                ),
+                force_new_generation=force_new_generation,
+            )
+        except Exception as exc:  # noqa: BLE001 - failed reservation keeps retry pending.
+            summary["global_sell_snapshot_reauction_request_failed"] = (
+                summary.get(
+                    "global_sell_snapshot_reauction_request_failed",
+                    0,
+                )
+                + 1
+            )
+            summary.setdefault(
+                "global_sell_snapshot_reauction_request_failures",
+                [],
+            ).append(str(exc)[:500])
+            deps.logger.exception(
+                "global SELL snapshot reauction request failed; keeping retry pending"
+            )
+            return False
+        if not durable_request_accepted:
+            summary["global_sell_snapshot_reauction_request_failed"] = (
+                summary.get(
+                    "global_sell_snapshot_reauction_request_failed",
+                    0,
+                )
+                + 1
+            )
+            return False
+        summary["global_sell_snapshot_reauctions_requested"] = (
+            summary.get("global_sell_snapshot_reauctions_requested", 0) + 1
+        )
+        return True
+
+    for position in tuple(getattr(portfolio, "positions", ()) or ()):
+        if not needs_global_sell_snapshot_reauction(position, conn):
+            continue
+        if recover_global_sell_snapshot_reauction_debt(
+            position,
+            conn=conn,
+            requester=request_global_sell_snapshot_reauction,
+        ):
+            portfolio_dirty = True
+            summary["global_sell_snapshot_reauction_debts_recovered"] = (
+                summary.get(
+                    "global_sell_snapshot_reauction_debts_recovered",
+                    0,
+                )
+                + 1
+            )
+        else:
+            summary["global_sell_snapshot_reauction_debts_pending"] = (
+                summary.get(
+                    "global_sell_snapshot_reauction_debts_pending",
+                    0,
+                )
+                + 1
+            )
 
     def urgent_preemption_requested() -> bool:
         if should_preempt_for_urgent_day0 is None:
@@ -5382,7 +5464,14 @@ def execute_monitoring_phase(
 
     if run_exit_preflight:
         try:
-            exit_stats = check_pending_exits(portfolio, clob, conn=conn)
+            exit_stats = check_pending_exits(
+                portfolio,
+                clob,
+                conn=conn,
+                global_sell_reauction_requester=(
+                    request_global_sell_snapshot_reauction
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - one pending-exit fault must not blind held monitoring.
             logger = getattr(deps, "logger", None)
             if logger is not None:
@@ -5801,7 +5890,13 @@ def execute_monitoring_phase(
                 )
                 continue
             if run_exit_preflight:
-                check_pending_retries(pos, conn=conn)
+                check_pending_retries(
+                    pos,
+                    conn=conn,
+                    global_sell_reauction_requester=(
+                        request_global_sell_snapshot_reauction
+                    ),
+                )
             if release_pending_exit_without_order_if_retryable(pos, conn=conn):
                 portfolio_dirty = True
                 summary["monitor_released_pending_exit_without_order"] = (
@@ -5853,7 +5948,13 @@ def execute_monitoring_phase(
             continue
 
         if run_exit_preflight:
-            check_pending_retries(pos, conn=conn)
+            check_pending_retries(
+                pos,
+                conn=conn,
+                global_sell_reauction_requester=(
+                    request_global_sell_snapshot_reauction
+                ),
+            )
 
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
         # PHASE LAW): the quarantine-admin-resolution monitor branch is
@@ -6355,6 +6456,9 @@ def execute_monitoring_phase(
                     if pending_exit_monitor_only and check_pending_retries(
                         pos,
                         conn=conn,
+                        global_sell_reauction_requester=(
+                            request_global_sell_snapshot_reauction
+                        ),
                     ):
                         pending_exit_monitor_only = False
                         portfolio_dirty = True
@@ -6569,7 +6673,7 @@ def execute_monitoring_phase(
                     request_global_auction_completion,
                 )
 
-                request_global_auction_completion(
+                completion_requested = request_global_auction_completion(
                     reason=(
                         "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
                     ),
@@ -6596,7 +6700,11 @@ def execute_monitoring_phase(
                             *(pos.applied_validations or []),
                             "local_statistical_sell_non_authoritative_record",
                             "global_statistical_sell_authority_unavailable",
-                            "global_auction_completion_requested",
+                            (
+                                "global_auction_completion_requested"
+                                if completion_requested
+                                else "global_auction_completion_request_failed"
+                            ),
                         ]
                     )
                 )
@@ -6607,11 +6715,14 @@ def execute_monitoring_phase(
                     )
                     + 1
                 )
-                summary[
+                completion_summary_key = (
                     "monitor_statistical_sell_auction_completion_requested"
-                ] = (
+                    if completion_requested
+                    else "monitor_statistical_sell_auction_completion_request_failed"
+                )
+                summary[completion_summary_key] = (
                     summary.get(
-                        "monitor_statistical_sell_auction_completion_requested",
+                        completion_summary_key,
                         0,
                     )
                     + 1

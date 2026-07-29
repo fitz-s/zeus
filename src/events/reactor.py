@@ -6177,8 +6177,12 @@ def request_global_auction_completion(
     reason: str,
     position_id: str,
     family: tuple[str, str, str] | None = None,
-) -> None:
-    """Persistently reserve one complete global cut for a held SELL."""
+    force_new_generation: bool = False,
+) -> bool:
+    """Persistently reserve one complete global cut for a held SELL.
+
+    Returns whether a matching durable wake already existed or was published.
+    """
 
     already_due = _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
@@ -6221,6 +6225,8 @@ def request_global_auction_completion(
         )
     else:
         logger = logging.getLogger("zeus.events.reactor")
+    if force_new_generation:
+        durable_request_exists = False
     if not durable_request_exists:
         try:
             publish_reactor_wake(
@@ -6231,8 +6237,10 @@ def request_global_auction_completion(
         except OSError:
             logger.exception(
                 "held SELL global-auction wake publish failed; "
-                "scheduled reactor remains the fallback"
+                "durable completion was not accepted"
             )
+            return False
+    return True
 
 
 def _global_auction_monitor_cancellation_probe(
@@ -6271,10 +6279,16 @@ def _global_auction_monitor_cancellation_probe(
         # ignores ordinary monitor pressure until one global auction finishes.
         # RESET: _settle_global_auction_monitor_fairness clears the debt only
         # after a non-cancelled auction result; Day0 cancellation keeps it due.
-        request_global_auction_completion(
+        completion_reserved = request_global_auction_completion(
             reason="periodic_monitor_preemption",
             position_id="",
         )
+        if not completion_reserved:
+            logging.getLogger("zeus.events.reactor").warning(
+                "global auction kept current selection because monitor completion "
+                "wake was not durably accepted"
+            )
+            return False
         cancelled_this_cycle = True
         logging.getLogger("zeus.events.reactor").info(
             "global auction yielded once to periodic held monitor; completion debt armed"

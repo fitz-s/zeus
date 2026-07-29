@@ -1,5 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-07-29
+# Lifecycle: created=2026-05-24; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -1827,6 +1828,25 @@ def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
+def test_monitor_does_not_preempt_when_completion_wake_is_not_durable(
+    monkeypatch,
+):
+    from src.events import reactor
+
+    monkeypatch.setattr(
+        reactor,
+        "request_global_auction_completion",
+        lambda **_kwargs: False,
+    )
+    due_at_start, cancellation_probe = (
+        reactor._global_auction_monitor_cancellation_probe(lambda: True)
+    )
+
+    assert due_at_start is False
+    assert cancellation_probe() is False
+    assert cancellation_probe() is False
+
+
 def test_held_sell_completion_request_deduplicates_durable_family(monkeypatch):
     from types import SimpleNamespace
 
@@ -1857,24 +1877,24 @@ def test_held_sell_completion_request_deduplicates_durable_family(monkeypatch):
     )
     reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     try:
-        reactor.request_global_auction_completion(
+        assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
             position_id="position-1",
-        )
-        reactor.request_global_auction_completion(
+        ) is True
+        assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
             position_id="position-2",
-        )
-        reactor.request_global_auction_completion(
+        ) is True
+        assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
             position_id="position-3",
             family=("Paris", "2026-07-28", "LOW"),
-        )
-        reactor.request_global_auction_completion(
+        ) is True
+        assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
             position_id="position-4",
             family=("Paris", "2026-07-28", "low"),
-        )
+        ) is True
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
         assert wakes == [
             {
@@ -1926,21 +1946,83 @@ def test_held_sell_completion_request_survives_wake_io_failure(monkeypatch):
     )
     reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     try:
-        reactor.request_global_auction_completion(
+        assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
             position_id="position-1",
             family=("Paris", "2026-07-28", "low"),
-        )
-        reactor.request_global_auction_completion(
+        ) is False
+        assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
             position_id="position-1",
             family=("Paris", "2026-07-28", "low"),
-        )
+        ) is True
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
         assert len(attempts) == 2
         assert len(durable_wakes) == 1
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_snapshot_reauction_forces_new_wake_generation(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    old_wake = SimpleNamespace(
+        reason=reactor.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(("Paris", "2026-07-28", "low"),),
+    )
+    published = []
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _at: (old_wake,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **kwargs: published.append(kwargs) or SimpleNamespace(**kwargs),
+    )
+
+    assert reactor.request_global_auction_completion(
+        reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+        position_id="position-release-generation",
+        family=("Paris", "2026-07-28", "low"),
+        force_new_generation=True,
+    ) is True
+    assert published == [
+        {
+            "source": "held_position_monitor",
+            "reason": reactor.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            "forecast_families": (("Paris", "2026-07-28", "low"),),
+        }
+    ]
+
+
+def test_new_reauction_generation_survives_old_generation_ack(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    family = (("Paris", "2026-07-28", "low"),)
+    old = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="old-in-flight-generation",
+        forecast_families=family,
+    )
+    new = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="new-release-generation",
+        forecast_families=family,
+    )
+
+    assert reactor_wake.acknowledge_reactor_wake(old, path=path) is True
+    remaining = reactor_wake.reactor_wakes_since(None, path=path)
+    assert tuple(wake.wake_id for wake in remaining) == (new.wake_id,)
 
 
 def test_day0_cancellation_does_not_discharge_monitor_fairness_debt():

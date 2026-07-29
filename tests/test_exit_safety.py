@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-19
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Last reused/audited: 2026-07-29
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -7030,6 +7030,237 @@ def test_check_pending_retries_persists_day0_redecision_release(conn):
     assert payload["status"] == "ready"
     assert payload["previous_retry_count"] == 1
     assert payload["release_reason"] == "EXIT_RETRY_COOLDOWN_EXPIRED"
+
+
+def test_global_sell_snapshot_failure_releases_to_new_global_auction(
+    conn,
+    monkeypatch,
+):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id="pos-global-sell-snapshot-reauction",
+        market_id="condition-test",
+        city="San Francisco",
+        cluster="San Francisco",
+        target_date="2026-07-28",
+        temperature_metric="high",
+        bin_label="70-71F",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        state="holding",
+        chain_state="synced",
+        shares=8.3,
+        chain_shares=8.3,
+        cost_basis_usd=4.98,
+        chain_cost_basis_usd=4.98,
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+        entered_at="2026-07-28T10:00:00+00:00",
+        order_status="filled",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+
+    exit_lifecycle._mark_exit_retry(
+        position,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL [EXECUTABLE_SNAPSHOT_UNAVAILABLE]",
+        error="global_sell_exit_executable_snapshot_unavailable",
+        conn=conn,
+    )
+    conn.commit()
+
+    assert position.state == "pending_exit"
+    assert position.exit_state == "retry_pending"
+    assert position.exit_retry_count == 0
+    assert datetime.fromisoformat(position.next_exit_retry_at) <= (
+        datetime.now(timezone.utc) + timedelta(seconds=1)
+    )
+
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
+    assert position.state == "pending_exit"
+    assert position.exit_state == "retry_pending"
+
+    requested = []
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            exit_lifecycle,
+            "_dual_write_exit_retry_released_if_available",
+            lambda *_args, **_kwargs: False,
+        )
+        assert exit_lifecycle.check_pending_retries(
+            position,
+            conn=conn,
+            global_sell_reauction_requester=lambda released, force_new: (
+                requested.append(released.trade_id) or True
+            ),
+        ) is False
+    assert requested == []
+    assert position.state == "pending_exit"
+    assert position.exit_state == "retry_pending"
+
+    def request_reauction(released, force_new_generation):
+        latest_event = conn.execute(
+            """
+            SELECT event_type, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (released.trade_id,),
+        ).fetchone()
+        projection = conn.execute(
+            """
+            SELECT phase
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (released.trade_id,),
+        ).fetchone()
+        assert conn.in_transaction is False
+        assert force_new_generation is True
+        assert latest_event["event_type"] == "EXIT_RETRY_RELEASED"
+        assert projection["phase"] == "active"
+        requested.append(released.trade_id)
+        return True
+
+    assert exit_lifecycle.check_pending_retries(
+        position,
+        conn=conn,
+        global_sell_reauction_requester=request_reauction,
+    ) is True
+
+    assert requested == [position.trade_id]
+    released_event = conn.execute(
+        """
+        SELECT event_type, payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_RETRY_RELEASED'
+           AND COALESCE(
+               json_extract(
+                   payload_json,
+                   '$.global_sell_reauction_status'
+               ),
+               ''
+           ) != 'durable_wake_reserved'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert released_event["event_type"] == "EXIT_RETRY_RELEASED"
+    release_payload = json.loads(released_event["payload_json"])
+    assert (
+        release_payload["release_reason"]
+        == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+    )
+    assert release_payload["error"] == (
+        "global_sell_exit_executable_snapshot_unavailable"
+    )
+    assert position.state == "holding"
+    assert position.order_status == "filled"
+    assert position.last_exit_error == ""
+    reserved_event = conn.execute(
+        """
+        SELECT event_type, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert reserved_event["event_type"] == "EXIT_RETRY_RELEASED"
+    assert json.loads(reserved_event["payload_json"])[
+        "global_sell_reauction_status"
+    ] == "durable_wake_reserved"
+    assert (
+        exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+        is False
+    )
+
+    failed_wake = replace(
+        position,
+        trade_id="pos-global-sell-snapshot-wake-failed",
+        market_id="condition-wake-failed",
+        condition_id="condition-wake-failed",
+        token_id="yes-token-wake-failed",
+        no_token_id="no-token-wake-failed",
+        last_exit_error="",
+    )
+    upsert_position_current(
+        conn,
+        build_position_current_projection(failed_wake),
+    )
+    exit_lifecycle._mark_exit_retry(
+        failed_wake,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL [EXECUTABLE_SNAPSHOT_UNAVAILABLE]",
+        error="global_sell_exit_executable_snapshot_unavailable",
+        conn=conn,
+    )
+    conn.commit()
+
+    assert exit_lifecycle.check_pending_retries(
+        failed_wake,
+        conn=conn,
+        global_sell_reauction_requester=lambda _released, _force_new: False,
+    ) is True
+    assert failed_wake.state == "holding"
+    assert failed_wake.last_exit_error == (
+        "global_sell_exit_executable_snapshot_unavailable"
+    )
+    assert (
+        exit_lifecycle.needs_global_sell_snapshot_reauction(
+            failed_wake,
+            conn,
+        )
+        is True
+    )
+    failed_projection = conn.execute(
+        """
+        SELECT phase
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (failed_wake.trade_id,),
+    ).fetchone()
+    assert failed_projection["phase"] == "active"
+    failed_wake.last_exit_error = ""
+    assert (
+        exit_lifecycle.needs_global_sell_snapshot_reauction(
+            failed_wake,
+            conn,
+        )
+        is True
+    )
+    recovery_requests = []
+
+    def recover_reauction(released, force_new_generation):
+        recovery_requests.append(
+            (released.trade_id, force_new_generation)
+        )
+        return True
+
+    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        failed_wake,
+        conn=conn,
+        requester=recover_reauction,
+    ) is True
+    assert recovery_requests == [(failed_wake.trade_id, True)]
+    assert (
+        exit_lifecycle.needs_global_sell_snapshot_reauction(
+            failed_wake,
+            conn,
+        )
+        is False
+    )
 
 
 def test_no_bid_retry_waits_for_fresh_positive_bid_before_release(conn):
