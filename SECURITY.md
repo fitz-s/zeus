@@ -31,14 +31,16 @@ address associated with the account.
 
 ### Disclosed incident
 
-A Weather Underground API key (fingerprint `6532d645…` (32 hex chars)) was
+A Weather Underground API key (fingerprint `6532d645…`, 32 hex chars) was
 committed to this repository starting 2026-03-30, and by 2026-04-16 was
 present across multiple tracked files, including `docs/zeus-system-constitution.md`
 and files under `src/data/`. It was removed from the tracked tree on
 2026-05-23 (commit `98708567e`). History was not rewritten, so the value
-remains retrievable from public git history — confirm with
-`git log -S` against the full value (deliberately not reproduced here). Rotation of this
-credential is pending as of this writing.
+remains retrievable from public git history by anyone who already holds
+it — confirmable with `git log -S` against the full value, which is
+deliberately not reproduced here. Rotation of this credential is pending
+as of this writing; this document will be updated with the rotation date
+once it happens.
 
 ## Scope
 
