@@ -521,3 +521,139 @@ margin); F/high, C/low, F/low all refuse (`fitted=False`, neutral `k=1.0`).
   (5 schema-migration tests expecting a column already present in the base schema; 5 unrelated
   AST/source-scan antibodies) -- zero regressions attributable to this work.
 - `ruff check`, `py_compile`, `git diff --check`: all clean.
+
+## 2026-07-28 (fifth pass) Re-review: CONDITIONAL GO to merge dormant, NO-GO to activate -- Batch A + Batch B
+
+Re-review verdict on the eight-fix PR: the artifact is dormant (absent from `state/`, no
+auto-placement path exists) so the WIRING is safe to merge, but SIX further fixes are required
+before any fitted artifact may actually be placed and take effect. Two batches, both landed in this
+pass.
+
+### Batch A -- unblock merge (bot-review threads, BUG-class doc/metadata fixes)
+
+Five `@copilot-pull-request-reviewer` threads, all classified BUG (missing freshness-metadata
+headers on the new test files and the fitter script per `architecture/naming_conventions.yaml`'s
+`freshness_metadata` spec, and a stale Problem-section sentence still describing tau as
+computed_at-anchored after FIX 1 switched it to the issue clock). Fixed by commit, no text replies;
+threads resolved via the GraphQL `resolveReviewThread` mutation per
+`architecture/agent_pr_discipline_2026_05_09.md` Principle 2.
+
+### Batch B -- activation fixes (six items, required before any artifact may be placed)
+
+- **B1 (BLOCKER) fit/serve parity.** Extracted `served_settlement_log_probability` in
+  `src/data/replacement_forecast_materializer.py` -- the ONE function that reproduces, verbatim, the
+  two transforms `_compute_posterior_payload` applies before any bin integrates: the T0-1
+  remaining-window Day0 center correction (`mu -= delta` for HIGH, `mu += delta` for LOW) and the
+  day0/normal dispatch (`_day0_conditioned_bin_probability` vs `bin_probability_settlement`, the
+  SAME settlement integrator). The fitter now joins the causal Day0 state per row directly from the
+  posterior's own provenance (`day0_conditioning.active`/`observed_extreme_c`,
+  `day0_remaining_center_delta_c` -- both already stamped, no schema change needed) and scores
+  Day0-active rows through this shared function (`scripts/fit_sigma_tau_calibration.py`'s new
+  `_censored_log_prob`, which falls back to the existing fast vectorized `_log_interval_prob` for
+  the (majority) non-Day0 rows -- Day0-active rows are a narrow lead-time slice, so the scalar path
+  costs nothing at corpus scale). Locked by
+  `test_censored_log_prob_day0_row_matches_served_settlement_log_probability` (bit-for-bit parity
+  against the materializer's own function) and `test_censored_log_prob_day0_row_differs_from_plain_normal`
+  (the day0 transform must actually change the answer, not silently degrade to plain Normal).
+- **B2 (BLOCKER) model selection law made authoritative.** `gate_group` now runs a three-way
+  selection: NEUTRAL if the flat global-k-only rung doesn't beat k=1 by the OOS margin; GLOBAL_K_V1
+  if the full bucket+city model doesn't beat the flat model by the margin (Occam's razor by
+  evidence); BUCKET_CITY_K_V1 otherwise. `_meta.model_type` is now a per-group field
+  (`neutral`/`global_k_v1`/`bucket_city_k_v1`); the materializer's loader dispatches STRICTLY on it
+  and rejects a group whose actual bucket/city shape doesn't match what the declaration promises (a
+  `global_k_v1` group with varying buckets or non-empty cities is a shape mismatch, not data).
+- **B3 (BLOCKER) composed bound.** `k_eff = bucket_k * c_shrunk` is now enforced at BOTH fitter
+  emission (a city whose composed product with any bucket k would escape `[0.25, 4.0]` is rejected)
+  and loader lookup (neutral, never clamped, if the composed product is out of range) -- each factor
+  individually passing its own range does not guarantee the product does.
+- **B4 (HIGH) generation pinning.** Investigated the live materialization batch caller
+  (`replacement_forecast_live_materialization_queue.py::_run_materialization_batch`): each item runs
+  as a SEPARATE SUBPROCESS, so true cycle-pinning is already achieved by process isolation in the
+  live path. Hardened the mtime-based cache to also key on file size (`st_size` alongside
+  `st_mtime_ns`), the practical improvement available within this module's scope; a true
+  cycle-id-keyed snapshot would require threading state through the queue/batch caller, a follow-up
+  if an in-process batch caller is ever introduced.
+- **B5 (HIGH) inert-hash.** `sigma_tau_artifact_hash` now reaches provenance ONLY when a
+  schema-valid, gate-passed group actually applies a non-neutral k (including the `k_eff == 1.0` by
+  coincidence case, which still omits the hash). A rejected artifact, a missing group, or an
+  unfitted group logs the rejection (`_log_sigma_tau_rejection`, best-effort, never raises) instead
+  of stamping a hash.
+- **B6 (HIGH) malformed-scope invalidation.** `_validate_sigma_tau_group` now invalidates the WHOLE
+  group on any malformed bucket or city subtree -- only a schema-valid `fitted: false` bucket may
+  legitimately inherit `global_k`. `_city_settlement_unit_from_bins` now returns `None` (never
+  defaults to `"C"`) when bins are absent or malformed; verified all 6 call sites degrade safely to
+  neutral/inert on `None`.
+- **MEDIUM cleanups.** Artifact write now uses a unique tmp filename (`{out}.{pid}.{uuid8}.tmp`,
+  never collides across concurrent runs), `allow_nan=False` (a NaN/Infinity that slipped through the
+  gates now fails the write loudly instead of shipping invalid JSON), and an `fsync` before the
+  atomic rename. Dedup is now keyed on INFORMATION IDENTITY -- `(source_cycle_time,
+  posterior_config_hash)`, falling back to the exact `computed_at` when the hash is absent -- not a
+  wall-clock hour floor: the old key never even included `source_cycle_time`, so two rows from
+  DIFFERENT source cycles whose `computed_at` happened to land in the same wall hour could be wrongly
+  collapsed. Both new test files registered in `architecture/test_topology.yaml`'s trusted registry
+  (`test_sigma_tau_calibration_lookup.py` at the full law-antibody tier alongside its serving-
+  equivalence sibling; `test_fit_sigma_tau_calibration_fitter.py` at the lighter `trusted_tests`
+  tier, matching the precedent set by `test_fit_sigma_scale.py` / `test_fit_source_clock_city_weights.py`).
+
+### Re-run `--validate 2026-07-21` after Batch B (live DB, read-only, 2026-07-28)
+
+```
+[sigma-tau] {'n_posteriors_read': 52539, 'n_settlements_read': 9610, 'n_joined_dedup': 25296,
+             'n_dropped_negative_lead': 0, 'n_final': 25296, 'n_joined_raw': 39194,
+             'n_dropped_unknown_city': 0, 'unknown_cities': [],
+             'n_dropped_computed_at_after_local_target_end': 995}
+[sigma-tau] validate cutoff=2026-07-21 clock=PRIMARY(issue-clock) n_train_rows=13491 n_val_rows=11805
+  C/high: n_events_train=341 n_events_val=208 global_k=1.498959 (normal_crosscheck=1.255544)
+    censored  oos_mean_loglik delta:+1.54145  GATE:PASS (margin required:0.01)
+    normal_xc oos_mean_loglik delta:+0.48876
+    global_k_only (no bucket/city indexing) oos_mean_loglik delta:+1.54169
+    coverage@68.3 (event-weighted) k=1:0.5891 fitted:0.7597
+  C/low: SKIP (n_events_train=42, n_events_val=33)
+  F/high: n_events_train=61 n_events_val=65 global_k=1.338368 (normal_crosscheck=0.985888)
+    censored  oos_mean_loglik delta:-0.07022  GATE:REJECT (margin required:0.01)
+    normal_xc oos_mean_loglik delta:-0.09000
+    global_k_only (no bucket/city indexing) oos_mean_loglik delta:-0.07022
+    coverage@68.3 (event-weighted) k=1:0.7313 fitted:0.8240
+  F/low: SKIP (n_events_train=10, n_events_val=12)
+```
+
+The numbers moved AGAIN, substantially, relative to the eight-fix pass (+0.304 -> +1.54145 for
+C/high's censored OOS delta) -- expected, since B1 now correctly scores Day0-active rows through
+the max/min absorbing transform instead of silently mis-scoring them as plain Normal against the
+WRONG (pre-Day0-correction) mu; the live dataset in this window evidently carries enough Day0-active
+rows for this to matter a lot, not a little. C/high's `full_delta - global_delta =
+1.54145 - 1.54169 = -0.00024` does not clear the `0.01` OOS_MARGIN_NATS, so the bucket+city
+structure does NOT earn its complexity -- ships as `model_type: global_k_v1`,
+`global_k=1.498959`, `cities: {}`, exactly the expected shippable per B2's model-selection law.
+F/high still correctly REJECTs (censored delta -0.07022, below margin); C/low and F/low still
+refuse on insufficient events (42 and 10 respectively, below `MIN_GROUP_N=60`).
+
+Regenerated the artifact (`--out`, same cutoff-governed gate) to the scratchpad -- NEVER
+`state/sigma_tau_calibration.json` (activation remains a separate, operator-gated decision from
+this re-fit). Verified the regenerated artifact round-trips cleanly through the materializer's OWN
+strict loader (`_validate_sigma_tau_artifact` / `_validate_sigma_tau_group`): C/high validates to
+`{global_k: 1.498959, buckets: {<all 7 labels>: 1.498959}, cities: {}}`, i.e. every bucket carries
+the identical global k (as `global_k_v1` requires) and the composed `k_eff = 1.498959 * 1.0`
+(no city correction) sits safely inside `[0.25, 4.0]`.
+
+### Test/verification summary after Batch A + Batch B
+
+- `tests/test_sigma_tau_calibration_lookup.py`: 35 passed (2 new: schema-valid unfitted-bucket
+  inherit, absent-city-still-safe -- both B6).
+- `tests/test_sigma_tau_calibration_serving_equivalence.py`: 6 passed (fixture updated for B2's
+  `model_type` field).
+- `tests/test_fit_sigma_tau_calibration_fitter.py`: 37 passed (4 new: pinned-bound test updated for
+  the `fit_interval_censored_scale` signature change; day0-provenance-join, day0-vs-non-day0-inert,
+  and day0-row-matches-served-kernel -- all B1).
+- `tests/test_replacement_forecast_materializer.py`: 44 passed, 5 failed -- IDENTICAL to the
+  unmodified checkout (verified via `git stash`; all 5 are schema-migration tests asserting a column
+  absent from the base schema, pre-existing, unrelated to this work).
+- `tests/test_topology_doctor.py`: 32 failed both WITH and WITHOUT this pass's
+  `architecture/test_topology.yaml` edit (verified via an isolated single-file `git stash`) -- root
+  cause is `FileNotFoundError: .agents/skills/zeus-ai-handoff/SKILL.md` missing from this worktree's
+  provisioning, a pre-existing environment gap, not a topology-registry regression. Direct
+  `scripts/topology_doctor.py --tests --json` invocation (the actual governance gate, not the pytest
+  wrapper) shows 38 errors before AND after this pass's registry edit (zero new), warnings 475 -> 474
+  (one fewer -- `test_sigma_tau_calibration_lookup.py`'s prior "no topology classification" gap is
+  now closed).
+- `ruff check`, `py_compile`: all clean on every touched file.
