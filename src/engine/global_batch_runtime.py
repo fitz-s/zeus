@@ -4574,7 +4574,9 @@ def process_current_global_batch(
                 current_capital_limit_resolver=current_capital_limit_resolver,
                 candidate_policy_rejection_resolver=candidate_policy,
                 preflight_excluded_by_family=preflight_excluded_by_family,
-                buy_disabled_family_keys=frozenset(held_only_family_keys),
+                buy_disabled_family_keys=frozenset(
+                    held_only_family_keys.intersection(attempt_probabilities)
+                ),
                 payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                 cancelled=selection_cancelled,
             )

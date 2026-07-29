@@ -18520,6 +18520,39 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
     )
     assert result.economic_cut_completed is True
 
+    selected_kwargs.clear()
+    global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=lambda item, _at: EventSubmissionReceipt(
+            False,
+            item.event_id,
+            item.causal_snapshot_id,
+            reason=entry_only_reason,
+        ),
+        prepare_held_event=lambda item, _at: EventSubmissionReceipt(
+            False,
+            item.event_id,
+            item.causal_snapshot_id,
+            prepared_global_family=SimpleNamespace(probability_witness=witness),
+        ),
+        actuate_winner=lambda *_: pytest.fail(
+            "book-omitted held family must not actuate"
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        portfolio_state_provider=lambda: object(),
+        current_book_epoch_provider=lambda _probabilities, _at: ({}, None),
+    )
+
+    assert selected_kwargs["buy_disabled_family_keys"] == frozenset()
+
     held_failure_reason = (
         "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
         "FamilyAuthorityUnavailable:"
