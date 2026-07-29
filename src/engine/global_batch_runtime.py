@@ -692,6 +692,7 @@ def held_sell_reauction_coverage(
     position_id: str,
     probability_content_identity: str,
     token_id: str,
+    family: tuple[str, str, str] = (),
 ) -> GlobalHoldingAuctionCoverage | None:
     """Expose the committed global cut that answered one held-sell request."""
 
@@ -701,10 +702,23 @@ def held_sell_reauction_coverage(
     if lease is None or lease.generation != generation:
         return None
     row = lease.row
+    family_key = ""
+    if family:
+        if len(family) != 3:
+            return None
+        family_key = weather_family_id(
+            city=str(family[0] or ""),
+            target_date=str(family[1] or ""),
+            metric=str(family[2] or ""),
+        )
     if (
-        row.probability_content_identity
-        != str(probability_content_identity or "")
+        (
+            bool(str(probability_content_identity or ""))
+            and row.probability_content_identity
+            != str(probability_content_identity or "")
+        )
         or row.token_id != str(token_id or "")
+        or (family_key and row.family_key != family_key)
     ):
         return None
     return row

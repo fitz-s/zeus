@@ -75,6 +75,10 @@ from src.state.venue_command_repo import (
 
 logger = logging.getLogger(__name__)
 
+
+class TerminalExitHeldTokenMismatch(RuntimeError):
+    """A terminal EXIT command must name the exact residual asset it released."""
+
 _RECOVERY_LOCK_RETRY_DELAYS = (2.0, 5.0, 10.0)
 _LIVE_TICK_DB_BUDGET_SECONDS = 0.1
 _LIVE_TICK_DB_PROGRESS_OPCODES = 1_000
@@ -13457,6 +13461,7 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                cmd.decision_id,
                cmd.snapshot_id,
                cmd.venue_order_id,
+               cmd.token_id AS command_token_id,
                cmd.size AS command_size,
                cmd.state AS command_state,
                fact.fact_id AS order_fact_id,
@@ -13550,6 +13555,70 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                     "updated_at": occurred_at,
                 }
             )
+            direction = str(current.get("direction") or "").strip().lower()
+            current_held_token_raw = (
+                current.get("no_token_id")
+                if direction == "buy_no"
+                else current.get("token_id")
+            )
+            current_held_token_id = str(current_held_token_raw or "").strip()
+            held_token_id = str(candidate.get("command_token_id") or "").strip()
+            family = (
+                str(current.get("city") or "").strip(),
+                str(current.get("target_date") or "").strip(),
+                str(current.get("temperature_metric") or "").strip().lower(),
+            )
+            if not held_token_id or not current_held_token_id or not all(family):
+                raise RuntimeError("terminal partial EXIT has no exact held token scope")
+            if held_token_id != current_held_token_id:
+                raise TerminalExitHeldTokenMismatch(
+                    "TERMINAL_EXIT_COMMAND_TOKEN_MISMATCH:"
+                    f"command={held_token_id}:position={current_held_token_id}"
+                )
+            from src.runtime.reactor_wake import held_sell_reauction_scope_identity
+
+            scope_identity = held_sell_reauction_scope_identity(
+                position_id=position_id,
+                family=family,
+                probability_content_identity="",
+                held_token_id=held_token_id,
+            )
+            residual_proof = {
+                "command_id": command_id,
+                "command_token_id": held_token_id,
+                "order_fact_id": candidate.get("order_fact_id"),
+                "order_fact_state": candidate.get("order_fact_state"),
+                "matched_size": candidate.get("order_fact_matched_size"),
+                "order_remaining_size": candidate.get("order_fact_remaining_size"),
+                "residual_shares": current.get("chain_shares") or current.get("shares"),
+                "chain_state": current.get("chain_state"),
+                "chain_seen_at": current.get("chain_seen_at"),
+            }
+            generation = hashlib.sha256(
+                json.dumps(
+                    {
+                        "scope_identity": scope_identity,
+                        "residual_proof": residual_proof,
+                    },
+                    sort_keys=True,
+                    default=str,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            held_sell_reauction_obligation = {
+                "schema_version": 2,
+                "scope_identity": scope_identity,
+                "generation": generation,
+                "position_id": position_id,
+                "family": family,
+                "held_token_id": held_token_id,
+                "probability_content_identity": "",
+                "probability_observed_at": "",
+                "held_best_bid": None,
+                "bid_observed_at": "",
+                "book_state": "UNKNOWN",
+                "residual_proof": residual_proof,
+            }
             existing = conn.execute(
                 "SELECT 1 FROM position_events WHERE idempotency_key = ? LIMIT 1",
                 (event_key,),
@@ -13587,6 +13656,7 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                         ),
                         "command_state": candidate.get("command_state"),
                         "command_size": candidate.get("command_size"),
+                        "command_token_id": held_token_id,
                         "order_fact_id": candidate.get("order_fact_id"),
                         "order_fact_state": candidate.get("order_fact_state"),
                         "matched_size": candidate.get("order_fact_matched_size"),
@@ -13594,6 +13664,7 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                         "residual_shares": current.get("chain_shares") or current.get("shares"),
                         "chain_state": current.get("chain_state"),
                         "chain_seen_at": current.get("chain_seen_at"),
+                        "held_sell_reauction_obligation": held_sell_reauction_obligation,
                     },
                     sort_keys=True,
                     default=str,
@@ -13601,6 +13672,13 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
             }
             append_many_and_project(conn, [event], projection)
             summary["advanced"] += 1
+        except TerminalExitHeldTokenMismatch as exc:
+            logger.warning(
+                "recovery: terminal EXIT held-token mismatch for %s: %s",
+                position_id,
+                exc,
+            )
+            summary["stayed"] += 1
         except Exception as exc:
             logger.error(
                 "recovery: pending EXIT terminal-order release failed for %s: %s",

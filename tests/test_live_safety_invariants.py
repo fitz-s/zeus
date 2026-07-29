@@ -2476,6 +2476,94 @@ def _make_portfolio(*positions) -> PortfolioState:
     return PortfolioState(positions=list(positions))
 
 
+def test_monitor_writer_timeout_preserves_nonred_exit_authority(monkeypatch):
+    """A bounded canonical-write timeout cannot relabel an economic exit HOLD."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="writer-timeout-exit-authority",
+        state="holding",
+        chain_state="synced",
+        shares=10.0,
+        chain_shares=10.0,
+    )
+    results = []
+    exits = []
+    def refresh(*_args):
+        context = _monitor_test_edge_context(position)
+        context.divergence_score = 0.0
+        context.market_velocity_1h = 0.0
+        return context
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda *_args: ExitDecision(
+            True,
+            "CI_WRITER_TIMEOUT_NONRED_EXIT",
+            trigger="CI_WRITER_TIMEOUT_NONRED_EXIT",
+            applied_validations=["replacement_posterior"],
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **kwargs: exits.append(kwargs["position"].trade_id) or "exit_retry:writer_lease_timeout",
+    )
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        artifact,
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_writer_timeout_preserves_exit"),
+        run_exit_preflight=False,
+    )
+
+    assert exits == [position.trade_id]
+    assert results[-1].should_exit is True
+    assert results[-1].exit_reason == "CI_WRITER_TIMEOUT_NONRED_EXIT"
+    assert summary["monitor_canonical_write_failed_exit_authority_preserved"] == 1
+
+
+def test_canonical_trade_write_lease_identity_failure_is_fail_closed():
+    from src.engine import cycle_runtime
+
+    class BrokenPragmaConnection:
+        def execute(self, _sql):
+            raise sqlite3.DatabaseError("pragma unavailable")
+
+    with pytest.raises(cycle_runtime.CanonicalTradeWriteIdentityError) as exc:
+        cycle_runtime._canonical_trade_write_lease(
+            BrokenPragmaConnection(),
+            owner="test",
+            deadline_ms=1,
+            max_hold_ms=50,
+        )
+    assert str(exc.value) == "CANONICAL_TRADE_DB_IDENTITY_UNAVAILABLE"
+
+    with cycle_runtime._canonical_trade_write_lease(
+        sqlite3.connect(":memory:"),
+        owner="test",
+        deadline_ms=1,
+        max_hold_ms=50,
+    ):
+        pass
+
+
 def _seed_canonical_entry_baseline(conn, position) -> None:
     """T1.c-followup (2026-04-23): post-T4.1b, chain_reconciliation.reconcile
     gates rescue strictly on the existence of a canonical baseline

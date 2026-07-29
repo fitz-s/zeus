@@ -62,6 +62,7 @@ class GlobalHoldingAuctionCoverage:
     bin_label: str | None = None
     canonical_bin_identity: str | None = None
     sell_book_witness_identity: str | None = None
+    book_state: str = "UNKNOWN"
     sell_exit_authority_status: str = "not_applicable"
     sell_exit_authority_reason: str = "non_day0_family"
     sell_action_authority_identity: str = "non_day0_default_authority"
@@ -69,6 +70,7 @@ class GlobalHoldingAuctionCoverage:
     def __post_init__(self) -> None:
         evaluated = self.status == "EVALUATED"
         excluded = self.status == "EXCLUDED"
+        book_state = str(self.book_state or "").strip().upper()
         canonical_bin_identity = str(
             self.canonical_bin_identity or f"condition:{self.condition_id}"
         ).strip()
@@ -77,6 +79,7 @@ class GlobalHoldingAuctionCoverage:
             "canonical_bin_identity",
             canonical_bin_identity,
         )
+        object.__setattr__(self, "book_state", book_state)
         if (
             not (evaluated or excluded)
             or not all(
@@ -101,6 +104,13 @@ class GlobalHoldingAuctionCoverage:
                 or str(self.bin_label or "").strip()
             )
             or self.side not in {"YES", "NO"}
+            or book_state not in {
+                "UNKNOWN",
+                "NO_EXECUTABLE_BOOK",
+                "STALE",
+                "EXECUTABLE",
+            }
+            or (evaluated and book_state != "EXECUTABLE")
             or not Decimal(self.held_shares).is_finite()
             or Decimal(self.held_shares) <= 0
             or any(
@@ -785,6 +795,7 @@ def select_prepared_global_auction(
             candidate_id: str | None = None,
             reason: str | None = None,
             sell_book_witness_identity: str | None = None,
+            book_state: str = "UNKNOWN",
         ) -> GlobalHoldingAuctionCoverage:
             binding = holding_binding(holding, probability)
             prepared = prepared_by_family[holding.family_key]
@@ -811,6 +822,7 @@ def select_prepared_global_auction(
                 candidate_id=candidate_id,
                 reason=reason,
                 sell_book_witness_identity=sell_book_witness_identity,
+                book_state=book_state,
                 sell_exit_authority_status=str(
                     prepared.day0_exit_authority_status
                 ),
@@ -952,6 +964,11 @@ def select_prepared_global_auction(
                             probability,
                             status="EXCLUDED",
                             reason=reason,
+                            book_state=(
+                                "STALE"
+                                if book_status == "VENUE_METADATA_STALE"
+                                else "NO_EXECUTABLE_BOOK"
+                            ),
                         )
                     )
                     continue
@@ -982,6 +999,7 @@ def select_prepared_global_auction(
                                         candidate.executable_sell_curve
                                     )
                                 ),
+                                book_state="EXECUTABLE",
                             )
                         )
                     else:

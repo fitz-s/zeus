@@ -7554,6 +7554,7 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
     assert position.exit_state == "retry_pending"
 
     requested = []
+    requested_obligations = []
 
     with monkeypatch.context() as scoped:
         scoped.setattr(
@@ -7593,6 +7594,9 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
         ).fetchone()
         assert conn.in_transaction is False
         assert force_new_generation is True
+        requested_obligations.append(
+            dict(getattr(released, "_held_sell_reauction_obligation", {}))
+        )
         assert latest_event["event_type"] == "EXIT_RETRY_RELEASED"
         assert projection["phase"] == "active"
         requested.append(released.trade_id)
@@ -7643,6 +7647,11 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
     assert release_payload["error"] == (
         "global_sell_exit_executable_snapshot_unavailable"
     )
+    obligation = release_payload["held_sell_reauction_obligation"]
+    assert obligation["schema_version"] == 2
+    assert obligation["book_state"] == "UNKNOWN"
+    assert obligation["held_token_id"] == NO_TOKEN
+    assert requested_obligations == [obligation]
     assert position.state == "holding"
     assert position.order_status == "filled"
     assert position.last_exit_error == ""
@@ -7786,6 +7795,153 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
         """,
         (runtime_only.trade_id,),
     ).fetchone()["phase"] == "pending_exit"
+
+
+def test_restart_republishes_unbound_v2_residual_with_same_generation_until_terminal(
+    conn,
+    monkeypatch,
+    tmp_path,
+):
+    """A committed UNKNOWN residual survives restart and waits for fresh q/book."""
+    from types import SimpleNamespace
+
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.events import reactor
+    from src.execution import exit_lifecycle
+    from src.runtime import reactor_wake
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id="karachi-residual-restart",
+        market_id="condition-karachi-residual",
+        condition_id="condition-karachi-residual",
+        city="Karachi",
+        cluster="Karachi",
+        target_date="2026-07-29",
+        temperature_metric="high",
+        bin_label="35C",
+        direction="buy_yes",
+        token_id="token-karachi-residual",
+        no_token_id="token-karachi-residual-no",
+        state="holding",
+        chain_state="synced",
+        shares=4.0,
+        chain_shares=4.0,
+        order_status="filled",
+        strategy_key="forecast_qkernel_entry",
+        env="test",
+        entered_at="2026-07-29T10:00:00+00:00",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    exit_lifecycle._mark_exit_retry(
+        position,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL [EXECUTABLE_SNAPSHOT_UNAVAILABLE]",
+        error="global_sell_exit_executable_snapshot_unavailable",
+        conn=conn,
+    )
+    conn.commit()
+    assert exit_lifecycle.check_pending_retries(
+        position,
+        conn=conn,
+        global_sell_reauction_requester=lambda _position, _force: False,
+    ) is True
+    conn.commit()
+
+    stored = conn.execute(
+        """
+        SELECT payload_json FROM position_events
+         WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+         ORDER BY sequence_no DESC LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    obligation = json.loads(stored["payload_json"])["held_sell_reauction_obligation"]
+    assert obligation["book_state"] == "UNKNOWN"
+    assert obligation["probability_content_identity"] == ""
+    assert conn.in_transaction is False
+
+    # Fresh process/runtime object: only canonical event state supplies the debt.
+    restarted = replace(position, last_exit_error="")
+    restarted._day0_monitor_probability_receipt = {
+        "probability_content_identity": "q-karachi-restarted-current"
+    }
+    published = []
+
+    def publish(**kwargs):
+        published.append(
+            SimpleNamespace(
+                reason=kwargs["reason"],
+                forecast_families=kwargs["forecast_families"],
+                held_sell_reauction_requests=kwargs["held_sell_reauction_requests"],
+            )
+        )
+        return published[-1]
+
+    monkeypatch.setattr(reactor_wake, "publish_reactor_wake", publish)
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", lambda _at: tuple(published))
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        def publish_after_restart(released, force_new_generation):
+            restored = getattr(released, "_held_sell_reauction_obligation")
+            return reactor.request_global_auction_completion(
+                reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+                position_id=released.trade_id,
+                family=(released.city, released.target_date, released.temperature_metric),
+                probability_content_identity=(
+                    restored["probability_content_identity"]
+                    or released._day0_monitor_probability_receipt[
+                        "probability_content_identity"
+                    ]
+                ),
+                held_token_id=restored["held_token_id"],
+                held_best_bid=restored["held_best_bid"],
+                bid_observed_at=restored["bid_observed_at"],
+                book_state=restored["book_state"],
+                generation=restored["generation"],
+                scope_identity=restored["scope_identity"],
+                force_new_generation=force_new_generation,
+            )
+
+        assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            restarted,
+            conn=conn,
+            requester=publish_after_restart,
+        ) is True
+        assert len(published) == 1
+        request = published[0].held_sell_reauction_requests[0]
+        assert request.generation == obligation["generation"]
+        assert request.scope_identity == obligation["scope_identity"]
+        assert request.book_state == "UNKNOWN"
+        assert not reactor_wake.held_sell_reauction_requests_completed(
+            (request,), path=tmp_path / "wake.json"
+        )
+
+        monkeypatch.setattr(
+            "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+            lambda **kwargs: (
+                kwargs["probability_content_identity"] == ""
+                and SimpleNamespace(
+                    status="EVALUATED",
+                    probability_content_identity="q-karachi-restarted-current",
+                    selection_epoch_identity="epoch-karachi-restarted",
+                    sell_book_witness_identity="book-karachi-restarted",
+                )
+            ),
+        )
+        receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+            requests=(request,),
+            result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+        )
+        assert receipts[0].answered_probability_content_identity == "q-karachi-restarted-current"
+        assert reactor_wake.persist_held_sell_reauction_receipts(
+            receipts, path=tmp_path / "wake.json"
+        )
+        assert reactor_wake.held_sell_reauction_requests_completed(
+            (request,), path=tmp_path / "wake.json"
+        )
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
 def test_no_bid_retry_waits_for_fresh_positive_bid_before_release(conn):

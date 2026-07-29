@@ -452,6 +452,106 @@ def _is_global_sell_snapshot_reauction_error(error: object) -> bool:
     )
 
 
+def _held_sell_reauction_obligation(
+    position: Position,
+    *,
+    generation_material: Mapping[str, object],
+) -> dict[str, object]:
+    """Build the V2 durable scope without treating a missing book as a price."""
+
+    raw_direction = getattr(position, "direction", "")
+    direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
+    token_id = str(
+        getattr(position, "no_token_id", "")
+        if direction == "buy_no"
+        else getattr(position, "token_id", "")
+    ).strip()
+    position_id = str(
+        getattr(position, "position_id", "")
+        or getattr(position, "trade_id", "")
+        or ""
+    ).strip()
+    family = (
+        str(getattr(position, "city", "") or "").strip(),
+        str(getattr(position, "target_date", "") or "").strip(),
+        str(getattr(position, "temperature_metric", "") or "").strip().lower(),
+    )
+    probability_receipt = getattr(position, "_day0_monitor_probability_receipt", None)
+    probability_content_identity = (
+        str(probability_receipt.get("probability_content_identity") or "").strip()
+        if isinstance(probability_receipt, Mapping)
+        else ""
+    )
+    if not all((position_id, token_id, *family)):
+        return {}
+    from src.runtime.reactor_wake import held_sell_reauction_scope_identity
+
+    scope_identity = held_sell_reauction_scope_identity(
+        position_id=position_id,
+        family=family,
+        probability_content_identity=probability_content_identity,
+        held_token_id=token_id,
+    )
+    generation = hashlib.sha256(
+        json.dumps(
+            {
+                "scope_identity": scope_identity,
+                "generation_material": dict(generation_material),
+            },
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": 2,
+        "scope_identity": scope_identity,
+        "generation": generation,
+        "position_id": position_id,
+        "family": family,
+        "held_token_id": token_id,
+        "probability_content_identity": probability_content_identity,
+        "probability_observed_at": str(
+            getattr(position, "last_monitor_at", "") or ""
+        ),
+        "held_best_bid": None,
+        "bid_observed_at": "",
+        "book_state": "UNKNOWN",
+    }
+
+
+def _latest_held_sell_reauction_obligation(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> dict[str, object]:
+    """Return only an exact, canonical V2 residual/reauction obligation."""
+
+    if conn is None:
+        return {}
+    position_id = str(getattr(position, "trade_id", "") or "")
+    if not position_id:
+        return {}
+    try:
+        row = conn.execute(
+            """
+            SELECT payload_json FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+             ORDER BY sequence_no DESC, datetime(occurred_at) DESC LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(str(row[0] or "{}")) if row is not None else {}
+    except (sqlite3.Error, TypeError, json.JSONDecodeError):
+        return {}
+    obligation = payload.get("held_sell_reauction_obligation")
+    if not isinstance(obligation, dict) or obligation.get("schema_version") != 2:
+        return {}
+    required = ("scope_identity", "generation", "position_id", "held_token_id")
+    if not all(str(obligation.get(key) or "").strip() for key in required):
+        return {}
+    return dict(obligation)
+
+
 def has_global_sell_snapshot_reauction_retry(
     position: Position,
     conn: sqlite3.Connection | None = None,
@@ -508,7 +608,7 @@ def needs_global_sell_snapshot_reauction(
         == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
         and _is_global_sell_snapshot_reauction_error(payload.get("error"))
     )
-    return canonical_debt
+    return canonical_debt or bool(_latest_held_sell_reauction_obligation(conn, position))
 
 
 def _is_runtime_submit_gate_block_error(error: str) -> bool:
@@ -7164,6 +7264,19 @@ def _dual_write_exit_retry_released_if_available(
             "next_retry_at": "",
             "release_reason": release_reason,
         }
+        if release_reason == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED":
+            obligation = _held_sell_reauction_obligation(
+                position,
+                generation_material={
+                    "event_type": event_type,
+                    "sequence_no": sequence_no,
+                    "previous_error": previous_error,
+                    "release_reason": release_reason,
+                },
+            )
+            if not obligation:
+                return False
+            payload["held_sell_reauction_obligation"] = obligation
         event = {
             "event_id": f"{trade_id}:{event_type.lower()}:{sequence_no}",
             "position_id": trade_id,
@@ -7295,6 +7408,9 @@ def recover_global_sell_snapshot_reauction_debt(
     runtime_state = str(getattr(raw_state, "value", raw_state) or "")
     if runtime_state == "pending_exit":
         return False
+    obligation = _latest_held_sell_reauction_obligation(conn, position)
+    if obligation:
+        setattr(position, "_held_sell_reauction_obligation", obligation)
     if not requester(position, True):
         return False
     if not record_global_sell_reauction_reserved(conn, position):

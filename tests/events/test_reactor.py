@@ -2204,6 +2204,311 @@ def test_held_sell_reauction_typed_reject_receipt_completes_request(tmp_path):
     ) is True
 
 
+def test_lucknow_zero_bid_v2_obligation_is_durable_but_cannot_ack(tmp_path):
+    """A zero bid is a durable redecision debt, never an executable SELL price."""
+    from src.runtime.reactor_wake import (
+        HeldSellReauctionReceipt,
+        held_sell_reauction_requests_completed,
+        make_held_sell_reauction_request,
+        persist_held_sell_reauction_receipts,
+        publish_reactor_wake,
+        reactor_wakes_since,
+    )
+
+    path = tmp_path / "wake.json"
+    request = make_held_sell_reauction_request(
+        position_id="lucknow-bid-zero",
+        family=("Lucknow", "2026-07-29", "high"),
+        probability_content_identity="q-lucknow-current",
+        held_token_id="token-lucknow-no",
+        held_best_bid=0.0,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        schema_version=2,
+        book_state="NO_EXECUTABLE_BOOK",
+        generation="lucknow-zero-generation",
+    )
+    publish_reactor_wake(
+        source="held_position_monitor",
+        reason="held_sell_global_auction_completion_requested",
+        path=path,
+        held_sell_reauction_requests=(request,),
+    )
+
+    stored = reactor_wakes_since(None, path=path)
+    assert stored[0].held_sell_reauction_requests == (request,)
+    assert request.held_best_bid == 0.0
+    assert request.book_state == "NO_EXECUTABLE_BOOK"
+    assert persist_held_sell_reauction_receipts(
+        (
+            HeldSellReauctionReceipt(
+                request_id=request.request_id,
+                material_identity=request.material_identity,
+                generation=request.generation,
+                status="REJECTED",
+                reason="legacy_generic_reject_must_not_ack_v2",
+            ),
+        ),
+        path=path,
+    ) is True
+    assert not held_sell_reauction_requests_completed((request,), path=path)
+
+
+def test_lucknow_no_book_generation_completes_only_from_fresh_same_q_book(monkeypatch, tmp_path):
+    """A later book answers the original V2 debt; clocks never mint a new debt."""
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime.reactor_wake import (
+        held_sell_reauction_requests_completed,
+        make_held_sell_reauction_request,
+        persist_held_sell_reauction_receipts,
+    )
+
+    kwargs = {
+        "position_id": "lucknow-no-book-generation",
+        "family": ("Lucknow", "2026-07-29", "high"),
+        "probability_content_identity": "q-lucknow-current",
+        "held_token_id": "token-lucknow-no-book",
+        "schema_version": 2,
+        "generation": "lucknow-stable-generation",
+    }
+    original = make_held_sell_reauction_request(
+        **kwargs,
+        held_best_bid=0.0,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        book_state="NO_EXECUTABLE_BOOK",
+    )
+    fresh = make_held_sell_reauction_request(
+        **kwargs,
+        held_best_bid=0.21,
+        bid_observed_at="2026-07-29T12:01:00+00:00",
+        probability_observed_at="2026-07-29T12:01:00+00:00",
+        book_state="EXECUTABLE",
+    )
+    assert fresh.material_identity == original.material_identity == original.scope_identity
+    assert fresh.request_id == original.request_id
+
+    monkeypatch.setattr(
+        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(
+            status="EVALUATED",
+            probability_content_identity="q-lucknow-current",
+            selection_epoch_identity="epoch-lucknow-fresh",
+            sell_book_witness_identity="book-lucknow-fresh",
+        ),
+    )
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(original,),
+        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+    )
+    assert len(receipts) == 1
+    assert receipts[0].request_id == original.request_id
+    assert receipts[0].answered_probability_content_identity == "q-lucknow-current"
+    assert persist_held_sell_reauction_receipts(
+        receipts, path=tmp_path / "wake.json"
+    ) is True
+    assert held_sell_reauction_requests_completed(
+        (original,), path=tmp_path / "wake.json"
+    ) is True
+
+
+def test_v2_no_book_wake_upgrades_same_generation_on_fresh_superseding_q(monkeypatch, tmp_path):
+    """A fresh book/q republishes the original debt, never a stale-q action."""
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    published = []
+
+    def publish(**kwargs):
+        published.append(
+            SimpleNamespace(
+                reason=kwargs["reason"],
+                forecast_families=kwargs["forecast_families"],
+                held_sell_reauction_requests=kwargs["held_sell_reauction_requests"],
+            )
+        )
+        return published[-1]
+
+    monkeypatch.setattr(reactor_wake, "publish_reactor_wake", publish)
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", lambda _at: tuple(published))
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        common = {
+            "reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+            "position_id": "lucknow-q-supersession",
+            "family": ("Lucknow", "2026-07-29", "high"),
+            "held_token_id": "token-lucknow-q-supersession",
+            "schema_version": 2,
+        }
+        assert reactor.request_global_auction_completion(
+            **common,
+            probability_content_identity="q-trigger-old",
+            held_best_bid=0.0,
+            bid_observed_at="2026-07-29T12:00:00+00:00",
+            book_state="NO_EXECUTABLE_BOOK",
+        ) is True
+        original = published[0].held_sell_reauction_requests[0]
+        assert reactor.request_global_auction_completion(
+            **common,
+            probability_content_identity="q-current-new",
+            probability_observed_at="2026-07-29T12:01:00+00:00",
+            held_best_bid=0.24,
+            bid_observed_at="2026-07-29T12:01:00+00:00",
+            book_state="EXECUTABLE",
+        ) is True
+        assert len(published) == 2
+        refreshed = published[1].held_sell_reauction_requests[0]
+        assert refreshed.scope_identity == original.scope_identity
+        assert refreshed.generation == original.generation
+        assert refreshed.request_id == original.request_id
+        assert refreshed.probability_content_identity == "q-current-new"
+
+        monkeypatch.setattr(
+            "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+            lambda **kwargs: (
+                kwargs["probability_content_identity"] == ""
+                and SimpleNamespace(
+                    status="EVALUATED",
+                    probability_content_identity="q-current-new",
+                    selection_epoch_identity="epoch-lucknow-current",
+                    sell_book_witness_identity="book-lucknow-current",
+                )
+            ),
+        )
+        receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+            requests=(refreshed,),
+            result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+        )
+        assert receipts[0].answered_probability_content_identity == "q-current-new"
+        assert reactor_wake.persist_held_sell_reauction_receipts(
+            receipts, path=tmp_path / "wake.json"
+        ) is True
+        assert reactor_wake.held_sell_reauction_requests_completed(
+            (original, refreshed), path=tmp_path / "wake.json"
+        ) is True
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_v2_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="karachi-in-band",
+        family=("Karachi", "2026-07-29", "low"),
+        probability_content_identity="q-karachi-current",
+        held_token_id="token-karachi-no",
+        held_best_bid=0.17,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        schema_version=2,
+        book_state="EXECUTABLE",
+        generation="karachi-current-generation",
+    )
+    monkeypatch.setattr(
+        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(
+            status="EVALUATED",
+            probability_content_identity="q-karachi-current",
+            selection_epoch_identity="epoch-karachi",
+            sell_book_witness_identity="book-karachi",
+        ),
+    )
+    actuated = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+    )
+    assert actuated[0].status == "ACTUATED"
+    assert actuated[0].schema_version == 2
+    assert actuated[0].scope_identity == request.scope_identity
+    assert actuated[0].answered_probability_content_identity == "q-karachi-current"
+
+    rejected = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=reactor.ReactorResult(
+            global_auction_completed_non_cancelled=1,
+            rejection_reasons=["GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"],
+        ),
+    )
+    assert rejected[0].status == "CAPITAL_REJECTED"
+    assert rejected[0].capital_objective_proof.endswith("CASH_DOMINATES")
+    assert rejected[0].answered_probability_content_identity == "q-karachi-current"
+
+
+def test_v2_excluded_or_unknown_q_global_cut_stays_pending(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="karachi-no-book",
+        family=("Karachi", "2026-07-29", "low"),
+        probability_content_identity="",
+        held_token_id="token-karachi-no-book",
+        held_best_bid=None,
+        bid_observed_at="",
+        schema_version=2,
+        book_state="UNKNOWN",
+        generation="karachi-no-book-generation",
+    )
+    monkeypatch.setattr(
+        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(status="EXCLUDED"),
+    )
+    assert reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+    ) == ()
+
+
+def test_v2_old_generation_receipt_cannot_ack_new_generation(tmp_path):
+    from src.runtime.reactor_wake import (
+        HeldSellReauctionReceipt,
+        held_sell_reauction_requests_completed,
+        make_held_sell_reauction_request,
+        persist_held_sell_reauction_receipts,
+    )
+
+    kwargs = dict(
+        position_id="karachi-generation-fence",
+        family=("Karachi", "2026-07-29", "high"),
+        probability_content_identity="q-karachi-generation",
+        held_token_id="token-karachi-generation",
+        held_best_bid=0.22,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        schema_version=2,
+        book_state="EXECUTABLE",
+    )
+    old = make_held_sell_reauction_request(**kwargs, generation="old")
+    new = make_held_sell_reauction_request(**kwargs, generation="new")
+    assert persist_held_sell_reauction_receipts(
+        (
+            HeldSellReauctionReceipt(
+                request_id=old.request_id,
+                material_identity=old.material_identity,
+                generation=old.generation,
+                schema_version=2,
+                scope_identity=old.scope_identity,
+                book_state="EXECUTABLE",
+                status="ACTUATED",
+                reason="current_global_cut_actuated",
+                selection_epoch_identity="epoch-old",
+                sell_book_witness_identity="book-old",
+                answered_probability_content_identity="q-karachi-generation",
+            ),
+        ),
+        path=tmp_path / "wake.json",
+    )
+    assert not held_sell_reauction_requests_completed(
+        (new,), path=tmp_path / "wake.json"
+    )
+
+
 def test_held_sell_reauction_request_round_trips_through_durable_wake(tmp_path):
     import json
 
@@ -2319,6 +2624,8 @@ def test_snapshot_reauction_forces_new_wake_generation(monkeypatch, tmp_path):
         "held_token_id": "token-no-release-generation",
         "held_best_bid": 0.10,
         "bid_observed_at": "2026-07-28T08:00:00+00:00",
+        "schema_version": 2,
+        "book_state": "EXECUTABLE",
     }
     old_request = reactor_wake.make_held_sell_reauction_request(
         **request_kwargs,
@@ -2359,8 +2666,14 @@ def test_snapshot_reauction_forces_new_wake_generation(monkeypatch, tmp_path):
                 request_id=old_request.request_id,
                 material_identity=old_request.material_identity,
                 generation=old_request.generation,
-                status="REJECTED",
-                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+                schema_version=2,
+                scope_identity=old_request.scope_identity,
+                book_state="EXECUTABLE",
+                status="ACTUATED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_ACTUATED",
+                selection_epoch_identity="epoch-old",
+                sell_book_witness_identity="book-old",
+                answered_probability_content_identity="q-content-release-generation",
             ),
         ),
         path=receipt_path,
@@ -2375,8 +2688,14 @@ def test_snapshot_reauction_forces_new_wake_generation(monkeypatch, tmp_path):
                 request_id=new_request.request_id,
                 material_identity=new_request.material_identity,
                 generation=new_request.generation,
-                status="REJECTED",
-                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+                schema_version=2,
+                scope_identity=new_request.scope_identity,
+                book_state="EXECUTABLE",
+                status="ACTUATED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_ACTUATED",
+                selection_epoch_identity="epoch-new",
+                sell_book_witness_identity="book-new",
+                answered_probability_content_identity="q-content-release-generation",
             ),
         ),
         path=receipt_path,

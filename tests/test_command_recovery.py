@@ -22141,9 +22141,19 @@ class TestRecoveryResolutionTable:
             },
         }
 
+    @pytest.mark.parametrize(
+        ("command_token_id", "releases"),
+        (
+            ("tok-filled-exit-slice", True),
+            ("tok-foreign-exit-asset", False),
+        ),
+        ids=("exact-command-token", "mismatched-command-token-stays"),
+    )
     def test_filled_selected_exit_slice_releases_post_fill_chain_remainder(
         self,
         conn,
+        command_token_id,
+        releases,
     ):
         """A filled slice must return its proven chain remainder to redecision."""
         from src.execution.command_recovery import (
@@ -22183,6 +22193,7 @@ class TestRecoveryResolutionTable:
             command_id="cmd-filled-exit-slice",
             position_id=position_id,
             intent_kind="EXIT",
+            token_id=command_token_id,
             side="SELL",
             size=10.0,
             price=0.14,
@@ -22219,7 +22230,7 @@ class TestRecoveryResolutionTable:
                 condition_id, token_id, order_id, order_status, updated_at,
                 temperature_metric
             ) VALUES (
-                ?, 'pending_exit', 'Chongqing', '2026-04-26', '35C', 'buy_yes',
+                ?, 'pending_exit', 'Karachi', '2026-04-26', '35C', 'buy_yes',
                 21.0, 21.0, 'synced', '2026-04-26T00:06:00Z',
                 'forecast_qkernel_entry', 'cond-filled-exit-slice',
                 'tok-filled-exit-slice', ?, 'sell_pending_confirmation',
@@ -22230,6 +22241,30 @@ class TestRecoveryResolutionTable:
         )
 
         summary = reconcile_pending_exit_terminal_order_releases(conn)
+
+        if not releases:
+            assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+            current = conn.execute(
+                """
+                SELECT phase, order_id, order_status
+                  FROM position_current
+                 WHERE position_id = ?
+                """,
+                (position_id,),
+            ).fetchone()
+            assert dict(current) == {
+                "phase": "pending_exit",
+                "order_id": order_id,
+                "order_status": "sell_pending_confirmation",
+            }
+            assert conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+                """,
+                (position_id,),
+            ).fetchone()[0] == 0
+            return
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         current = conn.execute(
@@ -22258,6 +22293,7 @@ class TestRecoveryResolutionTable:
             (position_id,),
         ).fetchone()
         payload = json.loads(event["payload_json"])
+        obligation = payload.pop("held_sell_reauction_obligation")
         assert dict(event) | {"payload_json": payload} == {
             "event_type": "EXIT_RETRY_RELEASED",
             "phase_before": "pending_exit",
@@ -22268,6 +22304,7 @@ class TestRecoveryResolutionTable:
                 "chain_state": "synced",
                 "command_size": 10.0,
                 "command_state": "FILLED",
+                "command_token_id": "tok-filled-exit-slice",
                 "matched_size": "10",
                 "order_fact_id": payload["order_fact_id"],
                 "order_fact_state": "MATCHED",
@@ -22277,6 +22314,40 @@ class TestRecoveryResolutionTable:
                 "residual_shares": 21.0,
             },
         }
+        assert obligation == {
+            "schema_version": 2,
+            "scope_identity": obligation["scope_identity"],
+            "generation": obligation["generation"],
+            "position_id": position_id,
+            "family": ["Karachi", "2026-04-26", "high"],
+            "held_token_id": "tok-filled-exit-slice",
+            "probability_content_identity": "",
+            "probability_observed_at": "",
+            "held_best_bid": None,
+            "bid_observed_at": "",
+            "book_state": "UNKNOWN",
+            "residual_proof": {
+                "command_id": "cmd-filled-exit-slice",
+                "command_token_id": "tok-filled-exit-slice",
+                "order_fact_id": obligation["residual_proof"]["order_fact_id"],
+                "order_fact_state": "MATCHED",
+                "matched_size": "10",
+                "order_remaining_size": "0",
+                "residual_shares": 21.0,
+                "chain_state": "synced",
+                "chain_seen_at": "2026-04-26T00:06:00Z",
+            },
+        }
+        rerun = reconcile_pending_exit_terminal_order_releases(conn)
+        assert rerun == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        stored = conn.execute(
+            """
+            SELECT payload_json FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+            """,
+            (position_id,),
+        ).fetchone()
+        assert json.loads(stored["payload_json"])["held_sell_reauction_obligation"] == obligation
 
     @pytest.mark.parametrize(
         ("shares", "chain_shares", "chain_seen_at"),

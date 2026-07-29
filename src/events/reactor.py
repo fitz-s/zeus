@@ -6203,6 +6203,11 @@ def request_global_auction_completion(
     held_token_id: str = "",
     held_best_bid: float | None = None,
     bid_observed_at: str = "",
+    book_state: str | None = None,
+    probability_observed_at: str = "",
+    generation: str | None = None,
+    scope_identity: str = "",
+    schema_version: int = 2,
     force_new_generation: bool = False,
 ) -> bool:
     """Persistently reserve one complete global cut for a held SELL.
@@ -6210,6 +6215,7 @@ def request_global_auction_completion(
     Returns whether a matching durable wake already existed or was published.
     """
 
+    caller_supplied_scope = bool(str(scope_identity or "").strip())
     already_due = _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
     clean_family = tuple(
@@ -6226,6 +6232,7 @@ def request_global_auction_completion(
     try:
         from src.runtime.reactor_wake import (
             held_sell_reauction_material_identity,
+            held_sell_reauction_scope_identity,
             make_held_sell_reauction_request,
             publish_reactor_wake,
             reactor_wakes_since,
@@ -6234,14 +6241,24 @@ def request_global_auction_completion(
         held_request = None
         held_request_material_identity = ""
         held_request_kwargs = None
-        if any(
-            (
-                probability_content_identity,
-                held_token_id,
-                held_best_bid is not None,
-                bid_observed_at,
-            )
-        ):
+        if held_token_id:
+            inferred_book_state = str(book_state or "").strip().upper()
+            if not inferred_book_state:
+                if held_best_bid is None:
+                    inferred_book_state = "UNKNOWN"
+                elif float(held_best_bid) <= 0:
+                    inferred_book_state = "NO_EXECUTABLE_BOOK"
+                elif not bid_observed_at:
+                    inferred_book_state = "STALE"
+                else:
+                    inferred_book_state = "EXECUTABLE"
+            if not scope_identity:
+                scope_identity = held_sell_reauction_scope_identity(
+                    position_id=str(position_id or ""),
+                    family=clean_family,
+                    probability_content_identity=probability_content_identity,
+                    held_token_id=held_token_id,
+                )
             held_request_kwargs = {
                 "position_id": str(position_id or ""),
                 "family": clean_family,
@@ -6249,9 +6266,19 @@ def request_global_auction_completion(
                 "held_token_id": held_token_id,
                 "held_best_bid": held_best_bid,
                 "bid_observed_at": bid_observed_at,
+                "schema_version": schema_version,
+                "scope_identity": scope_identity,
+                "book_state": inferred_book_state,
+                "probability_observed_at": probability_observed_at,
             }
+            if generation:
+                held_request_kwargs["generation"] = generation
             held_request_material_identity = held_sell_reauction_material_identity(
-                **held_request_kwargs
+                **{
+                    key: value
+                    for key, value in held_request_kwargs.items()
+                    if key != "generation"
+                }
             )
 
         durable_wakes = tuple(
@@ -6259,32 +6286,93 @@ def request_global_auction_completion(
             for wake in reactor_wakes_since(None)
             if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
         )
+        same_asset_v2_requests = tuple(
+            request
+            for wake in durable_wakes
+            for request in getattr(wake, "held_sell_reauction_requests", ())
+            if (
+                int(getattr(request, "schema_version", 1) or 1) == 2
+                and str(getattr(request, "position_id", "") or "")
+                == str(position_id or "")
+                and tuple(getattr(request, "family", ()) or ()) == clean_family
+                and str(getattr(request, "held_token_id", "") or "")
+                == str(held_token_id or "")
+            )
+        )
+        if (
+            held_request_kwargs is not None
+            and int(schema_version) == 2
+            and not caller_supplied_scope
+            and same_asset_v2_requests
+            and not force_new_generation
+        ):
+            existing_scope = str(
+                getattr(same_asset_v2_requests[-1], "scope_identity", "") or ""
+            ).strip()
+            if existing_scope:
+                held_request_kwargs["scope_identity"] = existing_scope
+                held_request_material_identity = held_sell_reauction_material_identity(
+                    **{
+                        key: value
+                        for key, value in held_request_kwargs.items()
+                        if key != "generation"
+                    }
+                )
+        matching_v2_requests = tuple(
+            request
+            for request in same_asset_v2_requests
+            if str(getattr(request, "material_identity", "") or "")
+            == held_request_material_identity
+        )
+        if (
+            held_request_kwargs is not None
+            and int(schema_version) == 2
+            and not generation
+            and matching_v2_requests
+            and not force_new_generation
+        ):
+            # The durable scope owns the generation.  A later fresh book only
+            # upgrades its context; it must never mint a second obligation.
+            held_request_kwargs["generation"] = str(
+                getattr(matching_v2_requests[-1], "generation", "") or ""
+            )
+        if held_request_kwargs is not None:
+            held_request = make_held_sell_reauction_request(
+                **held_request_kwargs
+            )
+        def _context_rank(request: object) -> tuple[int, int, int]:
+            state = str(getattr(request, "book_state", "UNKNOWN") or "UNKNOWN").upper()
+            state_rank = {
+                "UNKNOWN": 0,
+                "NO_EXECUTABLE_BOOK": 1,
+                "STALE": 1,
+                "EXECUTABLE": 2,
+            }.get(state, -1)
+            return (
+                state_rank,
+                int(bool(getattr(request, "probability_content_identity", ""))),
+                int(bool(getattr(request, "bid_observed_at", ""))),
+            )
         durable_request_exists = (
             any(
-                held_request_material_identity
-                in {
-                    request.material_identity
-                    for request in getattr(
-                        wake,
-                        "held_sell_reauction_requests",
-                        (),
-                    )
-                }
+                str(getattr(request, "request_id", "") or "")
+                == held_request.request_id
                 for wake in durable_wakes
+                for request in getattr(wake, "held_sell_reauction_requests", ())
             )
-            if held_request_material_identity
+            if held_request is not None
             else (
                 any(wake_families[0] in wake.forecast_families for wake in durable_wakes)
                 if wake_families
                 else bool(durable_wakes)
             )
         )
-        if held_request_kwargs is not None and (
-            force_new_generation or not durable_request_exists
-        ):
-            held_request = make_held_sell_reauction_request(
-                **held_request_kwargs
-            )
+        context_upgrade = bool(
+            held_request is not None
+            and matching_v2_requests
+            and _context_rank(held_request)
+            > max(_context_rank(request) for request in matching_v2_requests)
+        )
     except ValueError:
         logging.getLogger("zeus.events.reactor").error(
             "held SELL reauction request rejected before durable publish: "
@@ -6308,7 +6396,7 @@ def request_global_auction_completion(
         logger = logging.getLogger("zeus.events.reactor")
     if force_new_generation:
         durable_request_exists = False
-    if not durable_request_exists:
+    if not durable_request_exists or context_upgrade:
         try:
             publish_reactor_wake(
                 source="held_position_monitor",
@@ -6358,17 +6446,30 @@ def _held_sell_reauction_receipts_from_global_cut(
             ),
             "generation": str(getattr(request, "generation", "") or ""),
         }
+        request_schema_version = int(getattr(request, "schema_version", 1) or 1)
+        request_q = str(
+            getattr(request, "probability_content_identity", "") or ""
+        )
         coverage = held_sell_reauction_coverage(
             position_id=str(getattr(request, "position_id", "") or ""),
-            probability_content_identity=str(
-                getattr(request, "probability_content_identity", "") or ""
+            # V2 trigger q is historical context.  The terminal answer must
+            # use the fresh cut's current q, including a q supersession after
+            # an earlier no-book wake.
+            probability_content_identity=(
+                "" if request_schema_version >= 2 else request_q
             ),
             token_id=str(getattr(request, "held_token_id", "") or ""),
+            family=tuple(getattr(request, "family", ()) or ()),
         )
         if coverage is None:
             continue
+        coverage_q = str(
+            getattr(coverage, "probability_content_identity", "") or ""
+        )
+        if request_schema_version >= 2 and not coverage_q:
+            continue
         if coverage.status == "EVALUATED":
-            if global_no_trade_reason:
+            if global_no_trade_reason and request_schema_version < 2:
                 receipts.append(
                     HeldSellReauctionReceipt(
                         **receipt_identity,
@@ -6388,16 +6489,55 @@ def _held_sell_reauction_receipts_from_global_cut(
             )
             if not selection_epoch_identity or not sell_book_witness_identity:
                 continue
+            if global_no_trade_reason:
+                if request_schema_version >= 2:
+                    economic_reason = global_no_trade_reason.removeprefix(
+                        "GLOBAL_AUCTION_NO_TRADE:"
+                    )
+                    if economic_reason not in {
+                        "CASH_DOMINATES",
+                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+                        "ROBUST_MAJORITY_LOSS",
+                    }:
+                        continue
+                    receipts.append(
+                        HeldSellReauctionReceipt(
+                            **receipt_identity,
+                            schema_version=2,
+                            scope_identity=str(
+                                getattr(request, "scope_identity", "") or ""
+                            ),
+                            book_state="EXECUTABLE",
+                            status="CAPITAL_REJECTED",
+                            reason="GLOBAL_AUCTION_CAPITAL_REJECTED",
+                            selection_epoch_identity=selection_epoch_identity,
+                            sell_book_witness_identity=sell_book_witness_identity,
+                            capital_objective_proof=(
+                                "global_single_order_terminal_wealth:"
+                                f"{global_no_trade_reason}"
+                            ),
+                            answered_probability_content_identity=coverage_q,
+                        )
+                    )
+                    continue
             receipts.append(
                 HeldSellReauctionReceipt(
                     **receipt_identity,
+                    schema_version=request_schema_version,
+                    scope_identity=str(
+                        getattr(request, "scope_identity", "") or ""
+                    ),
+                    book_state="EXECUTABLE",
                     status="ACTUATED",
                     reason="GLOBAL_AUCTION_CURRENT_HOLDING_COVERAGE_ACTUATED",
                     selection_epoch_identity=selection_epoch_identity,
                     sell_book_witness_identity=sell_book_witness_identity,
+                    answered_probability_content_identity=(
+                        coverage_q if request_schema_version >= 2 else ""
+                    ),
                 )
             )
-        elif coverage.status == "EXCLUDED":
+        elif coverage.status == "EXCLUDED" and request_schema_version < 2:
             receipts.append(
                 HeldSellReauctionReceipt(
                     **receipt_identity,

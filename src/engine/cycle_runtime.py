@@ -3205,6 +3205,10 @@ def _monitor_refreshed_phase_for_position(pos) -> str:
     return LifecyclePhase.ACTIVE.value
 
 
+class CanonicalTradeWriteIdentityError(RuntimeError):
+    """The live trade DB identity could not be proven before a canonical write."""
+
+
 def _canonical_trade_write_lease(conn, *, owner: str, deadline_ms: int, max_hold_ms: int):
     """Serialize canonical live-trade writes without imposing the live lease on test DBs."""
 
@@ -3214,16 +3218,23 @@ def _canonical_trade_write_lease(conn, *, owner: str, deadline_ms: int, max_hold
     from src.state.db import _zeus_trade_db_path
 
     try:
-        main_path = next(
-            (
-                Path(str(row[2])).resolve(strict=False)
-                for row in conn.execute("PRAGMA database_list").fetchall()
-                if str(row[1]) == "main" and str(row[2])
-            ),
-            None,
-        )
-    except Exception:
-        main_path = None
+        main_rows = [
+            row
+            for row in conn.execute("PRAGMA database_list").fetchall()
+            if str(row[1]) == "main"
+        ]
+    except Exception as exc:
+        raise CanonicalTradeWriteIdentityError(
+            "CANONICAL_TRADE_DB_IDENTITY_UNAVAILABLE"
+        ) from exc
+    if len(main_rows) != 1:
+        raise CanonicalTradeWriteIdentityError("CANONICAL_TRADE_DB_IDENTITY_AMBIGUOUS")
+    raw_main_path = str(main_rows[0][2] or "").strip()
+    # sqlite :memory: and explicitly named noncanonical fixtures are test-only
+    # surfaces. A PRAGMA failure or an ambiguous main identity is never one.
+    if not raw_main_path:
+        return nullcontext()
+    main_path = Path(raw_main_path).resolve(strict=False)
     if main_path != _zeus_trade_db_path().resolve(strict=False):
         return nullcontext()
 
@@ -5430,6 +5441,33 @@ def execute_monitoring_phase(
         try:
             from src.events.reactor import request_global_auction_completion
 
+            obligation = getattr(position, "_held_sell_reauction_obligation", {})
+            obligation = obligation if isinstance(obligation, dict) else {}
+            raw_direction = getattr(position, "direction", "")
+            direction = str(
+                getattr(raw_direction, "value", raw_direction) or ""
+            ).lower()
+            held_token_id = str(
+                obligation.get("held_token_id")
+                or (
+                    getattr(position, "no_token_id", "")
+                    if direction == "buy_no"
+                    else getattr(position, "token_id", "")
+                )
+                or ""
+            ).strip()
+            probability_receipt = getattr(
+                position, "_day0_monitor_probability_receipt", None
+            )
+            probability_content_identity = str(
+                obligation.get("probability_content_identity")
+                or (
+                    probability_receipt.get("probability_content_identity")
+                    if isinstance(probability_receipt, dict)
+                    else ""
+                )
+                or ""
+            ).strip()
             durable_request_accepted = request_global_auction_completion(
                 reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
                 position_id=str(
@@ -5444,6 +5482,18 @@ def execute_monitoring_phase(
                         getattr(position, "temperature_metric", "") or ""
                     ).strip().lower(),
                 ),
+                probability_content_identity=probability_content_identity,
+                held_token_id=held_token_id,
+                held_best_bid=obligation.get("held_best_bid"),
+                bid_observed_at=str(obligation.get("bid_observed_at") or ""),
+                probability_observed_at=str(
+                    obligation.get("probability_observed_at")
+                    or getattr(position, "last_monitor_at", "")
+                    or ""
+                ),
+                book_state=str(obligation.get("book_state") or "UNKNOWN"),
+                generation=str(obligation.get("generation") or "") or None,
+                scope_identity=str(obligation.get("scope_identity") or ""),
                 force_new_generation=force_new_generation,
             )
         except Exception as exc:  # noqa: BLE001 - failed reservation keeps retry pending.
@@ -6944,7 +6994,7 @@ def execute_monitoring_phase(
                 summary["monitor_canonical_write_failed"] = (
                     summary.get("monitor_canonical_write_failed", 0) + 1
                 )
-                if exit_trigger != "RED_FORCE_EXIT":
+                if exit_trigger != "RED_FORCE_EXIT" and not should_exit:
                     monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
                     artifact.add_monitor_result(
                         deps.MonitorResult(
@@ -6959,6 +7009,14 @@ def execute_monitoring_phase(
                     monitor_result_written = True
                     summary["monitors"] += 1
                     continue
+                if should_exit:
+                    # The bounded writer lease is telemetry/backpressure, not a
+                    # revocation of already-decided economic exit authority.
+                    summary["monitor_canonical_write_failed_exit_authority_preserved"] = (
+                        summary.get(
+                            "monitor_canonical_write_failed_exit_authority_preserved", 0)
+                        + 1
+                    )
 
             monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
             artifact.add_monitor_result(

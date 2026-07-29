@@ -2129,6 +2129,11 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
             "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
             lambda *, position, city, now=None, world_conn=None, **kwargs: hard_fact_verdict,
         )
+        executed = []
+        monkeypatch.setattr(
+            "src.execution.exit_lifecycle.execute_exit",
+            lambda **kwargs: (executed.append(kwargs["position"].trade_id) or "exit_retry:writer_timeout"),
+        )
 
         results = []
 
@@ -2157,32 +2162,36 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
             None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
             deps=deps,
         )
-        return results, summary
+        return results, summary, executed
 
-    def test_dead_bin_sell_fails_closed_when_canonical_write_fails(self, monkeypatch):
+    def test_dead_bin_sell_preserves_exit_authority_when_canonical_write_fails(self, monkeypatch):
         verdict = HardFactVerdict(
             action="EXIT_DEAD_BIN",
             reason="running high extreme 26.0 beyond bin [25.0,25.0] — YES structurally dead",
             metric="high", rounded_extreme=26.0, source="same_station_fast_tail",
         )
-        results, summary = self._run_phase(monkeypatch, hard_fact_verdict=verdict)
+        results, summary, executed = self._run_phase(
+            monkeypatch, hard_fact_verdict=verdict
+        )
         assert summary.get("day0_hard_fact_direct_exit_decisions") == 1
         assert summary.get("monitor_canonical_write_failed") == 1
+        assert summary.get("monitor_canonical_write_failed_exit_authority_preserved") == 1
         exits = [r for r in results if getattr(r, "should_exit", False)]
-        assert not exits
-        assert any(
-            "MONITOR_CANONICAL_WRITE_FAILED" in str(getattr(r, "exit_reason", ""))
-            for r in results
-        )
+        assert len(exits) == 1
+        assert executed == ["hf_p04_001"]
+        assert verdict.reason in exits[0].exit_reason
         assert summary.get("exits_suppressed_no_submit", 0) == 0
 
     def test_no_hard_fact_keeps_the_existing_failure_continue(self, monkeypatch):
-        results, summary = self._run_phase(monkeypatch, hard_fact_verdict=None)
+        results, summary, executed = self._run_phase(
+            monkeypatch, hard_fact_verdict=None
+        )
         assert summary.get("monitor_canonical_write_failed") == 1
         assert summary.get("day0_hard_fact_exits") is None
         reasons = [str(getattr(r, "exit_reason", "")) for r in results]
         assert any("MONITOR_CANONICAL_WRITE_FAILED" in reason for reason in reasons)
         assert not any(getattr(r, "should_exit", False) for r in results)
+        assert executed == []
 
 
 # ===========================================================================
