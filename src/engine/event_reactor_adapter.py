@@ -153,6 +153,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import os
 import sqlite3
 import threading
@@ -19499,6 +19500,13 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "live_authority_status": payload.get("live_authority_status"),
         "raw_value": payload.get("raw_value"),
         "rounded_value": payload.get("rounded_value"),
+        "station_id": payload.get("station_id"),
+        "configured_station_id": payload.get("configured_station_id"),
+        "settlement_source": payload.get("settlement_source"),
+        "raw_payload_sha256": payload.get("raw_payload_sha256"),
+        "day0_observation_provenance_hash": payload.get(
+            "day0_observation_provenance_hash"
+        ),
         "high_so_far": payload.get("high_so_far"),
         "low_so_far": payload.get("low_so_far"),
         "observation_time": payload.get("observation_time"),
@@ -20549,9 +20557,14 @@ def _day0_live_source_parent_certificates(
             "target_date": payload.get("target_date"),
             "metric": payload.get("metric") or payload.get("temperature_metric"),
             "station_id": payload.get("station_id"),
+            "configured_station_id": payload.get("configured_station_id"),
             "settlement_source": payload.get("settlement_source"),
             "observation_time": observation_time,
             "observation_available_at": observation_available_at,
+            "raw_payload_sha256": payload.get("raw_payload_sha256"),
+            "day0_observation_provenance_hash": payload.get(
+                "day0_observation_provenance_hash"
+            ),
             "raw_value": payload.get("raw_value"),
             "rounded_value": rounded_value,
             "source_match_status": payload.get("source_match_status"),
@@ -20647,6 +20660,15 @@ def _final_intent_decision_source_context_payload(
     observation_available_at = _nonnull(day0_authority.payload.get("observation_available_at"))
     if not observation_time or not observation_available_at:
         raise ValueError("DAY0_DECISION_SOURCE_CONTEXT_MISSING_OBSERVATION_CLOCK")
+    raw_payload_sha256 = _nonnull(day0_authority.payload.get("raw_payload_sha256"))
+    configured_station_id = _nonnull(
+        day0_authority.payload.get("configured_station_id")
+    )
+    provenance_hash = _nonnull(
+        day0_authority.payload.get("day0_observation_provenance_hash")
+    )
+    if not raw_payload_sha256 or not configured_station_id or not provenance_hash:
+        raise ValueError("DAY0_DECISION_SOURCE_CONTEXT_MISSING_RAW_PROVENANCE")
 
     base_source_id = _nonnull(
         forecast_payload.get("forecast_source_id") or forecast_payload.get("source_id")
@@ -20668,6 +20690,9 @@ def _final_intent_decision_source_context_payload(
             "base_raw_payload_hash": forecast_payload.get("raw_payload_hash"),
             "observation_time": observation_time,
             "observation_available_at": observation_available_at,
+            "raw_payload_sha256": raw_payload_sha256,
+            "configured_station_id": configured_station_id,
+            "day0_observation_provenance_hash": provenance_hash,
         }
     )
     combined = {
@@ -20683,6 +20708,9 @@ def _final_intent_decision_source_context_payload(
         "authority_tier": "OBSERVATION",
         "observation_time": observation_time,
         "observation_available_at": observation_available_at,
+        "raw_payload_sha256": raw_payload_sha256,
+        "configured_station_id": configured_station_id,
+        "day0_observation_provenance_hash": provenance_hash,
         "provider_reported_time": day0_authority.payload.get("provider_reported_time"),
         "decision_source_basis": "day0_live_observation_over_base_forecast",
         "base_forecast_source_id": base_source_id,
@@ -22705,6 +22733,13 @@ def _day0_calibration_authority_payload_and_clock(
         observation_time=str(payload.get("observation_time") or ""),
         raw_value=raw_value,
         rounded_value=rounded_value,
+        station_id=str(payload.get("station_id") or ""),
+        configured_station_id=str(payload.get("configured_station_id") or ""),
+        settlement_source=str(payload.get("settlement_source") or ""),
+        raw_payload_sha256=str(payload.get("raw_payload_sha256") or ""),
+        day0_observation_provenance_hash=str(
+            payload.get("day0_observation_provenance_hash") or ""
+        ),
         settlement_semantics=semantics,
     )
     try:
@@ -29931,6 +29966,9 @@ def _global_day0_execution_payload(
         )
     ):
         raise ValueError("GLOBAL_DAY0_CONDITIONING_SOURCE_IDENTITY_MISMATCH")
+    raw_payload_sha256 = str(fact.get("raw_payload_sha256") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", raw_payload_sha256):
+        raise ValueError("GLOBAL_DAY0_RAW_PROVENANCE_MISSING")
     if fast_residual_conditioning is not None:
         likelihood = fast_residual_conditioning["fast_residual_likelihood"]
         if (
@@ -29956,10 +29994,25 @@ def _global_day0_execution_payload(
         "rounded_value": rounded,
         "sample_count": observed_samples,
         "station_id": station_id,
+        "configured_station_id": expected_station,
         "settlement_source": observation_source,
         "settlement_unit": unit,
+        "raw_payload_sha256": raw_payload_sha256,
         "evidence_finality": evidence_finality,
     }
+    binding["day0_observation_provenance_hash"] = stable_hash(
+        {
+            "city": binding["city"],
+            "target_date": binding["target_date"],
+            "metric": binding["metric"],
+            "settlement_source": binding["settlement_source"],
+            "station_id": binding["station_id"],
+            "configured_station_id": binding["configured_station_id"],
+            "raw_payload_sha256": binding["raw_payload_sha256"],
+            "observation_time": binding["observation_time"],
+            "observation_available_at": binding["observation_available_at"],
+        }
+    )
     if conditioning_clock_lag_seconds is not None:
         binding.update(
             {
@@ -30068,8 +30121,13 @@ def _global_day0_execution_payload(
         "samples_count": observed_samples,
         "sample_count": observed_samples,
         "station_id": station_id,
+        "configured_station_id": expected_station,
         "settlement_source": observation_source,
         "settlement_unit": unit,
+        "raw_payload_sha256": raw_payload_sha256,
+        "day0_observation_provenance_hash": binding[
+            "day0_observation_provenance_hash"
+        ],
         "evidence_finality": evidence_finality,
         "source_match_status": "MATCH",
         "local_date_status": "MATCH",

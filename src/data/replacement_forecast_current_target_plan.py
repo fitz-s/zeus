@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -30,6 +31,14 @@ from src.state.db import _connect_read_only
 
 
 SOURCE_ID = "openmeteo_ecmwf_ifs9_bayes_fusion"
+
+
+def _raw_payload_sha256(raw_payload: object) -> str:
+    """Return the SHA-256 of an exact persisted provider payload, if present."""
+
+    if not isinstance(raw_payload, str) or not raw_payload:
+        return ""
+    return hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -818,7 +827,8 @@ def _latest_authorized_day0_fact(
                        source,
                        {optional_column('station_id')},
                        {optional_column('temp_unit')},
-                       {optional_column('imported_at')}
+                       {optional_column('imported_at')},
+                       {optional_column('raw_response')}
                   FROM observation_instants
                  WHERE city = ?
                    AND target_date = ?
@@ -853,18 +863,13 @@ def _latest_authorized_day0_fact(
                    AND {extreme_col} IS NOT NULL
             )
             SELECT observed_extreme_native,
-                   (
-                       SELECT MAX(observation_fact_time)
-                         FROM authorized
-                   ) AS observation_time,
+                   observation_fact_time AS observation_time,
                    (SELECT COUNT(*) FROM authorized) AS sample_count,
                    source AS observation_source,
                    station_id,
                    temp_unit,
-                   (
-                       SELECT MAX(COALESCE(imported_at, utc_timestamp))
-                         FROM authorized
-                   ) AS observation_available_at
+                   raw_response,
+                   COALESCE(imported_at, utc_timestamp) AS observation_available_at
               FROM authorized
              ORDER BY {instant_order},
                       source DESC
@@ -884,6 +889,9 @@ def _latest_authorized_day0_fact(
                     "unit": str(row["temp_unit"] or "").strip().upper(),
                     "observation_available_at": str(
                         row["observation_available_at"] or row["observation_time"]
+                    ),
+                    "raw_payload_sha256": _raw_payload_sha256(
+                        row["raw_response"]
                     ),
                 }
             )
@@ -1058,6 +1066,9 @@ def _latest_authorized_day0_fact(
                     "observation_available_at": str(
                         observation_available_at.isoformat()
                     ),
+                    "raw_payload_sha256": _raw_payload_sha256(
+                        str(event_row["payload_json"] or "")
+                    ),
                 }
             )
             event_key = (
@@ -1153,7 +1164,7 @@ def _latest_authorized_day0_fact(
                 # append-only audit trail intact while making every consumer
                 # share one conditioning identity with the Day0 event bridge.
                 canonical_prints: dict[
-                    tuple[str, str, float], tuple[str, str, float]
+                    tuple[str, str, float], tuple[str, str, float, str]
                 ] = {}
                 for print_row in print_rows:
                     channel = str(print_row["source_channel"])
@@ -1241,15 +1252,18 @@ def _latest_authorized_day0_fact(
                             canonical_publish_ts,
                             canonical_fetched_at,
                             float(value),
+                            str(print_row["raw_report"] or ""),
                         )
 
                 best_value: float | None = None
                 best_channel = ""
                 latest_clock_by_channel: dict[str, tuple[str, str]] = {}
+                best_raw_report = ""
                 for (channel, _source_clock, _value), (
                     publish_ts,
                     fetched_at,
                     value,
+                    raw_report,
                 ) in canonical_prints.items():
                     previous_clock = latest_clock_by_channel.get(channel)
                     if previous_clock is None or (publish_ts, fetched_at) > previous_clock:
@@ -1265,6 +1279,7 @@ def _latest_authorized_day0_fact(
                     ):
                         best_value = value
                         best_channel = channel
+                        best_raw_report = raw_report
                 if best_value is not None:
                     best_publish_ts, best_fetched_at = latest_clock_by_channel[
                         best_channel
@@ -1279,6 +1294,9 @@ def _latest_authorized_day0_fact(
                             "station_id": expected_station or "",
                             "unit": expected_unit,
                             "observation_available_at": best_fetched_at,
+                            "raw_payload_sha256": _raw_payload_sha256(
+                                best_raw_report
+                            ),
                         }
                     )
 

@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-26
+# Last reused/audited: 2026-07-29
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -4635,6 +4635,17 @@ def test_live_entry_gate_rejects_unknown_event_type_even_with_qkernel_cert():
 
 def test_day0_final_intent_source_context_binds_observation_and_base_forecast():
     decision_time = datetime(2026, 7, 1, 21, tzinfo=timezone.utc)
+    day0_provenance = {
+        "city": "Chicago",
+        "target_date": "2026-07-01",
+        "metric": "high",
+        "settlement_source": "wu_icao_history",
+        "station_id": "KORD",
+        "configured_station_id": "KORD",
+        "raw_payload_sha256": "a" * 64,
+        "observation_time": "2026-07-01T20:51:00+00:00",
+        "observation_available_at": "2026-07-01T20:55:56+00:00",
+    }
     forecast = build_certificate(
         certificate_type=claims.FORECAST_AUTHORITY,
         semantic_key="forecast:day0-base",
@@ -4681,6 +4692,10 @@ def test_day0_final_intent_source_context_binds_observation_and_base_forecast():
             "target_date": "2026-07-01",
             "metric": "high",
             "station_id": "KORD",
+            "configured_station_id": "KORD",
+            "settlement_source": "wu_icao_history",
+            "raw_payload_sha256": "a" * 64,
+            "day0_observation_provenance_hash": stable_hash(day0_provenance),
             "observation_time": "2026-07-01T20:51:00+00:00",
             "observation_available_at": "2026-07-01T20:55:56+00:00",
         },
@@ -4718,6 +4733,8 @@ def test_day0_final_intent_source_context_binds_observation_and_base_forecast():
     assert payload["posterior_identity_hash"] == payload["raw_payload_hash"]
     assert payload["base_posterior_identity_hash"] == "qv-day0-base-001"
     assert payload["day0_authority_certificate_hash"] == day0.certificate_hash
+    assert payload["raw_payload_sha256"] == "a" * 64
+    assert payload["day0_observation_provenance_hash"] == stable_hash(day0_provenance)
     assert ctx is not None
     assert ctx.posterior_identity_hash == payload["raw_payload_hash"]
     assert ctx.integrity_errors() == ()
