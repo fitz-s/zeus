@@ -830,6 +830,24 @@ def remaining_day_extremes_c(
 
 _REFRESH_LOCK = threading.Lock()
 _LAST_REFRESH_MONOTONIC: dict[str, float] = {}
+_INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC: dict[str, float] = {}
+
+
+def _refresh_throttled_locked(
+    refresh_key: str,
+    *,
+    now_monotonic: float,
+    interval_s: float,
+) -> bool:
+    """Return whether refresh is throttled while ``_REFRESH_LOCK`` is held."""
+
+    retry_not_before = _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.get(refresh_key)
+    if retry_not_before is not None:
+        if now_monotonic < retry_not_before:
+            return True
+        _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)
+    last = _LAST_REFRESH_MONOTONIC.get(refresh_key)
+    return last is not None and now_monotonic - last < float(interval_s)
 
 
 def maybe_refresh_day0_hourly_vectors(
@@ -890,8 +908,11 @@ def maybe_refresh_day0_hourly_vectors(
             if not models:
                 continue
             with _REFRESH_LOCK:
-                last = _LAST_REFRESH_MONOTONIC.get(refresh_key)
-                if last is not None and now_monotonic - last < float(interval_s):
+                if _refresh_throttled_locked(
+                    refresh_key,
+                    now_monotonic=now_monotonic,
+                    interval_s=interval_s,
+                ):
                     skipped_throttle += 1
                     continue
             quota_context = (
@@ -904,8 +925,11 @@ def maybe_refresh_day0_hourly_vectors(
                     skipped_quota += 1
                     break
                 with _REFRESH_LOCK:
-                    last = _LAST_REFRESH_MONOTONIC.get(refresh_key)
-                    if last is not None and now_monotonic - last < float(interval_s):
+                    if _refresh_throttled_locked(
+                        refresh_key,
+                        now_monotonic=now_monotonic,
+                        interval_s=interval_s,
+                    ):
                         skipped_throttle += 1
                         continue
                     _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
@@ -949,13 +973,10 @@ def maybe_refresh_day0_hourly_vectors(
                         reason="DAY0_HOURLY_BUNDLE_INCOMPLETE",
                     )
                 )
-                retry_after_s = min(
-                    max(0.0, float(interval_s)),
-                    INCOMPLETE_BUNDLE_RETRY_INTERVAL_S,
-                )
                 with _REFRESH_LOCK:
-                    _LAST_REFRESH_MONOTONIC[refresh_key] = (
-                        now_monotonic - max(0.0, float(interval_s)) + retry_after_s
+                    _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
+                    _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] = (
+                        time.monotonic() + INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
                     )
                 continue
             for target_date in target_dates:

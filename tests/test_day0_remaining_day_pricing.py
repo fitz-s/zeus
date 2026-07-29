@@ -2509,8 +2509,18 @@ class TestRequestHashProvenance:
             ("Sao Paulo", "America/Sao_Paulo"),
         ],
     )
+    @pytest.mark.parametrize(
+        ("first_interval_s", "next_interval_s"),
+        [(1800.0, 300.0), (300.0, 1800.0)],
+        ids=["interval_1800_to_300", "interval_300_to_1800"],
+    )
     def test_partial_expected_bundle_returns_typed_unavailable_and_retries_soon(
-        self, monkeypatch, city_name, timezone_name
+        self,
+        monkeypatch,
+        city_name,
+        timezone_name,
+        first_interval_s,
+        next_interval_s,
     ):
         """Held-city partial bundles retry inside freshness law, never persist partials."""
         import src.data.day0_hourly_vectors as hv
@@ -2544,12 +2554,13 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
         monkeypatch.setattr(hv.time, "monotonic", lambda: clock["now"])
         hv._LAST_REFRESH_MONOTONIC.clear()
+        hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
 
         decision_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
         first = hv.maybe_refresh_day0_hourly_vectors(
             [city],
             decision_time=decision_time,
-            interval_s=1800.0,
+            interval_s=first_interval_s,
             return_stats=True,
         )
         assert first.vectors_written == 0
@@ -2564,20 +2575,37 @@ class TestRequestHashProvenance:
             "ukmo_global_deterministic_10km",
         )
         assert attempts == {"fetch": 1, "persist": 0}
+        refresh_key = f"{city_name}|2026-06-10"
+        assert refresh_key not in hv._LAST_REFRESH_MONOTONIC
+        assert hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] == (
+            clock["now"] + hv.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+        )
 
-        clock["now"] += hv.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S + 1.0
+        clock["now"] += 1.0
+        too_soon = hv.maybe_refresh_day0_hourly_vectors(
+            [city],
+            decision_time=decision_time + timedelta(seconds=1.0),
+            interval_s=next_interval_s,
+            return_stats=True,
+        )
+        assert too_soon.vectors_written == 0
+        assert too_soon.cities_skipped_throttle == 1
+        assert attempts == {"fetch": 1, "persist": 0}
+
+        clock["now"] += hv.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
         second = hv.maybe_refresh_day0_hourly_vectors(
             [city],
             decision_time=decision_time + timedelta(
                 seconds=hv.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S + 1.0
             ),
-            interval_s=1800.0,
+            interval_s=next_interval_s,
             return_stats=True,
         )
 
         assert second.vectors_written == 6
         assert second.unavailable_bundles == ()
         assert attempts == {"fetch": 2, "persist": 2}
+        assert refresh_key not in hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
 
     def test_quota_block_stops_batch_without_fetch_or_throttle(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
