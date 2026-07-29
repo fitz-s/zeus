@@ -1,8 +1,12 @@
-# Created: 2026-07-08 (as test_no_edge_rule1_guard.py)
-# Rewritten: 2026-07-28 — the guard it tests was inverted, not tuned.
-# Rewritten again: 2026-07-28 — adversarial review (GPT-5.6 Pro) on PR #452
-# found the replacement guard itself defective: it hard-blocked (reproducing
-# the original defect's shape pointed the other way), its evidence predicate
+# Lifecycle: created=2026-07-08; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Purpose: Fire/silent regression for the unsupported_edge_claim_guard Stop hook — the advisory-only replacement for no_edge_rule1_guard.
+# Reuse: Re-run this file before trusting the guard's behavior; it is the executable spec for fire/silent/known-limit cases.
+#
+# History: created 2026-07-08 as test_no_edge_rule1_guard.py. Rewritten
+# 2026-07-28 when the guard it tests was inverted, not tuned. Rewritten again
+# 2026-07-28 after adversarial review (GPT-5.6 Pro) on PR #452 found the
+# replacement guard itself defective: it hard-blocked (reproducing the
+# original defect's shape pointed the other way), its evidence predicate
 # contradicted its own message text (releasing on ANY one of three claimed-
 # required categories, and on bare keywords with no number), and its sample-
 # scope inference was unfixable prose-parsing dressed up as precision. This
