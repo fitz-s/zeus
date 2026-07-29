@@ -4040,8 +4040,10 @@ def _canonical_trade_write_lease(conn, *, owner: str, deadline_ms: int, max_hold
             ),
             None,
         )
-    except Exception:
-        main_path = None
+    except Exception as exc:
+        raise RuntimeError(
+            "canonical TRADE DB identity unavailable for writer lease"
+        ) from exc
     if main_path != _zeus_trade_db_path().resolve(strict=False):
         return nullcontext()
 
@@ -4074,8 +4076,10 @@ def _trade_writer_lease_required(conn: sqlite3.Connection) -> bool:
             None,
         )
         return main_path == _zeus_trade_db_path().resolve(strict=False)
-    except Exception:
-        return True
+    except Exception as exc:
+        raise RuntimeError(
+            "canonical TRADE DB identity unavailable for writer admission"
+        ) from exc
 
 
 def _open_entry_risk_reservation(
@@ -6623,6 +6627,10 @@ def execute_exit_order(
             # uncommitted persist and return a CLEAN transient rejection so the candidate
             # re-attempts next cycle. Non-lock OperationalError re-raises (unchanged).
             if "database is locked" not in str(exc).lower():
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 raise
             try:
                 conn.rollback()
@@ -6643,6 +6651,15 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
+        except BaseException:
+            # The coordinator lease serializes writers but does not own the
+            # caller's SQLite transaction. Never release the file lease while
+            # an unexpected pre-venue failure still holds a write transaction.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
 
         logger.info(
             "SELL ORDER: token=%s...%s @ %.3f limit, %.2f shares (mid=%.3f, bid=%s)",

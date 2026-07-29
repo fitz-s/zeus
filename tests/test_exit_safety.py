@@ -3964,6 +3964,65 @@ def test_exit_ctf_reservation_failure_rolls_back_snapshot_command_event_and_rese
         _clear_exit_submit_prereqs()
 
 
+def test_exit_unexpected_prevenue_failure_rolls_back_caller_transaction(conn, monkeypatch):
+    from src.execution import executor
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    snapshot_id = _ensure_snapshot(conn, snapshot_id="snap-exit-unexpected-rollback")
+    conn.commit()
+    baseline = {
+        "snapshots": conn.execute("SELECT COUNT(*) FROM collateral_ledger_snapshots").fetchone()[0],
+        "commands": conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0],
+        "events": conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0],
+        "reservations": conn.execute("SELECT COUNT(*) FROM collateral_reservations").fetchone()[0],
+    }
+
+    class FakeClient:
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == [YES_TOKEN]
+            return {
+                "authority_tier": "CHAIN",
+                "ctf_token_balances": {YES_TOKEN: 50},
+                "ctf_token_allowances": {YES_TOKEN: 50},
+            }
+
+        def place_limit_order(self, **_kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("unexpected pre-venue failure must prevent submit")
+
+    def fail_after_command_insert(*_args, **_kwargs):
+        raise RuntimeError("injected unexpected pre-venue failure")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    monkeypatch.setattr(executor, "_trade_writer_lease_required", lambda _conn: True)
+    monkeypatch.setattr("src.state.venue_command_repo.append_event", fail_after_command_insert)
+    try:
+        with pytest.raises(RuntimeError, match="injected unexpected pre-venue failure"):
+            execute_exit_order(
+                create_exit_order_intent(
+                    trade_id="pos-exit-unexpected-rollback",
+                    token_id=YES_TOKEN,
+                    shares=5.0,
+                    current_price=0.50,
+                    best_bid=0.49,
+                    executable_snapshot_id=snapshot_id,
+                ),
+                conn=conn,
+                decision_id="exit-unexpected-rollback",
+            )
+
+        assert conn.in_transaction is False
+        assert conn.execute("SELECT COUNT(*) FROM collateral_ledger_snapshots").fetchone()[0] == baseline["snapshots"]
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == baseline["commands"]
+        assert conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0] == baseline["events"]
+        assert conn.execute("SELECT COUNT(*) FROM collateral_reservations").fetchone()[0] == baseline["reservations"]
+    finally:
+        _clear_exit_submit_prereqs()
+
+
 def test_exit_refuses_caller_transaction_before_lease_without_rollback(conn, monkeypatch):
     from src.execution import executor
     from src.execution.executor import create_exit_order_intent, execute_exit_order

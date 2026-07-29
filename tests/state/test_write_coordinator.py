@@ -64,6 +64,28 @@ def test_live_and_bulk_share_same_file_gate(tmp_path: Path) -> None:
     assert not (tmp_path / "zeus-world.db.writer-lock.bulk").exists()
 
 
+def test_exit_writer_identity_failure_cannot_bypass_trade_lease() -> None:
+    from src.execution.executor import (
+        _canonical_trade_write_lease,
+        _trade_writer_lease_required,
+    )
+
+    class BrokenIdentityConnection:
+        def execute(self, _sql):
+            raise sqlite3.OperationalError("identity probe unavailable")
+
+    conn = BrokenIdentityConnection()
+    with pytest.raises(RuntimeError, match="canonical TRADE DB identity unavailable"):
+        _canonical_trade_write_lease(
+            conn,
+            owner="identity-failure",
+            deadline_ms=10,
+            max_hold_ms=10,
+        )
+    with pytest.raises(RuntimeError, match="canonical TRADE DB identity unavailable"):
+        _trade_writer_lease_required(conn)
+
+
 def test_monitor_and_exit_trade_writers_serialize_wal_transactions_with_telemetry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
