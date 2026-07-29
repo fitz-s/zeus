@@ -810,7 +810,7 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
             ),
             max_age=timedelta(seconds=30),
             allow_provisional_day0_replacement=True,
-            entry_authority=False,
+            probability_use=adapter._CurrentProbabilityUse.HELD_MONITOR,
         )
     forecast.close()
     observations.close()

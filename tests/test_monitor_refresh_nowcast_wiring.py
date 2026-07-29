@@ -434,7 +434,10 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
         assert kwargs["observation_conn"] is world
         assert kwargs["required_condition_id"] == condition_id
         assert kwargs["allow_provisional_day0_replacement"] is True
-        assert kwargs["entry_authority"] is False
+        assert (
+            kwargs["probability_use"]
+            is event_reactor_adapter._CurrentProbabilityUse.HELD_MONITOR
+        )
         kwargs["day0_payload_out"].update(
             {
                 "_edli_global_day0_binding": {

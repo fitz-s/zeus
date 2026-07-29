@@ -160,6 +160,7 @@ import time as _time
 import zlib
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
+from enum import StrEnum
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 from decimal import Decimal, ROUND_FLOOR
@@ -7438,7 +7439,7 @@ def event_bound_live_adapter_from_trade_conn(
                     max_age=FRESHNESS_WINDOW_DEFAULT,
                     allow_unobserved_day0_replacement=not is_forecast_lane,
                     allow_provisional_day0_replacement=not is_forecast_lane,
-                    entry_authority=False,
+                    probability_use=_CurrentProbabilityUse.HELD_MONITOR,
                     cache_metadata_out=cache_metadata,
                 )
             except Exception as exc:  # noqa: BLE001 - held authority remains fail closed
@@ -12997,6 +12998,7 @@ def _current_global_actuation_prepared_family(
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_WITNESS_MISSING")
     decision = getattr(global_actuation, "decision", None)
     candidate = getattr(decision, "candidate", None)
+    probability_use = _current_probability_use_for_global_candidate(candidate)
     required_condition_id = str(
         getattr(candidate, "condition_id", "") or ""
     ).strip()
@@ -13016,17 +13018,12 @@ def _current_global_actuation_prepared_family(
             selected, DeterministicBinPayoffWitness
         ),
         allow_unobserved_day0_replacement=(
-            str(getattr(candidate, "action", "BUY") or "BUY").upper()
-            == "SELL"
+            probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
         ),
         allow_provisional_day0_replacement=(
-            str(getattr(candidate, "action", "BUY") or "BUY").upper()
-            == "SELL"
+            probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
         ),
-        entry_authority=(
-            str(getattr(candidate, "action", "BUY") or "BUY").upper()
-            != "SELL"
-        ),
+        probability_use=probability_use,
     )
     current_witness = getattr(current, "probability_witness", None)
     probability_mismatches = (
@@ -30484,6 +30481,54 @@ def _prepared_candidate_payoff_q_lcb_cap(
     return matches[0]
 
 
+class _CurrentProbabilityUse(StrEnum):
+    ENTRY = "entry"
+    HELD_MONITOR = "held_monitor"
+    REDUCE_ONLY_EXIT = "reduce_only_exit"
+
+
+def _current_probability_use_for_global_candidate(
+    candidate: object,
+) -> _CurrentProbabilityUse:
+    """Derive probability scope from the solver's typed capital action."""
+
+    from src.solve.solver import (
+        GlobalSingleOrderCandidate,
+        GlobalSingleOrderSellCandidate,
+    )
+
+    if isinstance(candidate, GlobalSingleOrderSellCandidate):
+        return _CurrentProbabilityUse.REDUCE_ONLY_EXIT
+    if isinstance(candidate, GlobalSingleOrderCandidate):
+        return _CurrentProbabilityUse.ENTRY
+    # SCOPE: this selected global-auction candidate only.
+    # DRAIN: the next auction emits one of the two canonical typed candidates.
+    # RESET: the next submit preflight rebinds the freshly selected candidate.
+    raise ValueError("GLOBAL_ACTUATION_CANDIDATE_TYPE_INVALID")
+
+
+def _post_local_incomplete_day0_redecision_authority(
+    *,
+    observation_fact: Mapping[str, object] | None,
+    allow_incomplete_replacement: bool,
+    probability_use: _CurrentProbabilityUse,
+    target_date: date,
+    local_date: date,
+) -> bool:
+    """Keep reduce-only statistical q alive while final source proof drains."""
+
+    return bool(
+        observation_fact is not None
+        and allow_incomplete_replacement
+        and probability_use
+        in {
+            _CurrentProbabilityUse.HELD_MONITOR,
+            _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+        }
+        and target_date < local_date
+    )
+
+
 def _prepare_current_global_probability_family(
     event: OpportunityEvent,
     *,
@@ -30498,7 +30543,7 @@ def _prepare_current_global_probability_family(
     allow_partial_deterministic: bool | None = None,
     allow_unobserved_day0_replacement: bool = False,
     allow_provisional_day0_replacement: bool = False,
-    entry_authority: bool = True,
+    probability_use: _CurrentProbabilityUse = _CurrentProbabilityUse.ENTRY,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
@@ -30537,8 +30582,9 @@ def _prepare_current_global_probability_family(
         raise ValueError("GLOBAL_UNOBSERVED_DAY0_REPLACEMENT_POLICY_INVALID")
     if not isinstance(allow_provisional_day0_replacement, bool):
         raise ValueError("GLOBAL_PROVISIONAL_DAY0_REPLACEMENT_POLICY_INVALID")
-    if not isinstance(entry_authority, bool):
-        raise ValueError("GLOBAL_ENTRY_AUTHORITY_POLICY_INVALID")
+    if not isinstance(probability_use, _CurrentProbabilityUse):
+        raise ValueError("GLOBAL_PROBABILITY_USE_INVALID")
+    entry_authority = probability_use is _CurrentProbabilityUse.ENTRY
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
     rows = _event_family_market_topology_rows(topology_conn, payload)
@@ -30573,7 +30619,7 @@ def _prepare_current_global_probability_family(
     day0_snapshot: Mapping[str, object] | None = None
     day0_base_identity = ""
     provisional_day0_observation = False
-    post_local_provisional_monitor_authority = False
+    post_local_incomplete_monitor_authority = False
     provisional_day0_fact: Mapping[str, object] | None = None
     fast_residual_conditioning: Mapping[str, object] | None = None
     physical_frontier_requires_confirmation = False
@@ -30684,16 +30730,27 @@ def _prepare_current_global_probability_family(
                 raise ValueError(
                     "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY"
                 )
-            post_local_provisional_monitor_authority = bool(
-                provisional_day0_observation
-                and allow_provisional_day0_replacement
-                and not entry_authority
-                and local_target < local_now.date()
+            post_local_incomplete_monitor_authority = (
+                _post_local_incomplete_day0_redecision_authority(
+                    observation_fact=provisional_day0_fact,
+                    allow_incomplete_replacement=(
+                        allow_provisional_day0_replacement
+                    ),
+                    probability_use=probability_use,
+                    target_date=local_target,
+                    local_date=local_now.date(),
+                )
             )
             if (
                 local_target < local_now.date()
-                and not post_local_provisional_monitor_authority
+                and not post_local_incomplete_monitor_authority
             ):
+                # SCOPE: this completed local-day family only.
+                # DRAIN: a causal authorized settlement-channel observation
+                # restores reduce-only statistical q, or complete final-daily
+                # evidence upgrades the family to an exact simplex.
+                # RESET: the next held-family refresh consumes either proof;
+                # entry authority remains independently fail-closed.
                 raise ValueError("POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
             observation_table = day0_observation_conn.execute(
                 "SELECT 1 FROM sqlite_master "
@@ -31094,14 +31151,14 @@ def _prepare_current_global_probability_family(
                         "_edli_day0_q_mode": "fast_residual_conditioned_replacement",
                     }
                 )
-            elif post_local_provisional_monitor_authority:
+            elif post_local_incomplete_monitor_authority:
                 # Wall-clock completion does not make the information set
-                # complete.  The interval after the latest official HKO
-                # snapshot and before local midnight has happened physically,
-                # but remains unobserved by the settlement channel.  Price that
-                # causal tail with the same observation-conditioned Day0
-                # kernel used before midnight; the full-day replacement
-                # simplex ignores the provisional observation entirely.
+                # complete.  The interval after the latest authorized
+                # settlement-channel observation and before local midnight has
+                # happened physically, but remains unobserved by that channel.
+                # Held-position redecision must keep pricing that causal tail;
+                # only the complete final-daily proof may upgrade it to an
+                # exact settlement simplex.  Entry authority remains blocked.
                 components = _day0_remaining_global_probability_components(
                     event,
                     forecast_conn=forecast_conn,
@@ -31119,7 +31176,11 @@ def _prepare_current_global_probability_family(
                         "probability_authority": probability_authority,
                         "q_source": "day0_remaining_day",
                         "_edli_q_source": "day0_remaining_day",
-                        "_edli_day0_q_mode": "post_local_provisional_tail",
+                        "_edli_day0_q_mode": (
+                            "post_local_provisional_tail"
+                            if provisional_day0_observation
+                            else "post_local_incomplete_settlement_tail"
+                        ),
                     }
                 )
             else:

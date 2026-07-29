@@ -4630,6 +4630,7 @@ def _build_current_global_day0_family_snapshot(
             )
         event = OpportunityEvent(**dict(row))
         from src.engine.event_reactor_adapter import (
+            _CurrentProbabilityUse,
             _prepare_current_global_probability_family,
         )
 
@@ -4653,7 +4654,7 @@ def _build_current_global_day0_family_snapshot(
                 required_condition_id=condition_id,
                 allow_unobserved_day0_replacement=unobserved_prefix,
                 allow_provisional_day0_replacement=True,
-                entry_authority=False,
+                probability_use=_CurrentProbabilityUse.HELD_MONITOR,
             )
         except ValueError as exc:
             if (
