@@ -30192,21 +30192,39 @@ def _replacement_global_probability_components(
         return None
     matrix = np.asarray(columns, dtype=float).T
     point_q = np.asarray(points, dtype=float)
+    simplex_atol = 1e-9
     if (
         matrix.ndim != 2
         or matrix.shape[0] < 2
         or matrix.shape[1] != len(bindings)
         or not np.isfinite(matrix).all()
-        or (matrix < 0.0).any()
-        or (matrix > 1.0).any()
-        or not np.allclose(matrix.sum(axis=1), 1.0, atol=1e-9)
+        or (matrix < -simplex_atol).any()
+        or (matrix > 1.0 + simplex_atol).any()
+        or not np.allclose(
+            matrix.sum(axis=1),
+            1.0,
+            rtol=0.0,
+            atol=simplex_atol,
+        )
         or point_q.shape != (len(bindings),)
         or not np.isfinite(point_q).all()
-        or (point_q < 0.0).any()
-        or (point_q > 1.0).any()
-        or not math.isclose(float(point_q.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9)
+        or (point_q < -simplex_atol).any()
+        or (point_q > 1.0 + simplex_atol).any()
+        or not math.isclose(
+            float(point_q.sum()),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=simplex_atol,
+        )
     ):
         return None
+    # Bootstrap arithmetic may leave an otherwise valid simplex one ULP
+    # outside [0, 1]. Canonicalize only after the strict tolerance-bounded
+    # proof above; material probability violations remain fail-closed.
+    matrix = np.clip(matrix, 0.0, 1.0)
+    matrix /= matrix.sum(axis=1, keepdims=True)
+    point_q = np.clip(point_q, 0.0, 1.0)
+    point_q /= point_q.sum()
     # Producer basis records how the current served draws were constructed
     # (plain, finite-evidence widened, or rho-mixed). The global optimizer needs
     # their common decision semantics: each row is a current coherent settlement
@@ -31142,7 +31160,7 @@ def _prepare_current_global_probability_family(
                 )
                 if components is None:
                     raise ValueError(
-                        "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
+                        "GLOBAL_DAY0_FAST_RESIDUAL_SIMPLEX_INVALID"
                     )
                 probability_authority = (
                     "day0_conditioned_replacement_global_probability_v1"

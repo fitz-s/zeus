@@ -198,6 +198,56 @@ def test_fast_residual_bundle_is_one_conditioned_day0_probability_world(
         )
 
 
+def test_fast_residual_simplex_canonicalizes_only_ieee754_boundary_dust() -> None:
+    family = _family()
+    bindings = tuple(
+        OutcomeTokenBinding(
+            bin_id=f"bin-{int(candidate.bin.low)}",
+            condition_id=candidate.condition_id,
+            yes_token_id=candidate.yes_token_id,
+            no_token_id=candidate.no_token_id,
+        )
+        for candidate in family.candidates
+    )
+    bundle = _replacement_bundle()
+    bundle.q = {"bin-27": 1.0, "bin-28": 0.0}
+    bundle.provenance_json.update(
+        {
+            "q_bootstrap_samples_basis": "day0_fast_residual_joint_simplex_v1",
+            "day0_provisional_observation": _fast_residual_conditioning(),
+            "q_bootstrap_samples_by_bin": {
+                "bin-27": [np.nextafter(1.0, 2.0), 0.2],
+                "bin-28": [0.0, 0.8],
+            },
+        }
+    )
+
+    components = adapter._replacement_global_probability_components(
+        bundle,
+        candidates=family.candidates,
+        bindings=bindings,
+    )
+
+    assert components is not None
+    samples, point_q, _basis = components
+    assert samples[0].tolist() == [1.0, 0.0]
+    assert np.allclose(samples.sum(axis=1), 1.0, rtol=0.0, atol=1e-15)
+    assert point_q.tolist() == [1.0, 0.0]
+
+    bundle.provenance_json["q_bootstrap_samples_by_bin"] = {
+        "bin-27": [1.0 + 2e-9, 0.2],
+        "bin-28": [-2e-9, 0.8],
+    }
+    assert (
+        adapter._replacement_global_probability_components(
+            bundle,
+            candidates=family.candidates,
+            bindings=bindings,
+        )
+        is None
+    )
+
+
 def test_day0_execution_payload_binds_fast_probability_without_promoting_settlement_truth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2366,3 +2366,35 @@ Acceptance requires:
 - direct active/day0 settlement remains binary and its PnL is unchanged;
 - planning-lock, targeted settlement/state tests, compile, diff, evidence-based
   review, standard hot-fix landing, and post-restart settled-row evidence pass.
+
+## 2026-07-29 Day0 simplex floating-boundary continuity
+
+Live Ankara 2026-07-29 HIGH monitor refreshes repeatedly failed with
+`GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID` even though the current
+posterior identity, 11-bin point q, and all 400 bootstrap rows were coherent.
+The exact failing cell was `1.0000000000000002`: one IEEE-754 ULP above one.
+The consumer simultaneously accepted row sums within `1e-9` but rejected any
+cell strictly above one, so a numerically valid current simplex made held
+position redecision blind.
+
+The repair gives component bounds and row normalization one explicit
+`1e-9`, zero-relative-tolerance contract. Values inside that contract are
+clipped and renormalized to a canonical exact simplex before witness
+construction. Values outside it remain fail-closed under a distinct
+`GLOBAL_DAY0_FAST_RESIDUAL_SIMPLEX_INVALID` reason instead of being mislabeled
+as a posterior identity failure. This changes neither q, forecast/source
+authority, nor economic action law beyond floating-point dust.
+
+SCOPE is the current replacement global probability component reader for one
+weather family. DRAIN is the next held-monitor or event-reactor compile using
+the already-current posterior. RESET is a finite canonical component matrix
+whose cells lie in `[0,1]` and rows sum to one. Entry and exit share the same
+reader, so the fix is symmetric; malformed material violations still block.
+
+Allowed files are `src/engine/event_reactor_adapter.py`, its focused trusted
+replacement-probability antibody, and this plan. Acceptance requires:
+
+- the exact `nextafter(1.0, 2.0)` live failure compiles to `[1.0, 0.0]`;
+- a balanced material violation beyond `1e-9` still fails closed;
+- focused replacement/Day0/global-witness tests, planning-lock, compile, diff,
+  standard hot-fix landing, and post-restart fresh Ankara monitor evidence pass.
