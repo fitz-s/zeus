@@ -55,8 +55,8 @@ from src.execution.command_bus import (
     IntentKind,
     VenueCommand,
 )
+from src.execution import exchange_reconcile as _exchange_reconcile
 from src.execution.exit_safety import reconcile_review_required_exit_mutex_releases
-from src.execution.exchange_reconcile import _ensure_exit_fill_position_event
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
 from src.contracts.venue_submission_envelope import (
     LIVE_ORDER_MAX_UNIT_PRICE,
@@ -2710,7 +2710,7 @@ def _append_exit_order_fill_projection(
     if str(command.get("intent_kind") or "").upper() != "EXIT":
         return False
     try:
-        _ensure_exit_fill_position_event(
+        projected = _exchange_reconcile._ensure_exit_fill_position_event(
             conn,
             command=command,
             venue_order_id=venue_order_id,
@@ -2718,7 +2718,10 @@ def _append_exit_order_fill_projection(
             fill_price=fill_price,
             observed_at=_coerce_iso_datetime(observed_at),
             command_event=event_type,
+            venue_order_payload=_order_fact_point_payload(command),
         )
+        if not projected:
+            return False
         conn.execute(
             """
             UPDATE position_current
@@ -10667,7 +10670,7 @@ def _repair_exit_matched_order_fact_projection(
         )
     updated_command = dict(candidate)
     updated_command["state"] = CommandState.FILLED.value
-    _append_exit_order_fill_projection(
+    return _append_exit_order_fill_projection(
         conn,
         command=updated_command,
         venue_order_id=venue_order_id,
@@ -10676,7 +10679,6 @@ def _repair_exit_matched_order_fact_projection(
         observed_at=occurred_at,
         event_type=CommandEventType.FILL_CONFIRMED.value,
     )
-    return True
 
 
 def reconcile_exit_lifecycle_alignment_repairs(conn: sqlite3.Connection) -> dict:
