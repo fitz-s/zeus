@@ -926,16 +926,14 @@ def _accumulate_hko_reading(conn, *, schema: str = "main") -> bool:
         )
         conn.execute("RELEASE SAVEPOINT hko_rhrread_source")
         savepoint_open = False
-        conn.commit()
     except Exception as exc:  # noqa: BLE001 — source transaction must fail closed
-        try:
-            if savepoint_open:
+        if savepoint_open:
+            try:
                 conn.execute("ROLLBACK TO SAVEPOINT hko_rhrread_source")
                 conn.execute("RELEASE SAVEPOINT hko_rhrread_source")
-            else:
-                conn.rollback()
-        except Exception:  # noqa: BLE001 — retain the original source failure
-            logger.exception("HKO rhrread source transaction rollback failed")
+            except Exception:
+                logger.exception("HKO rhrread source savepoint cleanup failed")
+                raise
         logger.error(
             "HKO_RHRREAD_SOURCE_TRANSACTION_FAILED source=hko_rhrread_spot "
             "target_date=%s publish_ts=%s exc=%s: %s",

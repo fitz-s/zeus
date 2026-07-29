@@ -459,12 +459,8 @@ class TestHkoSpotPrintWriterAndFold:
         with pytest.raises(ValueError, match="missing source updateTime"):
             _hko_rhrread_source_issued_at({"temperature": {"data": []}})
 
-    def test_hko_type_specimen_spot_reading_enters_day0_fact_at_29(self):
-        """The Hong Kong 2026-07-15 defect-4 type specimen, this time through
-        the ledger: a spot print of 29.0C must be visible to the day0 fact
-        reduction (HKO has no settlement-grade ledger channel yet -- only the
-        physical rhrread_spot lane, matching require_settlement_channel=False,
-        the same physical/settlement split every other city uses)."""
+    def test_hko_spot_reading_is_excluded_from_settlement_day0_fact(self):
+        """HKO spot telemetry may condition trajectory, never settlement extrema."""
         conn = _conn()
         append_print(
             conn, city="Hong Kong", station_id="HKO", source_channel="hko_rhrread_spot",
@@ -475,9 +471,7 @@ class TestHkoSpotPrintWriterAndFold:
             conn, city="Hong Kong", target_date="2026-07-15", temperature_metric="high",
             decision_time=datetime(2026, 7, 14, 19, 0, tzinfo=UTC),
         )
-        assert fact is not None
-        assert fact["observed_extreme_native"] == 29.0
-        assert fact["source"] == "observation_prints:hko_rhrread_spot"
+        assert fact is None
 
 
 # ---------------------------------------------------------------------------
