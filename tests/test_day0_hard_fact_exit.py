@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-07-29
 # Authority basis: alpha-clock realignment plus adversarial review MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),
 #   #3-wiring (resting-order cancel), #4 (METAR plausibility bound), #5 (day0
@@ -31,6 +31,7 @@ Relationship contracts:
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import date as Date
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -39,6 +40,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from src.execution.day0_hard_fact_exit import (
+    HardFactEvidence,
     HardFactVerdict,
     _final_daily_observation_extreme,
     _hko_rounded_extremes,
@@ -141,6 +143,13 @@ def _manila():
     )
 
 
+def _shenzhen():
+    return SimpleNamespace(
+        name="Shenzhen", timezone="Asia/Shanghai", settlement_unit="C",
+        wu_station="ZGSZ", settlement_source_type="wu_icao",
+    )
+
+
 def _hong_kong():
     return SimpleNamespace(
         name="Hong Kong", timezone="Asia/Hong_Kong", settlement_unit="C",
@@ -162,6 +171,41 @@ def _set_metar_memo(monkeypatch, value):
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit._metar_rounded_extreme",
         lambda city_name, target_date, metric, **kwargs: value,
+    )
+
+
+def _hard_fact_observation_conn(*, station_id: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            local_timestamp TEXT, utc_timestamp TEXT, imported_at TEXT,
+            running_max REAL, running_min REAL, authority TEXT,
+            causality_status TEXT, temperature_metric TEXT
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Shenzhen", "2026-06-10", "wu_icao_history", station_id,
+            "2026-06-10T23:00:00+08:00", "2026-06-10T15:00:00+00:00",
+            "2026-06-10T15:01:00+00:00", 28.6, 24.0, "VERIFIED", "OK", "high",
+        ),
+    )
+    return conn
+
+
+def _valid_hard_fact_evidence(*, station_id: str = "ZGSZ") -> HardFactEvidence:
+    return HardFactEvidence(
+        source="wu_api+durable_observation_instants",
+        station_id=station_id,
+        observed_at="2026-06-10T15:00:00+00:00",
+        issued_at="2026-06-10T15:01:00+00:00",
+        raw_extreme=28.6,
+        rounded_extreme=29.0,
+        payload_identity="a" * 64,
+        source_identity="wu_api:ZGSZ+wu_icao_history:ZGSZ",
     )
 
 
@@ -999,7 +1043,16 @@ class TestSourceDiscipline:
                 running_min REAL,
                 authority TEXT NOT NULL,
                 causality_status TEXT,
-                temperature_metric TEXT
+                temperature_metric TEXT,
+                station_id TEXT GENERATED ALWAYS AS (
+                    CASE city
+                        WHEN 'Tokyo' THEN 'RJTT'
+                        WHEN 'Paris' THEN 'LFPB'
+                        WHEN 'Manila' THEN 'RPLL'
+                        ELSE ''
+                    END
+                ) VIRTUAL,
+                imported_at TEXT GENERATED ALWAYS AS (utc_timestamp) VIRTUAL
             )"""
         )
         return conn
@@ -1051,7 +1104,7 @@ class TestSourceDiscipline:
         assert verdict is not None
         assert verdict.action == "HOLD_STRUCTURAL_WIN"
         assert verdict.rounded_extreme == pytest.approx(18.0)
-        assert verdict.source == "durable_observation_instants"
+        assert verdict.source == "wu_icao_history"
         belief = hard_fact_monitor_belief(verdict=verdict, direction="buy_no")
         assert belief is not None
         assert belief.held_side_prob == pytest.approx(1.0)
@@ -1233,11 +1286,9 @@ class TestSourceDiscipline:
             city=_tokyo(),
             now=NOW,
         )
-        assert verdict is not None
-        assert verdict.action == "HOLD_STRUCTURAL_WIN"
-        belief = hard_fact_monitor_belief(verdict=verdict, direction=Direction.NO)
-        assert belief is not None
-        assert belief.held_side_prob == pytest.approx(1.0)
+        # A bare scalar cannot create a held-position hard fact: it lacks the
+        # station and source clocks now persisted with absorbing q authority.
+        assert verdict is None
 
     def test_metar_kill_at_faithful_city_uses_zero_margin(self, monkeypatch):
         _set_metar_memo(monkeypatch, 26)
@@ -1250,8 +1301,8 @@ class TestSourceDiscipline:
     def test_recently_measured_wellington_uses_zero_margin_and_boundary_law(
         self, monkeypatch,
     ):
-        """Wellington's bounded empirical measurement authorizes same-station
-        METAR at zero margin for both the probability and hard-fact lanes."""
+        """The scalar remains available to the legacy helper, but cannot
+        authorize a held hard-fact verdict without WU payload provenance."""
         _set_metar_memo(monkeypatch, 26)
         effective, source = settlement_grade_effective_extreme(
             city=_wellington(), target_date="2026-06-10", metric="high", now=NOW,
@@ -1262,7 +1313,7 @@ class TestSourceDiscipline:
             position=_position(city="Wellington"),
             city=_wellington(),
             now=NOW,
-        ).action == "EXIT_DEAD_BIN"
+        ) is None
 
         _set_metar_memo(monkeypatch, 25)
         assert evaluate_hard_fact_exit(
@@ -1284,7 +1335,7 @@ class TestSourceDiscipline:
             position=_position(city="Ankara"),
             city=_ankara(),
             now=NOW,
-        ).action == "EXIT_DEAD_BIN"
+        ) is None
 
         _set_metar_memo(monkeypatch, 25)
         assert evaluate_hard_fact_exit(
@@ -1342,24 +1393,20 @@ class TestSourceDiscipline:
 
 class TestLaneEndToEnd:
     def test_boundary_death_exits_in_one_evaluation(self, monkeypatch):
-        """Reviewer Q1 scenario: hold YES 25C, METAR prints 26.x — ONE call to
-        the lane (== one monitor cycle) produces the exit verdict. No maturity
-        gate, no CI separation, no fresh_prob involved."""
+        """A fast-tail scalar alone is not a held hard-fact authority."""
         _set_metar_memo(monkeypatch, 26)
         verdict = evaluate_hard_fact_exit(position=_position(), city=_tokyo(), now=NOW)
-        assert verdict is not None and verdict.action == "EXIT_DEAD_BIN"
-        assert verdict.source == "same_station_fast_tail"
+        assert verdict is None
 
     def test_buy_no_death_ride_is_closed(self, monkeypatch):
-        """Reviewer 'worst way to lose money #1': buy_no on the shoulder the
-        extreme entered now exits via the hard-fact lane despite buy_no having
-        no estimator-lane authority."""
+        """A shoulder keeps its bin semantics, but unbound fast-tail input is
+        read-only rather than an exit authority."""
         _set_metar_memo(monkeypatch, 27)
         verdict = evaluate_hard_fact_exit(
             position=_position(direction="buy_no", bin_label="27°C or higher"),
             city=_tokyo(), now=NOW,
         )
-        assert verdict is not None and verdict.action == "EXIT_DEAD_BIN"
+        assert verdict is None
 
     def test_estimator_flip_is_not_a_hard_fact(self, monkeypatch):
         """The panic-sell category stays dead: extreme INSIDE the held finite
@@ -1542,7 +1589,9 @@ class TestRestingOrderCancel:
                 city TEXT, target_date TEXT, source TEXT, timezone_name TEXT,
                 local_timestamp TEXT, utc_timestamp TEXT, running_max REAL,
                 running_min REAL, authority TEXT, causality_status TEXT,
-                temperature_metric TEXT)"""
+                temperature_metric TEXT,
+                station_id TEXT GENERATED ALWAYS AS ('RJTT') VIRTUAL,
+                imported_at TEXT GENERATED ALWAYS AS (utc_timestamp) VIRTUAL)"""
         )
         conn.execute(
             "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -1574,7 +1623,9 @@ class TestRestingOrderCancel:
                 city TEXT, target_date TEXT, source TEXT, timezone_name TEXT,
                 local_timestamp TEXT, utc_timestamp TEXT, running_max REAL,
                 running_min REAL, authority TEXT, causality_status TEXT,
-                temperature_metric TEXT)"""
+                temperature_metric TEXT,
+                station_id TEXT GENERATED ALWAYS AS ('RJTT') VIRTUAL,
+                imported_at TEXT GENERATED ALWAYS AS (utc_timestamp) VIRTUAL)"""
         )
         conn.execute(
             "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -2492,3 +2543,104 @@ class TestTupleConnectionTopology:
         assert identity is not None and identity["metric"] == "high"
         conn.execute("DELETE FROM market_topology_state")
         assert _resolve_order_bin_identity(conn, "tok-dead-yes") is None
+
+
+def test_station_bound_durable_wu_evidence_structurally_wins_shenzhen_shape(monkeypatch):
+    """A WU record proves a generic 28C NO win only when it names ZGSZ."""
+    _set_metar_memo(monkeypatch, None)
+    verdict = evaluate_hard_fact_exit(
+        position=_position(
+            city="Shenzhen", target_date="2026-06-10", bin_label="28°C on June 10?",
+            direction="buy_no", temperature_metric="high",
+        ),
+        city=_shenzhen(), now=NOW,
+        world_conn=_hard_fact_observation_conn(station_id="ZGSZ"),
+    )
+
+    assert verdict is not None
+    assert verdict.action == "HOLD_STRUCTURAL_WIN"
+    assert verdict.rounded_extreme == pytest.approx(29.0)
+    assert verdict.evidence is not None
+    assert verdict.evidence.station_id == "ZGSZ"
+    assert verdict.evidence.raw_extreme == pytest.approx(28.6)
+    assert verdict.evidence.rounded_extreme == pytest.approx(29.0)
+    assert verdict.evidence.is_complete_for(_shenzhen())
+
+
+def test_station_mismatch_is_not_hard_fact_authority(monkeypatch):
+    _set_metar_memo(monkeypatch, None)
+
+    verdict = evaluate_hard_fact_exit(
+        position=_position(
+            city="Shenzhen", target_date="2026-06-10", bin_label="28°C on June 10?",
+            direction="buy_no", temperature_metric="high",
+        ),
+        city=_shenzhen(), now=NOW,
+        world_conn=_hard_fact_observation_conn(station_id="ZGGG"),
+    )
+
+    assert verdict is None
+
+
+def test_incomplete_hard_fact_evidence_is_read_only_not_fresh(monkeypatch):
+    from src.engine import monitor_refresh
+
+    pos = _position(city="Shenzhen", target_date="2026-06-10", p_posterior=0.42)
+    monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *args: True)
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda **kwargs: HardFactVerdict(
+            action="HOLD_STRUCTURAL_WIN", reason="unbound source", metric="high",
+            rounded_extreme=29.0, source="wu_api",
+        ),
+    )
+
+    probability, refreshed, fresh = monitor_refresh.monitor_probability_refresh(
+        pos, conn=None, city=_shenzhen(), target_d=Date(2026, 6, 10)
+    )
+
+    assert probability == pytest.approx(0.42)
+    assert fresh is False
+    assert getattr(refreshed, "_monitor_probability_is_fresh") is False
+    assert "day0_absorbing_hard_fact_evidence_incomplete:read_only" in refreshed.applied_validations
+
+
+def test_complete_hard_fact_evidence_round_trips_to_monitor_refreshed(monkeypatch):
+    from src.engine import monitor_refresh
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.portfolio import Position
+
+    evidence = _valid_hard_fact_evidence()
+    verdict = HardFactVerdict(
+        action="HOLD_STRUCTURAL_WIN", reason="bound WU hard fact", metric="high",
+        rounded_extreme=29.0, source=evidence.source, evidence=evidence,
+    )
+    pos = Position(
+        trade_id="hard-fact-round-trip", market_id="m", city="Shenzhen", cluster="CN",
+        target_date="2026-06-10", bin_label="28°C on June 10?", direction="buy_no",
+        temperature_metric="high", unit="C", state="day0_window", env="test",
+        entry_price=0.5, p_posterior=0.42, strategy_key="center_bin_buy",
+        entered_at="2026-06-10T12:00:00+00:00",
+    )
+    monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *args: True)
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda **kwargs: verdict,
+    )
+
+    probability, refreshed, fresh = monitor_refresh.monitor_probability_refresh(
+        pos, conn=None, city=_shenzhen(), target_d=Date(2026, 6, 10)
+    )
+    # refresh_position persists the producer attestation onto Position before
+    # cycle_runtime emits MONITOR_REFRESHED; exercise that persistence seam here.
+    refreshed.last_monitor_prob_is_fresh = fresh
+    events, _ = build_monitor_refreshed_canonical_write(
+        refreshed, sequence_no=1, phase_after="day0_window",
+        occurred_at="2026-06-10T15:02:00+00:00",
+    )
+    payload = json.loads(events[0]["payload_json"])
+    receipt = payload["monitor_probability_receipt"]
+
+    assert probability == pytest.approx(1.0)
+    assert fresh is True
+    assert receipt["hard_fact_evidence"] == evidence.as_dict()

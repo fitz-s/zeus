@@ -10554,7 +10554,7 @@ def test_day0_wu_observation_unavailable_reseeds_without_forecast_fallback(monke
 def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
     """Tokyo LOW regression: absorbing hard fact is exact monitor belief."""
     from src.engine import monitor_refresh
-    from src.execution.day0_hard_fact_exit import HardFactVerdict
+    from src.execution.day0_hard_fact_exit import HardFactEvidence, HardFactVerdict
 
     pos = _make_position(
         state="day0_window",
@@ -10579,6 +10579,13 @@ def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
             assert token_id == "tok_no_tokyo_low_21"
             return 0.99, 1.00, 100.0, 100.0
 
+    evidence = HardFactEvidence(
+        source="wu_api+wu_icao_history", station_id="RJTT",
+        observed_at="2026-06-18T08:00:00+00:00",
+        issued_at="2026-06-18T08:01:00+00:00",
+        raw_extreme=20.0, rounded_extreme=20.0,
+        payload_identity="a" * 64, source_identity="wu_api:RJTT+wu_icao_history:RJTT",
+    )
     monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *a, **k: True)
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
@@ -10587,7 +10594,8 @@ def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
             reason="running low extreme 20 killed bin [21.0,21.0]",
             metric="low",
             rounded_extreme=20.0,
-            source="same_station_fast_tail",
+            source=evidence.source,
+            evidence=evidence,
         ),
     )
     monkeypatch.setattr(
@@ -10617,12 +10625,13 @@ def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
     assert "held_prob=1.000000" in belief_tags[0]
     assert "forecast_posteriors_dominated_by_day0_hard_fact" in pos.applied_validations
     assert "model_divergence_panic_inapplicable:day0_absorbing_hard_fact" in pos.applied_validations
+    assert getattr(pos, "_monitor_probability_receipt")["hard_fact_evidence"] == evidence.as_dict()
 
 
 def test_active_same_day_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
     """Active same-day positions must not wait for phase transition before hard-fact overlay."""
     from src.engine import monitor_refresh
-    from src.execution.day0_hard_fact_exit import HardFactVerdict
+    from src.execution.day0_hard_fact_exit import HardFactEvidence, HardFactVerdict
 
     pos = _make_position(
         state="holding",
@@ -10647,6 +10656,13 @@ def test_active_same_day_absorbing_hard_fact_dominates_replacement_posterior(mon
             assert token_id == "tok_no_tokyo_low_21"
             return 0.99, 1.00, 100.0, 100.0
 
+    evidence = HardFactEvidence(
+        source="wu_api+wu_icao_history", station_id="RJTT",
+        observed_at="2026-06-18T08:00:00+00:00",
+        issued_at="2026-06-18T08:01:00+00:00",
+        raw_extreme=20.0, rounded_extreme=20.0,
+        payload_identity="b" * 64, source_identity="wu_api:RJTT+wu_icao_history:RJTT",
+    )
     monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *a, **k: True)
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
@@ -10655,7 +10671,8 @@ def test_active_same_day_absorbing_hard_fact_dominates_replacement_posterior(mon
             reason="running low extreme 20 killed bin [21.0,21.0]",
             metric="low",
             rounded_extreme=20.0,
-            source="same_station_fast_tail",
+            source=evidence.source,
+            evidence=evidence,
         ),
     )
     monkeypatch.setattr(
