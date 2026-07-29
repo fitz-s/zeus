@@ -273,7 +273,7 @@ def test_m5_authority_deadline_fails_closed_without_publishing_health(monkeypatc
 
 def test_m5_authority_job_isolated_from_long_fill_bridge_repair() -> None:
     from concurrent.futures import ThreadPoolExecutor
-    from threading import Event, Lock
+    from threading import Event
 
     tree = ast.parse(_PRICE_CHANNEL_DAEMON.read_text(encoding="utf-8"))
     jobs: dict[str, ast.Call] = {}
@@ -340,25 +340,13 @@ def test_m5_authority_job_isolated_from_long_fill_bridge_repair() -> None:
 
     bridge_started = Event()
     release_bridge = Event()
-    writer_lock = Lock()
-    active_writers = 0
-    max_active_writers = 0
-
-    def _canonical_write() -> None:
-        nonlocal active_writers, max_active_writers
-        with writer_lock:
-            active_writers += 1
-            max_active_writers = max(max_active_writers, active_writers)
-            active_writers -= 1
 
     def _long_bridge_repair() -> str:
-        _canonical_write()
         bridge_started.set()
         assert release_bridge.wait(timeout=1.0)
         return "repaired"
 
     def _m5_proof() -> dict[str, str]:
-        _canonical_write()
         return {"status": "m5_authority_proof_complete"}
 
     with (
@@ -378,7 +366,6 @@ def test_m5_authority_job_isolated_from_long_fill_bridge_repair() -> None:
         assert not bridge_future.done()
         release_bridge.set()
         assert bridge_future.result(timeout=0.2) == "repaired"
-    assert max_active_writers == 1
 
 
 def test_price_channel_clob_fetchers_are_budget_bound(monkeypatch) -> None:
@@ -2851,7 +2838,9 @@ def test_position_fill_redecision_reads_before_world_write_without_poisoning_cha
     assert "_edli_durable_fill_bridge_scan" not in m5_src
 
     repair_src = inspect.getsource(lane._edli_fill_bridge_repair_cycle)
-    assert '"scheduler_failure_reason": fill_redecision_error' in repair_src
+    assert '"scheduler_failure_reason": scheduler_failure_reason' in repair_src
+    assert "canonical_failure_reasons[0]" in repair_src
+    assert "else fill_redecision_error" in repair_src
     assert "processed_with_fill_redecision_error" in repair_src
 
 

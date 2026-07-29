@@ -48,9 +48,10 @@ ARTIFACT-ONLY DEPLOY: the launchd plist
 load/kickstart any service.
 
 INV-37: the reconcile cycle's fill-bridge cross-DB write goes through the sanctioned
-``get_trade_connection_with_world_required`` ATTACH+SAVEPOINT path; no independent cross-DB
-connection is opened — the process boundary relocates WHICH process owns the transaction; it
-does not relax the cross-DB-write law.
+``get_trade_connection_with_world_required`` ATTACH+SAVEPOINT path while holding the
+canonical WORLD+TRADE writer lease; no independent cross-DB connection is opened — the
+process boundary relocates WHICH process owns the transaction; it does not relax the
+cross-DB-write law.
 """
 from __future__ import annotations
 
@@ -359,9 +360,12 @@ def main() -> None:
         coalesce=True,
         executor="m5_authority",
     )
-    # PRODUCER 3A: durable fill bridge and derived fill-redecision repair. It
-    # remains single-instance and uses the existing canonical writer gates, but
-    # a long repair pass can no longer consume M5's proof cadence.
+    # PRODUCER 3A: durable fill bridge and derived fill-redecision repair.
+    # SCOPE: persisted trade facts, WORLD dispositions, TRADE positions, and
+    # their derived wake. DRAIN: idempotent minute sweeps retry durable orphans.
+    # RESET: the next canonical-success pass clears failed scheduler health.
+    # It remains single-instance and uses canonical writer gates, but a long
+    # repair pass can no longer consume M5's proof cadence.
     _scheduler.add_job(
         _scheduler_job("edli_fill_bridge_repair")(_edli_fill_bridge_repair_cycle),
         "interval",

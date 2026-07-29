@@ -11,7 +11,9 @@ from __future__ import annotations
 import ast
 import contextlib
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -223,6 +225,138 @@ def test_trade_gate_never_takes_world_mutex(monkeypatch):
         "exit:coordinator",
         "exit:world_mutex",
     ]
+
+
+def test_m5_and_fill_bridge_cycles_serialize_on_production_world_trade_gate(
+    monkeypatch,
+    tmp_path,
+):
+    from src.events import edli_trade_fact_bridge
+    from src.events import price_channel_redecision_router
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+    from src.state import write_coordinator
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    world_path = tmp_path / "world.db"
+    trade_path = tmp_path / "trades.db"
+    world_conn = sqlite3.connect(world_path)
+    init_schema(world_conn)
+    world_conn.close()
+    trade_conn = sqlite3.connect(trade_path)
+    init_schema_trade_only(trade_conn)
+    trade_conn.close()
+
+    telemetry = []
+    coordinator = WriteCoordinator(
+        {
+            DBIdentity.WORLD: world_path,
+            DBIdentity.TRADE: trade_path,
+        },
+        telemetry_sink=telemetry.append,
+    )
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    monkeypatch.setattr(
+        lane,
+        "settings",
+        {
+            "edli": {
+                "enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "edli_user_channel_message_queue_path": "",
+                "edli_venue_reconcile_facts_path": "",
+            }
+        },
+    )
+
+    bridge_scan_started = Event()
+    release_bridge_scan = Event()
+    m5_gate_attempted = Event()
+    m5_world_opened = Event()
+
+    class _EmptyUserReader:
+        def poll(self, *, max_messages):  # noqa: ARG002
+            m5_gate_attempted.set()
+            return []
+
+    def _open_world(*args, **kwargs):  # noqa: ARG001
+        if bridge_scan_started.is_set():
+            m5_world_opened.set()
+        conn = sqlite3.connect(world_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _open_trade_with_world(*args, **kwargs):  # noqa: ARG001
+        conn = sqlite3.connect(trade_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+        return conn
+
+    def _blocking_bridge_scan(
+        conn,  # noqa: ARG001
+        *,
+        now=None,  # noqa: ARG001
+        failure_reasons=None,  # noqa: ARG001
+    ):
+        bridge_scan_started.set()
+        assert release_bridge_scan.wait(timeout=1.0)
+        return 0
+
+    monkeypatch.setattr(lane, "_edli_user_channel_reader", lambda _cfg: _EmptyUserReader())
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        _open_world,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_with_world_required",
+        _open_trade_with_world,
+    )
+    monkeypatch.setattr(
+        edli_trade_fact_bridge,
+        "append_confirmed_trade_facts_to_edli",
+        lambda conn, *, now: 0,
+    )
+    monkeypatch.setattr(
+        edli_trade_fact_bridge,
+        "append_rest_filled_orphan_trade_facts_to_edli",
+        lambda conn, *, now: 0,
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_durable_fill_bridge_work_exists_read_only",
+        lambda: True,
+    )
+    monkeypatch.setattr(lane, "_edli_durable_fill_bridge_scan", _blocking_bridge_scan)
+    monkeypatch.setattr(
+        price_channel_redecision_router,
+        "_edli_position_fill_redecision_cycle",
+        lambda: 0,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        repair_future = executor.submit(lane._edli_fill_bridge_repair_cycle)
+        assert bridge_scan_started.wait(timeout=1.0)
+        m5_future = executor.submit(lane._edli_user_channel_reconcile_cycle)
+        assert m5_gate_attempted.wait(timeout=1.0)
+        assert not m5_world_opened.wait(timeout=0.05)
+        release_bridge_scan.set()
+        repair_result = repair_future.result(timeout=1.0)
+        m5_result = m5_future.result(timeout=1.0)
+
+    assert repair_result["scheduler_failed"] is False
+    assert m5_result["status"] == "m5_authority_proof_complete"
+    bridge_leases = [
+        item for item in telemetry if item.owner == "price_channel_fill_bridge"
+    ]
+    assert len(bridge_leases) == 1
+    assert set(bridge_leases[0].db_set) == {"world", "trade"}
 
 
 def test_world_gate_releases_mutex_when_coordinator_times_out(monkeypatch):
@@ -467,6 +601,26 @@ def test_user_channel_reconcile_uses_world_main_with_trades_attached():
         if isinstance(target, ast.Name)
     }
     assert repair_openers["bridge_conn"] == "get_trade_connection_with_world_required"
+    bridge_gate = next(
+        sub
+        for sub in ast.walk(repair_node)
+        if isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Name)
+        and sub.func.id == "_PriceChannelWriteGate"
+        and any(
+            keyword.arg == "owner"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == "price_channel_fill_bridge"
+            for keyword in sub.keywords
+        )
+    )
+    scope = next(
+        keyword.value
+        for keyword in bridge_gate.keywords
+        if keyword.arg == "scope"
+    )
+    assert isinstance(scope, ast.Constant)
+    assert scope.value == "world_trade"
 
 
 def test_forever_ingestor_passes_independent_trade_and_world_gates():
