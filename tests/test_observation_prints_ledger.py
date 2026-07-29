@@ -1,5 +1,5 @@
 # Created: 2026-07-16
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-29
 # Authority basis: day0 defects 1-5 (Paris 2026-07-14 monotonicity regression,
 #   WU-backfill-frozen hour buckets, climatology-band self-blinding, HKO
 #   accumulator never folding its own spot read, Seoul binary exclusion where
@@ -424,7 +424,10 @@ class TestSeoulMarginThroughLedger:
 
 class TestHkoSpotPrintWriterAndFold:
     def test_rhrread_spot_reading_is_appended_with_hko_publish_clock(self):
-        from src.data.daily_obs_append import _append_hko_rhrread_print_to_ledger
+        from src.data.daily_obs_append import (
+            _append_hko_rhrread_print_to_ledger,
+            _hko_rhrread_source_issued_at,
+        )
 
         conn = _conn()
         data = {
@@ -432,8 +435,10 @@ class TestHkoSpotPrintWriterAndFold:
             "temperature": {"data": [{"place": "Hong Kong Observatory", "value": 29.0}]},
         }
         _append_hko_rhrread_print_to_ledger(
-            conn, data=data, temp_c=29.0,
+            conn, temp_c=29.0,
             now_utc=datetime(2026, 7, 15, 2, 25, tzinfo=UTC),
+            source_issued_at=_hko_rhrread_source_issued_at(data),
+            raw_report="{}",
         )
         row = conn.execute(
             "SELECT city, station_id, source_channel, publish_ts_utc, value_native, unit "
@@ -448,18 +453,11 @@ class TestHkoSpotPrintWriterAndFold:
         assert row["value_native"] == 29.0
         assert row["unit"] == "C"
 
-    def test_rhrread_spot_reading_falls_back_to_fetch_clock_without_update_time(self):
-        from src.data.daily_obs_append import _append_hko_rhrread_print_to_ledger
+    def test_rhrread_spot_reading_rejects_missing_source_publish_clock(self):
+        from src.data.daily_obs_append import _hko_rhrread_source_issued_at
 
-        conn = _conn()
-        now_utc = datetime(2026, 7, 15, 2, 25, tzinfo=UTC)
-        _append_hko_rhrread_print_to_ledger(
-            conn, data={"temperature": {"data": []}}, temp_c=29.0, now_utc=now_utc,
-        )
-        (publish_ts,) = conn.execute(
-            "SELECT publish_ts_utc FROM observation_prints"
-        ).fetchone()
-        assert publish_ts == now_utc.isoformat()
+        with pytest.raises(ValueError, match="missing source updateTime"):
+            _hko_rhrread_source_issued_at({"temperature": {"data": []}})
 
     def test_hko_type_specimen_spot_reading_enters_day0_fact_at_29(self):
         """The Hong Kong 2026-07-15 defect-4 type specimen, this time through
@@ -487,7 +485,7 @@ class TestHkoSpotPrintWriterAndFold:
 # ---------------------------------------------------------------------------
 
 
-class TestLedgerWriteFailSoft:
+class TestLedgerWriteFailures:
     def test_metar_ledger_append_failure_does_not_raise(self):
         from src.data.day0_fast_obs import (
             FAST_OBS_SOURCE_ID,
@@ -513,19 +511,21 @@ class TestLedgerWriteFailSoft:
         # Must not raise -- fail-soft is the whole point.
         _append_metar_prints_to_ledger(ExplodingConn(), eligible, [report])
 
-    def test_hko_ledger_append_failure_does_not_raise(self):
+    def test_hko_ledger_append_failure_propagates_to_source_transaction(self):
         from src.data.daily_obs_append import _append_hko_rhrread_print_to_ledger
 
         class ExplodingConn:
             def execute(self, *_a, **_k):
                 raise sqlite3.OperationalError("simulated ledger write failure")
 
-        _append_hko_rhrread_print_to_ledger(
-            ExplodingConn(),
-            data={"temperature": {"data": []}},
-            temp_c=29.0,
-            now_utc=datetime(2026, 7, 15, 2, 25, tzinfo=UTC),
-        )  # must not raise
+        with pytest.raises(sqlite3.OperationalError, match="simulated ledger write failure"):
+            _append_hko_rhrread_print_to_ledger(
+                ExplodingConn(),
+                temp_c=29.0,
+                now_utc=datetime(2026, 7, 15, 2, 25, tzinfo=UTC),
+                source_issued_at=datetime(2026, 7, 14, 18, 20, tzinfo=UTC),
+                raw_report="{}",
+            )
 
     def test_wu_ledger_append_failure_does_not_raise(self):
         import scripts.obs_live_tick as obs_tick
