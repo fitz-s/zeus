@@ -22,7 +22,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_current_state_identity_hash,
+    stable_hash,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +386,17 @@ def test_b71_f109_compares_owned_token_not_sibling_topology(conn):
 
 
 def _valid_day0_pre_submit_payload(**overrides):
+    provenance = {
+        "city": "Chicago",
+        "target_date": "2026-06-30",
+        "metric": "high",
+        "settlement_source": "wu_icao_history",
+        "station_id": "KMDW",
+        "configured_station_id": "KMDW",
+        "raw_payload_sha256": "a" * 64,
+        "observation_time": "2026-06-30T17:18:00+00:00",
+        "observation_available_at": "2026-06-30T17:18:01+00:00",
+    }
     payload = {
         "event_id": "evt-day0-presubmit",
         "final_intent_id": "intent-day0-presubmit",
@@ -465,7 +479,8 @@ def _valid_day0_pre_submit_payload(**overrides):
         "day0_q_mode": "remaining_day",
         "day0_remaining_models": 37,
         "rounded_value": 72.0,
-        "observation_time": "2026-06-30T17:18:00+00:00",
+        **provenance,
+        "day0_observation_provenance_hash": stable_hash(provenance),
         "day0_lcb_transform": {
             "yes_lcb_by_condition": {"cond-day0-presubmit": 0.95},
             "no_lcb_by_condition": {"cond-day0-presubmit": 0.05},
