@@ -5743,13 +5743,35 @@ def _complete_intentional_position_reduction(
             if intent_holding is not None
             else None
         )
-        fill_already_reflected = (
-            expected_remaining is not None
-            and expected_remaining > Decimal("1e-9")
-            and abs(open_shares - expected_remaining) <= Decimal("0.000001")
-        )
-        if fill_already_reflected:
-            remaining_shares = open_shares
+        if expected_remaining is not None:
+            tolerance = Decimal("0.000001")
+            if expected_remaining <= Decimal("1e-9"):
+                raise RuntimeError(
+                    "intentional reduction would manufacture a full close"
+                )
+            if open_shares > intent_holding + tolerance:
+                raise RuntimeError(
+                    "intentional reduction current exposure exceeds intent holding"
+                )
+            if open_shares + tolerance < expected_remaining:
+                raise RuntimeError(
+                    "intentional reduction current exposure is below fill target"
+                )
+            remaining_shares = expected_remaining
+            unreflected_fill = open_shares - expected_remaining
+            if abs(unreflected_fill) <= tolerance:
+                remaining_shares = open_shares
+            elif not _apply_partial_exit_fill(
+                position,
+                filled_shares=float(unreflected_fill),
+                remaining_shares=float(remaining_shares),
+                fill_price=fill_price,
+                order_id=order_id,
+                status=status,
+            ):
+                raise RuntimeError(
+                    "confirmed reduction could not converge to fill target"
+                )
         else:
             if newly_filled >= open_shares:
                 raise RuntimeError(

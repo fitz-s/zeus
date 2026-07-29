@@ -1350,7 +1350,15 @@ def test_confirmed_partial_reduction_trade_fact_reopens_exact_remaining_claim(co
     assert current["shares"] == pytest.approx(17.5)
 
 
-def test_confirmed_reduction_records_fill_already_reflected_by_chain(conn):
+@pytest.mark.parametrize(
+    ("chain_reflected_shares", "chain_reflected_cost"),
+    ((16.0, 11.2), (18.0, 12.6)),
+)
+def test_confirmed_reduction_records_fill_already_reflected_by_chain(
+    conn,
+    chain_reflected_shares,
+    chain_reflected_cost,
+):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position
     from src.state.venue_command_repo import append_trade_fact
@@ -1378,7 +1386,7 @@ def test_confirmed_reduction_records_fill_already_reflected_by_chain(conn):
         trade_id=position.trade_id,
         reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
         token_id=NO_TOKEN,
-        shares=6.0,
+        shares=4.0,
         current_market_price=0.60,
         best_bid=0.60,
         close_position=False,
@@ -1416,7 +1424,7 @@ def test_confirmed_reduction_records_fill_already_reflected_by_chain(conn):
         command_id="cmd-chain-reflected-reduction",
         position_id=position.trade_id,
         token_id=NO_TOKEN,
-        size=6.0,
+        size=4.0,
         price=0.60,
         venue_order_id=position.last_exit_order_id,
         created_at=(
@@ -1435,30 +1443,36 @@ def test_confirmed_reduction_records_fill_already_reflected_by_chain(conn):
         venue_order_id=position.last_exit_order_id,
         command_id="cmd-chain-reflected-reduction",
         state="CONFIRMED",
-        filled_size="6",
+        filled_size="4",
         fill_price="0.60",
         source="REST",
         observed_at="2026-07-16T00:00:00+00:00",
         raw_payload_hash=hashlib.sha256(
             b"chain-reflected-reduction"
         ).hexdigest(),
-        raw_payload_json={"size_matched": "6", "status": "CONFIRMED"},
+        raw_payload_json={"size_matched": "4", "status": "CONFIRMED"},
     )
 
-    position.shares = 14.0
-    position.size_usd = 9.8
-    position.cost_basis_usd = 9.8
-    position.chain_shares = 14.0
+    position.shares = chain_reflected_shares
+    position.size_usd = chain_reflected_cost
+    position.cost_basis_usd = chain_reflected_cost
+    position.chain_shares = chain_reflected_shares
     conn.execute(
         """
         UPDATE position_current
-           SET shares = 14.0,
-               size_usd = 9.8,
-               cost_basis_usd = 9.8,
-               chain_shares = 14.0
+           SET shares = ?,
+               size_usd = ?,
+               cost_basis_usd = ?,
+               chain_shares = ?
          WHERE position_id = ?
         """,
-        (position.trade_id,),
+        (
+            chain_reflected_shares,
+            chain_reflected_cost,
+            chain_reflected_cost,
+            chain_reflected_shares,
+            position.trade_id,
+        ),
     )
 
     stats = exit_lifecycle.check_pending_exits(
@@ -1468,21 +1482,23 @@ def test_confirmed_reduction_records_fill_already_reflected_by_chain(conn):
     )
 
     assert stats["reduced_from_trade_fact"] == 1
-    assert position.shares == pytest.approx(14.0)
+    assert position.shares == pytest.approx(16.0)
     current = conn.execute(
         "SELECT phase, shares, chain_shares FROM position_current WHERE position_id = ?",
         (position.trade_id,),
     ).fetchone()
     assert dict(current) == {
         "phase": "active",
-        "shares": 14.0,
-        "chain_shares": 14.0,
+        "shares": 16.0,
+        "chain_shares": chain_reflected_shares,
     }
     assert exit_lifecycle._recorded_reduction_fill_shares(
         conn,
         position_id=position.trade_id,
         order_id=reduction_order_id,
-    ) == Decimal("6.0")
+    ) == Decimal("4.0")
+    if chain_reflected_shares == 18.0:
+        assert position.nested_fills[-1]["filled_shares"] == pytest.approx(2.0)
 
 
 def test_pending_exit_fill_poller_skips_retry_without_order_id(conn):
