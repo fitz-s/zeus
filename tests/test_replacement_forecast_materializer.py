@@ -356,6 +356,88 @@ def test_day0_owner_witness_allows_current_owner_posterior_write(
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 1
 
 
+@pytest.mark.parametrize(
+    ("metric", "baseline_data_version", "absorbing_extreme", "fast_extreme"),
+    [
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 30.0, 31.0),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 21.0, 20.0),
+    ],
+)
+def test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+    baseline_data_version: str,
+    absorbing_extreme: float,
+    fast_extreme: float,
+) -> None:
+    """A newer fast extreme keeps its residual likelihood and exact enqueue owner."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    absorbing = replace(
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=absorbing_extreme,
+            day0_observed_extreme_source="wu_icao_history",
+            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+            day0_observed_extreme_sample_count=12,
+        ),
+        temperature_metric=metric,
+        baseline_data_version=baseline_data_version,
+    )
+    assert materialize_replacement_forecast_live(conn, absorbing).ok is True
+
+    current = replace(
+        absorbing,
+        computed_at=_dt(18, 10),
+        day0_observed_extreme_c=fast_extreme,
+        day0_observed_extreme_source="wu_api+same_station_fast_tail",
+        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+        day0_observed_extreme_sample_count=13,
+    )
+    likelihood = SimpleNamespace(
+        residual_weights_c=((0.0, 1.0),),
+        unknown_weight=0.0,
+        settlement_extreme_c=absorbing_extreme,
+        identity_hash="1" * 64,
+        as_payload=lambda: {
+            "identity_hash": "1" * 64,
+            "settlement_extreme_c": absorbing_extreme,
+        },
+    )
+    monkeypatch.setattr(
+        "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
+        lambda *args, **kwargs: likelihood,
+    )
+    witness = _day0_owner_witness(current, seed_file=tmp_path / "fast-owner.json")
+    _record_day0_owner(conn, current, witness)
+    prepared = _prepare_for_final_write(
+        conn, replace(current, day0_enqueue_owner_witness=witness)
+    )
+
+    conn.execute("BEGIN IMMEDIATE")
+    result = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    conn.commit()
+
+    assert result.ok is True
+    provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (result.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    assert provenance["q_shape"] == "fused_day0_fast_residual_likelihood"
+    assert (
+        provenance["day0_provisional_observation"]["observed_extreme_c"]
+        == fast_extreme
+    )
+    assert (
+        provenance["day0_provisional_observation"]["source"]
+        == "wu_api+same_station_fast_tail"
+    )
+
+
 def test_day0_owner_witness_blocks_swapped_owner_before_posterior_insert(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -738,6 +738,62 @@ def _request_with_day0_physical_frontier(
 
     if not candidates:
         return request
+    if request_extreme is None and request_observed_extreme is not None:
+        # A WU-settlement city can have a newer same-station fast print beyond
+        # the last absorbing WU extreme. Its residual likelihood already carries
+        # the settlement-channel frontier into every scenario, so replacing the
+        # request with that older WU carrier would discard current evidence and
+        # invalidate its exact enqueue witness. Preserve the provisional request
+        # only when both the fast value and the likelihood's WU bound dominate
+        # the durable frontier; missing/thin/mismatched likelihood stays fail-closed
+        # on the absorbing carrier below.
+        absorbing_frontier = (
+            min(item[0] for item in candidates)
+            if metric == "low"
+            else max(item[0] for item in candidates)
+        )
+        try:
+            from src.data.day0_fast_obs import (  # noqa: PLC0415
+                build_fast_station_residual_likelihood,
+            )
+
+            likelihood = build_fast_station_residual_likelihood(
+                conn,
+                city=request.city,
+                target_date=_date_text(request.target_date),
+                metric=metric,
+                observed_source=str(request.day0_observed_extreme_source or ""),
+                observation_time=request.day0_observed_extreme_observation_time,
+                decision_time=request.computed_at,
+            )
+            likelihood_frontier_raw = (
+                None
+                if likelihood is None
+                else getattr(likelihood, "settlement_extreme_c", None)
+            )
+            likelihood_frontier = (
+                None
+                if likelihood_frontier_raw is None
+                else float(likelihood_frontier_raw)
+            )
+        except (TypeError, ValueError):
+            likelihood_frontier = None
+        provisional_covers = (
+            request_observed_extreme <= absorbing_frontier
+            if metric == "low"
+            else request_observed_extreme >= absorbing_frontier
+        )
+        likelihood_covers = (
+            likelihood_frontier is not None
+            and math.isfinite(likelihood_frontier)
+            and (
+                likelihood_frontier <= absorbing_frontier
+                if metric == "low"
+                else likelihood_frontier >= absorbing_frontier
+            )
+        )
+        if provisional_covers and likelihood_covers:
+            return request
     frontier = min(item[0] for item in candidates) if metric == "low" else max(item[0] for item in candidates)
     dominant = [item for item in candidates if item[0] == frontier]
     current_dominant = [item for item in dominant if item[5]]
