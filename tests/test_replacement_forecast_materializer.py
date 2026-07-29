@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-28
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-19; last_reused=2026-07-28
+# Last reused/audited: 2026-07-29
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.

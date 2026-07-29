@@ -61,6 +61,7 @@ test_trust_policy:
     tests/data/test_fusion_upgrade_trigger.py: {created: "2026-06-11", last_used: "2026-07-17", note: "Fusion upgrade detects both provider-family growth and exact persisted source-row revision changes without repeated no-op materialization."}
     tests/data/test_previous_runs_substitution.py: {created: "2026-06-11", last_used: "2026-07-20", note: "Previous-runs substitution and replacement materialization queue contracts, including bounded per-family subprocess concurrency and timeout isolation."}
     tests/test_replacement_forecast_current_target_plan.py: {created: "2026-06-06", last_used: "2026-07-28", note: "Current active-family coverage and seedability, including automatic reseed for probability-semantics drift, qualified fast-station Day0 evidence, and duplicate raw-METAR writer canonicalization that preserves one causal conditioning clock."}
+    tests/test_replacement_forecast_materializer.py: {created: "2026-06-06", last_used: "2026-07-29", note: "Replacement live materialization authority and INV-37 connection contract, including exact Day0 enqueue ownership, HIGH/LOW absorbing-frontier monotonicity, causal fast-residual likelihood bounds, fail-closed writer races, and sanctioned forecasts+world attached reads."}
     tests/test_forecast_live_daemon_boot_schema.py: {created: "2026-07-20", last_used: "2026-07-20", note: "Forecast daemon fast boot requires live indexes to belong to their active tables; legacy tables cannot satisfy the gate by retaining a matching global index name."}
     tests/test_replacement_forecast_materializer_cycle_policy.py: {created: "2026-06-10", last_used: "2026-07-15", note: "Shared replacement cycle and probability-semantics policy; the current revision is part of tradeable-grade coverage and materialization identity."}
     tests/engine/test_position_belief_authority.py: {created: "2026-06-12", last_used: "2026-07-20", note: "Held-position belief reads the same replacement authority as entry, excludes future-computed rows at causal replay cuts, and refuses old current-evidence probability semantics."}
@@ -828,6 +829,7 @@ categories:
     - tests/test_finite_evidence_probability_symmetry.py
     - tests/test_replacement_forecast_extras_coverage_gate.py
     - tests/test_replacement_forecast_current_target_plan.py
+    - tests/test_replacement_forecast_materializer.py
     - tests/test_replacement_forecast_materializer_cycle_policy.py
     - tests/test_replacement_forecast_seed_discovery.py
     - tests/test_replacement_fused_q_shape.py
@@ -1777,6 +1779,20 @@ test_metadata:
       another probability authority or blocking event delivery; the bounded
       poll catches every newer canonical identity even when the model cycle is
       unchanged.
+  tests/test_replacement_forecast_materializer.py:
+    modules: [data, state]
+    category: core_law_antibody
+    blocks_commit: true
+    law_dependencies:
+      - architecture/invariants.yaml
+      - architecture/db_table_ownership.yaml
+      - docs/authority/zeus_current_architecture.md
+    notes: >
+      Protects replacement posterior write authority across exact Day0 enqueue
+      ownership, absorbing HIGH/LOW frontiers, causal fast-station residual
+      likelihoods, final-writer races, and the sanctioned forecasts-main plus
+      world-attached connection required to reproduce canonical observation
+      evidence without splitting the transaction boundary.
   tests/test_day0_obs_fastlane_optionbc.py:
     modules: [data, engine]
     category: core_law_antibody
