@@ -650,6 +650,7 @@ def _request_with_day0_physical_frontier(
 
     from src.events.day0_authority import (  # noqa: PLC0415
         DAY0_ABSORBING_FINALITIES,
+        DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
         day0_evidence_finality,
     )
 
@@ -693,13 +694,6 @@ def _request_with_day0_physical_frontier(
                 "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
             )
         source = str(conditioning.get("source") or "")
-        if (
-            day0_evidence_finality({"settlement_source": source})
-            not in DAY0_ABSORBING_FINALITIES
-        ):
-            return blocked(
-                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
-            )
         try:
             extreme = float(conditioning["observed_extreme_c"])
             observed_at = _to_utc(
@@ -715,6 +709,36 @@ def _request_with_day0_physical_frontier(
             or observed_at > row_computed_at
             or observed_at > computed_at
         ):
+            return blocked(
+                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
+            )
+        declared_finality: str | None = None
+        if "evidence_finality" in conditioning:
+            raw_finality = conditioning.get("evidence_finality")
+            if not isinstance(raw_finality, str):
+                return blocked(
+                    "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
+                )
+            declared_finality = raw_finality.strip().upper()
+            if declared_finality not in (
+                DAY0_ABSORBING_FINALITIES
+                | {DAY0_PROVISIONAL_CURRENT_SNAPSHOT}
+            ):
+                return blocked(
+                    "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
+                )
+        finality = day0_evidence_finality(
+            {
+                "settlement_source": source,
+                "evidence_finality": declared_finality,
+            }
+        )
+        if finality == DAY0_PROVISIONAL_CURRENT_SNAPSHOT:
+            # Older certificates persisted a typed provisional snapshot in
+            # ``day0_conditioning``. It is valid causal evidence, but not a
+            # durable physical frontier and cannot veto newer evidence.
+            continue
+        if finality not in DAY0_ABSORBING_FINALITIES:
             return blocked(
                 "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
             )

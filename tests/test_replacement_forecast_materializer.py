@@ -1473,6 +1473,258 @@ def test_materializer_blocks_malformed_day0_frontier_ledger(
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 1
 
 
+@pytest.mark.parametrize(
+    ("metric", "baseline_data_version", "legacy_extreme", "current_extreme"),
+    [
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 31.0, 32.0),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 19.0, 18.0),
+    ],
+)
+def test_materializer_ignores_typed_legacy_provisional_frontier_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+    baseline_data_version: str,
+    legacy_extreme: float,
+    current_extreme: float,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    legacy = replace(
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=legacy_extreme,
+            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        ),
+        temperature_metric=metric,
+        baseline_data_version=baseline_data_version,
+    )
+    written = materialize_replacement_forecast_live(conn, legacy)
+    assert written.ok is True
+    provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (written.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    provenance["day0_conditioning"]["evidence_finality"] = (
+        "PROVISIONAL_CURRENT_SNAPSHOT"
+    )
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), written.posterior_id),
+    )
+
+    current = replace(
+        legacy,
+        computed_at=_dt(18, 10),
+        day0_observed_extreme_c=current_extreme,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+    )
+    result = materialize_replacement_forecast_live(conn, current)
+
+    assert result.ok is True
+    current_provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (result.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    assert (
+        current_provenance["day0_conditioning"]["observed_extreme_c"]
+        == current_extreme
+    )
+    assert current_provenance["day0_conditioning"]["source"] == (
+        "aviationweather_metar"
+    )
+
+
+@pytest.mark.parametrize(
+    ("metric", "baseline_data_version", "malformation"),
+    [
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", "missing"),
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", "nonfinite"),
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", "future"),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", "missing"),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", "nonfinite"),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", "future"),
+    ],
+)
+def test_materializer_blocks_malformed_typed_provisional_frontier_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+    baseline_data_version: str,
+    malformation: str,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    first = replace(
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=31.0 if metric == "high" else 19.0,
+            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        ),
+        temperature_metric=metric,
+        baseline_data_version=baseline_data_version,
+    )
+    written = materialize_replacement_forecast_live(conn, first)
+    assert written.ok is True
+    provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (written.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    conditioning = provenance["day0_conditioning"]
+    conditioning["evidence_finality"] = "PROVISIONAL_CURRENT_SNAPSHOT"
+    if malformation == "missing":
+        del conditioning["observed_extreme_c"]
+    elif malformation == "nonfinite":
+        conditioning["observed_extreme_c"] = "nan"
+    else:
+        conditioning["observation_time"] = _dt(18, 5).isoformat()
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), written.posterior_id),
+    )
+
+    result = materialize_replacement_forecast_live(
+        conn,
+        replace(
+            first,
+            computed_at=_dt(18, 10),
+            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+        ),
+    )
+
+    assert result.ok is False
+    assert result.reason_codes == (
+        "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID",
+    )
+
+
+@pytest.mark.parametrize(
+    ("metric", "baseline_data_version"),
+    [
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max"),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min"),
+    ],
+)
+def test_materializer_blocks_unknown_frontier_finality(
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+    baseline_data_version: str,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    first = replace(
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=31.0 if metric == "high" else 19.0,
+            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        ),
+        temperature_metric=metric,
+        baseline_data_version=baseline_data_version,
+    )
+    written = materialize_replacement_forecast_live(conn, first)
+    assert written.ok is True
+    provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (written.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    provenance["day0_conditioning"]["source"] = "unclassified_sensor"
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), written.posterior_id),
+    )
+
+    result = materialize_replacement_forecast_live(
+        conn,
+        replace(
+            first,
+            computed_at=_dt(18, 10),
+            day0_observed_extreme_c=32.0,
+            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+        ),
+    )
+
+    assert result.ok is False
+    assert result.reason_codes == (
+        "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID",
+    )
+
+
+@pytest.mark.parametrize(
+    ("metric", "baseline_data_version", "declared_finality"),
+    [
+        (
+            "high",
+            "ecmwf_opendata_mx2t3_local_calendar_day_max",
+            "TYPO_OR_UNKNOWN_FINALITY",
+        ),
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", "UNKNOWN"),
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", None),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", ""),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", "UNKNOWN"),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 1),
+    ],
+)
+def test_materializer_blocks_unknown_declared_frontier_finality(
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+    baseline_data_version: str,
+    declared_finality: object,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    first = replace(
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=31.0 if metric == "high" else 19.0,
+            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        ),
+        temperature_metric=metric,
+        baseline_data_version=baseline_data_version,
+    )
+    written = materialize_replacement_forecast_live(conn, first)
+    assert written.ok is True
+    provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (written.posterior_id,),
+        ).fetchone()["provenance_json"]
+    )
+    provenance["day0_conditioning"]["evidence_finality"] = declared_finality
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), written.posterior_id),
+    )
+
+    result = materialize_replacement_forecast_live(
+        conn,
+        replace(
+            first,
+            computed_at=_dt(18, 10),
+            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+        ),
+    )
+
+    assert result.ok is False
+    assert result.reason_codes == (
+        "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID",
+    )
+
+
 def test_materializer_blocks_ledger_observation_after_its_own_compute_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
