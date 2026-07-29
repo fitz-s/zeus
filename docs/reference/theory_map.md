@@ -41,6 +41,7 @@ on disagreement).
 | [`docs/authority/zeus_current_architecture.md`](../authority/zeus_current_architecture.md) | Architecture law including settlement invariants, SettlementSemantics as a semantic atom, truth planes, and DB ownership rules. | `[authority]` |
 | [`docs/reference/zeus_strategy_spec.md`](zeus_strategy_spec.md) | Strategy mathematics and proof taxonomy: Wilson lower bound mechanics, adverse-selection defense, offline evidence baseline description. **Superseded for the live q chain** (see §0 authority notice), but retained as reference for the offline evidence baseline, strategy grading, and proof taxonomy. | `[ref]` partial supersession |
 | [`docs/authority/statistical_calibration_authority_2026-06-12_README.md`](../authority/statistical_calibration_authority_2026-06-12_README.md) | Calibration statistical law. See §1. | `[authority]` |
+| [`docs/reference/calibration_report.md`](calibration_report.md) | Generated settled-position reliability diagram (predicted probability vs settled frequency), decomposed and cut by lead time/side/strategy/six-class attribution. Regenerate with `python3 scripts/generate_calibration_report.py`. | `[ref]` generated |
 
 ---
 
@@ -119,6 +120,7 @@ This map indexes docs; the entries below are executable sources the docs above d
 | File | What it is | Status |
 |------|------------|--------|
 | [`src/analysis/settlement_skill_attribution.py`](../../src/analysis/settlement_skill_attribution.py) | Six-category settlement attribution grader — only skill outcomes (SKILL_WIN/SKILL_LOSS) train calibration; luck and stale decisions are excluded. | `[ref]` code |
+| [`scripts/generate_calibration_report.py`](../../scripts/generate_calibration_report.py) | Generates `docs/reference/calibration_report.md` from `settlement_attribution` — reliability diagram, Murphy decomposition, cuts by lead time/side/strategy/attribution class. | `[ref]` code |
 | [`src/decision/selection_calibrator.py`](../../src/decision/selection_calibrator.py) | Wilson / empirical-Bayes selection lower bound; from-scratch regularized incomplete beta implementation at ~L298–395 (no SciPy dependency). | `[ref]` code |
 | [`src/execution/command_bus.py`](../../src/execution/command_bus.py) | `IdempotencyKey` (~L145–233): factory-only deterministic key construction for venue commands. | `[ref]` code |
 
