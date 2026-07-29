@@ -394,8 +394,7 @@ def test_day0_extreme_bridge_enqueues_exactly_one_seed_and_dedups_same_observati
 def test_day0_extreme_bridge_advances_on_strictly_newer_observation_time(
     tmp_path, monkeypatch
 ) -> None:
-    """A genuinely newer observed extreme (later observation_time) re-seeds even though the
-    model cycle has not advanced — the same-day exit-blindness fix this reuses verbatim."""
+    """A newer observed extreme re-seeds after the exact prior owner drains."""
     _prepare_forecast_db(tmp_path)
     cfg = _queue_config(tmp_path)
     monkeypatch.setattr(
@@ -421,6 +420,7 @@ def test_day0_extreme_bridge_advances_on_strictly_newer_observation_time(
         held_position=False,
     )
     assert report_1["enqueued"] is True
+    Path(_fetch_enqueue_row(cfg["forecast_db"])["seed_file"]).unlink()
 
     monkeypatch.setattr(
         seed_discovery,
@@ -444,7 +444,7 @@ def test_day0_extreme_bridge_advances_on_strictly_newer_observation_time(
 def test_day0_extreme_bridge_reseeds_for_every_conditioning_identity_change(
     tmp_path, monkeypatch
 ) -> None:
-    """A same-cycle Day0 marker suppresses only an identical posterior condition."""
+    """Every changed condition re-seeds after the preceding exact owner drains."""
     _prepare_forecast_db(tmp_path)
     cfg = _queue_config(tmp_path)
     monkeypatch.setattr(
@@ -481,6 +481,7 @@ def test_day0_extreme_bridge_reseeds_for_every_conditioning_identity_change(
             held_position=True,
         )
         assert report["enqueued"] is True
+        Path(_fetch_enqueue_row(cfg["forecast_db"])["seed_file"]).unlink()
 
     assert calls["count"] == 5
     row = _fetch_enqueue_row(cfg["forecast_db"])
@@ -493,7 +494,7 @@ def test_day0_extreme_bridge_reseeds_for_every_conditioning_identity_change(
         "source": "wu_api+same_station_fast_tail",
         "unit": "F",
     }
-    assert Path(row["seed_file"]).is_file()
+    assert not Path(row["seed_file"]).exists()
 
 
 def test_day0_bridge_publishes_only_the_monotonic_cas_owner(tmp_path, monkeypatch) -> None:
@@ -2376,6 +2377,105 @@ def test_cycle_poll_keeps_later_claimed_owner_past_batch_timeout_until_terminal(
     assert calls["count"] == 1
     assert marker["seed_file"] != str(owned_seed)
     assert Path(marker["seed_file"]).is_file()
+
+
+def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
+    tmp_path, monkeypatch
+) -> None:
+    """A newer observation cannot invalidate the request currently materializing."""
+    db_path = _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC).isoformat()
+    old_payload = _day0_payload("2026-07-19T05:00:00+00:00")
+    new_payload = _day0_payload("2026-07-19T05:05:00+00:00")
+    new_conditioning = {
+        key: new_payload[key]
+        for key in (
+            "day0_observed_extreme_observation_time",
+            "day0_observed_extreme_source",
+            "day0_observed_extreme_c",
+            "day0_observed_extreme_unit",
+        )
+    }
+    owned_seed = Path(cfg["seed_dir"]) / "old-revision.enqueue-owner.json"
+    old_identity = cycle_advance._day0_conditioning_identity(
+        source=old_payload["day0_observed_extreme_source"],
+        observation_time=old_payload["day0_observed_extreme_observation_time"],
+        observed_extreme_c=old_payload["day0_observed_extreme_c"],
+        unit=old_payload["day0_observed_extreme_unit"],
+    )
+    assert old_identity is not None
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(owned_seed),
+        reason="MISSING_LIVE_POSTERIOR",
+        day0_observed_extreme_observation_time=old_payload[
+            "day0_observed_extreme_observation_time"
+        ],
+        day0_observed_extreme_source=old_payload["day0_observed_extreme_source"],
+        day0_observed_extreme_c=old_payload["day0_observed_extreme_c"],
+        day0_observed_extreme_unit=old_payload["day0_observed_extreme_unit"],
+    )
+    conn.commit()
+
+    claim_dir = Path(cfg["inflight_dir"]) / "claimed-old-revision"
+    claim_dir.mkdir(parents=True)
+    claimed_request = claim_dir / owned_seed.name
+    claimed_request.write_text(
+        json.dumps(
+            {
+                "day0_enqueue_owner_witness": {
+                    "city": "Shanghai",
+                    "target_date": "2026-07-19",
+                    "metric": "high",
+                    "target_cycle_time": cycle,
+                    "seed_file": str(owned_seed),
+                    "conditioning_identity": old_identity,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        **new_conditioning,
+    ) is True
+    marker = conn.execute(
+        "SELECT seed_file, day0_conditioning_identity_json "
+        "FROM cycle_advance_enqueues"
+    ).fetchone()
+    assert marker["seed_file"] == str(owned_seed)
+    assert marker["day0_conditioning_identity_json"] == old_identity
+
+    claimed_request.unlink()
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        **new_conditioning,
+    ) is False
+    assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
+    conn.close()
 
 
 def test_day0_owner_claim_lock_closes_pending_to_inflight_move_race(

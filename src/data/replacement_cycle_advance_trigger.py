@@ -854,12 +854,15 @@ def _already_enqueued(
     reason = str((row["reason"] if hasattr(row, "keys") else row[1]) or "")
     if not seed_file and reason.startswith("CYCLE_LEG_ARTIFACT_MISSING:"):
         return False
-    if incoming_identity is not None:
-        recorded_identity = (
-            row["day0_conditioning_identity_json"] if hasattr(row, "keys") else row[5]
-        )
-        if recorded_identity != incoming_identity:
-            return False
+    recorded_identity_raw = (
+        row["day0_conditioning_identity_json"] if hasattr(row, "keys") else row[5]
+    )
+    recorded_identity = (
+        str(recorded_identity_raw) if recorded_identity_raw not in (None, "") else None
+    )
+    identity_changed = (
+        incoming_identity is not None and recorded_identity != incoming_identity
+    )
     visible_seed_file = Path(seed_file) if seed_file else None
     owned_stage_file = (
         None
@@ -875,8 +878,54 @@ def _already_enqueued(
             target_cycle_iso=target_cycle_iso,
             staged_seed_file=owned_stage_file,
             visible_seed_file=visible_seed_file,
-            identity=incoming_identity,
+            identity=recorded_identity,
         )
+    if identity_changed:
+        # SCOPE: one family/cycle's exact current enqueue owner. DRAIN: its staged,
+        # pending, or inflight request reaches a terminal queue move. RESET: the next
+        # current-evidence tick proves that exact owner absent, removes only its marker,
+        # and then admits the newer observation identity. Serializing revisions here
+        # preserves full seed/request input identity while preventing owner-swap livelock.
+        if (
+            visible_seed_file is not None
+            and (
+                visible_seed_file.exists()
+                or (owned_stage_file is not None and owned_stage_file.exists())
+            )
+        ):
+            return True
+        if visible_seed_file is not None and recorded_identity is not None:
+            request_check = _day0_enqueue_owner_request_check(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                target_cycle_iso=target_cycle_iso,
+                seed_file=seed_file,
+                identity=recorded_identity,
+            )
+            if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
+                return True
+            if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
+                _LOG.warning(
+                    "superseded day0 enqueue owner request INDETERMINATE; retaining marker "
+                    "city=%s target_date=%s metric=%s target_cycle=%s reason=%s",
+                    city,
+                    target_date,
+                    metric,
+                    target_cycle_iso,
+                    request_check.reason,
+                )
+                return True
+        if visible_seed_file is not None and owned_stage_file is not None:
+            _delete_missing_owned_cycle_advance_marker(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                target_cycle_iso=target_cycle_iso,
+                seed_file=seed_file,
+            )
+        return False
     if incoming_identity is not None:
         if visible_seed_file is not None and visible_seed_file.exists():
             return True
