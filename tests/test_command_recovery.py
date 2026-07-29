@@ -19956,6 +19956,72 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()[0] == 0
 
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                order_id, caused_by, source_module, env, payload_json
+            ) VALUES (
+                'pos-001:partial-exit-fill-applied', 'pos-001', 1, ?,
+                'MONITOR_REFRESHED', '2026-07-28T00:01:11Z',
+                'pending_exit', 'pending_exit', 'center_buy',
+                'ord-exit-partial', 'partial_exit_fill',
+                'src.execution.exit_lifecycle', 'live', ?
+            )
+            """,
+            (
+                sequence_no + 2,
+                json.dumps(
+                    {
+                        "filled_shares": 10.0,
+                        "remaining_shares": 11.0,
+                        "semantic_event": "CAPITAL_REDUCTION_FILLED",
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'day0_window',
+                   shares = 11.0,
+                   chain_shares = 11.0,
+                   order_id = NULL,
+                   order_status = 'filled'
+             WHERE position_id = 'pos-001'
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_exit_pending_projections,
+        )
+
+        replay = reconcile_exit_pending_projections(conn)
+
+        assert replay == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert dict(
+            conn.execute(
+                """
+                SELECT phase, shares, chain_shares, order_id, order_status
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+        ) == {
+            "phase": "day0_window",
+            "shares": 11.0,
+            "chain_shares": 11.0,
+            "order_id": None,
+            "order_status": "filled",
+        }
+
     @pytest.mark.parametrize(
         ("ambiguous_time", "ambiguous_payload"),
         [

@@ -8466,6 +8466,25 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
            AND cmd.venue_order_id != ''
            AND cmd.state IN ({placeholders})
            AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM position_events applied
+                 WHERE applied.position_id = cmd.position_id
+                   AND applied.caused_by = 'partial_exit_fill'
+                   AND applied.order_id = cmd.venue_order_id
+                 GROUP BY applied.position_id, applied.order_id
+                HAVING SUM(
+                           CAST(
+                               COALESCE(
+                                   json_extract(
+                                       applied.payload_json,
+                                       '$.filled_shares'
+                                   ),
+                                   0
+                               ) AS REAL
+                           )
+                       ) >= CAST(cmd.size AS REAL) - 0.000000001
+           )
          ORDER BY exit_fill.observed_at, cmd.command_id
         """
     rows = conn.execute(
