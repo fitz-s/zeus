@@ -7761,6 +7761,30 @@ def event_bound_live_adapter_from_trade_conn(
                     token for token in tokens if token in reduce_only_book_tokens
                 )
 
+            def _missing_held_binding_families(
+                probability_slice,
+            ) -> frozenset[str]:
+                if reduce_only_book_tokens is None:
+                    return frozenset()
+                return frozenset(
+                    family_key
+                    for family_key, witness in probability_slice.items()
+                    if held_tokens_by_family.get(family_key)
+                    and not held_tokens_by_family[family_key].issubset(
+                        {
+                            str(token_id or "").strip()
+                            for binding in tuple(
+                                getattr(witness, "bindings", ()) or ()
+                            )
+                            for token_id in (
+                                getattr(binding, "yes_token_id", ""),
+                                getattr(binding, "no_token_id", ""),
+                            )
+                            if str(token_id or "").strip()
+                        }
+                    )
+                )
+
             def _bind(
                 probability_slice,
                 *,
@@ -7768,11 +7792,19 @@ def event_bound_live_adapter_from_trade_conn(
                 metadata_sink=None,
                 force_current_gamma=False,
             ):
-                slice_required_tokens = _reduce_only_tokens(
-                    _global_book_prefetch_tokens(probability_slice)
+                missing_held_binding_families = (
+                    _missing_held_binding_families(probability_slice)
+                )
+                slice_required_tokens = (
+                    None
+                    if missing_held_binding_families
+                    else _reduce_only_tokens(
+                        _global_book_prefetch_tokens(probability_slice)
+                    )
                 )
                 if (
                     reduce_only_book_tokens is not None
+                    and slice_required_tokens is not None
                     and not slice_required_tokens
                 ):
                     return dict(probability_slice)
@@ -7904,6 +7936,7 @@ def event_bound_live_adapter_from_trade_conn(
                         required_token_ids=(
                             frozenset(slice_required_tokens)
                             if reduce_only_book_tokens is not None
+                            and slice_required_tokens is not None
                             else None
                         ),
                     )
@@ -8300,6 +8333,12 @@ def event_bound_live_adapter_from_trade_conn(
                     ),
                 )
             )
+            held_binding_refresh_family_keys = (
+                _missing_held_binding_families(probabilities)
+            )
+            metadata_refresh_family_keys = metadata_refresh_family_keys.union(
+                held_binding_refresh_family_keys
+            )
             effective_book_refresh_family_keys = (
                 None
                 if book_refresh_family_keys is None
@@ -8309,6 +8348,11 @@ def event_bound_live_adapter_from_trade_conn(
                 logging.getLogger(__name__).info(
                     "global book metadata refresh required before book I/O: families=%d",
                     len(metadata_refresh_family_keys),
+                )
+            if held_binding_refresh_family_keys:
+                logging.getLogger(__name__).warning(
+                    "global held-token witness rebind required: families=%d",
+                    len(held_binding_refresh_family_keys),
                 )
             speculative_topology = _global_book_speculative_topology(
                 trade_conn,
@@ -8448,7 +8492,12 @@ def event_bound_live_adapter_from_trade_conn(
                     state_tokens_by_family.setdefault(str(state[0]), set()).add(
                         str(state[4])
                     )
-                exact_refresh_allowed = cached_probabilities is not None
+                exact_refresh_allowed = (
+                    cached_probabilities is not None
+                    and not held_binding_refresh_family_keys.intersection(
+                        eligible_refresh_family_keys
+                    )
+                )
                 for family_key in eligible_refresh_family_keys:
                     family_tokens = state_tokens_by_family.get(family_key, set())
                     event_tokens = projected_book_refresh_tokens.get(family_key)

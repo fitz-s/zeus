@@ -6540,6 +6540,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     bind_required_tokens = []
     capture_required_tokens = []
     omitted_bind_families = set()
+    rebound_no_token_by_family = {}
     metadata_keys = (
         ("condition", "yes-token"),
         ("condition", "no-token"),
@@ -6574,11 +6575,27 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         if metadata_sink is not None:
             for metadata_key in metadata_keys:
                 metadata_sink[metadata_key] = metadata
-        return {
-            family_key: witness
-            for family_key, witness in probability_witnesses.items()
-            if family_key not in omitted_bind_families
-        }
+        rebound = {}
+        for family_key, witness in probability_witnesses.items():
+            if family_key in omitted_bind_families:
+                continue
+            no_token = rebound_no_token_by_family.get(family_key)
+            bindings = tuple(getattr(witness, "bindings", ()) or ())
+            if no_token is not None and bindings:
+                bindings = tuple(
+                    SimpleNamespace(
+                        bin_id=binding.bin_id,
+                        condition_id=binding.condition_id,
+                        yes_token_id=binding.yes_token_id,
+                        no_token_id=no_token,
+                    )
+                    for binding in bindings
+                )
+                witness = SimpleNamespace(
+                    **{**vars(witness), "bindings": bindings}
+                )
+            rebound[family_key] = witness
+        return rebound
 
     def fake_capture(_trade_conn, *, metadata_overrides, **_):
         metadata_calls.append(dict(metadata_overrides))
@@ -6685,6 +6702,28 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         probabilities,
         _dt.datetime.now(_dt.timezone.utc),
     )
+    assert capture_required_tokens[-1] == frozenset({"no-token"})
+
+    rebound_no_token_by_family["family"] = "no-token"
+    missing_no_probabilities = {
+        "family": SimpleNamespace(
+            family_key="family",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin",
+                    condition_id="condition",
+                    yes_token_id="yes-token",
+                    no_token_id="",
+                ),
+            ),
+        )
+    }
+    returned_probabilities, _ = captured["current_book_epoch_provider"](
+        missing_no_probabilities,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    assert returned_probabilities["family"].bindings[0].no_token_id == "no-token"
+    assert bind_required_tokens[-1] is None
     assert capture_required_tokens[-1] == frozenset({"no-token"})
 
     trade.execute(
