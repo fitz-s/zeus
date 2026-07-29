@@ -9464,6 +9464,44 @@ def test_global_book_epoch_cache_requires_stable_topology(monkeypatch):
     conn.close()
 
 
+def test_global_book_cached_token_reuse_accepts_equal_scope(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    at = _dt.datetime.now(_dt.timezone.utc)
+    probability = {
+        "family": SimpleNamespace(
+            family_key="family",
+            witness_identity="probability-current",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin",
+                    condition_id="condition",
+                    yes_token_id="yes-token",
+                    no_token_id="no-token",
+                ),
+            ),
+        )
+    }
+    epoch = SimpleNamespace(
+        witness_identity="book-current",
+        current_identity=lambda _checked_at: "book-current",
+    )
+    assert era._store_global_book_epoch(
+        conn,
+        probability,
+        epoch,
+        checked_at=at,
+    ) == "stored"
+
+    rebound, reason = era._reuse_global_book_superset_token_bindings(
+        conn,
+        probability,
+    )
+
+    assert rebound == probability
+    assert reason == "hit"
+
+
 def test_global_book_epoch_cache_serves_exact_scoped_subset(monkeypatch):
     conn = sqlite3.connect(":memory:")
     monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)

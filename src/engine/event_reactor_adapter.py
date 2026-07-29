@@ -910,7 +910,7 @@ def _reuse_global_book_superset_token_bindings(
     trade_conn: sqlite3.Connection,
     probabilities: Mapping[str, object],
 ) -> tuple[dict[str, object] | None, str]:
-    """Reuse immutable token identity when the current scope narrows."""
+    """Reuse immutable token identity when the current scope is stable or narrows."""
 
     namespace = _global_book_epoch_cache_namespace(trade_conn)
     if namespace is None:
@@ -922,7 +922,7 @@ def _reuse_global_book_superset_token_bindings(
     if entry.namespace != namespace:
         return None, "namespace_changed"
     cached = dict(entry.bound_probabilities)
-    if not set(probabilities) < set(cached):
+    if not set(probabilities) <= set(cached):
         return None, "not_cached_superset"
     try:
         cached_slice = {
@@ -8327,6 +8327,37 @@ def event_bound_live_adapter_from_trade_conn(
             # that can change this decision. Untouched families keep fresh q while
             # reusing the token identity already validated by the current epoch.
             cache_checked_at = datetime.now(UTC)
+            held_binding_refresh_family_keys = (
+                _missing_held_binding_families(probabilities)
+            )
+            if held_binding_refresh_family_keys:
+                (
+                    cached_bound_probabilities,
+                    cached_binding_reason,
+                ) = _reuse_global_book_superset_token_bindings(
+                    trade_conn,
+                    probabilities,
+                )
+                if cached_bound_probabilities is not None:
+                    probabilities = cached_bound_probabilities
+                    held_binding_refresh_family_keys = (
+                        _missing_held_binding_families(probabilities)
+                    )
+                    logging.getLogger(__name__).info(
+                        "global held-token topology rebound from current cache: "
+                        "families=%d",
+                        len(probabilities),
+                    )
+                elif cached_binding_reason not in {
+                    "cache_empty",
+                    "namespace_changed",
+                    "namespace_unavailable",
+                    "not_cached_superset",
+                }:
+                    logging.getLogger(__name__).info(
+                        "global held-token cached topology reuse rejected: reason=%s",
+                        cached_binding_reason,
+                    )
             metadata_refresh_family_keys = (
                 _global_book_metadata_refresh_family_keys(
                     trade_conn,
@@ -8336,9 +8367,6 @@ def event_bound_live_adapter_from_trade_conn(
                         trade_conn
                     ),
                 )
-            )
-            held_binding_refresh_family_keys = (
-                _missing_held_binding_families(probabilities)
             )
             metadata_refresh_family_keys = metadata_refresh_family_keys.union(
                 held_binding_refresh_family_keys
