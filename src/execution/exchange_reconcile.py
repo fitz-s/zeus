@@ -4023,6 +4023,7 @@ def _append_linkable_trade_fact_if_missing(
                 fill_price=fill_price,
                 observed_at=observed_at,
                 command_event=existing_event if state == "CONFIRMED" else None,
+                venue_order_payload=raw,
             )
             return _record_nonfinal_full_exit_fill_finality_finding(
                 conn,
@@ -4188,6 +4189,7 @@ def _append_linkable_trade_fact_if_missing(
         fill_price=fill_price,
         observed_at=observed_at,
         command_event=event if state == "CONFIRMED" else None,
+        venue_order_payload=raw,
     )
     return finality_finding
 
@@ -5115,6 +5117,79 @@ def _entry_fill_economics_for_command(
     return fallback_shares, fallback_price, fallback_shares * fallback_price
 
 
+def _exit_fill_identity_matches_position(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    position: Mapping[str, Any],
+    venue_order_payload: Mapping[str, Any] | None,
+) -> bool:
+    """Bind an EXIT fill to the position's exact held CTF asset."""
+
+    command_id = str(command.get("command_id") or "").strip()
+    direction = str(position.get("direction") or "").strip().lower()
+    held_token = str(
+        position.get("no_token_id" if direction == "buy_no" else "token_id") or ""
+    ).strip()
+    command_token = str(command.get("token_id") or "").strip()
+    position_condition = str(position.get("condition_id") or "").strip()
+    if (
+        not command_id
+        or direction not in {"buy_yes", "buy_no"}
+        or not held_token
+        or command_token != held_token
+        or not position_condition
+    ):
+        return False
+    if not all(
+        _table_exists(conn, table)
+        for table in (
+            "venue_commands",
+            "venue_submission_envelopes",
+            "executable_market_snapshots",
+        )
+    ):
+        return False
+    canonical = conn.execute(
+        """
+        SELECT cmd.position_id, cmd.token_id,
+               env.condition_id, env.selected_outcome_token_id,
+               snap.condition_id, snap.selected_outcome_token_id
+          FROM venue_commands cmd
+          JOIN venue_submission_envelopes env
+            ON env.envelope_id = cmd.envelope_id
+          JOIN executable_market_snapshots snap
+            ON snap.snapshot_id = cmd.snapshot_id
+         WHERE cmd.command_id = ?
+           AND cmd.intent_kind = 'EXIT'
+           AND cmd.side = 'SELL'
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    if canonical is None:
+        return False
+    if (
+        str(canonical[0] or "").strip() != str(position.get("position_id") or "").strip()
+        or str(canonical[1] or "").strip() != command_token
+        or {str(canonical[2] or "").strip(), str(canonical[4] or "").strip()}
+        != {position_condition}
+        or {str(canonical[3] or "").strip(), str(canonical[5] or "").strip()}
+        != {held_token}
+    ):
+        return False
+
+    if venue_order_payload is not None:
+        venue_assets = {
+            str(venue_order_payload.get(key) or "").strip()
+            for key in ("asset_id", "assetId", "asset", "token_id", "tokenId")
+            if str(venue_order_payload.get(key) or "").strip()
+        }
+        if venue_assets and venue_assets != {held_token}:
+            return False
+    return True
+
+
 def _ensure_exit_fill_position_event(
     conn: sqlite3.Connection,
     *,
@@ -5124,16 +5199,17 @@ def _ensure_exit_fill_position_event(
     fill_price: str,
     observed_at: datetime,
     command_event: str | None = None,
-) -> None:
+    venue_order_payload: Mapping[str, Any] | None = None,
+) -> bool:
     if command_event != "FILL_CONFIRMED":
-        return
+        return False
     if str(command.get("intent_kind") or "").upper() != "EXIT":
-        return
+        return False
     if str(command.get("side") or "").upper() != "SELL":
-        return
+        return False
     position_id = str(command.get("position_id") or "").strip()
     if not position_id:
-        return
+        return False
     row = conn.execute(
         """
         SELECT *
@@ -5145,9 +5221,23 @@ def _ensure_exit_fill_position_event(
         (position_id,),
     ).fetchone()
     if row is None:
-        return
+        return False
 
     current = dict(row)
+    if not _exit_fill_identity_matches_position(
+        conn,
+        command=command,
+        position=current,
+        venue_order_payload=venue_order_payload,
+    ):
+        logger.warning(
+            "exchange_reconcile: refuse exit fill projection with ambiguous or "
+            "mismatched asset identity command_id=%s position_id=%s order_id=%s",
+            command.get("command_id"),
+            position_id,
+            venue_order_id,
+        )
+        return False
     phase = str(current.get("phase") or "")
     if phase not in _EXIT_FILL_PROJECTION_PHASES:
         logger.info(
@@ -5156,7 +5246,7 @@ def _ensure_exit_fill_position_event(
             phase,
             venue_order_id,
         )
-        return
+        return False
     # A fully-filled SELL command is not necessarily a fully-closed position.
     # Capital reallocation may intentionally sell only part of the holding.  The
     # linked EXIT_INTENT is the position-finality authority; command size alone
@@ -5181,7 +5271,7 @@ def _ensure_exit_fill_position_event(
             venue_order_id,
             position_id,
         )
-        return
+        return False
     full_close_target = _canonical_full_exit_intent_shares(
         conn,
         SimpleNamespace(trade_id=position_id),
@@ -5199,7 +5289,7 @@ def _ensure_exit_fill_position_event(
             command_size,
             venue_order_id,
         )
-        return
+        return False
     fill_economics = _exit_fill_economics_for_command(
         conn,
         command_id=str(command.get("command_id") or ""),
@@ -5207,7 +5297,7 @@ def _ensure_exit_fill_position_event(
         fallback_fill_price=fill_price,
     )
     if fill_economics is None:
-        return
+        return False
     shares_dec, exit_price_dec = fill_economics
     holding_sizes = [
         _positive_decimal_or_none(current.get("shares")),
@@ -5237,7 +5327,7 @@ def _ensure_exit_fill_position_event(
             holding_disagrees,
             venue_order_id,
         )
-        return
+        return False
     occurred_at = observed_at.isoformat()
     exit_reason = _strategy_exit_reason_for_reconciled_fill(conn, position_id, current)
     # Bug A (truth-path PnL booking, 2026-07-07; structurally unified R0-a
@@ -5315,7 +5405,7 @@ def _ensure_exit_fill_position_event(
             exit_price=exit_price_dec,
             realized_pnl=realized_pnl,
         ):
-            return
+            return True
         from src.engine.lifecycle_events import build_position_current_projection
 
         projection = build_position_current_projection(position)
@@ -5330,7 +5420,7 @@ def _ensure_exit_fill_position_event(
             exit_price=exit_price_dec,
             upsert_only=True,
         )
-        return
+        return True
     seq_row = conn.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
         (position_id,),
@@ -5362,6 +5452,7 @@ def _ensure_exit_fill_position_event(
         exit_price=exit_price_dec,
         upsert_only=False,
     )
+    return True
 
 
 def _exit_fill_materialization_is_current(

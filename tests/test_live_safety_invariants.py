@@ -2476,6 +2476,94 @@ def _make_portfolio(*positions) -> PortfolioState:
     return PortfolioState(positions=list(positions))
 
 
+def test_monitor_writer_timeout_preserves_nonred_exit_authority(monkeypatch):
+    """A bounded canonical-write timeout cannot relabel an economic exit HOLD."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="writer-timeout-exit-authority",
+        state="holding",
+        chain_state="synced",
+        shares=10.0,
+        chain_shares=10.0,
+    )
+    results = []
+    exits = []
+    def refresh(*_args):
+        context = _monitor_test_edge_context(position)
+        context.divergence_score = 0.0
+        context.market_velocity_1h = 0.0
+        return context
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda *_args: ExitDecision(
+            True,
+            "CI_WRITER_TIMEOUT_NONRED_EXIT",
+            trigger="CI_WRITER_TIMEOUT_NONRED_EXIT",
+            applied_validations=["replacement_posterior"],
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **kwargs: exits.append(kwargs["position"].trade_id) or "exit_retry:writer_lease_timeout",
+    )
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        artifact,
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_writer_timeout_preserves_exit"),
+        run_exit_preflight=False,
+    )
+
+    assert exits == [position.trade_id]
+    assert results[-1].should_exit is True
+    assert results[-1].exit_reason == "CI_WRITER_TIMEOUT_NONRED_EXIT"
+    assert summary["monitor_canonical_write_failed_exit_authority_preserved"] == 1
+
+
+def test_canonical_trade_write_lease_identity_failure_is_fail_closed():
+    from src.engine import cycle_runtime
+
+    class BrokenPragmaConnection:
+        def execute(self, _sql):
+            raise sqlite3.DatabaseError("pragma unavailable")
+
+    with pytest.raises(cycle_runtime.CanonicalTradeWriteIdentityError) as exc:
+        cycle_runtime._canonical_trade_write_lease(
+            BrokenPragmaConnection(),
+            owner="test",
+            deadline_ms=1,
+            max_hold_ms=50,
+        )
+    assert str(exc.value) == "CANONICAL_TRADE_DB_IDENTITY_UNAVAILABLE"
+
+    with cycle_runtime._canonical_trade_write_lease(
+        sqlite3.connect(":memory:"),
+        owner="test",
+        deadline_ms=1,
+        max_hold_ms=50,
+    ):
+        pass
+
+
 def _seed_canonical_entry_baseline(conn, position) -> None:
     """T1.c-followup (2026-04-23): post-T4.1b, chain_reconciliation.reconcile
     gates rescue strictly on the existence of a canonical baseline
@@ -5515,6 +5603,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                     pos.target_date,
                     pos.temperature_metric,
                 ),
+                "probability_content_identity": "probability-content-current",
+                "held_token_id": "paris-no",
+                "held_best_bid": 0.49,
+                "bid_observed_at": "2026-07-14T18:00:00+00:00",
             }
         ]
         assert execute_calls == []
@@ -10554,7 +10646,7 @@ def test_day0_wu_observation_unavailable_reseeds_without_forecast_fallback(monke
 def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
     """Tokyo LOW regression: absorbing hard fact is exact monitor belief."""
     from src.engine import monitor_refresh
-    from src.execution.day0_hard_fact_exit import HardFactVerdict
+    from src.execution.day0_hard_fact_exit import HardFactEvidence, HardFactVerdict
 
     pos = _make_position(
         state="day0_window",
@@ -10579,6 +10671,13 @@ def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
             assert token_id == "tok_no_tokyo_low_21"
             return 0.99, 1.00, 100.0, 100.0
 
+    evidence = HardFactEvidence(
+        source="wu_api+wu_icao_history", station_id="RJTT",
+        observed_at="2026-06-18T08:00:00+00:00",
+        issued_at="2026-06-18T08:01:00+00:00",
+        raw_extreme=20.0, rounded_extreme=20.0,
+        payload_identity="a" * 64, source_identity="wu_api:RJTT+wu_icao_history:RJTT",
+    )
     monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *a, **k: True)
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
@@ -10587,7 +10686,8 @@ def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
             reason="running low extreme 20 killed bin [21.0,21.0]",
             metric="low",
             rounded_extreme=20.0,
-            source="same_station_fast_tail",
+            source=evidence.source,
+            evidence=evidence,
         ),
     )
     monkeypatch.setattr(
@@ -10617,12 +10717,13 @@ def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
     assert "held_prob=1.000000" in belief_tags[0]
     assert "forecast_posteriors_dominated_by_day0_hard_fact" in pos.applied_validations
     assert "model_divergence_panic_inapplicable:day0_absorbing_hard_fact" in pos.applied_validations
+    assert getattr(pos, "_monitor_probability_receipt")["hard_fact_evidence"] == evidence.as_dict()
 
 
 def test_active_same_day_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
     """Active same-day positions must not wait for phase transition before hard-fact overlay."""
     from src.engine import monitor_refresh
-    from src.execution.day0_hard_fact_exit import HardFactVerdict
+    from src.execution.day0_hard_fact_exit import HardFactEvidence, HardFactVerdict
 
     pos = _make_position(
         state="holding",
@@ -10647,6 +10748,13 @@ def test_active_same_day_absorbing_hard_fact_dominates_replacement_posterior(mon
             assert token_id == "tok_no_tokyo_low_21"
             return 0.99, 1.00, 100.0, 100.0
 
+    evidence = HardFactEvidence(
+        source="wu_api+wu_icao_history", station_id="RJTT",
+        observed_at="2026-06-18T08:00:00+00:00",
+        issued_at="2026-06-18T08:01:00+00:00",
+        raw_extreme=20.0, rounded_extreme=20.0,
+        payload_identity="b" * 64, source_identity="wu_api:RJTT+wu_icao_history:RJTT",
+    )
     monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *a, **k: True)
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
@@ -10655,7 +10763,8 @@ def test_active_same_day_absorbing_hard_fact_dominates_replacement_posterior(mon
             reason="running low extreme 20 killed bin [21.0,21.0]",
             metric="low",
             rounded_extreme=20.0,
-            source="same_station_fast_tail",
+            source=evidence.source,
+            evidence=evidence,
         ),
     )
     monkeypatch.setattr(

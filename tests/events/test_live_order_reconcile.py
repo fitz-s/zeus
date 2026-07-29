@@ -1,5 +1,5 @@
 # Created: 2026-05-26
-# Last reused or audited: 2026-07-03
+# Last reused or audited: 2026-07-29
 # Authority basis: PR332 user-channel/reconcile authority substrate.
 #   2026-06-08 (system_decomposition_plan §8 Step 3, P3 lift): the user-channel/reconcile
 #   cycle was lifted from src.main to src.ingest.price_channel_ingest. The four
@@ -8,8 +8,9 @@
 #   canonical source modules); the reconcile invariants asserted are unchanged.
 from __future__ import annotations
 
-import sqlite3
+import contextlib
 import json
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
@@ -598,15 +599,15 @@ def test_reconcile_wrapper_keeps_fill_commit_and_reports_redecision_failure(
         ),
     )
 
-    wrapped = daemon._scheduler_job("edli_user_channel_reconcile")(
+    m5_wrapped = daemon._scheduler_job("edli_user_channel_reconcile")(
         lane._edli_user_channel_reconcile_cycle
     )
-    result = wrapped()
+    m5_result = m5_wrapped()
 
-    assert result["scheduler_failed"] is False
-    assert "fill wake unavailable" in result["scheduler_failure_reason"]
+    assert m5_result["scheduler_failed"] is False
+    assert m5_result["status"] == "m5_authority_proof_complete"
     assert health_writes[-1]["failed"] is False
-    assert health_writes[-1]["extra"] == result
+    assert health_writes[-1]["extra"] == m5_result
     durable = _conn(db_path).execute(
         """
         SELECT payload_json
@@ -616,6 +617,360 @@ def test_reconcile_wrapper_keeps_fill_commit_and_reports_redecision_failure(
     ).fetchone()
     assert durable is not None
     assert json.loads(durable["payload_json"])["fill_authority_state"] == "FILL_CONFIRMED"
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_durable_fill_bridge_work_exists_read_only",
+        lambda: False,
+    )
+    repair_result = daemon._scheduler_job("edli_fill_bridge_repair")(
+        lane._edli_fill_bridge_repair_cycle
+    )()
+
+    assert repair_result["scheduler_failed"] is False
+    assert "fill wake unavailable" in repair_result["scheduler_failure_reason"]
+    assert health_writes[-1]["job_name"] == "edli_fill_bridge_repair"
+    assert health_writes[-1]["failed"] is False
+    assert health_writes[-1]["extra"] == repair_result
+
+
+def test_fill_bridge_trade_fact_failure_marks_scheduler_health_failed(
+    monkeypatch,
+    tmp_path,
+):
+    from src.events import edli_trade_fact_bridge
+    from src.events import price_channel_redecision_router
+    from src.ingest import price_channel_daemon as daemon
+    from src.ingest import price_channel_ingest as lane
+    import src.observability.scheduler_health as scheduler_health
+    import src.state.db as state_db
+
+    db_path = tmp_path / "world.db"
+    _conn(db_path).close()
+    health_writes = []
+    monkeypatch.setattr(
+        lane,
+        "_edli_price_channel_world_write_gate",
+        lambda *, owner: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
+    monkeypatch.setattr(
+        edli_trade_fact_bridge,
+        "append_confirmed_trade_facts_to_edli",
+        lambda conn, *, now: (_ for _ in ()).throw(RuntimeError("bridge failed")),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_durable_fill_bridge_work_exists_read_only",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        price_channel_redecision_router,
+        "_edli_position_fill_redecision_cycle",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: health_writes.append(
+            {"job_name": job_name, **kwargs}
+        ),
+    )
+
+    result = daemon._scheduler_job("edli_fill_bridge_repair")(
+        lane._edli_fill_bridge_repair_cycle
+    )()
+
+    assert result["scheduler_failed"] is True
+    assert (
+        result["scheduler_failure_reason"]
+        == lane.FILL_BRIDGE_TRADE_FACT_PERSIST_FAILED
+    )
+    assert health_writes[-1]["failed"] is True
+    assert health_writes[-1]["reason"] == lane.FILL_BRIDGE_TRADE_FACT_PERSIST_FAILED
+
+
+def test_fill_bridge_position_failure_marks_scheduler_health_failed(
+    monkeypatch,
+    tmp_path,
+):
+    from src.events import edli_trade_fact_bridge
+    from src.events import price_channel_redecision_router
+    from src.ingest import price_channel_daemon as daemon
+    from src.ingest import price_channel_ingest as lane
+    import src.observability.scheduler_health as scheduler_health
+    import src.state.db as state_db
+
+    db_path = tmp_path / "world.db"
+    _conn(db_path).close()
+    health_writes = []
+    monkeypatch.setattr(
+        lane,
+        "_edli_price_channel_world_write_gate",
+        lambda *, owner: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_PriceChannelWriteGate",
+        lambda *, owner, scope: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_with_world_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
+    monkeypatch.setattr(
+        edli_trade_fact_bridge,
+        "append_confirmed_trade_facts_to_edli",
+        lambda conn, *, now: 0,
+    )
+    monkeypatch.setattr(
+        edli_trade_fact_bridge,
+        "append_rest_filled_orphan_trade_facts_to_edli",
+        lambda conn, *, now: 0,
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_durable_fill_bridge_work_exists_read_only",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_durable_fill_bridge_scan",
+        lambda conn, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("position materialization failed")
+        ),
+    )
+    monkeypatch.setattr(
+        price_channel_redecision_router,
+        "_edli_position_fill_redecision_cycle",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: health_writes.append(
+            {"job_name": job_name, **kwargs}
+        ),
+    )
+
+    result = daemon._scheduler_job("edli_fill_bridge_repair")(
+        lane._edli_fill_bridge_repair_cycle
+    )()
+
+    assert result["scheduler_failed"] is True
+    assert (
+        result["scheduler_failure_reason"]
+        == lane.FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED
+    )
+    assert health_writes[-1]["failed"] is True
+    assert (
+        health_writes[-1]["reason"]
+        == lane.FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED
+    )
+
+
+@pytest.mark.parametrize(
+    ("message_count", "fail_check", "durable_after_failure"),
+    (
+        (1, 5, False),
+        (2, 6, False),
+        (1, 6, True),
+    ),
+)
+def test_m5_deadline_covers_each_inbox_row_and_commit_boundary(
+    monkeypatch,
+    tmp_path,
+    message_count,
+    fail_check,
+    durable_after_failure,
+):
+    from src.ingest import price_channel_ingest as lane
+    import src.state.db as state_db
+
+    db_path = tmp_path / "world.db"
+    conn = _conn(db_path)
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed(ledger)
+    conn.commit()
+    conn.close()
+    queue_path = tmp_path / "user_channel.jsonl"
+    queue_path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "source": "polymarket_user_channel",
+                    "type": "order",
+                    "aggregate_id": "event-1:intent-1",
+                    "event_id": "event-1",
+                    "final_intent_id": "intent-1",
+                    "venue_order_id": "venue-1",
+                    "order_update_type": "UPDATE",
+                    "message_hash": f"deadline-order-{index}",
+                    "occurred_at": NOW.isoformat(),
+                }
+            )
+            for index in range(message_count)
+        )
+    )
+    checks = 0
+
+    def _deadline_check(deadline_monotonic):  # noqa: ARG001
+        nonlocal checks
+        checks += 1
+        if checks == fail_check:
+            raise TimeoutError("m5_authority_proof_deadline_exhausted")
+
+    monkeypatch.setattr(
+        lane,
+        "settings",
+        {
+            "edli": {
+                "enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "edli_user_channel_message_queue_path": str(queue_path),
+                "edli_venue_reconcile_facts_path": "",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_price_channel_world_write_gate",
+        lambda *, owner: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(lane, "_m5_authority_deadline_check", _deadline_check)
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
+
+    with pytest.raises(
+        TimeoutError,
+        match="m5_authority_proof_deadline_exhausted",
+    ):
+        lane._edli_user_channel_reconcile_cycle()
+
+    check_conn = _conn(db_path)
+    inbox_count = check_conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM edli_user_channel_inbox
+         WHERE message_hash LIKE 'deadline-order-%'
+        """
+    ).fetchone()[0]
+    event_count = check_conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM edli_live_order_events
+         WHERE event_type = 'UserOrderObserved'
+        """
+    ).fetchone()[0]
+    expected = 1 if durable_after_failure else 0
+    assert inbox_count == expected
+    assert event_count == expected
+
+
+def test_m5_deadline_checked_after_external_reconcile_returns(
+    monkeypatch,
+    tmp_path,
+):
+    from src.ingest import price_channel_ingest as lane
+    import src.state.db as state_db
+
+    db_path = tmp_path / "world.db"
+    conn = _conn(db_path)
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed(ledger)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitUnknown",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "venue_order_id": "venue-1",
+        },
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+    conn.commit()
+    conn.close()
+    checks = 0
+    reconcile_returned = False
+
+    class _EmptyUserReader:
+        def poll(self, *, max_messages):  # noqa: ARG002
+            return []
+
+    class _ReconcileReader:
+        def reconcile(self, pending):  # noqa: ARG002
+            nonlocal reconcile_returned
+            reconcile_returned = True
+            return {
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "source": "venue_reconcile",
+                "pending_reconcile": False,
+                "observed_at": NOW.isoformat(),
+            }
+
+    def _deadline_check(deadline_monotonic):  # noqa: ARG001
+        nonlocal checks
+        checks += 1
+        if checks == 6:
+            raise TimeoutError("m5_authority_proof_deadline_exhausted")
+
+    monkeypatch.setattr(
+        lane,
+        "settings",
+        {
+            "edli": {
+                "enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "edli_user_channel_message_queue_path": "",
+                "edli_venue_reconcile_facts_path": "",
+            }
+        },
+    )
+    monkeypatch.setattr(lane, "_edli_user_channel_reader", lambda _cfg: _EmptyUserReader())
+    monkeypatch.setattr(
+        lane,
+        "_edli_venue_reconcile_reader",
+        lambda _cfg: _ReconcileReader(),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_price_channel_world_write_gate",
+        lambda *, owner: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(lane, "_m5_authority_deadline_check", _deadline_check)
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
+
+    with pytest.raises(
+        TimeoutError,
+        match="m5_authority_proof_deadline_exhausted",
+    ):
+        lane._edli_user_channel_reconcile_cycle()
+
+    assert reconcile_returned is True
+    projection = LiveOrderAggregateLedger(_conn(db_path)).get_projection(
+        "event-1:intent-1"
+    )
+    assert projection.pending_reconcile is True
 
 
 def test_user_channel_reconcile_cycle_recovers_rest_filled_orphan(monkeypatch, tmp_path):
@@ -687,6 +1042,7 @@ def test_user_channel_reconcile_cycle_recovers_rest_filled_orphan(monkeypatch, t
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
     main._edli_user_channel_reconcile_cycle()
+    main._edli_fill_bridge_repair_cycle()
 
     check_ledger = LiveOrderAggregateLedger(_conn(db_path))
     projection = check_ledger.get_projection("event-1:intent-1")
@@ -1076,7 +1432,7 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
 
     def _open_world(*args, **kwargs):
         phase_transactions.append(("world_open", conn.in_transaction, gate_depth))
-        return conn
+        return _conn(db_path)
 
     def _open_trade(*args, **kwargs):
         phase_transactions.append(("trade_open", False, gate_depth))
@@ -1131,11 +1487,13 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
     main._edli_user_channel_reconcile_cycle()
+    main._edli_fill_bridge_repair_cycle()
 
     assert phase_transactions == [
         ("user_poll", False, 0),
         ("world_open", False, 1),
         ("external_reconcile", False, 0),
+        ("world_open", False, 1),
         ("confirmed_scan", False, 1),
         ("rest_scan", False, 1),
         ("trade_open", False, 1),
@@ -1143,6 +1501,7 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
     assert gate_owners == [
         "price_channel_user_inbox",
         "price_channel_venue_reconcile",
+        "price_channel_fill_bridge_reconcile",
         "price_channel_fill_bridge",
     ]
     assert gate_depth == 0
@@ -1150,7 +1509,6 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
     assert projection.current_state == "RECONCILED"
     assert projection.pending_reconcile is False
 
-    conn = _conn(db_path)
     phase_transactions.clear()
     gate_owners.clear()
     monkeypatch.setattr(
@@ -1169,11 +1527,13 @@ def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
     )
 
     main._edli_user_channel_reconcile_cycle()
+    main._edli_fill_bridge_repair_cycle()
 
     assert "price_channel_fill_bridge" not in gate_owners
     assert gate_owners == [
         "price_channel_user_inbox",
         "price_channel_venue_reconcile",
+        "price_channel_fill_bridge_reconcile",
     ]
 
 

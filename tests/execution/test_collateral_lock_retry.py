@@ -213,9 +213,9 @@ def test_exit_refresh_wrapper_does_not_reuse_entry_pusd_snapshot(monkeypatch):
     out = _refresh_exit_collateral_snapshot_for_submit(conn)
 
     assert calls["payload"] == 1
-    assert out["allowed"] is True
-    assert out["details"]["action"] == "exit_submit"
-    assert "reused_fresh_snapshot" not in out["details"]
+    assert out.action == "exit_submit"
+    assert out.persist is True
+    assert out.snapshot.ctf_token_balances == {"exit-token": _CTF_SCALE}
 
 
 def test_exit_refresh_wrapper_uses_target_ctf_payload(monkeypatch):
@@ -330,9 +330,9 @@ def test_exit_wrapper_refreshes_target_before_stale_pusd_only_rejection(monkeypa
         shares=7.0,
     )
 
-    assert out["allowed"] is True
     assert calls["target"] == 1
-    CollateralLedger(conn).sell_preflight(token_id="exit-token", size=7.0)
+    assert out.persist is True
+    assert out.snapshot.ctf_token_balances == {"exit-token": 7 * _CTF_SCALE}
 
 
 def test_entry_refresh_wrapper_reuses_fresh_sidecar_snapshot(monkeypatch):
@@ -371,20 +371,28 @@ def test_entry_refresh_wrapper_reuses_fresh_sidecar_snapshot(monkeypatch):
     assert out["details"]["reused_fresh_snapshot"] is True
 
 
-def test_exit_refresh_wrapper_retries_transient_lock(monkeypatch):
+def test_exit_prepared_snapshot_does_not_retry_sqlite_lock(monkeypatch):
     calls = {"n": 0}
 
-    def side():
-        calls["n"] += 1
-        if calls["n"] < 2:
+    class _ExitAdapter:
+        def get_collateral_payload(self):
+            calls["n"] += 1
             raise sqlite3.OperationalError("database is locked")
-        return _ok_snapshot()
 
-    ex, _ci = _patch(monkeypatch, side)
-    out = ex._refresh_exit_collateral_snapshot_for_submit(sqlite3.connect(":memory:"))
-    assert calls["n"] == 2
-    assert out["allowed"] is True
-    assert out["details"]["action"] == "exit_submit"
+    class _StubClient:
+        def _ensure_v2_adapter(self):
+            return _ExitAdapter()
+
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient", lambda *a, **k: _StubClient()
+    )
+    from src.execution.executor import _refresh_exit_collateral_snapshot_for_submit
+
+    out = _refresh_exit_collateral_snapshot_for_submit(sqlite3.connect(":memory:"))
+
+    assert calls["n"] == 1
+    assert out.persist is True
+    assert out.snapshot.authority_tier == "DEGRADED"
 
 
 def test_exit_sell_preflight_uses_refreshed_submit_connection_snapshot():

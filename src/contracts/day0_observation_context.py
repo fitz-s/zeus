@@ -12,10 +12,13 @@ Classifies where in the Day0 lifecycle a position sits relative to the
 current observation:
 
   DETERMINISTIC
-      The observed extreme so far already determines the settlement outcome
-      regardless of remaining forecast members. For HIGH markets: observed_high
-      already exceeds every remaining-period member max. For LOW markets:
-      observed_low already undercuts every remaining-period member min.
+      The remaining window has closed and the observation is a final settlement
+      witness. No future weather can change the settlement outcome.
+
+  MODEL_SUPPORT_COLLAPSED
+      The observed extreme covers every remaining ensemble member, but the
+      remaining window is still open. This is a collapse of model support, not
+      a deterministic statement about the real-world settlement outcome.
 
   BOUNDED_LIVE
       An observation is present and the outcome is not yet determined. The
@@ -68,8 +71,12 @@ class BoundClassification(str, Enum):
     Values
     ------
     DETERMINISTIC
-        Observed extreme already determines settlement outcome.
-        No remaining forecast member can change the result.
+        Remaining window has closed and observed extreme is the final settlement
+        witness.
+
+    MODEL_SUPPORT_COLLAPSED
+        Observation covers every remaining ensemble member while the remaining
+        window is open. This is model support collapse, not settlement certainty.
 
     BOUNDED_LIVE
         Observation present; outcome depends on remaining forecast window.
@@ -81,6 +88,7 @@ class BoundClassification(str, Enum):
     """
 
     DETERMINISTIC = "DETERMINISTIC"
+    MODEL_SUPPORT_COLLAPSED = "MODEL_SUPPORT_COLLAPSED"
     BOUNDED_LIVE = "BOUNDED_LIVE"
     UNBOUNDED_NO_OBS_YET = "UNBOUNDED_NO_OBS_YET"
 
@@ -106,7 +114,8 @@ class Day0ObservationContext:
         build_day0_temporal_context degraded (malformed solar_daily rootpage).
 
     bound_classification
-        DETERMINISTIC | BOUNDED_LIVE | UNBOUNDED_NO_OBS_YET.
+        DETERMINISTIC | MODEL_SUPPORT_COLLAPSED | BOUNDED_LIVE |
+        UNBOUNDED_NO_OBS_YET.
 
     observed_extreme_so_far
         The intraday observed high (for HIGH markets) or observed low (for LOW
@@ -122,7 +131,7 @@ class Day0ObservationContext:
     daypart
         One of {"pre_sunrise", "morning", "afternoon", "post_peak"} derived
         from the solar phase and peak-hour confidence. Part of the 12-cell
-        matrix (3 BoundClassification × 4 daypart).
+        matrix (4 BoundClassification × 4 daypart).
     """
 
     temporal_context: "Day0TemporalContext | None"
@@ -141,6 +150,7 @@ def classify_bound(
     observed_extreme_so_far: float | None,
     member_extremes_remaining: "list[float] | None",
     is_high_market: bool,
+    observation_is_final_settlement_witness: bool = False,
 ) -> BoundClassification:
     """Classify bound state from observation and remaining ensemble members.
 
@@ -153,12 +163,19 @@ def classify_bound(
         remaining forecast window. None = forecast not yet available.
     is_high_market
         True for HIGH-temperature markets; False for LOW.
+    observation_is_final_settlement_witness
+        True only when upstream source validation has established that this
+        observation is the final settlement witness. Defaults to False so a
+        closed model window alone cannot create settlement certainty.
 
     Returns
     -------
     BoundClassification
         UNBOUNDED_NO_OBS_YET if observed_extreme_so_far is None.
-        DETERMINISTIC if the observation already determines settlement.
+        DETERMINISTIC only if the remaining window has closed and
+        observation_is_final_settlement_witness is True.
+        MODEL_SUPPORT_COLLAPSED if the observation covers every remaining
+        ensemble member while the remaining window is open.
         BOUNDED_LIVE otherwise.
 
     Raises
@@ -180,17 +197,19 @@ def classify_bound(
         )
 
     if len(member_extremes_remaining) == 0:
-        # Forecast window closed (no remaining members) — observation determines settlement
-        return BoundClassification.DETERMINISTIC
+        if observation_is_final_settlement_witness:
+            return BoundClassification.DETERMINISTIC
+        # No remaining model support is not itself a settlement witness.
+        return BoundClassification.MODEL_SUPPORT_COLLAPSED
 
     if is_high_market:
-        # DETERMINISTIC if observation already exceeds every remaining member max
+        # Ensemble support collapse is not real-world settlement certainty.
         if all(observed_extreme_so_far >= m for m in member_extremes_remaining):
-            return BoundClassification.DETERMINISTIC
+            return BoundClassification.MODEL_SUPPORT_COLLAPSED
     else:
-        # LOW market: DETERMINISTIC if observation already undercuts every remaining member min
+        # Ensemble support collapse is not real-world settlement certainty.
         if all(observed_extreme_so_far <= m for m in member_extremes_remaining):
-            return BoundClassification.DETERMINISTIC
+            return BoundClassification.MODEL_SUPPORT_COLLAPSED
 
     return BoundClassification.BOUNDED_LIVE
 
@@ -200,6 +219,7 @@ def build_day0_observation_context(
     observed_extreme_so_far: float | None,
     member_extremes_remaining: "list[float] | None",
     is_high_market: bool,
+    observation_is_final_settlement_witness: bool = False,
 ) -> Day0ObservationContext:
     """Build a Day0ObservationContext from temporal context + observation state.
 
@@ -217,6 +237,10 @@ def build_day0_observation_context(
         Per-member extremes for the remaining window.
     is_high_market
         True for HIGH, False for LOW.
+    observation_is_final_settlement_witness
+        True only when the observation is validated as the final settlement
+        witness; otherwise a closed remaining window remains model support
+        collapse rather than DETERMINISTIC.
 
     Returns
     -------
@@ -226,6 +250,7 @@ def build_day0_observation_context(
         observed_extreme_so_far=observed_extreme_so_far,
         member_extremes_remaining=member_extremes_remaining,
         is_high_market=is_high_market,
+        observation_is_final_settlement_witness=observation_is_final_settlement_witness,
     )
 
     is_dst_gap_hour: bool = (

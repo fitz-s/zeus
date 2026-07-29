@@ -1077,6 +1077,91 @@ def test_retired_attribution_hash_matching_is_case_insensitive(tmp_path: Path) -
     assert blocker["sample"][0]["decision_certificate_hash"] == "hash-retired"
 
 
+def test_referenced_retired_certificate_blocks_retention_for_terminal_history(
+    tmp_path: Path,
+) -> None:
+    world, trades, wconn, tconn = _fixture(tmp_path)
+    receipt = tmp_path / "referenced-retention.json"
+    try:
+        _insert_certificate(wconn, "retired", "hash-retired", mode=_retired_mode())
+        tconn.execute(
+            """
+            INSERT INTO position_decision_attribution VALUES (
+                'attr-terminal', 'position-terminal', 'command-terminal', 'hash-retired',
+                'ATTRIBUTED', NULL, 'BACKFILL', 'ENTRY',
+                '2026-07-29T00:00:00+00:00', 1
+            )
+            """
+        )
+        wconn.commit()
+        tconn.commit()
+    finally:
+        wconn.close()
+        tconn.close()
+
+    plan = migration.plan_world_decision_graph(world, trades)
+    assert plan["status"] == "blocked"
+    blocker = next(
+        item
+        for item in plan["blockers"]
+        if item["kind"] == "retired_closure_referenced_by_attribution"
+    )
+    assert blocker["count"] == 1
+    with pytest.raises(RuntimeError, match="retired_closure_referenced_by_attribution"):
+        migration.migrate_world_decision_graph(world, trades, receipt)
+    assert not receipt.exists()
+    check = sqlite3.connect(world)
+    try:
+        assert check.execute(
+            "SELECT 1 FROM decision_certificates WHERE certificate_hash='hash-retired'"
+        ).fetchone() is not None
+    finally:
+        check.close()
+
+
+def test_unreferenced_retired_certificate_is_removed_by_retention(tmp_path: Path) -> None:
+    world, trades, wconn, tconn = _fixture(tmp_path)
+    receipt = tmp_path / "unreferenced-retention.json"
+    try:
+        _insert_certificate(wconn, "retired", "hash-retired", mode=_retired_mode())
+        wconn.commit()
+        tconn.commit()
+    finally:
+        wconn.close()
+        tconn.close()
+
+    migration.migrate_world_decision_graph(world, trades, receipt)
+    check = sqlite3.connect(world)
+    try:
+        assert check.execute("SELECT COUNT(*) FROM decision_certificates").fetchone()[0] == 0
+    finally:
+        check.close()
+
+
+def test_retention_without_attached_trades_authority_fails_closed(tmp_path: Path) -> None:
+    world, _trades, wconn, tconn = _fixture(tmp_path)
+    try:
+        _insert_certificate(wconn, "retired", "hash-retired", mode=_retired_mode())
+        wconn.commit()
+        tconn.commit()
+        restore_query_only = migration._materialize_retired_closure(wconn)
+        try:
+            with pytest.raises(RuntimeError, match="requires attached trades"):
+                migration._rebuild_world_decision_graph(wconn)
+        finally:
+            migration._drop_retired_closure(wconn, restore_query_only)
+    finally:
+        wconn.close()
+        tconn.close()
+    check = sqlite3.connect(world)
+    try:
+        assert check.execute(
+            "SELECT 1 FROM decision_certificates WHERE certificate_hash='hash-retired'"
+        ).fetchone() is not None
+    finally:
+        check.close()
+
+
 def test_mixed_case_parent_hash_closes_dependent_certificate(tmp_path: Path) -> None:
     world, trades, wconn, tconn = _fixture(tmp_path)
     receipt = tmp_path / "mixed-case.json"

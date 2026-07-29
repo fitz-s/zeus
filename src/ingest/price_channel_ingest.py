@@ -167,6 +167,12 @@ PRICE_CHANNEL_REDECISION_WORLD_WRITE_BUDGET_MS = 750
 PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS = 25
 PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
 PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS = 0.25
+M5_AUTHORITY_PROOF_CADENCE_SECONDS = 30
+M5_AUTHORITY_PROOF_DEADLINE_SECONDS = 20.0
+FILL_BRIDGE_TRADE_FACT_PERSIST_FAILED = "fill_bridge_trade_fact_persist_failed"
+FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED = (
+    "fill_bridge_position_materialization_failed"
+)
 
 
 def _bound_price_channel_sqlite_wait(
@@ -288,6 +294,8 @@ class _PriceChannelWriteGate:
                 dbs = (DBIdentity.WORLD,)
             elif self._scope == "trade":
                 dbs = (DBIdentity.TRADE,)
+            elif self._scope == "world_trade":
+                dbs = (DBIdentity.WORLD, DBIdentity.TRADE)
             else:
                 raise ValueError(f"unsupported price-channel write scope {self._scope!r}")
             deadline = time.monotonic() + self._deadline_ms / 1000.0
@@ -345,6 +353,7 @@ def _edli_price_channel_world_write_gate(*, owner: str) -> _PriceChannelWriteGat
         if owner in {
             "price_channel_user_inbox",
             "price_channel_venue_reconcile",
+            "price_channel_fill_bridge_reconcile",
         }
         else PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS
     )
@@ -1313,6 +1322,7 @@ def _edli_durable_fill_bridge_scan(
     now=None,
     limit: int = 500,
     already_bridged_repair_limit: int = 0,
+    failure_reasons: list[str] | None = None,
 ) -> int:
     """MF-1: durable, idempotent, self-healing EDLI fill -> position_current scan.
 
@@ -1349,6 +1359,11 @@ def _edli_durable_fill_bridge_scan(
     (in production a trade connection with ``world`` ATTACHed). Performs NO
     independent connection and does NOT commit — the caller owns the transaction
     boundary (the cycle / boot wrapper commits once after the scan).
+
+    ``failure_reasons`` is an optional business-liveness sink. The scan remains
+    durable and idempotent for boot callers that only need the bridged count;
+    the scheduled repair cycle supplies the sink so caught canonical
+    materialization failures cannot be reported as healthy.
 
     Returns the number of orphaned fills bridged this pass.
     """
@@ -1488,6 +1503,8 @@ def _edli_durable_fill_bridge_scan(
             exc,
             exc_info=True,
         )
+        if failure_reasons is not None:
+            failure_reasons.append(FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED)
         return 0
 
     bridged = 0
@@ -1532,6 +1549,10 @@ def _edli_durable_fill_bridge_scan(
                         now=now,
                     )
                 except Exception as exc:  # noqa: BLE001
+                    if failure_reasons is not None:
+                        failure_reasons.append(
+                            FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED
+                        )
                     logger.warning(
                         "EDLI durable fill-bridge: command position-link sync failed "
                         "for already-bridged aggregate=%s position_id=%s: %s",
@@ -1667,6 +1688,10 @@ def _edli_durable_fill_bridge_scan(
                 )
         except Exception as exc:  # noqa: BLE001
             error_str = str(exc)
+            if failure_reasons is not None:
+                failure_reasons.append(
+                    FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED
+                )
             try:
                 attempt_count = _increment_failure_count(conn, aggregate_id, error_str, now_str)
             except Exception:  # noqa: BLE001
@@ -1690,12 +1715,26 @@ def _edli_durable_fill_bridge_scan(
 # applies its own scheduler-health wrapper (the P2 pattern).
 # ---------------------------------------------------------------------------
 
+def _m5_authority_deadline_check(deadline_monotonic: float) -> None:
+    if time.monotonic() >= deadline_monotonic:
+        raise TimeoutError("m5_authority_proof_deadline_exhausted")
+
+
 def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
-    """EDLI user-channel/reconcile service boundary.
+    """Run the bounded M5 user-channel/reconcile authority proof.
 
     The live-order aggregate may only accept fill/lifecycle facts from
     authenticated user channel or explicit reconcile writers; public
     market-channel data remains quote evidence only.
+
+    SCOPE: the durable M5 proof consumed by the order daemon's clean-boot WS
+    latch. DRAIN: persist the bounded user-channel/reconcile sweep. RESET:
+    scheduler health expires at the guard's existing 180-second freshness
+    boundary; a skipped or deadline-exhausted proof never publishes success.
+
+    The durable fill bridge and derived fill-redecision wake deliberately run
+    in ``_edli_fill_bridge_repair_cycle``. They may take longer, but cannot
+    consume this proof job's single scheduler instance or freshness cadence.
     """
     from src.state.db import get_world_connection_with_trades_required
 
@@ -1703,12 +1742,9 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
     max_messages = int(edli_cfg.get("edli_user_channel_reconcile_max_messages", 50))
     pending_limit = int(edli_cfg.get("edli_user_channel_reconcile_pending_limit", 50))
     now = datetime.now(timezone.utc)
+    deadline_monotonic = time.monotonic() + M5_AUTHORITY_PROOF_DEADLINE_SECONDS
     message_count = 0
     reconcile_count = 0
-    # DEFECT-1: aggregates whose user-channel TRADE message was processed this
-    # cycle. After the world-conn commit, the bridge materialises a canonical
-    # position_current row for each that reached FILL_CONFIRMED.
-    _edli_fill_bridge_aggregate_ids: set[str] = set()
     from src.events.live_order_aggregate import (
         LiveOrderAggregateError,
         LiveOrderAggregateLedger,
@@ -1732,8 +1768,10 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
     # Fetch source evidence before opening or serialising the canonical writer.
     # The current reader is file-backed, but this boundary must also remain safe
     # if authenticated channel polling becomes network-backed.
+    _m5_authority_deadline_check(deadline_monotonic)
     user_channel_reader = _edli_user_channel_reader(edli_cfg)
     user_messages = tuple(user_channel_reader.poll(max_messages=max_messages))
+    _m5_authority_deadline_check(deadline_monotonic)
 
     conn = None
     try:
@@ -1750,6 +1788,7 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                 _bound_price_channel_sqlite_wait(conn)
                 ledger = LiveOrderAggregateLedger(conn)
                 for message in user_messages:
+                    _m5_authority_deadline_check(deadline_monotonic)
                     aggregate_id = _resolve_edli_user_channel_aggregate_id(
                         conn, message
                     )
@@ -1770,6 +1809,7 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                 for inbox_row in pending_user_channel_inbox_messages(
                     conn, limit=max_messages
                 ):
+                    _m5_authority_deadline_check(deadline_monotonic)
                     message_hash = str(_row_get(inbox_row, "message_hash"))
                     aggregate_id = str(_row_get(inbox_row, "aggregate_id"))
                     try:
@@ -1808,17 +1848,6 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                             processed_at=now,
                         )
                         message_count += 1
-                        # DEFECT-1 bridge (capital recoverability): a confirmed
-                        # EDLI fill must materialise a canonical position_current
-                        # row. Record the work set here; the cross-DB bridge below
-                        # executes after the world commit.
-                        _message_kind = str(
-                            message.get("message_type")
-                            or message.get("type")
-                            or ""
-                        ).lower()
-                        if _message_kind == "trade":
-                            _edli_fill_bridge_aggregate_ids.add(aggregate_id)
                     except RuntimeError as exc:
                         status = (
                             INBOX_STALE_REJECTED
@@ -1841,7 +1870,9 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                             error=str(exc),
                         )
 
+                _m5_authority_deadline_check(deadline_monotonic)
                 conn.commit()
+                _m5_authority_deadline_check(deadline_monotonic)
             except BaseException:
                 conn.rollback()
                 raise
@@ -1861,6 +1892,7 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                 )
             else:
                 for pending in pending_rows:
+                    _m5_authority_deadline_check(deadline_monotonic)
                     try:
                         fact = venue_reconcile_reader.reconcile(pending)
                     except Exception as exc:  # noqa: BLE001 - one aggregate cannot block peers
@@ -1871,6 +1903,7 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                             exc_info=True,
                         )
                         continue
+                    _m5_authority_deadline_check(deadline_monotonic)
                     if fact:
                         reconcile_facts.append((pending, fact))
 
@@ -1879,6 +1912,7 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
         ):
             try:
                 for pending, fact in reconcile_facts:
+                    _m5_authority_deadline_check(deadline_monotonic)
                     aggregate_id = str(_row_get(pending, "aggregate_id"))
                     current = conn.execute(
                         "SELECT pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
@@ -1928,27 +1962,37 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                         )
                         continue
                     reconcile_count += 1
+                _m5_authority_deadline_check(deadline_monotonic)
                 conn.commit()
-
-                from src.events.edli_trade_fact_bridge import (
-                    append_confirmed_trade_facts_to_edli,
-                    append_rest_filled_orphan_trade_facts_to_edli,
-                )
-
-                reconcile_count += append_confirmed_trade_facts_to_edli(
-                    conn, now=now
-                )
-                conn.commit()
-                reconcile_count += append_rest_filled_orphan_trade_facts_to_edli(
-                    conn, now=now
-                )
-                conn.commit()
+                _m5_authority_deadline_check(deadline_monotonic)
             except BaseException:
                 conn.rollback()
                 raise
     finally:
         if conn is not None:
             conn.close()
+
+    return {
+        "scheduler_failed": False,
+        "status": "m5_authority_proof_complete",
+        "fill_authority": "user_channel_or_reconcile_only",
+        "public_market_channel_fill_truth": "forbidden",
+        "user_channel_messages": message_count,
+        "venue_reconciliations": reconcile_count,
+    }
+
+
+def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
+    """Repair durable fill materialization outside the M5 authority cadence.
+
+    SCOPE: only persisted fill truth and its derived redecision wake. DRAIN:
+    idempotent durable scans repeat until no orphan remains; canonical failures
+    make scheduler health fail while the durable facts remain retryable. RESET:
+    the next fully successful canonical bridge pass clears failed scheduler
+    health; this job cannot publish M5 authority.
+    """
+    now = datetime.now(timezone.utc)
+    canonical_failure_reasons: list[str] = []
 
     # MF-1 / DEFECT-1 bridge pass (capital recoverability). The EDLI events are
     # now durable on world.db. Materialise a canonical position_current row for
@@ -1960,11 +2004,8 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
     # re-derives whether an orphan exists through a read-only admission query;
     # only a positive or uncertain result enters the durable, idempotent writer
     # scan. A confirmed fill orphaned by a daemon death / swallowed exception
-    # between the inbox PROCESSED commit and this bridge commit is therefore
-    # healed on the next cycle without taking the trade writer in the healthy
-    # no-work steady state. The transient `_edli_fill_bridge_aggregate_ids` set
-    # is kept ONLY as a fast in-cycle optimisation. Both repair paths run on the
-    # SAME bridge connection within the SAME commit.
+    # is therefore healed on the next cycle without taking the trade writer in
+    # the healthy no-work steady state.
     #
     # INV-37: runs on a trade connection with world ATTACHed — the bridge reads
     # world.edli_live_order_events and writes position_current / position_events on
@@ -1973,11 +2014,39 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
     # skips aggregates that already have a position_current row.
     # Fail-safe: a bridge error must not crash the scheduler job — log and retry
     # next cycle (the EDLI events persist; the next durable scan re-runs).
+    reconciled_trade_facts = 0
+    from src.state.db import get_world_connection_with_trades_required
+
+    conn = None
+    try:
+        with _edli_price_channel_world_write_gate(
+            owner="price_channel_fill_bridge_reconcile"
+        ):
+            conn = get_world_connection_with_trades_required(write_class="live")
+            _bound_price_channel_sqlite_wait(conn)
+            from src.events.edli_trade_fact_bridge import (
+                append_confirmed_trade_facts_to_edli,
+                append_rest_filled_orphan_trade_facts_to_edli,
+            )
+
+            reconciled_trade_facts += append_confirmed_trade_facts_to_edli(conn, now=now)
+            conn.commit()
+            reconciled_trade_facts += append_rest_filled_orphan_trade_facts_to_edli(
+                conn, now=now
+            )
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001 - durable facts retry next repair cycle
+        if conn is not None:
+            conn.rollback()
+        canonical_failure_reasons.append(FILL_BRIDGE_TRADE_FACT_PERSIST_FAILED)
+        logger.error("EDLI trade-fact bridge pass failed (non-fatal): %s", exc, exc_info=True)
+    finally:
+        if conn is not None:
+            conn.close()
+
     bridged_positions = 0
     try:
-        durable_bridge_work_exists = bool(
-            _edli_fill_bridge_aggregate_ids
-        ) or _edli_durable_fill_bridge_work_exists_read_only()
+        durable_bridge_work_exists = _edli_durable_fill_bridge_work_exists_read_only()
     except Exception as exc:  # noqa: BLE001 - uncertainty must preserve repair
         durable_bridge_work_exists = True
         logger.warning(
@@ -1987,48 +2056,35 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
             exc_info=True,
         )
     if durable_bridge_work_exists:
-        from src.events.edli_position_bridge import (
-            materialize_position_current_from_edli_fill,
-        )
         from src.state.db import get_trade_connection_with_world_required
 
         bridge_conn = None
         try:
             with _PriceChannelWriteGate(
                 owner="price_channel_fill_bridge",
-                scope="trade",
+                scope="world_trade",
             ):
-                # As with WORLD above, acquire coordination before the
-                # write-capable connection runs journal bootstrap.
+                # The scan may write WORLD disposition and TRADE position rows
+                # through one attached connection. Hold both canonical writer
+                # leases in coordinator path order before connection bootstrap.
                 bridge_conn = get_trade_connection_with_world_required(
                     write_class="live"
                 )
                 _bound_price_channel_sqlite_wait(bridge_conn)
-                # Fast in-cycle path: bridge the fills processed THIS cycle first
-                # (zero extra scan). These will already exist by the time the durable
-                # scan runs, so the scan's absence filter skips them — no double work.
-                for _agg_id in sorted(_edli_fill_bridge_aggregate_ids):
-                    try:
-                        result = materialize_position_current_from_edli_fill(
-                            bridge_conn, _agg_id, now=now
-                        )
-                        if result is not None:
-                            bridged_positions += 1
-                    except Exception as exc:  # noqa: BLE001
-                        logger.error(
-                            "EDLI position bridge failed for aggregate %s (non-fatal; "
-                            "EDLI events persist, durable scan retries): %s",
-                            _agg_id,
-                            exc,
-                            exc_info=True,
-                        )
                 # Authoritative durable scan: heal ANY orphaned confirmed fill,
                 # including ones stranded by a prior restart / swallowed exception.
                 bridged_positions += _edli_durable_fill_bridge_scan(
-                    bridge_conn, now=now
+                    bridge_conn,
+                    now=now,
+                    failure_reasons=canonical_failure_reasons,
                 )
                 bridge_conn.commit()
         except Exception as exc:  # noqa: BLE001
+            if bridge_conn is not None:
+                bridge_conn.rollback()
+            canonical_failure_reasons.append(
+                FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED
+            )
             logger.error(
                 "EDLI position bridge pass failed (non-fatal): %s", exc, exc_info=True
             )
@@ -2059,22 +2115,32 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
             exc_info=True,
         )
 
+    canonical_failure_reasons = list(dict.fromkeys(canonical_failure_reasons))
+    scheduler_failed = bool(canonical_failure_reasons)
+    scheduler_failure_reason = (
+        canonical_failure_reasons[0]
+        if canonical_failure_reasons
+        else fill_redecision_error
+    )
     return {
-        # Canonical user-channel/reconcile truth is already committed above.
-        # A derived redecision wake has its own durable retry source and cannot
-        # relabel the authenticated channel/reconcile job as unavailable.
-        "scheduler_failed": False,
-        "scheduler_failure_reason": fill_redecision_error,
+        # The canonical user-channel/reconcile truth is published by the M5
+        # proof job. A derived wake has its own durable retry source.
+        "scheduler_failed": scheduler_failed,
+        "scheduler_failure_reason": scheduler_failure_reason,
         "status": (
-            "processed_with_fill_redecision_error"
-            if fill_redecision_error
-            else "processed_user_channel_reconcile_cycle"
+            "canonical_fill_bridge_failed"
+            if scheduler_failed
+            else (
+                "processed_with_fill_redecision_error"
+                if fill_redecision_error
+                else "processed_fill_bridge_repair_cycle"
+            )
         ),
         "fill_authority": "user_channel_or_reconcile_only",
         "public_market_channel_fill_truth": "forbidden",
-        "user_channel_messages": message_count,
-        "venue_reconciliations": reconcile_count,
+        "reconciled_trade_facts": reconciled_trade_facts,
         "edli_positions_bridged": bridged_positions,
+        "canonical_failure_reasons": canonical_failure_reasons,
         "position_fill_redecision_events": fill_redecision_events,
         "position_fill_redecision_error": fill_redecision_error,
     }

@@ -426,6 +426,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 status="EVALUATED",
                 candidate_id="sell-negative",
                 sell_book_witness_identity="sell-book-current",
+                book_state="EXECUTABLE",
             ),
             GlobalHoldingAuctionCoverage(
                 position_id="position-q-missing",
@@ -1224,6 +1225,7 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
         status="EVALUATED",
         candidate_id="sell-1",
         sell_book_witness_identity="sell-book-1",
+        book_state="EXECUTABLE",
     )
     global_batch_runtime._publish_global_holding_coverage(
         (evaluated,),
@@ -3019,30 +3021,31 @@ def _stale_day0_carrier_and_current_observations():
             authority TEXT,
             training_allowed INTEGER,
             causality_status TEXT,
-            source_role TEXT
+            source_role TEXT,
+            raw_response TEXT
         )
         """
     )
     conn.executemany(
-        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             (
                 "Moscow", "2026-07-10", "ogimet_metar_uuww", "UUWW",
                 "2026-07-10T16:00:00+03:00", "2026-07-10T13:00:00+00:00",
                 "2026-07-10T13:05:00+00:00", "C", 27.0, 27.0,
-                "VERIFIED", 1, "OK", "historical_hourly",
+                "VERIFIED", 1, "OK", "historical_hourly", "METAR UUWW 101300Z 27/14",
             ),
             (
                 "Moscow", "2026-07-10", "ogimet_metar_uuww", "UUWW",
                 "2026-07-10T22:00:00+03:00", "2026-07-10T19:00:00+00:00",
-                "2026-07-10T19:05:00+00:00", "C", 19.0, 19.0,
-                "VERIFIED", 1, "OK", "historical_hourly",
+                "2026-07-10T19:05:00+00:00", "C", 27.0, 19.0,
+                "VERIFIED", 1, "OK", "historical_hourly", "METAR UUWW 101900Z 19/14",
             ),
             (
                 "Moscow", "2026-07-10", "ogimet_metar_uuww", "UUWW",
                 "2026-07-10T23:00:00+03:00", "2026-07-10T20:00:00+00:00",
-                "2026-07-10T20:30:00+00:00", "C", 18.0, 18.0,
-                "VERIFIED", 1, "OK", "historical_hourly",
+                "2026-07-10T20:30:00+00:00", "C", 27.0, 18.0,
+                "VERIFIED", 1, "OK", "historical_hourly", "METAR UUWW 102000Z 18/14",
             ),
         ),
     )
@@ -3147,17 +3150,17 @@ def test_global_day0_plateau_advances_physical_clock_without_promoting_proxy_val
             local_timestamp TEXT, utc_timestamp TEXT, imported_at TEXT,
             temp_unit TEXT, running_max REAL, running_min REAL,
             authority TEXT, training_allowed INTEGER, causality_status TEXT,
-            source_role TEXT
+            source_role TEXT, raw_response TEXT
         )
         """
     )
     conn.execute(
-        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             "Paris", "2026-07-14", "wu_icao_history", "LFPB",
             "2026-07-14T16:00:00+02:00", "2026-07-14T14:00:00+00:00",
             "2026-07-14T14:05:00+00:00", "C", 35.0, 25.0,
-            "VERIFIED", 1, "OK", "historical_hourly",
+            "VERIFIED", 1, "OK", "historical_hourly", "METAR LFPB 141400Z 35/14",
         ),
     )
     ensure_table(conn)
@@ -3370,29 +3373,25 @@ def test_global_day0_actuation_binds_native_fahrenheit_to_conditioned_celsius():
         """
         UPDATE observation_instants
            SET city='NYC', source='wu_icao_history', station_id='KLGA', temp_unit='F',
-               running_max=CASE utc_timestamp
-                   WHEN '2026-07-10T13:00:00+00:00' THEN 80.6
-                   WHEN '2026-07-10T19:00:00+00:00' THEN 66.0
-                   ELSE 64.0
-               END
+               running_max=80.6
         """
     )
     conn.execute(
-        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             "NYC", "2026-07-10", "wu_icao_history_kjfk", "KJFK",
             "2026-07-10T15:30:00-04:00", "2026-07-10T19:30:00+00:00",
             "2026-07-10T19:35:00+00:00", "F", 75.0, 70.0,
-            "VERIFIED", 1, "OK", "historical_hourly",
+            "VERIFIED", 1, "OK", "historical_hourly", "METAR KJFK 101930Z 75/14",
         ),
     )
     conn.execute(
-        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             "NYC", "2026-07-10", "wu_icao_history", "KLGA",
             "2026-07-10T15:45:00-04:00", "2026-07-10T19:45:00+00:00",
             "2026-07-10T19:50:00+00:00", "C", 25.0, 20.0,
-            "VERIFIED", 1, "OK", "historical_hourly",
+            "VERIFIED", 1, "OK", "historical_hourly", "METAR KLGA 101945Z 25/14",
         ),
     )
     carrier_payload = {
@@ -3548,6 +3547,7 @@ def test_global_day0_held_conditioning_uses_named_physical_frontier(
         "observation_source": "wu_icao_history",
         "station_id": "UUWW",
         "unit": "C",
+        "raw_payload_sha256": hashlib.sha256(b"settlement-fact").hexdigest(),
     }
     physical_fact = {
         "observed_extreme_native": 28.0,
@@ -3557,6 +3557,7 @@ def test_global_day0_held_conditioning_uses_named_physical_frontier(
         "observation_source": physical_source,
         "station_id": "UUWW",
         "unit": "C",
+        "raw_payload_sha256": hashlib.sha256(b"physical-fact").hexdigest(),
     }
     monkeypatch.setattr(
         current_plan,
@@ -3620,6 +3621,7 @@ def test_global_day0_settlement_conditioning_ignores_older_same_source_physical_
         "observation_source": "wu_icao_history",
         "station_id": "UUWW",
         "unit": "C",
+        "raw_payload_sha256": hashlib.sha256(b"settlement-fact").hexdigest(),
     }
     older_physical_view = {
         **settlement_fact,
@@ -5941,7 +5943,7 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
             local_timestamp TEXT, utc_timestamp TEXT, time_basis TEXT,
             running_max REAL, running_min REAL, temp_unit TEXT,
             imported_at TEXT, authority TEXT, causality_status TEXT,
-            source_role TEXT, training_allowed INTEGER
+            source_role TEXT, training_allowed INTEGER, raw_response TEXT
         )
         """
     )
@@ -5980,10 +5982,11 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
             causality,
             "historical_hourly",
             1,
+            f"METAR {row_station} {observed_at:%d%H%MZ} {value}",
         )
 
     observations.execute(
-        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         observation_row(
             observed_at=peak_at,
             row_target_date="2026-07-11",
@@ -6180,13 +6183,13 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
                 local_timestamp TEXT, utc_timestamp TEXT, time_basis TEXT,
                 running_max REAL, running_min REAL, temp_unit TEXT,
                 imported_at TEXT, authority TEXT, causality_status TEXT,
-                source_role TEXT, training_allowed INTEGER
+                source_role TEXT, training_allowed INTEGER, raw_response TEXT
             )
             """
         )
         invalid_observations.execute(
             "INSERT INTO observation_instants VALUES "
-            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             observation_row(
                 observed_at=peak_at,
                 row_target_date="2026-07-11",
@@ -6232,7 +6235,7 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
     )
     observations.executemany(
         "INSERT INTO observation_instants VALUES "
-        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         rows,
     )
 
@@ -23695,6 +23698,7 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
             sell_book_witness_identity=global_sell_book_witness_identity(
                 sell_curve
             ),
+            book_state="EXECUTABLE",
         )
         coverage_rows = [coverage]
         if current and same_family_unexecutable:

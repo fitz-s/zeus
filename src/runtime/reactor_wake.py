@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import socket
 import tempfile
@@ -19,6 +20,12 @@ REACTOR_WAKE_FILENAME = "edli-reactor-wake.json"
 REACTOR_WAKE_QUEUE_SUFFIX = ".d"
 REACTOR_WAKE_SOCKET_SUFFIX = ".sock"
 REACTOR_URGENT_WAKE_SUFFIX = ".urgent"
+HELD_SELL_REAUCTION_RECEIPT_SUFFIX = ".held-sell-reauction-receipts"
+HELD_SELL_REAUCTION_V2 = 2
+HELD_SELL_REAUCTION_V3 = 3
+_HELD_SELL_BOOK_STATES = frozenset(
+    {"UNKNOWN", "NO_EXECUTABLE_BOOK", "STALE", "EXECUTABLE"}
+)
 GLOBAL_AUCTION_COMPLETION_WAKE_REASON = (
     "held_sell_global_auction_completion_requested"
 )
@@ -36,6 +43,45 @@ _WAKE_QUEUE_REVISIONS: dict[Path, tuple[int, ...]] = {}
 
 
 @dataclass(frozen=True)
+class HeldSellReauctionRequest:
+    """One held statistical-SELL obligation that requires a global reauction."""
+
+    request_id: str
+    material_identity: str
+    generation: str
+    position_id: str
+    family: tuple[str, str, str]
+    probability_content_identity: str
+    held_token_id: str
+    held_best_bid: float | None
+    bid_observed_at: str
+    schema_version: int = 1
+    scope_identity: str = ""
+    book_state: str = "EXECUTABLE"
+    probability_observed_at: str = ""
+    attempt_identity: str = ""
+
+
+@dataclass(frozen=True)
+class HeldSellReauctionReceipt:
+    """Durable terminal result for one held reauction obligation."""
+
+    request_id: str
+    material_identity: str
+    generation: str
+    status: str
+    reason: str
+    selection_epoch_identity: str = ""
+    sell_book_witness_identity: str = ""
+    schema_version: int = 1
+    scope_identity: str = ""
+    book_state: str = "EXECUTABLE"
+    capital_objective_proof: str = ""
+    answered_probability_content_identity: str = ""
+    attempt_identity: str = ""
+
+
+@dataclass(frozen=True)
 class ReactorWake:
     wake_id: str
     published_at: str
@@ -43,6 +89,7 @@ class ReactorWake:
     reason: str
     event_ids: tuple[str, ...] = ()
     forecast_families: tuple[tuple[str, str, str], ...] = ()
+    held_sell_reauction_requests: tuple[HeldSellReauctionRequest, ...] = ()
 
 
 def _wake_path(path: Path | None) -> Path:
@@ -70,6 +117,11 @@ def _wake_socket_path(path: Path | None) -> Path:
 def _urgent_wake_path(path: Path | None) -> Path:
     target = _wake_path(path)
     return target.with_name(f"{target.name}{REACTOR_URGENT_WAKE_SUFFIX}")
+
+
+def _held_sell_reauction_receipt_dir(path: Path | None) -> Path:
+    target = _wake_path(path)
+    return target.with_name(f"{target.name}{HELD_SELL_REAUCTION_RECEIPT_SUFFIX}")
 
 
 def _notify_reactor_wake(path: Path | None) -> None:
@@ -162,6 +214,351 @@ def _clean_forecast_families(
     return tuple(families)
 
 
+def _held_sell_reauction_material(
+    *,
+    position_id: str,
+    family: tuple[str, str, str],
+    probability_content_identity: str,
+    held_token_id: str,
+    held_best_bid: float | None,
+    bid_observed_at: str,
+    schema_version: int = 1,
+    scope_identity: str = "",
+    book_state: str = "EXECUTABLE",
+    probability_observed_at: str = "",
+) -> dict[str, object]:
+    """Validate and normalize the stable held-position witness."""
+
+    clean_family = _clean_forecast_families((family,))
+    clean_position_id = str(position_id or "").strip()
+    clean_q_identity = str(probability_content_identity or "").strip()
+    clean_token_id = str(held_token_id or "").strip()
+    clean_observed_at = str(bid_observed_at or "").strip()
+    clean_probability_observed_at = str(probability_observed_at or "").strip()
+    try:
+        clean_schema_version = int(schema_version)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("HELD_SELL_REAUCTION_SCHEMA_VERSION_INVALID") from exc
+    clean_book_state = str(book_state or "").strip().upper()
+    clean_scope_identity = str(scope_identity or "").strip()
+    clean_bid: float | None
+    if held_best_bid in (None, ""):
+        clean_bid = None
+    else:
+        try:
+            clean_bid = float(held_best_bid)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("HELD_SELL_REAUCTION_BID_INVALID") from exc
+        if not math.isfinite(clean_bid):
+            raise ValueError("HELD_SELL_REAUCTION_BID_INVALID")
+    if clean_schema_version == 1:
+        if (
+            len(clean_family) != 1
+            or not all(
+                (
+                    clean_position_id,
+                    clean_q_identity,
+                    clean_token_id,
+                    clean_observed_at,
+                )
+            )
+            or clean_bid is None
+            or not 0.05 <= clean_bid <= 0.95
+        ):
+            raise ValueError("HELD_SELL_REAUCTION_REQUEST_INVALID")
+    elif clean_schema_version in {
+        HELD_SELL_REAUCTION_V2,
+        HELD_SELL_REAUCTION_V3,
+    }:
+        if (
+            len(clean_family) != 1
+            or not all((clean_position_id, clean_token_id, clean_scope_identity))
+            or clean_book_state not in _HELD_SELL_BOOK_STATES
+            or (clean_bid is not None and not 0.0 <= clean_bid <= 1.0)
+            or (
+                clean_book_state == "EXECUTABLE"
+                and (
+                    not all((clean_q_identity, clean_observed_at))
+                    or clean_bid is None
+                    or not 0.05 <= clean_bid <= 0.95
+                )
+            )
+        ):
+            raise ValueError("HELD_SELL_REAUCTION_V2_REQUEST_INVALID")
+    else:
+        raise ValueError("HELD_SELL_REAUCTION_SCHEMA_VERSION_INVALID")
+    material = {
+        "position_id": clean_position_id,
+        "family": clean_family[0],
+        "probability_content_identity": clean_q_identity,
+        "held_token_id": clean_token_id,
+        "held_best_bid": clean_bid,
+        "bid_observed_at": clean_observed_at,
+    }
+    if clean_schema_version in {
+        HELD_SELL_REAUCTION_V2,
+        HELD_SELL_REAUCTION_V3,
+    }:
+        material.update(
+            {
+                "schema_version": clean_schema_version,
+                "scope_identity": clean_scope_identity,
+                "probability_observed_at": clean_probability_observed_at,
+                "book_state": clean_book_state,
+            }
+        )
+    return material
+
+
+def held_sell_reauction_scope_identity(
+    *,
+    position_id: str,
+    family: tuple[str, str, str],
+    probability_content_identity: str,
+    held_token_id: str,
+) -> str:
+    """Stable versioned scope for one position/token obligation."""
+
+    material = {
+        "position_id": str(position_id or "").strip(),
+        "family": tuple(str(value or "").strip() for value in family),
+        "probability_content_identity": str(
+            probability_content_identity or ""
+        ).strip(),
+        "held_token_id": str(held_token_id or "").strip(),
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def held_sell_reauction_material_identity(
+    *,
+    position_id: str,
+    family: tuple[str, str, str],
+    probability_content_identity: str,
+    held_token_id: str,
+    held_best_bid: float | None,
+    bid_observed_at: str,
+    schema_version: int = 1,
+    scope_identity: str = "",
+    book_state: str = "EXECUTABLE",
+    probability_observed_at: str = "",
+) -> str:
+    """Return the V1 witness identity or the versioned obligation scope."""
+
+    material = _held_sell_reauction_material(
+        position_id=position_id,
+        family=family,
+        probability_content_identity=probability_content_identity,
+        held_token_id=held_token_id,
+        held_best_bid=held_best_bid,
+        bid_observed_at=bid_observed_at,
+        schema_version=schema_version,
+        scope_identity=scope_identity,
+        book_state=book_state,
+        probability_observed_at=probability_observed_at,
+    )
+    if int(schema_version) in {
+        HELD_SELL_REAUCTION_V2,
+        HELD_SELL_REAUCTION_V3,
+    }:
+        # Versioned book/q clocks describe one attempt, not the obligation. A new
+        # executable book must answer the original no-book wake generation.
+        return str(material["scope_identity"])
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _held_sell_reauction_attempt_identity(material: dict[str, object]) -> str:
+    """Bind one V3 attempt to its trigger q/book context."""
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "scope_identity": material["scope_identity"],
+                "probability_content_identity": material[
+                    "probability_content_identity"
+                ],
+                "probability_observed_at": material["probability_observed_at"],
+                "held_best_bid": material["held_best_bid"],
+                "bid_observed_at": material["bid_observed_at"],
+                "book_state": material["book_state"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _held_sell_reauction_request_id(
+    material_identity: str,
+    generation: str,
+    attempt_identity: str = "",
+) -> str:
+    identity = {
+        "generation": generation,
+        "material_identity": material_identity,
+    }
+    if attempt_identity:
+        identity["attempt_identity"] = attempt_identity
+    return hashlib.sha256(
+        json.dumps(
+            identity,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def make_held_sell_reauction_request(
+    *,
+    position_id: str,
+    family: tuple[str, str, str],
+    probability_content_identity: str,
+    held_token_id: str,
+    held_best_bid: float | None,
+    bid_observed_at: str,
+    generation: str | None = None,
+    schema_version: int = 1,
+    scope_identity: str = "",
+    book_state: str = "EXECUTABLE",
+    probability_observed_at: str = "",
+) -> HeldSellReauctionRequest:
+    """Bind one monitor witness to one non-reusable request generation."""
+
+    if int(schema_version) in {
+        HELD_SELL_REAUCTION_V2,
+        HELD_SELL_REAUCTION_V3,
+    } and not scope_identity:
+        scope_identity = held_sell_reauction_scope_identity(
+            position_id=position_id,
+            family=family,
+            probability_content_identity=probability_content_identity,
+            held_token_id=held_token_id,
+        )
+    material = _held_sell_reauction_material(
+        position_id=position_id,
+        family=family,
+        probability_content_identity=probability_content_identity,
+        held_token_id=held_token_id,
+        held_best_bid=held_best_bid,
+        bid_observed_at=bid_observed_at,
+        schema_version=schema_version,
+        scope_identity=scope_identity,
+        book_state=book_state,
+        probability_observed_at=probability_observed_at,
+    )
+    material_identity = held_sell_reauction_material_identity(
+        position_id=position_id,
+        family=family,
+        probability_content_identity=probability_content_identity,
+        held_token_id=held_token_id,
+        held_best_bid=held_best_bid,
+        bid_observed_at=bid_observed_at,
+        schema_version=schema_version,
+        scope_identity=scope_identity,
+        book_state=book_state,
+        probability_observed_at=probability_observed_at,
+    )
+    clean_generation = str(generation or uuid.uuid4().hex).strip()
+    if not clean_generation or len(clean_generation) > 128:
+        raise ValueError("HELD_SELL_REAUCTION_GENERATION_INVALID")
+    attempt_identity = (
+        _held_sell_reauction_attempt_identity(material)
+        if int(material.get("schema_version", 1)) == HELD_SELL_REAUCTION_V3
+        else ""
+    )
+    request_id = _held_sell_reauction_request_id(
+        material_identity,
+        clean_generation,
+        attempt_identity,
+    )
+    return HeldSellReauctionRequest(
+        request_id=request_id,
+        material_identity=material_identity,
+        generation=clean_generation,
+        attempt_identity=attempt_identity,
+        **material,
+    )
+
+
+def _clean_held_sell_reauction_requests(
+    values: object,
+) -> tuple[HeldSellReauctionRequest, ...]:
+    if not isinstance(values, (list, tuple)):
+        return ()
+    requests: list[HeldSellReauctionRequest] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, (HeldSellReauctionRequest, dict)):
+            continue
+
+        def get(key: str, default: object = None) -> object:
+            if isinstance(raw, dict):
+                return raw.get(key, default)
+            return getattr(raw, key, default)
+
+        claimed_request_id = str(get("request_id") or "").strip()
+        claimed_material_identity = str(get("material_identity") or "").strip()
+        generation = str(get("generation") or "").strip()
+        try:
+            material_identity = held_sell_reauction_material_identity(
+                position_id=str(get("position_id") or ""),
+                family=tuple(get("family") or ()),
+                probability_content_identity=str(
+                    get("probability_content_identity") or ""
+                ),
+                held_token_id=str(get("held_token_id") or ""),
+                held_best_bid=get("held_best_bid"),
+                bid_observed_at=str(get("bid_observed_at") or ""),
+                schema_version=get("schema_version", 1),
+                scope_identity=str(get("scope_identity") or ""),
+                book_state=str(get("book_state") or "EXECUTABLE"),
+                probability_observed_at=str(
+                    get("probability_observed_at") or ""
+                ),
+            )
+            if claimed_material_identity and (
+                claimed_material_identity != material_identity
+            ):
+                continue
+            legacy_generation = not generation
+            if legacy_generation:
+                if claimed_request_id != material_identity:
+                    continue
+                generation = f"legacy-{claimed_request_id}"
+            request = make_held_sell_reauction_request(
+                position_id=str(get("position_id") or ""),
+                family=tuple(get("family") or ()),
+                probability_content_identity=str(
+                    get("probability_content_identity") or ""
+                ),
+                held_token_id=str(get("held_token_id") or ""),
+                held_best_bid=get("held_best_bid"),
+                bid_observed_at=str(get("bid_observed_at") or ""),
+                generation=generation,
+                schema_version=get("schema_version", 1),
+                scope_identity=str(get("scope_identity") or ""),
+                book_state=str(get("book_state") or "EXECUTABLE"),
+                probability_observed_at=str(
+                    get("probability_observed_at") or ""
+                ),
+            )
+        except (TypeError, ValueError):
+            continue
+        if not legacy_generation and claimed_request_id != request.request_id:
+            continue
+        if request.request_id in seen:
+            continue
+        seen.add(request.request_id)
+        requests.append(request)
+        if len(requests) == 100:
+            break
+    return tuple(requests)
+
+
 def publish_reactor_wake(
     *,
     source: str,
@@ -171,6 +568,7 @@ def publish_reactor_wake(
     published_at: datetime | None = None,
     event_ids: tuple[str, ...] = (),
     forecast_families: tuple[tuple[str, str, str], ...] = (),
+    held_sell_reauction_requests: tuple[HeldSellReauctionRequest, ...] = (),
 ) -> ReactorWake:
     """Atomically publish a non-authoritative wake hint after durable truth commits."""
 
@@ -186,6 +584,9 @@ def publish_reactor_wake(
         )
     )[:100]
     clean_forecast_families = _clean_forecast_families(forecast_families)
+    clean_held_sell_reauction_requests = _clean_held_sell_reauction_requests(
+        held_sell_reauction_requests
+    )
     wake = ReactorWake(
         wake_id=str(wake_id or uuid.uuid4().hex),
         published_at=(published_at or datetime.now(timezone.utc))
@@ -195,6 +596,7 @@ def publish_reactor_wake(
         reason=clean_reason,
         event_ids=clean_event_ids,
         forecast_families=clean_forecast_families,
+        held_sell_reauction_requests=clean_held_sell_reauction_requests,
     )
     target = _wake_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -213,7 +615,17 @@ def _atomic_write_wake(target: Path, wake: ReactorWake) -> None:
     temp = target.with_name(f".{target.name}.{os.getpid()}.{wake.wake_id}.tmp")
     try:
         temp.write_text(
-            json.dumps(wake.__dict__, sort_keys=True, separators=(",", ":")),
+            json.dumps(
+                {
+                    **wake.__dict__,
+                    "held_sell_reauction_requests": [
+                        request.__dict__
+                        for request in wake.held_sell_reauction_requests
+                    ],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             encoding="utf-8",
         )
         os.replace(temp, target)
@@ -247,6 +659,9 @@ def _read_reactor_wake_path(path: Path) -> ReactorWake | None:
             )[:100],
             forecast_families=_clean_forecast_families(
                 payload.get("forecast_families", ())
+            ),
+            held_sell_reauction_requests=_clean_held_sell_reauction_requests(
+                payload.get("held_sell_reauction_requests", ())
             ),
         )
     except (FileNotFoundError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -483,6 +898,234 @@ def coalescible_reactor_wakes(
         event_ids = next_event_ids
         families = next_families
     return tuple(wakes)
+
+
+def _held_sell_reauction_receipt_path(
+    request_id: str,
+    *,
+    path: Path | None = None,
+) -> Path:
+    return _held_sell_reauction_receipt_dir(path) / f"{request_id}.json"
+
+
+def _read_held_sell_reauction_receipt(
+    request_id: str,
+    *,
+    path: Path | None = None,
+) -> HeldSellReauctionReceipt | None:
+    try:
+        payload = json.loads(
+            _held_sell_reauction_receipt_path(request_id, path=path).read_text(
+                encoding="utf-8"
+            )
+        )
+        receipt = HeldSellReauctionReceipt(
+            request_id=str(payload["request_id"]).strip(),
+            material_identity=str(payload["material_identity"]).strip(),
+            generation=str(payload["generation"]).strip(),
+            status=str(payload["status"]).strip(),
+            reason=str(payload["reason"]).strip(),
+            selection_epoch_identity=str(
+                payload.get("selection_epoch_identity") or ""
+            ).strip(),
+            sell_book_witness_identity=str(
+                payload.get("sell_book_witness_identity") or ""
+            ).strip(),
+            schema_version=int(payload.get("schema_version", 1)),
+            scope_identity=str(payload.get("scope_identity") or "").strip(),
+            book_state=str(payload.get("book_state") or "EXECUTABLE").strip(),
+            capital_objective_proof=str(
+                payload.get("capital_objective_proof") or ""
+            ).strip(),
+            answered_probability_content_identity=str(
+                payload.get("answered_probability_content_identity") or ""
+            ).strip(),
+            attempt_identity=str(payload.get("attempt_identity") or "").strip(),
+        )
+    except (FileNotFoundError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        receipt.request_id != str(request_id or "").strip()
+        or receipt.request_id
+        != _held_sell_reauction_request_id(
+            receipt.material_identity,
+            receipt.generation,
+            receipt.attempt_identity,
+        )
+        or not receipt.material_identity
+        or not receipt.generation
+        or receipt.schema_version not in {
+            1,
+            HELD_SELL_REAUCTION_V2,
+            HELD_SELL_REAUCTION_V3,
+        }
+        or not receipt.reason
+    ):
+        return None
+    if receipt.schema_version == 1 and receipt.status not in {"ACTUATED", "REJECTED"}:
+        return None
+    if receipt.schema_version in {
+        HELD_SELL_REAUCTION_V2,
+        HELD_SELL_REAUCTION_V3,
+    } and (
+        receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
+        or not receipt.scope_identity
+        or receipt.book_state != "EXECUTABLE"
+        or not receipt.answered_probability_content_identity
+    ):
+        return None
+    if (
+        receipt.schema_version == HELD_SELL_REAUCTION_V3
+        and not receipt.attempt_identity
+    ):
+        return None
+    if receipt.status == "ACTUATED" and not all(
+        (
+            receipt.selection_epoch_identity,
+            receipt.sell_book_witness_identity,
+        )
+    ):
+        return None
+    if receipt.status == "CAPITAL_REJECTED" and not all(
+        (
+            receipt.selection_epoch_identity,
+            receipt.sell_book_witness_identity,
+            receipt.capital_objective_proof,
+        )
+    ):
+        return None
+    return receipt
+
+
+def persist_held_sell_reauction_receipts(
+    receipts: tuple[HeldSellReauctionReceipt, ...],
+    *,
+    path: Path | None = None,
+) -> bool:
+    """Durably record terminal global-auction outcomes before wake acknowledgement."""
+
+    try:
+        directory = _held_sell_reauction_receipt_dir(path)
+        directory.mkdir(parents=True, exist_ok=True)
+        for receipt in receipts:
+            if (
+                not isinstance(receipt, HeldSellReauctionReceipt)
+                or receipt.schema_version not in {
+                    1,
+                    HELD_SELL_REAUCTION_V2,
+                    HELD_SELL_REAUCTION_V3,
+                }
+                or not receipt.request_id
+                or not receipt.material_identity
+                or not receipt.generation
+                or receipt.request_id
+                != _held_sell_reauction_request_id(
+                    receipt.material_identity,
+                    receipt.generation,
+                    receipt.attempt_identity,
+                )
+                or not receipt.reason
+                or (
+                    receipt.schema_version == 1
+                    and receipt.status not in {"ACTUATED", "REJECTED"}
+                )
+                or (
+                    receipt.schema_version in {
+                        HELD_SELL_REAUCTION_V2,
+                        HELD_SELL_REAUCTION_V3,
+                    }
+                    and (
+                        receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
+                        or not receipt.scope_identity
+                        or receipt.book_state != "EXECUTABLE"
+                        or not receipt.answered_probability_content_identity
+                    )
+                )
+                or (
+                    receipt.schema_version == HELD_SELL_REAUCTION_V3
+                    and not receipt.attempt_identity
+                )
+                or (
+                    receipt.status == "ACTUATED"
+                    and not (
+                        receipt.selection_epoch_identity
+                        and receipt.sell_book_witness_identity
+                    )
+                )
+                or (
+                    receipt.status == "CAPITAL_REJECTED"
+                    and not (
+                        receipt.selection_epoch_identity
+                        and receipt.sell_book_witness_identity
+                        and receipt.capital_objective_proof
+                    )
+                )
+            ):
+                raise ValueError("HELD_SELL_REAUCTION_RECEIPT_INVALID")
+            target = _held_sell_reauction_receipt_path(receipt.request_id, path=path)
+            existing = _read_held_sell_reauction_receipt(receipt.request_id, path=path)
+            if existing is not None:
+                # The first valid terminal receipt is immutable authority. A
+                # later coalesced cut may re-answer that completed attempt
+                # while also carrying a fresh attempt in the same batch.
+                # Preserve the original and continue so the fresh receipt is
+                # not starved behind an idempotent old answer.
+                continue
+            temp = target.with_name(
+                f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                temp.write_text(
+                    json.dumps(
+                        receipt.__dict__, sort_keys=True, separators=(",", ":")
+                    ),
+                    encoding="utf-8",
+                )
+                os.replace(temp, target)
+            finally:
+                try:
+                    temp.unlink()
+                except FileNotFoundError:
+                    pass
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def held_sell_reauction_requests_completed(
+    requests: tuple[HeldSellReauctionRequest, ...],
+    *,
+    path: Path | None = None,
+) -> bool:
+    """A request completes only with its own durable actuation/reject receipt."""
+
+    if not requests:
+        return False
+    for request in requests:
+        receipt = _read_held_sell_reauction_receipt(request.request_id, path=path)
+        if (
+            receipt is None
+            or receipt.material_identity != request.material_identity
+            or receipt.generation != request.generation
+            or receipt.schema_version != request.schema_version
+            or (
+                request.schema_version in {
+                    HELD_SELL_REAUCTION_V2,
+                    HELD_SELL_REAUCTION_V3,
+                }
+                and (
+                    receipt.scope_identity != request.scope_identity
+                    or receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
+                    or not receipt.answered_probability_content_identity
+                )
+            )
+            or (
+                request.schema_version == HELD_SELL_REAUCTION_V3
+                and receipt.attempt_identity != request.attempt_identity
+            )
+        ):
+            return False
+    return True
 
 
 def acknowledge_reactor_wake(

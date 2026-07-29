@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-07-29
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector option from the day0 first-principles
 #   review §6.1/§6.3). INV-37: all writes go to zeus-forecasts.db under
@@ -79,6 +79,7 @@ DEFAULT_FETCH_TIMEOUT_S = 4.0
 DEFAULT_REFRESH_BUDGET_S = 6.0
 DEFAULT_REFRESH_MAX_CITIES = 3
 DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES = 60.0
+INCOMPLETE_BUNDLE_RETRY_INTERVAL_S = 60.0
 
 _TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS day0_hourly_vectors (
@@ -141,7 +142,20 @@ class Day0HourlyRefreshStats:
     cities_skipped_throttle: int = 0
     cities_skipped_quota: int = 0
     incomplete_expected_bundles: int = 0
+    unavailable_bundles: tuple["Day0HourlyBundleUnavailable", ...] = ()
     budget_exhausted: bool = False
+
+
+@dataclass(frozen=True)
+class Day0HourlyBundleUnavailable:
+    """Typed fail-closed outcome for one attempted, incomplete live bundle."""
+
+    city: str
+    target_dates: tuple[str, ...]
+    expected_models: tuple[str, ...]
+    available_models: tuple[str, ...]
+    missing_models: tuple[str, ...]
+    reason: str
 
 
 def in_domain_models_for_city(city: Any, *, models: Iterable[str] = DAY0_HOURLY_MODELS) -> list[str]:
@@ -816,6 +830,24 @@ def remaining_day_extremes_c(
 
 _REFRESH_LOCK = threading.Lock()
 _LAST_REFRESH_MONOTONIC: dict[str, float] = {}
+_INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC: dict[str, float] = {}
+
+
+def _refresh_throttled_locked(
+    refresh_key: str,
+    *,
+    now_monotonic: float,
+    interval_s: float,
+) -> bool:
+    """Return whether refresh is throttled while ``_REFRESH_LOCK`` is held."""
+
+    retry_not_before = _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.get(refresh_key)
+    if retry_not_before is not None:
+        if now_monotonic < retry_not_before:
+            return True
+        _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)
+    last = _LAST_REFRESH_MONOTONIC.get(refresh_key)
+    return last is not None and now_monotonic - last < float(interval_s)
 
 
 def maybe_refresh_day0_hourly_vectors(
@@ -835,16 +867,20 @@ def maybe_refresh_day0_hourly_vectors(
     Cities with an in-domain regional high-res model use that regional source;
     other cities use the ECMWF IFS global fallback from
     ``day0_hourly_models_for_city``. One open-meteo call per city per interval.
-    Fail-soft per city. Failed or incomplete fetches retain the refresh
-    interval so a provider outage cannot turn the 45-second scheduler into a
-    quota-consuming retry storm. The ordered prefix named by
-    ``quota_priority_cities`` may consume the Open-Meteo reserve; callers must
-    use that prefix only for current held-position exposure.
+    Fail-soft per city. A failed fetch retains the normal refresh interval so a
+    provider outage cannot turn the 45-second scheduler into a quota-consuming
+    retry storm. An incomplete fetch is never persisted as a partial live
+    bundle; it returns a typed unavailable result and retries within
+    ``INCOMPLETE_BUNDLE_RETRY_INTERVAL_S`` (well inside the three-hour reader
+    freshness law). The ordered prefix named by ``quota_priority_cities`` may
+    consume the Open-Meteo reserve; callers must use that prefix only for
+    current held-position exposure.
     """
     written = 0
     skipped_throttle = 0
     skipped_quota = 0
     incomplete_expected_bundles = 0
+    unavailable_bundles: list[Day0HourlyBundleUnavailable] = []
     budget_exhausted = False
     now_monotonic = time.monotonic()
     started_monotonic = now_monotonic
@@ -872,8 +908,11 @@ def maybe_refresh_day0_hourly_vectors(
             if not models:
                 continue
             with _REFRESH_LOCK:
-                last = _LAST_REFRESH_MONOTONIC.get(refresh_key)
-                if last is not None and now_monotonic - last < float(interval_s):
+                if _refresh_throttled_locked(
+                    refresh_key,
+                    now_monotonic=now_monotonic,
+                    interval_s=interval_s,
+                ):
                     skipped_throttle += 1
                     continue
             quota_context = (
@@ -886,8 +925,11 @@ def maybe_refresh_day0_hourly_vectors(
                     skipped_quota += 1
                     break
                 with _REFRESH_LOCK:
-                    last = _LAST_REFRESH_MONOTONIC.get(refresh_key)
-                    if last is not None and now_monotonic - last < float(interval_s):
+                    if _refresh_throttled_locked(
+                        refresh_key,
+                        now_monotonic=now_monotonic,
+                        interval_s=interval_s,
+                    ):
                         skipped_throttle += 1
                         continue
                     _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
@@ -902,19 +944,48 @@ def maybe_refresh_day0_hourly_vectors(
                     vectors, request_hash = fetch_day0_hourly_vectors(
                         city, models=models, now=decision_time
                     )
-            if vectors and request_hash:
-                vector_models = {str(vector.model) for vector in vectors}
-                expected_models = {str(model) for model in models}
-                incomplete_expected = bool(expected_models and not expected_models.issubset(vector_models))
-                for target_date in target_dates:
-                    written += persist_day0_hourly_vectors(
-                        vectors,
-                        target_date=target_date,
-                        request_hash=request_hash,
-                        lock_blocking=persist_lock_blocking,
+            expected_models = tuple(dict.fromkeys(str(model) for model in models))
+            vector_models = tuple(dict.fromkeys(str(vector.model) for vector in vectors))
+            missing_models = tuple(
+                model for model in expected_models if model not in vector_models
+            )
+            if not vectors or not request_hash:
+                unavailable_bundles.append(
+                    Day0HourlyBundleUnavailable(
+                        city=name,
+                        target_dates=target_dates,
+                        expected_models=expected_models,
+                        available_models=vector_models,
+                        missing_models=missing_models or expected_models,
+                        reason="DAY0_HOURLY_BUNDLE_FETCH_UNAVAILABLE",
                     )
-                if incomplete_expected:
-                    incomplete_expected_bundles += 1
+                )
+                continue
+            if missing_models:
+                incomplete_expected_bundles += 1
+                unavailable_bundles.append(
+                    Day0HourlyBundleUnavailable(
+                        city=name,
+                        target_dates=target_dates,
+                        expected_models=expected_models,
+                        available_models=vector_models,
+                        missing_models=missing_models,
+                        reason="DAY0_HOURLY_BUNDLE_INCOMPLETE",
+                    )
+                )
+                with _REFRESH_LOCK:
+                    _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
+                    _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] = (
+                        time.monotonic() + INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+                    )
+                continue
+            for target_date in target_dates:
+                written += persist_day0_hourly_vectors(
+                    vectors,
+                    target_date=target_date,
+                    request_hash=request_hash,
+                    lock_blocking=persist_lock_blocking,
+                )
         except Exception as exc:  # noqa: BLE001 — one city must not kill the pass
             if isinstance(exc, BlockingIOError):
                 with _REFRESH_LOCK:
@@ -929,6 +1000,7 @@ def maybe_refresh_day0_hourly_vectors(
         cities_skipped_throttle=skipped_throttle,
         cities_skipped_quota=skipped_quota,
         incomplete_expected_bundles=incomplete_expected_bundles,
+        unavailable_bundles=tuple(unavailable_bundles),
         budget_exhausted=budget_exhausted,
     )
     return stats if return_stats else stats.vectors_written

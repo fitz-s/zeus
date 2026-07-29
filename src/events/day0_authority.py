@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import math
+import re
 from typing import Mapping
 
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.decision_kernel.canonicalization import stable_hash
 
 
 class Day0AuthorityError(ValueError):
@@ -154,6 +156,65 @@ def assert_live_day0_payload_authority(payload: Mapping[str, object]) -> None:
     errors = day0_live_payload_authority_errors(payload)
     if errors:
         raise Day0AuthorityError(",".join(errors))
+
+
+def day0_entry_provenance_errors(payload: Mapping[str, object]) -> tuple[str, ...]:
+    """Return missing or inconsistent immutable Day0 ENTRY provenance fields."""
+
+    raw_payload_sha256 = str(payload.get("raw_payload_sha256") or "").strip()
+    station_id = str(payload.get("station_id") or "").strip().upper()
+    configured_station_id = str(
+        payload.get("configured_station_id") or ""
+    ).strip().upper()
+    observation_time = str(payload.get("observation_time") or "").strip()
+    observation_available_at = str(
+        payload.get("observation_available_at") or ""
+    ).strip()
+    provenance_hash = str(
+        payload.get("day0_observation_provenance_hash") or ""
+    ).strip()
+    errors: list[str] = []
+    if not re.fullmatch(r"[0-9a-f]{64}", raw_payload_sha256):
+        errors.append("raw_payload_sha256")
+    if not station_id:
+        errors.append("station_id")
+    if not configured_station_id:
+        errors.append("configured_station_id")
+    elif not (station_id == configured_station_id or station_id.startswith(f"{configured_station_id}:")):
+        errors.append("configured_station_id_mismatch")
+    try:
+        observed_at = datetime.fromisoformat(observation_time.replace("Z", "+00:00"))
+        available_at = datetime.fromisoformat(
+            observation_available_at.replace("Z", "+00:00")
+        )
+        if observed_at.tzinfo is None or available_at.tzinfo is None or observed_at > available_at:
+            errors.append("observation_clocks")
+    except ValueError:
+        errors.append("observation_clocks")
+    expected_hash = stable_hash(
+        {
+            "city": payload.get("city"),
+            "target_date": payload.get("target_date"),
+            "metric": payload.get("metric") or payload.get("temperature_metric"),
+            "settlement_source": payload.get("settlement_source"),
+            "station_id": station_id,
+            "configured_station_id": configured_station_id,
+            "raw_payload_sha256": raw_payload_sha256,
+            "observation_time": observation_time,
+            "observation_available_at": observation_available_at,
+        }
+    )
+    if provenance_hash != expected_hash:
+        errors.append("day0_observation_provenance_hash")
+    return tuple(errors)
+
+
+def assert_live_day0_entry_provenance(payload: Mapping[str, object]) -> None:
+    """Fail closed unless an ENTRY carries one exact Day0 observation binding."""
+
+    errors = day0_entry_provenance_errors(payload)
+    if errors:
+        raise Day0AuthorityError("day0_entry_provenance:" + ",".join(errors))
 
 
 def _day0_probability_block(payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -1449,6 +1510,11 @@ class Day0AuthorityEvidence:
     observation_time: str
     raw_value: float
     rounded_value: int
+    station_id: str
+    configured_station_id: str
+    settlement_source: str
+    raw_payload_sha256: str
+    day0_observation_provenance_hash: str
     settlement_semantics: SettlementSemantics
 
 
@@ -1472,6 +1538,22 @@ def assert_live_day0_authority(evidence: Day0AuthorityEvidence) -> None:
     rounded = int(evidence.settlement_semantics.round_single(evidence.raw_value))
     if rounded != evidence.rounded_value:
         raise Day0AuthorityError("rounded_value does not match SettlementSemantics")
+    assert_live_day0_entry_provenance(
+        {
+            "city": evidence.city,
+            "target_date": evidence.target_date,
+            "metric": evidence.metric,
+            "station_id": evidence.station_id,
+            "configured_station_id": evidence.configured_station_id,
+            "settlement_source": evidence.settlement_source,
+            "raw_payload_sha256": evidence.raw_payload_sha256,
+            "observation_time": evidence.observation_time,
+            "observation_available_at": evidence.observation_available_at,
+            "day0_observation_provenance_hash": (
+                evidence.day0_observation_provenance_hash
+            ),
+        }
+    )
 
 
 def observability_row_to_authority(row: Mapping[str, object]) -> Day0AuthorityEvidence:
@@ -1497,5 +1579,12 @@ def observability_row_to_authority(row: Mapping[str, object]) -> Day0AuthorityEv
         observation_time=str(row.get("observation_time") or ""),
         raw_value=float(row.get("raw_value") or 0.0),
         rounded_value=int(row.get("rounded_value") or 0),
+        station_id=str(row.get("station_id") or ""),
+        configured_station_id=str(row.get("configured_station_id") or ""),
+        settlement_source=str(row.get("settlement_source") or ""),
+        raw_payload_sha256=str(row.get("raw_payload_sha256") or ""),
+        day0_observation_provenance_hash=str(
+            row.get("day0_observation_provenance_hash") or ""
+        ),
         settlement_semantics=semantics,
     )

@@ -132,6 +132,8 @@ _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
 _HELD_POSITION_MONITOR_RESERVATION_MIN = 2
 _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
+_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS = 50
+_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 100
 
 
 def _held_position_monitor_reservation_count(position_count: int) -> int:
@@ -3203,6 +3205,51 @@ def _monitor_refreshed_phase_for_position(pos) -> str:
     return LifecyclePhase.ACTIVE.value
 
 
+class CanonicalTradeWriteIdentityError(RuntimeError):
+    """The live trade DB identity could not be proven before a canonical write."""
+
+
+def _canonical_trade_write_lease(conn, *, owner: str, deadline_ms: int, max_hold_ms: int):
+    """Serialize canonical live-trade writes without imposing the live lease on test DBs."""
+
+    from contextlib import nullcontext
+    from pathlib import Path
+
+    from src.state.db import _zeus_trade_db_path
+
+    try:
+        main_rows = [
+            row
+            for row in conn.execute("PRAGMA database_list").fetchall()
+            if str(row[1]) == "main"
+        ]
+    except Exception as exc:
+        raise CanonicalTradeWriteIdentityError(
+            "CANONICAL_TRADE_DB_IDENTITY_UNAVAILABLE"
+        ) from exc
+    if len(main_rows) != 1:
+        raise CanonicalTradeWriteIdentityError("CANONICAL_TRADE_DB_IDENTITY_AMBIGUOUS")
+    raw_main_path = str(main_rows[0][2] or "").strip()
+    # sqlite :memory: and explicitly named noncanonical fixtures are test-only
+    # surfaces. A PRAGMA failure or an ambiguous main identity is never one.
+    if not raw_main_path:
+        return nullcontext()
+    main_path = Path(raw_main_path).resolve(strict=False)
+    if main_path != _zeus_trade_db_path().resolve(strict=False):
+        return nullcontext()
+
+    from src.state.db_writer_lock import WriteClass
+    from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+
+    return default_runtime_write_coordinator().lease(
+        (DBIdentity.TRADE,),
+        owner=owner,
+        write_class=WriteClass.LIVE,
+        deadline_ms=deadline_ms,
+        max_hold_ms=max_hold_ms,
+    )
+
+
 def _emit_monitor_refreshed_canonical_if_available(
     conn,
     pos,
@@ -3218,34 +3265,49 @@ def _emit_monitor_refreshed_canonical_if_available(
 
     from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
     from src.state.db import append_many_and_project
+    from src.state.write_coordinator import WriteLeaseTimeout
 
     try:
-        row = conn.execute(
-            "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
-            (getattr(pos, "trade_id", ""),),
-        ).fetchone()
-        next_seq = int((row[0] if row else 0) or 0) + 1
-        monitor_occurred_at = (
-            deps._utcnow().isoformat()
-            if hasattr(deps, "_utcnow")
-            else (
-                str(getattr(pos, "last_monitor_at", "") or "").strip()
-                or datetime.now(timezone.utc).isoformat()
+        with _canonical_trade_write_lease(
+            conn,
+            owner="monitor_canonical_append",
+            deadline_ms=_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+        ):
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+                (getattr(pos, "trade_id", ""),),
+            ).fetchone()
+            next_seq = int((row[0] if row else 0) or 0) + 1
+            monitor_occurred_at = (
+                deps._utcnow().isoformat()
+                if hasattr(deps, "_utcnow")
+                else (
+                    str(getattr(pos, "last_monitor_at", "") or "").strip()
+                    or datetime.now(timezone.utc).isoformat()
+                )
             )
+            pos.last_monitor_at = monitor_occurred_at
+            events, projection = build_monitor_refreshed_canonical_write(
+                pos,
+                sequence_no=next_seq,
+                phase_after=_monitor_refreshed_phase_for_position(pos),
+                source_module="src.engine.cycle_runtime",
+                occurred_at=monitor_occurred_at,
+                exit_decision=exit_decision,
+                final_should_exit=final_should_exit,
+                final_exit_reason=final_exit_reason,
+                final_exit_trigger=final_exit_trigger,
+            )
+            append_many_and_project(conn, events, projection)
+            conn.commit()
+    except WriteLeaseTimeout as exc:
+        deps.logger.info(
+            "CANONICAL_MONITOR_REFRESHED_YIELDED trade_id=%s reason=%s",
+            getattr(pos, "trade_id", ""),
+            exc,
         )
-        pos.last_monitor_at = monitor_occurred_at
-        events, projection = build_monitor_refreshed_canonical_write(
-            pos,
-            sequence_no=next_seq,
-            phase_after=_monitor_refreshed_phase_for_position(pos),
-            source_module="src.engine.cycle_runtime",
-            occurred_at=monitor_occurred_at,
-            exit_decision=exit_decision,
-            final_should_exit=final_should_exit,
-            final_exit_reason=final_exit_reason,
-            final_exit_trigger=final_exit_trigger,
-        )
-        append_many_and_project(conn, events, projection)
+        return False
     except Exception as exc:
         deps.logger.warning(
             "CANONICAL_MONITOR_REFRESHED_EMIT_FAILED trade_id=%s reason=%s",
@@ -5379,6 +5441,25 @@ def execute_monitoring_phase(
         try:
             from src.events.reactor import request_global_auction_completion
 
+            obligation = getattr(position, "_held_sell_reauction_obligation", {})
+            obligation = obligation if isinstance(obligation, dict) else {}
+            held_token_id = str(
+                obligation.get("held_token_id")
+                or _position_held_token_id(position)
+                or ""
+            ).strip()
+            probability_receipt = getattr(
+                position, "_day0_monitor_probability_receipt", None
+            )
+            probability_content_identity = str(
+                obligation.get("probability_content_identity")
+                or (
+                    probability_receipt.get("probability_content_identity")
+                    if isinstance(probability_receipt, dict)
+                    else ""
+                )
+                or ""
+            ).strip()
             durable_request_accepted = request_global_auction_completion(
                 reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
                 position_id=str(
@@ -5393,6 +5474,18 @@ def execute_monitoring_phase(
                         getattr(position, "temperature_metric", "") or ""
                     ).strip().lower(),
                 ),
+                probability_content_identity=probability_content_identity,
+                held_token_id=held_token_id,
+                held_best_bid=obligation.get("held_best_bid"),
+                bid_observed_at=str(obligation.get("bid_observed_at") or ""),
+                probability_observed_at=str(
+                    obligation.get("probability_observed_at")
+                    or getattr(position, "last_monitor_at", "")
+                    or ""
+                ),
+                book_state=str(obligation.get("book_state") or "UNKNOWN"),
+                generation=str(obligation.get("generation") or "") or None,
+                scope_identity=str(obligation.get("scope_identity") or ""),
                 force_new_generation=force_new_generation,
             )
         except Exception as exc:  # noqa: BLE001 - failed reservation keeps retry pending.
@@ -6700,6 +6793,15 @@ def execute_monitoring_phase(
                     exit_reason,
                 )
             )
+            probability_receipt = getattr(
+                pos,
+                "_day0_monitor_probability_receipt",
+                None,
+            )
+            probability_content_identity = _monitor_probability_content_identity(
+                probability_receipt
+            )
+            held_token_id = _position_held_token_id(pos).strip()
             global_holding_coverage = None
             if (
                 should_exit
@@ -6707,16 +6809,6 @@ def execute_monitoring_phase(
                 and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
                 and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
             ):
-                probability_receipt = getattr(
-                    pos,
-                    "_day0_monitor_probability_receipt",
-                    None,
-                )
-                probability_content_identity = (
-                    _monitor_probability_content_identity(
-                        probability_receipt
-                    )
-                )
                 if probability_content_identity:
                     def coverage_time() -> datetime:
                         try:
@@ -6802,6 +6894,10 @@ def execute_monitoring_phase(
                             getattr(pos, "temperature_metric", "") or ""
                         ).strip().lower(),
                     ),
+                    probability_content_identity=probability_content_identity,
+                    held_token_id=held_token_id,
+                    held_best_bid=exit_context.best_bid,
+                    bid_observed_at=str(getattr(pos, "last_monitor_at", "") or ""),
                 )
                 should_exit = False
                 exit_reason = (
@@ -6882,7 +6978,7 @@ def execute_monitoring_phase(
                 summary["monitor_canonical_write_failed"] = (
                     summary.get("monitor_canonical_write_failed", 0) + 1
                 )
-                if exit_trigger != "RED_FORCE_EXIT":
+                if exit_trigger != "RED_FORCE_EXIT" and not should_exit:
                     monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
                     artifact.add_monitor_result(
                         deps.MonitorResult(
@@ -6897,6 +6993,14 @@ def execute_monitoring_phase(
                     monitor_result_written = True
                     summary["monitors"] += 1
                     continue
+                if should_exit:
+                    # The bounded writer lease is telemetry/backpressure, not a
+                    # revocation of already-decided economic exit authority.
+                    summary["monitor_canonical_write_failed_exit_authority_preserved"] = (
+                        summary.get(
+                            "monitor_canonical_write_failed_exit_authority_preserved", 0)
+                        + 1
+                    )
 
             monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
             artifact.add_monitor_result(

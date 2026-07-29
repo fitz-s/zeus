@@ -7649,6 +7649,210 @@ def test_held_sell_completion_wake_stays_durable_until_economic_cut(
     ]
 
 
+def test_position_held_sell_reauction_wake_does_not_ack_generic_reactor_run(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    request = wake_module.make_held_sell_reauction_request(
+        position_id="position-generic-run",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-generic-run",
+        held_token_id="token-no-generic-run",
+        held_best_bid=0.10,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+    wake = wake_module.ReactorWake(
+        "wake-position-held-sell",
+        "2026-07-28T08:00:00+00:00",
+        "held_position_monitor",
+        wake_module.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(request.family,),
+        held_sell_reauction_requests=(request,),
+    )
+    acknowledgements: list[str] = []
+    cycle_calls: list[dict] = []
+
+    class IdleLock:
+        def locked(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(main_module, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: False,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleLock())
+    monkeypatch.setattr(
+        main_module,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: cycle_calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert acknowledgements == []
+    assert cycle_calls[0]["producer_held_sell_reauction_requests"] == (request,)
+
+
+def test_position_held_sell_reauction_wake_acks_after_typed_receipt(monkeypatch) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    request = wake_module.make_held_sell_reauction_request(
+        position_id="position-typed-receipt",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-typed-receipt",
+        held_token_id="token-no-typed-receipt",
+        held_best_bid=0.10,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+    wake = wake_module.ReactorWake(
+        "wake-position-typed-receipt",
+        "2026-07-28T08:00:00+00:00",
+        "held_position_monitor",
+        wake_module.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(request.family,),
+        held_sell_reauction_requests=(request,),
+    )
+    acknowledgements: list[str] = []
+
+    class IdleLock:
+        def locked(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(main_module, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: True,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleLock())
+    monkeypatch.setattr(main_module, "_edli_event_reactor_cycle", lambda **_kwargs: True)
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is True
+    assert acknowledgements == [wake.wake_id]
+
+
+def test_forced_held_sell_generation_waits_for_its_exact_receipt(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    request_kwargs = {
+        "position_id": "position-generation-ack",
+        "family": ("Paris", "2026-07-28", "low"),
+        "probability_content_identity": "q-content-generation-ack",
+        "held_token_id": "token-no-generation-ack",
+        "held_best_bid": 0.10,
+        "bid_observed_at": "2026-07-28T08:00:00+00:00",
+    }
+    old_request = wake_module.make_held_sell_reauction_request(
+        **request_kwargs,
+        generation="old-generation",
+    )
+    new_request = wake_module.make_held_sell_reauction_request(
+        **request_kwargs,
+        generation="forced-generation",
+    )
+    receipt_path = tmp_path / "wake.json"
+    assert wake_module.persist_held_sell_reauction_receipts(
+        (
+            wake_module.HeldSellReauctionReceipt(
+                request_id=old_request.request_id,
+                material_identity=old_request.material_identity,
+                generation=old_request.generation,
+                status="REJECTED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+            ),
+        ),
+        path=receipt_path,
+    )
+    wake = wake_module.ReactorWake(
+        "wake-forced-generation",
+        "2026-07-28T08:00:00+00:00",
+        "held_position_monitor",
+        wake_module.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(new_request.family,),
+        held_sell_reauction_requests=(new_request,),
+    )
+    acknowledgements: list[str] = []
+
+    class IdleLock:
+        def locked(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(main_module, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    completed = wake_module.held_sell_reauction_requests_completed
+    monkeypatch.setattr(
+        wake_module,
+        "held_sell_reauction_requests_completed",
+        lambda requests: completed(requests, path=receipt_path),
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleLock())
+    monkeypatch.setattr(main_module, "_edli_event_reactor_cycle", lambda **_kwargs: True)
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert acknowledgements == []
+
+    assert wake_module.persist_held_sell_reauction_receipts(
+        (
+            wake_module.HeldSellReauctionReceipt(
+                request_id=new_request.request_id,
+                material_identity=new_request.material_identity,
+                generation=new_request.generation,
+                status="REJECTED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+            ),
+        ),
+        path=receipt_path,
+    )
+    assert main_module._edli_reactor_wake_poll_once() is True
+    assert acknowledgements == [wake.wake_id]
+
+
 def test_claimed_monitor_owns_day0_priority_without_starving_reactor(
     monkeypatch,
 ) -> None:

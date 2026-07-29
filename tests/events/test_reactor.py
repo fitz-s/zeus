@@ -19,7 +19,11 @@ from types import SimpleNamespace
 import pytest
 
 from src.decision_kernel import claims
-from src.events.event_store import EventStore, GLOBAL_WINNER_TARGETED_CLAIM
+from src.events.event_store import (
+    EventStore,
+    GLOBAL_WINNER_SUBMIT_FENCED,
+    GLOBAL_WINNER_TARGETED_CLAIM,
+)
 from src.events.opportunity_event import (
     Day0ExtremeUpdatedPayload,
     ForecastSnapshotReadyPayload,
@@ -409,10 +413,10 @@ def test_day0_catchup_emitter_returns_exact_event_ids(monkeypatch):
         reactor_module,
         "_edli_scan_day0_with_lock_retry",
         lambda **_kwargs: (
-            [SimpleNamespace(event_id="day0-authority")],
+            [SimpleNamespace(event_id="day0-authority", inserted=True)],
             [
-                SimpleNamespace(event_id="day0-observation"),
-                SimpleNamespace(event_id="day0-authority"),
+                SimpleNamespace(event_id="day0-observation", inserted=True),
+                SimpleNamespace(event_id="day0-authority", inserted=False),
             ],
         ),
     )
@@ -431,6 +435,184 @@ def test_day0_catchup_emitter_returns_exact_event_ids(monkeypatch):
         world.close()
 
     assert event_ids == ("day0-authority", "day0-observation")
+
+
+@pytest.mark.parametrize(
+    ("city", "station_id"),
+    (("Kuala Lumpur", "WMKK"), ("Manila", "RPLL")),
+)
+def test_held_day0_catchup_wakes_once_and_keeps_nonheld_suppression(
+    monkeypatch,
+    city,
+    station_id,
+):
+    """Held authority persists once; duplicate and non-held paths stay quiet."""
+    from src.events import reactor as reactor_module
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.day0_extreme_updated import (
+        Day0ExtremeUpdatedTrigger,
+        build_day0_extreme_updated_event,
+    )
+    from src.runtime import reactor_wake
+
+    class _Semantics:
+        def round_single(self, value):
+            return int(value)
+
+    decision_time = datetime(2026, 7, 30, 6, 0, tzinfo=timezone.utc)
+    family = (city, "2026-07-30", "high")
+    admitted_family = reactor_module._substrate_refresh_family_key(*family)
+    context_id = f"{station_id.lower()}-jul30"
+    base_observation = {
+        "city": family[0],
+        "target_date": family[1],
+        "metric": family[2],
+        "settlement_source": "wu_icao_history",
+        "station_id": station_id,
+        "observation_time": "2026-07-30T05:00:00+00:00",
+        "observation_available_at": "2026-07-30T05:05:00+00:00",
+        "raw_value": 31.0,
+        "high_so_far": 31.0,
+        "low_so_far": 25.0,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "observation_context_id": context_id,
+    }
+    refreshed_observation = {
+        **base_observation,
+        "observation_time": "2026-07-30T05:30:00+00:00",
+        "observation_available_at": "2026-07-30T05:35:00+00:00",
+    }
+    world = sqlite3.connect(":memory:")
+    trade = sqlite3.connect(":memory:")
+    init_schema(world)
+    try:
+        prior = build_day0_extreme_updated_event(
+            observation=base_observation,
+            settlement_semantics=_Semantics(),
+            decision_time=decision_time,
+            received_at="2026-07-30T05:06:00+00:00",
+        )
+        assert EventWriter(world).write(prior).inserted
+        world.execute(
+            """
+            INSERT INTO no_trade_regret_events (
+                regret_event_id, event_id, rejection_stage, rejection_reason,
+                regret_bucket, decision_time, city, target_date, metric,
+                family_id, causal_snapshot_id, created_at, schema_version
+            ) VALUES (?, ?, 'TRADE_SCORE', 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:none',
+                      'NO_EDGE', ?, ?, ?, ?, 'family-kl-high', ?, ?, 1)
+            """,
+            (
+                f"regret-{prior.event_id}",
+                prior.event_id,
+                "2026-07-30T05:40:00+00:00",
+                *family,
+                context_id,
+                "2026-07-30T05:40:00+00:00",
+            ),
+        )
+        assert Day0ExtremeUpdatedTrigger(
+            EventWriter(world),
+            suppress_recent_no_value_refutations=True,
+        ).emit_from_observation(
+            observation=refreshed_observation,
+            settlement_semantics=_Semantics(),
+            decision_time=decision_time,
+            received_at="2026-07-30T05:40:00+00:00",
+        ) is None
+
+        scan_observation = [refreshed_observation]
+
+        def _scan(*, trigger, **_kwargs):
+            result = trigger.emit_from_observation(
+                observation=scan_observation[0],
+                settlement_semantics=_Semantics(),
+                decision_time=decision_time,
+                received_at="2026-07-30T05:40:00+00:00",
+            )
+            return [], [] if result is None else [result]
+
+        monkeypatch.setattr(reactor_module, "_edli_scan_day0_with_lock_retry", _scan)
+        admission = reactor_module._Day0LiveFamilyAdmission(
+            admitted_families=frozenset({admitted_family}),
+            held_families=frozenset({admitted_family}),
+            expiry_safe=True,
+            scan_cities=frozenset({family[0]}),
+        )
+        first_event_ids = _edli_emit_day0_extreme_events(
+            world,
+            trade,
+            decision_time=decision_time,
+            received_at="2026-07-30T05:40:00+00:00",
+            limit=5,
+            family_admission=admission,
+        )
+        second_event_ids = _edli_emit_day0_extreme_events(
+            world,
+            trade,
+            decision_time=decision_time,
+            received_at="2026-07-30T05:40:00+00:00",
+            limit=5,
+            family_admission=admission,
+        )
+
+        bridged = []
+        wakes = []
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_bridge_day0_extreme_materialization_seeds",
+            lambda event_ids: bridged.append(event_ids),
+        )
+        monkeypatch.setattr(
+            reactor_wake,
+            "publish_reactor_wake",
+            lambda **kwargs: wakes.append(kwargs),
+        )
+        assert reactor_module._edli_publish_committed_day0_catchup(
+            first_event_ids
+        ) is True
+        assert reactor_module._edli_publish_committed_day0_catchup(
+            second_event_ids
+        ) is False
+
+        scan_observation[0] = {
+            **refreshed_observation,
+            "observation_time": "2026-07-30T05:45:00+00:00",
+            "observation_available_at": "2026-07-30T05:50:00+00:00",
+        }
+        nonheld_event_ids = _edli_emit_day0_extreme_events(
+            world,
+            trade,
+            decision_time=decision_time,
+            received_at="2026-07-30T05:55:00+00:00",
+            limit=5,
+            family_admission=reactor_module._Day0LiveFamilyAdmission(
+                admitted_families=frozenset({admitted_family}),
+                expiry_safe=True,
+                scan_cities=frozenset({family[0]}),
+            ),
+        )
+        durable_event_count = world.execute(
+            "SELECT COUNT(*) FROM opportunity_events "
+            "WHERE event_type = 'DAY0_EXTREME_UPDATED'"
+        ).fetchone()[0]
+    finally:
+        trade.close()
+        world.close()
+
+    assert len(first_event_ids) == 1
+    assert second_event_ids == ()
+    assert nonheld_event_ids == ()
+    assert bridged == [first_event_ids]
+    assert [wake["event_ids"] for wake in wakes] == [first_event_ids]
+    assert durable_event_count == 2
 
 
 def test_global_not_selected_is_terminal_for_completed_epoch(caplog):
@@ -1508,9 +1690,18 @@ def test_targeted_forecast_supersession_aborts_cycle_before_ack_boundary():
 def _global_batch_probe_reactor(
     store, observations, *, incomplete=False, next_claim_event=None
 ):
+    bound_claims = {"generations": {}, "attempt_counts": {}}
+
     def _direct_submit(*_args, **_kwargs):
         observations["direct_submit_calls"] += 1
         raise AssertionError("global batch path must not invoke per-event submit")
+
+    def _bind_global_claim_generations(generations, attempt_counts):
+        bound_claims["generations"] = generations or {}
+        bound_claims["attempt_counts"] = attempt_counts or {}
+        observations.setdefault("claim_bind_calls", []).append(
+            (generations is not None, attempt_counts is not None)
+        )
 
     def _process_global_batch(
         events,
@@ -1524,6 +1715,12 @@ def _global_batch_probe_reactor(
         observations["world_conn_in_txn_at_batch"] = bool(store.conn.in_transaction)
         observations["claimed_statuses_at_batch"] = tuple(
             _processing_status(store.conn, event.event_id) for event in events
+        )
+        observations["claim_generations_at_batch"] = dict(
+            bound_claims["generations"]
+        )
+        observations["claim_attempt_counts_at_batch"] = dict(
+            bound_claims["attempt_counts"]
         )
         receipts = {
             event.event_id: EventSubmissionReceipt(
@@ -1546,6 +1743,9 @@ def _global_batch_probe_reactor(
 
     observations.update(direct_submit_calls=0, batch_calls=0)
     _direct_submit.process_global_batch = _process_global_batch  # type: ignore[attr-defined]
+    _direct_submit.bind_global_claim_generations = (  # type: ignore[attr-defined]
+        _bind_global_claim_generations
+    )
     return OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: True,
@@ -1647,6 +1847,13 @@ def test_global_batch_claims_epoch_then_calls_one_lock_free_batch_seam():
     assert observations["mutex_locked_at_batch"] is False
     assert observations["world_conn_in_txn_at_batch"] is False
     assert observations["claimed_statuses_at_batch"] == ("processing", "processing")
+    assert observations["claim_generations_at_batch"] == {
+        event.event_id: _DT_VENUE_OPEN.isoformat() for event in events
+    }
+    assert observations["claim_attempt_counts_at_batch"] == {
+        event.event_id: 1 for event in events
+    }
+    assert observations["claim_bind_calls"] == [(True, True), (False, False)]
     assert result.retried == 2
     assert all(_processing_status(conn, event.event_id) == "pending" for event in events)
     assert {
@@ -1847,7 +2054,7 @@ def test_monitor_does_not_preempt_when_completion_wake_is_not_durable(
     assert cancellation_probe() is False
 
 
-def test_held_sell_completion_request_deduplicates_durable_family(monkeypatch):
+def test_held_sell_completion_request_persists_position_q_and_bid_witness(monkeypatch):
     from types import SimpleNamespace
 
     from src.events import reactor
@@ -1871,6 +2078,9 @@ def test_held_sell_completion_request_deduplicates_durable_family(monkeypatch):
             SimpleNamespace(
                 reason=wake["reason"],
                 forecast_families=wake["forecast_families"],
+                held_sell_reauction_requests=wake.get(
+                    "held_sell_reauction_requests", ()
+                ),
             )
             for wake in wakes
         ),
@@ -1880,40 +2090,37 @@ def test_held_sell_completion_request_deduplicates_durable_family(monkeypatch):
         assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
             position_id="position-1",
-        ) is True
-        assert reactor.request_global_auction_completion(
-            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
-            position_id="position-2",
-        ) is True
-        assert reactor.request_global_auction_completion(
-            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
-            position_id="position-3",
             family=("Paris", "2026-07-28", "LOW"),
+            probability_content_identity="q-content-1",
+            held_token_id="token-no-1",
+            held_best_bid=0.12,
+            bid_observed_at="2026-07-28T08:00:00+00:00",
         ) is True
         assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
-            position_id="position-4",
+            position_id="position-1",
             family=("Paris", "2026-07-28", "low"),
+            probability_content_identity="q-content-1",
+            held_token_id="token-no-1",
+            held_best_bid=0.12,
+            bid_observed_at="2026-07-28T08:00:00+00:00",
         ) is True
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
-        assert wakes == [
-            {
-                "source": "held_position_monitor",
-                "reason": (
-                    "held_sell_global_auction_completion_requested"
-                ),
-                "forecast_families": (),
-            },
-            {
-                "source": "held_position_monitor",
-                "reason": (
-                    "held_sell_global_auction_completion_requested"
-                ),
-                "forecast_families": (
-                    ("Paris", "2026-07-28", "low"),
-                ),
-            },
-        ]
+        assert len(wakes) == 1
+        assert wakes[0]["source"] == "held_position_monitor"
+        assert wakes[0]["reason"] == (
+            "held_sell_global_auction_completion_requested"
+        )
+        assert wakes[0]["forecast_families"] == (
+            ("Paris", "2026-07-28", "low"),
+        )
+        request = wakes[0]["held_sell_reauction_requests"][0]
+        assert request.position_id == "position-1"
+        assert request.family == ("Paris", "2026-07-28", "low")
+        assert request.probability_content_identity == "q-content-1"
+        assert request.held_token_id == "token-no-1"
+        assert request.held_best_bid == 0.12
+        assert request.bid_observed_at == "2026-07-28T08:00:00+00:00"
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
@@ -1963,15 +2170,744 @@ def test_held_sell_completion_request_survives_wake_io_failure(monkeypatch):
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
-def test_snapshot_reauction_forces_new_wake_generation(monkeypatch):
+def test_held_sell_reauction_typed_reject_receipt_completes_request(tmp_path):
+    from src.runtime.reactor_wake import (
+        HeldSellReauctionReceipt,
+        held_sell_reauction_requests_completed,
+        make_held_sell_reauction_request,
+        persist_held_sell_reauction_receipts,
+    )
+
+    request = make_held_sell_reauction_request(
+        position_id="position-reject",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-reject",
+        held_token_id="token-no-reject",
+        held_best_bid=0.09,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+
+    assert persist_held_sell_reauction_receipts(
+        (
+            HeldSellReauctionReceipt(
+                request_id=request.request_id,
+                material_identity=request.material_identity,
+                generation=request.generation,
+                status="REJECTED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+            ),
+        ),
+        path=tmp_path / "wake.json",
+    ) is True
+    assert held_sell_reauction_requests_completed(
+        (request,), path=tmp_path / "wake.json"
+    ) is True
+
+
+def test_parent_v1_held_sell_request_hash_and_receipt_remain_compatible(tmp_path):
+    """A pre-V2 durable wake must survive parsing and retain its original ID."""
+    import hashlib
+    import json
+
+    from src.runtime import reactor_wake
+
+    material = {
+        "position_id": "legacy-v1-position",
+        "family": ("Paris", "2026-07-28", "low"),
+        "probability_content_identity": "legacy-v1-q",
+        "held_token_id": "legacy-v1-token",
+        "held_best_bid": 0.17,
+        "bid_observed_at": "2026-07-28T08:00:00+00:00",
+    }
+    material_identity = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    generation = "legacy-v1-generation"
+    request_id = hashlib.sha256(
+        json.dumps(
+            {
+                "generation": generation,
+                "material_identity": material_identity,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    parsed = reactor_wake._clean_held_sell_reauction_requests(
+        (
+            {
+                **material,
+                "request_id": request_id,
+                "material_identity": material_identity,
+                "generation": generation,
+            },
+        )
+    )
+
+    assert len(parsed) == 1
+    assert parsed[0].schema_version == 1
+    assert parsed[0].material_identity == material_identity
+    assert parsed[0].request_id == request_id
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (
+            reactor_wake.HeldSellReauctionReceipt(
+                request_id=request_id,
+                material_identity=material_identity,
+                generation=generation,
+                status="REJECTED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+            ),
+        ),
+        path=tmp_path / "wake.json",
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        parsed, path=tmp_path / "wake.json"
+    )
+
+
+def test_parent_v2_held_sell_request_and_receipt_remain_compatible(tmp_path):
+    """Schema 3 must not reinterpret already-durable schema-2 identities."""
+    import hashlib
+    import json
+
+    from src.runtime import reactor_wake
+
+    family = ("Lucknow", "2026-07-29", "high")
+    scope_identity = reactor_wake.held_sell_reauction_scope_identity(
+        position_id="legacy-v2-position",
+        family=family,
+        probability_content_identity="legacy-v2-q",
+        held_token_id="legacy-v2-token",
+    )
+    generation = "legacy-v2-generation"
+    request_id = hashlib.sha256(
+        json.dumps(
+            {
+                "generation": generation,
+                "material_identity": scope_identity,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    parsed = reactor_wake._clean_held_sell_reauction_requests(
+        (
+            {
+                "request_id": request_id,
+                "material_identity": scope_identity,
+                "generation": generation,
+                "position_id": "legacy-v2-position",
+                "family": family,
+                "probability_content_identity": "legacy-v2-q",
+                "held_token_id": "legacy-v2-token",
+                "held_best_bid": 0.19,
+                "bid_observed_at": "2026-07-29T12:00:00+00:00",
+                "schema_version": 2,
+                "scope_identity": scope_identity,
+                "book_state": "EXECUTABLE",
+                "probability_observed_at": "2026-07-29T12:00:00+00:00",
+            },
+        )
+    )
+
+    assert len(parsed) == 1
+    assert parsed[0].schema_version == 2
+    assert parsed[0].attempt_identity == ""
+    assert parsed[0].request_id == request_id
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (
+            reactor_wake.HeldSellReauctionReceipt(
+                request_id=request_id,
+                material_identity=scope_identity,
+                generation=generation,
+                schema_version=2,
+                scope_identity=scope_identity,
+                book_state="EXECUTABLE",
+                status="ACTUATED",
+                reason="legacy-v2-actuated",
+                selection_epoch_identity="legacy-v2-epoch",
+                sell_book_witness_identity="legacy-v2-book",
+                answered_probability_content_identity="legacy-v2-q",
+            ),
+        ),
+        path=tmp_path / "wake.json",
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        parsed, path=tmp_path / "wake.json"
+    )
+
+
+def test_lucknow_zero_bid_v3_obligation_is_durable_but_cannot_ack(tmp_path):
+    """A zero bid is a durable redecision debt, never an executable SELL price."""
+    from src.runtime.reactor_wake import (
+        HeldSellReauctionReceipt,
+        held_sell_reauction_requests_completed,
+        make_held_sell_reauction_request,
+        persist_held_sell_reauction_receipts,
+        publish_reactor_wake,
+        reactor_wakes_since,
+    )
+
+    path = tmp_path / "wake.json"
+    request = make_held_sell_reauction_request(
+        position_id="lucknow-bid-zero",
+        family=("Lucknow", "2026-07-29", "high"),
+        probability_content_identity="q-lucknow-current",
+        held_token_id="token-lucknow-no",
+        held_best_bid=0.0,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        schema_version=3,
+        book_state="NO_EXECUTABLE_BOOK",
+        generation="lucknow-zero-generation",
+    )
+    publish_reactor_wake(
+        source="held_position_monitor",
+        reason="held_sell_global_auction_completion_requested",
+        path=path,
+        held_sell_reauction_requests=(request,),
+    )
+
+    stored = reactor_wakes_since(None, path=path)
+    assert stored[0].held_sell_reauction_requests == (request,)
+    assert request.held_best_bid == 0.0
+    assert request.book_state == "NO_EXECUTABLE_BOOK"
+    assert persist_held_sell_reauction_receipts(
+        (
+            HeldSellReauctionReceipt(
+                request_id=request.request_id,
+                material_identity=request.material_identity,
+                generation=request.generation,
+                status="REJECTED",
+                reason="legacy_generic_reject_must_not_ack_v3",
+            ),
+        ),
+        path=path,
+    ) is False
+    assert not held_sell_reauction_requests_completed((request,), path=path)
+
+
+def test_lucknow_no_book_generation_completes_only_from_fresh_same_q_book(monkeypatch, tmp_path):
+    """A later book answers the V3 debt without reusing an old attempt."""
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime.reactor_wake import (
+        held_sell_reauction_requests_completed,
+        make_held_sell_reauction_request,
+        persist_held_sell_reauction_receipts,
+    )
+
+    kwargs = {
+        "position_id": "lucknow-no-book-generation",
+        "family": ("Lucknow", "2026-07-29", "high"),
+        "probability_content_identity": "q-lucknow-current",
+        "held_token_id": "token-lucknow-no-book",
+        "schema_version": 3,
+        "generation": "lucknow-stable-generation",
+    }
+    original = make_held_sell_reauction_request(
+        **kwargs,
+        held_best_bid=0.0,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        book_state="NO_EXECUTABLE_BOOK",
+    )
+    fresh = make_held_sell_reauction_request(
+        **kwargs,
+        held_best_bid=0.21,
+        bid_observed_at="2026-07-29T12:01:00+00:00",
+        probability_observed_at="2026-07-29T12:01:00+00:00",
+        book_state="EXECUTABLE",
+    )
+    assert fresh.material_identity == original.material_identity == original.scope_identity
+    assert fresh.generation == original.generation
+    assert fresh.attempt_identity != original.attempt_identity
+    assert fresh.request_id != original.request_id
+
+    monkeypatch.setattr(
+        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(
+            status="EVALUATED",
+            probability_content_identity="q-lucknow-current",
+            selection_epoch_identity="epoch-lucknow-fresh",
+            sell_book_witness_identity="book-lucknow-fresh",
+        ),
+    )
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(original,),
+        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+    )
+    assert len(receipts) == 1
+    assert receipts[0].request_id == original.request_id
+    assert receipts[0].answered_probability_content_identity == "q-lucknow-current"
+    assert persist_held_sell_reauction_receipts(
+        receipts, path=tmp_path / "wake.json"
+    ) is True
+    assert held_sell_reauction_requests_completed(
+        (original,), path=tmp_path / "wake.json"
+    ) is True
+    assert held_sell_reauction_requests_completed(
+        (fresh,), path=tmp_path / "wake.json"
+    ) is False
+
+    fresh_receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(fresh,),
+        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+    )
+    assert persist_held_sell_reauction_receipts(
+        fresh_receipts, path=tmp_path / "wake.json"
+    ) is True
+    assert held_sell_reauction_requests_completed(
+        (fresh,), path=tmp_path / "wake.json"
+    ) is True
+
+
+@pytest.mark.parametrize("status", ("ACTUATED", "CAPITAL_REJECTED"))
+def test_v3_old_attempt_receipt_cannot_ack_fresh_context(tmp_path, status):
+    from src.runtime import reactor_wake
+
+    common = {
+        "position_id": f"old-attempt-{status.lower()}",
+        "family": ("Lucknow", "2026-07-29", "high"),
+        "held_token_id": f"token-{status.lower()}",
+        "schema_version": 3,
+        "generation": "same-obligation-generation",
+    }
+    old = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        probability_content_identity="q-old",
+        held_best_bid=0.0,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        book_state="NO_EXECUTABLE_BOOK",
+    )
+    fresh = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        scope_identity=old.scope_identity,
+        probability_content_identity="q-fresh",
+        probability_observed_at="2026-07-29T12:01:00+00:00",
+        held_best_bid=0.23,
+        bid_observed_at="2026-07-29T12:01:00+00:00",
+        book_state="EXECUTABLE",
+    )
+    assert old.generation == fresh.generation
+    assert old.material_identity == fresh.material_identity
+    assert old.request_id != fresh.request_id
+
+    receipt = reactor_wake.HeldSellReauctionReceipt(
+        request_id=old.request_id,
+        material_identity=old.material_identity,
+        generation=old.generation,
+        schema_version=3,
+        scope_identity=old.scope_identity,
+        book_state="EXECUTABLE",
+        status=status,
+        reason=f"old-{status.lower()}",
+        selection_epoch_identity="old-epoch",
+        sell_book_witness_identity="old-book",
+        capital_objective_proof=(
+            "old-capital-proof" if status == "CAPITAL_REJECTED" else ""
+        ),
+        answered_probability_content_identity="q-old",
+        attempt_identity=old.attempt_identity,
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (receipt,), path=tmp_path / "wake.json"
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (old,), path=tmp_path / "wake.json"
+    )
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (fresh,), path=tmp_path / "wake.json"
+    )
+
+
+def test_completed_old_attempt_cannot_starve_coalesced_fresh_receipt(tmp_path):
+    from src.runtime import reactor_wake
+
+    common = {
+        "position_id": "coalesced-attempts",
+        "family": ("Lucknow", "2026-07-29", "high"),
+        "held_token_id": "coalesced-token",
+        "schema_version": 3,
+        "generation": "coalesced-generation",
+    }
+    old = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        probability_content_identity="q-old",
+        held_best_bid=0.0,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        book_state="NO_EXECUTABLE_BOOK",
+    )
+    fresh = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        scope_identity=old.scope_identity,
+        probability_content_identity="q-fresh",
+        probability_observed_at="2026-07-29T12:01:00+00:00",
+        held_best_bid=0.23,
+        bid_observed_at="2026-07-29T12:01:00+00:00",
+        book_state="EXECUTABLE",
+    )
+
+    def receipt(request, suffix):
+        return reactor_wake.HeldSellReauctionReceipt(
+            request_id=request.request_id,
+            material_identity=request.material_identity,
+            generation=request.generation,
+            schema_version=3,
+            scope_identity=request.scope_identity,
+            book_state="EXECUTABLE",
+            status="ACTUATED",
+            reason=f"actuated-{suffix}",
+            selection_epoch_identity=f"epoch-{suffix}",
+            sell_book_witness_identity=f"book-{suffix}",
+            answered_probability_content_identity=f"q-{suffix}",
+            attempt_identity=request.attempt_identity,
+        )
+
+    path = tmp_path / "wake.json"
+    first_old = receipt(old, "old-first")
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (first_old,), path=path
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (receipt(old, "old-reanswered"), receipt(fresh, "fresh")),
+        path=path,
+    )
+    assert reactor_wake._read_held_sell_reauction_receipt(
+        old.request_id, path=path
+    ) == first_old
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (old, fresh), path=path
+    )
+
+
+def test_v3_no_book_wake_upgrades_same_generation_on_fresh_superseding_q(monkeypatch, tmp_path):
+    """A fresh book/q republishes the original debt, never a stale-q action."""
     from types import SimpleNamespace
 
     from src.events import reactor
     from src.runtime import reactor_wake
 
+    published = []
+
+    def publish(**kwargs):
+        published.append(
+            SimpleNamespace(
+                reason=kwargs["reason"],
+                forecast_families=kwargs["forecast_families"],
+                held_sell_reauction_requests=kwargs["held_sell_reauction_requests"],
+            )
+        )
+        return published[-1]
+
+    monkeypatch.setattr(reactor_wake, "publish_reactor_wake", publish)
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", lambda _at: tuple(published))
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        common = {
+            "reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+            "position_id": "lucknow-q-supersession",
+            "family": ("Lucknow", "2026-07-29", "high"),
+            "held_token_id": "token-lucknow-q-supersession",
+            "schema_version": 3,
+        }
+        assert reactor.request_global_auction_completion(
+            **common,
+            probability_content_identity="q-trigger-old",
+            held_best_bid=0.0,
+            bid_observed_at="2026-07-29T12:00:00+00:00",
+            book_state="NO_EXECUTABLE_BOOK",
+        ) is True
+        original = published[0].held_sell_reauction_requests[0]
+        assert reactor.request_global_auction_completion(
+            **common,
+            probability_content_identity="q-current-new",
+            probability_observed_at="2026-07-29T12:01:00+00:00",
+            held_best_bid=0.24,
+            bid_observed_at="2026-07-29T12:01:00+00:00",
+            book_state="EXECUTABLE",
+        ) is True
+        assert len(published) == 2
+        refreshed = published[1].held_sell_reauction_requests[0]
+        assert refreshed.scope_identity == original.scope_identity
+        assert refreshed.generation == original.generation
+        assert refreshed.attempt_identity != original.attempt_identity
+        assert refreshed.request_id != original.request_id
+        assert refreshed.probability_content_identity == "q-current-new"
+
+        monkeypatch.setattr(
+            "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+            lambda **kwargs: (
+                kwargs["probability_content_identity"] == ""
+                and SimpleNamespace(
+                    status="EVALUATED",
+                    probability_content_identity="q-current-new",
+                    selection_epoch_identity="epoch-lucknow-current",
+                    sell_book_witness_identity="book-lucknow-current",
+                )
+            ),
+        )
+        receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+            requests=(refreshed,),
+            result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+        )
+        assert receipts[0].answered_probability_content_identity == "q-current-new"
+        assert reactor_wake.persist_held_sell_reauction_receipts(
+            receipts, path=tmp_path / "wake.json"
+        ) is True
+        assert reactor_wake.held_sell_reauction_requests_completed(
+            (refreshed,), path=tmp_path / "wake.json"
+        ) is True
+        assert reactor_wake.held_sell_reauction_requests_completed(
+            (original,), path=tmp_path / "wake.json"
+        ) is False
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_v3_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="karachi-in-band",
+        family=("Karachi", "2026-07-29", "low"),
+        probability_content_identity="q-karachi-current",
+        held_token_id="token-karachi-no",
+        held_best_bid=0.17,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        schema_version=3,
+        book_state="EXECUTABLE",
+        generation="karachi-current-generation",
+    )
+    monkeypatch.setattr(
+        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(
+            status="EVALUATED",
+            probability_content_identity="q-karachi-current",
+            selection_epoch_identity="epoch-karachi",
+            sell_book_witness_identity="book-karachi",
+        ),
+    )
+    actuated = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+    )
+    assert actuated[0].status == "ACTUATED"
+    assert actuated[0].schema_version == 3
+    assert actuated[0].scope_identity == request.scope_identity
+    assert actuated[0].answered_probability_content_identity == "q-karachi-current"
+
+    rejected = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=reactor.ReactorResult(
+            global_auction_completed_non_cancelled=1,
+            rejection_reasons=["GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"],
+        ),
+    )
+    assert rejected[0].status == "CAPITAL_REJECTED"
+    assert rejected[0].capital_objective_proof.endswith("CASH_DOMINATES")
+    assert rejected[0].answered_probability_content_identity == "q-karachi-current"
+
+
+def test_v3_excluded_or_unknown_q_global_cut_stays_pending(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="karachi-no-book",
+        family=("Karachi", "2026-07-29", "low"),
+        probability_content_identity="",
+        held_token_id="token-karachi-no-book",
+        held_best_bid=None,
+        bid_observed_at="",
+        schema_version=3,
+        book_state="UNKNOWN",
+        generation="karachi-no-book-generation",
+    )
+    monkeypatch.setattr(
+        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(status="EXCLUDED"),
+    )
+    assert reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+    ) == ()
+
+
+def test_v3_old_generation_receipt_cannot_ack_new_generation(tmp_path):
+    from src.runtime.reactor_wake import (
+        HeldSellReauctionReceipt,
+        held_sell_reauction_requests_completed,
+        make_held_sell_reauction_request,
+        persist_held_sell_reauction_receipts,
+    )
+
+    kwargs = dict(
+        position_id="karachi-generation-fence",
+        family=("Karachi", "2026-07-29", "high"),
+        probability_content_identity="q-karachi-generation",
+        held_token_id="token-karachi-generation",
+        held_best_bid=0.22,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        schema_version=3,
+        book_state="EXECUTABLE",
+    )
+    old = make_held_sell_reauction_request(**kwargs, generation="old")
+    new = make_held_sell_reauction_request(**kwargs, generation="new")
+    assert persist_held_sell_reauction_receipts(
+        (
+            HeldSellReauctionReceipt(
+                request_id=old.request_id,
+                material_identity=old.material_identity,
+                generation=old.generation,
+                schema_version=3,
+                scope_identity=old.scope_identity,
+                book_state="EXECUTABLE",
+                status="ACTUATED",
+                reason="current_global_cut_actuated",
+                selection_epoch_identity="epoch-old",
+                sell_book_witness_identity="book-old",
+                answered_probability_content_identity="q-karachi-generation",
+                attempt_identity=old.attempt_identity,
+            ),
+        ),
+        path=tmp_path / "wake.json",
+    )
+    assert not held_sell_reauction_requests_completed(
+        (new,), path=tmp_path / "wake.json"
+    )
+
+
+def test_held_sell_reauction_request_round_trips_through_durable_wake(tmp_path):
+    import json
+
+    from src.runtime import reactor_wake
+
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="position-durable",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-durable",
+        held_token_id="token-no-durable",
+        held_best_bid=0.13,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        held_sell_reauction_requests=(request,),
+    )
+
+    stored = reactor_wake.reactor_wakes_since(None, path=path)
+    queue_file = next((tmp_path / "wake.json.d").glob("*.json"))
+    payload = json.loads(queue_file.read_text(encoding="utf-8"))
+    stored_request = payload["held_sell_reauction_requests"][0]
+
+    assert len(stored) == 1
+    assert stored[0].held_sell_reauction_requests == (request,)
+    assert stored_request["material_identity"] == request.material_identity
+    assert stored_request["generation"] == request.generation
+    assert stored_request["request_id"] == request.request_id
+
+
+def test_held_sell_reauction_current_coverage_emits_actuation_receipt(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="position-covered",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-covered",
+        held_token_id="token-no-covered",
+        held_best_bid=0.11,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(
+            status="EVALUATED",
+            selection_epoch_identity="selection-epoch-covered",
+            sell_book_witness_identity="book-witness-covered",
+        ),
+    )
+
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].request_id == request.request_id
+    assert receipts[0].material_identity == request.material_identity
+    assert receipts[0].generation == request.generation
+    assert receipts[0].status == "ACTUATED"
+    assert receipts[0].selection_epoch_identity == "selection-epoch-covered"
+    assert receipts[0].sell_book_witness_identity == "book-witness-covered"
+
+
+def test_held_sell_reauction_global_no_trade_emits_typed_reject(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="position-no-trade",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-no-trade",
+        held_token_id="token-no-no-trade",
+        held_best_bid=0.11,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(status="EVALUATED"),
+    )
+
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=reactor.ReactorResult(
+            global_auction_completed_non_cancelled=1,
+            rejection_reasons=["GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"],
+        ),
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].status == "REJECTED"
+    assert receipts[0].reason.endswith("GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES")
+
+
+def test_snapshot_reauction_forces_new_wake_generation(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    request_kwargs = {
+        "position_id": "position-release-generation",
+        "family": ("Paris", "2026-07-28", "low"),
+        "probability_content_identity": "q-content-release-generation",
+        "held_token_id": "token-no-release-generation",
+        "held_best_bid": 0.10,
+        "bid_observed_at": "2026-07-28T08:00:00+00:00",
+        "schema_version": 3,
+        "book_state": "EXECUTABLE",
+    }
+    old_request = reactor_wake.make_held_sell_reauction_request(
+        **request_kwargs,
+        generation="old-generation",
+    )
     old_wake = SimpleNamespace(
         reason=reactor.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
         forecast_families=(("Paris", "2026-07-28", "low"),),
+        held_sell_reauction_requests=(old_request,),
     )
     published = []
     monkeypatch.setattr(
@@ -1987,17 +2923,62 @@ def test_snapshot_reauction_forces_new_wake_generation(monkeypatch):
 
     assert reactor.request_global_auction_completion(
         reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
-        position_id="position-release-generation",
-        family=("Paris", "2026-07-28", "low"),
+        **request_kwargs,
         force_new_generation=True,
     ) is True
-    assert published == [
-        {
-            "source": "held_position_monitor",
-            "reason": reactor.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
-            "forecast_families": (("Paris", "2026-07-28", "low"),),
-        }
-    ]
+    assert len(published) == 1
+    new_request = published[0]["held_sell_reauction_requests"][0]
+    assert new_request.material_identity == old_request.material_identity
+    assert new_request.generation != old_request.generation
+    assert new_request.request_id != old_request.request_id
+
+    receipt_path = tmp_path / "wake.json"
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (
+            reactor_wake.HeldSellReauctionReceipt(
+                request_id=old_request.request_id,
+                material_identity=old_request.material_identity,
+                generation=old_request.generation,
+                schema_version=3,
+                scope_identity=old_request.scope_identity,
+                book_state="EXECUTABLE",
+                status="ACTUATED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_ACTUATED",
+                selection_epoch_identity="epoch-old",
+                sell_book_witness_identity="book-old",
+                answered_probability_content_identity="q-content-release-generation",
+                attempt_identity=old_request.attempt_identity,
+            ),
+        ),
+        path=receipt_path,
+    )
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (new_request,),
+        path=receipt_path,
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (
+            reactor_wake.HeldSellReauctionReceipt(
+                request_id=new_request.request_id,
+                material_identity=new_request.material_identity,
+                generation=new_request.generation,
+                schema_version=3,
+                scope_identity=new_request.scope_identity,
+                book_state="EXECUTABLE",
+                status="ACTUATED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_ACTUATED",
+                selection_epoch_identity="epoch-new",
+                sell_book_witness_identity="book-new",
+                answered_probability_content_identity="q-content-release-generation",
+                attempt_identity=new_request.attempt_identity,
+            ),
+        ),
+        path=receipt_path,
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (new_request,),
+        path=receipt_path,
+    )
 
 
 def test_new_reauction_generation_survives_old_generation_ack(tmp_path):
@@ -3760,6 +4741,595 @@ def test_global_target_processing_lease_blocks_new_target_materialization():
     ).fetchone() is None
 
 
+def test_superseded_global_target_without_venue_attempt_cannot_starve_redecision(
+    monkeypatch,
+):
+    import src.events.event_store as event_store
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("stale-target-source", target_date="2026-05-25")
+    stale_target = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="stale-target-economics",
+        payload=json.loads(source.payload_json),
+    )
+    current_target = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=11),
+        economic_identity="current-target-economics",
+        payload=json.loads(source.payload_json),
+    )
+    other_source = _forecast_event("other-family-source", target_date="2026-05-25")
+    other_payload = json.loads(other_source.payload_json)
+    other_payload["city"] = "Seattle"
+    other_target = _next_claim_carrier(
+        other_source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=1),
+        economic_identity="other-family-economics",
+        payload=other_payload,
+    )
+
+    assert store.prioritize_global_winner(stale_target)
+    assert store.claim(stale_target.event_id, claimed_at=clock[0])
+    clock[0] = "2026-05-24T18:00:01+00:00"
+    assert store.prioritize_global_winner(other_target)
+
+    clock[0] = "2026-05-24T18:00:02+00:00"
+    recovered = store.prioritized_global_winner_event(current_target)
+
+    assert recovered == current_target
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, stale_target.event_id),
+        ).fetchone()
+    ) == (
+        "expired",
+        None,
+        "GLOBAL_WINNER_TARGET_SUPERSEDED",
+    )
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store._winner_pointer_consumer_name, current_target.event_id),
+        ).fetchone()
+    ) == ("pending", GLOBAL_WINNER_TARGETED_CLAIM)
+
+
+@pytest.mark.parametrize(
+    "fence_event_type",
+    ("ExecutionCommandCreated", "VenueSubmitAttempted"),
+)
+def test_superseded_global_target_with_command_fence_remains_recovery_owned(
+    monkeypatch,
+    fence_event_type,
+):
+    import src.events.event_store as event_store
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("attempted-target-source", target_date="2026-05-25")
+    attempted = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="attempted-target-economics",
+        payload=json.loads(source.payload_json),
+    )
+    current = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=20),
+        economic_identity="current-target-economics",
+        payload=json.loads(source.payload_json),
+    )
+    other_source = _forecast_event("attempted-other-source", target_date="2026-05-25")
+    other_payload = json.loads(other_source.payload_json)
+    other_payload["city"] = "Seattle"
+    other = _next_claim_carrier(
+        other_source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=1),
+        economic_identity="attempted-other-economics",
+        payload=other_payload,
+    )
+
+    assert store.prioritize_global_winner(attempted)
+    assert store.claim(attempted.event_id, claimed_at=clock[0])
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "attempted-target-event",
+            f"{attempted.event_id}:final-intent",
+            1,
+            fence_event_type,
+            "attempted-target-hash",
+            "{}",
+            "attempted-target-payload-hash",
+            "engine_adapter",
+            clock[0],
+            clock[0],
+        ),
+    )
+    clock[0] = "2026-05-24T18:00:01+00:00"
+    assert store.prioritize_global_winner(other)
+
+    clock[0] = "2026-05-24T18:00:20+00:00"
+    assert store.prioritized_global_winner_event(current) is None
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, attempted.event_id),
+        ).fetchone()
+    ) == ("processing", GLOBAL_WINNER_TARGETED_CLAIM)
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+        (current.event_id,),
+    ).fetchone() is None
+
+
+def test_global_target_command_fence_rejects_superseded_claim(monkeypatch):
+    import src.events.event_store as event_store
+    from src.engine.event_reactor_adapter import (
+        _LiveOpportunityAlreadyLocked,
+        _fence_global_target_claim_before_command,
+    )
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("fenced-old-source", target_date="2026-05-25")
+    old = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="fenced-old-economics",
+        payload=json.loads(source.payload_json),
+    )
+    other_source = _forecast_event("fenced-other-source", target_date="2026-05-25")
+    other_payload = json.loads(other_source.payload_json)
+    other_payload["city"] = "Seattle"
+    other = _next_claim_carrier(
+        other_source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=1),
+        economic_identity="fenced-other-economics",
+        payload=other_payload,
+    )
+
+    assert store.prioritize_global_winner(old)
+    assert store.claim(old.event_id, claimed_at=clock[0])
+    old_attempt = store.attempt_count(old.event_id)
+    clock[0] = "2026-05-24T18:00:01+00:00"
+    assert store.prioritize_global_winner(other)
+
+    with pytest.raises(
+        _LiveOpportunityAlreadyLocked,
+        match="GLOBAL_WINNER_CLAIM_FENCE_LOST",
+    ):
+        _fence_global_target_claim_before_command(
+            conn,
+            old,
+            claimed_at="2026-05-24T18:00:00+00:00",
+            attempt_count=old_attempt,
+        )
+
+
+def test_global_target_command_fence_serializes_before_pointer_supersession(
+    monkeypatch,
+):
+    import src.events.event_store as event_store
+    from src.engine.event_reactor_adapter import (
+        _fence_global_target_claim_before_command,
+    )
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("fenced-command-source", target_date="2026-05-25")
+    old = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="fenced-command-economics",
+        payload=json.loads(source.payload_json),
+    )
+    current = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=2),
+        economic_identity="fenced-command-current-economics",
+        payload=json.loads(source.payload_json),
+    )
+    other_source = _forecast_event("fenced-command-other", target_date="2026-05-25")
+    other_payload = json.loads(other_source.payload_json)
+    other_payload["city"] = "Seattle"
+    other = _next_claim_carrier(
+        other_source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=1),
+        economic_identity="fenced-command-other-economics",
+        payload=other_payload,
+    )
+
+    assert store.prioritize_global_winner(old)
+    assert store.claim(old.event_id, claimed_at=clock[0])
+    old_attempt = store.attempt_count(old.event_id)
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    _fence_global_target_claim_before_command(
+        conn,
+        old,
+        claimed_at=clock[0],
+        attempt_count=old_attempt,
+    )
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "fenced-command-event",
+            f"{old.event_id}:final-intent",
+            1,
+            "ExecutionCommandCreated",
+            "fenced-command-hash",
+            "{}",
+            "fenced-command-payload-hash",
+            "engine_adapter",
+            clock[0],
+            clock[0],
+        ),
+    )
+    conn.commit()
+
+    clock[0] = "2026-05-24T18:00:01+00:00"
+    conn.execute("BEGIN IMMEDIATE")
+    assert store.prioritize_global_winner(other)
+    conn.commit()
+
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, old.event_id),
+        ).fetchone()
+    ) == ("processing", "2026-05-24T18:00:00+00:00", GLOBAL_WINNER_SUBMIT_FENCED)
+    assert store.prioritized_global_winner_event(current) is None
+
+
+def test_global_target_command_fence_rejects_reclaimed_old_generation(
+    monkeypatch,
+):
+    import src.events.event_store as event_store
+    from src.engine.event_reactor_adapter import (
+        _LiveOpportunityAlreadyLocked,
+        _fence_global_target_claim_before_command,
+    )
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("reclaimed-fence-source", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="reclaimed-fence-economics",
+        payload=json.loads(source.payload_json),
+    )
+
+    assert store.prioritize_global_winner(target)
+    first_generation = clock[0]
+    assert store.claim(target.event_id, claimed_at=first_generation)
+    first_attempt = store.attempt_count(target.event_id)
+    clock[0] = "2026-05-24T18:00:11+00:00"
+    second_generation = clock[0]
+    assert store.claim(target.event_id, claimed_at=second_generation)
+    second_attempt = store.attempt_count(target.event_id)
+
+    with pytest.raises(
+        _LiveOpportunityAlreadyLocked,
+        match="GLOBAL_WINNER_CLAIM_FENCE_LOST",
+    ):
+        _fence_global_target_claim_before_command(
+            conn,
+            target,
+            claimed_at=first_generation,
+            attempt_count=first_attempt,
+        )
+    _fence_global_target_claim_before_command(
+        conn,
+        target,
+        claimed_at=second_generation,
+        attempt_count=second_attempt,
+    )
+    assert tuple(
+        conn.execute(
+            "SELECT claimed_at, attempt_count, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, target.event_id),
+        ).fetchone()
+    ) == (second_generation, second_attempt, GLOBAL_WINNER_SUBMIT_FENCED)
+    clock[0] = "2026-05-24T18:00:22+00:00"
+    assert not store.claim(target.event_id, claimed_at=clock[0])
+
+
+def test_stale_global_target_with_venue_attempt_cannot_reclaim_or_refence(
+    monkeypatch,
+):
+    import src.events.event_store as event_store
+    from src.engine.event_reactor_adapter import (
+        _LiveOpportunityAlreadyLocked,
+        _fence_global_target_claim_before_command,
+    )
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("attempted-reclaim-source", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="attempted-reclaim-economics",
+        payload=json.loads(source.payload_json),
+    )
+
+    assert store.prioritize_global_winner(target)
+    first_generation = clock[0]
+    assert store.claim(target.event_id, claimed_at=first_generation)
+    first_attempt = store.attempt_count(target.event_id)
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "attempted-reclaim-event",
+            f"{target.event_id}:final-intent",
+            1,
+            "VenueSubmitAttempted",
+            "attempted-reclaim-hash",
+            "{}",
+            "attempted-reclaim-payload-hash",
+            "engine_adapter",
+            clock[0],
+            clock[0],
+        ),
+    )
+    clock[0] = "2026-05-24T18:01:11+00:00"
+
+    assert store.fetch_pending(decision_time=clock[0], limit=1) == [target]
+    assert not store.claim(target.event_id, claimed_at=clock[0])
+    with pytest.raises(
+        _LiveOpportunityAlreadyLocked,
+        match="GLOBAL_WINNER_CLAIM_FENCE_LOST",
+    ):
+        _fence_global_target_claim_before_command(
+            conn,
+            target,
+            claimed_at=first_generation,
+            attempt_count=first_attempt,
+        )
+    assert tuple(
+        conn.execute(
+            "SELECT claimed_at, attempt_count, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, target.event_id),
+        ).fetchone()
+    ) == (first_generation, first_attempt, GLOBAL_WINNER_TARGETED_CLAIM)
+
+
+def test_fenced_global_target_without_command_requeues_for_retry_and_boot():
+    from src.engine.event_reactor_adapter import (
+        _fence_global_target_claim_before_command,
+    )
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    conn, store = _store()
+    source = _forecast_event("fenced-no-command-source", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat("2026-05-24T18:00:00+00:00"),
+        economic_identity="fenced-no-command-economics",
+        payload=json.loads(source.payload_json),
+    )
+    claimed_at = "2026-05-24T18:00:00+00:00"
+    assert store.prioritize_global_winner(target)
+    assert store.claim(target.event_id, claimed_at=claimed_at)
+    attempt_count = store.attempt_count(target.event_id)
+    _fence_global_target_claim_before_command(
+        conn,
+        target,
+        claimed_at=claimed_at,
+        attempt_count=attempt_count,
+    )
+
+    assert store.requeue_claim_if_current(
+        target.event_id,
+        claimed_at=claimed_at,
+        attempt_count=attempt_count,
+        last_error="GLOBAL_SELL_EXECUTION_FAILED",
+    )
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, target.event_id),
+        ).fetchone()
+    ) == ("pending", None, GLOBAL_WINNER_TARGETED_CLAIM)
+
+    assert store.claim(
+        target.event_id,
+        claimed_at="2026-05-24T18:01:00+00:00",
+    )
+    second_attempt = store.attempt_count(target.event_id)
+    _fence_global_target_claim_before_command(
+        conn,
+        target,
+        claimed_at="2026-05-24T18:01:00+00:00",
+        attempt_count=second_attempt,
+    )
+    assert (
+        store.requeue_processing_before_boot(
+            boot_at="2026-05-24T18:02:00+00:00"
+        )
+        == 1
+    )
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, target.event_id),
+        ).fetchone()
+    ) == ("pending", None, GLOBAL_WINNER_TARGETED_CLAIM)
+
+
+@pytest.mark.parametrize("inject_venue_attempt_during_expiry", (False, True))
+def test_legacy_orphaned_global_target_expiry_is_atomic_with_venue_attempt(
+    monkeypatch,
+    inject_venue_attempt_during_expiry,
+):
+    import src.events.event_store as event_store
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("legacy-orphan-source", target_date="2026-05-25")
+    orphan = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="legacy-orphan-economics",
+        payload=json.loads(source.payload_json),
+    )
+    current = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=11),
+        economic_identity="legacy-current-economics",
+        payload=json.loads(source.payload_json),
+    )
+
+    assert store.prioritize_global_winner(orphan)
+    assert store.claim(orphan.event_id, claimed_at=clock[0])
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "legacy-orphan-proof-event",
+            f"{orphan.event_id}:final-intent",
+            1,
+            "DecisionProofAccepted",
+            "legacy-orphan-proof-hash",
+            "{}",
+            "legacy-orphan-proof-payload-hash",
+            "decision_kernel",
+            clock[0],
+            clock[0],
+        ),
+    )
+    conn.execute(
+        "UPDATE opportunity_event_processing "
+        "SET processing_status='expired', processed_at=?, "
+        "last_error='GLOBAL_WINNER_TARGET_SUPERSEDED', updated_at=? "
+        "WHERE consumer_name=? AND event_id=?",
+        (
+            clock[0],
+            clock[0],
+            store._winner_pointer_consumer_name,
+            orphan.event_id,
+        ),
+    )
+
+    clock[0] = "2026-05-24T18:00:05+00:00"
+    assert store.prioritized_global_winner_event(current) is None
+    if inject_venue_attempt_during_expiry:
+        original_table_exists = event_store._table_exists
+        injected = False
+
+        def _inject_attempt_after_ledger_check(connection, table):
+            nonlocal injected
+            exists = original_table_exists(connection, table)
+            if table == "edli_live_order_events" and exists and not injected:
+                injected = True
+                connection.execute(
+                    "INSERT INTO edli_live_order_events ("
+                    "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+                    "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+                    "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+                    (
+                        "legacy-orphan-attempt-event",
+                        f"{orphan.event_id}:final-intent",
+                        2,
+                        "VenueSubmitAttempted",
+                        "legacy-orphan-attempt-hash",
+                        "{}",
+                        "legacy-orphan-attempt-payload-hash",
+                        "engine_adapter",
+                        clock[0],
+                        clock[0],
+                    ),
+                )
+            return exists
+
+        monkeypatch.setattr(
+            event_store,
+            "_table_exists",
+            _inject_attempt_after_ledger_check,
+        )
+    clock[0] = "2026-05-24T18:00:11+00:00"
+    recovered = store.prioritized_global_winner_event(current)
+
+    assert recovered == (None if inject_venue_attempt_during_expiry else current)
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, orphan.event_id),
+        ).fetchone()
+    ) == (
+        (
+            "processing",
+            GLOBAL_WINNER_TARGETED_CLAIM,
+        )
+        if inject_venue_attempt_during_expiry
+        else (
+            "expired",
+            "GLOBAL_WINNER_TARGET_SUPERSEDED",
+        )
+    )
+
+
 def test_boot_recovers_targeted_claim_only_after_prior_owner_died():
     conn, store = _store()
     target = _forecast_event("boot-orphan-target", target_date="2026-05-25")
@@ -3821,7 +5391,7 @@ def test_late_targeted_requeue_cannot_replace_newer_winner_pointer():
     )
     conn.commit()
 
-    assert store.requeue_claim_if_current(
+    assert not store.requeue_claim_if_current(
         old.event_id,
         claimed_at=claimed_at,
         attempt_count=attempt_count,

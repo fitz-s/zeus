@@ -1024,6 +1024,53 @@ state_machines:
       - tests/engine/test_event_reactor_live_qkernel_gate.py
       - tests/strategy/live_inference/test_source_clock_vnext.py
 
+  global_winner_claim_reason:
+    owner: src/events/event_store.py
+    description: >
+      Event-store claim reasons for a family-global auction winner.
+      GLOBAL_WINNER_TARGETED_CLAIM marks the selected winner's processing
+      claim; GLOBAL_WINNER_SUBMIT_FENCED keeps that claim non-reclaimable while
+      its submit outcome is still being durably finalized. These are processing
+      lease reasons, not lifecycle, order, venue, or fill states.
+    states:
+      - GLOBAL_WINNER_TARGETED_CLAIM
+      - GLOBAL_WINNER_SUBMIT_FENCED
+    invariant_tests:
+      - tests/events/test_reactor.py
+      - tests/events/test_continuous_redecision_emit.py
+
+  held_sell_reauction_receipt_status:
+    owner: src/runtime/reactor_wake.py
+    description: >
+      Terminal receipt statuses for a held-position SELL reauction request.
+      ACTUATED requires an exact current-context sell actuation witness;
+      CAPITAL_REJECTED requires the same current probability/book attempt plus
+      a global capital-objective proof that retaining the holding dominates the
+      executable reduction. Legacy schema-v1 REJECTED remains wire-compatible
+      but is not valid terminal authority for schema-v2/v3 requests. None of
+      these statuses is position lifecycle or venue fill truth.
+    states:
+      - ACTUATED
+      - CAPITAL_REJECTED
+      - REJECTED
+    invariant_tests:
+      - tests/events/test_reactor.py
+      - tests/test_day0_hard_fact_exit.py
+
+  held_sell_reauction_reason:
+    owner: src/events/reactor.py
+    description: >
+      GLOBAL_AUCTION_CAPITAL_REJECTED is the typed terminal reason paired with
+      a CAPITAL_REJECTED held-SELL receipt after the current global
+      expected-log-wealth auction evaluates the exact probability and
+      executable book attempt. It is not a generic stop-loss, lifecycle state,
+      or proof of a venue side effect.
+    states:
+      - GLOBAL_AUCTION_CAPITAL_REJECTED
+    invariant_tests:
+      - tests/events/test_reactor.py
+      - tests/test_day0_hard_fact_exit.py
+
   command_recovery_and_exit_reason_labels:
     owner: src/execution/command_recovery.py
     description: >

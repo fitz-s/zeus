@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-07-29
 # Authority basis: PR332 full-live split verdict; live-order aggregate substrate PR A.
 from __future__ import annotations
 
@@ -11,7 +11,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_current_state_identity_hash,
+    stable_hash,
+)
 from src.decision_kernel.verifier import (
     _current_state_solve_payload,
     _verify_pre_submit_revalidation_for_command,
@@ -2565,6 +2568,17 @@ def _day0_pre_submit_payload(**overrides):
         q_lcb,
         remaining_models=remaining_models,
     )
+    provenance = {
+        "city": "Chicago",
+        "target_date": "2026-05-25",
+        "metric": "high",
+        "settlement_source": "wu_icao_history",
+        "station_id": "KMDW",
+        "configured_station_id": "KMDW",
+        "raw_payload_sha256": "a" * 64,
+        "observation_time": "2026-05-25T17:30:00+00:00",
+        "observation_available_at": "2026-05-25T17:35:00+00:00",
+    }
     payload = _pre_submit_payload(
         q_live=q_live,
         q_lcb_5pct=q_lcb,
@@ -2581,8 +2595,16 @@ def _day0_pre_submit_payload(**overrides):
         raw_value=20.0,
         rounded_value=20,
         high_so_far=20.0,
-        observation_time="2026-05-25T17:30:00+00:00",
-        observation_available_at="2026-05-25T17:35:00+00:00",
+        observation_time=provenance["observation_time"],
+        observation_available_at=provenance["observation_available_at"],
+        city=provenance["city"],
+        target_date=provenance["target_date"],
+        metric=provenance["metric"],
+        station_id=provenance["station_id"],
+        configured_station_id=provenance["configured_station_id"],
+        settlement_source=provenance["settlement_source"],
+        raw_payload_sha256=provenance["raw_payload_sha256"],
+        day0_observation_provenance_hash=stable_hash(provenance),
         day0_probability_authority=day0_probability,
         _edli_q_source="day0_remaining_day",
         _edli_day0_q_mode="remaining_day",
@@ -2616,6 +2638,19 @@ def _day0_qkernel_economics(*, q_live: float = 0.70, q_lcb: float = 0.60) -> dic
         }
     )
     return economics
+
+
+def test_day0_pre_submit_rejects_missing_raw_observation_provenance():
+    payload = _day0_pre_submit_payload(raw_payload_sha256="")
+
+    with pytest.raises(LiveOrderAggregateError, match="raw_payload_sha256"):
+        LiveOrderAggregateLedger(_conn()).append_event(
+            aggregate_id="event-provenance:intent-provenance",
+            event_type="PreSubmitRevalidated",
+            payload=payload,
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
 
 
 def _seed_command_with_submit_attempt(ledger: LiveOrderAggregateLedger) -> None:

@@ -1,10 +1,11 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-07-29
 # Authority basis: docs/operations/edli_v1/PR328_REDEMPTION_PACKAGE.md R2/R3 proof.
 
 import pytest
 
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.decision_kernel.canonicalization import stable_hash
 from src.events.day0_authority import (
     Day0AuthorityError,
     Day0AuthorityEvidence,
@@ -42,6 +43,17 @@ def _semantics() -> SettlementSemantics:
 
 
 def _day0(**overrides):
+    provenance = {
+        "city": "Chicago",
+        "target_date": "2026-05-24",
+        "metric": "high",
+        "settlement_source": "wu_icao_history",
+        "station_id": "KMDW",
+        "configured_station_id": "KMDW",
+        "raw_payload_sha256": "a" * 64,
+        "observation_time": "2026-05-24T08:00:00+00:00",
+        "observation_available_at": "2026-05-24T08:05:00+00:00",
+    }
     values = dict(
         city="Chicago",
         target_date="2026-05-24",
@@ -58,6 +70,11 @@ def _day0(**overrides):
         observation_time="2026-05-24T08:00:00+00:00",
         raw_value=80.2,
         rounded_value=80,
+        station_id=provenance["station_id"],
+        configured_station_id=provenance["configured_station_id"],
+        settlement_source=provenance["settlement_source"],
+        raw_payload_sha256=provenance["raw_payload_sha256"],
+        day0_observation_provenance_hash=stable_hash(provenance),
         settlement_semantics=_semantics(),
     )
     values.update(overrides)
@@ -113,6 +130,23 @@ def test_pre_cutover_durable_live_authority_alias_is_read_as_live():
         "observation_time": "2026-05-24T08:00:00+00:00",
         "raw_value": 80.2,
         "rounded_value": 80,
+        "station_id": "KMDW",
+        "configured_station_id": "KMDW",
+        "settlement_source": "wu_icao_history",
+        "raw_payload_sha256": "a" * 64,
+        "day0_observation_provenance_hash": stable_hash(
+            {
+                "city": "Chicago",
+                "target_date": "2026-05-24",
+                "metric": "high",
+                "settlement_source": "wu_icao_history",
+                "station_id": "KMDW",
+                "configured_station_id": "KMDW",
+                "raw_payload_sha256": "a" * 64,
+                "observation_time": "2026-05-24T08:00:00+00:00",
+                "observation_available_at": "2026-05-24T08:05:00+00:00",
+            }
+        ),
         "settlement_semantics": _semantics(),
     }
 
@@ -135,3 +169,8 @@ def test_dst_ambiguous_blocks():
 def test_settlement_semantics_only():
     with pytest.raises(Day0AuthorityError, match="SettlementSemantics"):
         assert_live_day0_authority(_day0(raw_value=80.6, rounded_value=80))
+
+
+def test_missing_raw_observation_provenance_blocks():
+    with pytest.raises(Day0AuthorityError, match="raw_payload_sha256"):
+        assert_live_day0_authority(_day0(raw_payload_sha256=""))

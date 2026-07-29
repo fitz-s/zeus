@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-07-29
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -22,7 +22,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_current_state_identity_hash,
+    stable_hash,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +386,17 @@ def test_b71_f109_compares_owned_token_not_sibling_topology(conn):
 
 
 def _valid_day0_pre_submit_payload(**overrides):
+    provenance = {
+        "city": "Chicago",
+        "target_date": "2026-06-30",
+        "metric": "high",
+        "settlement_source": "wu_icao_history",
+        "station_id": "KMDW",
+        "configured_station_id": "KMDW",
+        "raw_payload_sha256": "a" * 64,
+        "observation_time": "2026-06-30T17:18:00+00:00",
+        "observation_available_at": "2026-06-30T17:18:01+00:00",
+    }
     payload = {
         "event_id": "evt-day0-presubmit",
         "final_intent_id": "intent-day0-presubmit",
@@ -465,7 +479,8 @@ def _valid_day0_pre_submit_payload(**overrides):
         "day0_q_mode": "remaining_day",
         "day0_remaining_models": 37,
         "rounded_value": 72.0,
-        "observation_time": "2026-06-30T17:18:00+00:00",
+        **provenance,
+        "day0_observation_provenance_hash": stable_hash(provenance),
         "day0_lcb_transform": {
             "yes_lcb_by_condition": {"cond-day0-presubmit": 0.95},
             "no_lcb_by_condition": {"cond-day0-presubmit": 0.05},
@@ -1912,6 +1927,9 @@ def _entry_submit_payload() -> dict:
 def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
             decision_id="dec-001", idempotency_key=None,
             intent_kind="ENTRY", market_id="mkt-001", token_id="tok-001",
+            condition_id: str = "condition-test",
+            snapshot_id: str | None = None,
+            envelope_id: str | None = None,
             no_token_id: str | None = None,
             selected_token_id: str | None = None,
             outcome_label: str | None = None,
@@ -1930,18 +1948,41 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
     snapshot_id = _ensure_snapshot(
         conn,
         token_id=token_id,
+        snapshot_id=snapshot_id,
+        condition_id=condition_id,
         no_token_id=no_token_id,
         selected_outcome_token_id=selected_token_id,
         outcome_label=outcome_label,
         event_slug=event_slug,
     )
-    insert_command(
-        conn,
-        command_id=command_id,
-        snapshot_id=snapshot_id,
-        envelope_id=_ensure_envelope(
-            conn,
+    decision_certificate_hash = hashlib.sha256(
+        f"test-certificate:{command_id}".encode()
+    ).hexdigest()
+    submission_envelope = None
+    attached_world_for_admission = False
+    if intent_kind == "ENTRY":
+        schemas = {
+            str(row[1]).strip()
+            for row in conn.execute("PRAGMA database_list").fetchall()
+            if len(row) > 1 and str(row[1]).strip()
+        }
+        if "world" not in schemas:
+            conn.execute("ATTACH DATABASE ':memory:' AS world")
+            attached_world_for_admission = True
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS world.decision_certificates (
+                certificate_hash TEXT PRIMARY KEY,
+                certificate_type TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                verifier_status TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        submission_envelope = _make_envelope(
             token_id=token_id,
+            condition_id=condition_id,
             no_token_id=no_token_id,
             selected_outcome_token_id=selected_token_id,
             outcome_label=outcome_label,
@@ -1949,7 +1990,50 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
             order_type=order_type,
             price=price,
             size=size,
-        ),
+        )
+        direction = "buy_no" if selected_token_id == no_token_id else "buy_yes"
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO world.decision_certificates(
+                certificate_hash, certificate_type, mode,
+                verifier_status, payload_json
+            ) VALUES (?, 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', ?)
+            """,
+            (
+                decision_certificate_hash,
+                json.dumps(
+                    {
+                        "condition_id": condition_id,
+                        "token_id": selected_token_id,
+                        "direction": direction,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+    persisted_envelope_id = (
+        envelope_id or f"env-{command_id}"
+        if submission_envelope is not None
+        else _ensure_envelope(
+            conn,
+            token_id=token_id,
+            condition_id=condition_id,
+            no_token_id=no_token_id,
+            selected_outcome_token_id=selected_token_id,
+            outcome_label=outcome_label,
+            side=side,
+            order_type=order_type,
+            price=price,
+            size=size,
+            envelope_id=envelope_id,
+        )
+    )
+    insert_command(
+        conn,
+        command_id=command_id,
+        snapshot_id=snapshot_id,
+        envelope_id=persisted_envelope_id,
+        submission_envelope=submission_envelope,
         position_id=position_id,
         decision_id=decision_id,
         idempotency_key=idempotency_key,
@@ -1961,10 +2045,11 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         price=price,
         created_at=created_at,
         q_version="test-q-version",
-        decision_certificate_hash=hashlib.sha256(
-            f"test-certificate:{command_id}".encode()
-        ).hexdigest(),
+        decision_certificate_hash=decision_certificate_hash,
     )
+    if attached_world_for_admission:
+        conn.commit()
+        conn.execute("DETACH DATABASE world")
     return command_id
 
 
@@ -2566,6 +2651,7 @@ def _ensure_snapshot(
     *,
     token_id: str,
     snapshot_id: str | None = None,
+    condition_id: str = "condition-test",
     no_token_id: str | None = None,
     selected_outcome_token_id: str | None = None,
     outcome_label: str = "YES",
@@ -2586,7 +2672,7 @@ def _ensure_snapshot(
             gamma_market_id="gamma-test",
             event_id="event-test",
             event_slug=event_slug or "event-test",
-            condition_id="condition-test",
+            condition_id=condition_id,
             question_id="question-test",
             yes_token_id=token_id,
             no_token_id=no_token_id,
@@ -2624,6 +2710,7 @@ def _ensure_envelope(
     conn,
     *,
     token_id: str,
+    condition_id: str = "condition-test",
     no_token_id: str | None = None,
     selected_outcome_token_id: str | None = None,
     outcome_label: str = "YES",
@@ -2640,14 +2727,29 @@ def _ensure_envelope(
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> str:
-    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.venue_command_repo import insert_submission_envelope
 
-    price_dec = Decimal(str(price))
-    size_dec = Decimal(str(size))
-    no_token_id = no_token_id or f"{token_id}-no"
-    selected_outcome_token_id = selected_outcome_token_id or token_id
-    envelope_id = envelope_id or f"env-{selected_outcome_token_id}-{side}-{price_dec}-{size_dec}"
+    envelope = _make_envelope(
+        token_id=token_id,
+        condition_id=condition_id,
+        no_token_id=no_token_id,
+        selected_outcome_token_id=selected_outcome_token_id,
+        outcome_label=outcome_label,
+        side=side,
+        order_type=order_type,
+        price=price,
+        size=size,
+        raw_response_json=raw_response_json,
+        order_id=order_id,
+        transaction_hashes=transaction_hashes,
+        signed_order=signed_order,
+        signed_order_hash=signed_order_hash,
+        error_code=error_code,
+        error_message=error_message,
+    )
+    envelope_id = envelope_id or (
+        f"env-{envelope.selected_outcome_token_id}-{side}-{envelope.price}-{envelope.size}"
+    )
     if conn.execute(
         "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
         (envelope_id,),
@@ -2655,42 +2757,68 @@ def _ensure_envelope(
         return envelope_id
     insert_submission_envelope(
         conn,
-        VenueSubmissionEnvelope(
-            sdk_package="py-clob-client-v2",
-            sdk_version="test",
-            host="https://clob-v2.polymarket.com",
-            chain_id=137,
-            funder_address="0xfunder",
-            condition_id="condition-test",
-            question_id="question-test",
-            yes_token_id=token_id,
-            no_token_id=no_token_id,
-            selected_outcome_token_id=selected_outcome_token_id,
-            outcome_label=outcome_label,
-            side=side,
-            price=price_dec,
-            size=size_dec,
-            order_type=order_type,
-            post_only=False,
-            tick_size=Decimal("0.01"),
-            min_order_size=Decimal("0.01"),
-            neg_risk=False,
-            fee_details={},
-            canonical_pre_sign_payload_hash="d" * 64,
-            signed_order=signed_order,
-            signed_order_hash=signed_order_hash,
-            raw_request_hash="e" * 64,
-            raw_response_json=raw_response_json,
-            order_id=order_id,
-            trade_ids=(),
-            transaction_hashes=transaction_hashes,
-            error_code=error_code,
-            error_message=error_message,
-            captured_at=_NOW.isoformat(),
-        ),
+        envelope,
         envelope_id=envelope_id,
     )
     return envelope_id
+
+
+def _make_envelope(
+    *,
+    token_id: str,
+    condition_id: str = "condition-test",
+    no_token_id: str | None = None,
+    selected_outcome_token_id: str | None = None,
+    outcome_label: str = "YES",
+    side: str = "BUY",
+    order_type: str = "GTC",
+    price: float | Decimal = 0.5,
+    size: float | Decimal = 10.0,
+    raw_response_json: str | None = None,
+    order_id: str | None = None,
+    transaction_hashes: tuple[str, ...] = (),
+    signed_order: bytes | None = None,
+    signed_order_hash: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+):
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    no_token_id = no_token_id or f"{token_id}-no"
+    selected_outcome_token_id = selected_outcome_token_id or token_id
+    return VenueSubmissionEnvelope(
+        sdk_package="py-clob-client-v2",
+        sdk_version="test",
+        host="https://clob-v2.polymarket.com",
+        chain_id=137,
+        funder_address="0xfunder",
+        condition_id=condition_id,
+        question_id="question-test",
+        yes_token_id=token_id,
+        no_token_id=no_token_id,
+        selected_outcome_token_id=selected_outcome_token_id,
+        outcome_label=outcome_label,
+        side=side,
+        price=Decimal(str(price)),
+        size=Decimal(str(size)),
+        order_type=order_type,
+        post_only=False,
+        tick_size=Decimal("0.01"),
+        min_order_size=Decimal("0.01"),
+        neg_risk=False,
+        fee_details={},
+        canonical_pre_sign_payload_hash="d" * 64,
+        signed_order=signed_order,
+        signed_order_hash=signed_order_hash,
+        raw_request_hash="e" * 64,
+        raw_response_json=raw_response_json,
+        order_id=order_id,
+        trade_ids=(),
+        transaction_hashes=transaction_hashes,
+        error_code=error_code,
+        error_message=error_message,
+        captured_at=_NOW.isoformat(),
+    )
 
 
 def _advance_to_submitting(conn, command_id="cmd-001", venue_order_id=None):
@@ -10231,6 +10359,174 @@ class TestRecoveryResolutionTable:
                 "terminal_exec_status": "partial",
             }
         ]
+
+    def test_live_tick_projects_recorded_matched_full_exit(self, tmp_path, monkeypatch):
+        """A durable full EXIT match must not wait for the full recovery sweep."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema, init_schema_trade_only
+        from src.state.venue_command_repo import append_event, append_order_fact
+
+        db_path = tmp_path / "live-tick-matched-exit.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        _insert(seed, command_id="cmd-entry", position_id="pos-001", size=8.25, price=0.56)
+        _advance_to_acked(seed, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(seed, command_id="cmd-entry", order_id="ord-entry")
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'day0_window',
+                   shares = 8.25,
+                   chain_shares = 8.25,
+                   cost_basis_usd = 4.62,
+                   entry_price = 0.56,
+                   order_status = 'filled'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _seed_full_exit_intent(seed, position_id="pos-001", shares=8.25)
+        _insert(
+            seed,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=8.25,
+            price=0.95,
+            token_id="tok-001",
+            created_at="2026-04-26T00:04:30Z",
+        )
+        _advance_to_acked(seed, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            seed,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="0xexitfill",
+            state="MATCHED",
+            filled_size="8.25",
+            fill_price="0.95",
+            tx_hash="0xexitfill",
+        )
+        append_order_fact(
+            seed,
+            venue_order_id="ord-exit",
+            command_id="cmd-exit",
+            state="MATCHED",
+            remaining_size="0",
+            matched_size="8.25",
+            source="REST",
+            observed_at="2026-04-26T00:05:00Z",
+            venue_timestamp="2026-04-26T00:05:00Z",
+            raw_payload_hash="e" * 64,
+            raw_payload_json={
+                "submit_result": {
+                    "orderID": "ord-exit",
+                    "status": "matched",
+                    "side": "SELL",
+                    "makingAmount": "8.25",
+                    "takingAmount": "7.8375",
+                    "transactionsHashes": ["0xexitfill"],
+                }
+            },
+        )
+        append_event(
+            seed,
+            command_id="cmd-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "venue_order_id": "ord-exit",
+                "filled_size": "8.25",
+                "fill_price": "0.95",
+                "trade_id": "0xexitfill",
+            },
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        _conn_factory.supports_nonblocking_flocks = True
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        alignment = []
+        real_alignment = command_recovery.reconcile_exit_lifecycle_alignment_repairs
+
+        def _alignment_pass(conn):
+            result = real_alignment(conn)
+            alignment.append(result)
+            return result
+
+        def _stop_after_local_passes(*_args, **_kwargs):
+            raise RuntimeError("stop after local recovery passes")
+
+        monkeypatch.setattr(
+            command_recovery,
+            "reconcile_exit_lifecycle_alignment_repairs",
+            _alignment_pass,
+        )
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "capture_venue_read_snapshot",
+            _stop_after_local_passes,
+        )
+        client = MagicMock(
+            spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        with pytest.raises(RuntimeError, match="stop after local recovery passes"):
+            command_recovery.reconcile_unresolved_commands(
+                client=client,
+                scope="live_tick",
+            )
+
+        check = _conn_factory()
+        try:
+            current = check.execute(
+                """
+                SELECT phase, order_status, exit_price, realized_pnl_usd
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+            event = check.execute(
+                """
+                SELECT event_type, phase_before, phase_after, order_id, command_id
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                   AND event_type = 'EXIT_ORDER_FILLED'
+                """
+            ).fetchone()
+        finally:
+            check.close()
+
+        assert alignment == [{
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }]
+        assert dict(current) == {
+            "phase": "economically_closed",
+            "order_status": "sell_filled",
+            "exit_price": pytest.approx(0.95),
+            "realized_pnl_usd": pytest.approx(3.22),
+        }
+        assert dict(event) == {
+            "event_type": "EXIT_ORDER_FILLED",
+            "phase_before": "pending_exit",
+            "phase_after": "economically_closed",
+            "order_id": "ord-exit",
+            "command_id": "cmd-exit",
+        }
 
     def test_partial_entry_uses_canonical_order_truth_over_later_weaker_fact(
         self,
@@ -19791,6 +20087,134 @@ class TestRecoveryResolutionTable:
         second = reconcile_exit_lifecycle_alignment_repairs(conn)
         assert second["scanned"] == 0
 
+    @pytest.mark.parametrize("phase", ["active", "day0_window"])
+    @pytest.mark.parametrize(
+        "mismatch",
+        ["command_token", "command_condition", "venue_asset"],
+    )
+    def test_filled_exit_identity_mismatch_cannot_close_position(
+        self,
+        conn,
+        mock_client,
+        phase,
+        mismatch,
+    ):
+        """A matched EXIT closes only the exact held token and condition."""
+        from src.state.venue_command_repo import append_event, append_order_fact
+
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=8.25, price=0.56)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        direction = "buy_no" if phase == "day0_window" else "buy_yes"
+        held_token = "tok-001-no" if direction == "buy_no" else "tok-001"
+        opposite_token = "tok-001" if direction == "buy_no" else "tok-001-no"
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = ?,
+                   direction = ?,
+                   shares = 8.25,
+                   chain_shares = 8.25,
+                   cost_basis_usd = 4.62,
+                   entry_price = 0.56,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """,
+            (phase, direction),
+        )
+        _seed_full_exit_intent(conn, position_id="pos-001", shares=8.25)
+        command_token = opposite_token if mismatch == "command_token" else held_token
+        command_condition = (
+            "condition-wrong" if mismatch == "command_condition" else "condition-test"
+        )
+        venue_asset = opposite_token if mismatch == "venue_asset" else command_token
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=8.25,
+            price=0.95,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id=command_token,
+            outcome_label="NO" if command_token == "tok-001-no" else "YES",
+            condition_id=command_condition,
+            snapshot_id=f"snap-exit-{phase}-{mismatch}",
+            envelope_id=f"env-exit-{phase}-{mismatch}",
+            created_at="2026-04-26T00:04:30Z",
+        )
+        _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="0xexitfill",
+            state="MATCHED",
+            filled_size="8.25",
+            fill_price="0.95",
+            tx_hash="0xexitfill",
+        )
+        append_order_fact(
+            conn,
+            venue_order_id="ord-exit",
+            command_id="cmd-exit",
+            state="MATCHED",
+            remaining_size="0",
+            matched_size="8.25",
+            source="REST",
+            observed_at="2026-04-26T00:05:00Z",
+            venue_timestamp="2026-04-26T00:05:00Z",
+            raw_payload_hash="a" * 64,
+            raw_payload_json={
+                "submit_result": {
+                    "orderID": "ord-exit",
+                    "status": "matched",
+                    "side": "SELL",
+                    "asset_id": venue_asset,
+                    "makingAmount": "8.25",
+                    "takingAmount": "7.8375",
+                    "transactionsHashes": ["0xexitfill"],
+                }
+            },
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "venue_order_id": "ord-exit",
+                "filled_size": "8.25",
+                "fill_price": "0.95",
+                "trade_id": "0xexitfill",
+            },
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_exit_lifecycle_alignment_repairs,
+        )
+
+        assert reconcile_exit_lifecycle_alignment_repairs(conn) == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()["phase"] == phase
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'EXIT_ORDER_FILLED'
+            """
+        ).fetchone()[0] == 0
+
     def test_filled_partial_exit_command_ignores_newer_full_close_intent(
         self,
         conn,
@@ -21717,9 +22141,19 @@ class TestRecoveryResolutionTable:
             },
         }
 
+    @pytest.mark.parametrize(
+        ("command_token_id", "releases"),
+        (
+            ("tok-filled-exit-slice", True),
+            ("tok-foreign-exit-asset", False),
+        ),
+        ids=("exact-command-token", "mismatched-command-token-stays"),
+    )
     def test_filled_selected_exit_slice_releases_post_fill_chain_remainder(
         self,
         conn,
+        command_token_id,
+        releases,
     ):
         """A filled slice must return its proven chain remainder to redecision."""
         from src.execution.command_recovery import (
@@ -21759,6 +22193,7 @@ class TestRecoveryResolutionTable:
             command_id="cmd-filled-exit-slice",
             position_id=position_id,
             intent_kind="EXIT",
+            token_id=command_token_id,
             side="SELL",
             size=10.0,
             price=0.14,
@@ -21795,7 +22230,7 @@ class TestRecoveryResolutionTable:
                 condition_id, token_id, order_id, order_status, updated_at,
                 temperature_metric
             ) VALUES (
-                ?, 'pending_exit', 'Chongqing', '2026-04-26', '35C', 'buy_yes',
+                ?, 'pending_exit', 'Karachi', '2026-04-26', '35C', 'buy_yes',
                 21.0, 21.0, 'synced', '2026-04-26T00:06:00Z',
                 'forecast_qkernel_entry', 'cond-filled-exit-slice',
                 'tok-filled-exit-slice', ?, 'sell_pending_confirmation',
@@ -21806,6 +22241,30 @@ class TestRecoveryResolutionTable:
         )
 
         summary = reconcile_pending_exit_terminal_order_releases(conn)
+
+        if not releases:
+            assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+            current = conn.execute(
+                """
+                SELECT phase, order_id, order_status
+                  FROM position_current
+                 WHERE position_id = ?
+                """,
+                (position_id,),
+            ).fetchone()
+            assert dict(current) == {
+                "phase": "pending_exit",
+                "order_id": order_id,
+                "order_status": "sell_pending_confirmation",
+            }
+            assert conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+                """,
+                (position_id,),
+            ).fetchone()[0] == 0
+            return
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         current = conn.execute(
@@ -21834,6 +22293,7 @@ class TestRecoveryResolutionTable:
             (position_id,),
         ).fetchone()
         payload = json.loads(event["payload_json"])
+        obligation = payload.pop("held_sell_reauction_obligation")
         assert dict(event) | {"payload_json": payload} == {
             "event_type": "EXIT_RETRY_RELEASED",
             "phase_before": "pending_exit",
@@ -21844,6 +22304,7 @@ class TestRecoveryResolutionTable:
                 "chain_state": "synced",
                 "command_size": 10.0,
                 "command_state": "FILLED",
+                "command_token_id": "tok-filled-exit-slice",
                 "matched_size": "10",
                 "order_fact_id": payload["order_fact_id"],
                 "order_fact_state": "MATCHED",
@@ -21853,6 +22314,40 @@ class TestRecoveryResolutionTable:
                 "residual_shares": 21.0,
             },
         }
+        assert obligation == {
+            "schema_version": 3,
+            "scope_identity": obligation["scope_identity"],
+            "generation": obligation["generation"],
+            "position_id": position_id,
+            "family": ["Karachi", "2026-04-26", "high"],
+            "held_token_id": "tok-filled-exit-slice",
+            "probability_content_identity": "",
+            "probability_observed_at": "",
+            "held_best_bid": None,
+            "bid_observed_at": "",
+            "book_state": "UNKNOWN",
+            "residual_proof": {
+                "command_id": "cmd-filled-exit-slice",
+                "command_token_id": "tok-filled-exit-slice",
+                "order_fact_id": obligation["residual_proof"]["order_fact_id"],
+                "order_fact_state": "MATCHED",
+                "matched_size": "10",
+                "order_remaining_size": "0",
+                "residual_shares": 21.0,
+                "chain_state": "synced",
+                "chain_seen_at": "2026-04-26T00:06:00Z",
+            },
+        }
+        rerun = reconcile_pending_exit_terminal_order_releases(conn)
+        assert rerun == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        stored = conn.execute(
+            """
+            SELECT payload_json FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+            """,
+            (position_id,),
+        ).fetchone()
+        assert json.loads(stored["payload_json"])["held_sell_reauction_obligation"] == obligation
 
     @pytest.mark.parametrize(
         ("shares", "chain_shares", "chain_seen_at"),

@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-28
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Last reused/audited: 2026-07-29
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
 # Authority basis: Replacement forecast coverage must bind to the live baseline source_run, not stale city/date rows.
@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -501,6 +502,9 @@ def test_day0_hwm_accepts_authorized_durable_fast_observation_event() -> None:
     assert fact["observed_extreme_native"] == 25.0
     assert fact["source"] == "durable_day0_event:aviationweather_metar"
     assert fact["unit"] == "C"
+    assert fact["raw_payload_sha256"] == hashlib.sha256(
+        json.dumps(payload).encode("utf-8")
+    ).hexdigest()
     assert reason is not None
     assert reason.startswith("basis=day0_observation_hwm_lag")
 

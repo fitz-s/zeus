@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-20
+# Last reused or audited: 2026-07-29
 # Authority basis: adversarial review /tmp/day0_adversarial_review.md MUST-FIX
 #   #1 (hard-fact bin-death exit lane) + #3-wiring (resting-order cancel on bin
 #   death) — operator requirement "新高出现时能否立即drop". Calibration artifact:
@@ -28,18 +28,12 @@ Verdicts (both directions, both metrics):
     (not a hard fact for either side: a max can still leave upward / min downward;
      that is estimator territory and stays behind the maturity gate)
 
-Settlement-grade extreme sources (source-family routed, provenance-ordered):
-  1. Current official source evidence — WU bucket observations for WU contracts,
-     HKO official cumulative extrema for HKO contracts — throttled per
-     (source family, city, date); margin 0.
-  2. Same-station fast-tail memo (same physical station, ~3-9 min fresh) — admitted only
-     for settlement-faithful cities (config/wu_metar_divergence.json), with a
-     divergence margin derived from the SAME calibration artifact:
-       empirical threshold <= 1.0 (feeds measured byte-identical post-rounding)
-         -> margin 0 whole units: the integer-grid strict crossing (rounded 26 vs
-            edge 25) is already a full rounding-quantum crossing;
-       otherwise (default_guess / measured spread) -> margin = ceil(threshold)
-            extra whole units beyond the edge before the kill counts as hard.
+Held-position hard-fact authority combines current WU observations and durable
+WU rows monotonically, but only when each selected fact binds the configured
+station, source clocks, raw/settlement-rounded value, and source-payload
+identity.  The same-station fast-tail scalar remains available to its legacy
+non-hard-fact consumers; it cannot manufacture that provenance for an
+absorbing held-side probability or exit.
   An ACTIVE oracle-anomaly pause for the family disables the lane entirely
   (a suspect truth source must not drive an irreversible exit).
 
@@ -50,7 +44,11 @@ class without touching the estimator-evidence machinery.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import math
+import re
 import threading
 import time
 from collections.abc import Collection
@@ -71,11 +69,129 @@ _CURRENT_SOURCE_FAILURE_RETRY_S = 120.0
 SAME_STATION_FAST_TAIL_SOURCE = "same_station_fast_tail"
 COMBINED_WU_FAST_TAIL_SOURCE = f"wu_api+{SAME_STATION_FAST_TAIL_SOURCE}"
 _CURRENT_SOURCE_MEMO: dict[
-    tuple[str, str, str], tuple[float, Optional[float], Optional[float]]
+    tuple[str, str, str],
+    tuple[
+        float,
+        Optional[float],
+        Optional[float],
+        "HardFactEvidence | None",
+        "HardFactEvidence | None",
+    ],
 ] = {}
 _CURRENT_SOURCE_MEMO_LOCK = threading.Lock()
 _RESTING_ENTRY_SCAN_CURSOR = 0
 _RESTING_ENTRY_SCAN_CURSOR_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class HardFactEvidence:
+    """Persistable source proof for an absorbing Day0 probability.
+
+    The identity is deliberately of the observed source payload, not of the
+    forecast/posterior that preceded it.  A hard fact without every field below
+    can still be diagnostic telemetry, but cannot authorise a held-side q.
+    """
+
+    source: str
+    station_id: str
+    observed_at: str
+    issued_at: str
+    raw_extreme: float
+    rounded_extreme: float
+    payload_identity: str
+    source_identity: str
+    contributor_payload_identities: tuple[str, ...] = ()
+
+    def is_complete_for(self, city: Any) -> bool:
+        expected_station = str(getattr(city, "wu_station", "") or "").strip().upper()
+        station = str(self.station_id or "").strip().upper()
+        try:
+            finite_extrema = (
+                math.isfinite(float(self.raw_extreme))
+                and math.isfinite(float(self.rounded_extreme))
+            )
+        except (TypeError, ValueError):
+            finite_extrema = False
+        payload_identity = _strict_sha256_digest(self.payload_identity)
+        contributor_identities = (
+            self.contributor_payload_identities or (self.payload_identity,)
+        )
+        normalized_contributor_identities = tuple(
+            _strict_sha256_digest(identity) for identity in contributor_identities
+        )
+        return bool(
+            expected_station
+            and station == expected_station
+            and str(self.source or "").strip()
+            and _is_aware_timestamp(self.observed_at)
+            and _is_aware_timestamp(self.issued_at)
+            and _timestamps_are_ordered(self.observed_at, self.issued_at)
+            and payload_identity is not None
+            and all(identity is not None for identity in normalized_contributor_identities)
+            and payload_identity in normalized_contributor_identities
+            and str(self.source_identity or "").strip()
+            and finite_extrema
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "station_id": self.station_id,
+            "observed_at": self.observed_at,
+            "issued_at": self.issued_at,
+            "raw_extreme": self.raw_extreme,
+            "rounded_extreme": self.rounded_extreme,
+            "payload_identity": self.payload_identity,
+            "source_identity": self.source_identity,
+            "contributor_payload_identities": list(
+                self.contributor_payload_identities
+            ),
+        }
+
+
+_SHA256_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_PROVENANCE_SHA256_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
+
+
+def _strict_sha256_digest(value: Any) -> str | None:
+    candidate = str(value or "").strip()
+    return candidate if _SHA256_DIGEST_RE.fullmatch(candidate) else None
+
+
+def _provenance_payload_digest(value: Any) -> str | None:
+    """Extract only canonical raw-payload SHA-256 provenance."""
+
+    try:
+        provenance = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(provenance, dict):
+        return None
+    payload_hash = provenance.get("payload_hash")
+    if not isinstance(payload_hash, str):
+        return None
+    match = _PROVENANCE_SHA256_RE.fullmatch(payload_hash.strip())
+    return match.group(1) if match else None
+
+
+def _is_aware_timestamp(value: Any) -> bool:
+    return _aware_datetime(value) is not None
+
+
+def _aware_datetime(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def _timestamps_are_ordered(observed_at: Any, issued_at: Any) -> bool:
+    observed = _aware_datetime(observed_at)
+    issued = _aware_datetime(issued_at)
+    return observed is not None and issued is not None and observed <= issued
 
 
 @dataclass(frozen=True)
@@ -85,6 +201,7 @@ class HardFactVerdict:
     metric: str
     rounded_extreme: float
     source: str  # source-family evidence labels, possibly + same_station_fast_tail
+    evidence: HardFactEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -99,10 +216,18 @@ class HardFactMonitorBelief:
 
 @dataclass(frozen=True)
 class DurableObservationExtremes:
-    high: Optional[float]
-    low: Optional[float]
+    high_evidence: HardFactEvidence | None
+    low_evidence: HardFactEvidence | None
     source: str
     row_count: int
+
+    @property
+    def high(self) -> Optional[float]:
+        return None if self.high_evidence is None else self.high_evidence.rounded_extreme
+
+    @property
+    def low(self) -> Optional[float]:
+        return None if self.low_evidence is None else self.low_evidence.rounded_extreme
 
 
 @dataclass(frozen=True)
@@ -648,6 +773,7 @@ def _current_source_rounded_extremes(
             if monotonic_now - cached[0] < retry_after:
                 return cached[1], cached[2]
     high = low = None
+    high_evidence = low_evidence = None
     try:
         from src.contracts.settlement_semantics import SettlementSemantics
 
@@ -661,10 +787,38 @@ def _current_source_rounded_extremes(
         semantics = SettlementSemantics.for_city(city)
         raw_high = getattr(obs, "high_so_far", None)
         raw_low = getattr(obs, "low_so_far", None)
+        observed_at = str(getattr(obs, "observation_time", "") or "").strip()
+        issued_at = str(
+            getattr(obs, "provider_reported_time", None)
+            or getattr(obs, "observation_available_at", "")
+            or ""
+        ).strip()
+        station_id = str(getattr(obs, "station_id", "") or "").strip().upper()
+        payload_identity = _strict_sha256_digest(
+            getattr(obs, "raw_payload_hash", "")
+        )
+
+        def _evidence(raw_value: Any, rounded_value: float) -> HardFactEvidence:
+            return HardFactEvidence(
+                source=observed_source,
+                station_id=station_id,
+                observed_at=observed_at,
+                issued_at=issued_at,
+                raw_extreme=float(raw_value),
+                rounded_extreme=rounded_value,
+                payload_identity=payload_identity or "",
+                source_identity=f"{observed_source}:{station_id}",
+                contributor_payload_identities=(
+                    (payload_identity,) if payload_identity is not None else ()
+                ),
+            )
+
         if raw_high is not None:
             high = float(semantics.round_single(float(raw_high)))
+            high_evidence = _evidence(raw_high, high)
         if raw_low is not None:
             low = float(semantics.round_single(float(raw_low)))
+            low_evidence = _evidence(raw_low, low)
     except Exception as exc:  # noqa: BLE001 — source fail-soft, lane holds
         logger.debug(
             "day0 hard-fact %s source unavailable for %s/%s: %s",
@@ -674,8 +828,27 @@ def _current_source_rounded_extremes(
             exc,
         )
     with _CURRENT_SOURCE_MEMO_LOCK:
-        _CURRENT_SOURCE_MEMO[key] = (monotonic_now, high, low)
+        _CURRENT_SOURCE_MEMO[key] = (
+            monotonic_now,
+            high,
+            low,
+            high_evidence,
+            low_evidence,
+        )
     return high, low
+
+
+def _current_source_hard_fact_evidence(
+    *, city: Any, target_date: str, metric: str
+) -> HardFactEvidence | None:
+    """Return the typed proof retained alongside the current WU scalar memo."""
+
+    key = ("wu", str(getattr(city, "name", "")), str(target_date))
+    with _CURRENT_SOURCE_MEMO_LOCK:
+        cached = _CURRENT_SOURCE_MEMO.get(key)
+    if cached is None:
+        return None
+    return cached[3] if metric == "high" else cached[4]
 
 
 def _wu_rounded_extremes(
@@ -752,6 +925,9 @@ def _durable_observation_instants_summary(
     if not city_name or not target_date:
         return None
 
+    station_id = str(getattr(city, "wu_station", "") or "").strip().upper()
+    if not station_id:
+        return None
     metric_filter = ("", "high", "low")
     now_iso = now.astimezone(UTC).isoformat()
     table_refs = (
@@ -761,12 +937,16 @@ def _durable_observation_instants_summary(
     )
     for table_ref in table_refs:
         try:
-            row = world_conn.execute(
+            rows = world_conn.execute(
                 f"""
                 SELECT
-                    MAX(CASE WHEN running_max IS NOT NULL THEN CAST(running_max AS REAL) END) AS high,
-                    MIN(CASE WHEN running_min IS NOT NULL THEN CAST(running_min AS REAL) END) AS low,
-                    COUNT(*) AS n_rows
+                    CAST(running_max AS REAL) AS high_raw,
+                    CAST(running_min AS REAL) AS low_raw,
+                    source,
+                    station_id,
+                    utc_timestamp,
+                    imported_at,
+                    provenance_json
                 FROM {table_ref}
                 WHERE city = ?
                   AND target_date = ?
@@ -775,21 +955,14 @@ def _durable_observation_instants_summary(
                   AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
                   AND COALESCE(causality_status, 'OK') = 'OK'
                   AND LOWER(COALESCE(source, '')) LIKE 'wu%'
+                  AND UPPER(COALESCE(station_id, '')) = ?
                   AND LOWER(COALESCE(temperature_metric, '')) IN (?, ?, ?)
                 """,
-                (city_name, target_date, now_iso, *metric_filter),
-            ).fetchone()
+                (city_name, target_date, now_iso, station_id, *metric_filter),
+            ).fetchall()
         except Exception:  # noqa: BLE001 - missing attachment/table/columns fail soft
             continue
-        if row is None:
-            continue
-        try:
-            n_rows = int(row["n_rows"] if hasattr(row, "keys") else row[2] or 0)
-            high_raw = row["high"] if hasattr(row, "keys") else row[0]
-            low_raw = row["low"] if hasattr(row, "keys") else row[1]
-        except (TypeError, KeyError, IndexError, ValueError):
-            continue
-        if n_rows <= 0 or (high_raw is None and low_raw is None):
+        if not rows:
             continue
         # M-8 (audit 2026-07-18): settlement-round the durable extremes before any
         # grid comparison — the WU/METAR sibling paths round, and the market settles
@@ -802,13 +975,80 @@ def _durable_observation_instants_summary(
         except Exception:  # noqa: BLE001 — semantics unavailable: raw value fail-soft
             def _round(value: float) -> float:
                 return value
-        high = float(_round(float(high_raw))) if high_raw is not None else None
-        low = float(_round(float(low_raw))) if low_raw is not None else None
+        def _row_value(row: Any, key: str, index: int) -> Any:
+            return row[key] if hasattr(row, "keys") else row[index]
+
+        def _evidence(row: Any, *, raw_value: float, rounded_value: float) -> HardFactEvidence:
+            source = str(_row_value(row, "source", 2) or "").strip()
+            row_station = str(_row_value(row, "station_id", 3) or "").strip().upper()
+            observed_at = str(_row_value(row, "utc_timestamp", 4) or "").strip()
+            issued_at = str(_row_value(row, "imported_at", 5) or "").strip()
+            payload_identity = _provenance_payload_digest(
+                _row_value(row, "provenance_json", 6)
+            )
+            return HardFactEvidence(
+                source=source,
+                station_id=row_station,
+                observed_at=observed_at,
+                issued_at=issued_at,
+                raw_extreme=raw_value,
+                rounded_extreme=rounded_value,
+                payload_identity=payload_identity or "",
+                source_identity=f"{source}:{row_station}",
+                contributor_payload_identities=(
+                    (payload_identity,) if payload_identity is not None else ()
+                ),
+            )
+
+        high_candidates: list[tuple[float, HardFactEvidence]] = []
+        low_candidates: list[tuple[float, HardFactEvidence]] = []
+        for row in rows:
+            try:
+                high_raw = _row_value(row, "high_raw", 0)
+                low_raw = _row_value(row, "low_raw", 1)
+                if high_raw is not None and math.isfinite(float(high_raw)):
+                    raw_high = float(high_raw)
+                    high_evidence = _evidence(
+                        row,
+                        raw_value=raw_high,
+                        rounded_value=float(_round(raw_high)),
+                    )
+                    issued = _aware_datetime(high_evidence.issued_at)
+                    if (
+                        high_evidence.is_complete_for(city)
+                        and issued is not None
+                        and issued <= now
+                    ):
+                        high_candidates.append((raw_high, high_evidence))
+                if low_raw is not None and math.isfinite(float(low_raw)):
+                    raw_low = float(low_raw)
+                    low_evidence = _evidence(
+                        row,
+                        raw_value=raw_low,
+                        rounded_value=float(_round(raw_low)),
+                    )
+                    issued = _aware_datetime(low_evidence.issued_at)
+                    if (
+                        low_evidence.is_complete_for(city)
+                        and issued is not None
+                        and issued <= now
+                    ):
+                        low_candidates.append((raw_low, low_evidence))
+            except (TypeError, KeyError, IndexError, ValueError):
+                continue
+        if not high_candidates and not low_candidates:
+            continue
+        high_evidence = None
+        low_evidence = None
+        if high_candidates:
+            _, high_evidence = max(high_candidates, key=lambda item: item[0])
+        if low_candidates:
+            _, low_evidence = min(low_candidates, key=lambda item: item[0])
         return DurableObservationExtremes(
-            high=high,
-            low=low,
+            high_evidence=high_evidence,
+            low_evidence=low_evidence,
             source="durable_observation_instants",
-            row_count=n_rows,
+            row_count=len(rows),
         )
     return None
 
@@ -829,6 +1069,96 @@ def _durable_observation_instants_extremes(
     if summary is None:
         return None, None, ""
     return summary.high, summary.low, summary.source
+
+
+def _combined_wu_hard_fact_evidence(
+    evidence: Collection[HardFactEvidence], *, metric: str, city: Any
+) -> HardFactEvidence | None:
+    """Monotonically combine direct and durable WU facts from one station."""
+
+    complete = [item for item in evidence if item.is_complete_for(city)]
+    if not complete:
+        return None
+    selected = (
+        max(complete, key=lambda item: item.rounded_extreme)
+        if metric == "high"
+        else min(complete, key=lambda item: item.rounded_extreme)
+    )
+    sources = tuple(dict.fromkeys(item.source for item in complete))
+    contributor_payload_identities = tuple(
+        dict.fromkeys(
+            digest
+            for item in complete
+            for digest in (
+                item.contributor_payload_identities or (item.payload_identity,)
+            )
+        )
+    )
+    source_identity_payload = {
+        "contributor_payload_identities": contributor_payload_identities,
+        "metric": metric,
+        "source_identities": tuple(item.source_identity for item in complete),
+    }
+    return HardFactEvidence(
+        source="+".join(sources),
+        station_id=selected.station_id,
+        observed_at=selected.observed_at,
+        issued_at=selected.issued_at,
+        raw_extreme=selected.raw_extreme,
+        rounded_extreme=selected.rounded_extreme,
+        payload_identity=selected.payload_identity,
+        source_identity="wu-hard-fact:"
+        + hashlib.sha256(
+            json.dumps(
+                source_identity_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        contributor_payload_identities=contributor_payload_identities,
+    )
+
+
+def _wu_hard_fact_evidence(
+    *,
+    city: Any,
+    target_date: str,
+    metric: str,
+    now: datetime,
+    world_conn: Any,
+    durable_only: bool,
+) -> HardFactEvidence | None:
+    """Return the only evidence class that may drive held Day0 hard facts.
+
+    The same-station fast-tail scalar remains available to its existing
+    non-hard-fact consumers, but it cannot manufacture the WU observation
+    clock and payload identity required for a held-position absorbing q.
+    """
+
+    candidates: list[HardFactEvidence] = []
+    if not durable_only:
+        try:
+            _wu_rounded_extremes(city, target_date, now=now)
+        except Exception as exc:  # noqa: BLE001 - durable evidence remains usable
+            logger.debug(
+                "day0 hard-fact direct WU unavailable for %s/%s: %s",
+                getattr(city, "name", "?"), target_date, exc,
+            )
+        direct = _current_source_hard_fact_evidence(
+            city=city, target_date=target_date, metric=metric
+        )
+        if direct is not None:
+            candidates.append(direct)
+    durable = _durable_observation_instants_summary(
+        city=city, target_date=target_date, now=now, world_conn=world_conn
+    )
+    if durable is not None:
+        durable_evidence = (
+            durable.high_evidence if metric == "high" else durable.low_evidence
+        )
+        if durable_evidence is not None:
+            candidates.append(durable_evidence)
+    return _combined_wu_hard_fact_evidence(candidates, metric=metric, city=city)
 
 
 def settlement_grade_effective_extreme(
@@ -937,17 +1267,20 @@ def day0_entry_bin_still_alive(
         city_name = str(getattr(city, "name", "") or "")
         if is_day0_family_paused(city_name, target_date, now=moment):
             return False
-        effective, _source = settlement_grade_effective_extreme(
-            city=city, target_date=target_date, metric=metric, now=moment,
+        evidence = _wu_hard_fact_evidence(
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            now=moment,
             world_conn=world_conn,
             durable_only=True,
         )
-        if effective is None:
+        if evidence is None:
             return True
         verdict = hard_fact_bin_verdict(
             metric=metric, direction=direction,
             bin_low=bin_low, bin_high=bin_high,
-            effective_extreme=effective,
+            effective_extreme=evidence.rounded_extreme,
         )
         return verdict is None or verdict.action != "EXIT_DEAD_BIN"
     except Exception:  # noqa: BLE001 — fail-soft: never block a submit on a lane error
@@ -996,62 +1329,34 @@ def evaluate_hard_fact_exit(
         if bin_low is None and bin_high is None:
             return None
 
-        durable_summary = _durable_observation_instants_summary(
+        evidence = _wu_hard_fact_evidence(
             city=city,
             target_date=target_date,
+            metric=metric,
             now=moment,
             world_conn=world_conn,
+            durable_only=durable_only,
         )
-        durable_high = durable_summary.high if durable_summary is not None else None
-        durable_low = durable_summary.low if durable_summary is not None else None
-        durable_source = durable_summary.source if durable_summary is not None else ""
-        durable_effective = durable_high if metric == "high" else durable_low
-        if durable_effective is not None:
-            durable_verdict = hard_fact_bin_verdict(
-                metric=metric, direction=direction,
-                bin_low=bin_low, bin_high=bin_high,
-                effective_extreme=float(durable_effective),
-            )
-            if durable_verdict is not None:
-                verdict = HardFactVerdict(
-                    action=durable_verdict.action,
-                    reason=durable_verdict.reason,
-                    metric=durable_verdict.metric,
-                    rounded_extreme=durable_verdict.rounded_extreme,
-                    source=durable_source,
-                )
-                log = logger.warning if verdict.action == "EXIT_DEAD_BIN" else logger.info
-                log(
-                    "DAY0_HARD_FACT_%s trade=%s city=%s date=%s dir=%s bin=[%s,%s] "
-                    "extreme=%s source=%s: %s",
-                    verdict.action, getattr(position, "trade_id", "?"), city_name, target_date,
-                    direction, bin_low, bin_high, durable_effective, durable_source, verdict.reason,
-                )
-                return verdict
-        if durable_only:
-            return None
-
-        effective, source = settlement_grade_effective_extreme(
-            city=city, target_date=target_date, metric=metric, now=moment, world_conn=world_conn
-        )
-        if effective is None:
+        if evidence is None:
             return None
         verdict = hard_fact_bin_verdict(
             metric=metric, direction=direction,
             bin_low=bin_low, bin_high=bin_high,
-            effective_extreme=effective,
+            effective_extreme=evidence.rounded_extreme,
         )
         if verdict is None:
             return None
         verdict = HardFactVerdict(
             action=verdict.action, reason=verdict.reason, metric=verdict.metric,
-            rounded_extreme=verdict.rounded_extreme, source=source,
+            rounded_extreme=verdict.rounded_extreme,
+            source=evidence.source,
+            evidence=evidence,
         )
         log = logger.warning if verdict.action == "EXIT_DEAD_BIN" else logger.info
         log(
             "DAY0_HARD_FACT_%s trade=%s city=%s date=%s dir=%s bin=[%s,%s] extreme=%s source=%s: %s",
             verdict.action, getattr(position, "trade_id", "?"), city_name, target_date,
-            direction, bin_low, bin_high, effective, source, verdict.reason,
+            direction, bin_low, bin_high, evidence.rounded_extreme, evidence.source, verdict.reason,
         )
         return verdict
     except Exception as exc:  # noqa: BLE001 — the lane must never break the monitor
@@ -1413,16 +1718,20 @@ def cancel_day0_dead_bin_resting_entries(
                 # held-position exit lane consults (cycle_runtime world_conn=conn).
                 # Without it the durable observation_instants source is silently
                 # excluded and a cold-memo restart leaves dead-bin BUYs resting.
-                effective, source = settlement_grade_effective_extreme(
-                    city=city, target_date=target_date, metric=metric, now=moment,
+                evidence = _wu_hard_fact_evidence(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    now=moment,
                     world_conn=conn,
+                    durable_only=False,
                 )
-                if effective is not None:
+                if evidence is not None:
                     verdict = hard_fact_bin_verdict(
                         metric=metric, direction=direction,
                         bin_low=float(range_low) if range_low is not None else None,
                         bin_high=float(range_high) if range_high is not None else None,
-                        effective_extreme=effective,
+                        effective_extreme=evidence.rounded_extreme,
                     )
             if not paused and (verdict is None or verdict.action != "EXIT_DEAD_BIN"):
                 continue

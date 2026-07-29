@@ -1505,11 +1505,25 @@ class OpportunityEventReactor:
             return max(decision_time, claimed_at.astimezone(UTC))
 
         try:
-            batch_result = process_batch(
-                tuple(claimed),
-                decision_time.astimezone(UTC),
-                claim_unpaged_winner=_claim_unpaged_winner,
+            bind_claim_generations = getattr(
+                self._submit,
+                "bind_global_claim_generations",
+                None,
             )
+            if callable(bind_claim_generations):
+                bind_claim_generations(
+                    claim_generations,
+                    claim_attempt_counts,
+                )
+            try:
+                batch_result = process_batch(
+                    tuple(claimed),
+                    decision_time.astimezone(UTC),
+                    claim_unpaged_winner=_claim_unpaged_winner,
+                )
+            finally:
+                if callable(bind_claim_generations):
+                    bind_claim_generations(None, None)
             if not isinstance(batch_result, GlobalBatchSubmitResult):
                 raise TypeError("global batch adapter returned an invalid result")
             claimed_ids = frozenset(event.event_id for event in claimed)
@@ -5666,6 +5680,7 @@ class _Day0LiveFamilyAdmission:
     admitted_families: frozenset[tuple[str, str, str]]
     expiry_safe: bool
     scan_cities: frozenset[str] = frozenset()
+    held_families: frozenset[tuple[str, str, str]] = frozenset()
 
     def __call__(self, observation: dict[str, Any]) -> bool:
         family = _substrate_refresh_family_key(
@@ -5758,6 +5773,7 @@ def _edli_day0_live_family_admission(
         )
 
     exposure_families: set[tuple[str, str, str]] = set()
+    held_families: set[tuple[str, str, str]] = set()
     exposure_surface_read_ok = False
     try:
         trade_tables = {
@@ -5787,7 +5803,12 @@ def _edli_day0_live_family_admission(
     try:
         from src.data.replacement_cycle_advance_trigger import _held_position_families
 
-        _add_families(_held_position_families(trade_conn))
+        raw_held_families = _held_position_families(trade_conn)
+        _add_families(raw_held_families)
+        for city, target_date, metric in raw_held_families:
+            family = _substrate_refresh_family_key(city, target_date, metric)
+            if all(family):
+                held_families.add(family)
     except Exception as exc:  # noqa: BLE001
         _log.warning("EDLI day0 live family admission: held-position family read failed: %r", exc)
 
@@ -5801,6 +5822,7 @@ def _edli_day0_live_family_admission(
             for city_name in cities_by_name
             if _substrate_refresh_family_text_key(city_name) in admitted_city_keys
         ),
+        held_families=frozenset(held_families),
     )
 
 
@@ -6177,6 +6199,15 @@ def request_global_auction_completion(
     reason: str,
     position_id: str,
     family: tuple[str, str, str] | None = None,
+    probability_content_identity: str = "",
+    held_token_id: str = "",
+    held_best_bid: float | None = None,
+    bid_observed_at: str = "",
+    book_state: str | None = None,
+    probability_observed_at: str = "",
+    generation: str | None = None,
+    scope_identity: str = "",
+    schema_version: int = 3,
     force_new_generation: bool = False,
 ) -> bool:
     """Persistently reserve one complete global cut for a held SELL.
@@ -6184,6 +6215,7 @@ def request_global_auction_completion(
     Returns whether a matching durable wake already existed or was published.
     """
 
+    caller_supplied_scope = bool(str(scope_identity or "").strip())
     already_due = _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
     clean_family = tuple(
@@ -6199,22 +6231,162 @@ def request_global_auction_completion(
         )
     try:
         from src.runtime.reactor_wake import (
+            held_sell_reauction_material_identity,
+            held_sell_reauction_scope_identity,
+            make_held_sell_reauction_request,
             publish_reactor_wake,
             reactor_wakes_since,
         )
+
+        held_request = None
+        held_request_material_identity = ""
+        held_request_kwargs = None
+        if held_token_id:
+            inferred_book_state = str(book_state or "").strip().upper()
+            if not inferred_book_state:
+                if held_best_bid is None:
+                    inferred_book_state = "UNKNOWN"
+                elif float(held_best_bid) <= 0:
+                    inferred_book_state = "NO_EXECUTABLE_BOOK"
+                elif not bid_observed_at:
+                    inferred_book_state = "STALE"
+                else:
+                    inferred_book_state = "EXECUTABLE"
+            if not scope_identity:
+                scope_identity = held_sell_reauction_scope_identity(
+                    position_id=str(position_id or ""),
+                    family=clean_family,
+                    probability_content_identity=probability_content_identity,
+                    held_token_id=held_token_id,
+                )
+            held_request_kwargs = {
+                "position_id": str(position_id or ""),
+                "family": clean_family,
+                "probability_content_identity": probability_content_identity,
+                "held_token_id": held_token_id,
+                "held_best_bid": held_best_bid,
+                "bid_observed_at": bid_observed_at,
+                "schema_version": schema_version,
+                "scope_identity": scope_identity,
+                "book_state": inferred_book_state,
+                "probability_observed_at": probability_observed_at,
+            }
+            if generation:
+                held_request_kwargs["generation"] = generation
+            held_request_material_identity = held_sell_reauction_material_identity(
+                **{
+                    key: value
+                    for key, value in held_request_kwargs.items()
+                    if key != "generation"
+                }
+            )
 
         durable_wakes = tuple(
             wake
             for wake in reactor_wakes_since(None)
             if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
         )
-        durable_request_exists = (
-            any(wake_families[0] in wake.forecast_families for wake in durable_wakes)
-            if wake_families
-            else bool(durable_wakes)
+        same_asset_versioned_requests = tuple(
+            request
+            for wake in durable_wakes
+            for request in getattr(wake, "held_sell_reauction_requests", ())
+            if (
+                int(getattr(request, "schema_version", 1) or 1) in {2, 3}
+                and str(getattr(request, "position_id", "") or "")
+                == str(position_id or "")
+                and tuple(getattr(request, "family", ()) or ()) == clean_family
+                and str(getattr(request, "held_token_id", "") or "")
+                == str(held_token_id or "")
+            )
         )
+        if (
+            held_request_kwargs is not None
+            and int(schema_version) in {2, 3}
+            and not caller_supplied_scope
+            and same_asset_versioned_requests
+            and not force_new_generation
+        ):
+            existing_scope = str(
+                getattr(same_asset_versioned_requests[-1], "scope_identity", "") or ""
+            ).strip()
+            if existing_scope:
+                held_request_kwargs["scope_identity"] = existing_scope
+                held_request_material_identity = held_sell_reauction_material_identity(
+                    **{
+                        key: value
+                        for key, value in held_request_kwargs.items()
+                        if key != "generation"
+                    }
+                )
+        matching_versioned_requests = tuple(
+            request
+            for request in same_asset_versioned_requests
+            if str(getattr(request, "material_identity", "") or "")
+            == held_request_material_identity
+        )
+        if (
+            held_request_kwargs is not None
+            and int(schema_version) in {2, 3}
+            and not generation
+            and matching_versioned_requests
+            and not force_new_generation
+        ):
+            # The durable scope owns the generation.  A later fresh book only
+            # upgrades its context; it must never mint a second obligation.
+            held_request_kwargs["generation"] = str(
+                getattr(matching_versioned_requests[-1], "generation", "") or ""
+            )
+        if held_request_kwargs is not None:
+            held_request = make_held_sell_reauction_request(
+                **held_request_kwargs
+            )
+        def _context_rank(request: object) -> tuple[int, int, int]:
+            state = str(getattr(request, "book_state", "UNKNOWN") or "UNKNOWN").upper()
+            state_rank = {
+                "UNKNOWN": 0,
+                "NO_EXECUTABLE_BOOK": 1,
+                "STALE": 1,
+                "EXECUTABLE": 2,
+            }.get(state, -1)
+            return (
+                state_rank,
+                int(bool(getattr(request, "probability_content_identity", ""))),
+                int(bool(getattr(request, "bid_observed_at", ""))),
+            )
+        durable_request_exists = (
+            any(
+                str(getattr(request, "request_id", "") or "")
+                == held_request.request_id
+                for wake in durable_wakes
+                for request in getattr(wake, "held_sell_reauction_requests", ())
+            )
+            if held_request is not None
+            else (
+                any(wake_families[0] in wake.forecast_families for wake in durable_wakes)
+                if wake_families
+                else bool(durable_wakes)
+            )
+        )
+        context_upgrade = bool(
+            held_request is not None
+            and matching_versioned_requests
+            and _context_rank(held_request)
+            > max(
+                _context_rank(request)
+                for request in matching_versioned_requests
+            )
+        )
+    except ValueError:
+        logging.getLogger("zeus.events.reactor").error(
+            "held SELL reauction request rejected before durable publish: "
+            "position_id=%s reason=%s",
+            str(position_id or "unknown"),
+            str(reason or "authority_unavailable"),
+        )
+        return False
     except OSError:
         durable_request_exists = False
+        held_request = None
     if not already_due:
         logger = logging.getLogger("zeus.events.reactor")
         logger.warning(
@@ -6227,12 +6399,15 @@ def request_global_auction_completion(
         logger = logging.getLogger("zeus.events.reactor")
     if force_new_generation:
         durable_request_exists = False
-    if not durable_request_exists:
+    if not durable_request_exists or context_upgrade:
         try:
             publish_reactor_wake(
                 source="held_position_monitor",
                 reason=GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
                 forecast_families=wake_families,
+                held_sell_reauction_requests=(held_request,)
+                if held_request is not None
+                else (),
             )
         except OSError:
             logger.exception(
@@ -6241,6 +6416,145 @@ def request_global_auction_completion(
             )
             return False
     return True
+
+
+def _held_sell_reauction_receipts_from_global_cut(
+    *,
+    requests: tuple[object, ...],
+    result: object,
+) -> tuple[object, ...]:
+    """Bind each durable held request to the exact global cut that answered it."""
+
+    if int(getattr(result, "global_auction_completed_non_cancelled", 0) or 0) <= 0:
+        return ()
+    from src.engine.global_batch_runtime import held_sell_reauction_coverage
+    from src.runtime.reactor_wake import HeldSellReauctionReceipt
+
+    receipts: list[HeldSellReauctionReceipt] = []
+    global_no_trade_reason = next(
+        (
+            str(reason)
+            for reason in getattr(result, "rejection_reasons", ())
+            if str(reason).startswith(
+                ("GLOBAL_AUCTION_NO_TRADE:", "GLOBAL_PREFLIGHT_")
+            )
+        ),
+        "",
+    )
+    for request in requests:
+        receipt_identity = {
+            "request_id": str(getattr(request, "request_id", "") or ""),
+            "material_identity": str(
+                getattr(request, "material_identity", "") or ""
+            ),
+            "generation": str(getattr(request, "generation", "") or ""),
+            "attempt_identity": str(
+                getattr(request, "attempt_identity", "") or ""
+            ),
+        }
+        request_schema_version = int(getattr(request, "schema_version", 1) or 1)
+        request_q = str(
+            getattr(request, "probability_content_identity", "") or ""
+        )
+        coverage = held_sell_reauction_coverage(
+            position_id=str(getattr(request, "position_id", "") or ""),
+            # A versioned trigger q is historical context. The terminal answer must
+            # use the fresh cut's current q, including a q supersession after
+            # an earlier no-book wake.
+            probability_content_identity=(
+                "" if request_schema_version >= 2 else request_q
+            ),
+            token_id=str(getattr(request, "held_token_id", "") or ""),
+            family=tuple(getattr(request, "family", ()) or ()),
+        )
+        if coverage is None:
+            continue
+        coverage_q = str(
+            getattr(coverage, "probability_content_identity", "") or ""
+        )
+        if request_schema_version >= 2 and not coverage_q:
+            continue
+        if coverage.status == "EVALUATED":
+            if global_no_trade_reason and request_schema_version < 2:
+                receipts.append(
+                    HeldSellReauctionReceipt(
+                        **receipt_identity,
+                        status="REJECTED",
+                        reason=(
+                            "GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:"
+                            f"{global_no_trade_reason}"
+                        ),
+                    )
+                )
+                continue
+            selection_epoch_identity = str(
+                getattr(coverage, "selection_epoch_identity", "") or ""
+            )
+            sell_book_witness_identity = str(
+                getattr(coverage, "sell_book_witness_identity", "") or ""
+            )
+            if not selection_epoch_identity or not sell_book_witness_identity:
+                continue
+            if global_no_trade_reason:
+                if request_schema_version >= 2:
+                    economic_reason = global_no_trade_reason.removeprefix(
+                        "GLOBAL_AUCTION_NO_TRADE:"
+                    )
+                    if economic_reason not in {
+                        "CASH_DOMINATES",
+                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+                        "ROBUST_MAJORITY_LOSS",
+                    }:
+                        continue
+                    receipts.append(
+                        HeldSellReauctionReceipt(
+                            **receipt_identity,
+                            schema_version=request_schema_version,
+                            scope_identity=str(
+                                getattr(request, "scope_identity", "") or ""
+                            ),
+                            book_state="EXECUTABLE",
+                            status="CAPITAL_REJECTED",
+                            reason="GLOBAL_AUCTION_CAPITAL_REJECTED",
+                            selection_epoch_identity=selection_epoch_identity,
+                            sell_book_witness_identity=sell_book_witness_identity,
+                            capital_objective_proof=(
+                                "global_single_order_terminal_wealth:"
+                                f"{global_no_trade_reason}"
+                            ),
+                            answered_probability_content_identity=coverage_q,
+                        )
+                    )
+                    continue
+            receipts.append(
+                HeldSellReauctionReceipt(
+                    **receipt_identity,
+                    schema_version=request_schema_version,
+                    scope_identity=str(
+                        getattr(request, "scope_identity", "") or ""
+                    ),
+                    book_state="EXECUTABLE",
+                    status="ACTUATED",
+                    reason="GLOBAL_AUCTION_CURRENT_HOLDING_COVERAGE_ACTUATED",
+                    selection_epoch_identity=selection_epoch_identity,
+                    sell_book_witness_identity=sell_book_witness_identity,
+                    answered_probability_content_identity=(
+                        coverage_q if request_schema_version >= 2 else ""
+                    ),
+                )
+            )
+        elif coverage.status == "EXCLUDED" and request_schema_version < 2:
+            receipts.append(
+                HeldSellReauctionReceipt(
+                    **receipt_identity,
+                    status="REJECTED",
+                    reason=(
+                        "GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:"
+                        f"{str(getattr(coverage, 'reason', '') or 'unspecified')}"
+                    ),
+                )
+            )
+    return tuple(receipts)
 
 
 def _global_auction_monitor_cancellation_probe(
@@ -6326,6 +6640,7 @@ def run_edli_event_reactor_cycle(
     producer_wake_published_at: str | None = None,
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
+    producer_held_sell_reauction_requests: tuple[object, ...] = (),
     urgent_day0_pending: Callable[[], bool] | None = None,
     held_position_monitor_pending: Callable[[], bool] | None = None,
     live_entry_block_reason: str | None = None,
@@ -6836,34 +7151,12 @@ def run_edli_event_reactor_cycle(
                 len(targeted_event_ids),
             )
             _log_stage("committed_event_fast_path")
-        if catchup_day0_event_ids:
-            # EVENT-DRIVEN Day0 recompute bridge (2026-07-19): the catch-up scan lane
-            # (non-METAR / WU / HKO sources, and reboot catch-up) commits DAY0_EXTREME_UPDATED
-            # events here just like the fast METAR source clock does in ingest_main.py's
-            # _commit_pending_day0_metar. Bridge those families to an immediate
-            # re-materialization seed too, so this lane does not stay on the ~40-min
-            # scheduled cadence while the fast lane already races the book. Runs AFTER
-            # conn.commit() and the world-write mutex release above — no txn is open.
-            _edli_bridge_day0_extreme_materialization_seeds(catchup_day0_event_ids)
-            try:
-                from src.runtime.reactor_wake import publish_reactor_wake
-
-                publish_reactor_wake(
-                    source="edli_reactor_day0_catchup",
-                    reason="day0_extreme_event_committed",
-                    event_ids=catchup_day0_event_ids,
-                )
-            except OSError:
-                _log.exception(
-                    "EDLI Day0 catch-up wake publish failed; retaining current-cycle "
-                    "processing as the durable fallback"
-                )
-            else:
-                _log.info(
-                    "EDLI reactor yielded periodic cycle to targeted Day0 wake: events=%d",
-                    len(catchup_day0_event_ids),
-                )
-                return False
+        # EVENT-DRIVEN Day0 recompute bridge (2026-07-19): only newly inserted
+        # catch-up facts bridge to materialization and publish a targeted wake.
+        # Duplicate EventWriteResults are filtered at the emitter boundary, and
+        # this helper independently treats an empty set as a strict no-op.
+        if _edli_publish_committed_day0_catchup(catchup_day0_event_ids):
+            return False
         if not producer_fast_path and _urgent_wake_pending():
             _log.info(
                 "EDLI reactor maintenance preempted after emit by urgent producer wake"
@@ -7072,11 +7365,22 @@ def run_edli_event_reactor_cycle(
                 urgent_day0_pending=urgent_day0_pending,
             ),
         )
+        if producer_held_sell_reauction_requests:
+            from src.runtime.reactor_wake import persist_held_sell_reauction_receipts
+
+            held_sell_reauction_receipts = _held_sell_reauction_receipts_from_global_cut(
+                requests=producer_held_sell_reauction_requests,
+                result=_rr,
+            )
+            if held_sell_reauction_receipts and not persist_held_sell_reauction_receipts(
+                held_sell_reauction_receipts
+            ):
+                completion_wake_needs_retry = True
         completion_satisfied = _settle_global_auction_monitor_fairness(
             completion_due_at_start=_monitor_completion_due_at_start,
             result=_rr,
         )
-        completion_wake_needs_retry = (
+        completion_wake_needs_retry = completion_wake_needs_retry or (
             completion_wake and not completion_satisfied
         )
         _log_stage("process_pending")
@@ -8142,6 +8446,36 @@ def _edli_bridge_day0_extreme_materialization_seeds(event_ids: tuple[str, ...]) 
                 city, target_date, metric, exc,
             )
 
+
+def _edli_publish_committed_day0_catchup(event_ids: tuple[str, ...]) -> bool:
+    """Bridge and wake only for events inserted by this catch-up transaction."""
+
+    if not event_ids:
+        return False
+    import logging as _logging
+
+    _log = _logging.getLogger("zeus.events.reactor")
+    _edli_bridge_day0_extreme_materialization_seeds(event_ids)
+    try:
+        from src.runtime.reactor_wake import publish_reactor_wake
+
+        publish_reactor_wake(
+            source="edli_reactor_day0_catchup",
+            reason="day0_extreme_event_committed",
+            event_ids=event_ids,
+        )
+    except OSError:
+        _log.exception(
+            "EDLI Day0 catch-up wake publish failed; retaining current-cycle "
+            "processing as the durable fallback"
+        )
+        return False
+    _log.info(
+        "EDLI reactor yielded periodic cycle to targeted Day0 wake: events=%d",
+        len(event_ids),
+    )
+    return True
+
 def _edli_emit_day0_extreme_events(
     world_conn,
     trade_conn,
@@ -8152,7 +8486,7 @@ def _edli_emit_day0_extreme_events(
     budget_seconds: float | None = None,
     family_admission: _Day0LiveFamilyAdmission | None = None,
     urgent_wake_pending: Callable[[], bool] | None = None,
-) -> int:
+) -> tuple[str, ...]:
     """Emit DB-only Day0 catch-up events.
 
     The data-ingest source clock exclusively owns fast METAR capture and direct
@@ -8164,6 +8498,7 @@ def _edli_emit_day0_extreme_events(
         _edli_clear_sqlite_progress_handler,
         _edli_install_sqlite_deadline,
         _settings_section,
+        _substrate_refresh_family_text_key,
     )
     _log = _logging.getLogger("zeus.events.reactor")
 
@@ -8192,29 +8527,76 @@ def _edli_emit_day0_extreme_events(
         cancelled=urgent_wake_pending,
     )
     try:
-        trigger = Day0ExtremeUpdatedTrigger(
-            EventWriter(world_conn),
-            suppress_recent_no_value_refutations=True,
-            family_admission=family_admission,
-            scan_cities=(
-                family_admission.scan_cities
-                if family_admission is not None
-                else None
-            ),
-            scan_families=(
-                family_admission.admitted_families
-                if family_admission is not None
-                else ()
-            ),
+        def _scan(
+            admission: _Day0LiveFamilyAdmission | None,
+            *,
+            suppress_recent_no_value_refutations: bool,
+            scan_limit: int,
+        ) -> tuple[list, list]:
+            trigger = Day0ExtremeUpdatedTrigger(
+                EventWriter(world_conn),
+                suppress_recent_no_value_refutations=suppress_recent_no_value_refutations,
+                family_admission=admission,
+                scan_cities=admission.scan_cities if admission is not None else None,
+                scan_families=admission.admitted_families if admission is not None else (),
+            )
+            return _edli_scan_day0_with_lock_retry(
+                trigger=trigger,
+                world_conn=world_conn,
+                trade_conn=trade_conn,
+                decision_time=decision_time,
+                received_at=received_at,
+                limit=scan_limit,
+            )
+
+        held_families = (
+            frozenset()
+            if family_admission is None
+            else family_admission.held_families & family_admission.admitted_families
         )
-        authority_results, observation_results = _edli_scan_day0_with_lock_retry(
-            trigger=trigger,
-            world_conn=world_conn,
-            trade_conn=trade_conn,
-            decision_time=decision_time,
-            received_at=received_at,
-            limit=limit,
-        )
+        if not held_families:
+            authority_results, observation_results = _scan(
+                family_admission,
+                suppress_recent_no_value_refutations=True,
+                scan_limit=limit,
+            )
+        else:
+            held_city_keys = {family[0] for family in held_families}
+            held_admission = _Day0LiveFamilyAdmission(
+                admitted_families=held_families,
+                expiry_safe=family_admission.expiry_safe,
+                scan_cities=frozenset(
+                    city
+                    for city in family_admission.scan_cities
+                    if _substrate_refresh_family_text_key(city) in held_city_keys
+                ),
+                held_families=held_families,
+            )
+            authority_results, observation_results = _scan(
+                held_admission,
+                suppress_recent_no_value_refutations=False,
+                scan_limit=limit,
+            )
+            remaining_limit = max(0, limit - len(authority_results) - len(observation_results))
+            other_families = family_admission.admitted_families - held_families
+            if other_families and remaining_limit:
+                other_city_keys = {family[0] for family in other_families}
+                other_admission = _Day0LiveFamilyAdmission(
+                    admitted_families=frozenset(other_families),
+                    expiry_safe=family_admission.expiry_safe,
+                    scan_cities=frozenset(
+                        city
+                        for city in family_admission.scan_cities
+                        if _substrate_refresh_family_text_key(city) in other_city_keys
+                    ),
+                )
+                other_authority_results, other_observation_results = _scan(
+                    other_admission,
+                    suppress_recent_no_value_refutations=True,
+                    scan_limit=remaining_limit,
+                )
+                authority_results.extend(other_authority_results)
+                observation_results.extend(other_observation_results)
         _log.info(
             "EDLI day0 catch-up emit: day0_authority_emitted=%d "
             "day0_observation_instants_emitted=%d admitted_families=%d",
@@ -8226,7 +8608,8 @@ def _edli_emit_day0_extreme_events(
             dict.fromkeys(
                 str(result.event_id)
                 for result in (*authority_results, *observation_results)
-                if str(getattr(result, "event_id", "") or "").strip()
+                if bool(getattr(result, "inserted", False))
+                and str(getattr(result, "event_id", "") or "").strip()
             )
         )
     except sqlite3.OperationalError as exc:

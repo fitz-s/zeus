@@ -286,6 +286,7 @@ def _compact_monitor_probability_receipt(
             "q_version",
             "source_truth_identity",
             "held_side_probability",
+            "hard_fact_evidence",
         )
         if payload.get(key) is not None
     }
@@ -4143,6 +4144,17 @@ def _day0_absorbing_hard_fact_overlay(
         )
         if verdict is None:
             return None
+        evidence = getattr(verdict, "evidence", None)
+        if evidence is None or not evidence.is_complete_for(city):
+            stale = _clone_for_probability_refresh(pos)
+            setattr(stale, "selected_method", SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
+            _append_monitor_validation(
+                stale,
+                "day0_absorbing_hard_fact_evidence_incomplete:read_only",
+            )
+            _set_monitor_probability_fresh(stale, False)
+            _set_day0_zero_probability_exit_authority(stale, False)
+            return float(getattr(pos, "p_posterior", 0.0) or 0.0), stale, False
         belief = hard_fact_monitor_belief(
             verdict=verdict,
             direction=getattr(pos, "direction", ""),
@@ -4171,7 +4183,10 @@ def _day0_absorbing_hard_fact_overlay(
             f"yes_prob={belief.yes_prob:.6f};"
             f"held_prob={belief.held_side_prob:.6f};"
             f"effective_extreme={verdict.rounded_extreme:g};"
-            f"source={verdict.source or 'unknown'}"
+            f"source={verdict.source or 'unknown'};"
+            f"station_id={evidence.station_id};"
+            f"observed_at={evidence.observed_at};"
+            f"payload_identity={evidence.payload_identity}"
         ),
     )
     if belief.held_verdict == "STRUCTURAL_WIN":
@@ -4185,6 +4200,20 @@ def _day0_absorbing_hard_fact_overlay(
     _append_monitor_validation(
         hard_pos,
         "forecast_posteriors_dominated_by_day0_hard_fact",
+    )
+    setattr(
+        hard_pos,
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+        _compact_monitor_probability_receipt(
+            {
+                "schema_version": 1,
+                "selected_method": SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT,
+                "probability_authority": "day0_absorbing_hard_fact",
+                "probability_functional": "DETERMINISTIC_ABSORBING_FACT",
+                "held_side_probability": float(belief.held_side_prob),
+                "hard_fact_evidence": evidence.as_dict(),
+            }
+        ),
     )
     _set_monitor_probability_fresh(hard_pos, True)
     _set_day0_zero_probability_exit_authority(hard_pos, True)

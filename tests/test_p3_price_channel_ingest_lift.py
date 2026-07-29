@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-28 (WORLD writer critical-section read cut)
+# Last reused or audited: 2026-07-29 (isolated M5 authority proof cadence)
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
@@ -50,7 +50,11 @@ _EXECUTOR_PY = _REPO_ROOT / "src" / "execution" / "executor.py"
 
 # The two scheduled cycles lifted to P3 (the WS user-channel ingestor is a long-running
 # THREAD, not an add_job — it is started by _start_user_channel_ingestor_if_enabled).
-_LIFTED_JOB_IDS = ("edli_market_channel_ingestor", "edli_user_channel_reconcile")
+_LIFTED_JOB_IDS = (
+    "edli_market_channel_ingestor",
+    "edli_user_channel_reconcile",
+    "edli_fill_bridge_repair",
+)
 
 # The lifted producer surface that must live in the new P3 lane module.
 _LIFTED_PRODUCERS = (
@@ -237,6 +241,131 @@ def test_price_channel_daemon_records_max_instance_skip(monkeypatch) -> None:
             },
         }
     ]
+
+
+def test_m5_authority_deadline_fails_closed_without_publishing_health(monkeypatch) -> None:
+    import src.ingest.price_channel_daemon as daemon
+    from src.ingest import price_channel_ingest as lane
+    import src.observability.scheduler_health as scheduler_health
+
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: writes.append({"job_name": job_name, **kwargs}),
+    )
+    monotonic = iter((100.0, 120.0))
+    monkeypatch.setattr(lane.time, "monotonic", lambda: next(monotonic))
+
+    result = daemon._scheduler_job("edli_user_channel_reconcile")(
+        lane._edli_user_channel_reconcile_cycle
+    )()
+
+    assert result is None
+    assert writes == [
+        {
+            "job_name": "edli_user_channel_reconcile",
+            "failed": True,
+            "reason": "m5_authority_proof_deadline_exhausted",
+        }
+    ]
+
+
+def test_m5_authority_job_isolated_from_long_fill_bridge_repair() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    tree = ast.parse(_PRICE_CHANNEL_DAEMON.read_text(encoding="utf-8"))
+    jobs: dict[str, ast.Call] = {}
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_job"
+        ):
+            continue
+        job_id = next(
+            (
+                keyword.value.value
+                for keyword in node.keywords
+                if keyword.arg == "id" and isinstance(keyword.value, ast.Constant)
+            ),
+            None,
+        )
+        if isinstance(job_id, str):
+            jobs[job_id] = node
+
+    m5_job = jobs["edli_user_channel_reconcile"]
+    bridge_job = jobs["edli_fill_bridge_repair"]
+    for job, executor in ((m5_job, "m5_authority"), (bridge_job, "fill_bridge")):
+        keywords = {keyword.arg: keyword.value for keyword in job.keywords}
+        assert isinstance(keywords["max_instances"], ast.Constant)
+        assert keywords["max_instances"].value == 1
+        assert isinstance(keywords["coalesce"], ast.Constant)
+        assert keywords["coalesce"].value is True
+        assert isinstance(keywords["executor"], ast.Constant)
+        assert keywords["executor"].value == executor
+
+    interval = {
+        keyword.arg: keyword.value
+        for keyword in m5_job.keywords
+        if keyword.arg in {"seconds", "minutes"}
+    }
+    assert set(interval) == {"seconds"}
+    assert isinstance(interval["seconds"], ast.Name)
+    assert interval["seconds"].id == "M5_AUTHORITY_PROOF_CADENCE_SECONDS"
+
+    lane_tree = ast.parse(_PRICE_CHANNEL_MODULE.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node
+        for node in ast.walk(lane_tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    m5_calls = {
+        node.func.id
+        for node in ast.walk(functions["_edli_user_channel_reconcile_cycle"])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    repair_calls = {
+        node.func.id
+        for node in ast.walk(functions["_edli_fill_bridge_repair_cycle"])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "_edli_durable_fill_bridge_scan" not in m5_calls
+    assert "_edli_position_fill_redecision_cycle" not in m5_calls
+    assert "_edli_price_channel_world_write_gate" in m5_calls
+    assert "_edli_durable_fill_bridge_scan" in repair_calls
+    assert "_edli_position_fill_redecision_cycle" in repair_calls
+    assert "_edli_price_channel_world_write_gate" in repair_calls
+
+    bridge_started = Event()
+    release_bridge = Event()
+
+    def _long_bridge_repair() -> str:
+        bridge_started.set()
+        assert release_bridge.wait(timeout=1.0)
+        return "repaired"
+
+    def _m5_proof() -> dict[str, str]:
+        return {"status": "m5_authority_proof_complete"}
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as m5_executor,
+        ThreadPoolExecutor(max_workers=1) as bridge_executor,
+    ):
+        bridge_future = bridge_executor.submit(_long_bridge_repair)
+        assert bridge_started.wait(timeout=0.2)
+        proof_future = m5_executor.submit(_m5_proof)
+        assert proof_future.result(timeout=0.2) == {
+            "status": "m5_authority_proof_complete"
+        }
+        repeat_proof_future = m5_executor.submit(_m5_proof)
+        assert repeat_proof_future.result(timeout=0.2) == {
+            "status": "m5_authority_proof_complete"
+        }
+        assert not bridge_future.done()
+        release_bridge.set()
+        assert bridge_future.result(timeout=0.2) == "repaired"
 
 
 def test_price_channel_clob_fetchers_are_budget_bound(monkeypatch) -> None:
@@ -2703,10 +2832,16 @@ def test_position_fill_redecision_reads_before_world_write_without_poisoning_cha
     assert read_build < world_write
     assert "(evaluated_fact_ids - event_fact_ids) | acknowledged_fact_ids" in cycle_src
 
-    reconcile_src = inspect.getsource(lane._edli_user_channel_reconcile_cycle)
-    assert '"scheduler_failed": False' in reconcile_src
-    assert '"scheduler_failure_reason": fill_redecision_error' in reconcile_src
-    assert "processed_with_fill_redecision_error" in reconcile_src
+    m5_src = inspect.getsource(lane._edli_user_channel_reconcile_cycle)
+    assert '"scheduler_failed": False' in m5_src
+    assert "m5_authority_proof_complete" in m5_src
+    assert "_edli_durable_fill_bridge_scan" not in m5_src
+
+    repair_src = inspect.getsource(lane._edli_fill_bridge_repair_cycle)
+    assert '"scheduler_failure_reason": scheduler_failure_reason' in repair_src
+    assert "canonical_failure_reasons[0]" in repair_src
+    assert "else fill_redecision_error" in repair_src
+    assert "processed_with_fill_redecision_error" in repair_src
 
 
 def _seed_committed_denver_2026_06_20(forecasts_conn) -> None:

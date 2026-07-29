@@ -153,6 +153,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import os
 import sqlite3
 import threading
@@ -258,7 +259,7 @@ from src.state.snapshot_repo import (
 from src.events.candidate_binding import MarketTopologyCandidate, weather_family_id
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
-from src.events.event_store import EventStore
+from src.events.event_store import EventStore, GLOBAL_WINNER_SUBMIT_FENCED
 from src.events.forecast_completeness import ForecastCompletenessStatus
 from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
 from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_kelly, evaluate_riskguard
@@ -3345,6 +3346,80 @@ class _LiveOpportunityAlreadyLocked(RuntimeError):
     """Raised when continuous redecision rediscovers an already-locked opportunity."""
 
 
+def _fence_global_target_claim_before_command(
+    conn: sqlite3.Connection,
+    event: OpportunityEvent,
+    *,
+    claimed_at: str | None,
+    attempt_count: int | None,
+) -> None:
+    """Bind a global-winner claim to command creation under one writer lock.
+
+    A winner pointer may be superseded while an older carrier is still building
+    its final command.  The guarded no-op UPDATE is deliberately the first write
+    in the live-order savepoint: it serializes against pointer supersession and
+    proves that this exact carrier still owns both the main claim and pointer.
+    Once ``ExecutionCommandCreated`` is appended later in the same transaction,
+    supersession leaves the carrier recovery-owned.
+    """
+
+    if not str(event.source or "").startswith("global_auction_winner_target:"):
+        return
+    generation = str(claimed_at or "").strip()
+    if not generation or attempt_count is None:
+        raise _LiveOpportunityAlreadyLocked(
+            "GLOBAL_WINNER_CLAIM_GENERATION_MISSING:"
+            f"event_id={event.event_id}"
+        )
+    # SCOPE: this exact global-winner carrier. DRAIN: a superseded carrier with
+    # no durable command loses the fence immediately; a command-owning carrier
+    # drains through normal submit/recovery. RESET: a fresh carrier has a new
+    # event_id and can acquire the fence after the prior carrier is terminal.
+    cursor = conn.execute(
+        """
+        UPDATE opportunity_event_processing AS main
+           SET last_error = ?,
+               updated_at = ?
+         WHERE main.consumer_name = 'edli_reactor_v1'
+           AND main.event_id = ?
+           AND main.processing_status = 'processing'
+           AND main.claimed_at = ?
+           AND main.attempt_count = ?
+           AND main.last_error = 'GLOBAL_WINNER_TARGETED_CLAIM'
+           AND EXISTS (
+                SELECT 1
+                  FROM opportunity_event_processing AS pointer
+                 WHERE pointer.consumer_name =
+                           main.consumer_name || ':global_winner_v1'
+                   AND pointer.event_id = main.event_id
+                   AND pointer.processing_status = 'pending'
+                   AND pointer.last_error = 'GLOBAL_WINNER_TARGETED_CLAIM'
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM edli_live_order_events AS order_event
+                 WHERE order_event.event_type IN (
+                           'ExecutionCommandCreated',
+                           'VenueSubmitAttempted'
+                       )
+                   AND order_event.aggregate_id GLOB main.event_id || ':*'
+           )
+        """,
+        (
+            GLOBAL_WINNER_SUBMIT_FENCED,
+            datetime.now(UTC).isoformat(),
+            event.event_id,
+            generation,
+            int(attempt_count),
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise _LiveOpportunityAlreadyLocked(
+            "GLOBAL_WINNER_CLAIM_FENCE_LOST:"
+            f"event_id={event.event_id}"
+        )
+
+
 _DURABLE_LIVE_CAP_UNKNOWN_CITY = "__unknown_live_cap_city__"
 
 
@@ -6317,6 +6392,8 @@ def event_bound_live_adapter_from_trade_conn(
         str,
         tuple[str, str, dict[tuple[str, str], str | None]],
     ] = {}
+    _global_claim_generations: Mapping[str, str] = {}
+    _global_claim_attempt_counts: Mapping[str, int] = {}
     from src.runtime.reactor_wake import (
         reactor_urgent_wake_identity,
         reactor_urgent_wake_reason,
@@ -6366,6 +6443,10 @@ def event_bound_live_adapter_from_trade_conn(
             calibration_conn=calibration_conn,
             preflight_only=preflight_only,
             preflight_receipt=preflight_receipt,
+            global_claimed_at=_global_claim_generations.get(event.event_id),
+            global_claim_attempt_count=_global_claim_attempt_counts.get(
+                event.event_id
+            ),
         )
         if not preflight_only and receipt.venue_call_started:
             _live_submit_count[0] += 1
@@ -6767,6 +6848,10 @@ def event_bound_live_adapter_from_trade_conn(
                     trade_conn=trade_conn,
                     pre_submit_authority_provider=pre_submit_authority_provider,
                     live_order_schema_initialized=live_order_schema_initialized,
+                    global_claimed_at=_global_claim_generations.get(event.event_id),
+                    global_claim_attempt_count=_global_claim_attempt_counts.get(
+                        event.event_id
+                    ),
                 )
                 _live_order_build_phase = "live_order_certificates_built"
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
@@ -9265,6 +9350,16 @@ def event_bound_live_adapter_from_trade_conn(
             except Exception:  # noqa: BLE001 - commit is a lock-release boundary; never mask the real result/raise
                 pass
 
+    def _bind_global_claim_generations(
+        generations: Mapping[str, str] | None,
+        attempt_counts: Mapping[str, int] | None,
+    ) -> None:
+        nonlocal _global_claim_generations, _global_claim_attempt_counts
+        _global_claim_generations = generations if generations is not None else {}
+        _global_claim_attempt_counts = (
+            attempt_counts if attempt_counts is not None else {}
+        )
+
     # FIX B: expose the per-cycle ledger so the reactor commits/rolls back
     # provisional reservations in its post-submit phase.
     _submit.reservation_ledger = portfolio_reservation  # type: ignore[attr-defined]
@@ -9275,6 +9370,9 @@ def event_bound_live_adapter_from_trade_conn(
     _submit._live_ack_count = _live_ack_count  # type: ignore[attr-defined]
     _submit.prepare_global_event = _prepare_global_event  # type: ignore[attr-defined]
     _submit.process_global_batch = _process_global_batch  # type: ignore[attr-defined]
+    _submit.bind_global_claim_generations = (  # type: ignore[attr-defined]
+        _bind_global_claim_generations
+    )
     return _submit
 
 
@@ -10827,6 +10925,8 @@ def _submit_current_global_sell(
     calibration_conn: sqlite3.Connection | None,
     preflight_only: bool,
     preflight_receipt: EventSubmissionReceipt | None,
+    global_claimed_at: str | None = None,
+    global_claim_attempt_count: int | None = None,
 ) -> EventSubmissionReceipt:
     """Preflight or actuate one exact global SELL through reduce-only exit law."""
 
@@ -11159,6 +11259,12 @@ def _submit_current_global_sell(
                 },
             )
             exit_evidence = ExitExecutionEvidence()
+            _fence_global_target_claim_before_command(
+                trade_conn,
+                event,
+                claimed_at=global_claimed_at,
+                attempt_count=global_claim_attempt_count,
+            )
             outcome = execute_exit(
                 portfolio,
                 position,
@@ -17464,6 +17570,8 @@ def _build_live_execution_command_certificates(
     trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     live_order_schema_initialized: bool = False,
+    global_claimed_at: str | None = None,
+    global_claim_attempt_count: int | None = None,
 ) -> tuple[DecisionCertificate, ...]:
     global_actuation = receipt.global_actuation
     global_decision = (
@@ -18143,6 +18251,12 @@ def _build_live_execution_command_certificates(
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
 
         def _append_live_order_state() -> tuple[DecisionCertificate, DecisionCertificate, DecisionCertificate]:
+            _fence_global_target_claim_before_command(
+                live_cap_conn,
+                event,
+                claimed_at=global_claimed_at,
+                attempt_count=global_claim_attempt_count,
+            )
             aggregate_ledger = LiveOrderAggregateLedger(
                 live_cap_conn,
                 initialize_schema=False,
@@ -19386,6 +19500,13 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "live_authority_status": payload.get("live_authority_status"),
         "raw_value": payload.get("raw_value"),
         "rounded_value": payload.get("rounded_value"),
+        "station_id": payload.get("station_id"),
+        "configured_station_id": payload.get("configured_station_id"),
+        "settlement_source": payload.get("settlement_source"),
+        "raw_payload_sha256": payload.get("raw_payload_sha256"),
+        "day0_observation_provenance_hash": payload.get(
+            "day0_observation_provenance_hash"
+        ),
         "high_so_far": payload.get("high_so_far"),
         "low_so_far": payload.get("low_so_far"),
         "observation_time": payload.get("observation_time"),
@@ -20436,9 +20557,14 @@ def _day0_live_source_parent_certificates(
             "target_date": payload.get("target_date"),
             "metric": payload.get("metric") or payload.get("temperature_metric"),
             "station_id": payload.get("station_id"),
+            "configured_station_id": payload.get("configured_station_id"),
             "settlement_source": payload.get("settlement_source"),
             "observation_time": observation_time,
             "observation_available_at": observation_available_at,
+            "raw_payload_sha256": payload.get("raw_payload_sha256"),
+            "day0_observation_provenance_hash": payload.get(
+                "day0_observation_provenance_hash"
+            ),
             "raw_value": payload.get("raw_value"),
             "rounded_value": rounded_value,
             "source_match_status": payload.get("source_match_status"),
@@ -20534,6 +20660,15 @@ def _final_intent_decision_source_context_payload(
     observation_available_at = _nonnull(day0_authority.payload.get("observation_available_at"))
     if not observation_time or not observation_available_at:
         raise ValueError("DAY0_DECISION_SOURCE_CONTEXT_MISSING_OBSERVATION_CLOCK")
+    raw_payload_sha256 = _nonnull(day0_authority.payload.get("raw_payload_sha256"))
+    configured_station_id = _nonnull(
+        day0_authority.payload.get("configured_station_id")
+    )
+    provenance_hash = _nonnull(
+        day0_authority.payload.get("day0_observation_provenance_hash")
+    )
+    if not raw_payload_sha256 or not configured_station_id or not provenance_hash:
+        raise ValueError("DAY0_DECISION_SOURCE_CONTEXT_MISSING_RAW_PROVENANCE")
 
     base_source_id = _nonnull(
         forecast_payload.get("forecast_source_id") or forecast_payload.get("source_id")
@@ -20555,6 +20690,9 @@ def _final_intent_decision_source_context_payload(
             "base_raw_payload_hash": forecast_payload.get("raw_payload_hash"),
             "observation_time": observation_time,
             "observation_available_at": observation_available_at,
+            "raw_payload_sha256": raw_payload_sha256,
+            "configured_station_id": configured_station_id,
+            "day0_observation_provenance_hash": provenance_hash,
         }
     )
     combined = {
@@ -20570,6 +20708,9 @@ def _final_intent_decision_source_context_payload(
         "authority_tier": "OBSERVATION",
         "observation_time": observation_time,
         "observation_available_at": observation_available_at,
+        "raw_payload_sha256": raw_payload_sha256,
+        "configured_station_id": configured_station_id,
+        "day0_observation_provenance_hash": provenance_hash,
         "provider_reported_time": day0_authority.payload.get("provider_reported_time"),
         "decision_source_basis": "day0_live_observation_over_base_forecast",
         "base_forecast_source_id": base_source_id,
@@ -22592,6 +22733,13 @@ def _day0_calibration_authority_payload_and_clock(
         observation_time=str(payload.get("observation_time") or ""),
         raw_value=raw_value,
         rounded_value=rounded_value,
+        station_id=str(payload.get("station_id") or ""),
+        configured_station_id=str(payload.get("configured_station_id") or ""),
+        settlement_source=str(payload.get("settlement_source") or ""),
+        raw_payload_sha256=str(payload.get("raw_payload_sha256") or ""),
+        day0_observation_provenance_hash=str(
+            payload.get("day0_observation_provenance_hash") or ""
+        ),
         settlement_semantics=semantics,
     )
     try:
@@ -29818,6 +29966,9 @@ def _global_day0_execution_payload(
         )
     ):
         raise ValueError("GLOBAL_DAY0_CONDITIONING_SOURCE_IDENTITY_MISMATCH")
+    raw_payload_sha256 = str(fact.get("raw_payload_sha256") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", raw_payload_sha256):
+        raise ValueError("GLOBAL_DAY0_RAW_PROVENANCE_MISSING")
     if fast_residual_conditioning is not None:
         likelihood = fast_residual_conditioning["fast_residual_likelihood"]
         if (
@@ -29843,10 +29994,25 @@ def _global_day0_execution_payload(
         "rounded_value": rounded,
         "sample_count": observed_samples,
         "station_id": station_id,
+        "configured_station_id": expected_station,
         "settlement_source": observation_source,
         "settlement_unit": unit,
+        "raw_payload_sha256": raw_payload_sha256,
         "evidence_finality": evidence_finality,
     }
+    binding["day0_observation_provenance_hash"] = stable_hash(
+        {
+            "city": binding["city"],
+            "target_date": binding["target_date"],
+            "metric": binding["metric"],
+            "settlement_source": binding["settlement_source"],
+            "station_id": binding["station_id"],
+            "configured_station_id": binding["configured_station_id"],
+            "raw_payload_sha256": binding["raw_payload_sha256"],
+            "observation_time": binding["observation_time"],
+            "observation_available_at": binding["observation_available_at"],
+        }
+    )
     if conditioning_clock_lag_seconds is not None:
         binding.update(
             {
@@ -29955,8 +30121,13 @@ def _global_day0_execution_payload(
         "samples_count": observed_samples,
         "sample_count": observed_samples,
         "station_id": station_id,
+        "configured_station_id": expected_station,
         "settlement_source": observation_source,
         "settlement_unit": unit,
+        "raw_payload_sha256": raw_payload_sha256,
+        "day0_observation_provenance_hash": binding[
+            "day0_observation_provenance_hash"
+        ],
         "evidence_finality": evidence_finality,
         "source_match_status": "MATCH",
         "local_date_status": "MATCH",
@@ -35891,10 +36062,17 @@ def _record_day0_remaining_day_exit_authority(
                 "day0_extreme_maturity_unavailable:no_intraday_extreme"
             )
             return
-        if classification == BoundClassification.DETERMINISTIC:
-            payload["_edli_day0_model_bound_classification"] = "deterministic"
+        if classification == BoundClassification.MODEL_SUPPORT_COLLAPSED:
+            payload["_edli_day0_model_bound_classification"] = (
+                "model_support_collapsed"
+            )
             payload["_edli_day0_model_bound_classification_role"] = (
                 "forecast_remaining_window_evidence_only"
+            )
+        elif classification == BoundClassification.DETERMINISTIC:
+            payload["_edli_day0_model_bound_classification"] = "deterministic"
+            payload["_edli_day0_model_bound_classification_role"] = (
+                "final_settlement_witness"
             )
         _record_day0_temporal_exit_authority(
             payload=payload,
