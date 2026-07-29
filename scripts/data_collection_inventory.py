@@ -7,7 +7,7 @@
 #   from _SRC_MAIN_DATA_COLLECTION_JOB_IDS — the order daemon no longer collects WU daily)
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR3);
 #   operator spec §"Job registry"; src/data/source_job_registry.py;
-#   docs/architecture/system_decomposition_plan.md §8 Step 4.
+#   docs/reference/design_system_decomposition_plan.md §8 Step 4.
 """Data-collection job inventory CLI — PR3 (advisory, read-only).
 
     python3 scripts/data_collection_inventory.py            # render the job matrix

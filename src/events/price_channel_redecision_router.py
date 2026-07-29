@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-07-08
 # Authority basis: docs/rebuild/EXECUTION_MASTER_2026-07-07.md §E R6 (venue 契约层 —
 #   price_channel_ingest 3.1K 拆 venue-fact 桥接 vs re-decision 路由: venue 不决定谁
-#   re-solve); docs/architecture/system_decomposition_plan.md §4.2/§7 I2 (price-channel
+#   re-solve); docs/reference/design_system_decomposition_plan.md §4.2/§7 I2 (price-channel
 #   is a quote-EVIDENCE producer, never a trading authority).
 """EDLI price-channel RE-DECISION ROUTING — split out of src.ingest.price_channel_ingest.
 

@@ -2,7 +2,7 @@
 
 Created: 2026-06-08
 Last reused or audited: 2026-06-08
-Authority basis: docs/architecture/system_decomposition_plan.md (P1..P4 boundaries, I1..I7 seams);
+Authority basis: docs/reference/design_system_decomposition_plan.md (P1..P4 boundaries, I1..I7 seams);
   AGENTS.md money path (`contract semantics -> source truth -> forecast signal -> calibration ->
   edge -> execution`) + INV-37 cross-DB rule; architecture/db_table_ownership.yaml schema_version 2;
   src/data/release_calendar.py + config/source_release_calendar.yaml (the existing per-source

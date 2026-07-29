@@ -1,6 +1,6 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-07-24
-# Authority basis: docs/architecture/system_decomposition_plan.md
+# Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 commit-before-HTTP no-back-coupling; I4 ingest->P4),
 #   §8 Step 2 (lift chain-sync READ + redeem/wrap pollers), §9 (regression-unconstructable).

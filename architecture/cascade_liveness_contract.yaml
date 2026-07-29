@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-06-08 (P4 fix: orphan-check antibody now derives the
 #   state-machine poller naming convention from this file's required_pollers ids; the
 #   operator_runbook references are verified to resolve to files on disk.
-#   Authority basis: docs/architecture/system_decomposition_plan.md §8 Step 2.)
+#   Authority basis: docs/reference/design_system_decomposition_plan.md §8 Step 2.)
 # Authority basis: docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §G.2 + §K.6 v5
 #   + 守護 2026-06-03: harvester added to required_pollers so the boot guard
 #     enforces its presence in live modes (memory #56 Shanghai cca68b44).

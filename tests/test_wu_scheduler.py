@@ -3,7 +3,7 @@
 #   updated test_main_wu_daily_job_uses_scheduler_not_fixed_cron for the post-dedup topology,
 #   where data-ingest is the SOLE WU-daily owner and src.main registers no wu_daily job)
 # Authority basis: G4_CLEANUP_DESIGN.md §2 L (Cluster L), src/data/AGENTS.md;
-#   docs/architecture/system_decomposition_plan.md §8 Step 4
+#   docs/reference/design_system_decomposition_plan.md §8 Step 4
 # Lifecycle: created=2026-05-18; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: Verify WU scheduler eligibility logic and dispatch routing (K2 cluster L)
 # Reuse: standalone pytest; no shared fixtures beyond conftest.py

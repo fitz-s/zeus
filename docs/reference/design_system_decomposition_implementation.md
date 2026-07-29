@@ -2,7 +2,7 @@
 
 Created: 2026-06-08
 Last reused or audited: 2026-06-09 (whole-refactor final verification)
-Authority basis: docs/architecture/system_decomposition_plan.md (the spec — §0 framing,
+Authority basis: docs/reference/design_system_decomposition_plan.md (the spec — §0 framing,
   §3 verdicts, §4 lift-outs, §5 what-stays, §6 target topology, §7 interface contracts,
   §8 migration steps, §9 regression-unconstructable proof). This report records WHAT was
   implemented against that plan and the verification evidence; the plan remains the law.

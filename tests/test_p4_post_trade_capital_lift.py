@@ -1,7 +1,7 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-07-26
 # Reuse: Run when post-trade-capital process recovery, poller ownership, or launchd liveness changes.
-# Authority basis: docs/architecture/system_decomposition_plan.md
+# Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 P4->riskguard/P1 no-back-coupling + commit-before-HTTP; I4 ingest->P4),
 #   §8 Step 2 (split chain-sync READ from exit-SUBMIT), §9 (regression-unconstructable).
