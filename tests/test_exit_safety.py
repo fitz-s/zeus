@@ -1350,6 +1350,141 @@ def test_confirmed_partial_reduction_trade_fact_reopens_exact_remaining_claim(co
     assert current["shares"] == pytest.approx(17.5)
 
 
+def test_confirmed_reduction_records_fill_already_reflected_by_chain(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.venue_command_repo import append_trade_fact
+
+    position = Position(
+        trade_id="pos-chain-reflected-reduction",
+        market_id="mkt-chain-reflected-reduction",
+        city="Seoul",
+        cluster="asia",
+        target_date="2026-07-16",
+        bin_label="30C",
+        direction="buy_no",
+        strategy_key="center_buy",
+        size_usd=14.0,
+        entry_price=0.70,
+        shares=20.0,
+        cost_basis_usd=14.0,
+        state="holding",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-chain-reflected-reduction",
+        last_monitor_market_price=0.60,
+    )
+    intent = exit_lifecycle.ExitIntent(
+        trade_id=position.trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=NO_TOKEN,
+        shares=6.0,
+        current_market_price=0.60,
+        best_bid=0.60,
+        close_position=False,
+        capital_certificate={"held_shares": "20"},
+    )
+    exit_lifecycle._record_exit_intent_before_execution_gates(
+        conn,
+        position,
+        intent,
+    )
+    reduction_order_id = "ord-chain-reflected-reduction"
+    position.last_exit_order_id = reduction_order_id
+    position.exit_state = "sell_placed"
+    position.order_status = "sell_placed"
+    assert exit_lifecycle._dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=intent.reason,
+        error="",
+        event_type="EXIT_ORDER_POSTED",
+    )
+    intent_occurred_at = conn.execute(
+        """
+        SELECT occurred_at
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_INTENT'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()[0]
+    _insert_exit_command(
+        conn,
+        command_id="cmd-chain-reflected-reduction",
+        position_id=position.trade_id,
+        token_id=NO_TOKEN,
+        size=6.0,
+        price=0.60,
+        venue_order_id=position.last_exit_order_id,
+        created_at=(
+            datetime.fromisoformat(intent_occurred_at.replace("Z", "+00:00"))
+            + timedelta(microseconds=1)
+        ),
+    )
+    _ack_exit(
+        conn,
+        command_id="cmd-chain-reflected-reduction",
+        venue_order_id=position.last_exit_order_id,
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-chain-reflected-reduction",
+        venue_order_id=position.last_exit_order_id,
+        command_id="cmd-chain-reflected-reduction",
+        state="CONFIRMED",
+        filled_size="6",
+        fill_price="0.60",
+        source="REST",
+        observed_at="2026-07-16T00:00:00+00:00",
+        raw_payload_hash=hashlib.sha256(
+            b"chain-reflected-reduction"
+        ).hexdigest(),
+        raw_payload_json={"size_matched": "6", "status": "CONFIRMED"},
+    )
+
+    position.shares = 14.0
+    position.size_usd = 9.8
+    position.cost_basis_usd = 9.8
+    position.chain_shares = 14.0
+    conn.execute(
+        """
+        UPDATE position_current
+           SET shares = 14.0,
+               size_usd = 9.8,
+               cost_basis_usd = 9.8,
+               chain_shares = 14.0
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    )
+
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[position]),
+        object(),
+        conn=conn,
+    )
+
+    assert stats["reduced_from_trade_fact"] == 1
+    assert position.shares == pytest.approx(14.0)
+    current = conn.execute(
+        "SELECT phase, shares, chain_shares FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "active",
+        "shares": 14.0,
+        "chain_shares": 14.0,
+    }
+    assert exit_lifecycle._recorded_reduction_fill_shares(
+        conn,
+        position_id=position.trade_id,
+        order_id=reduction_order_id,
+    ) == Decimal("6.0")
+
+
 def test_pending_exit_fill_poller_skips_retry_without_order_id(conn):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position

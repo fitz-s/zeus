@@ -5574,6 +5574,29 @@ def _canonical_reduction_intent_shares(
     return _positive_decimal(payload.get("exit_intent_shares"))
 
 
+def _canonical_reduction_intent_holding_shares(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    order_id: str,
+) -> Decimal | None:
+    """Return the immutable pre-reduction holding from its capital certificate."""
+
+    payload = _canonical_exit_intent_payload(
+        conn,
+        position,
+        order_id=order_id,
+    )
+    certificate = (
+        payload.get("exit_intent_capital_certificate")
+        if isinstance(payload, dict)
+        else None
+    )
+    if not isinstance(certificate, dict):
+        return None
+    return _positive_decimal(certificate.get("held_shares"))
+
+
 def _canonical_full_exit_intent_shares(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -5710,18 +5733,40 @@ def _complete_intentional_position_reduction(
     newly_filled = total_filled - already_applied
     if newly_filled > Decimal("1e-9"):
         open_shares = Decimal(str(position.effective_shares))
-        if newly_filled >= open_shares:
-            raise RuntimeError("intentional reduction would manufacture a full close")
-        remaining_shares = open_shares - newly_filled
-        if not _apply_partial_exit_fill(
+        intent_holding = _canonical_reduction_intent_holding_shares(
+            conn,
             position,
-            filled_shares=float(newly_filled),
-            remaining_shares=float(remaining_shares),
-            fill_price=fill_price,
             order_id=order_id,
-            status=status,
-        ):
-            raise RuntimeError("confirmed reduction could not update open exposure")
+        )
+        expected_remaining = (
+            intent_holding - total_filled
+            if intent_holding is not None
+            else None
+        )
+        fill_already_reflected = (
+            expected_remaining is not None
+            and expected_remaining > Decimal("1e-9")
+            and abs(open_shares - expected_remaining) <= Decimal("0.000001")
+        )
+        if fill_already_reflected:
+            remaining_shares = open_shares
+        else:
+            if newly_filled >= open_shares:
+                raise RuntimeError(
+                    "intentional reduction would manufacture a full close"
+                )
+            remaining_shares = open_shares - newly_filled
+            if not _apply_partial_exit_fill(
+                position,
+                filled_shares=float(newly_filled),
+                remaining_shares=float(remaining_shares),
+                fill_price=fill_price,
+                order_id=order_id,
+                status=status,
+            ):
+                raise RuntimeError(
+                    "confirmed reduction could not update open exposure"
+                )
         persisted = _dual_write_partial_exit_projection_if_available(
             conn,
             position,
