@@ -5666,6 +5666,7 @@ class _Day0LiveFamilyAdmission:
     admitted_families: frozenset[tuple[str, str, str]]
     expiry_safe: bool
     scan_cities: frozenset[str] = frozenset()
+    held_families: frozenset[tuple[str, str, str]] = frozenset()
 
     def __call__(self, observation: dict[str, Any]) -> bool:
         family = _substrate_refresh_family_key(
@@ -5758,6 +5759,7 @@ def _edli_day0_live_family_admission(
         )
 
     exposure_families: set[tuple[str, str, str]] = set()
+    held_families: set[tuple[str, str, str]] = set()
     exposure_surface_read_ok = False
     try:
         trade_tables = {
@@ -5787,7 +5789,12 @@ def _edli_day0_live_family_admission(
     try:
         from src.data.replacement_cycle_advance_trigger import _held_position_families
 
-        _add_families(_held_position_families(trade_conn))
+        raw_held_families = _held_position_families(trade_conn)
+        _add_families(raw_held_families)
+        for city, target_date, metric in raw_held_families:
+            family = _substrate_refresh_family_key(city, target_date, metric)
+            if all(family):
+                held_families.add(family)
     except Exception as exc:  # noqa: BLE001
         _log.warning("EDLI day0 live family admission: held-position family read failed: %r", exc)
 
@@ -5801,6 +5808,7 @@ def _edli_day0_live_family_admission(
             for city_name in cities_by_name
             if _substrate_refresh_family_text_key(city_name) in admitted_city_keys
         ),
+        held_families=frozenset(held_families),
     )
 
 
@@ -8152,7 +8160,7 @@ def _edli_emit_day0_extreme_events(
     budget_seconds: float | None = None,
     family_admission: _Day0LiveFamilyAdmission | None = None,
     urgent_wake_pending: Callable[[], bool] | None = None,
-) -> int:
+) -> tuple[str, ...]:
     """Emit DB-only Day0 catch-up events.
 
     The data-ingest source clock exclusively owns fast METAR capture and direct
@@ -8164,6 +8172,7 @@ def _edli_emit_day0_extreme_events(
         _edli_clear_sqlite_progress_handler,
         _edli_install_sqlite_deadline,
         _settings_section,
+        _substrate_refresh_family_text_key,
     )
     _log = _logging.getLogger("zeus.events.reactor")
 
@@ -8192,29 +8201,76 @@ def _edli_emit_day0_extreme_events(
         cancelled=urgent_wake_pending,
     )
     try:
-        trigger = Day0ExtremeUpdatedTrigger(
-            EventWriter(world_conn),
-            suppress_recent_no_value_refutations=True,
-            family_admission=family_admission,
-            scan_cities=(
-                family_admission.scan_cities
-                if family_admission is not None
-                else None
-            ),
-            scan_families=(
-                family_admission.admitted_families
-                if family_admission is not None
-                else ()
-            ),
+        def _scan(
+            admission: _Day0LiveFamilyAdmission | None,
+            *,
+            suppress_recent_no_value_refutations: bool,
+            scan_limit: int,
+        ) -> tuple[list, list]:
+            trigger = Day0ExtremeUpdatedTrigger(
+                EventWriter(world_conn),
+                suppress_recent_no_value_refutations=suppress_recent_no_value_refutations,
+                family_admission=admission,
+                scan_cities=admission.scan_cities if admission is not None else None,
+                scan_families=admission.admitted_families if admission is not None else (),
+            )
+            return _edli_scan_day0_with_lock_retry(
+                trigger=trigger,
+                world_conn=world_conn,
+                trade_conn=trade_conn,
+                decision_time=decision_time,
+                received_at=received_at,
+                limit=scan_limit,
+            )
+
+        held_families = (
+            frozenset()
+            if family_admission is None
+            else family_admission.held_families & family_admission.admitted_families
         )
-        authority_results, observation_results = _edli_scan_day0_with_lock_retry(
-            trigger=trigger,
-            world_conn=world_conn,
-            trade_conn=trade_conn,
-            decision_time=decision_time,
-            received_at=received_at,
-            limit=limit,
-        )
+        if not held_families:
+            authority_results, observation_results = _scan(
+                family_admission,
+                suppress_recent_no_value_refutations=True,
+                scan_limit=limit,
+            )
+        else:
+            held_city_keys = {family[0] for family in held_families}
+            held_admission = _Day0LiveFamilyAdmission(
+                admitted_families=held_families,
+                expiry_safe=family_admission.expiry_safe,
+                scan_cities=frozenset(
+                    city
+                    for city in family_admission.scan_cities
+                    if _substrate_refresh_family_text_key(city) in held_city_keys
+                ),
+                held_families=held_families,
+            )
+            authority_results, observation_results = _scan(
+                held_admission,
+                suppress_recent_no_value_refutations=False,
+                scan_limit=limit,
+            )
+            remaining_limit = max(0, limit - len(authority_results) - len(observation_results))
+            other_families = family_admission.admitted_families - held_families
+            if other_families and remaining_limit:
+                other_city_keys = {family[0] for family in other_families}
+                other_admission = _Day0LiveFamilyAdmission(
+                    admitted_families=frozenset(other_families),
+                    expiry_safe=family_admission.expiry_safe,
+                    scan_cities=frozenset(
+                        city
+                        for city in family_admission.scan_cities
+                        if _substrate_refresh_family_text_key(city) in other_city_keys
+                    ),
+                )
+                other_authority_results, other_observation_results = _scan(
+                    other_admission,
+                    suppress_recent_no_value_refutations=True,
+                    scan_limit=remaining_limit,
+                )
+                authority_results.extend(other_authority_results)
+                observation_results.extend(other_observation_results)
         _log.info(
             "EDLI day0 catch-up emit: day0_authority_emitted=%d "
             "day0_observation_instants_emitted=%d admitted_families=%d",

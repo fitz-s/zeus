@@ -433,6 +433,130 @@ def test_day0_catchup_emitter_returns_exact_event_ids(monkeypatch):
     assert event_ids == ("day0-authority", "day0-observation")
 
 
+@pytest.mark.parametrize(
+    ("city", "station_id"),
+    (("Kuala Lumpur", "WMKK"), ("Manila", "RPLL")),
+)
+def test_held_day0_catchup_persists_despite_same_evidence_no_value_refutation(
+    monkeypatch,
+    city,
+    station_id,
+):
+    """Held Day0 authority must not disappear behind entry no-value suppression."""
+    from src.events import reactor as reactor_module
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.day0_extreme_updated import (
+        Day0ExtremeUpdatedTrigger,
+        build_day0_extreme_updated_event,
+    )
+
+    class _Semantics:
+        def round_single(self, value):
+            return int(value)
+
+    decision_time = datetime(2026, 7, 30, 6, 0, tzinfo=timezone.utc)
+    family = (city, "2026-07-30", "high")
+    admitted_family = reactor_module._substrate_refresh_family_key(*family)
+    base_observation = {
+        "city": family[0],
+        "target_date": family[1],
+        "metric": family[2],
+        "settlement_source": "wu_icao_history",
+        "station_id": station_id,
+        "observation_time": "2026-07-30T05:00:00+00:00",
+        "observation_available_at": "2026-07-30T05:05:00+00:00",
+        "raw_value": 31.0,
+        "high_so_far": 31.0,
+        "low_so_far": 25.0,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "observation_context_id": "wmkk-jul30",
+    }
+    refreshed_observation = {
+        **base_observation,
+        "observation_time": "2026-07-30T05:30:00+00:00",
+        "observation_available_at": "2026-07-30T05:35:00+00:00",
+    }
+    world = sqlite3.connect(":memory:")
+    trade = sqlite3.connect(":memory:")
+    init_schema(world)
+    try:
+        prior = build_day0_extreme_updated_event(
+            observation=base_observation,
+            settlement_semantics=_Semantics(),
+            decision_time=decision_time,
+            received_at="2026-07-30T05:06:00+00:00",
+        )
+        assert EventWriter(world).write(prior).inserted
+        world.execute(
+            """
+            INSERT INTO no_trade_regret_events (
+                regret_event_id, event_id, rejection_stage, rejection_reason,
+                regret_bucket, decision_time, city, target_date, metric,
+                family_id, causal_snapshot_id, created_at, schema_version
+            ) VALUES (?, ?, 'TRADE_SCORE', 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:none',
+                      'NO_EDGE', ?, ?, ?, ?, 'family-kl-high', ?, ?, 1)
+            """,
+            (
+                f"regret-{prior.event_id}",
+                prior.event_id,
+                "2026-07-30T05:40:00+00:00",
+                *family,
+                "wmkk-jul30",
+                "2026-07-30T05:40:00+00:00",
+            ),
+        )
+        assert Day0ExtremeUpdatedTrigger(
+            EventWriter(world),
+            suppress_recent_no_value_refutations=True,
+        ).emit_from_observation(
+            observation=refreshed_observation,
+            settlement_semantics=_Semantics(),
+            decision_time=decision_time,
+            received_at="2026-07-30T05:40:00+00:00",
+        ) is None
+
+        def _scan(*, trigger, **_kwargs):
+            result = trigger.emit_from_observation(
+                observation=refreshed_observation,
+                settlement_semantics=_Semantics(),
+                decision_time=decision_time,
+                received_at="2026-07-30T05:40:00+00:00",
+            )
+            return [], [] if result is None else [result]
+
+        monkeypatch.setattr(reactor_module, "_edli_scan_day0_with_lock_retry", _scan)
+        event_ids = _edli_emit_day0_extreme_events(
+            world,
+            trade,
+            decision_time=decision_time,
+            received_at="2026-07-30T05:40:00+00:00",
+            limit=5,
+            family_admission=reactor_module._Day0LiveFamilyAdmission(
+                admitted_families=frozenset({admitted_family}),
+                held_families=frozenset({admitted_family}),
+                expiry_safe=True,
+                scan_cities=frozenset({family[0]}),
+            ),
+        )
+        durable_event_count = world.execute(
+            "SELECT COUNT(*) FROM opportunity_events "
+            "WHERE event_type = 'DAY0_EXTREME_UPDATED'"
+        ).fetchone()[0]
+    finally:
+        trade.close()
+        world.close()
+
+    assert len(event_ids) == 1
+    assert durable_event_count == 2
+
+
 def test_global_not_selected_is_terminal_for_completed_epoch(caplog):
     reason = "GLOBAL_NOT_SELECTED:winning-actuation-identity"
 
