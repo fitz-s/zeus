@@ -585,7 +585,10 @@ def _global_book_metadata_is_current(
     still be inside its own executable-snapshot freshness interval.
     """
 
-    if metadata.get("_global_current_gamma") is True:
+    if (
+        metadata.get("_global_current_gamma") is True
+        or metadata.get("_global_current_clob") is True
+    ):
         return True
     try:
         captured_at = datetime.fromisoformat(
@@ -662,9 +665,10 @@ def _current_global_book_asset_state(
     CurrentGlobalBookAsset | None,
     CurrentGlobalSellAsset | None,
 ]:
-    if not metadata.get("_global_current_gamma") and bool(
-        metadata.get("snapshot_invalidated")
-    ):
+    if not (
+        metadata.get("_global_current_gamma")
+        or metadata.get("_global_current_clob")
+    ) and bool(metadata.get("snapshot_invalidated")):
         raise ValueError(f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token_id}")
     market_event_id = str(metadata.get("event_id") or "").strip()
     gamma_market_id = str(metadata.get("gamma_market_id") or "").strip()
@@ -788,8 +792,9 @@ def capture_current_global_book_epoch(
     metadata_overrides: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
     prefetched_books: Mapping[str, Mapping[str, object]] | None = None,
     prefetched_at_utc: datetime | None = None,
+    required_token_ids: frozenset[str] | None = None,
 ) -> CurrentGlobalBookEpoch:
-    """Fetch every candidate-capable native book without shrinking its set."""
+    """Fetch current books for the economically feasible token set."""
 
     if (
         max_age <= timedelta(0)
@@ -812,6 +817,11 @@ def capture_current_global_book_epoch(
                         "GLOBAL_TOKEN_IDENTITY_INCOMPLETE:"
                         f"{family_key}:{binding.bin_id}:{side}"
                     )
+                if (
+                    required_token_ids is not None
+                    and token_id not in required_token_ids
+                ):
+                    continue
                 bindings.append(
                     (
                         family_key,
@@ -854,9 +864,10 @@ def capture_current_global_book_epoch(
             raise ValueError(
                 f"GLOBAL_BOOK_METADATA_MISSING:{condition_id}:{token_id}"
             )
-        if not metadata.get("_global_current_gamma") and bool(
-            metadata.get("snapshot_invalidated")
-        ):
+        if not (
+            metadata.get("_global_current_gamma")
+            or metadata.get("_global_current_clob")
+        ) and bool(metadata.get("snapshot_invalidated")):
             raise ValueError(
                 f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token_id}"
             )
@@ -1278,12 +1289,51 @@ def bind_current_global_probability_tokens(
         [Sequence[str]], Sequence[Mapping[str, object]]
     ]
     | None = None,
+    get_clob_market: Callable[[str], Mapping[str, object] | None] | None = None,
     trade_conn: sqlite3.Connection | None = None,
     checked_at_utc: datetime | None = None,
     max_workers: int = 8,
     metadata_sink: dict[tuple[str, str], Mapping[str, object]] | None = None,
+    required_token_ids: frozenset[str] | None = None,
 ) -> Mapping[str, FamilyPayoffWitness]:
     """Bind tokens and, when requested, current Gamma tradeability metadata."""
+
+    if required_token_ids is not None and metadata_sink is None:
+        raise ValueError("GLOBAL_REQUIRED_TOKENS_NEED_METADATA_SINK")
+    required_tokens = (
+        frozenset(str(token or "").strip() for token in required_token_ids)
+        if required_token_ids is not None
+        else None
+    )
+    if required_tokens is not None and (
+        not required_tokens or "" in required_tokens
+    ):
+        raise ValueError("GLOBAL_REQUIRED_TOKENS_INVALID")
+
+    def _metadata_keys(
+        witness: FamilyPayoffWitness,
+    ) -> set[tuple[str, str]]:
+        keys = {
+            (binding.condition_id, token_id)
+            for binding in witness.bindings
+            for token_id in (binding.yes_token_id, binding.no_token_id)
+            if token_id
+            and (required_tokens is None or token_id in required_tokens)
+        }
+        return keys
+
+    if required_tokens is not None:
+        witnessed_tokens = {
+            token_id
+            for witness in probability_witnesses.values()
+            for _condition_id, token_id in _metadata_keys(witness)
+        }
+        missing_required = required_tokens.difference(witnessed_tokens)
+        if missing_required:
+            raise ValueError(
+                "GLOBAL_REQUIRED_TOKEN_BINDING_MISSING:"
+                + ",".join(sorted(missing_required))
+            )
 
     missing_by_family = {
         family_key: witness
@@ -1295,13 +1345,23 @@ def bind_current_global_probability_tokens(
     }
     refresh_metadata = metadata_sink is not None
     work_by_family = (
-        dict(probability_witnesses) if refresh_metadata else missing_by_family
+        {
+            family_key: witness
+            for family_key, witness in probability_witnesses.items()
+            if _metadata_keys(witness)
+        }
+        if refresh_metadata
+        else missing_by_family
     )
     if not work_by_family:
         return dict(probability_witnesses)
 
     local_tokens: dict[str, tuple[str, str]] = {}
     local_metadata_by_token: dict[tuple[str, str], Mapping[str, object]] = {}
+    static_tokens: dict[str, tuple[str, str]] = {}
+    static_metadata_by_token: dict[
+        tuple[str, str], Mapping[str, object]
+    ] = {}
     if trade_conn is not None:
         if checked_at_utc is None or checked_at_utc.tzinfo is None:
             raise ValueError("GLOBAL_LOCAL_TOKEN_CHECK_TIME_INVALID")
@@ -1324,44 +1384,194 @@ def bind_current_global_probability_tokens(
             no = str(row.get("no_token_id") or "").strip()
             if not condition_id or not yes or not no:
                 continue
-            if not _global_book_metadata_is_current(
-                row,
-                checked_at_utc=checked_at_utc,
-            ):
-                continue
             pair = (yes, no)
-            previous = local_tokens.get(condition_id)
+            previous = static_tokens.get(condition_id)
             if previous is not None and previous != pair:
                 raise ValueError(
                     f"GLOBAL_LOCAL_TOKEN_IDENTITY_AMBIGUOUS:{condition_id}"
                 )
-            local_tokens[condition_id] = pair
+            static_tokens[condition_id] = pair
             selected = str(row.get("selected_outcome_token_id") or "").strip()
             if selected not in pair:
                 raise ValueError(
                     f"GLOBAL_LOCAL_SELECTED_TOKEN_IDENTITY_INVALID:{condition_id}"
                 )
+            static_metadata_by_token.setdefault((condition_id, selected), row)
+            if bool(row.get("snapshot_invalidated")) or not (
+                _global_book_metadata_is_current(
+                    row,
+                    checked_at_utc=checked_at_utc,
+                )
+            ):
+                continue
+            local_tokens[condition_id] = pair
             local_metadata_by_token.setdefault((condition_id, selected), row)
 
     local_metadata_family_keys: set[str] = set()
     if metadata_sink is not None:
         for family_key, witness in work_by_family.items():
-            token_keys = {
-                (binding.condition_id, token_id)
-                for binding in witness.bindings
-                for token_id in (binding.yes_token_id, binding.no_token_id)
-            }
+            token_keys = _metadata_keys(witness)
             if not token_keys or not token_keys.issubset(local_metadata_by_token):
                 continue
             local_metadata_family_keys.add(family_key)
-            for binding in witness.bindings:
-                yes, no = local_tokens[binding.condition_id]
-                metadata_sink[(binding.condition_id, yes)] = local_metadata_by_token[
-                    (binding.condition_id, yes)
-                ]
-                metadata_sink[(binding.condition_id, no)] = local_metadata_by_token[
-                    (binding.condition_id, no)
-                ]
+            for token_key in token_keys:
+                metadata_sink[token_key] = local_metadata_by_token[token_key]
+
+    if (
+        metadata_sink is not None
+        and get_clob_market is not None
+        and checked_at_utc is not None
+    ):
+        clob_candidates = {
+            family_key: witness
+            for family_key, witness in work_by_family.items()
+            if family_key not in local_metadata_family_keys
+            and _metadata_keys(witness).issubset(static_metadata_by_token)
+            and all(
+                binding.condition_id in static_tokens
+                for binding in witness.bindings
+                if any(
+                    token_id
+                    and (required_tokens is None or token_id in required_tokens)
+                    for token_id in (
+                        binding.yes_token_id,
+                        binding.no_token_id,
+                    )
+                )
+            )
+        }
+        clob_condition_ids = tuple(
+            dict.fromkeys(
+                condition_id
+                for witness in clob_candidates.values()
+                for condition_id, _token_id in _metadata_keys(witness)
+            )
+        )
+        clob_markets: dict[str, Mapping[str, object]] = {}
+        if clob_condition_ids:
+            from concurrent.futures import ThreadPoolExecutor
+
+            workers = max(1, min(int(max_workers), 16, len(clob_condition_ids)))
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="global-clob-metadata",
+            ) as pool:
+                futures = {
+                    condition_id: pool.submit(get_clob_market, condition_id)
+                    for condition_id in clob_condition_ids
+                }
+                for condition_id, future in futures.items():
+                    raw = future.result()
+                    if isinstance(raw, Mapping):
+                        clob_markets[condition_id] = raw
+
+        def _boolish(raw: Mapping[str, object], *names: str) -> bool | None:
+            for name in names:
+                if name not in raw or raw.get(name) is None:
+                    continue
+                value = raw.get(name)
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, (int, float)):
+                    return bool(value)
+                if isinstance(value, str):
+                    normalized = value.strip().lower()
+                    if normalized in {"true", "1", "yes"}:
+                        return True
+                    if normalized in {"false", "0", "no"}:
+                        return False
+            return None
+
+        def _clob_token_ids(raw: Mapping[str, object]) -> set[str]:
+            tokens = raw.get("tokens")
+            if not isinstance(tokens, Sequence) or isinstance(
+                tokens, (str, bytes)
+            ):
+                return set()
+            return {
+                str(item.get("token_id") or item.get("tokenId") or "").strip()
+                for item in tokens
+                if isinstance(item, Mapping)
+                and str(
+                    item.get("token_id") or item.get("tokenId") or ""
+                ).strip()
+            }
+
+        for family_key, witness in clob_candidates.items():
+            token_keys = _metadata_keys(witness)
+            refreshed: dict[tuple[str, str], Mapping[str, object]] = {}
+            for condition_id, token_id in token_keys:
+                raw = clob_markets.get(condition_id)
+                if raw is None:
+                    break
+                raw_condition = str(
+                    raw.get("condition_id") or raw.get("conditionId") or ""
+                ).strip()
+                yes, no = static_tokens[condition_id]
+                if (
+                    raw_condition != condition_id
+                    or {yes, no}.difference(_clob_token_ids(raw))
+                ):
+                    break
+                active = _boolish(raw, "active", "isActive")
+                closed = _boolish(raw, "closed", "isClosed")
+                archived = _boolish(raw, "archived", "isArchived")
+                accepting = _boolish(
+                    raw, "accepting_orders", "acceptingOrders"
+                )
+                orderbook = _boolish(
+                    raw,
+                    "enable_order_book",
+                    "enableOrderBook",
+                    "orderbookEnabled",
+                )
+                if None in (active, closed, archived, accepting, orderbook):
+                    break
+                executable_allowed = bool(
+                    active
+                    and not closed
+                    and not archived
+                    and accepting
+                    and orderbook
+                )
+                base = dict(static_metadata_by_token[(condition_id, token_id)])
+                base.update(
+                    {
+                        "active": active,
+                        "closed": closed or archived,
+                        "accepting_orders": accepting,
+                        "enable_orderbook": orderbook,
+                        "min_tick_size": str(
+                            raw.get("minimum_tick_size")
+                            or raw.get("minimumTickSize")
+                            or base.get("min_tick_size")
+                            or ""
+                        ),
+                        "min_order_size": str(
+                            raw.get("minimum_order_size")
+                            or raw.get("minimumOrderSize")
+                            or base.get("min_order_size")
+                            or ""
+                        ),
+                        "tradeability_status_json": json.dumps(
+                            {
+                                "executable_allowed": executable_allowed,
+                                "reason": "global_current_clob_market",
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        "captured_at": checked_at_utc.isoformat(),
+                        "freshness_deadline": checked_at_utc.isoformat(),
+                        "snapshot_invalidated": False,
+                        "_global_current_clob": True,
+                    }
+                )
+                refreshed[(condition_id, token_id)] = base
+                local_tokens[condition_id] = (yes, no)
+            if refreshed.keys() == token_keys:
+                metadata_sink.update(refreshed)
+                local_metadata_family_keys.add(family_key)
 
     remote_work_by_family = {
         family_key: witness

@@ -28,6 +28,7 @@ from typing import Any, Callable, Optional
 import httpx
 
 from src.data.polymarket_request_governor import (
+    EndpointClass,
     RequestPriority,
     polymarket_request_governor,
 )
@@ -399,6 +400,8 @@ class PolymarketClient:
         *,
         params: dict[str, Any] | None = None,
         timeout: "float | httpx.Timeout | None" = None,
+        priority: RequestPriority | None = None,
+        endpoint_class_override: EndpointClass | None = None,
     ):
         url = f"{CLOB_BASE}{path}"
         if not hasattr(self, "_public_http_client"):
@@ -414,7 +417,15 @@ class PolymarketClient:
             "GET",
             url,
             params=params,
-            priority=getattr(self, "_public_request_priority", RequestPriority.SCAN),
+            priority=(
+                priority
+                or getattr(
+                    self,
+                    "_public_request_priority",
+                    RequestPriority.SCAN,
+                )
+            ),
+            endpoint_class_override=endpoint_class_override,
         )
 
     def _bounded_public_http_timeout(
@@ -722,6 +733,33 @@ class PolymarketClient:
         if isinstance(data, dict):
             return data
         raise RuntimeError(f"CLOB market response for {condition_id} is not an object")
+
+    def get_held_clob_market_info(
+        self,
+        condition_id: str,
+        *,
+        timeout: "float | httpx.Timeout | None" = None,
+    ) -> dict:
+        """Fetch current market facts on the isolated held-risk circuit."""
+
+        request_timeout = (
+            self._bounded_public_http_timeout(timeout)
+            if timeout is not None
+            else None
+        )
+        resp = self._public_get(
+            f"/markets/{condition_id}",
+            timeout=request_timeout,
+            priority=RequestPriority.HELD_REDUCE_ONLY,
+            endpoint_class_override=EndpointClass.HELD_RISK,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict):
+            return data
+        raise RuntimeError(
+            f"CLOB held market response for {condition_id} is not an object"
+        )
 
     def get_best_bid_ask(self, token_id: str) -> tuple[float, float, float, float]:
         """Get best bid/ask with sizes for VWMP calculation.

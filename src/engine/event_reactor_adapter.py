@@ -7654,6 +7654,38 @@ def event_bound_live_adapter_from_trade_conn(
             dict(book_metadata_by_key)
             or _cached_global_book_speculative_metadata(trade_conn)
         )
+        reduce_only_book_tokens: frozenset[str] | None = None
+        if (
+            entry_submit_suppression_reason is not None
+            or selection_completion_reserved
+        ):
+            try:
+                held_token_rows = trade_conn.execute(
+                    """
+                    SELECT direction, token_id, no_token_id
+                      FROM position_current
+                     WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                       AND COALESCE(chain_shares, shares, 0) > 0
+                    """
+                ).fetchall()
+            except sqlite3.OperationalError as exc:
+                if "no such table: position_current" not in str(exc).lower():
+                    raise
+                held_token_rows = ()
+            held_tokens = frozenset(
+                str(
+                    no_token_id
+                    if str(direction or "").strip().lower() == "buy_no"
+                    else token_id
+                ).strip()
+                for direction, token_id, no_token_id in held_token_rows
+                if str(
+                    no_token_id
+                    if str(direction or "").strip().lower() == "buy_no"
+                    else token_id
+                ).strip()
+            )
+            reduce_only_book_tokens = held_tokens or None
 
         def _current_book_epoch(probabilities, _at):
             from src.contracts.executable_market_snapshot import (
@@ -7702,6 +7734,13 @@ def event_bound_live_adapter_from_trade_conn(
             if _urgent_book_preemption("start"):
                 return probabilities, None
 
+            def _reduce_only_tokens(tokens):
+                if tokens is None or reduce_only_book_tokens is None:
+                    return tokens
+                return tuple(
+                    token for token in tokens if token in reduce_only_book_tokens
+                )
+
             def _bind(
                 probability_slice,
                 *,
@@ -7709,19 +7748,36 @@ def event_bound_live_adapter_from_trade_conn(
                 metadata_sink=None,
                 force_current_gamma=False,
             ):
+                slice_required_tokens = _reduce_only_tokens(
+                    _global_book_prefetch_tokens(probability_slice)
+                )
+                if (
+                    reduce_only_book_tokens is not None
+                    and not slice_required_tokens
+                ):
+                    return dict(probability_slice)
                 gamma_batch_requests = 0
                 gamma_event_requests = 0
                 refresh_started_at = datetime.now(UTC)
                 started = _time.monotonic()
                 gamma_deadline: float | None = None
+                clob_deadline: float | None = None
                 gamma = _global_current_gamma_client(
                     timeout_seconds=gamma_timeout,
+                )
+                clob_metadata = (
+                    PolymarketClient(
+                        public_http_timeout=gamma_timeout,
+                        public_request_priority=RequestPriority.SUBMIT_JIT,
+                    )
+                    if reduce_only_book_tokens is not None
+                    else contextlib.nullcontext(None)
                 )
                 # Batch futures may still be inside a slowly streaming response
                 # after the caller's absolute deadline. The process-scoped client
                 # stays valid for those bounded workers; closing a per-wave client
                 # here can wait on them and turn a 6s deadline into minutes.
-                with contextlib.nullcontext(gamma):
+                with contextlib.nullcontext(gamma), clob_metadata as clob:
 
                     def _remaining_gamma_timeout() -> float:
                         nonlocal gamma_deadline
@@ -7741,6 +7797,22 @@ def event_bound_live_adapter_from_trade_conn(
                             params=params,
                             timeout=min(float(timeout), _remaining_gamma_timeout()),
                             priority=RequestPriority.SUBMIT_JIT,
+                        )
+
+                    def _clob_market(condition_id):
+                        nonlocal clob_deadline
+                        if clob is None:
+                            return None
+                        if clob_deadline is None:
+                            clob_deadline = _time.monotonic() + gamma_timeout
+                        remaining = clob_deadline - _time.monotonic()
+                        if remaining <= 0.0:
+                            raise ValueError(
+                                "GLOBAL_CURRENT_CLOB_DEADLINE_EXCEEDED"
+                            )
+                        return clob.get_held_clob_market_info(
+                            condition_id,
+                            timeout=min(gamma_timeout, remaining),
                         )
 
                     def _gamma_markets(condition_ids):
@@ -7783,10 +7855,20 @@ def event_bound_live_adapter_from_trade_conn(
                         probability_witnesses=probability_slice,
                         get_gamma_event=_gamma_event,
                         get_gamma_markets=_gamma_markets,
+                        get_clob_market=(
+                            _clob_market
+                            if reduce_only_book_tokens is not None
+                            else None
+                        ),
                         trade_conn=None if force_current_gamma else trade_conn,
                         checked_at_utc=_at,
                         max_workers=16,
                         metadata_sink=metadata_sink,
+                        required_token_ids=(
+                            frozenset(slice_required_tokens)
+                            if reduce_only_book_tokens is not None
+                            else None
+                        ),
                     )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
@@ -7851,6 +7933,10 @@ def event_bound_live_adapter_from_trade_conn(
                             str(getattr(binding, "yes_token_id", "") or ""),
                             str(getattr(binding, "no_token_id", "") or ""),
                         )
+                        if (
+                            reduce_only_book_tokens is None
+                            or token_id in reduce_only_book_tokens
+                        )
                     )
                 }
                 if not stale_family_keys:
@@ -7863,7 +7949,7 @@ def event_bound_live_adapter_from_trade_conn(
                     },
                     mode="capture_current_metadata",
                     metadata_sink=current_metadata,
-                    force_current_gamma=True,
+                    force_current_gamma=reduce_only_book_tokens is None,
                 )
                 refreshed = dict(probability_slice)
                 refreshed.update(rebound)
@@ -7885,6 +7971,7 @@ def event_bound_live_adapter_from_trade_conn(
                     )
                 if tokens is None:
                     tokens = token_hint
+                tokens = _reduce_only_tokens(tokens)
                 if tokens is None:
                     return None
                 projection_checked = captured_at is not None
@@ -8003,13 +8090,18 @@ def event_bound_live_adapter_from_trade_conn(
                 capture_started = _time.monotonic()
                 prefetched_tokens = prefetched[0] if prefetched is not None else None
                 exact_tokens = (
-                    _global_current_executable_prefetch_tokens(
-                        bound_probabilities,
-                        book_metadata_by_key,
-                        checked_at=prefetched[2],
+                    _reduce_only_tokens(
+                        _global_current_executable_prefetch_tokens(
+                            bound_probabilities,
+                            book_metadata_by_key,
+                            checked_at=prefetched[2],
+                        )
                     )
                     if prefetched is not None and prefetched[2] is not None
                     else None
+                )
+                expected_tokens = _reduce_only_tokens(
+                    _global_book_prefetch_tokens(bound_probabilities)
                 )
                 matching_prefetch = (
                     prefetched
@@ -8020,8 +8112,7 @@ def event_bound_live_adapter_from_trade_conn(
                         max_age=FRESHNESS_WINDOW_DEFAULT,
                     )
                     and (
-                        _global_book_prefetch_tokens(bound_probabilities)
-                        == prefetched_tokens
+                        expected_tokens == prefetched_tokens
                         or exact_tokens == prefetched_tokens
                     )
                     else None
@@ -8045,6 +8136,7 @@ def event_bound_live_adapter_from_trade_conn(
                             batch_size=batch_size,
                             book_fetch_workers=4,
                             metadata_overrides=book_metadata_by_key,
+                            required_token_ids=reduce_only_book_tokens,
                         )
                 else:
                     _, books, captured_at = matching_prefetch
@@ -8059,6 +8151,7 @@ def event_bound_live_adapter_from_trade_conn(
                         metadata_overrides=book_metadata_by_key,
                         prefetched_books=books,
                         prefetched_at_utc=captured_at,
+                        required_token_ids=reduce_only_book_tokens,
                     )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
@@ -8079,13 +8172,17 @@ def event_bound_live_adapter_from_trade_conn(
                 *,
                 mode,
             ):
-                exact_tokens = _global_current_executable_prefetch_tokens(
-                    probability_slice,
-                    book_metadata_by_key,
-                    checked_at=datetime.now(UTC),
+                exact_tokens = _reduce_only_tokens(
+                    _global_current_executable_prefetch_tokens(
+                        probability_slice,
+                        book_metadata_by_key,
+                        checked_at=datetime.now(UTC),
+                    )
                 )
                 if exact_tokens is None:
-                    full_tokens = _global_book_prefetch_tokens(probability_slice)
+                    full_tokens = _reduce_only_tokens(
+                        _global_book_prefetch_tokens(probability_slice)
+                    )
                     return (
                         prefetched
                         if prefetched is not None
@@ -8897,7 +8994,14 @@ def event_bound_live_adapter_from_trade_conn(
                 candidate_policy_rejection_resolver=(
                     _current_entry_candidate_policy
                 ),
-                buy_candidates_enabled=entry_submit_suppression_reason is None,
+                # A held-SELL completion wake exists because local monitoring
+                # found a sell candidate that still needs the globally
+                # comparable SELL/HOLD/CASH cut.  Do not make that cut depend
+                # on metadata for unrelated speculative BUY families.
+                buy_candidates_enabled=(
+                    entry_submit_suppression_reason is None
+                    and not selection_completion_reserved
+                ),
                 fractional_kelly_multiplier=Decimal(
                     str(_runtime_kelly_multiplier())
                 ),

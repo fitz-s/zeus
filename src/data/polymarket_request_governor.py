@@ -75,6 +75,7 @@ class EndpointClass(str, Enum):
     MARKET_DATA = "clob-market-data"
     TRADING = "clob-trading"
     FEE_SCHEDULE = "clob-fee-schedule"
+    HELD_RISK = "clob-held-risk"
     DISCOVERY = "discovery"
     ANALYTICS = "analytics"
     UNKNOWN = "unknown"
@@ -128,13 +129,33 @@ def _legacy_global_governor_mode() -> bool:
     return os.environ.get("ZEUS_GOVERNOR_LEGACY_GLOBAL") == "1"
 
 
-def _endpoint_key(url: str) -> tuple[str, EndpointClass]:
-    """Return the circuit key (host[:class]) and the classified role."""
+def _endpoint_key(
+    url: str,
+    *,
+    endpoint_class_override: EndpointClass | None = None,
+) -> tuple[str, EndpointClass]:
+    """Return the circuit key (host[:class[:identity]]) and classified role."""
 
     host = _endpoint(url)
-    endpoint_class = _endpoint_class(url)
+    held_risk_identity: str | None = None
+    if endpoint_class_override is not None:
+        parsed = httpx.URL(url)
+        path = parsed.path.rstrip("/") or "/"
+        held_risk_prefix = "/markets/"
+        if path.startswith(held_risk_prefix):
+            held_risk_identity = path.removeprefix(held_risk_prefix)
+        if not (
+            endpoint_class_override is EndpointClass.HELD_RISK
+            and str(parsed.host) == "clob.polymarket.com"
+            and held_risk_identity
+            and "/" not in held_risk_identity
+        ):
+            raise ValueError("POLYMARKET_ENDPOINT_CLASS_OVERRIDE_INVALID")
+    endpoint_class = endpoint_class_override or _endpoint_class(url)
     if _legacy_global_governor_mode():
         return host, endpoint_class
+    if endpoint_class is EndpointClass.HELD_RISK:
+        return f"{host}:{endpoint_class.value}:{held_risk_identity}", endpoint_class
     return f"{host}:{endpoint_class.value}", endpoint_class
 
 
@@ -467,9 +488,13 @@ class PolymarketRequestGovernor:
         json_body: Any = None,
         priority: RequestPriority = RequestPriority.SCAN,
         lease_seconds: float = _LEASE_SECONDS,
+        endpoint_class_override: EndpointClass | None = None,
     ) -> RequestLease:
         request_id = request_identity(method, url, params=params, json_body=json_body)
-        endpoint, endpoint_class = _endpoint_key(url)
+        endpoint, endpoint_class = _endpoint_key(
+            url,
+            endpoint_class_override=endpoint_class_override,
+        )
         route_limits = _routes(url)
         rate_limit_route = _rate_limit_route(url)
         lease_id = secrets.token_hex(16)
@@ -829,12 +854,21 @@ class PolymarketRequestGovernor:
         json_body: Any = None,
         priority: RequestPriority = RequestPriority.SCAN,
         lease_seconds: float = _LEASE_SECONDS,
+        endpoint_class_override: EndpointClass | None = None,
     ) -> httpx.Response:
         """Perform one newly-admitted request and persist only outcome metadata."""
 
         if not self._active:
             return send()
-        lease = self.acquire(method, url, params=params, json_body=json_body, priority=priority, lease_seconds=lease_seconds)
+        lease = self.acquire(
+            method,
+            url,
+            params=params,
+            json_body=json_body,
+            priority=priority,
+            lease_seconds=lease_seconds,
+            endpoint_class_override=endpoint_class_override,
+        )
         transport_error: httpx.HTTPError | None = None
         try:
             response = send()

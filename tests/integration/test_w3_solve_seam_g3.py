@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-07-29
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -6354,10 +6354,11 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         "_prepare_current_global_probability_family",
         fake_prepare,
     )
+    entry_suppression_reason = ["entries_paused:test_containment"]
     monkeypatch.setattr(
         era,
         "_entry_global_submit_suppression_reason",
-        lambda: "entries_paused:test_containment",
+        lambda: entry_suppression_reason[0],
     )
     def make_adapter(*, completion_reserved=False):
         return era.event_bound_live_adapter_from_trade_conn(
@@ -6395,6 +6396,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert captured["restrict_to_family_keys"] is None
     assert callable(captured["candidate_policy_rejection_resolver"])
     assert captured["buy_candidates_enabled"] is False
+    paused_policy = captured["candidate_policy_rejection_resolver"]
     candidate = SimpleNamespace(family_key="family-dallas")
     assert captured["current_capital_limit_resolver"](
         candidate,
@@ -6410,11 +6412,19 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
             "correlation_key": "family-dallas",
         }
     ]
+    entry_suppression_reason[0] = None
+    unreserved_adapter = make_adapter()
+    unreserved_adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 11, tzinfo=_dt.timezone.utc),
+    )
+    assert captured["buy_candidates_enabled"] is True
     reserved_adapter = make_adapter(completion_reserved=True)
     reserved_adapter.process_global_batch(
         (event,),
         _dt.datetime(2026, 7, 10, 8, 12, tzinfo=_dt.timezone.utc),
     )
+    assert captured["buy_candidates_enabled"] is False
     urgent_revision["value"] = (7, 8, 9)
     urgent_reason["value"] = "forecast_posterior_advanced"
     assert captured["epoch_superseded"]() is False
@@ -6500,7 +6510,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
         "GLOBAL_PROBABILITY_DECISION_TIME_NAIVE"
     )
-    policy = captured["candidate_policy_rejection_resolver"]
+    policy = paused_policy
     low_price = SimpleNamespace(
         action="BUY",
         family_key="family-dallas",
@@ -6527,6 +6537,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert policy(reduce_only) is None
     metadata_calls = []
     bind_calls = []
+    bind_required_tokens = []
+    capture_required_tokens = []
     metadata_keys = (
         ("condition", "yes-token"),
         ("condition", "no-token"),
@@ -6557,6 +6569,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         **_,
     ):
         bind_calls.append(metadata_sink is not None)
+        bind_required_tokens.append(_.get("required_token_ids"))
         if metadata_sink is not None:
             for metadata_key in metadata_keys:
                 metadata_sink[metadata_key] = metadata
@@ -6564,6 +6577,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
 
     def fake_capture(_trade_conn, *, metadata_overrides, **_):
         metadata_calls.append(dict(metadata_overrides))
+        capture_required_tokens.append(_.get("required_token_ids"))
         return SimpleNamespace(witness_identity=f"book-{len(metadata_calls)}")
 
     class FakeClient:
@@ -6619,6 +6633,35 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert refresh_hwm_calls[0] == {}
     assert set(refresh_hwm_calls[1]) == {"family"}
     assert refresh_hwm_calls[1]["family"].tzinfo is not None
+    assert bind_required_tokens == [None, None]
+    assert capture_required_tokens == [None, None]
+
+    trade.execute(
+        """
+        CREATE TABLE position_current (
+            direction TEXT,
+            token_id TEXT,
+            no_token_id TEXT,
+            phase TEXT,
+            chain_shares REAL,
+            shares REAL
+        )
+        """
+    )
+    trade.execute(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?)",
+        ("buy_no", "yes-token", "no-token", "day0_window", 5.0, 5.0),
+    )
+    reserved_adapter = make_adapter(completion_reserved=True)
+    reserved_adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 11, tzinfo=_dt.timezone.utc),
+    )
+    captured["current_book_epoch_provider"](
+        probabilities,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    assert capture_required_tokens[-1] == frozenset({"no-token"})
 
     urgent_revision["value"] = (7, 8, 9)
     urgent_reason["value"] = "market_price_advanced"
@@ -15593,6 +15636,86 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
         json.loads(row["fee_details_json"])["token_id"] == token
         for (_condition_id, token), row in local_metadata.items()
     )
+
+    held_binding = original.bindings[0]
+    held_token = held_binding.no_token_id
+    held_metadata = {}
+    clob_calls = []
+    stale_local = _global_book_metadata_conn(
+        original,
+        captured_at="2026-07-10T07:55:00+00:00",
+        freshness_deadline="2026-07-10T07:56:00+00:00",
+    )
+    clob_rebound = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={original.family_key: original},
+        get_gamma_event=lambda _slug: pytest.fail(
+            "held reduce-only metadata must not require Gamma"
+        ),
+        get_gamma_markets=lambda _conditions: pytest.fail(
+            "held reduce-only metadata must not require Gamma"
+        ),
+        get_clob_market=lambda condition_id: (
+            clob_calls.append(condition_id)
+            or {
+                "condition_id": condition_id,
+                "active": True,
+                "closed": False,
+                "archived": False,
+                "accepting_orders": True,
+                "enable_order_book": True,
+                "minimum_tick_size": "0.01",
+                "minimum_order_size": "5",
+                "tokens": [
+                    {
+                        "token_id": held_binding.yes_token_id,
+                        "outcome": "Yes",
+                    },
+                    {
+                        "token_id": held_binding.no_token_id,
+                        "outcome": "No",
+                    },
+                ],
+            }
+        ),
+        trade_conn=stale_local,
+        checked_at_utc=at,
+        metadata_sink=held_metadata,
+        required_token_ids=frozenset({held_token}),
+    )[original.family_key]
+    assert clob_rebound.bindings == original.bindings
+    assert clob_calls == [held_binding.condition_id]
+    assert set(held_metadata) == {(held_binding.condition_id, held_token)}
+    assert held_metadata[(held_binding.condition_id, held_token)][
+        "_global_current_clob"
+    ] is True
+
+    requested_tokens = []
+    times = iter((at, at + _dt.timedelta(seconds=1)))
+    held_epoch = capture_current_global_book_epoch(
+        stale_local,
+        probability_witnesses={original.family_key: clob_rebound},
+        get_books=lambda tokens: (
+            requested_tokens.append(tuple(tokens))
+            or {
+                held_token: {
+                    "asset_id": held_token,
+                    "hash": "held-book",
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "bids": [{"price": "0.09", "size": "20"}],
+                    "asks": [{"price": "0.12", "size": "20"}],
+                }
+            }
+        ),
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+        metadata_overrides=held_metadata,
+        required_token_ids=frozenset({held_token}),
+    )
+    assert requested_tokens == [(held_token,)]
+    assert {asset.token_id for asset in held_epoch.sell_assets} == {held_token}
+    assert {state[4] for state in held_epoch.asset_states} == {held_token}
 
     one_side_missing = _global_book_metadata_conn(
         original,

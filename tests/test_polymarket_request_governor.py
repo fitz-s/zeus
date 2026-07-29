@@ -1,6 +1,6 @@
-# Lifecycle: created=2026-07-18; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-07-18; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Created: 2026-07-18
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-29
 # Authority basis: live Polymarket HTTP attempt governance and first-principles capital-preservation task
 
 from __future__ import annotations
@@ -868,6 +868,64 @@ def test_clob_discovery_scan_failures_do_not_embargo_clob_market_data_same_host(
     payload = json.loads((tmp_path / "governor.json").read_text())
     assert "clob.polymarket.com:discovery" in payload["endpoints"]
     assert "clob.polymarket.com:clob-market-data" in payload["endpoints"]
+
+
+def test_clob_discovery_embargo_does_not_block_held_risk_market_probe(
+    tmp_path: Path,
+) -> None:
+    """Held SELL tradeability revalidation has an independent circuit."""
+
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json")
+    for index in range(10):
+        with contextlib.suppress(RequestAdmissionDenied):
+            governor.request(
+                lambda: _response(503),
+                "GET",
+                f"https://clob.polymarket.com/markets/0xscan{index}",
+                priority=RequestPriority.SUBMIT_JIT,
+            )
+    with pytest.raises(RequestAdmissionDenied, match="ENDPOINT_EMBARGOED"):
+        governor.acquire(
+            "GET",
+            "https://clob.polymarket.com/markets/0xheld",
+            priority=RequestPriority.HELD_REDUCE_ONLY,
+        )
+
+    lease = governor.acquire(
+        "GET",
+        "https://clob.polymarket.com/markets/0xheld",
+        priority=RequestPriority.HELD_REDUCE_ONLY,
+        endpoint_class_override=EndpointClass.HELD_RISK,
+    )
+    assert lease.endpoint_class == EndpointClass.HELD_RISK.value
+    assert governor.record_success(lease) is True
+
+    failed = governor.acquire(
+        "GET",
+        "https://clob.polymarket.com/markets/0xfailing-held",
+        priority=RequestPriority.HELD_REDUCE_ONLY,
+        endpoint_class_override=EndpointClass.HELD_RISK,
+    )
+    assert governor.record_failure(failed) is True
+    unaffected = governor.acquire(
+        "GET",
+        "https://clob.polymarket.com/markets/0xother-held",
+        priority=RequestPriority.HELD_REDUCE_ONLY,
+        endpoint_class_override=EndpointClass.HELD_RISK,
+    )
+    assert governor.record_success(unaffected) is True
+
+    payload = json.loads((tmp_path / "governor.json").read_text())
+    assert "clob.polymarket.com:clob-held-risk:0xfailing-held" in payload["endpoints"]
+    assert "clob.polymarket.com:clob-held-risk:0xother-held" in payload["endpoints"]
+    with pytest.raises(
+        ValueError, match="POLYMARKET_ENDPOINT_CLASS_OVERRIDE_INVALID"
+    ):
+        governor.acquire(
+            "GET",
+            "https://gamma-api.polymarket.com/markets",
+            endpoint_class_override=EndpointClass.HELD_RISK,
+        )
 
 
 def test_cancel_priority_preempts_submit_jit_under_contention(tmp_path: Path) -> None:
