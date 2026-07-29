@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-27
-# Lifecycle: created=2026-06-10; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Last reused or audited: 2026-07-29
+# Lifecycle: created=2026-06-10; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -2414,7 +2414,7 @@ class TestRequestHashProvenance:
         captured = {"target_dates": []}
 
         def fake_fetch(city, *, models=None, now=None):
-            return [_vector()], "sha256:realhash"
+            return [_vector(model=model) for model in models], "sha256:realhash"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
             captured["request_hash"] = request_hash
@@ -2429,7 +2429,7 @@ class TestRequestHashProvenance:
         n = hv.maybe_refresh_day0_hourly_vectors(
             [_paris()], decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
         )
-        assert n == 2
+        assert n == 8
         assert captured["request_hash"] == "sha256:realhash"
         assert captured["target_dates"] == ["2026-06-10", "2026-06-11"]
 
@@ -2441,7 +2441,7 @@ class TestRequestHashProvenance:
 
         def fake_fetch(city, *, models=None, now=None, timeout_s=None):
             attempts["fetch"] += 1
-            return [_vector()], "sha256:realhash"
+            return [_vector(model=model) for model in models], "sha256:realhash"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
             attempts["persist"] += 1
@@ -2502,45 +2502,82 @@ class TestRequestHashProvenance:
         assert (n1, n2) == (0, 0)
         assert attempts == {"fetch": 1, "persist": 0}
 
-    def test_partial_expected_bundle_is_throttled_after_persist(self, monkeypatch):
-        """A partial bundle stays unauthorized without creating a retry storm."""
+    @pytest.mark.parametrize(
+        ("city_name", "timezone_name"),
+        [
+            ("Warsaw", "Europe/Warsaw"),
+            ("Sao Paulo", "America/Sao_Paulo"),
+        ],
+    )
+    def test_partial_expected_bundle_returns_typed_unavailable_and_retries_soon(
+        self, monkeypatch, city_name, timezone_name
+    ):
+        """Held-city partial bundles retry inside freshness law, never persist partials."""
         import src.data.day0_hourly_vectors as hv
 
         attempts = {"fetch": 0, "persist": 0}
+        clock = {"now": 60.0}
+        city = SimpleNamespace(
+            name=city_name,
+            timezone=timezone_name,
+            lat=0.0,
+            lon=0.0,
+        )
 
         def fake_fetch(city, *, models=None, now=None, timeout_s=None):
             attempts["fetch"] += 1
             assert list(models or []) == [
-                "icon_d2",
                 "ecmwf_ifs",
                 "icon_global",
                 "ukmo_global_deterministic_10km",
             ]
-            return [_vector(model="icon_d2")], "sha256:partial"
+            if attempts["fetch"] == 1:
+                return [_vector(model="ecmwf_ifs")], "sha256:partial"
+            return [_vector(model=model) for model in models], "sha256:complete"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
             attempts["persist"] += 1
             return len(vectors)
 
-        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: ["icon_d2"])
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
         monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
         monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
+        monkeypatch.setattr(hv.time, "monotonic", lambda: clock["now"])
         hv._LAST_REFRESH_MONOTONIC.clear()
 
         decision_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
-        n1 = hv.maybe_refresh_day0_hourly_vectors(
-            [_paris()],
+        first = hv.maybe_refresh_day0_hourly_vectors(
+            [city],
             decision_time=decision_time,
             interval_s=1800.0,
+            return_stats=True,
         )
-        n2 = hv.maybe_refresh_day0_hourly_vectors(
-            [_paris()],
-            decision_time=decision_time + timedelta(seconds=1),
+        assert first.vectors_written == 0
+        assert first.incomplete_expected_bundles == 1
+        assert len(first.unavailable_bundles) == 1
+        unavailable = first.unavailable_bundles[0]
+        assert unavailable.city == city_name
+        assert unavailable.reason == "DAY0_HOURLY_BUNDLE_INCOMPLETE"
+        assert unavailable.available_models == ("ecmwf_ifs",)
+        assert unavailable.missing_models == (
+            "icon_global",
+            "ukmo_global_deterministic_10km",
+        )
+        assert attempts == {"fetch": 1, "persist": 0}
+
+        clock["now"] += hv.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S + 1.0
+        second = hv.maybe_refresh_day0_hourly_vectors(
+            [city],
+            decision_time=decision_time + timedelta(
+                seconds=hv.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S + 1.0
+            ),
             interval_s=1800.0,
+            return_stats=True,
         )
 
-        assert (n1, n2) == (2, 0)
-        assert attempts == {"fetch": 1, "persist": 2}
+        assert second.vectors_written == 6
+        assert second.unavailable_bundles == ()
+        assert attempts == {"fetch": 2, "persist": 2}
 
     def test_quota_block_stops_batch_without_fetch_or_throttle(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
@@ -2672,7 +2709,7 @@ class TestRequestHashProvenance:
         captured_dates = []
 
         def fake_fetch(city, *, models=None, now=None, timeout_s=None):
-            return [_vector(model="ecmwf_ifs")], "sha256:datehash"
+            return [_vector(model=model) for model in models], "sha256:datehash"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
             captured_dates.append(target_date)
@@ -2697,7 +2734,7 @@ class TestRequestHashProvenance:
             interval_s=1800.0,
         )
 
-        assert (n1, n2) == (2, 2)
+        assert (n1, n2) == (6, 6)
         assert captured_dates == [
             "2026-06-25",
             "2026-06-26",
