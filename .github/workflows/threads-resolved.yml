@@ -1,8 +1,11 @@
 name: threads-resolved
 
-# Blocks merge when any review thread is unresolved OR any requested reviewer
-# has not yet submitted their review.
-# Gate enforced at GitHub level — works for UI, CLI (gh pr merge), and API.
+# Emits a merge-eligibility status (fail when any review thread is
+# unresolved OR any requested reviewer has not yet submitted their review).
+# A workflow run is not itself a merge gate — it only blocks merge (UI, CLI
+# `gh pr merge`, and API alike) once it is added as a required status check
+# in branch protection. As of this writing `live` has no branch protection
+# configured, so this check is advisory-only in practice.
 #
 # Setup: add "threads-resolved" as a required status check in branch protection
 # (Settings → Branches → live → Require status checks → "threads-resolved").
