@@ -174,6 +174,21 @@ WHERE
 """
 
 
+def _coverage_upsert_sql(conn: sqlite3.Connection) -> str:
+    """Bind writes to attached canonical world when MAIN has a ghost table."""
+
+    attached = {
+        str(row[1])
+        for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    table_ref = "world.data_coverage" if "world" in attached else "data_coverage"
+    return _UPSERT_SQL.replace(
+        "INSERT INTO data_coverage",
+        f"INSERT INTO {table_ref}",
+        1,
+    )
+
+
 def record_written(
     conn: WorldConnection,
     *,
@@ -192,7 +207,7 @@ def record_written(
     fetched_at wins).
     """
     conn.execute(
-        _UPSERT_SQL,
+        _coverage_upsert_sql(conn),
         (
             data_table.value,
             city,
@@ -228,7 +243,7 @@ def record_legitimate_gap(
     stable.
     """
     conn.execute(
-        _UPSERT_SQL,
+        _coverage_upsert_sql(conn),
         (
             data_table.value,
             city,
@@ -264,7 +279,7 @@ def record_failed(
     if retry_after.tzinfo is None:
         raise ValueError("retry_after must be a timezone-aware UTC datetime")
     conn.execute(
-        _UPSERT_SQL,
+        _coverage_upsert_sql(conn),
         (
             data_table.value,
             city,
@@ -298,7 +313,7 @@ def record_missing(
     a prior FAILED has exceeded retry_after).
     """
     conn.execute(
-        _UPSERT_SQL,
+        _coverage_upsert_sql(conn),
         (
             data_table.value,
             city,

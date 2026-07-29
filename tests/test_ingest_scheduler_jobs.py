@@ -129,8 +129,11 @@ def test_hko_final_daily_poll_has_own_lock_and_connection(monkeypatch) -> None:
     conn = object()
 
     class ReadConnection:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
         def close(self) -> None:
-            calls.append(("read_close", True))
+            calls.append((f"{self.name}_close", True))
 
     @contextmanager
     def fake_lock(name: str):
@@ -172,7 +175,14 @@ def test_hko_final_daily_poll_has_own_lock_and_connection(monkeypatch) -> None:
     monkeypatch.setattr(
         state_db,
         "get_forecasts_connection_read_only",
-        lambda: calls.append(("read_connection", True)) or ReadConnection(),
+        lambda: calls.append(("forecasts_read", True))
+        or ReadConnection("forecasts_read"),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_read_only",
+        lambda: calls.append(("world_read", True))
+        or ReadConnection("world_read"),
     )
     monkeypatch.setattr(
         daily_obs,
@@ -181,6 +191,11 @@ def test_hko_final_daily_poll_has_own_lock_and_connection(monkeypatch) -> None:
             calls.append(("missing", (date(2026, 7, 28),)))
             or (date(2026, 7, 28),)
         ),
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_recent_coverage_repair_dates",
+        lambda *_args, **_kwargs: calls.append(("coverage_repair", ())) or (),
     )
     prefetched = ({(2026, 7, 28): (29.5, 25.1)}, "url", "sha256:x")
     monkeypatch.setattr(
@@ -197,18 +212,21 @@ def test_hko_final_daily_poll_has_own_lock_and_connection(monkeypatch) -> None:
     result = im._k2_hko_daily_final_tick.__wrapped__()
 
     assert result["already_present"] == 1
-    assert calls[:7] == [
+    assert calls[:10] == [
         ("lock", "hko_daily_final"),
-        ("read_connection", True),
+        ("forecasts_read", True),
+        ("world_read", True),
         ("missing", (date(2026, 7, 28),)),
-        ("read_close", True),
+        ("coverage_repair", ()),
+        ("world_read_close", True),
+        ("forecasts_read_close", True),
         ("fetch", True),
         ("connection", ("bulk", False)),
         ("append_conn", conn),
     ]
-    assert str(calls[7][1]).startswith("hko_daily_final_")
-    assert calls[8] == ("prefetched_by_month", {(2026, 7): prefetched})
-    assert calls[9] == ("prefetch_failures_by_month", {})
+    assert str(calls[10][1]).startswith("hko_daily_final_")
+    assert calls[11] == ("prefetched_by_month", {(2026, 7): prefetched})
+    assert calls[12] == ("prefetch_failures_by_month", {})
 
 
 def test_hko_final_daily_poll_is_local_noop_after_publication(monkeypatch) -> None:
@@ -232,8 +250,18 @@ def test_hko_final_daily_poll_is_local_noop_after_publication(monkeypatch) -> No
         ReadConnection,
     )
     monkeypatch.setattr(
+        state_db,
+        "get_world_connection_read_only",
+        ReadConnection,
+    )
+    monkeypatch.setattr(
         daily_obs,
         "hko_daily_extract_recent_missing_dates",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_recent_coverage_repair_dates",
         lambda *_args, **_kwargs: (),
     )
     monkeypatch.setattr(
@@ -250,6 +278,89 @@ def test_hko_final_daily_poll_is_local_noop_after_publication(monkeypatch) -> No
     result = im._k2_hko_daily_final_tick.__wrapped__()
 
     assert result["already_present"] == 7
+
+
+def test_hko_final_daily_poll_repairs_coverage_without_provider_fetch(
+    monkeypatch,
+) -> None:
+    import src.data.daily_obs_append as daily_obs
+    import src.data.job_lock as job_lock
+    import src.ingest_main as im
+    import src.state.db as state_db
+
+    calls: list[tuple[str, object]] = []
+    writer_conn = object()
+
+    @contextmanager
+    def fake_lock(_name: str):
+        yield True
+
+    class ReadConnection:
+        def close(self) -> None:
+            return None
+
+    @contextmanager
+    def fake_connection(*, write_class: str, blocking: bool):
+        assert write_class == "bulk"
+        assert blocking is False
+        calls.append(("writer", True))
+        yield writer_conn
+
+    monkeypatch.setattr(job_lock, "acquire_lock", fake_lock)
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_read_only",
+        ReadConnection,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_read_only",
+        ReadConnection,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_with_world",
+        fake_connection,
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_recent_missing_dates",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_recent_coverage_repair_dates",
+        lambda *_args, **_kwargs: (date(2026, 7, 24),),
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "_fetch_hko_daily_extract_month",
+        lambda *_args: pytest.fail("coverage-only repair must not fetch HKO"),
+    )
+
+    def fake_append(given_conn, **kwargs):
+        assert given_conn is writer_conn
+        assert kwargs["prefetched_by_month"] == {}
+        assert kwargs["prefetch_failures_by_month"] == {}
+        calls.append(("append", True))
+        return {
+            "inserted": 0,
+            "already_present": 7,
+            "not_published": 0,
+            "guard_rejected": 0,
+            "fetch_errors": 0,
+        }
+
+    monkeypatch.setattr(
+        daily_obs,
+        "append_hko_daily_extract_recent",
+        fake_append,
+    )
+
+    result = im._k2_hko_daily_final_tick.__wrapped__()
+
+    assert result["already_present"] == 7
+    assert calls == [("writer", True), ("append", True)]
 
 
 def test_hko_final_daily_poll_surfaces_source_or_write_failure(monkeypatch) -> None:
@@ -286,12 +397,22 @@ def test_hko_final_daily_poll_surfaces_source_or_write_failure(monkeypatch) -> N
         ReadConnection,
     )
     monkeypatch.setattr(
+        state_db,
+        "get_world_connection_read_only",
+        ReadConnection,
+    )
+    monkeypatch.setattr(
         daily_obs,
         "hko_daily_extract_recent_missing_dates",
         lambda *_args, **_kwargs: (
             date(2026, 8, 1),
             date(2026, 7, 31),
         ),
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_recent_coverage_repair_dates",
+        lambda *_args, **_kwargs: (),
     )
 
     def fake_fetch(year, month):
@@ -378,9 +499,19 @@ def test_hko_final_daily_poll_defers_without_waiting_on_writer(monkeypatch) -> N
         ReadConnection,
     )
     monkeypatch.setattr(
+        state_db,
+        "get_world_connection_read_only",
+        ReadConnection,
+    )
+    monkeypatch.setattr(
         daily_obs,
         "hko_daily_extract_recent_missing_dates",
         lambda *_args, **_kwargs: (date(2026, 7, 28),),
+    )
+    monkeypatch.setattr(
+        daily_obs,
+        "hko_daily_extract_recent_coverage_repair_dates",
+        lambda *_args, **_kwargs: (),
     )
     monkeypatch.setattr(
         daily_obs,

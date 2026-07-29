@@ -82,6 +82,7 @@ from src.data.ingestion_guard import IngestionGuard, IngestionRejected
 from src.contracts.dst_semantics import _is_missing_local_hour
 from src.state.data_coverage import (
     CoverageReason,
+    CoverageStatus,
     DataTable,
     record_failed,
     record_legitimate_gap,
@@ -360,6 +361,83 @@ def hko_daily_extract_date_present(conn, *, target_date: date) -> bool:
     )
 
 
+_HKO_COVERAGE_STATUS_MAIN_SQL = """
+    SELECT status
+      FROM data_coverage
+     WHERE data_table = ? AND city = ? AND target_date = ?
+       AND data_source = ?
+     LIMIT 1
+"""
+
+_HKO_COVERAGE_STATUS_WORLD_SQL = """
+    SELECT status
+      FROM world.data_coverage
+     WHERE data_table = ? AND city = ? AND target_date = ?
+       AND data_source = ?
+     LIMIT 1
+"""
+
+
+def _hko_daily_extract_coverage_status(
+    conn,
+    *,
+    target_date: date,
+) -> str | None:
+    attached = {
+        str(row[1])
+        for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    sql = (
+        _HKO_COVERAGE_STATUS_WORLD_SQL
+        if "world" in attached
+        else _HKO_COVERAGE_STATUS_MAIN_SQL
+    )
+    row = conn.execute(
+        sql,
+        (
+            DataTable.OBSERVATIONS.value,
+            HKO_CITY_NAME,
+            target_date.isoformat(),
+            HKO_SOURCE,
+        ),
+    ).fetchone()
+    return None if row is None else str(row[0])
+
+
+def hko_daily_extract_coverage_repair_needed(
+    conn,
+    *,
+    target_date: date,
+) -> bool:
+    """Return whether a present final observation may repair coverage."""
+
+    return _hko_daily_extract_coverage_status(
+        conn,
+        target_date=target_date,
+    ) in {
+        None,
+        CoverageStatus.MISSING.value,
+        CoverageStatus.FAILED.value,
+    }
+
+
+def hko_daily_extract_recent_coverage_repair_dates(
+    conn,
+    *,
+    present_dates: Iterable[date],
+) -> tuple[date, ...]:
+    """Filter present observations to repairable canonical coverage gaps."""
+
+    return tuple(
+        target_d
+        for target_d in present_dates
+        if hko_daily_extract_coverage_repair_needed(
+            conn,
+            target_date=target_d,
+        )
+    )
+
+
 def hko_daily_extract_recent_missing_dates(
     conn,
     *,
@@ -563,11 +641,24 @@ def append_hko_daily_extract_recent(
     month_cache = dict(prefetched_by_month or {})
     month_failures = dict(prefetch_failures_by_month or {})
     logged_failure_months: set[tuple[int, int]] = set()
+    coverage_repairs = 0
     for target_d in hko_daily_extract_recent_target_dates(
         now_utc=now_utc,
         lookback_days=lookback_days,
     ):
         if hko_daily_extract_date_present(conn, target_date=target_d):
+            if hko_daily_extract_coverage_repair_needed(
+                conn,
+                target_date=target_d,
+            ):
+                record_written(
+                    conn,
+                    data_table=DataTable.OBSERVATIONS,
+                    city=HKO_CITY_NAME,
+                    data_source=HKO_SOURCE,
+                    target_date=target_d,
+                )
+                coverage_repairs += 1
             totals["already_present"] += 1
             continue
         month_key = (target_d.year, target_d.month)
@@ -623,6 +714,12 @@ def append_hko_daily_extract_recent(
         )
         for key in totals:
             totals[key] += int(result.get(key, 0))
+    if coverage_repairs:
+        conn.commit()
+        logger.info(
+            "HKO Daily Extract repaired canonical coverage rows: %d",
+            coverage_repairs,
+        )
     return totals
 
 

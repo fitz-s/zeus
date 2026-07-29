@@ -878,12 +878,16 @@ def get_forecasts_connection_with_world(
     BOTH ``observations`` (forecasts-class) AND ``data_coverage``
     (world-class) in a single SAVEPOINT.  A bare ``get_forecasts_connection``
     cannot service the ``data_coverage`` write; this helper opens
-    forecasts.db as MAIN and ATTACHes world.db so both bare table names
-    resolve correctly within the SAVEPOINT:
+    forecasts.db as MAIN and ATTACHes world.db so both owners participate in
+    the SAVEPOINT:
 
       - ``observations``   → MAIN (forecasts.db)  ✓
-      - ``data_coverage``  → world (world.db via ATTACH)  ✓
+      - ``data_coverage``  → world (explicitly qualified by its state API)  ✓
       - ``daily_observation_revisions`` → world (world.db via ATTACH)  ✓
+
+    Explicit qualification is required for ``data_coverage`` because a
+    retired forecasts-db ghost table may still exist on deployed DBs; SQLite
+    resolves an unqualified duplicate to MAIN before attached ``world``.
 
     Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
     (``zeus-forecasts.db`` before ``zeus-world.db``) to prevent deadlocks

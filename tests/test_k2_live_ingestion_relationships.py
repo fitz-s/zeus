@@ -935,6 +935,35 @@ def test_hko_daily_extract_poll_catches_up_recent_missing_dates_once(
         now_utc=now,
         rebuild_run_id="recent-catchup-first",
     )
+    conn.execute(
+        """
+        UPDATE data_coverage
+           SET status='MISSING', reason='SCANNER_DETECTED'
+         WHERE city='Hong Kong' AND data_source='hko_daily_api'
+           AND target_date='2026-07-18'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE data_coverage
+           SET status='LEGITIMATE_GAP', reason='HKO_INCOMPLETE_FLAG'
+         WHERE city='Hong Kong' AND data_source='hko_daily_api'
+           AND target_date='2026-07-17'
+        """
+    )
+    conn.commit()
+    original_record_written = daily_obs_append.record_written
+    repair_calls = []
+
+    def track_record_written(given_conn, **kwargs):
+        repair_calls.append(kwargs["target_date"])
+        return original_record_written(given_conn, **kwargs)
+
+    monkeypatch.setattr(
+        daily_obs_append,
+        "record_written",
+        track_record_written,
+    )
     second = daily_obs_append.append_hko_daily_extract_recent(
         conn,
         now_utc=now,
@@ -945,6 +974,14 @@ def test_hko_daily_extract_poll_catches_up_recent_missing_dates_once(
         SELECT target_date
           FROM observations
          WHERE city='Hong Kong' AND source='hko_daily_api'
+         ORDER BY target_date
+        """
+    ).fetchall()
+    coverage = conn.execute(
+        """
+        SELECT target_date, status
+          FROM data_coverage
+         WHERE city='Hong Kong' AND data_source='hko_daily_api'
          ORDER BY target_date
         """
     ).fetchall()
@@ -967,6 +1004,16 @@ def test_hko_daily_extract_poll_catches_up_recent_missing_dates_once(
     assert [row["target_date"] for row in written] == [
         f"2026-07-{day:02d}" for day in range(15, 22)
     ]
+    assert [row["status"] for row in coverage] == [
+        "WRITTEN",
+        "WRITTEN",
+        "LEGITIMATE_GAP",
+        "WRITTEN",
+        "WRITTEN",
+        "WRITTEN",
+        "WRITTEN",
+    ]
+    assert repair_calls == [date(2026, 7, 18)]
 
 
 def test_hko_daily_extract_cross_month_failure_preserves_other_month(

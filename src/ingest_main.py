@@ -1340,12 +1340,15 @@ def _k2_hko_daily_final_tick():
         HKO_DAILY_EXTRACT_CATCHUP_DAYS,
         _fetch_hko_daily_extract_month,
         append_hko_daily_extract_recent,
+        hko_daily_extract_recent_coverage_repair_dates,
         hko_daily_extract_recent_missing_dates,
+        hko_daily_extract_recent_target_dates,
     )
     from src.data.job_lock import acquire_lock
     from src.state.db import (
         get_forecasts_connection_read_only,
         get_forecasts_connection_with_world,
+        get_world_connection_read_only,
     )
 
     now = datetime.now(timezone.utc)
@@ -1354,12 +1357,26 @@ def _k2_hko_daily_final_tick():
             logger.info("ingest k2_hko_daily_final_tick skipped_lock_held")
             return {"status": "SOURCE_CONTENDED"}
         read_conn = get_forecasts_connection_read_only()
+        world_read_conn = None
         try:
+            world_read_conn = get_world_connection_read_only()
             missing_dates = hko_daily_extract_recent_missing_dates(
                 read_conn,
                 now_utc=now,
             )
-            if not missing_dates:
+            missing_set = set(missing_dates)
+            present_dates = tuple(
+                target_d
+                for target_d in hko_daily_extract_recent_target_dates(
+                    now_utc=now,
+                )
+                if target_d not in missing_set
+            )
+            repair_dates = hko_daily_extract_recent_coverage_repair_dates(
+                world_read_conn,
+                present_dates=present_dates,
+            )
+            if not missing_dates and not repair_dates:
                 return {
                     "inserted": 0,
                     "already_present": HKO_DAILY_EXTRACT_CATCHUP_DAYS,
@@ -1368,6 +1385,8 @@ def _k2_hko_daily_final_tick():
                     "fetch_errors": 0,
                 }
         finally:
+            if world_read_conn is not None:
+                world_read_conn.close()
             read_conn.close()
         missing_months = {
             (target_d.year, target_d.month) for target_d in missing_dates
