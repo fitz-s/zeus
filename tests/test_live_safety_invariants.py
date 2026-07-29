@@ -5603,6 +5603,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                     pos.target_date,
                     pos.temperature_metric,
                 ),
+                "probability_content_identity": "probability-content-current",
+                "held_token_id": "paris-no",
+                "held_best_bid": 0.49,
+                "bid_observed_at": "2026-07-14T18:00:00+00:00",
             }
         ]
         assert execute_calls == []

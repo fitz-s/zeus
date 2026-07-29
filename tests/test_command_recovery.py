@@ -22315,7 +22315,7 @@ class TestRecoveryResolutionTable:
             },
         }
         assert obligation == {
-            "schema_version": 2,
+            "schema_version": 3,
             "scope_identity": obligation["scope_identity"],
             "generation": obligation["generation"],
             "position_id": position_id,

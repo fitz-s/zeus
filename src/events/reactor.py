@@ -6207,7 +6207,7 @@ def request_global_auction_completion(
     probability_observed_at: str = "",
     generation: str | None = None,
     scope_identity: str = "",
-    schema_version: int = 2,
+    schema_version: int = 3,
     force_new_generation: bool = False,
 ) -> bool:
     """Persistently reserve one complete global cut for a held SELL.
@@ -6286,12 +6286,12 @@ def request_global_auction_completion(
             for wake in reactor_wakes_since(None)
             if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
         )
-        same_asset_v2_requests = tuple(
+        same_asset_versioned_requests = tuple(
             request
             for wake in durable_wakes
             for request in getattr(wake, "held_sell_reauction_requests", ())
             if (
-                int(getattr(request, "schema_version", 1) or 1) == 2
+                int(getattr(request, "schema_version", 1) or 1) in {2, 3}
                 and str(getattr(request, "position_id", "") or "")
                 == str(position_id or "")
                 and tuple(getattr(request, "family", ()) or ()) == clean_family
@@ -6301,13 +6301,13 @@ def request_global_auction_completion(
         )
         if (
             held_request_kwargs is not None
-            and int(schema_version) == 2
+            and int(schema_version) in {2, 3}
             and not caller_supplied_scope
-            and same_asset_v2_requests
+            and same_asset_versioned_requests
             and not force_new_generation
         ):
             existing_scope = str(
-                getattr(same_asset_v2_requests[-1], "scope_identity", "") or ""
+                getattr(same_asset_versioned_requests[-1], "scope_identity", "") or ""
             ).strip()
             if existing_scope:
                 held_request_kwargs["scope_identity"] = existing_scope
@@ -6318,23 +6318,23 @@ def request_global_auction_completion(
                         if key != "generation"
                     }
                 )
-        matching_v2_requests = tuple(
+        matching_versioned_requests = tuple(
             request
-            for request in same_asset_v2_requests
+            for request in same_asset_versioned_requests
             if str(getattr(request, "material_identity", "") or "")
             == held_request_material_identity
         )
         if (
             held_request_kwargs is not None
-            and int(schema_version) == 2
+            and int(schema_version) in {2, 3}
             and not generation
-            and matching_v2_requests
+            and matching_versioned_requests
             and not force_new_generation
         ):
             # The durable scope owns the generation.  A later fresh book only
             # upgrades its context; it must never mint a second obligation.
             held_request_kwargs["generation"] = str(
-                getattr(matching_v2_requests[-1], "generation", "") or ""
+                getattr(matching_versioned_requests[-1], "generation", "") or ""
             )
         if held_request_kwargs is not None:
             held_request = make_held_sell_reauction_request(
@@ -6369,9 +6369,12 @@ def request_global_auction_completion(
         )
         context_upgrade = bool(
             held_request is not None
-            and matching_v2_requests
+            and matching_versioned_requests
             and _context_rank(held_request)
-            > max(_context_rank(request) for request in matching_v2_requests)
+            > max(
+                _context_rank(request)
+                for request in matching_versioned_requests
+            )
         )
     except ValueError:
         logging.getLogger("zeus.events.reactor").error(
@@ -6445,6 +6448,9 @@ def _held_sell_reauction_receipts_from_global_cut(
                 getattr(request, "material_identity", "") or ""
             ),
             "generation": str(getattr(request, "generation", "") or ""),
+            "attempt_identity": str(
+                getattr(request, "attempt_identity", "") or ""
+            ),
         }
         request_schema_version = int(getattr(request, "schema_version", 1) or 1)
         request_q = str(
@@ -6452,7 +6458,7 @@ def _held_sell_reauction_receipts_from_global_cut(
         )
         coverage = held_sell_reauction_coverage(
             position_id=str(getattr(request, "position_id", "") or ""),
-            # V2 trigger q is historical context.  The terminal answer must
+            # A versioned trigger q is historical context. The terminal answer must
             # use the fresh cut's current q, including a q supersession after
             # an earlier no-book wake.
             probability_content_identity=(
@@ -6503,7 +6509,7 @@ def _held_sell_reauction_receipts_from_global_cut(
                     receipts.append(
                         HeldSellReauctionReceipt(
                             **receipt_identity,
-                            schema_version=2,
+                            schema_version=request_schema_version,
                             scope_identity=str(
                                 getattr(request, "scope_identity", "") or ""
                             ),
@@ -7374,7 +7380,7 @@ def run_edli_event_reactor_cycle(
             completion_due_at_start=_monitor_completion_due_at_start,
             result=_rr,
         )
-        completion_wake_needs_retry = (
+        completion_wake_needs_retry = completion_wake_needs_retry or (
             completion_wake and not completion_satisfied
         )
         _log_stage("process_pending")

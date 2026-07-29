@@ -7648,7 +7648,7 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
         "global_sell_exit_executable_snapshot_unavailable"
     )
     obligation = release_payload["held_sell_reauction_obligation"]
-    assert obligation["schema_version"] == 2
+    assert obligation["schema_version"] == 3
     assert obligation["book_state"] == "UNKNOWN"
     assert obligation["held_token_id"] == NO_TOKEN
     assert requested_obligations == [obligation]
@@ -7797,7 +7797,7 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
     ).fetchone()["phase"] == "pending_exit"
 
 
-def test_restart_republishes_unbound_v2_residual_with_same_generation_until_terminal(
+def test_restart_republishes_unbound_v3_residual_with_same_generation_until_terminal(
     conn,
     monkeypatch,
     tmp_path,

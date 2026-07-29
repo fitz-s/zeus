@@ -457,7 +457,7 @@ def _held_sell_reauction_obligation(
     *,
     generation_material: Mapping[str, object],
 ) -> dict[str, object]:
-    """Build the V2 durable scope without treating a missing book as a price."""
+    """Build the V3 durable scope without treating a missing book as a price."""
 
     raw_direction = getattr(position, "direction", "")
     direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
@@ -504,7 +504,7 @@ def _held_sell_reauction_obligation(
         ).encode("utf-8")
     ).hexdigest()
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "scope_identity": scope_identity,
         "generation": generation,
         "position_id": position_id,
@@ -524,7 +524,7 @@ def _latest_held_sell_reauction_obligation(
     conn: sqlite3.Connection | None,
     position: Position,
 ) -> dict[str, object]:
-    """Return only an exact, canonical V2 residual/reauction obligation."""
+    """Return only an exact canonical versioned residual obligation."""
 
     if conn is None:
         return {}
@@ -541,10 +541,10 @@ def _latest_held_sell_reauction_obligation(
             (position_id,),
         ).fetchone()
         payload = json.loads(str(row[0] or "{}")) if row is not None else {}
-    except (sqlite3.Error, TypeError, json.JSONDecodeError):
+    except (sqlite3.Error, AttributeError, TypeError, json.JSONDecodeError):
         return {}
     obligation = payload.get("held_sell_reauction_obligation")
-    if not isinstance(obligation, dict) or obligation.get("schema_version") != 2:
+    if not isinstance(obligation, dict) or obligation.get("schema_version") not in {2, 3}:
         return {}
     required = ("scope_identity", "generation", "position_id", "held_token_id")
     if not all(str(obligation.get(key) or "").strip() for key in required):

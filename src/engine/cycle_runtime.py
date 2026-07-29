@@ -5443,17 +5443,9 @@ def execute_monitoring_phase(
 
             obligation = getattr(position, "_held_sell_reauction_obligation", {})
             obligation = obligation if isinstance(obligation, dict) else {}
-            raw_direction = getattr(position, "direction", "")
-            direction = str(
-                getattr(raw_direction, "value", raw_direction) or ""
-            ).lower()
             held_token_id = str(
                 obligation.get("held_token_id")
-                or (
-                    getattr(position, "no_token_id", "")
-                    if direction == "buy_no"
-                    else getattr(position, "token_id", "")
-                )
+                or _position_held_token_id(position)
                 or ""
             ).strip()
             probability_receipt = getattr(
@@ -6809,15 +6801,7 @@ def execute_monitoring_phase(
             probability_content_identity = _monitor_probability_content_identity(
                 probability_receipt
             )
-            held_token_id = str(
-                (
-                    getattr(pos, "no_token_id", "")
-                    if str(getattr(pos, "direction", "") or "").strip().lower()
-                    == "buy_no"
-                    else getattr(pos, "token_id", "")
-                )
-                or ""
-            ).strip()
+            held_token_id = _position_held_token_id(pos).strip()
             global_holding_coverage = None
             if (
                 should_exit

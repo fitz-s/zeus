@@ -13606,7 +13606,7 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                 ).encode("utf-8")
             ).hexdigest()
             held_sell_reauction_obligation = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "scope_identity": scope_identity,
                 "generation": generation,
                 "position_id": position_id,

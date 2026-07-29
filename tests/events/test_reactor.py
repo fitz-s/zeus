@@ -2204,7 +2204,140 @@ def test_held_sell_reauction_typed_reject_receipt_completes_request(tmp_path):
     ) is True
 
 
-def test_lucknow_zero_bid_v2_obligation_is_durable_but_cannot_ack(tmp_path):
+def test_parent_v1_held_sell_request_hash_and_receipt_remain_compatible(tmp_path):
+    """A pre-V2 durable wake must survive parsing and retain its original ID."""
+    import hashlib
+    import json
+
+    from src.runtime import reactor_wake
+
+    material = {
+        "position_id": "legacy-v1-position",
+        "family": ("Paris", "2026-07-28", "low"),
+        "probability_content_identity": "legacy-v1-q",
+        "held_token_id": "legacy-v1-token",
+        "held_best_bid": 0.17,
+        "bid_observed_at": "2026-07-28T08:00:00+00:00",
+    }
+    material_identity = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    generation = "legacy-v1-generation"
+    request_id = hashlib.sha256(
+        json.dumps(
+            {
+                "generation": generation,
+                "material_identity": material_identity,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    parsed = reactor_wake._clean_held_sell_reauction_requests(
+        (
+            {
+                **material,
+                "request_id": request_id,
+                "material_identity": material_identity,
+                "generation": generation,
+            },
+        )
+    )
+
+    assert len(parsed) == 1
+    assert parsed[0].schema_version == 1
+    assert parsed[0].material_identity == material_identity
+    assert parsed[0].request_id == request_id
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (
+            reactor_wake.HeldSellReauctionReceipt(
+                request_id=request_id,
+                material_identity=material_identity,
+                generation=generation,
+                status="REJECTED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+            ),
+        ),
+        path=tmp_path / "wake.json",
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        parsed, path=tmp_path / "wake.json"
+    )
+
+
+def test_parent_v2_held_sell_request_and_receipt_remain_compatible(tmp_path):
+    """Schema 3 must not reinterpret already-durable schema-2 identities."""
+    import hashlib
+    import json
+
+    from src.runtime import reactor_wake
+
+    family = ("Lucknow", "2026-07-29", "high")
+    scope_identity = reactor_wake.held_sell_reauction_scope_identity(
+        position_id="legacy-v2-position",
+        family=family,
+        probability_content_identity="legacy-v2-q",
+        held_token_id="legacy-v2-token",
+    )
+    generation = "legacy-v2-generation"
+    request_id = hashlib.sha256(
+        json.dumps(
+            {
+                "generation": generation,
+                "material_identity": scope_identity,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    parsed = reactor_wake._clean_held_sell_reauction_requests(
+        (
+            {
+                "request_id": request_id,
+                "material_identity": scope_identity,
+                "generation": generation,
+                "position_id": "legacy-v2-position",
+                "family": family,
+                "probability_content_identity": "legacy-v2-q",
+                "held_token_id": "legacy-v2-token",
+                "held_best_bid": 0.19,
+                "bid_observed_at": "2026-07-29T12:00:00+00:00",
+                "schema_version": 2,
+                "scope_identity": scope_identity,
+                "book_state": "EXECUTABLE",
+                "probability_observed_at": "2026-07-29T12:00:00+00:00",
+            },
+        )
+    )
+
+    assert len(parsed) == 1
+    assert parsed[0].schema_version == 2
+    assert parsed[0].attempt_identity == ""
+    assert parsed[0].request_id == request_id
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (
+            reactor_wake.HeldSellReauctionReceipt(
+                request_id=request_id,
+                material_identity=scope_identity,
+                generation=generation,
+                schema_version=2,
+                scope_identity=scope_identity,
+                book_state="EXECUTABLE",
+                status="ACTUATED",
+                reason="legacy-v2-actuated",
+                selection_epoch_identity="legacy-v2-epoch",
+                sell_book_witness_identity="legacy-v2-book",
+                answered_probability_content_identity="legacy-v2-q",
+            ),
+        ),
+        path=tmp_path / "wake.json",
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        parsed, path=tmp_path / "wake.json"
+    )
+
+
+def test_lucknow_zero_bid_v3_obligation_is_durable_but_cannot_ack(tmp_path):
     """A zero bid is a durable redecision debt, never an executable SELL price."""
     from src.runtime.reactor_wake import (
         HeldSellReauctionReceipt,
@@ -2223,7 +2356,7 @@ def test_lucknow_zero_bid_v2_obligation_is_durable_but_cannot_ack(tmp_path):
         held_token_id="token-lucknow-no",
         held_best_bid=0.0,
         bid_observed_at="2026-07-29T12:00:00+00:00",
-        schema_version=2,
+        schema_version=3,
         book_state="NO_EXECUTABLE_BOOK",
         generation="lucknow-zero-generation",
     )
@@ -2245,16 +2378,16 @@ def test_lucknow_zero_bid_v2_obligation_is_durable_but_cannot_ack(tmp_path):
                 material_identity=request.material_identity,
                 generation=request.generation,
                 status="REJECTED",
-                reason="legacy_generic_reject_must_not_ack_v2",
+                reason="legacy_generic_reject_must_not_ack_v3",
             ),
         ),
         path=path,
-    ) is True
+    ) is False
     assert not held_sell_reauction_requests_completed((request,), path=path)
 
 
 def test_lucknow_no_book_generation_completes_only_from_fresh_same_q_book(monkeypatch, tmp_path):
-    """A later book answers the original V2 debt; clocks never mint a new debt."""
+    """A later book answers the V3 debt without reusing an old attempt."""
     from types import SimpleNamespace
 
     from src.events import reactor
@@ -2269,7 +2402,7 @@ def test_lucknow_no_book_generation_completes_only_from_fresh_same_q_book(monkey
         "family": ("Lucknow", "2026-07-29", "high"),
         "probability_content_identity": "q-lucknow-current",
         "held_token_id": "token-lucknow-no-book",
-        "schema_version": 2,
+        "schema_version": 3,
         "generation": "lucknow-stable-generation",
     }
     original = make_held_sell_reauction_request(
@@ -2286,7 +2419,9 @@ def test_lucknow_no_book_generation_completes_only_from_fresh_same_q_book(monkey
         book_state="EXECUTABLE",
     )
     assert fresh.material_identity == original.material_identity == original.scope_identity
-    assert fresh.request_id == original.request_id
+    assert fresh.generation == original.generation
+    assert fresh.attempt_identity != original.attempt_identity
+    assert fresh.request_id != original.request_id
 
     monkeypatch.setattr(
         "src.engine.global_batch_runtime.held_sell_reauction_coverage",
@@ -2310,9 +2445,142 @@ def test_lucknow_no_book_generation_completes_only_from_fresh_same_q_book(monkey
     assert held_sell_reauction_requests_completed(
         (original,), path=tmp_path / "wake.json"
     ) is True
+    assert held_sell_reauction_requests_completed(
+        (fresh,), path=tmp_path / "wake.json"
+    ) is False
+
+    fresh_receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(fresh,),
+        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+    )
+    assert persist_held_sell_reauction_receipts(
+        fresh_receipts, path=tmp_path / "wake.json"
+    ) is True
+    assert held_sell_reauction_requests_completed(
+        (fresh,), path=tmp_path / "wake.json"
+    ) is True
 
 
-def test_v2_no_book_wake_upgrades_same_generation_on_fresh_superseding_q(monkeypatch, tmp_path):
+@pytest.mark.parametrize("status", ("ACTUATED", "CAPITAL_REJECTED"))
+def test_v3_old_attempt_receipt_cannot_ack_fresh_context(tmp_path, status):
+    from src.runtime import reactor_wake
+
+    common = {
+        "position_id": f"old-attempt-{status.lower()}",
+        "family": ("Lucknow", "2026-07-29", "high"),
+        "held_token_id": f"token-{status.lower()}",
+        "schema_version": 3,
+        "generation": "same-obligation-generation",
+    }
+    old = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        probability_content_identity="q-old",
+        held_best_bid=0.0,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        book_state="NO_EXECUTABLE_BOOK",
+    )
+    fresh = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        scope_identity=old.scope_identity,
+        probability_content_identity="q-fresh",
+        probability_observed_at="2026-07-29T12:01:00+00:00",
+        held_best_bid=0.23,
+        bid_observed_at="2026-07-29T12:01:00+00:00",
+        book_state="EXECUTABLE",
+    )
+    assert old.generation == fresh.generation
+    assert old.material_identity == fresh.material_identity
+    assert old.request_id != fresh.request_id
+
+    receipt = reactor_wake.HeldSellReauctionReceipt(
+        request_id=old.request_id,
+        material_identity=old.material_identity,
+        generation=old.generation,
+        schema_version=3,
+        scope_identity=old.scope_identity,
+        book_state="EXECUTABLE",
+        status=status,
+        reason=f"old-{status.lower()}",
+        selection_epoch_identity="old-epoch",
+        sell_book_witness_identity="old-book",
+        capital_objective_proof=(
+            "old-capital-proof" if status == "CAPITAL_REJECTED" else ""
+        ),
+        answered_probability_content_identity="q-old",
+        attempt_identity=old.attempt_identity,
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (receipt,), path=tmp_path / "wake.json"
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (old,), path=tmp_path / "wake.json"
+    )
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (fresh,), path=tmp_path / "wake.json"
+    )
+
+
+def test_completed_old_attempt_cannot_starve_coalesced_fresh_receipt(tmp_path):
+    from src.runtime import reactor_wake
+
+    common = {
+        "position_id": "coalesced-attempts",
+        "family": ("Lucknow", "2026-07-29", "high"),
+        "held_token_id": "coalesced-token",
+        "schema_version": 3,
+        "generation": "coalesced-generation",
+    }
+    old = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        probability_content_identity="q-old",
+        held_best_bid=0.0,
+        bid_observed_at="2026-07-29T12:00:00+00:00",
+        book_state="NO_EXECUTABLE_BOOK",
+    )
+    fresh = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        scope_identity=old.scope_identity,
+        probability_content_identity="q-fresh",
+        probability_observed_at="2026-07-29T12:01:00+00:00",
+        held_best_bid=0.23,
+        bid_observed_at="2026-07-29T12:01:00+00:00",
+        book_state="EXECUTABLE",
+    )
+
+    def receipt(request, suffix):
+        return reactor_wake.HeldSellReauctionReceipt(
+            request_id=request.request_id,
+            material_identity=request.material_identity,
+            generation=request.generation,
+            schema_version=3,
+            scope_identity=request.scope_identity,
+            book_state="EXECUTABLE",
+            status="ACTUATED",
+            reason=f"actuated-{suffix}",
+            selection_epoch_identity=f"epoch-{suffix}",
+            sell_book_witness_identity=f"book-{suffix}",
+            answered_probability_content_identity=f"q-{suffix}",
+            attempt_identity=request.attempt_identity,
+        )
+
+    path = tmp_path / "wake.json"
+    first_old = receipt(old, "old-first")
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (first_old,), path=path
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (receipt(old, "old-reanswered"), receipt(fresh, "fresh")),
+        path=path,
+    )
+    assert reactor_wake._read_held_sell_reauction_receipt(
+        old.request_id, path=path
+    ) == first_old
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (old, fresh), path=path
+    )
+
+
+def test_v3_no_book_wake_upgrades_same_generation_on_fresh_superseding_q(monkeypatch, tmp_path):
     """A fresh book/q republishes the original debt, never a stale-q action."""
     from types import SimpleNamespace
 
@@ -2340,7 +2608,7 @@ def test_v2_no_book_wake_upgrades_same_generation_on_fresh_superseding_q(monkeyp
             "position_id": "lucknow-q-supersession",
             "family": ("Lucknow", "2026-07-29", "high"),
             "held_token_id": "token-lucknow-q-supersession",
-            "schema_version": 2,
+            "schema_version": 3,
         }
         assert reactor.request_global_auction_completion(
             **common,
@@ -2362,7 +2630,8 @@ def test_v2_no_book_wake_upgrades_same_generation_on_fresh_superseding_q(monkeyp
         refreshed = published[1].held_sell_reauction_requests[0]
         assert refreshed.scope_identity == original.scope_identity
         assert refreshed.generation == original.generation
-        assert refreshed.request_id == original.request_id
+        assert refreshed.attempt_identity != original.attempt_identity
+        assert refreshed.request_id != original.request_id
         assert refreshed.probability_content_identity == "q-current-new"
 
         monkeypatch.setattr(
@@ -2386,13 +2655,16 @@ def test_v2_no_book_wake_upgrades_same_generation_on_fresh_superseding_q(monkeyp
             receipts, path=tmp_path / "wake.json"
         ) is True
         assert reactor_wake.held_sell_reauction_requests_completed(
-            (original, refreshed), path=tmp_path / "wake.json"
+            (refreshed,), path=tmp_path / "wake.json"
         ) is True
+        assert reactor_wake.held_sell_reauction_requests_completed(
+            (original,), path=tmp_path / "wake.json"
+        ) is False
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
-def test_v2_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):
+def test_v3_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):
     from types import SimpleNamespace
 
     from src.events import reactor
@@ -2405,7 +2677,7 @@ def test_v2_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):
         held_token_id="token-karachi-no",
         held_best_bid=0.17,
         bid_observed_at="2026-07-29T12:00:00+00:00",
-        schema_version=2,
+        schema_version=3,
         book_state="EXECUTABLE",
         generation="karachi-current-generation",
     )
@@ -2423,7 +2695,7 @@ def test_v2_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):
         result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
     )
     assert actuated[0].status == "ACTUATED"
-    assert actuated[0].schema_version == 2
+    assert actuated[0].schema_version == 3
     assert actuated[0].scope_identity == request.scope_identity
     assert actuated[0].answered_probability_content_identity == "q-karachi-current"
 
@@ -2439,7 +2711,7 @@ def test_v2_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):
     assert rejected[0].answered_probability_content_identity == "q-karachi-current"
 
 
-def test_v2_excluded_or_unknown_q_global_cut_stays_pending(monkeypatch):
+def test_v3_excluded_or_unknown_q_global_cut_stays_pending(monkeypatch):
     from types import SimpleNamespace
 
     from src.events import reactor
@@ -2452,7 +2724,7 @@ def test_v2_excluded_or_unknown_q_global_cut_stays_pending(monkeypatch):
         held_token_id="token-karachi-no-book",
         held_best_bid=None,
         bid_observed_at="",
-        schema_version=2,
+        schema_version=3,
         book_state="UNKNOWN",
         generation="karachi-no-book-generation",
     )
@@ -2466,7 +2738,7 @@ def test_v2_excluded_or_unknown_q_global_cut_stays_pending(monkeypatch):
     ) == ()
 
 
-def test_v2_old_generation_receipt_cannot_ack_new_generation(tmp_path):
+def test_v3_old_generation_receipt_cannot_ack_new_generation(tmp_path):
     from src.runtime.reactor_wake import (
         HeldSellReauctionReceipt,
         held_sell_reauction_requests_completed,
@@ -2481,7 +2753,7 @@ def test_v2_old_generation_receipt_cannot_ack_new_generation(tmp_path):
         held_token_id="token-karachi-generation",
         held_best_bid=0.22,
         bid_observed_at="2026-07-29T12:00:00+00:00",
-        schema_version=2,
+        schema_version=3,
         book_state="EXECUTABLE",
     )
     old = make_held_sell_reauction_request(**kwargs, generation="old")
@@ -2492,7 +2764,7 @@ def test_v2_old_generation_receipt_cannot_ack_new_generation(tmp_path):
                 request_id=old.request_id,
                 material_identity=old.material_identity,
                 generation=old.generation,
-                schema_version=2,
+                schema_version=3,
                 scope_identity=old.scope_identity,
                 book_state="EXECUTABLE",
                 status="ACTUATED",
@@ -2500,6 +2772,7 @@ def test_v2_old_generation_receipt_cannot_ack_new_generation(tmp_path):
                 selection_epoch_identity="epoch-old",
                 sell_book_witness_identity="book-old",
                 answered_probability_content_identity="q-karachi-generation",
+                attempt_identity=old.attempt_identity,
             ),
         ),
         path=tmp_path / "wake.json",
@@ -2624,7 +2897,7 @@ def test_snapshot_reauction_forces_new_wake_generation(monkeypatch, tmp_path):
         "held_token_id": "token-no-release-generation",
         "held_best_bid": 0.10,
         "bid_observed_at": "2026-07-28T08:00:00+00:00",
-        "schema_version": 2,
+        "schema_version": 3,
         "book_state": "EXECUTABLE",
     }
     old_request = reactor_wake.make_held_sell_reauction_request(
@@ -2666,7 +2939,7 @@ def test_snapshot_reauction_forces_new_wake_generation(monkeypatch, tmp_path):
                 request_id=old_request.request_id,
                 material_identity=old_request.material_identity,
                 generation=old_request.generation,
-                schema_version=2,
+                schema_version=3,
                 scope_identity=old_request.scope_identity,
                 book_state="EXECUTABLE",
                 status="ACTUATED",
@@ -2674,6 +2947,7 @@ def test_snapshot_reauction_forces_new_wake_generation(monkeypatch, tmp_path):
                 selection_epoch_identity="epoch-old",
                 sell_book_witness_identity="book-old",
                 answered_probability_content_identity="q-content-release-generation",
+                attempt_identity=old_request.attempt_identity,
             ),
         ),
         path=receipt_path,
@@ -2688,7 +2962,7 @@ def test_snapshot_reauction_forces_new_wake_generation(monkeypatch, tmp_path):
                 request_id=new_request.request_id,
                 material_identity=new_request.material_identity,
                 generation=new_request.generation,
-                schema_version=2,
+                schema_version=3,
                 scope_identity=new_request.scope_identity,
                 book_state="EXECUTABLE",
                 status="ACTUATED",
@@ -2696,6 +2970,7 @@ def test_snapshot_reauction_forces_new_wake_generation(monkeypatch, tmp_path):
                 selection_epoch_identity="epoch-new",
                 sell_book_witness_identity="book-new",
                 answered_probability_content_identity="q-content-release-generation",
+                attempt_identity=new_request.attempt_identity,
             ),
         ),
         path=receipt_path,
