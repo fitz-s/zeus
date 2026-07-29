@@ -1408,6 +1408,7 @@ def bind_current_global_probability_tokens(
             local_metadata_by_token.setdefault((condition_id, selected), row)
 
     local_metadata_family_keys: set[str] = set()
+    clob_attempted_family_keys: set[str] = set()
     if metadata_sink is not None:
         for family_key, witness in work_by_family.items():
             token_keys = _metadata_keys(witness)
@@ -1447,6 +1448,7 @@ def bind_current_global_probability_tokens(
                 for condition_id, _token_id in _metadata_keys(witness)
             )
         )
+        clob_attempted_family_keys.update(clob_candidates)
         clob_markets: dict[str, Mapping[str, object]] = {}
         if clob_condition_ids:
             from concurrent.futures import ThreadPoolExecutor
@@ -1577,6 +1579,7 @@ def bind_current_global_probability_tokens(
         family_key: witness
         for family_key, witness in work_by_family.items()
         if family_key not in local_metadata_family_keys
+        and family_key not in clob_attempted_family_keys
     }
 
     from concurrent.futures import ThreadPoolExecutor
@@ -1772,6 +1775,8 @@ def bind_current_global_probability_tokens(
             and event is None
             and family_key not in local_metadata_family_keys
         ):
+            if family_key in clob_attempted_family_keys:
+                continue
             raise ValueError(f"GLOBAL_CURRENT_GAMMA_EVENT_MISSING:{family_key}")
         condition_ids = {binding.condition_id for binding in witness.bindings}
         token_map = {

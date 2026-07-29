@@ -15690,6 +15690,25 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
         "_global_current_clob"
     ] is True
 
+    unavailable_metadata = {}
+    unavailable = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={original.family_key: original},
+        get_gamma_event=lambda _slug: pytest.fail(
+            "failed held CLOB metadata must not fall back to Gamma"
+        ),
+        get_gamma_markets=lambda _conditions: pytest.fail(
+            "failed held CLOB metadata must not fall back to Gamma"
+        ),
+        get_clob_market=lambda _condition_id: None,
+        trade_conn=stale_local,
+        checked_at_utc=at,
+        metadata_sink=unavailable_metadata,
+        required_token_ids=frozenset({held_token}),
+    )
+    assert unavailable == {}
+    assert unavailable_metadata == {}
+
     requested_tokens = []
     times = iter((at, at + _dt.timedelta(seconds=1)))
     held_epoch = capture_current_global_book_epoch(

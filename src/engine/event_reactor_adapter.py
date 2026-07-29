@@ -7693,6 +7693,7 @@ def event_bound_live_adapter_from_trade_conn(
             )
             from src.data.polymarket_client import PolymarketClient
             from src.data.polymarket_request_governor import (
+                RequestAdmissionDenied,
                 RequestPriority,
                 polymarket_request_governor,
             )
@@ -7800,6 +7801,8 @@ def event_bound_live_adapter_from_trade_conn(
                         )
 
                     def _clob_market(condition_id):
+                        import httpx
+
                         nonlocal clob_deadline
                         if clob is None:
                             return None
@@ -7807,13 +7810,28 @@ def event_bound_live_adapter_from_trade_conn(
                             clob_deadline = _time.monotonic() + gamma_timeout
                         remaining = clob_deadline - _time.monotonic()
                         if remaining <= 0.0:
-                            raise ValueError(
-                                "GLOBAL_CURRENT_CLOB_DEADLINE_EXCEEDED"
+                            logging.getLogger(__name__).warning(
+                                "held-risk market metadata deadline exhausted: "
+                                "condition_id=%s",
+                                condition_id,
                             )
-                        return clob.get_held_clob_market_info(
-                            condition_id,
-                            timeout=min(gamma_timeout, remaining),
-                        )
+                            return None
+                        try:
+                            return clob.get_held_clob_market_info(
+                                condition_id,
+                                timeout=min(gamma_timeout, remaining),
+                            )
+                        except (
+                            httpx.HTTPError,
+                            RequestAdmissionDenied,
+                        ) as exc:
+                            logging.getLogger(__name__).warning(
+                                "held-risk market metadata unavailable: "
+                                "condition_id=%s error=%s",
+                                condition_id,
+                                type(exc).__name__,
+                            )
+                            return None
 
                     def _gamma_markets(condition_ids):
                         nonlocal gamma_batch_requests
