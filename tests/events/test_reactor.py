@@ -409,10 +409,10 @@ def test_day0_catchup_emitter_returns_exact_event_ids(monkeypatch):
         reactor_module,
         "_edli_scan_day0_with_lock_retry",
         lambda **_kwargs: (
-            [SimpleNamespace(event_id="day0-authority")],
+            [SimpleNamespace(event_id="day0-authority", inserted=True)],
             [
-                SimpleNamespace(event_id="day0-observation"),
-                SimpleNamespace(event_id="day0-authority"),
+                SimpleNamespace(event_id="day0-observation", inserted=True),
+                SimpleNamespace(event_id="day0-authority", inserted=False),
             ],
         ),
     )
@@ -437,18 +437,19 @@ def test_day0_catchup_emitter_returns_exact_event_ids(monkeypatch):
     ("city", "station_id"),
     (("Kuala Lumpur", "WMKK"), ("Manila", "RPLL")),
 )
-def test_held_day0_catchup_persists_despite_same_evidence_no_value_refutation(
+def test_held_day0_catchup_wakes_once_and_keeps_nonheld_suppression(
     monkeypatch,
     city,
     station_id,
 ):
-    """Held Day0 authority must not disappear behind entry no-value suppression."""
+    """Held authority persists once; duplicate and non-held paths stay quiet."""
     from src.events import reactor as reactor_module
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import (
         Day0ExtremeUpdatedTrigger,
         build_day0_extreme_updated_event,
     )
+    from src.runtime import reactor_wake
 
     class _Semantics:
         def round_single(self, value):
@@ -457,6 +458,7 @@ def test_held_day0_catchup_persists_despite_same_evidence_no_value_refutation(
     decision_time = datetime(2026, 7, 30, 6, 0, tzinfo=timezone.utc)
     family = (city, "2026-07-30", "high")
     admitted_family = reactor_module._substrate_refresh_family_key(*family)
+    context_id = f"{station_id.lower()}-jul30"
     base_observation = {
         "city": family[0],
         "target_date": family[1],
@@ -476,7 +478,7 @@ def test_held_day0_catchup_persists_despite_same_evidence_no_value_refutation(
         "rounding_status": "MATCH",
         "source_authorized_status": "AUTHORIZED",
         "live_authority_status": "live",
-        "observation_context_id": "wmkk-jul30",
+        "observation_context_id": context_id,
     }
     refreshed_observation = {
         **base_observation,
@@ -508,7 +510,7 @@ def test_held_day0_catchup_persists_despite_same_evidence_no_value_refutation(
                 prior.event_id,
                 "2026-07-30T05:40:00+00:00",
                 *family,
-                "wmkk-jul30",
+                context_id,
                 "2026-07-30T05:40:00+00:00",
             ),
         )
@@ -522,9 +524,11 @@ def test_held_day0_catchup_persists_despite_same_evidence_no_value_refutation(
             received_at="2026-07-30T05:40:00+00:00",
         ) is None
 
+        scan_observation = [refreshed_observation]
+
         def _scan(*, trigger, **_kwargs):
             result = trigger.emit_from_observation(
-                observation=refreshed_observation,
+                observation=scan_observation[0],
                 settlement_semantics=_Semantics(),
                 decision_time=decision_time,
                 received_at="2026-07-30T05:40:00+00:00",
@@ -532,15 +536,61 @@ def test_held_day0_catchup_persists_despite_same_evidence_no_value_refutation(
             return [], [] if result is None else [result]
 
         monkeypatch.setattr(reactor_module, "_edli_scan_day0_with_lock_retry", _scan)
-        event_ids = _edli_emit_day0_extreme_events(
+        admission = reactor_module._Day0LiveFamilyAdmission(
+            admitted_families=frozenset({admitted_family}),
+            held_families=frozenset({admitted_family}),
+            expiry_safe=True,
+            scan_cities=frozenset({family[0]}),
+        )
+        first_event_ids = _edli_emit_day0_extreme_events(
             world,
             trade,
             decision_time=decision_time,
             received_at="2026-07-30T05:40:00+00:00",
             limit=5,
+            family_admission=admission,
+        )
+        second_event_ids = _edli_emit_day0_extreme_events(
+            world,
+            trade,
+            decision_time=decision_time,
+            received_at="2026-07-30T05:40:00+00:00",
+            limit=5,
+            family_admission=admission,
+        )
+
+        bridged = []
+        wakes = []
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_bridge_day0_extreme_materialization_seeds",
+            lambda event_ids: bridged.append(event_ids),
+        )
+        monkeypatch.setattr(
+            reactor_wake,
+            "publish_reactor_wake",
+            lambda **kwargs: wakes.append(kwargs),
+        )
+        assert reactor_module._edli_publish_committed_day0_catchup(
+            first_event_ids
+        ) is True
+        assert reactor_module._edli_publish_committed_day0_catchup(
+            second_event_ids
+        ) is False
+
+        scan_observation[0] = {
+            **refreshed_observation,
+            "observation_time": "2026-07-30T05:45:00+00:00",
+            "observation_available_at": "2026-07-30T05:50:00+00:00",
+        }
+        nonheld_event_ids = _edli_emit_day0_extreme_events(
+            world,
+            trade,
+            decision_time=decision_time,
+            received_at="2026-07-30T05:55:00+00:00",
+            limit=5,
             family_admission=reactor_module._Day0LiveFamilyAdmission(
                 admitted_families=frozenset({admitted_family}),
-                held_families=frozenset({admitted_family}),
                 expiry_safe=True,
                 scan_cities=frozenset({family[0]}),
             ),
@@ -553,7 +603,11 @@ def test_held_day0_catchup_persists_despite_same_evidence_no_value_refutation(
         trade.close()
         world.close()
 
-    assert len(event_ids) == 1
+    assert len(first_event_ids) == 1
+    assert second_event_ids == ()
+    assert nonheld_event_ids == ()
+    assert bridged == [first_event_ids]
+    assert [wake["event_ids"] for wake in wakes] == [first_event_ids]
     assert durable_event_count == 2
 
 

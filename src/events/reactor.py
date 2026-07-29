@@ -6844,34 +6844,12 @@ def run_edli_event_reactor_cycle(
                 len(targeted_event_ids),
             )
             _log_stage("committed_event_fast_path")
-        if catchup_day0_event_ids:
-            # EVENT-DRIVEN Day0 recompute bridge (2026-07-19): the catch-up scan lane
-            # (non-METAR / WU / HKO sources, and reboot catch-up) commits DAY0_EXTREME_UPDATED
-            # events here just like the fast METAR source clock does in ingest_main.py's
-            # _commit_pending_day0_metar. Bridge those families to an immediate
-            # re-materialization seed too, so this lane does not stay on the ~40-min
-            # scheduled cadence while the fast lane already races the book. Runs AFTER
-            # conn.commit() and the world-write mutex release above — no txn is open.
-            _edli_bridge_day0_extreme_materialization_seeds(catchup_day0_event_ids)
-            try:
-                from src.runtime.reactor_wake import publish_reactor_wake
-
-                publish_reactor_wake(
-                    source="edli_reactor_day0_catchup",
-                    reason="day0_extreme_event_committed",
-                    event_ids=catchup_day0_event_ids,
-                )
-            except OSError:
-                _log.exception(
-                    "EDLI Day0 catch-up wake publish failed; retaining current-cycle "
-                    "processing as the durable fallback"
-                )
-            else:
-                _log.info(
-                    "EDLI reactor yielded periodic cycle to targeted Day0 wake: events=%d",
-                    len(catchup_day0_event_ids),
-                )
-                return False
+        # EVENT-DRIVEN Day0 recompute bridge (2026-07-19): only newly inserted
+        # catch-up facts bridge to materialization and publish a targeted wake.
+        # Duplicate EventWriteResults are filtered at the emitter boundary, and
+        # this helper independently treats an empty set as a strict no-op.
+        if _edli_publish_committed_day0_catchup(catchup_day0_event_ids):
+            return False
         if not producer_fast_path and _urgent_wake_pending():
             _log.info(
                 "EDLI reactor maintenance preempted after emit by urgent producer wake"
@@ -8150,6 +8128,36 @@ def _edli_bridge_day0_extreme_materialization_seeds(event_ids: tuple[str, ...]) 
                 city, target_date, metric, exc,
             )
 
+
+def _edli_publish_committed_day0_catchup(event_ids: tuple[str, ...]) -> bool:
+    """Bridge and wake only for events inserted by this catch-up transaction."""
+
+    if not event_ids:
+        return False
+    import logging as _logging
+
+    _log = _logging.getLogger("zeus.events.reactor")
+    _edli_bridge_day0_extreme_materialization_seeds(event_ids)
+    try:
+        from src.runtime.reactor_wake import publish_reactor_wake
+
+        publish_reactor_wake(
+            source="edli_reactor_day0_catchup",
+            reason="day0_extreme_event_committed",
+            event_ids=event_ids,
+        )
+    except OSError:
+        _log.exception(
+            "EDLI Day0 catch-up wake publish failed; retaining current-cycle "
+            "processing as the durable fallback"
+        )
+        return False
+    _log.info(
+        "EDLI reactor yielded periodic cycle to targeted Day0 wake: events=%d",
+        len(event_ids),
+    )
+    return True
+
 def _edli_emit_day0_extreme_events(
     world_conn,
     trade_conn,
@@ -8282,7 +8290,8 @@ def _edli_emit_day0_extreme_events(
             dict.fromkeys(
                 str(result.event_id)
                 for result in (*authority_results, *observation_results)
-                if str(getattr(result, "event_id", "") or "").strip()
+                if bool(getattr(result, "inserted", False))
+                and str(getattr(result, "event_id", "") or "").strip()
             )
         )
     except sqlite3.OperationalError as exc:
