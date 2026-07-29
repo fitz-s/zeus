@@ -26,6 +26,14 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | runtime-local scratch and control | Runtime state, DBs, coordination files, and ignored planning scratch | `state/**`, `.omx/**`, `.omc/**` | Treat as runtime context, not repo law |
 | generated evidence sinks | Dated evidence packets and raw captures | `docs/evidence/**`, `docs/rebuild/**`, `raw/**`; artifacts/historical_evidence untracked on disk | Evidence only unless promoted through a packet |
 
+## Root reference docs
+
+| Path | Role |
+|------|------|
+| `SYSTEM_CARD.md` | Claims/evidence/limits snapshot for external readers |
+| `AI_ASSISTANCE.md` | What AI-assistance metrics measure and don't, what stays human, documented control failures |
+| `.claude/README.md` | Router into agent governance: authority rule, write tiers, sandbox, incident-derived hooks |
+
 ## Directory router
 
 | Path | Role | Next read |
