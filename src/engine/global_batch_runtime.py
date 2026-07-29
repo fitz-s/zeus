@@ -401,6 +401,7 @@ def _complete_holding_coverage(
     decision_at_utc: datetime,
     book_deadline_at_utc: datetime,
     unavailable_book_by_position: Mapping[str, str] | None = None,
+    selection_no_trade_reason: str = "",
 ) -> tuple[GlobalHoldingAuctionCoverage, ...]:
     """Build one typed row for every exact held obligation, never by id alone."""
 
@@ -431,6 +432,15 @@ def _complete_holding_coverage(
                 else book_reason
             )
             if not reason:
+                _LOG.error(
+                    "global holding coverage source missing: position_id=%s "
+                    "family_key=%s selection_no_trade_reason=%s "
+                    "coverage_rows=%d",
+                    obligation.position_id,
+                    obligation.family_key,
+                    str(selection_no_trade_reason or "none"),
+                    len(rows),
+                )
                 raise ValueError(
                     "GLOBAL_HOLDING_COVERAGE_SCOPE_INCOMPLETE:"
                     f"{obligation.position_id}"
@@ -4611,6 +4621,9 @@ def process_current_global_batch(
                         ineligible_by_family=ineligible_by_family,
                         unavailable_book_by_position=(
                             unavailable_book_by_position
+                        ),
+                        selection_no_trade_reason=str(
+                            selected.decision.no_trade_reason or ""
                         ),
                         ledger_snapshot_id=selection_wealth.ledger_snapshot_id,
                         wealth_economic_identity=selection_wealth.economic_identity,
