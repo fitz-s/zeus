@@ -42,6 +42,8 @@ class HeldSellReauctionRequest:
     """One held statistical-SELL obligation that requires a global reauction."""
 
     request_id: str
+    material_identity: str
+    generation: str
     position_id: str
     family: tuple[str, str, str]
     probability_content_identity: str
@@ -55,6 +57,8 @@ class HeldSellReauctionReceipt:
     """Durable terminal result for one held reauction obligation."""
 
     request_id: str
+    material_identity: str
+    generation: str
     status: str
     reason: str
     selection_epoch_identity: str = ""
@@ -194,7 +198,7 @@ def _clean_forecast_families(
     return tuple(families)
 
 
-def make_held_sell_reauction_request(
+def _held_sell_reauction_material(
     *,
     position_id: str,
     family: tuple[str, str, str],
@@ -202,8 +206,8 @@ def make_held_sell_reauction_request(
     held_token_id: str,
     held_best_bid: float,
     bid_observed_at: str,
-) -> HeldSellReauctionRequest:
-    """Bind one monitor witness to the exact global reauction it requires."""
+) -> dict[str, object]:
+    """Validate and normalize the stable held-position witness."""
 
     clean_family = _clean_forecast_families((family,))
     clean_position_id = str(position_id or "").strip()
@@ -236,10 +240,85 @@ def make_held_sell_reauction_request(
         "held_best_bid": clean_bid,
         "bid_observed_at": clean_observed_at,
     }
-    request_id = hashlib.sha256(
+    return material
+
+
+def held_sell_reauction_material_identity(
+    *,
+    position_id: str,
+    family: tuple[str, str, str],
+    probability_content_identity: str,
+    held_token_id: str,
+    held_best_bid: float,
+    bid_observed_at: str,
+) -> str:
+    """Return the stable identity of one held-position q/book witness."""
+
+    material = _held_sell_reauction_material(
+        position_id=position_id,
+        family=family,
+        probability_content_identity=probability_content_identity,
+        held_token_id=held_token_id,
+        held_best_bid=held_best_bid,
+        bid_observed_at=bid_observed_at,
+    )
+    return hashlib.sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    return HeldSellReauctionRequest(request_id=request_id, **material)
+
+
+def _held_sell_reauction_request_id(
+    material_identity: str,
+    generation: str,
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "generation": generation,
+                "material_identity": material_identity,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def make_held_sell_reauction_request(
+    *,
+    position_id: str,
+    family: tuple[str, str, str],
+    probability_content_identity: str,
+    held_token_id: str,
+    held_best_bid: float,
+    bid_observed_at: str,
+    generation: str | None = None,
+) -> HeldSellReauctionRequest:
+    """Bind one monitor witness to one non-reusable request generation."""
+
+    material = _held_sell_reauction_material(
+        position_id=position_id,
+        family=family,
+        probability_content_identity=probability_content_identity,
+        held_token_id=held_token_id,
+        held_best_bid=held_best_bid,
+        bid_observed_at=bid_observed_at,
+    )
+    material_identity = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    clean_generation = str(generation or uuid.uuid4().hex).strip()
+    if not clean_generation or len(clean_generation) > 128:
+        raise ValueError("HELD_SELL_REAUCTION_GENERATION_INVALID")
+    request_id = _held_sell_reauction_request_id(
+        material_identity,
+        clean_generation,
+    )
+    return HeldSellReauctionRequest(
+        request_id=request_id,
+        material_identity=material_identity,
+        generation=clean_generation,
+        **material,
+    )
 
 
 def _clean_held_sell_reauction_requests(
@@ -250,28 +329,56 @@ def _clean_held_sell_reauction_requests(
     requests: list[HeldSellReauctionRequest] = []
     seen: set[str] = set()
     for raw in values:
-        if isinstance(raw, HeldSellReauctionRequest):
-            material = raw
-        elif isinstance(raw, dict):
-            try:
-                material = make_held_sell_reauction_request(
-                    position_id=str(raw.get("position_id") or ""),
-                    family=tuple(raw.get("family") or ()),
-                    probability_content_identity=str(
-                        raw.get("probability_content_identity") or ""
-                    ),
-                    held_token_id=str(raw.get("held_token_id") or ""),
-                    held_best_bid=raw.get("held_best_bid"),
-                    bid_observed_at=str(raw.get("bid_observed_at") or ""),
-                )
-            except (TypeError, ValueError):
+        if not isinstance(raw, (HeldSellReauctionRequest, dict)):
+            continue
+
+        def get(key: str, default: object = None) -> object:
+            if isinstance(raw, dict):
+                return raw.get(key, default)
+            return getattr(raw, key, default)
+
+        claimed_request_id = str(get("request_id") or "").strip()
+        claimed_material_identity = str(get("material_identity") or "").strip()
+        generation = str(get("generation") or "").strip()
+        try:
+            material_identity = held_sell_reauction_material_identity(
+                position_id=str(get("position_id") or ""),
+                family=tuple(get("family") or ()),
+                probability_content_identity=str(
+                    get("probability_content_identity") or ""
+                ),
+                held_token_id=str(get("held_token_id") or ""),
+                held_best_bid=get("held_best_bid"),
+                bid_observed_at=str(get("bid_observed_at") or ""),
+            )
+            if claimed_material_identity and (
+                claimed_material_identity != material_identity
+            ):
                 continue
-        else:
+            legacy_generation = not generation
+            if legacy_generation:
+                if claimed_request_id != material_identity:
+                    continue
+                generation = f"legacy-{claimed_request_id}"
+            request = make_held_sell_reauction_request(
+                position_id=str(get("position_id") or ""),
+                family=tuple(get("family") or ()),
+                probability_content_identity=str(
+                    get("probability_content_identity") or ""
+                ),
+                held_token_id=str(get("held_token_id") or ""),
+                held_best_bid=get("held_best_bid"),
+                bid_observed_at=str(get("bid_observed_at") or ""),
+                generation=generation,
+            )
+        except (TypeError, ValueError):
             continue
-        if material.request_id in seen:
+        if not legacy_generation and claimed_request_id != request.request_id:
             continue
-        seen.add(material.request_id)
-        requests.append(material)
+        if request.request_id in seen:
+            continue
+        seen.add(request.request_id)
+        requests.append(request)
         if len(requests) == 100:
             break
     return tuple(requests)
@@ -639,6 +746,8 @@ def _read_held_sell_reauction_receipt(
         )
         receipt = HeldSellReauctionReceipt(
             request_id=str(payload["request_id"]).strip(),
+            material_identity=str(payload["material_identity"]).strip(),
+            generation=str(payload["generation"]).strip(),
             status=str(payload["status"]).strip(),
             reason=str(payload["reason"]).strip(),
             selection_epoch_identity=str(
@@ -652,6 +761,13 @@ def _read_held_sell_reauction_receipt(
         return None
     if (
         receipt.request_id != str(request_id or "").strip()
+        or receipt.request_id
+        != _held_sell_reauction_request_id(
+            receipt.material_identity,
+            receipt.generation,
+        )
+        or not receipt.material_identity
+        or not receipt.generation
         or receipt.status not in {"ACTUATED", "REJECTED"}
         or not receipt.reason
     ):
@@ -681,6 +797,13 @@ def persist_held_sell_reauction_receipts(
                 not isinstance(receipt, HeldSellReauctionReceipt)
                 or receipt.status not in {"ACTUATED", "REJECTED"}
                 or not receipt.request_id
+                or not receipt.material_identity
+                or not receipt.generation
+                or receipt.request_id
+                != _held_sell_reauction_request_id(
+                    receipt.material_identity,
+                    receipt.generation,
+                )
                 or not receipt.reason
                 or (
                     receipt.status == "ACTUATED"
@@ -720,10 +843,17 @@ def held_sell_reauction_requests_completed(
 ) -> bool:
     """A request completes only with its own durable actuation/reject receipt."""
 
-    return bool(requests) and all(
-        _read_held_sell_reauction_receipt(request.request_id, path=path) is not None
-        for request in requests
-    )
+    if not requests:
+        return False
+    for request in requests:
+        receipt = _read_held_sell_reauction_receipt(request.request_id, path=path)
+        if (
+            receipt is None
+            or receipt.material_identity != request.material_identity
+            or receipt.generation != request.generation
+        ):
+            return False
+    return True
 
 
 def acknowledge_reactor_wake(

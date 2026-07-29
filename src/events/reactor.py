@@ -6225,12 +6225,15 @@ def request_global_auction_completion(
         )
     try:
         from src.runtime.reactor_wake import (
+            held_sell_reauction_material_identity,
             make_held_sell_reauction_request,
             publish_reactor_wake,
             reactor_wakes_since,
         )
 
         held_request = None
+        held_request_material_identity = ""
+        held_request_kwargs = None
         if any(
             (
                 probability_content_identity,
@@ -6239,13 +6242,16 @@ def request_global_auction_completion(
                 bid_observed_at,
             )
         ):
-            held_request = make_held_sell_reauction_request(
-                position_id=str(position_id or ""),
-                family=clean_family,
-                probability_content_identity=probability_content_identity,
-                held_token_id=held_token_id,
-                held_best_bid=held_best_bid,
-                bid_observed_at=bid_observed_at,
+            held_request_kwargs = {
+                "position_id": str(position_id or ""),
+                "family": clean_family,
+                "probability_content_identity": probability_content_identity,
+                "held_token_id": held_token_id,
+                "held_best_bid": held_best_bid,
+                "bid_observed_at": bid_observed_at,
+            }
+            held_request_material_identity = held_sell_reauction_material_identity(
+                **held_request_kwargs
             )
 
         durable_wakes = tuple(
@@ -6255,20 +6261,30 @@ def request_global_auction_completion(
         )
         durable_request_exists = (
             any(
-                held_request.request_id
+                held_request_material_identity
                 in {
-                    request.request_id
-                    for request in wake.held_sell_reauction_requests
+                    request.material_identity
+                    for request in getattr(
+                        wake,
+                        "held_sell_reauction_requests",
+                        (),
+                    )
                 }
                 for wake in durable_wakes
             )
-            if held_request is not None
+            if held_request_material_identity
             else (
                 any(wake_families[0] in wake.forecast_families for wake in durable_wakes)
                 if wake_families
                 else bool(durable_wakes)
             )
         )
+        if held_request_kwargs is not None and (
+            force_new_generation or not durable_request_exists
+        ):
+            held_request = make_held_sell_reauction_request(
+                **held_request_kwargs
+            )
     except ValueError:
         logging.getLogger("zeus.events.reactor").error(
             "held SELL reauction request rejected before durable publish: "
@@ -6335,6 +6351,13 @@ def _held_sell_reauction_receipts_from_global_cut(
         "",
     )
     for request in requests:
+        receipt_identity = {
+            "request_id": str(getattr(request, "request_id", "") or ""),
+            "material_identity": str(
+                getattr(request, "material_identity", "") or ""
+            ),
+            "generation": str(getattr(request, "generation", "") or ""),
+        }
         coverage = held_sell_reauction_coverage(
             position_id=str(getattr(request, "position_id", "") or ""),
             probability_content_identity=str(
@@ -6348,9 +6371,7 @@ def _held_sell_reauction_receipts_from_global_cut(
             if global_no_trade_reason:
                 receipts.append(
                     HeldSellReauctionReceipt(
-                        request_id=str(
-                            getattr(request, "request_id", "") or ""
-                        ),
+                        **receipt_identity,
                         status="REJECTED",
                         reason=(
                             "GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:"
@@ -6369,7 +6390,7 @@ def _held_sell_reauction_receipts_from_global_cut(
                 continue
             receipts.append(
                 HeldSellReauctionReceipt(
-                    request_id=str(getattr(request, "request_id", "") or ""),
+                    **receipt_identity,
                     status="ACTUATED",
                     reason="GLOBAL_AUCTION_CURRENT_HOLDING_COVERAGE_ACTUATED",
                     selection_epoch_identity=selection_epoch_identity,
@@ -6379,7 +6400,7 @@ def _held_sell_reauction_receipts_from_global_cut(
         elif coverage.status == "EXCLUDED":
             receipts.append(
                 HeldSellReauctionReceipt(
-                    request_id=str(getattr(request, "request_id", "") or ""),
+                    **receipt_identity,
                     status="REJECTED",
                     reason=(
                         "GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:"

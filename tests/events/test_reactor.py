@@ -2191,6 +2191,8 @@ def test_held_sell_reauction_typed_reject_receipt_completes_request(tmp_path):
         (
             HeldSellReauctionReceipt(
                 request_id=request.request_id,
+                material_identity=request.material_identity,
+                generation=request.generation,
                 status="REJECTED",
                 reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
             ),
@@ -2203,6 +2205,8 @@ def test_held_sell_reauction_typed_reject_receipt_completes_request(tmp_path):
 
 
 def test_held_sell_reauction_request_round_trips_through_durable_wake(tmp_path):
+    import json
+
     from src.runtime import reactor_wake
 
     request = reactor_wake.make_held_sell_reauction_request(
@@ -2222,9 +2226,15 @@ def test_held_sell_reauction_request_round_trips_through_durable_wake(tmp_path):
     )
 
     stored = reactor_wake.reactor_wakes_since(None, path=path)
+    queue_file = next((tmp_path / "wake.json.d").glob("*.json"))
+    payload = json.loads(queue_file.read_text(encoding="utf-8"))
+    stored_request = payload["held_sell_reauction_requests"][0]
 
     assert len(stored) == 1
     assert stored[0].held_sell_reauction_requests == (request,)
+    assert stored_request["material_identity"] == request.material_identity
+    assert stored_request["generation"] == request.generation
+    assert stored_request["request_id"] == request.request_id
 
 
 def test_held_sell_reauction_current_coverage_emits_actuation_receipt(monkeypatch):
@@ -2257,6 +2267,8 @@ def test_held_sell_reauction_current_coverage_emits_actuation_receipt(monkeypatc
 
     assert len(receipts) == 1
     assert receipts[0].request_id == request.request_id
+    assert receipts[0].material_identity == request.material_identity
+    assert receipts[0].generation == request.generation
     assert receipts[0].status == "ACTUATED"
     assert receipts[0].selection_epoch_identity == "selection-epoch-covered"
     assert receipts[0].sell_book_witness_identity == "book-witness-covered"
@@ -2294,15 +2306,28 @@ def test_held_sell_reauction_global_no_trade_emits_typed_reject(monkeypatch):
     assert receipts[0].reason.endswith("GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES")
 
 
-def test_snapshot_reauction_forces_new_wake_generation(monkeypatch):
+def test_snapshot_reauction_forces_new_wake_generation(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
     from src.events import reactor
     from src.runtime import reactor_wake
 
+    request_kwargs = {
+        "position_id": "position-release-generation",
+        "family": ("Paris", "2026-07-28", "low"),
+        "probability_content_identity": "q-content-release-generation",
+        "held_token_id": "token-no-release-generation",
+        "held_best_bid": 0.10,
+        "bid_observed_at": "2026-07-28T08:00:00+00:00",
+    }
+    old_request = reactor_wake.make_held_sell_reauction_request(
+        **request_kwargs,
+        generation="old-generation",
+    )
     old_wake = SimpleNamespace(
         reason=reactor.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
         forecast_families=(("Paris", "2026-07-28", "low"),),
+        held_sell_reauction_requests=(old_request,),
     )
     published = []
     monkeypatch.setattr(
@@ -2318,18 +2343,48 @@ def test_snapshot_reauction_forces_new_wake_generation(monkeypatch):
 
     assert reactor.request_global_auction_completion(
         reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
-        position_id="position-release-generation",
-        family=("Paris", "2026-07-28", "low"),
+        **request_kwargs,
         force_new_generation=True,
     ) is True
-    assert published == [
-        {
-            "source": "held_position_monitor",
-            "reason": reactor.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
-            "forecast_families": (("Paris", "2026-07-28", "low"),),
-            "held_sell_reauction_requests": (),
-        }
-    ]
+    assert len(published) == 1
+    new_request = published[0]["held_sell_reauction_requests"][0]
+    assert new_request.material_identity == old_request.material_identity
+    assert new_request.generation != old_request.generation
+    assert new_request.request_id != old_request.request_id
+
+    receipt_path = tmp_path / "wake.json"
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (
+            reactor_wake.HeldSellReauctionReceipt(
+                request_id=old_request.request_id,
+                material_identity=old_request.material_identity,
+                generation=old_request.generation,
+                status="REJECTED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+            ),
+        ),
+        path=receipt_path,
+    )
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (new_request,),
+        path=receipt_path,
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (
+            reactor_wake.HeldSellReauctionReceipt(
+                request_id=new_request.request_id,
+                material_identity=new_request.material_identity,
+                generation=new_request.generation,
+                status="REJECTED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+            ),
+        ),
+        path=receipt_path,
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (new_request,),
+        path=receipt_path,
+    )
 
 
 def test_new_reauction_generation_survives_old_generation_ack(tmp_path):
