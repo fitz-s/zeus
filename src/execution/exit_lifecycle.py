@@ -458,12 +458,11 @@ def needs_global_sell_snapshot_reauction(
 ) -> bool:
     """Whether canonical runtime state carries an unserved fresh-cut debt."""
 
-    if _is_global_sell_snapshot_reauction_error(
+    runtime_error = _is_global_sell_snapshot_reauction_error(
         getattr(position, "last_exit_error", "")
-    ):
-        return True
+    )
     if conn is None:
-        return False
+        return runtime_error
     trade_id = str(getattr(position, "trade_id", "") or "")
     if not trade_id:
         return False
@@ -492,11 +491,12 @@ def needs_global_sell_snapshot_reauction(
         == "durable_wake_reserved"
     ):
         return False
-    return (
+    canonical_debt = (
         payload.get("release_reason")
         == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
         and _is_global_sell_snapshot_reauction_error(payload.get("error"))
     )
+    return canonical_debt
 
 
 def _is_runtime_submit_gate_block_error(error: str) -> bool:

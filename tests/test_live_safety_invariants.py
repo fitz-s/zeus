@@ -2161,6 +2161,119 @@ def test_global_sell_reauction_commit_failure_restores_runtime_without_network(
     )
 
 
+def test_late_global_sell_retry_commit_failure_restores_runtime(monkeypatch):
+    """A retry missed by preflight cannot escape rollback in the monitor tail."""
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    pos = _make_position(
+        trade_id="late-global-sell-reauction-commit-failure",
+        token_id="late-global-sell-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    pos.exit_state = "retry_pending"
+    pos.state = "pending_exit"
+    pos.order_status = "retry_pending"
+    pos.next_exit_retry_at = "2026-01-01T00:00:00+00:00"
+    pos.last_exit_error = "global_sell_exit_executable_snapshot_unavailable"
+    events: list[str] = []
+
+    class Conn:
+        in_transaction = True
+        commits = 0
+
+        def commit(self):
+            self.commits += 1
+            if self.commits == 1:
+                events.append("preflight_commit")
+                self.in_transaction = False
+                return
+            events.append("late_commit_failed")
+            raise RuntimeError("commit unavailable")
+
+        def rollback(self):
+            events.append("rollback")
+            self.in_transaction = False
+
+    conn = Conn()
+
+    def release_write(*_args, **_kwargs):
+        events.append("release_write")
+        conn.in_transaction = True
+        return True
+
+    class Clob:
+        def get_orderbook_snapshots(self, _token_ids):
+            events.append("network_publish")
+            raise AssertionError("network must remain deferred")
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.check_pending_exits",
+        lambda *_args, **_kwargs: {
+            "filled": 0,
+            "retried": 0,
+            "unchanged": 1,
+            "filled_positions": [],
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_dual_write_exit_retry_released_if_available",
+        release_write,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_snapshot_min_order_dust_error",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.release_pending_exit_without_order_if_retryable",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [pos],
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda _position: False,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        conn,
+        Clob(),
+        _make_portfolio(pos),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_late_reauction_commit_failure"),
+    )
+
+    assert events[:4] == [
+        "preflight_commit",
+        "release_write",
+        "late_commit_failed",
+        "rollback",
+    ]
+    assert "network_publish" not in events
+    assert pos.state == "pending_exit"
+    assert pos.exit_state == "retry_pending"
+    assert pos.order_status == "retry_pending"
+    assert pos.last_exit_error == (
+        "global_sell_exit_executable_snapshot_unavailable"
+    )
+
+
 def test_monitoring_phase_urgent_wake_counts_only_unvisited_tail(monkeypatch):
     """A wake after the batch cannot count the already-scanned position twice."""
     from src.engine import cycle_runtime

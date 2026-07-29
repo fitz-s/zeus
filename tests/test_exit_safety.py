@@ -7274,6 +7274,51 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
         is False
     )
 
+    runtime_only = replace(
+        failed_wake,
+        trade_id="pos-global-sell-runtime-only-debt",
+        market_id="condition-runtime-only",
+        condition_id="condition-runtime-only",
+        token_id="yes-token-runtime-only",
+        no_token_id="no-token-runtime-only",
+        state="holding",
+        exit_state="",
+        order_status="filled",
+        last_exit_error=(
+            "global_sell_exit_executable_snapshot_unavailable"
+        ),
+    )
+    upsert_position_current(
+        conn,
+        {
+            **build_position_current_projection(runtime_only),
+            "phase": "pending_exit",
+        },
+    )
+    conn.commit()
+    runtime_only_requests = []
+    assert (
+        exit_lifecycle.needs_global_sell_snapshot_reauction(
+            runtime_only,
+            conn,
+        )
+        is False
+    )
+    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        runtime_only,
+        conn=conn,
+        requester=lambda *_args: runtime_only_requests.append(True) or True,
+    ) is False
+    assert runtime_only_requests == []
+    assert conn.execute(
+        """
+        SELECT phase
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (runtime_only.trade_id,),
+    ).fetchone()["phase"] == "pending_exit"
+
 
 def test_no_bid_retry_waits_for_fresh_positive_bid_before_release(conn):
     from src.engine.lifecycle_events import build_position_current_projection

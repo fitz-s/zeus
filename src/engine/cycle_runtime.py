@@ -5461,6 +5461,16 @@ def execute_monitoring_phase(
         "last_exit_error",
     )
 
+    def has_global_snapshot_retry_runtime(position) -> bool:
+        return str(
+            getattr(position, "last_exit_error", "") or ""
+        ).lower().startswith(
+            (
+                "global_sell_exit_executable_snapshot_unavailable",
+                "global_sell_exit_executable_snapshot_error:",
+            )
+        )
+
     def snapshot_global_retry_runtime() -> dict[int, dict[str, object]]:
         return {
             id(position): {
@@ -5468,7 +5478,10 @@ def execute_monitoring_phase(
                 for field in global_retry_runtime_fields
             }
             for position in tuple(getattr(portfolio, "positions", ()) or ())
-            if needs_global_sell_snapshot_reauction(position, conn)
+            if (
+                has_global_snapshot_retry_runtime(position)
+                or needs_global_sell_snapshot_reauction(position, conn)
+            )
         }
 
     def restore_global_retry_runtime(
@@ -5480,6 +5493,59 @@ def execute_monitoring_phase(
                 continue
             for field, value in snapshot.items():
                 setattr(position, field, value)
+
+    def check_pending_retry_with_committed_global_reauction(position) -> bool:
+        nonlocal portfolio_dirty
+        global_retry = has_global_snapshot_retry_runtime(position)
+        previous_runtime = (
+            {
+                field: getattr(position, field, "")
+                for field in global_retry_runtime_fields
+            }
+            if global_retry
+            else None
+        )
+        released = check_pending_retries(
+            position,
+            conn=conn,
+            global_sell_reauction_requester=(
+                request_global_sell_snapshot_reauction
+            ),
+        )
+        if not released or not global_retry:
+            return released
+        if conn is not None and conn.in_transaction and not _release_monitor_write_lock_boundary(
+            conn,
+            summary,
+            deps,
+            boundary="late_global_sell_snapshot_reauction",
+        ):
+            assert previous_runtime is not None
+            for field, value in previous_runtime.items():
+                setattr(position, field, value)
+            return False
+        if recover_global_sell_snapshot_reauction_debt(
+            position,
+            conn=conn,
+            requester=request_global_sell_snapshot_reauction,
+        ):
+            portfolio_dirty = True
+            summary["global_sell_snapshot_reauction_debts_recovered"] = (
+                summary.get(
+                    "global_sell_snapshot_reauction_debts_recovered",
+                    0,
+                )
+                + 1
+            )
+        else:
+            summary["global_sell_snapshot_reauction_debts_pending"] = (
+                summary.get(
+                    "global_sell_snapshot_reauction_debts_pending",
+                    0,
+                )
+                + 1
+            )
+        return released
 
     def urgent_preemption_requested() -> bool:
         if should_preempt_for_urgent_day0 is None:
@@ -5953,13 +6019,7 @@ def execute_monitoring_phase(
                 )
                 continue
             if run_exit_preflight:
-                check_pending_retries(
-                    pos,
-                    conn=conn,
-                    global_sell_reauction_requester=(
-                        request_global_sell_snapshot_reauction
-                    ),
-                )
+                check_pending_retry_with_committed_global_reauction(pos)
             if release_pending_exit_without_order_if_retryable(pos, conn=conn):
                 portfolio_dirty = True
                 summary["monitor_released_pending_exit_without_order"] = (
@@ -6011,13 +6071,7 @@ def execute_monitoring_phase(
             continue
 
         if run_exit_preflight:
-            check_pending_retries(
-                pos,
-                conn=conn,
-                global_sell_reauction_requester=(
-                    request_global_sell_snapshot_reauction
-                ),
-            )
+            check_pending_retry_with_committed_global_reauction(pos)
 
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
         # PHASE LAW): the quarantine-admin-resolution monitor branch is
@@ -6516,12 +6570,11 @@ def execute_monitoring_phase(
                     summary["pending_exit_retry_current_clob_quote_refreshed"] = (
                         summary.get("pending_exit_retry_current_clob_quote_refreshed", 0) + 1
                     )
-                    if pending_exit_monitor_only and check_pending_retries(
-                        pos,
-                        conn=conn,
-                        global_sell_reauction_requester=(
-                            request_global_sell_snapshot_reauction
-                        ),
+                    if (
+                        pending_exit_monitor_only
+                        and check_pending_retry_with_committed_global_reauction(
+                            pos
+                        )
                     ):
                         pending_exit_monitor_only = False
                         portfolio_dirty = True
