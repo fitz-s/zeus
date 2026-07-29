@@ -5554,6 +5554,10 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "execution_fact",
     "execution_feasibility_evidence",
     "executable_market_snapshots",
+    # book_snapshot_persistence (2026-07-29): decision-time family book ladder
+    # history for the center-evidence campaign (market-implied center vs our
+    # mu). Executable-market substrate, co-located with executable_market_snapshots.
+    "family_book_snapshots",
     # Repoint 2 (fix/prearm-fill-exit-readiness 2026-06-03): outcome_fact
     # corrected to trade_class. The live writer (harvester.py log_settlement_event)
     # has always written to zeus_trades.db via trade_conn (18 live rows confirmed,
@@ -6552,6 +6556,10 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     init_snapshot_schema(conn)
     from src.state.schema.book_hash_transitions_schema import ensure_table as _ensure_book_hash_transitions_table
     _ensure_book_hash_transitions_table(conn)
+    # book_snapshot_persistence (2026-07-29): decision-time family book ladder
+    # history, evidence-only (see src/state/schema/family_book_snapshots_schema.py).
+    from src.state.schema.family_book_snapshots_schema import ensure_table as _ensure_family_book_snapshots_table
+    _ensure_family_book_snapshots_table(conn)
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
     _ensure_execution_feasibility_evidence_table(conn)
     # W0.2 blind-window metric (architecture/invariants.yaml

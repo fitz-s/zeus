@@ -107,6 +107,10 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'execution_feasibility_latest': Domain.TRADE,
     'exit_mutex_holdings': Domain.TRADE,
     'exit_timing_attribution': Domain.WORLD,
+    # book_snapshot_persistence (2026-07-29): decision-time family book
+    # ladder history, executable-market substrate co-located with
+    # executable_market_snapshots.
+    'family_book_snapshots': Domain.TRADE,
     'family_rebalance_intents': Domain.WORLD,
     # LX-T4 (3b08139f1) continuous fill synchronizer cursor state.
     'fill_sync_watermarks': Domain.TRADE,

@@ -13859,6 +13859,19 @@ def _build_event_bound_no_submit_receipt_core(
                     )
                     break
                 _active_spine_entry_proofs = _next_spine_entry_proofs
+            # book_snapshot_persistence (2026-07-29): capture the decided family's
+            # order-book ladder BEFORE the prepare_global_auction/global_actuation
+            # branch below, so it fires on every arm (the other two arms skip
+            # _record_qkernel_selection_family_facts, which is the only place this
+            # would otherwise run). Fail-soft: never blocks or delays the decision.
+            from src.events.family_book_snapshot import append_family_book_snapshot
+            append_family_book_snapshot(
+                trade_conn,
+                decision=_spine_fact_decision,
+                family=family,
+                decision_time=decision_time,
+                causal_snapshot_id=event.causal_snapshot_id,
+            )
             if prepare_global_auction:
                 provenance_capture["prepared_global_family"] = _prepared_global_family
                 if _global_prepare_reason is not None:

@@ -2726,6 +2726,45 @@ tables:
       price readers and submit gates fail closed on rows captured before a
       matching invalidation until a newer snapshot is captured.
 
+  - name: family_book_snapshots
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema_trade_only + src.state.schema.family_book_snapshots_schema.ensure_table"
+    pk_col: snapshot_id
+    required_columns:
+      - {name: snapshot_id, type: TEXT, nullable: false}
+      - {name: family_id, type: TEXT, nullable: false}
+      - {name: city, type: TEXT, nullable: false}
+      - {name: target_date, type: TEXT, nullable: false}
+      - {name: temperature_metric, type: TEXT, nullable: false}
+      - {name: decision_time, type: TEXT, nullable: false}
+      - {name: captured_at_utc, type: TEXT, nullable: false}
+      - {name: book_hash, type: TEXT, nullable: false}
+      - {name: complete_book, type: INTEGER, nullable: false}
+      - {name: ladder_json, type: TEXT, nullable: false}
+      - {name: market_center_c, type: REAL, nullable: true}
+      - {name: our_mu_c, type: REAL, nullable: true}
+      - {name: our_sigma_c, type: REAL, nullable: true}
+      - {name: decision_snapshot_id, type: TEXT, nullable: true}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      EVIDENCE ONLY -- never decision authority. Append-only, dedup-by-hash
+      (UNIQUE(family_id, book_hash)) durable history of the decision-time
+      FamilyBook (src/execution/family_book.py) FamilyDecisionEngine.decide()
+      already builds every cycle and otherwise discards. Data prerequisite
+      for the center-evidence campaign (market-implied center vs our
+      posterior mu). market_center_c/our_mu_c/our_sigma_c are stored in the
+      family's native settlement unit (C or F per EventResolution.measurement_unit,
+      NOT always Celsius despite the column suffix -- see
+      docs/operations/current/book_snapshot_persistence/PLAN.md "Unit caveat").
+      Writer: src/events/family_book_snapshot.py append_family_book_snapshot
+      (fail-soft: any exception is caught and logged, never raised). Reader:
+      the center-evidence campaign (not yet wired). Hook:
+      src/engine/event_reactor_adapter.py, one call per decided family,
+      before the prepare_global_auction/global_actuation branch so it fires
+      on every arm.
+
   - name: book_hash_transitions
     db: trade
     schema_class: trade_class
