@@ -9,8 +9,8 @@ from __future__ import annotations
 import ast
 import glob
 import hashlib
+import json
 import sqlite3
-import unittest.mock
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -34,6 +34,18 @@ def conn():
     c.row_factory = sqlite3.Row
     init_schema(c)
     init_schema_trade_only(c)
+    c.execute("ATTACH DATABASE ':memory:' AS world")
+    c.execute(
+        """
+        CREATE TABLE world.decision_certificates (
+            certificate_hash TEXT PRIMARY KEY,
+            certificate_type TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            verifier_status TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
     yield c
     c.close()
 
@@ -53,17 +65,25 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
             decision_certificate_hash=None):
     from src.state.venue_command_repo import insert_command
     snapshot_id = _ensure_snapshot(c, token_id=token_id)
+    envelope_id = _ensure_envelope(
+        c,
+        token_id=token_id,
+        side=side,
+        price=price,
+        size=size,
+    )
+    if intent_kind == "ENTRY":
+        decision_certificate_hash = decision_certificate_hash or f"cert-{command_id}"
+        _ensure_entry_certificate(
+            c,
+            certificate_hash=decision_certificate_hash,
+            envelope_id=envelope_id,
+        )
     insert_command(
         c,
         command_id=command_id,
         snapshot_id=snapshot_id,
-        envelope_id=_ensure_envelope(
-            c,
-            token_id=token_id,
-            side=side,
-            price=price,
-            size=size,
-        ),
+        envelope_id=envelope_id,
         position_id=position_id,
         decision_id=decision_id,
         idempotency_key=idempotency_key,
@@ -270,6 +290,36 @@ def _ensure_envelope(
         envelope_id=envelope_id,
     )
     return envelope_id
+
+
+def _ensure_entry_certificate(c, *, certificate_hash: str, envelope_id: str) -> None:
+    envelope = c.execute(
+        """
+        SELECT condition_id, yes_token_id, no_token_id, selected_outcome_token_id
+          FROM venue_submission_envelopes WHERE envelope_id = ?
+        """,
+        (envelope_id,),
+    ).fetchone()
+    assert envelope is not None
+    token_id = str(envelope["selected_outcome_token_id"])
+    direction = "buy_yes" if token_id == str(envelope["yes_token_id"]) else "buy_no"
+    c.execute(
+        """
+        INSERT OR REPLACE INTO world.decision_certificates(
+            certificate_hash, certificate_type, mode, verifier_status, payload_json
+        ) VALUES (?, 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', ?)
+        """,
+        (
+            certificate_hash,
+            json.dumps(
+                {
+                    "condition_id": str(envelope["condition_id"]),
+                    "token_id": token_id,
+                    "direction": direction,
+                }
+            ),
+        ),
+    )
 
 
 def _signed_envelope(*, order_id="0xorder", token_id="tok-001", side="BUY"):
@@ -638,7 +688,7 @@ def test_append_order_fact_terminal_preservation_is_command_scoped(conn):
 
 class TestInsertCommandAtomicWithIntentCreatedEvent:
     def test_both_rows_inserted(self, conn):
-        from src.state.venue_command_repo import insert_command, list_events, get_command
+        from src.state.venue_command_repo import get_command, list_events
 
         _insert(conn)
 
@@ -667,11 +717,15 @@ class TestInsertCommandAtomicWithIntentCreatedEvent:
 
         with pytest.raises(Exception):
             snapshot_id = _ensure_snapshot(conn, token_id="tok-001")
+            envelope_id = _ensure_envelope(conn, token_id="tok-001", price=0.5, size=10.0)
+            _ensure_entry_certificate(
+                conn, certificate_hash="cert-fail", envelope_id=envelope_id
+            )
             insert_command(
                 conn,
                 command_id="cmd-fail",
                 snapshot_id=snapshot_id,
-                envelope_id=_ensure_envelope(conn, token_id="tok-001", price=0.5, size=10.0),
+                envelope_id=envelope_id,
                 position_id="pos-001",
                 decision_id="dec-001",
                 idempotency_key="idem-fail",
@@ -682,6 +736,7 @@ class TestInsertCommandAtomicWithIntentCreatedEvent:
                 size=10.0,
                 price=0.5,
                 created_at="2026-04-26T00:00:00Z",
+                decision_certificate_hash="cert-fail",
             )
 
         # The command row must NOT exist
@@ -793,11 +848,17 @@ class TestPositionDecisionAttributionAppendHook:
 
         with pytest.raises(Exception):
             snapshot_id = _ensure_snapshot(conn, token_id="tok-attr-4")
+            envelope_id = _ensure_envelope(conn, token_id="tok-attr-4", price=0.5, size=10.0)
+            _ensure_entry_certificate(
+                conn,
+                certificate_hash="cert-should-not-survive",
+                envelope_id=envelope_id,
+            )
             insert_command(
                 conn,
                 command_id="cmd-attr-4",
                 snapshot_id=snapshot_id,
-                envelope_id=_ensure_envelope(conn, token_id="tok-attr-4", price=0.5, size=10.0),
+                envelope_id=envelope_id,
                 position_id="pos-attr-4",
                 decision_id="dec-001",
                 idempotency_key="idem-attr-4",
@@ -814,6 +875,79 @@ class TestPositionDecisionAttributionAppendHook:
         assert _attribution_row(conn, "pos-attr-4") is None, (
             "attribution row should have been rolled back with the command"
         )
+
+
+class TestEntryCertificateReferentialClosure:
+    def test_dangling_hash_rejects_without_command_or_attribution(self, conn):
+        from src.state.venue_command_repo import insert_command
+
+        snapshot_id = _ensure_snapshot(conn, token_id="tok-dangling")
+        envelope_id = _ensure_envelope(conn, token_id="tok-dangling")
+        with pytest.raises(ValueError, match="exact LIVE VERIFIED"):
+            insert_command(
+                conn,
+                command_id="cmd-dangling",
+                snapshot_id=snapshot_id,
+                envelope_id=envelope_id,
+                position_id="pos-dangling",
+                decision_id="dec-dangling",
+                idempotency_key="idem-dangling",
+                intent_kind="ENTRY",
+                market_id="mkt-dangling",
+                token_id="tok-dangling",
+                side="BUY",
+                size=10.0,
+                price=0.5,
+                created_at="2026-07-29T00:00:00Z",
+                decision_certificate_hash="missing-certificate-hash",
+            )
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id='cmd-dangling'"
+        ).fetchone()[0] == 0
+        assert _attribution_row(conn, "pos-dangling") is None
+
+    def test_identity_mismatch_rejects_without_command_or_attribution(self, conn):
+        from src.state.venue_command_repo import insert_command
+
+        snapshot_id = _ensure_snapshot(conn, token_id="tok-identity")
+        envelope_id = _ensure_envelope(conn, token_id="tok-identity")
+        _ensure_entry_certificate(
+            conn,
+            certificate_hash="cert-identity-mismatch",
+            envelope_id=envelope_id,
+        )
+        conn.execute(
+            """
+            UPDATE world.decision_certificates
+               SET payload_json = ?
+             WHERE certificate_hash = 'cert-identity-mismatch'
+            """,
+            (json.dumps({"condition_id": "other", "token_id": "tok-identity", "direction": "buy_yes"}),),
+        )
+        with pytest.raises(ValueError, match="identity does not match"):
+            insert_command(
+                conn,
+                command_id="cmd-identity-mismatch",
+                snapshot_id=snapshot_id,
+                envelope_id=envelope_id,
+                position_id="pos-identity-mismatch",
+                decision_id="dec-identity-mismatch",
+                idempotency_key="idem-identity-mismatch",
+                intent_kind="ENTRY",
+                market_id="mkt-identity-mismatch",
+                token_id="tok-identity",
+                side="BUY",
+                size=10.0,
+                price=0.5,
+                created_at="2026-07-29T00:00:00Z",
+                decision_certificate_hash="cert-identity-mismatch",
+            )
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id='cmd-identity-mismatch'"
+        ).fetchone()[0] == 0
+        assert _attribution_row(conn, "pos-identity-mismatch") is None
 
 
 class TestInsertCommandQVersionStamp:
@@ -1234,11 +1368,15 @@ class TestIdempotencyKeyUniquenessEnforced:
 
         with pytest.raises(sqlite3.IntegrityError):
             snapshot_id = _ensure_snapshot(conn, token_id="tok-001")
+            envelope_id = _ensure_envelope(conn, token_id="tok-001", price=0.6, size=5.0)
+            _ensure_entry_certificate(
+                conn, certificate_hash="cert-cmd-002", envelope_id=envelope_id
+            )
             insert_command(
                 conn,
                 command_id="cmd-002",
                 snapshot_id=snapshot_id,
-                envelope_id=_ensure_envelope(conn, token_id="tok-001", price=0.6, size=5.0),
+                envelope_id=envelope_id,
                 position_id="pos-002",
                 decision_id="dec-002",
                 idempotency_key="same-key",  # same key
@@ -1249,6 +1387,7 @@ class TestIdempotencyKeyUniquenessEnforced:
                 size=5.0,
                 price=0.6,
                 created_at="2026-04-26T00:01:00Z",
+                decision_certificate_hash="cert-cmd-002",
             )
 
     def test_different_keys_succeed(self, conn):
@@ -1549,11 +1688,13 @@ class TestSavepointComposability:
 
         conn.execute("SAVEPOINT outer_test")
         snapshot_id = _ensure_snapshot(conn, token_id="t1")
+        envelope_id = _ensure_envelope(conn, token_id="t1", price=0.5, size=10.0)
+        _ensure_entry_certificate(conn, certificate_hash="cert-cmp", envelope_id=envelope_id)
         insert_command(
             conn,
             command_id="cmp-001",
             snapshot_id=snapshot_id,
-            envelope_id=_ensure_envelope(conn, token_id="t1", price=0.5, size=10.0),
+            envelope_id=envelope_id,
             position_id="pos-1",
             decision_id="dec-1",
             idempotency_key="idem-cmp-001",
@@ -1564,6 +1705,7 @@ class TestSavepointComposability:
             size=10.0,
             price=0.5,
             created_at="2026-04-26T00:00:00Z",
+            decision_certificate_hash="cert-cmp",
         )
         # Outer rollback must succeed (SAVEPOINT still exists).
         conn.execute("ROLLBACK TO SAVEPOINT outer_test")

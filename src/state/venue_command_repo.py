@@ -1294,6 +1294,16 @@ def insert_command(
                     "live ENTRY requires one exact position decision certificate: "
                     f"position_id={position_id!r} matches={len(inherited)}"
                 )
+        if intent_kind == _IntentKind.ENTRY.value:
+            if resolved_certificate_hash is None:
+                raise ValueError(
+                    "ENTRY venue command requires an exact decision certificate hash"
+                )
+            _assert_entry_certificate_closure(
+                conn,
+                decision_certificate_hash=resolved_certificate_hash,
+                envelope_id=envelope_id_value,
+            )
         conn.execute(
             """
             INSERT INTO venue_commands (
@@ -1440,6 +1450,91 @@ def _assert_envelope_gate(
                         f"provenance envelope {field} does not match executable snapshot"
                     )
     return envelope_id
+
+
+def _assert_entry_certificate_closure(
+    conn: sqlite3.Connection,
+    *,
+    decision_certificate_hash: str,
+    envelope_id: str,
+) -> None:
+    """Require an ENTRY's exact, live certificate in the attached WORLD ledger.
+
+    SCOPE: this command/envelope only.  DRAIN: none; a missing proof is not a
+    transient queue to bridge.  RESET: the caller retries only after the exact
+    certificate has been committed to WORLD and the sanctioned trade+world
+    connection attaches that authority.  This runs inside ``insert_command``'s
+    SAVEPOINT before any command, event, or attribution write.
+    """
+    schemas = {
+        str(row[1]).strip()
+        for row in conn.execute("PRAGMA database_list").fetchall()
+        if len(row) > 1 and str(row[1]).strip()
+    }
+    if "world" not in schemas:
+        raise ValueError(
+            "ENTRY certificate closure requires sanctioned attached world authority"
+        )
+    try:
+        with _row_factory_as(conn, sqlite3.Row):
+            envelope = conn.execute(
+                """
+                SELECT condition_id, yes_token_id, no_token_id,
+                       selected_outcome_token_id, side
+                  FROM venue_submission_envelopes
+                 WHERE envelope_id = ?
+                """,
+                (envelope_id,),
+            ).fetchone()
+            certificate = conn.execute(
+                """
+                SELECT payload_json
+                  FROM world.decision_certificates
+                 WHERE certificate_hash = ?
+                   AND certificate_type = 'ActionableTradeCertificate'
+                   AND mode = 'LIVE'
+                   AND verifier_status = 'VERIFIED'
+                 LIMIT 1
+                """,
+                (decision_certificate_hash,),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise ValueError("ENTRY certificate closure authority is unavailable") from exc
+    if envelope is None:
+        raise ValueError("ENTRY certificate closure envelope is unavailable")
+    if certificate is None:
+        raise ValueError(
+            "ENTRY certificate closure requires exact LIVE VERIFIED "
+            "ActionableTradeCertificate"
+        )
+    try:
+        payload = json.loads(str(certificate["payload_json"] or ""))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("ENTRY certificate closure payload is invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("ENTRY certificate closure payload must be an object")
+
+    token_id = str(envelope["selected_outcome_token_id"] or "").strip()
+    condition_id = str(envelope["condition_id"] or "").strip()
+    yes_token_id = str(envelope["yes_token_id"] or "").strip()
+    no_token_id = str(envelope["no_token_id"] or "").strip()
+    side = str(envelope["side"] or "").strip().upper()
+    if token_id == yes_token_id:
+        expected_direction = "buy_yes"
+    elif token_id == no_token_id:
+        expected_direction = "buy_no"
+    else:
+        raise ValueError("ENTRY certificate closure envelope token is not a YES/NO token")
+    if side != "BUY":
+        raise ValueError("ENTRY certificate closure only authorizes BUY envelope identity")
+    if (
+        str(payload.get("condition_id") or "").strip() != condition_id
+        or str(payload.get("token_id") or "").strip() != token_id
+        or str(payload.get("direction") or "").strip().lower() != expected_direction
+    ):
+        raise ValueError(
+            "ENTRY certificate closure identity does not match command envelope"
+        )
 
 
 def _decimal(value: Any) -> Decimal:
