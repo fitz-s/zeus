@@ -2478,6 +2478,95 @@ def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
     conn.close()
 
 
+def test_new_day0_revision_waits_for_legacy_pending_owner_then_replaces_it(
+    tmp_path, monkeypatch
+) -> None:
+    """A witnessless legacy request retains its exact seed owner until terminal."""
+    db_path = _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC).isoformat()
+    old_payload = _day0_payload("2026-07-19T05:00:00+00:00")
+    new_payload = _day0_payload("2026-07-19T05:05:00+00:00")
+    owned_seed = Path(cfg["seed_dir"]) / "legacy.enqueue-owner.json"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(owned_seed),
+        reason="MISSING_LIVE_POSTERIOR",
+        day0_observed_extreme_observation_time=old_payload[
+            "day0_observed_extreme_observation_time"
+        ],
+        day0_observed_extreme_source=old_payload["day0_observed_extreme_source"],
+        day0_observed_extreme_c=old_payload["day0_observed_extreme_c"],
+        day0_observed_extreme_unit=old_payload["day0_observed_extreme_unit"],
+    )
+    conn.execute(
+        "UPDATE cycle_advance_enqueues SET day0_conditioning_identity_json = NULL"
+    )
+    conn.commit()
+
+    pending = Path(cfg["request_dir"]) / owned_seed.name
+    pending.parent.mkdir(parents=True)
+    pending.write_text(
+        json.dumps(
+            {
+                "city": "Shanghai",
+                "target_date": "2026-07-19",
+                "temperature_metric": "high",
+            }
+        ),
+        encoding="utf-8",
+    )
+    new_conditioning = {
+        key: new_payload[key]
+        for key in (
+            "day0_observed_extreme_observation_time",
+            "day0_observed_extreme_source",
+            "day0_observed_extreme_c",
+            "day0_observed_extreme_unit",
+        )
+    }
+
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        **new_conditioning,
+    ) is True
+    marker = conn.execute(
+        "SELECT seed_file, day0_conditioning_identity_json "
+        "FROM cycle_advance_enqueues"
+    ).fetchone()
+    assert marker["seed_file"] == str(owned_seed)
+    assert marker["day0_conditioning_identity_json"] is None
+
+    pending.unlink()
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        **new_conditioning,
+    ) is False
+    assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
+    conn.close()
+
+
 def test_day0_owner_claim_lock_closes_pending_to_inflight_move_race(
     tmp_path, monkeypatch
 ) -> None:

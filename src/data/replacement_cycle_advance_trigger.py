@@ -530,7 +530,7 @@ def _day0_enqueue_owner_request_check(
     metric: str,
     target_cycle_iso: str,
     seed_file: str,
-    identity: str,
+    identity: str | None,
 ) -> _Day0EnqueueOwnerRequestCheck:
     """Classify whether this exact Day0 enqueue owner still has a live queue request.
 
@@ -894,7 +894,7 @@ def _already_enqueued(
             )
         ):
             return True
-        if visible_seed_file is not None and recorded_identity is not None:
+        if visible_seed_file is not None:
             request_check = _day0_enqueue_owner_request_check(
                 city=city,
                 target_date=target_date,
