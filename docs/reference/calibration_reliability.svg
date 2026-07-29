@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640" font-family="Helvetica,Arial,sans-serif">
+<rect x="0" y="0" width="640" height="640" fill="white"/>
+<line x1="64.0" y1="576.0" x2="64.0" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<line x1="64.0" y1="576.0" x2="576.0" y2="576.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="64.0" y="596.0" font-size="11" fill="#333" text-anchor="middle">0.0</text>
+<text x="54.0" y="580.0" font-size="11" fill="#333" text-anchor="end">0.0</text>
+<line x1="115.2" y1="576.0" x2="115.2" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<line x1="64.0" y1="524.8" x2="576.0" y2="524.8" stroke="#e5e5e5" stroke-width="1"/>
+<text x="115.2" y="596.0" font-size="11" fill="#333" text-anchor="middle">0.1</text>
+<text x="54.0" y="528.8" font-size="11" fill="#333" text-anchor="end">0.1</text>
+<line x1="166.4" y1="576.0" x2="166.4" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<line x1="64.0" y1="473.6" x2="576.0" y2="473.6" stroke="#e5e5e5" stroke-width="1"/>
+<text x="166.4" y="596.0" font-size="11" fill="#333" text-anchor="middle">0.2</text>
+<text x="54.0" y="477.6" font-size="11" fill="#333" text-anchor="end">0.2</text>
+<line x1="217.6" y1="576.0" x2="217.6" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<line x1="64.0" y1="422.4" x2="576.0" y2="422.4" stroke="#e5e5e5" stroke-width="1"/>
+<text x="217.6" y="596.0" font-size="11" fill="#333" text-anchor="middle">0.3</text>
+<text x="54.0" y="426.4" font-size="11" fill="#333" text-anchor="end">0.3</text>
+<line x1="268.8" y1="576.0" x2="268.8" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<line x1="64.0" y1="371.2" x2="576.0" y2="371.2" stroke="#e5e5e5" stroke-width="1"/>
+<text x="268.8" y="596.0" font-size="11" fill="#333" text-anchor="middle">0.4</text>
+<text x="54.0" y="375.2" font-size="11" fill="#333" text-anchor="end">0.4</text>
+<line x1="320.0" y1="576.0" x2="320.0" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<line x1="64.0" y1="320.0" x2="576.0" y2="320.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="320.0" y="596.0" font-size="11" fill="#333" text-anchor="middle">0.5</text>
+<text x="54.0" y="324.0" font-size="11" fill="#333" text-anchor="end">0.5</text>
+<line x1="371.2" y1="576.0" x2="371.2" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<line x1="64.0" y1="268.8" x2="576.0" y2="268.8" stroke="#e5e5e5" stroke-width="1"/>
+<text x="371.2" y="596.0" font-size="11" fill="#333" text-anchor="middle">0.6</text>
+<text x="54.0" y="272.8" font-size="11" fill="#333" text-anchor="end">0.6</text>
+<line x1="422.4" y1="576.0" x2="422.4" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<line x1="64.0" y1="217.6" x2="576.0" y2="217.6" stroke="#e5e5e5" stroke-width="1"/>
+<text x="422.4" y="596.0" font-size="11" fill="#333" text-anchor="middle">0.7</text>
+<text x="54.0" y="221.6" font-size="11" fill="#333" text-anchor="end">0.7</text>
+<line x1="473.6" y1="576.0" x2="473.6" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<line x1="64.0" y1="166.4" x2="576.0" y2="166.4" stroke="#e5e5e5" stroke-width="1"/>
+<text x="473.6" y="596.0" font-size="11" fill="#333" text-anchor="middle">0.8</text>
+<text x="54.0" y="170.4" font-size="11" fill="#333" text-anchor="end">0.8</text>
+<line x1="524.8" y1="576.0" x2="524.8" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<line x1="64.0" y1="115.2" x2="576.0" y2="115.2" stroke="#e5e5e5" stroke-width="1"/>
+<text x="524.8" y="596.0" font-size="11" fill="#333" text-anchor="middle">0.9</text>
+<text x="54.0" y="119.2" font-size="11" fill="#333" text-anchor="end">0.9</text>
+<line x1="576.0" y1="576.0" x2="576.0" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<line x1="64.0" y1="64.0" x2="576.0" y2="64.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="576.0" y="596.0" font-size="11" fill="#333" text-anchor="middle">1.0</text>
+<text x="54.0" y="68.0" font-size="11" fill="#333" text-anchor="end">1.0</text>
+<line x1="64.0" y1="576.0" x2="576.0" y2="576.0" stroke="#333" stroke-width="1.5"/>
+<line x1="64.0" y1="576.0" x2="64.0" y2="64.0" stroke="#333" stroke-width="1.5"/>
+<line x1="64.0" y1="576.0" x2="576.0" y2="64.0" stroke="#999" stroke-width="1.5" stroke-dasharray="5,4"/>
+<text x="381.4" y="238.1" font-size="11" fill="#999" transform="rotate(-40 381.4 238.1)">perfect calibration</text>
+<line x1="93.5" y1="576.0" x2="93.5" y2="422.8" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="93.5" cy="576.0" r="6.6" fill="#c0392b" fill-opacity="0.75"/>
+<text x="103.0" y="566.4" font-size="10" fill="#333">n=9</text>
+<line x1="139.6" y1="576.0" x2="139.6" y2="465.8" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="139.6" cy="576.0" r="7.2" fill="#c0392b" fill-opacity="0.75"/>
+<text x="149.8" y="565.8" font-size="10" fill="#333">n=14</text>
+<line x1="194.5" y1="576.0" x2="194.5" y2="288.5" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="194.5" cy="576.0" r="5.5" fill="#c0392b" fill-opacity="0.75"/>
+<text x="203.0" y="567.5" font-size="10" fill="#333">n=3</text>
+<line x1="245.2" y1="549.7" x2="245.2" y2="331.8" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="245.2" cy="482.9" r="6.8" fill="#c0392b" fill-opacity="0.75"/>
+<text x="255.1" y="473.1" font-size="10" fill="#333">n=11</text>
+<line x1="286.8" y1="539.4" x2="286.8" y2="273.5" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="286.8" cy="448.0" r="6.4" fill="#c0392b" fill-opacity="0.75"/>
+<text x="296.2" y="438.6" font-size="10" fill="#333">n=8</text>
+<line x1="349.0" y1="539.4" x2="349.0" y2="273.5" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="349.0" cy="448.0" r="6.4" fill="#c0392b" fill-opacity="0.75"/>
+<text x="358.5" y="438.6" font-size="10" fill="#333">n=8</text>
+<line x1="404.7" y1="534.1" x2="404.7" y2="318.7" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="404.7" cy="457.8" r="7.1" fill="#c0392b" fill-opacity="0.75"/>
+<text x="414.7" y="447.8" font-size="10" fill="#333">n=13</text>
+<line x1="455.2" y1="392.4" x2="455.2" y2="256.9" stroke="#2166ac" stroke-width="1.5"/>
+<circle cx="455.2" cy="325.0" r="10.1" fill="#2166ac" fill-opacity="0.75"/>
+<text x="468.3" y="311.9" font-size="10" fill="#333">n=51</text>
+<line x1="500.3" y1="313.2" x2="500.3" y2="225.9" stroke="#2166ac" stroke-width="1.5"/>
+<circle cx="500.3" cy="268.0" r="13.4" fill="#2166ac" fill-opacity="0.75"/>
+<text x="516.7" y="251.5" font-size="10" fill="#333">n=123</text>
+<line x1="566.1" y1="261.4" x2="566.1" y2="183.7" stroke="#2166ac" stroke-width="1.5"/>
+<circle cx="566.1" cy="219.8" r="14.0" fill="#2166ac" fill-opacity="0.75"/>
+<text x="583.1" y="202.8" font-size="10" fill="#333">n=138</text>
+<text x="320.0" y="622.0" font-size="12" fill="#111" text-anchor="middle">predicted probability (q_live, decision-time)</text>
+<text x="18" y="320.0" font-size="12" fill="#111" text-anchor="middle" transform="rotate(-90 18 320.0)">settled frequency (observed win rate)</text>
+<text x="320.0" y="24" font-size="13" fill="#111" text-anchor="middle">Reliability diagram — settled positions, dot area ∝ bin n, red = n&lt;30</text>
+</svg>

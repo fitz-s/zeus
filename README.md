@@ -140,6 +140,13 @@ lucky win, foreseeable loss, miscalibration loss, stale-data decision, unattribu
 only the skill outcomes feed calibration. The probability a position was sized on is frozen at
 decision time, and calibration consumes only outcomes that have already settled.
 
+The sample this produces is a few hundred settled positions — enough to ask whether the stated
+probability matches the settled frequency, not enough to support a return figure. `python3
+scripts/generate_calibration_report.py` regenerates
+[`docs/reference/calibration_report.md`](docs/reference/calibration_report.md), a settled-only
+reliability diagram (with per-bin counts and Wilson intervals) decomposed into calibration vs
+informativeness and cut by lead time, side, strategy, and the six-class attribution above.
+
 ## Strategies
 
 | Strategy | Edge source | Fades |
