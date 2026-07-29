@@ -426,6 +426,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 status="EVALUATED",
                 candidate_id="sell-negative",
                 sell_book_witness_identity="sell-book-current",
+                book_state="EXECUTABLE",
             ),
             GlobalHoldingAuctionCoverage(
                 position_id="position-q-missing",
@@ -1224,6 +1225,7 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
         status="EVALUATED",
         candidate_id="sell-1",
         sell_book_witness_identity="sell-book-1",
+        book_state="EXECUTABLE",
     )
     global_batch_runtime._publish_global_holding_coverage(
         (evaluated,),
@@ -23695,6 +23697,7 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
             sell_book_witness_identity=global_sell_book_witness_identity(
                 sell_curve
             ),
+            book_state="EXECUTABLE",
         )
         coverage_rows = [coverage]
         if current and same_family_unexecutable:
