@@ -60,20 +60,16 @@ CUTOVER_RETIRED_ASSIGNMENTS = frozenset(
         "RETIRED_TRANSFER_TABLE",
     }
 )
+# The manifest's retired-field tolerance is exempted by an exact AST
+# use-site contract (see _manifest_retired_field_site_violations), not by
+# the cutover script's generic control-target taint heuristic: the token
+# has exactly one legitimate definition site and exactly one legitimate
+# use site, so a positive allowlist of exact shapes is precise where a
+# five-name taint list would not catch e.g. status/authority/enabled
+# targets, return values, call arguments, or a second file.
 RAW_FORECAST_ARTIFACT_MANIFEST_SCRIPT = Path("src/data/raw_forecast_artifact_manifest.py")
-RAW_FORECAST_ARTIFACT_MANIFEST_RETIRED_ASSIGNMENTS = frozenset(
-    {"_RETIRED_TOP_LEVEL_MANIFEST_FIELDS"}
-)
-# Files permitted to hold a retired-token constant used ONLY to recognize and
-# discard the dead field/value on read (never to grant it live control). Each
-# entry is still checked by _retired_assignment_control_violations: the
-# retired constant may never flow into a live control target (mode, category,
-# lane, runtime, semantics). This is the same relapse-antibody shape as the
-# cutover script's exemption, scoped to additional named constants/files.
-_RETIRED_ASSIGNMENT_EXEMPTIONS: dict[Path, frozenset[str]] = {
-    CUTOVER_SCRIPT: CUTOVER_RETIRED_ASSIGNMENTS,
-    RAW_FORECAST_ARTIFACT_MANIFEST_SCRIPT: RAW_FORECAST_ARTIFACT_MANIFEST_RETIRED_ASSIGNMENTS,
-}
+RAW_FORECAST_ARTIFACT_MANIFEST_RETIRED_FIELD_NAME = "_RETIRED_TOP_LEVEL_MANIFEST_FIELDS"
+RAW_FORECAST_ARTIFACT_MANIFEST_READ_FUNCTION = "read_manifest"
 _LIVE_CONTROL_TARGETS = frozenset({"category", "lane", "mode", "runtime", "semantics"})
 EXCLUDED_SUBTREES = (
     Path("docs/archive"),
@@ -171,24 +167,35 @@ def violations(
                 f"{rel}: {item}"
                 for item in _identifier_concept_violations(source)
             )
-            retired_assignments = _RETIRED_ASSIGNMENT_EXEMPTIONS.get(rel, frozenset())
             scan_value += "\n" + "\n".join(
                 _static_python_strings(
                     source,
-                    allowed_retired_assignments=retired_assignments,
+                    allowed_retired_assignments=(
+                        CUTOVER_RETIRED_ASSIGNMENTS
+                        if rel == CUTOVER_SCRIPT
+                        else frozenset()
+                    ),
                 )
             )
-            if retired_assignments:
+            if rel == CUTOVER_SCRIPT:
                 out.extend(
                     f"{rel}: {item}"
-                    for item in _retired_assignment_control_violations(
-                        source, retired_assignments=retired_assignments
-                    )
+                    for item in _retired_assignment_control_violations(source)
+                )
+            if rel == RAW_FORECAST_ARTIFACT_MANIFEST_SCRIPT:
+                out.extend(
+                    f"{rel}: {item}"
+                    for item in _manifest_retired_field_site_violations(source)
                 )
         for token in _CONCEPT_TOKENS:
             if _contains_live_alternate_concept(token, scan_value):
                 out.append(f"{rel}: forbidden alternate-runtime concept {token!r}")
         for token in _FORBIDDEN:
+            if rel == RAW_FORECAST_ARTIFACT_MANIFEST_SCRIPT and token == _RETIRED_AUTHORITY_COLUMN:
+                # Governed by the exact-site contract above instead of the
+                # blunt whole-file scan: the token is legitimately visible
+                # in source at exactly one site.
+                continue
             if _contains_exact(token, rel_lower) or _contains_exact(token, scan_value):
                 out.append(f"{rel}: forbidden dormant-runtime token {token!r}")
         if rel.parts and rel.parts[0] in {
@@ -544,17 +551,15 @@ def _path_import_aliases(tree: ast.AST) -> dict[str, str]:
     return aliases
 
 
-def _retired_assignment_control_violations(
-    source: str, *, retired_assignments: frozenset[str]
-) -> list[str]:
-    """Reject use of retired deletion constants as live control semantics."""
+def _retired_assignment_control_violations(source: str) -> list[str]:
+    """Reject use of cutover deletion constants as live control semantics."""
 
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
 
-    literal_bindings = _literal_bindings(tree, excluded=retired_assignments)
+    literal_bindings = _literal_bindings(tree, excluded=CUTOVER_RETIRED_ASSIGNMENTS)
     assignments: list[tuple[list[ast.expr], ast.expr]] = []
     functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
     for node in ast.walk(tree):
@@ -565,7 +570,7 @@ def _retired_assignment_control_violations(
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             functions[node.name] = node
 
-    tainted = set(retired_assignments)
+    tainted = set(CUTOVER_RETIRED_ASSIGNMENTS)
     tainted_returns: set[str] = set()
     changed = True
     while changed:
@@ -779,6 +784,132 @@ def _retired_assignment_control_violations(
                     "retired deletion constant controls mutation of "
                     f"{control!r}"
                 )
+    return sorted(set(out))
+
+
+def _manifest_retired_field_site_violations(source: str) -> list[str]:
+    """Enforce an exact AST use-site contract for the manifest's one
+    legitimate retired-field tolerance, instead of a taint heuristic.
+
+    The retired trade_authority_status token is permitted to appear in
+    src/data/raw_forecast_artifact_manifest.py in exactly two AST shapes:
+
+      (a) as the sole literal element of the frozenset assigned to
+          RAW_FORECAST_ARTIFACT_MANIFEST_RETIRED_FIELD_NAME at module
+          scope — its one definition site; and
+      (b) loaded as the right operand of a `-` subtraction, lexically
+          inside the read_manifest function — its one consumption site,
+          where it is only ever subtracted out of the unsupported-field
+          set and never stored, branched on, returned, or passed to
+          another call.
+
+    Any other appearance of the literal string or the constant name — a
+    second definition, a different shape, a reference outside that one
+    subtraction, a reference inside a different function, a return
+    value, a call argument, an output mapping, a write path — is a
+    violation. This is a positive allowlist of exact shapes, not a
+    search for known-bad sinks: it fails closed on any use this contract
+    did not explicitly permit.
+    """
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    name = RAW_FORECAST_ARTIFACT_MANIFEST_RETIRED_FIELD_NAME
+    value = _RETIRED_AUTHORITY_COLUMN
+    out: list[str] = []
+
+    def _is_permitted_definition_value(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "frozenset"
+            and not node.keywords
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Set)
+            and len(node.args[0].elts) == 1
+            and isinstance(node.args[0].elts[0], ast.Constant)
+            and node.args[0].elts[0].value == value
+        )
+
+    module_body_ids = {id(stmt) for stmt in tree.body}
+    permitted_definition_value_ids: set[int] = set()
+    for node in ast.walk(tree):
+        is_name_assign = isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        )
+        is_name_annassign = (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+        )
+        if not (is_name_assign or is_name_annassign):
+            continue
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and id(node) in module_body_ids
+            and _is_permitted_definition_value(node.value)
+        ):
+            for descendant in ast.walk(node.value):
+                permitted_definition_value_ids.add(id(descendant))
+            continue
+        out.append(
+            f"retired manifest field constant {name!r} defined with an "
+            "unexpected shape or location (expected a single module-level "
+            f"frozenset({{{value!r}}}) assignment)"
+        )
+
+    enclosing_function: dict[int, str | None] = {}
+
+    def _walk_with_function(node: ast.AST, current: str | None) -> None:
+        enclosing_function[id(node)] = current
+        for child in ast.iter_child_nodes(node):
+            child_current = current
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                child_current = child.name
+            _walk_with_function(child, child_current)
+
+    _walk_with_function(tree, None)
+
+    permitted_use_ids: set[int] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.Sub)
+            and isinstance(node.right, ast.Name)
+            and node.right.id == name
+            and enclosing_function.get(id(node))
+            == RAW_FORECAST_ARTIFACT_MANIFEST_READ_FUNCTION
+        ):
+            permitted_use_ids.add(id(node.right))
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Name)
+            and node.id == name
+            and isinstance(node.ctx, ast.Load)
+            and id(node) not in permitted_use_ids
+        ):
+            out.append(
+                f"retired manifest field constant {name!r} referenced "
+                "outside its permitted subtraction inside "
+                f"{RAW_FORECAST_ARTIFACT_MANIFEST_READ_FUNCTION}()"
+            )
+
+    literal_bindings = _literal_bindings(tree, excluded=frozenset())
+    for node in ast.walk(tree):
+        if id(node) in permitted_definition_value_ids:
+            continue
+        if _literal_string(node, literal_bindings) == value:
+            out.append(
+                f"retired token {value!r} appears outside the permitted "
+                f"{name!r} definition"
+            )
+
     return sorted(set(out))
 
 
