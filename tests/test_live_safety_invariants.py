@@ -2177,7 +2177,7 @@ def test_late_global_sell_retry_commit_failure_restores_runtime(monkeypatch):
     pos.state = "pending_exit"
     pos.order_status = "retry_pending"
     pos.next_exit_retry_at = "2026-01-01T00:00:00+00:00"
-    pos.last_exit_error = "global_sell_exit_executable_snapshot_unavailable"
+    pos.last_exit_error = ""
     events: list[str] = []
 
     class Conn:
@@ -2229,6 +2229,13 @@ def test_late_global_sell_retry_commit_failure_restores_runtime(monkeypatch):
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_exit_reject_error",
+        lambda *_args, **_kwargs: (
+            "global_sell_exit_executable_snapshot_unavailable"
+        ),
+    )
+    monkeypatch.setattr(
         "src.execution.exit_lifecycle.release_pending_exit_without_order_if_retryable",
         lambda *_args, **_kwargs: False,
     )
@@ -2269,9 +2276,7 @@ def test_late_global_sell_retry_commit_failure_restores_runtime(monkeypatch):
     assert pos.state == "pending_exit"
     assert pos.exit_state == "retry_pending"
     assert pos.order_status == "retry_pending"
-    assert pos.last_exit_error == (
-        "global_sell_exit_executable_snapshot_unavailable"
-    )
+    assert pos.last_exit_error == ""
 
 
 def test_monitoring_phase_urgent_wake_counts_only_unvisited_tail(monkeypatch):

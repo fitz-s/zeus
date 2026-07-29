@@ -452,6 +452,18 @@ def _is_global_sell_snapshot_reauction_error(error: object) -> bool:
     )
 
 
+def has_global_sell_snapshot_reauction_retry(
+    position: Position,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Recognize the retry from runtime or its canonical reject event."""
+
+    error = str(getattr(position, "last_exit_error", "") or "")
+    if not error:
+        error = _latest_exit_reject_error(conn, position)
+    return _is_global_sell_snapshot_reauction_error(error)
+
+
 def needs_global_sell_snapshot_reauction(
     position: Position,
     conn: sqlite3.Connection | None = None,
@@ -6889,8 +6901,9 @@ def check_pending_retries(
     previous_error = str(getattr(position, "last_exit_error", "") or "")
     if not previous_error:
         previous_error = _latest_exit_reject_error(conn, position)
-    global_snapshot_reauction = _is_global_sell_snapshot_reauction_error(
-        previous_error
+    global_snapshot_reauction = has_global_sell_snapshot_reauction_retry(
+        position,
+        conn,
     )
 
     if position.exit_state == "backoff_exhausted":

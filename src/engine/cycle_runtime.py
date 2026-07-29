@@ -5357,6 +5357,7 @@ def execute_monitoring_phase(
         check_pending_exits,
         check_pending_retries,
         execute_exit,
+        has_global_sell_snapshot_reauction_retry,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
         needs_global_sell_snapshot_reauction,
@@ -5462,13 +5463,9 @@ def execute_monitoring_phase(
     )
 
     def has_global_snapshot_retry_runtime(position) -> bool:
-        return str(
-            getattr(position, "last_exit_error", "") or ""
-        ).lower().startswith(
-            (
-                "global_sell_exit_executable_snapshot_unavailable",
-                "global_sell_exit_executable_snapshot_error:",
-            )
+        return has_global_sell_snapshot_reauction_retry(
+            position,
+            conn,
         )
 
     def snapshot_global_retry_runtime() -> dict[int, dict[str, object]]:
