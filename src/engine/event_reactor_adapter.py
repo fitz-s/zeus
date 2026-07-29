@@ -31903,11 +31903,9 @@ def current_global_probability_authority(
 
 
 def _finite_sample_false_edge_rate(samples: tuple[float, ...], *, cost: float) -> float | None:
-    if not samples:
-        return None
-    threshold = float(cost)
-    false_edges = sum(1 for sample in samples if sample <= threshold)
-    return float((false_edges + 1) / (len(samples) + 1))
+    from src.solve.solver import finite_sample_false_edge_rate
+
+    return finite_sample_false_edge_rate(samples, cost=cost)
 
 
 def _replacement_no_lcb_for_bin(

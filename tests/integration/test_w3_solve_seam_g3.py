@@ -20166,7 +20166,9 @@ def test_global_buy_expected_objective_uses_current_point_not_confidence_mean():
         OutcomeTokenBinding("bin-b", "condition-b", "yes-b", "no-b"),
     )
     point_q = np.asarray((0.80, 0.20))
-    samples = np.tile(np.asarray(((0.40, 0.60),)), (400, 1))
+    # Keep the confidence distribution distinct from the point probability
+    # without making this fixture fail the separate route-level FDR law.
+    samples = np.tile(np.asarray(((0.70, 0.30),)), (400, 1))
     witness_id = joint_probability_witness_identity(
         family_key="family",
         bindings=bindings,

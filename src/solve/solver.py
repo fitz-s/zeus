@@ -5462,6 +5462,106 @@ def _probability_witness_rejection_reason(
     return None, payoff_q
 
 
+def finite_sample_false_edge_rate(
+    samples: Sequence[float],
+    *,
+    cost: float,
+) -> float | None:
+    """Smoothed empirical probability that one BUY edge is non-positive."""
+
+    if not samples:
+        return None
+    threshold = float(cost)
+    if not math.isfinite(threshold):
+        return None
+    false_edges = sum(1 for sample in samples if float(sample) <= threshold)
+    return float((false_edges + 1) / (len(samples) + 1))
+
+
+def _global_buy_fdr_feasible_share_cap(
+    candidate: GlobalSingleOrderCandidate,
+    *,
+    q_samples: np.ndarray,
+    alpha: float,
+) -> Decimal | None:
+    """Largest venue-legal BUY prefix whose exact average cost clears FDR."""
+
+    samples = tuple(float(value) for value in np.asarray(q_samples).reshape(-1))
+    if (
+        not samples
+        or not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in samples)
+        or not math.isfinite(alpha)
+        or not 0.0 < alpha < 1.0
+    ):
+        return None
+    raw_min = _single_order_min_marketable_shares(
+        candidate.executable_cost_curve
+    )
+    raw_max = sum(
+        (
+            Decimal(level.size)
+            for level in candidate.executable_cost_curve.levels
+            if level.price <= LIVE_ORDER_MAX_UNIT_PRICE
+        ),
+        Decimal("0"),
+    )
+    if raw_min is None or raw_max < raw_min:
+        return None
+    minimum = _single_order_venue_legal_neighbor(
+        candidate,
+        raw_min,
+        at_most=False,
+    )
+    maximum = _single_order_venue_legal_neighbor(
+        candidate,
+        raw_max,
+        at_most=True,
+    )
+    if minimum is None or maximum is None or maximum < minimum:
+        return None
+
+    def passes(shares: Decimal) -> bool:
+        try:
+            average_cost = (
+                _single_order_cost(candidate.executable_cost_curve, shares)
+                / shares
+            )
+        except (ArithmeticError, ValueError):
+            return False
+        false_edge_rate = finite_sample_false_edge_rate(
+            samples,
+            cost=float(average_cost),
+        )
+        return false_edge_rate is not None and false_edge_rate <= alpha
+
+    if not passes(minimum):
+        return None
+    if passes(maximum):
+        return maximum
+
+    quantum = Decimal("0.01")
+    low = int((minimum / quantum).to_integral_value(rounding=ROUND_CEILING))
+    high = int((maximum / quantum).to_integral_value(rounding=ROUND_FLOOR))
+    best = minimum
+    while low <= high:
+        middle = (low + high) // 2
+        raw_probe = Decimal(middle) * quantum
+        probe = _single_order_venue_legal_neighbor(
+            candidate,
+            raw_probe,
+            at_most=True,
+        )
+        if probe is None or probe < minimum:
+            low = middle + 1
+            continue
+        if passes(probe):
+            best = max(best, probe)
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
 def select_global_single_order(
     candidates: Sequence[GlobalSingleOrderAnyCandidate],
     *,
@@ -5618,6 +5718,7 @@ def select_global_single_order(
     joint_buy_candidates_by_family: dict[
         str, list[GlobalSingleOrderCandidate]
     ] = {}
+    fdr_buy_capital_limit_by_id: dict[str, Decimal] = {}
 
     def selection_cancelled() -> bool:
         if cancelled is None:
@@ -5768,6 +5869,52 @@ def select_global_single_order(
                 current_probability,
                 decision_at_utc=decision_at_utc,
             )
+        if (
+            reason is None
+            and isinstance(candidate, GlobalSingleOrderCandidate)
+            and not isinstance(
+                probability_witness,
+                DeterministicBinPayoffWitness,
+            )
+        ):
+            from src.strategy.selection_family import DEFAULT_FDR_ALPHA
+
+            assert q_samples is not None
+            payoff_probability_mean = family_payoff_point_q(
+                probability_witness,
+                bin_id=candidate.bin_id,
+                side=candidate.side,
+            )
+            minimum_unit_cost = (
+                candidate.executable_cost_curve.fee_model.all_in_price(
+                    candidate.executable_cost_curve.levels[0].price
+                )
+            )
+            if (
+                payoff_probability_mean is not None
+                and payoff_probability_mean > float(minimum_unit_cost)
+                and candidate.executable_cost_curve.levels[0].price
+                <= LIVE_ORDER_MAX_UNIT_PRICE
+                and candidate.executable_cost_curve.levels[-1].price
+                >= LIVE_ORDER_MIN_UNIT_PRICE
+            ):
+                fdr_share_cap = _global_buy_fdr_feasible_share_cap(
+                    candidate,
+                    q_samples=q_samples,
+                    alpha=float(DEFAULT_FDR_ALPHA),
+                )
+                if fdr_share_cap is None:
+                    reason = "FDR_ROUTE_FALSE_EDGE_RATE_EXCEEDS_ALPHA"
+                else:
+                    try:
+                        fdr_buy_capital_limit_by_id[candidate.candidate_id] = (
+                            _single_order_cost(
+                                candidate.executable_cost_curve,
+                                fdr_share_cap,
+                            )
+                        )
+                    except ValueError:
+                        reason = "FDR_ROUTE_FALSE_EDGE_RATE_EXCEEDS_ALPHA"
         if reason is None:
             try:
                 current_execution = current_execution_resolver(candidate)
@@ -6005,6 +6152,13 @@ def select_global_single_order(
                 capital_authority_available = False
                 rejections[candidate.candidate_id] = "CAPITAL_CONSTRAINT_UNAVAILABLE"
                 continue
+        candidate_capital_limit = min(
+            candidate_capital_limit,
+            fdr_buy_capital_limit_by_id.get(
+                candidate.candidate_id,
+                candidate_capital_limit,
+            ),
+        )
         if candidate_capital_limit <= 0:
             rejections[candidate.candidate_id] = "CAPITAL_CAPACITY_EXHAUSTED"
             continue

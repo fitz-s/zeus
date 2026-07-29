@@ -1689,6 +1689,84 @@ def test_family_entry_block_removes_higher_growth_buy_before_same_family_sell():
     assert evaluations[sell.candidate_id].status == "SELECTED"
 
 
+def test_global_buy_is_sized_to_current_fdr_feasible_prefix_before_ranking():
+    buy = _global_candidate(
+        candidate_id="buy-fdr-prefix-cap",
+        family="buy-fdr-prefix-cap-family",
+        side="YES",
+        q=0.90,
+        levels=(("0.40", "5"), ("0.70", "20")),
+        min_order="1",
+    )
+    q_samples = np.concatenate(
+        (
+            np.full(20, 0.30),
+            np.full(80, 0.50),
+            np.full(300, 0.90),
+        )
+    )
+    buy = _replace_global_q_samples(buy, q_samples)
+
+    decision = _global_select(
+        (buy,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+    )
+
+    assert decision.candidate is buy
+    selected_rate = S.finite_sample_false_edge_rate(
+        tuple(q_samples),
+        cost=float(decision.cost_usd / decision.shares),
+    )
+    assert selected_rate is not None
+    assert selected_rate <= 0.10
+    assert decision.shares < Decimal("25")
+
+
+def test_fdr_infeasible_buy_is_removed_before_positive_sell_ranking():
+    buy = _global_candidate(
+        candidate_id="buy-fdr-infeasible",
+        family="buy-fdr-infeasible-family",
+        side="YES",
+        q=0.99,
+        levels=(("0.40", "20"),),
+        min_order="1",
+    )
+    buy = _replace_global_q_samples(
+        buy,
+        np.concatenate((np.full(80, 0.20), np.full(320, 0.99))),
+    )
+    sell = _global_sell_candidate(
+        candidate_id="sell-after-fdr-infeasible-buy",
+        family="sell-after-fdr-infeasible-buy-family",
+        side="YES",
+        held_q=0.15,
+        bids=(("0.40", "4"), ("0.30", "6")),
+        shares="10",
+    )
+
+    decision = _global_select(
+        (buy, sell),
+        floor="100",
+        ceiling="110",
+        cash="100",
+        cap="100",
+    )
+
+    assert decision.candidate is sell
+    assert decision.rejection_reasons[buy.candidate_id] == (
+        "FDR_ROUTE_FALSE_EDGE_RATE_EXCEEDS_ALPHA"
+    )
+    evaluations = {
+        evaluation.candidate_id: evaluation
+        for evaluation in decision.candidate_evaluations
+    }
+    assert evaluations[buy.candidate_id].status == "REJECTED"
+    assert evaluations[sell.candidate_id].status == "SELECTED"
+
+
 def test_global_single_order_zero_buy_capacity_preserves_sell_and_cash():
     sell = _global_sell_candidate(
         candidate_id="sell-with-zero-buy-capacity",
@@ -2038,6 +2116,7 @@ def test_current_point_symmetrically_controls_buy_admission(side):
         q=0.80,
         levels=(("0.80", "1000"),),
     )
+    buy = _replace_global_q_samples(buy, np.full(400, 0.95))
     low_mean = _replace_global_point_q(buy, 0.70)
     high_mean = _replace_global_point_q(buy, 0.95)
 
