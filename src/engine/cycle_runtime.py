@@ -134,6 +134,7 @@ _HELD_POSITION_MONITOR_RESERVATION_MIN = 2
 _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
 _MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS = 50
 _MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 100
+_MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS = 100
 
 
 def _held_position_monitor_reservation_count(position_count: int) -> int:
@@ -3267,31 +3268,101 @@ def _emit_monitor_refreshed_canonical_if_available(
     from src.state.db import append_many_and_project
     from src.state.write_coordinator import WriteLeaseTimeout
 
-    try:
-        with _canonical_trade_write_lease(
-            conn,
-            owner="monitor_canonical_append",
-            deadline_ms=_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS,
-            max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
-        ):
-            row = conn.execute(
-                "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
-                (getattr(pos, "trade_id", ""),),
-            ).fetchone()
-            next_seq = int((row[0] if row else 0) or 0) + 1
-            monitor_occurred_at = (
-                deps._utcnow().isoformat()
-                if hasattr(deps, "_utcnow")
-                else (
-                    str(getattr(pos, "last_monitor_at", "") or "").strip()
-                    or datetime.now(timezone.utc).isoformat()
-                )
+    position_id = str(getattr(pos, "trade_id", "") or "").strip()
+    if not position_id:
+        deps.logger.warning("CANONICAL_MONITOR_REFRESHED_EMIT_FAILED trade_id missing")
+        return False
+    # This is the monitor observation's attempt identity. It is captured before
+    # either lease attempt and is never refreshed after waiting for a writer.
+    monitor_occurred_at = (
+        deps._utcnow().isoformat()
+        if callable(getattr(deps, "_utcnow", None))
+        else datetime.now(timezone.utc).isoformat()
+    )
+
+    def append_frozen_monitor_refreshed() -> bool:
+        current = conn.execute(
+            "SELECT phase, updated_at FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        if current is None:
+            deps.logger.info(
+                "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=missing_position",
+                position_id,
             )
+            return False
+        canonical_phase = str(current[0] or "").strip()
+        canonical_updated_at = str(current[1] or "").strip()
+        if is_terminal_state(canonical_phase):
+            deps.logger.info(
+                "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=terminal phase=%s",
+                position_id,
+                canonical_phase,
+            )
+            return False
+        if canonical_phase not in {
+            LifecyclePhase.ACTIVE.value,
+            LifecyclePhase.DAY0_WINDOW.value,
+            LifecyclePhase.PENDING_EXIT.value,
+        }:
+            deps.logger.info(
+                "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=unmonitorable phase=%s",
+                position_id,
+                canonical_phase,
+            )
+            return False
+        if canonical_updated_at:
+            try:
+                canonical_updated = datetime.fromisoformat(
+                    canonical_updated_at.replace("Z", "+00:00")
+                )
+                monitor_attempt_at = datetime.fromisoformat(
+                    monitor_occurred_at.replace("Z", "+00:00")
+                )
+            except (TypeError, ValueError):
+                deps.logger.warning(
+                    "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=invalid_timestamp",
+                    position_id,
+                )
+                return False
+            if canonical_updated.tzinfo is None or monitor_attempt_at.tzinfo is None:
+                deps.logger.warning(
+                    "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=invalid_timestamp",
+                    position_id,
+                )
+                return False
+            if canonical_updated > monitor_attempt_at:
+                deps.logger.info(
+                    "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=stale_attempt",
+                    position_id,
+                )
+                return False
+        existing = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+               AND occurred_at = ?
+             LIMIT 1
+            """,
+            (position_id, monitor_occurred_at),
+        ).fetchone()
+        if existing is not None:
             pos.last_monitor_at = monitor_occurred_at
+            return True
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        next_seq = int((row[0] if row else 0) or 0) + 1
+        previous_monitor_at = getattr(pos, "last_monitor_at", None)
+        pos.last_monitor_at = monitor_occurred_at
+        try:
             events, projection = build_monitor_refreshed_canonical_write(
                 pos,
                 sequence_no=next_seq,
-                phase_after=_monitor_refreshed_phase_for_position(pos),
+                phase_after=canonical_phase,
                 source_module="src.engine.cycle_runtime",
                 occurred_at=monitor_occurred_at,
                 exit_decision=exit_decision,
@@ -3301,16 +3372,52 @@ def _emit_monitor_refreshed_canonical_if_available(
             )
             append_many_and_project(conn, events, projection)
             conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            pos.last_monitor_at = previous_monitor_at
+            raise
+        return True
+
+    try:
+        with _canonical_trade_write_lease(
+            conn,
+            owner="monitor_canonical_append",
+            deadline_ms=_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+        ):
+            return append_frozen_monitor_refreshed()
     except WriteLeaseTimeout as exc:
-        deps.logger.info(
-            "CANONICAL_MONITOR_REFRESHED_YIELDED trade_id=%s reason=%s",
-            getattr(pos, "trade_id", ""),
-            exc,
-        )
-        return False
+        try:
+            with _canonical_trade_write_lease(
+                conn,
+                owner="monitor_canonical_append_retry",
+                deadline_ms=_MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS,
+                max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+            ):
+                return append_frozen_monitor_refreshed()
+        except WriteLeaseTimeout as retry_exc:
+            deps.logger.info(
+                "CANONICAL_MONITOR_REFRESHED_RETRY_DEFERRED_NEXT_CYCLE "
+                "trade_id=%s reason=%s retry_reason=%s",
+                position_id,
+                exc,
+                retry_exc,
+            )
+            return False
+        except Exception as retry_exc:
+            deps.logger.warning(
+                "CANONICAL_MONITOR_REFRESHED_RETRY_DEFERRED_NEXT_CYCLE "
+                "trade_id=%s reason=%s",
+                position_id,
+                retry_exc,
+            )
+            return False
     except Exception as exc:
         deps.logger.warning(
-            "CANONICAL_MONITOR_REFRESHED_EMIT_FAILED trade_id=%s reason=%s",
+            "CANONICAL_MONITOR_REFRESHED_DEFERRED_NEXT_CYCLE trade_id=%s reason=%s",
             getattr(pos, "trade_id", ""),
             exc,
         )

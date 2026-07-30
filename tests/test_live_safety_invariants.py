@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-30; last_reused=2026-07-30
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-29
+# Last reused/audited: 2026-07-30
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -2537,6 +2537,307 @@ def test_monitor_writer_timeout_preserves_nonred_exit_authority(monkeypatch):
     assert results[-1].should_exit is True
     assert results[-1].exit_reason == "CI_WRITER_TIMEOUT_NONRED_EXIT"
     assert summary["monitor_canonical_write_failed_exit_authority_preserved"] == 1
+
+
+def test_monitor_timeout_retries_frozen_attempt_once_into_canonical_projection(
+    tmp_path,
+    monkeypatch,
+):
+    """A timed-out held monitor retries its frozen canonical attempt once."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+    from src.state.write_coordinator import WriteLeaseTimeout
+
+    conn = get_connection(tmp_path / "monitor-retry-canonical.db")
+    init_schema(conn)
+    position = _make_position(
+        trade_id="monitor-retry-canonical",
+        state="holding",
+        city="Chicago",
+        target_date="2026-07-30",
+        order_id="o-monitor-retry",
+        entered_at="2026-07-30T17:00:00+00:00",
+        order_status="filled",
+        strategy_key="opening_inertia",
+        bin_label="90-91°F",
+        condition_id="0xmonitorretry00000000000000000000000000000000000000000000001",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        position,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-monitor-retry-seed",
+        source_module="tests/test_monitor_timeout_retries_frozen_attempt_once",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.commit()
+    # This is the prior cycle's observation. The new attempt must not reuse it.
+    position.last_monitor_at = "2026-07-30T18:00:00+00:00"
+    position.last_monitor_prob = 0.61
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_edge = 0.17
+    position.last_monitor_market_price = 0.44
+    position.last_monitor_market_price_is_fresh = True
+    lease_calls: list[dict] = []
+
+    class TimedOutLease:
+        def __enter__(self):
+            raise WriteLeaseTimeout("initial monitor lease timed out")
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+    class AcquiredLease:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+    def monitor_lease(*_args, **kwargs):
+        lease_calls.append(kwargs)
+        if kwargs["owner"] == "monitor_canonical_append":
+            return TimedOutLease()
+        return AcquiredLease()
+
+    monkeypatch.setattr(cycle_runtime, "_canonical_trade_write_lease", monitor_lease)
+
+    attempt_at = datetime(2026, 7, 30, 19, 0, tzinfo=timezone.utc)
+    deps = type(
+        "Deps",
+        (),
+        {
+            "logger": logging.getLogger("test_monitor_retry_canonical"),
+            "_utcnow": staticmethod(lambda: attempt_at),
+        },
+    )
+    try:
+        assert (
+            cycle_runtime._emit_monitor_refreshed_canonical_if_available(
+                conn,
+                position,
+                deps=deps,
+            )
+            is True
+        )
+        # Replaying the same frozen attempt after another initial timeout is
+        # idempotent: it observes the committed event instead of appending one.
+        assert (
+            cycle_runtime._emit_monitor_refreshed_canonical_if_available(
+                conn,
+                position,
+                deps=deps,
+            )
+            is True
+        )
+
+        event = conn.execute(
+            """
+            SELECT sequence_no, occurred_at, payload_json
+              FROM position_events
+             WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+            """,
+            (position.trade_id,),
+        ).fetchall()
+        assert len(event) == 1
+        assert event[0]["sequence_no"] == 4
+        assert event[0]["occurred_at"] == attempt_at.isoformat()
+        assert json.loads(event[0]["payload_json"])["last_monitor_prob"] == pytest.approx(0.61)
+        current = conn.execute(
+            """
+            SELECT phase, last_monitor_prob, last_monitor_market_price, updated_at
+              FROM position_current WHERE position_id = ?
+            """,
+            (position.trade_id,),
+        ).fetchone()
+        assert current["phase"] == LifecyclePhase.ACTIVE.value
+        assert current["last_monitor_prob"] == pytest.approx(0.61)
+        assert current["last_monitor_market_price"] == pytest.approx(0.44)
+        assert current["updated_at"] == attempt_at.isoformat()
+        assert position.last_monitor_at == attempt_at.isoformat()
+    finally:
+        conn.close()
+
+    assert lease_calls == [
+        {
+            "owner": "monitor_canonical_append",
+            "deadline_ms": cycle_runtime._MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS,
+            "max_hold_ms": cycle_runtime._MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+        },
+        {
+            "owner": "monitor_canonical_append_retry",
+            "deadline_ms": cycle_runtime._MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS,
+            "max_hold_ms": cycle_runtime._MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+        },
+        {
+            "owner": "monitor_canonical_append",
+            "deadline_ms": cycle_runtime._MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS,
+            "max_hold_ms": cycle_runtime._MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+        },
+        {
+            "owner": "monitor_canonical_append_retry",
+            "deadline_ms": cycle_runtime._MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS,
+            "max_hold_ms": cycle_runtime._MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+        },
+    ]
+
+
+def test_monitor_retry_timeout_defers_frozen_attempt_to_next_cycle(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """Both bounded lease timeouts leave no stale event and retain retry debt."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+    from src.state.write_coordinator import WriteLeaseTimeout
+
+    conn = get_connection(tmp_path / "monitor-retry-deferred.db")
+    init_schema(conn)
+    position = _make_position(
+        trade_id="monitor-retry-deferred",
+        state="holding",
+        city="Chicago",
+        target_date="2026-07-30",
+        order_id="o-monitor-retry-deferred",
+        entered_at="2026-07-30T17:00:00+00:00",
+        order_status="filled",
+        strategy_key="opening_inertia",
+        bin_label="90-91°F",
+        condition_id="0xmonitordeferred0000000000000000000000000000000000000000000001",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        position,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-monitor-retry-deferred-seed",
+        source_module="tests/test_monitor_retry_timeout_defers_frozen_attempt",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.commit()
+    previous_monitor_at = "2026-07-30T18:00:00+00:00"
+    position.last_monitor_at = previous_monitor_at
+
+    class TimedOutLease:
+        def __enter__(self):
+            raise WriteLeaseTimeout("monitor lease timed out")
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_canonical_trade_write_lease",
+        lambda *_args, **_kwargs: TimedOutLease(),
+    )
+    attempt_at = datetime(2026, 7, 30, 19, 0, tzinfo=timezone.utc)
+    deps = type(
+        "Deps",
+        (),
+        {
+            "logger": logging.getLogger("test_monitor_retry_deferred"),
+            "_utcnow": staticmethod(lambda: attempt_at),
+        },
+    )
+    caplog.set_level(logging.INFO)
+    try:
+        assert (
+            cycle_runtime._emit_monitor_refreshed_canonical_if_available(
+                conn,
+                position,
+                deps=deps,
+            )
+            is False
+        )
+        assert position.last_monitor_at == previous_monitor_at
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'",
+                (position.trade_id,),
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        conn.close()
+
+    assert "CANONICAL_MONITOR_REFRESHED_RETRY_DEFERRED_NEXT_CYCLE" in caplog.text
+
+
+def test_monitor_append_failure_rolls_back_and_retains_retry_debt(tmp_path, monkeypatch):
+    """A failed append cannot leave a transaction or in-memory monitor debt cleared."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    conn = get_connection(tmp_path / "monitor-append-rollback.db")
+    init_schema(conn)
+    position = _make_position(
+        trade_id="monitor-append-rollback",
+        state="holding",
+        city="Chicago",
+        target_date="2026-07-30",
+        order_id="o-monitor-append-rollback",
+        entered_at="2026-07-30T17:00:00+00:00",
+        order_status="filled",
+        strategy_key="opening_inertia",
+        bin_label="90-91°F",
+        condition_id="0xmonitorrollback0000000000000000000000000000000000000000000001",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        position,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-monitor-append-rollback-seed",
+        source_module="tests/test_monitor_append_failure_rolls_back",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.commit()
+    previous_monitor_at = "2026-07-30T18:00:00+00:00"
+    position.last_monitor_at = previous_monitor_at
+    prior_updated_at = conn.execute(
+        "SELECT updated_at FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0]
+
+    def failing_append(conn_arg, *_args):
+        conn_arg.execute(
+            "UPDATE position_current SET updated_at = ? WHERE position_id = ?",
+            ("2099-01-01T00:00:00+00:00", position.trade_id),
+        )
+        raise RuntimeError("injected append failure")
+
+    monkeypatch.setattr("src.state.db.append_many_and_project", failing_append)
+    attempt_at = datetime(2026, 7, 30, 19, 0, tzinfo=timezone.utc)
+    deps = type(
+        "Deps",
+        (),
+        {
+            "logger": logging.getLogger("test_monitor_append_rollback"),
+            "_utcnow": staticmethod(lambda: attempt_at),
+        },
+    )
+    try:
+        assert (
+            cycle_runtime._emit_monitor_refreshed_canonical_if_available(
+                conn,
+                position,
+                deps=deps,
+            )
+            is False
+        )
+        assert position.last_monitor_at == previous_monitor_at
+        assert conn.in_transaction is False
+        assert (
+            conn.execute(
+                "SELECT updated_at FROM position_current WHERE position_id = ?",
+                (position.trade_id,),
+            ).fetchone()[0]
+            == prior_updated_at
+        )
+    finally:
+        conn.close()
 
 
 def test_canonical_trade_write_lease_identity_failure_is_fail_closed():
@@ -9305,7 +9606,8 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
     pos.last_monitor_best_ask = 0.45
     pos.selected_method = "emos"
     pos.applied_validations = ["identity_one_calibrator"]
-    pos.last_monitor_at = "2026-04-01T05:00:00+00:00"
+    previous_monitor_at = "2026-04-01T05:00:00+00:00"
+    pos.last_monitor_at = previous_monitor_at
 
     deps = type(
         "Deps",
@@ -9324,7 +9626,7 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
         ("monitor-refresh-1",),
     ).fetchone()
     assert event is not None
-    assert event["occurred_at"] == "2026-04-01T05:00:00+00:00"
+    assert event["occurred_at"] != previous_monitor_at
     assert event["phase_before"] == LifecyclePhase.ACTIVE.value
     assert event["phase_after"] == LifecyclePhase.ACTIVE.value
     payload = json.loads(event["payload_json"])
@@ -9347,7 +9649,7 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
     assert current["last_monitor_prob"] == pytest.approx(0.61)
     assert current["last_monitor_edge"] == pytest.approx(0.17)
     assert current["last_monitor_market_price"] == pytest.approx(0.44)
-    assert current["updated_at"] == "2026-04-01T05:00:00+00:00"
+    assert current["updated_at"] == event["occurred_at"]
     conn.close()
 
 
