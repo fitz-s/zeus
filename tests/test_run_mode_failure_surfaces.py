@@ -8195,6 +8195,68 @@ def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> No
     assert not main_module._held_position_monitor_handoff_pending.is_set()
 
 
+def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class BusyReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return False
+
+    class IdleReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_handoff_pending.clear()
+    main_module._periodic_held_position_monitor_handoff_pending.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.clear()
+    main_module._held_position_monitor_bootstrap_complete.set()
+    main_module._day0_urgent_wake_pending.clear()
+    main_module._day0_held_monitor_preempt_requested.clear()
+    main_module._periodic_exit_monitor_day0_yielded.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("timed-out monitor must not run coverage"),
+    )
+    try:
+        assert main_module._exit_monitor_cycle() is False
+        assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+
+        monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleReactorGate())
+        monkeypatch.setattr(
+            exit_module,
+            "run_exit_monitor_cycle",
+            lambda **kwargs: kwargs["mark_held_position_monitor_complete"]() or True,
+        )
+        assert main_module._exit_monitor_cycle(
+            target_families=frozenset({("Paris", "2026-07-30", "high")}),
+            urgent_day0=True,
+        ) is True
+        assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
+
+        assert main_module._exit_monitor_cycle() is True
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+        main_module._day0_urgent_wake_pending.clear()
+        main_module._day0_held_monitor_preempt_requested.clear()
+        main_module._periodic_exit_monitor_day0_yielded.clear()
+
+
 def test_reactor_rechecks_monitor_priority_after_active_lock_claim() -> None:
     import inspect
     import src.events.reactor as reactor_module

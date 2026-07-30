@@ -91,6 +91,7 @@ _held_position_monitor_active = threading.Event()
 _held_position_monitor_claim = threading.Lock()
 _held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_handoff_pending = threading.Event()
+_periodic_held_position_monitor_fairness_debt = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
 _held_position_monitor_bootstrap_check_lock = threading.Lock()
 _held_position_monitor_bootstrap_last_check = 0.0
@@ -314,6 +315,19 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
 
     if job_name not in _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS:
         return False
+
+    # SCOPE: a timed-out periodic full-book monitor blocks only EDLI reactor
+    # admission. DRAIN: the next successful periodic full-book coverage clears
+    # the debt. RESET: process restart, or that successful coverage; targeted,
+    # urgent, and status-only monitor runs cannot clear it.
+    if (
+        job_name == "edli_event_reactor"
+        and _periodic_held_position_monitor_fairness_debt.is_set()
+    ):
+        logger.warning(
+            "edli_event_reactor deferred: periodic full-book monitor fairness debt"
+        )
+        return True
 
     # SCOPE: all monitor kinds may defer reactor admission before it owns the
     # active lock. Only the separate typed periodic signal may cancel an
@@ -6946,6 +6960,7 @@ def _exit_monitor_cycle(
     from src.execution.exit_lifecycle import run_exit_monitor_cycle
 
     urgent_fact = urgent_day0 or urgent_forecast
+    periodic_full_book = target_families is None and not urgent_fact
     if urgent_forecast and _day0_exit_monitor_priority_pending():
         logger.info("forecast exit monitor yielded to pending Day0 urgent wake")
         return False
@@ -6983,6 +6998,8 @@ def _exit_monitor_cycle(
         )
         reactor_idle = _edli_reactor_active_lock.acquire(timeout=handoff_timeout)
         if not reactor_idle:
+            if periodic_full_book:
+                _periodic_held_position_monitor_fairness_debt.set()
             logger.warning(
                 "exit_monitor deferred: active EDLI reactor did not finish within %.1fs",
                 handoff_timeout,
@@ -7049,6 +7066,8 @@ def _exit_monitor_cycle(
             # without a Python exception while every position was deferred for
             # missing executable books; that is not coverage.
             _periodic_exit_monitor_day0_yielded.clear()
+        if periodic_full_book:
+            _periodic_held_position_monitor_fairness_debt.clear()
         return True
     finally:
         if not urgent_fact:
