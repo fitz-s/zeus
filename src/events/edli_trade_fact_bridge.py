@@ -597,6 +597,24 @@ def _consume_absorbed_confirmed_fills(
         for table in required
     ):
         return () if discover_only else 0
+    event_schema = _schema_with_table(
+        conn, "edli_live_order_events", preferred="main"
+    )
+    projection_schema = _schema_with_table(
+        conn,
+        "edli_live_order_projection",
+        preferred=event_schema or "main",
+    )
+    cap_schema = _schema_with_table(
+        conn,
+        "edli_live_cap_usage",
+        preferred=event_schema or "main",
+    )
+    if event_schema is None or projection_schema is None or cap_schema is None:
+        return () if discover_only else 0
+    events = _q(event_schema, "edli_live_order_events")
+    projection = _q(projection_schema, "edli_live_order_projection")
+    cap_usage = _q(cap_schema, "edli_live_cap_usage")
     candidate_aggregate_ids = tuple(dict.fromkeys(aggregate_ids or ()))
     if aggregate_ids is not None and not candidate_aggregate_ids:
         return () if discover_only else 0
@@ -615,8 +633,8 @@ def _consume_absorbed_confirmed_fills(
         f"""
         WHERE fact.command_id IN (
             SELECT candidate_command.command_id
-              FROM edli_live_order_projection candidate_projection
-              JOIN edli_live_cap_usage candidate_usage
+              FROM {projection} candidate_projection
+              JOIN {cap_usage} candidate_usage
                 ON candidate_usage.event_id = candidate_projection.event_id
                AND candidate_usage.final_intent_id = candidate_projection.final_intent_id
               JOIN {commands} candidate_command
@@ -636,7 +654,7 @@ def _consume_absorbed_confirmed_fills(
                            ROW_NUMBER() OVER (
                                PARTITION BY aggregate_id ORDER BY event_sequence DESC
                            ) AS rank
-                      FROM edli_live_order_events
+                      FROM {events}
                      WHERE event_type = 'SubmitPlanBuilt'
                        {aggregate_filter}
                    )
@@ -649,7 +667,7 @@ def _consume_absorbed_confirmed_fills(
                            ROW_NUMBER() OVER (
                                PARTITION BY aggregate_id ORDER BY event_sequence DESC
                            ) AS rank
-                      FROM edli_live_order_events
+                      FROM {events}
                      WHERE event_type = 'UserTradeObserved'
                        {aggregate_filter}
                    )
@@ -678,10 +696,10 @@ def _consume_absorbed_confirmed_fills(
                entry_fill.event_id AS entry_fill_event_id,
                json_extract(entry_fill.payload_json, '$.shares')
                    AS entry_filled_shares
-          FROM edli_live_order_projection projection
+          FROM {projection} projection
           JOIN latest_plan plan USING (aggregate_id)
           JOIN latest_trade observed USING (aggregate_id)
-          JOIN edli_live_cap_usage usage
+          JOIN {cap_usage} usage
             ON usage.event_id = projection.event_id
            AND usage.final_intent_id = projection.final_intent_id
            AND usage.reservation_status = 'RESERVED'
@@ -797,9 +815,9 @@ def _consume_absorbed_confirmed_fills(
         ).hexdigest()
         projection_pending = bool(
             conn.execute(
-                """
+                f"""
                 SELECT pending_reconcile
-                  FROM edli_live_order_projection
+                  FROM {projection}
                  WHERE aggregate_id = ?
                 """,
                 (str(_row_get(row, "aggregate_id")),),

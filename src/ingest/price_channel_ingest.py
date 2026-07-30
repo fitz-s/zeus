@@ -1345,9 +1345,7 @@ def _edli_trade_fact_bridge_candidates_read_only():
     )
     from src.state.db import (
         ZEUS_WORLD_DB_PATH,
-        _zeus_trade_db_path,
         get_trade_connection_read_only,
-        get_world_connection_read_only,
     )
 
     conn = get_trade_connection_read_only()
@@ -1361,17 +1359,11 @@ def _edli_trade_fact_bridge_candidates_read_only():
             conn.execute("ATTACH DATABASE ? AS world", (world_uri,))
         confirmed_candidates = discover_confirmed_trade_fact_candidates(conn)
         rest_orphan_candidates = discover_rest_filled_orphan_trade_fact_candidates(conn)
-    finally:
-        conn.close()
-    world_conn = get_world_connection_read_only()
-    try:
-        trade_uri = f"{_zeus_trade_db_path().resolve().as_uri()}?mode=ro"
-        world_conn.execute("ATTACH DATABASE ? AS trades", (trade_uri,))
         absorbed_fill_aggregate_ids = discover_absorbed_confirmed_fill_aggregate_ids(
-            world_conn
+            conn
         )
     finally:
-        world_conn.close()
+        conn.close()
     return confirmed_candidates, rest_orphan_candidates, absorbed_fill_aggregate_ids
 
 

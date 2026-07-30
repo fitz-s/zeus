@@ -375,6 +375,28 @@ def test_empty_trade_fact_candidate_set_skips_world_writer(monkeypatch):
     assert result["reconciled_trade_facts"] == 0
 
 
+def test_trade_fact_discovery_uses_trade_readonly_main_with_world_attach():
+    node = _func_node("_edli_trade_fact_bridge_candidates_read_only")
+    called = {
+        sub.func.id
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+    }
+    assert "get_trade_connection_read_only" in called
+    assert "get_world_connection_read_only" not in called
+    attached = [
+        sub
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Attribute)
+        and sub.func.attr == "execute"
+        and sub.args
+        and isinstance(sub.args[0], ast.Constant)
+        and "ATTACH DATABASE ? AS world" in str(sub.args[0].value)
+    ]
+    assert len(attached) == 1
+
+
 def test_world_gate_releases_mutex_when_coordinator_times_out(monkeypatch):
     from src.events.triggers import market_channel_ingestor
     from src.ingest.price_channel_ingest import _PriceChannelWriteGate
