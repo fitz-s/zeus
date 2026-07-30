@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-29
-# Lifecycle: created=2026-05-24; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Last reused/audited: 2026-07-30
+# Lifecycle: created=2026-05-24; last_reviewed=2026-07-30; last_reused=2026-07-30
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -3738,6 +3738,11 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
         store.insert_or_ignore(event)
     reactor = _global_batch_probe_reactor(store, {})
     winner = events[-1]
+    actuated_cut = _held_sell_completion_result(
+        position_id="held-window-b-actuated",
+        token_id="token-window-b-actuated",
+        probability_content_identity="q-window-b-actuated",
+    ).global_held_sell_completion_cuts[0]
 
     def _batch(events, _decision_time, *, claim_unpaged_winner=None):
         receipts = {
@@ -3763,6 +3768,7 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
             # Even a malformed adapter disposition must never rewrite a batch
             # that crossed the venue side-effect boundary.
             economic_cut_completed=True,
+            held_sell_completion_cut=actuated_cut,
         )
 
     reactor._submit.process_global_batch = _batch
@@ -3819,6 +3825,7 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
     assert result.rejection_reasons == [
         "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"
     ] * result.retried
+    assert result.global_held_sell_completion_cuts == [actuated_cut]
     assert _processing_status(conn, events[1].event_id) == "processing"
 
 
@@ -3902,7 +3909,12 @@ def test_global_batch_rejects_partial_side_effect_as_completed_economic_cut():
     }
 
 
-def test_global_batch_economic_cut_requires_durable_window_b_finalization():
+def test_global_batch_economic_cut_requires_durable_window_b_finalization(
+    tmp_path,
+):
+    from src.events import reactor as reactor_module
+    from src.runtime import reactor_wake
+
     conn, store = _store()
     event = _forecast_event(
         "economic-cut-window-b-lock",
@@ -3910,6 +3922,30 @@ def test_global_batch_economic_cut_requires_durable_window_b_finalization():
     )
     store.insert_or_ignore(event)
     reactor = _global_batch_probe_reactor(store, {})
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="held-window-b-capital",
+        family=("Paris", "2026-05-25", "high"),
+        probability_content_identity="q-window-b-capital",
+        held_token_id="token-window-b-capital",
+        held_best_bid=0.18,
+        bid_observed_at="2026-05-24T18:00:00+00:00",
+        schema_version=3,
+        book_state="EXECUTABLE",
+    )
+    wake_path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        held_sell_reauction_requests=(request,),
+    )
+    capital_cut = _held_sell_completion_result(
+        position_id=request.position_id,
+        token_id=request.held_token_id,
+        probability_content_identity=request.probability_content_identity,
+        outcome="CAPITAL_REJECTED",
+        terminal_no_trade_reason="GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES",
+    ).global_held_sell_completion_cuts[0]
 
     def _batch(claimed, _decision_time, *, claim_unpaged_winner=None):
         del claim_unpaged_winner
@@ -3931,6 +3967,7 @@ def test_global_batch_economic_cut_requires_durable_window_b_finalization():
             winner_event_id=None,
             venue_submit_count=0,
             economic_cut_completed=True,
+            held_sell_completion_cut=capital_cut,
         )
 
     def _window_b_lock(
@@ -3965,6 +4002,18 @@ def test_global_batch_economic_cut_requires_durable_window_b_finalization():
 
     assert result.retried == 1
     assert result.global_auction_completed_non_cancelled == 0
+    assert len(result.global_held_sell_completion_cuts) == 1
+    incomplete_cut = result.global_held_sell_completion_cuts[0]
+    assert incomplete_cut.outcome == "INCOMPLETE"
+    assert incomplete_cut.economic_cut_completed is False
+    assert reactor_module._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=result,
+    ) == ()
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (request,),
+        path=wake_path,
+    )
     assert _processing_status(conn, event.event_id) == "pending"
 
 

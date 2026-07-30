@@ -47,7 +47,7 @@ import os
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass, field, replace as dataclass_replace
+from dataclasses import dataclass, field as dataclass_field, replace as dataclass_replace
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -506,7 +506,7 @@ class EventSubmissionReceipt:
     side_effect_status: str = "NO_SUBMIT"
     reason: str = ""
     proof_accepted: bool | None = None
-    decision_proof_bundle: Any | None = field(default=None, repr=False, compare=False)
+    decision_proof_bundle: Any | None = dataclass_field(default=None, repr=False, compare=False)
     # B2 (PR-4, 2026-06-03): edge-axis plumbing.
     # alpha_gap = q_live - c_fee_adjusted (direction-adjusted posterior minus
     # executable market price).  Positive = our estimate exceeds the ask price.
@@ -614,23 +614,23 @@ class EventSubmissionReceipt:
     # deadlock-free P1 write. compare=False + repr=False so it NEVER affects receipt equality or
     # the receipt hash (it is internal plumbing, never serialized into receipt_json). None on every
     # legacy / gate-reject receipt that never reached candidate-proof generation.
-    belief_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    belief_payload: "dict[str, Any] | None" = dataclass_field(default=None, repr=False, compare=False)
     # Cross-family auction transport. The adapter prepares the complete family
     # probability/token/book set without reserving or submitting; the reactor compares
     # every prepared family before one winner may reserve. Internal only: never serialized.
-    prepared_global_family: "Any | None" = field(default=None, repr=False, compare=False)
+    prepared_global_family: "Any | None" = dataclass_field(default=None, repr=False, compare=False)
     # Exact cross-family winner certificate. Present only on the one event selected
     # from a complete current universe; the live certificate builder consumes its
     # immutable shares/limit/book/wealth identities and may not re-size it locally.
-    global_actuation: "Any | None" = field(default=None, repr=False, compare=False)
+    global_actuation: "Any | None" = dataclass_field(default=None, repr=False, compare=False)
     # Submit-time curve observed by the side-effect-free winner preflight when it
     # supersedes the selected curve. Internal only: the global runtime overlays it
     # into the frozen complete universe and reruns the same optimizer.
-    global_jit_candidate: "Any | None" = field(default=None, repr=False, compare=False)
+    global_jit_candidate: "Any | None" = dataclass_field(default=None, repr=False, compare=False)
     # Candidate-local executable probability bound discovered by winner preflight.
     # Internal only: the global runtime feeds it back into the same complete auction
     # and re-sizes/re-ranks before any venue side effect.
-    global_jit_payoff_q_lcb: "float | None" = field(
+    global_jit_payoff_q_lcb: "float | None" = dataclass_field(
         default=None,
         repr=False,
         compare=False,
@@ -638,11 +638,11 @@ class EventSubmissionReceipt:
     # Direct reduce-only executor boundary facts.  They are internal control
     # evidence: reactor disposition and live counters must never infer venue
     # contact or ACK from an outcome string.
-    venue_call_started: bool = field(default=False, repr=False, compare=False)
-    venue_ack_received: bool = field(default=False, repr=False, compare=False)
-    venue_command_id: str | None = field(default=None, repr=False, compare=False)
-    venue_command_state: str | None = field(default=None, repr=False, compare=False)
-    venue_order_type: str | None = field(default=None, repr=False, compare=False)
+    venue_call_started: bool = dataclass_field(default=False, repr=False, compare=False)
+    venue_ack_received: bool = dataclass_field(default=False, repr=False, compare=False)
+    venue_command_id: str | None = dataclass_field(default=None, repr=False, compare=False)
+    venue_command_state: str | None = dataclass_field(default=None, repr=False, compare=False)
+    venue_order_type: str | None = dataclass_field(default=None, repr=False, compare=False)
     # D1 FILL-UP LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
     # When this receipt is an APPROVED same-token fill-up (stake overridden to the
     # residual delta), the family-rebalance lease intent_id + the owned-exposure
@@ -652,7 +652,7 @@ class EventSubmissionReceipt:
     # receipt equality or the receipt hash (internal plumbing, never serialized into
     # receipt_json). None on EVERY non-fill-up receipt — the fresh-entry path never
     # populates it, so the entry path is byte-identical.
-    fill_up_lease_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    fill_up_lease_payload: "dict[str, Any] | None" = dataclass_field(default=None, repr=False, compare=False)
     # D2 SHIFT-BIN LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
     # The close-before-open carrier. Two shapes, both keyed by the SHIFT_BIN lease
     # intent_id + old-leg identity (old_position_id / old_token_id):
@@ -665,7 +665,7 @@ class EventSubmissionReceipt:
     # compare=False + repr=False so it NEVER affects receipt equality or the receipt
     # hash. None on EVERY fresh-entry / fill-up receipt — the entry + D1 paths never
     # populate it, so both are byte-identical.
-    shift_bin_lease_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    shift_bin_lease_payload: "dict[str, Any] | None" = dataclass_field(default=None, repr=False, compare=False)
     # SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12; root cause
     # /tmp/allpass_nosubmit_rootcause.md). Records that the sole live adapter ran
     # this decision; it either submits, emits a venue terminal, or records a typed
@@ -868,15 +868,15 @@ class ReactorResult:
     # Immutable held-SELL completion evidence emitted by each completed global
     # epoch.  This deliberately survives process-local monitor coverage cache
     # invalidation between selection, venue actuation, and later epochs.
-    global_held_sell_completion_cuts: list["GlobalHeldSellCompletionCut"] = field(
-        default_factory=list
-    )
+    global_held_sell_completion_cuts: list[
+        "GlobalHeldSellCompletionCut"
+    ] = dataclass_field(default_factory=list)
     # VISIBILITY (2026-06-11 claim-storm incident): claim() lock bounces were
     # silently folded into ``retried`` — a 0/250 storm cycle was indistinguishable
     # from 250 honest snapshot-pending retries (reasons=[]). Counted separately so
     # the status pulse / logs expose lock contention as lock contention.
     claim_lock_bounces: int = 0
-    rejection_reasons: list[str] = field(default_factory=list)
+    rejection_reasons: list[str] = dataclass_field(default_factory=list)
     # ALWAYS-DECIDABLE invariant (2026-06-12): how many family-substrate refreshes the reactor
     # invoked this cycle in response to transient substrate blocks, and how many single-family
     # cycle-advance reseeds it enqueued for stale/absent posterior blocks. Visibility only — the
@@ -1748,9 +1748,15 @@ class OpportunityEventReactor:
                 )
         if batch_result.held_sell_completion_cut is not None:
             completion_cut = batch_result.held_sell_completion_cut
+            # No-trade is terminal only after every Window-B disposition is
+            # durable. A submitted held SELL crossed the venue boundary already.
             if (
                 completion_cut.economic_cut_completed
                 != batch_result.economic_cut_completed
+                or (
+                    completion_cut.outcome == "CAPITAL_REJECTED"
+                    and not all_claimed_finalized
+                )
             ):
                 completion_cut = dataclass_replace(
                     completion_cut,
