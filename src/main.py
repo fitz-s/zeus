@@ -116,6 +116,8 @@ _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS = _HELD_POSITION_MONITOR_DEFER_JOBS
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 _EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS = 60.0
+_EDLI_COMMAND_RECOVERY_FULL_CADENCE_SECONDS = 300.0
+_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET: int | None = None
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
 # Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
@@ -4858,11 +4860,49 @@ def _edli_command_recovery_cycle() -> None:
     if _defer_for_held_position_monitor("edli_command_recovery"):
         return
     from src.execution.command_recovery import reconcile_unresolved_commands
-    from src.state.db import get_trade_connection_with_world_required
 
     summary = reconcile_unresolved_commands(scope="live_tick")
+    _consume_edli_command_recovery_summary(
+        summary,
+        log_context="edli_command_recovery.live_tick",
+    )
+    full_bucket = _edli_command_recovery_full_bucket()
+    global _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET
+    if full_bucket == _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET:
+        return
+    full_summary = reconcile_unresolved_commands(scope="full")
+    _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET = full_bucket
+    _consume_edli_command_recovery_summary(
+        full_summary,
+        log_context="edli_command_recovery.full",
+    )
+
+
+def _edli_command_recovery_full_bucket(
+    now: datetime | None = None,
+) -> int:
+    """Return the crash-stable bucket owning one bounded account-wide sweep."""
+
+    observed = now or datetime.now(timezone.utc)
+    if observed.tzinfo is None:
+        raise ValueError("EDLI_COMMAND_RECOVERY_FULL_BUCKET_NAIVE")
+    return int(
+        observed.astimezone(timezone.utc).timestamp()
+        // _EDLI_COMMAND_RECOVERY_FULL_CADENCE_SECONDS
+    )
+
+
+def _consume_edli_command_recovery_summary(
+    summary: dict,
+    *,
+    log_context: str,
+) -> None:
+    """Apply allocator and redecision follow-through for one recovery scope."""
+
+    from src.state.db import get_trade_connection_with_world_required
+
     if summary.get("scanned"):
-        logger.info("edli_command_recovery: %s", summary)
+        logger.info("%s: %s", log_context, summary)
     if _command_recovery_summary_mutated_allocator_inputs(summary):
         trade_conn = get_trade_connection_with_world_required(write_class=None)
         try:
@@ -4870,10 +4910,14 @@ def _edli_command_recovery_cycle() -> None:
         finally:
             trade_conn.close()
         logger.info(
-            "edli_command_recovery: refreshed allocator after recovery mutation: %s",
+            "%s: refreshed allocator after recovery mutation: %s",
+            log_context,
             allocator_refresh,
         )
-    _emit_command_recovery_redecision_continuations(summary, log_context="edli_command_recovery")
+    _emit_command_recovery_redecision_continuations(
+        summary,
+        log_context=log_context,
+    )
 
 
 _CHAIN_MIRROR_RECONCILE_CADENCE_SECONDS = 600  # matches the "interval" job's minutes=10

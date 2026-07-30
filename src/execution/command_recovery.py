@@ -21211,14 +21211,15 @@ def _identity_bound_submitting_candidates(
     if not _table_exists(conn, "venue_commands"):
         return [], 0
     candidate_limit = max(1, int(limit))
-    where_sql = """
-         WHERE state = ?
-           AND intent_kind IN ('ENTRY', 'EXIT')
-           AND COALESCE(venue_order_id, '') != ''
-    """
     total = int(
         conn.execute(
-            "SELECT COUNT(*) FROM venue_commands " + where_sql,
+            """
+            SELECT COUNT(*)
+              FROM venue_commands
+             WHERE state = ?
+               AND intent_kind IN ('ENTRY', 'EXIT')
+               AND COALESCE(venue_order_id, '') != ''
+            """,
             (CommandState.SUBMITTING.value,),
         ).fetchone()[0]
         or 0
@@ -21230,32 +21231,69 @@ def _identity_bound_submitting_candidates(
         if rotation_slot is None
         else max(0, int(rotation_slot))
     )
-    offset = (slot * candidate_limit) % total
-    order_sql = """
-         ORDER BY CASE intent_kind WHEN 'EXIT' THEN 0 ELSE 1 END,
-                  updated_at,
-                  command_id
-    """
-
-    def _slice(slice_limit: int, slice_offset: int) -> list[dict]:
+    def _intent_slice(
+        intent_kind: str,
+        slice_limit: int,
+    ) -> tuple[list[dict], int]:
+        intent_total = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM venue_commands
+                 WHERE state = ?
+                   AND intent_kind = ?
+                   AND COALESCE(venue_order_id, '') != ''
+                """,
+                (CommandState.SUBMITTING.value, intent_kind),
+            ).fetchone()[0]
+            or 0
+        )
+        if intent_total <= 0 or slice_limit <= 0:
+            return [], intent_total
+        offset = (slot * slice_limit) % intent_total
         rows = conn.execute(
-            "SELECT * FROM venue_commands "
-            + where_sql
-            + order_sql
-            + " LIMIT ? OFFSET ?",
+            """
+            SELECT *
+              FROM venue_commands
+             WHERE state = ?
+               AND intent_kind = ?
+               AND COALESCE(venue_order_id, '') != ''
+             ORDER BY updated_at, command_id
+             LIMIT ? OFFSET ?
+            """,
             (
                 CommandState.SUBMITTING.value,
-                max(0, int(slice_limit)),
-                max(0, int(slice_offset)),
+                intent_kind,
+                slice_limit,
+                offset,
             ),
         ).fetchall()
-        return [_dict_row(row) for row in rows]
+        selected = [_dict_row(row) for row in rows]
+        if len(selected) < min(slice_limit, intent_total):
+            wrap_rows = conn.execute(
+                """
+                SELECT *
+                  FROM venue_commands
+                 WHERE state = ?
+                   AND intent_kind = ?
+                   AND COALESCE(venue_order_id, '') != ''
+                 ORDER BY updated_at, command_id
+                 LIMIT ?
+                """,
+                (
+                    CommandState.SUBMITTING.value,
+                    intent_kind,
+                    min(slice_limit, intent_total) - len(selected),
+                ),
+            ).fetchall()
+            selected.extend(_dict_row(row) for row in wrap_rows)
+        return selected, intent_total
 
-    candidates = _slice(candidate_limit, offset)
-    if len(candidates) < min(candidate_limit, total):
-        candidates.extend(
-            _slice(min(candidate_limit, total) - len(candidates), 0)
-        )
+    candidates, _exit_total = _intent_slice("EXIT", candidate_limit)
+    remaining = candidate_limit - len(candidates)
+    if remaining > 0:
+        entries, _entry_total = _intent_slice("ENTRY", remaining)
+        candidates.extend(entries)
     return candidates, max(0, total - len(candidates))
 
 

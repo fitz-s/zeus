@@ -24032,6 +24032,40 @@ def test_identity_bound_submit_candidates_are_bounded_with_durable_remainder(con
     }
 
 
+def test_identity_bound_rotation_reserves_exit_priority(conn):
+    from src.execution.command_recovery import _identity_bound_submitting_candidates
+
+    for index in range(5):
+        command_id = f"cmd-entry-{index}"
+        _insert(conn, command_id=command_id, intent_kind="ENTRY")
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=f"ord-entry-{index}",
+        )
+    _insert(
+        conn,
+        command_id="cmd-exit-priority",
+        intent_kind="EXIT",
+        side="SELL",
+    )
+    _advance_to_submitting(
+        conn,
+        command_id="cmd-exit-priority",
+        venue_order_id="ord-exit-priority",
+    )
+
+    for slot in range(4):
+        candidates, deferred = _identity_bound_submitting_candidates(
+            conn,
+            limit=4,
+            rotation_slot=slot,
+        )
+        assert candidates[0]["command_id"] == "cmd-exit-priority"
+        assert candidates[0]["intent_kind"] == "EXIT"
+        assert deferred == 2
+
+
 def test_identity_bound_rotation_recovers_fifth_matched_command_next_tick(conn):
     from src.execution.command_recovery import (
         _identity_bound_submitting_candidates,
@@ -24215,3 +24249,49 @@ class TestRecoveryCycleIntegration:
         assert 'summary["command_recovery"]' in cr_src, (
             'cycle_runner.py must record summary["command_recovery"] result (INV-31)'
         )
+
+
+def test_edli_command_recovery_runs_fast_tick_and_periodic_full_sweep(monkeypatch):
+    from src import main
+    from src.execution import command_recovery
+
+    scopes = []
+    consumed = []
+    monkeypatch.setattr(main, "get_mode", lambda: "live")
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _job_name: False,
+    )
+    monkeypatch.setattr(main, "_edli_command_recovery_full_bucket", lambda: 7)
+    monkeypatch.setattr(main, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", None)
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda *, scope: scopes.append(scope)
+        or {
+            "scope": scope,
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_consume_edli_command_recovery_summary",
+        lambda summary, *, log_context: consumed.append(
+            (summary["scope"], log_context)
+        ),
+    )
+
+    main._edli_command_recovery_cycle.__wrapped__()
+    main._edli_command_recovery_cycle.__wrapped__()
+
+    assert scopes == ["live_tick", "full", "live_tick"]
+    assert consumed == [
+        ("live_tick", "edli_command_recovery.live_tick"),
+        ("full", "edli_command_recovery.full"),
+        ("live_tick", "edli_command_recovery.live_tick"),
+    ]
+    assert main._EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET == 7
