@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-07-29
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
@@ -833,44 +833,320 @@ def test_pusd_collateral_payload_does_not_enumerate_ctf_positions(tmp_path):
     ]
 
 
-def test_target_ctf_collateral_payload_does_not_enumerate_all_positions(tmp_path):
-    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+def test_target_ctf_collateral_payload_does_not_enumerate_all_positions(
+    monkeypatch,
+    tmp_path,
+):
+    from src.venue import polymarket_v2_adapter as adapter_module
 
-    class FakeClientWithTargetCtf(FakeBalanceAllowanceClient):
-        def get_positions(self):
-            raise AssertionError("target exit CTF proof must not enumerate every position")
+    token_id = "21427700"
+    calls = []
 
-        def get_balance_allowance(self, params):
-            self.calls.append(("get_balance_allowance", params))
-            asset_type = str(getattr(params, "asset_type", "")).upper()
-            if "CONDITIONAL" in asset_type:
-                assert getattr(params, "token_id") == "exit-token"
-                return {"balance": "21427700"}
-            return {"balance": "100000000", "allowance": "50000000"}
+    def batch_call(_url, requested, *, timeout_seconds):
+        calls.extend(requested)
+        assert timeout_seconds == 8.0
+        return [
+            f"0x{100_000_000:064x}",
+            f"0x{50_000_000:064x}",
+            f"0x{40_000_000:064x}",
+            f"0x{21_427_700:064x}",
+            f"0x{1:064x}",
+            f"0x{1:064x}",
+        ]
 
-    fake = FakeClientWithTargetCtf()
-    adapter = PolymarketV2Adapter(
+    monkeypatch.setattr(
+        adapter_module,
+        "_json_rpc_batch_call_hard_deadline",
+        batch_call,
+    )
+    adapter = adapter_module.PolymarketV2Adapter(
         host="https://clob.polymarket.com",
-        funder_address="0xfunder",
+        funder_address="0x0000000000000000000000000000000000000001",
         signer_key="test-key",
         chain_id=137,
         signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
         q1_egress_evidence_path=tmp_path / "unused.txt",
-        client_factory=lambda **kwargs: fake,
+        client_factory=lambda **_kwargs: pytest.fail(
+            "targeted submit proof must not create a CLOB client"
+        ),
     )
 
-    payload = adapter.get_ctf_collateral_payload(token_ids=["exit-token"])
+    payload = adapter.get_ctf_collateral_payload(
+        token_ids=["", token_id, token_id]
+    )
 
     assert payload["ctf_token_scope"] == "targeted"
-    assert payload["ctf_token_balances_units"] == {"exit-token": 21427700}
-    assert payload["ctf_token_allowances_units"] == {"exit-token": 21427700}
-    call_asset_types = [
-        str(getattr(call[1], "asset_type", "")).upper()
-        for call in fake.calls
-        if call[0] == "get_balance_allowance"
-    ]
-    assert any("COLLATERAL" in asset for asset in call_asset_types)
-    assert any("CONDITIONAL" in asset for asset in call_asset_types)
+    assert payload["ctf_token_balances_units"] == {token_id: 21427700}
+    assert payload["ctf_token_allowances_units"] == {token_id: 21427700}
+    assert payload["authority_tier"] == "CHAIN"
+    assert len(calls) == 6
+
+
+def test_target_ctf_chain_batch_finishes_inside_submit_guard(
+    monkeypatch,
+    tmp_path,
+):
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    observed = {}
+
+    token_one = "123456789"
+    token_two = "987654321"
+
+    def batch_call(_url, requested, *, timeout_seconds):
+        observed["calls"] = requested
+        observed["timeout_seconds"] = timeout_seconds
+        return [
+            f"0x{100_000_000:064x}",
+            f"0x{90_000_000:064x}",
+            f"0x{80_000_000:064x}",
+            f"0x{13_000_000:064x}",
+            f"0x{1:064x}",
+            f"0x{1:064x}",
+            f"0x{17_000_000:064x}",
+            f"0x{1:064x}",
+            f"0x{0:064x}",
+        ]
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_json_rpc_batch_call_hard_deadline",
+        batch_call,
+    )
+    adapter = adapter_module.PolymarketV2Adapter(
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        polygon_rpc_url="https://polygon.invalid",
+        network_timeout_seconds=30.0,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: pytest.fail("CLOB is not submit authority"),
+    )
+
+    payload = adapter.get_ctf_collateral_payload(
+        token_ids=["", token_one, token_one, token_two]
+    )
+
+    assert observed["timeout_seconds"] == 10.0
+    calls = observed["calls"]
+    assert len(calls) == 9
+    collateral, spenders = adapter_module._collateral_allowance_contracts(137)
+    funder_word = adapter_module._abi_address(adapter.funder_address)
+    assert calls[0] == (
+        "eth_call",
+        [
+            {
+                "to": collateral,
+                "data": "0x70a08231" + funder_word,
+            },
+            "latest",
+        ],
+    )
+    for index, spender in enumerate(spenders, start=1):
+        assert calls[index] == (
+            "eth_call",
+            [
+                {
+                    "to": collateral,
+                    "data": (
+                        "0xdd62ed3e"
+                        + funder_word
+                        + adapter_module._abi_address(spender)
+                    ),
+                },
+                "latest",
+            ],
+        )
+    for token_offset, token_id in enumerate((token_one, token_two)):
+        base = 3 + token_offset * 3
+        assert calls[base] == (
+            "eth_call",
+            [
+                {
+                    "to": adapter_module.POLYGON_CTF_ADDRESS,
+                    "data": (
+                        adapter_module.ERC1155_BALANCE_OF_SELECTOR
+                        + funder_word
+                        + format(int(token_id), "064x")
+                    ),
+                },
+                "latest",
+            ],
+        )
+        for approval_offset, spender in enumerate(spenders, start=1):
+            assert calls[base + approval_offset] == (
+                "eth_call",
+                [
+                    {
+                        "to": adapter_module.POLYGON_CTF_ADDRESS,
+                        "data": (
+                            adapter_module.ERC1155_IS_APPROVED_FOR_ALL_SELECTOR
+                            + funder_word
+                            + adapter_module._abi_address(spender)
+                        ),
+                    },
+                    "latest",
+                ],
+            )
+    assert payload["pusd_allowance_micro"] == 80_000_000
+    assert payload["ctf_token_balances_units"] == {
+        token_one: 13_000_000,
+        token_two: 17_000_000,
+    }
+    assert payload["ctf_token_allowances_units"] == {
+        token_one: 13_000_000,
+        token_two: 0,
+    }
+
+
+@pytest.mark.parametrize("token_id", ["not-a-token", "-1", str(2**256)])
+def test_target_ctf_chain_batch_rejects_invalid_uint256_token(
+    monkeypatch,
+    tmp_path,
+    token_id,
+):
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_json_rpc_batch_call_hard_deadline",
+        lambda *_args, **_kwargs: pytest.fail(
+            "invalid token must fail before Polygon I/O"
+        ),
+    )
+    adapter = adapter_module.PolymarketV2Adapter(
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        polygon_rpc_url="https://polygon.invalid",
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+    )
+
+    with pytest.raises(
+        adapter_module.V2AdapterError,
+        match="invalid targeted|outside uint256",
+    ):
+        adapter.get_ctf_collateral_payload(token_ids=[token_id])
+
+
+def test_target_ctf_chain_batch_rejects_noncanonical_approval_bool(
+    monkeypatch,
+    tmp_path,
+):
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_json_rpc_batch_call_hard_deadline",
+        lambda *_args, **_kwargs: [
+            f"0x{100_000_000:064x}",
+            f"0x{90_000_000:064x}",
+            f"0x{80_000_000:064x}",
+            f"0x{13_000_000:064x}",
+            f"0x{2:064x}",
+            f"0x{1:064x}",
+        ],
+    )
+    adapter = adapter_module.PolymarketV2Adapter(
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        polygon_rpc_url="https://polygon.invalid",
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+    )
+
+    with pytest.raises(
+        adapter_module.V2AdapterError,
+        match="canonical bools",
+    ):
+        adapter.get_ctf_collateral_payload(token_ids=["123456789"])
+
+
+def test_target_ctf_chain_batch_hard_deadline_kills_slow_drip_worker():
+    import multiprocessing
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    body = json.dumps(
+        [{"jsonrpc": "2.0", "id": 1, "result": f"0x{1:064x}"}]
+    ).encode()
+
+    class SlowDripHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            try:
+                for byte in body:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowDripHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        with pytest.raises(TimeoutError, match="hard deadline"):
+            adapter_module._json_rpc_batch_call_hard_deadline(
+                f"http://127.0.0.1:{server.server_port}",
+                [("eth_call", [{"to": "0x1"}, "latest"])],
+                timeout_seconds=0.25,
+            )
+        assert all(
+            child.name != "zeus-targeted-collateral-rpc"
+            for child in multiprocessing.active_children()
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1.0)
+
+
+def test_target_ctf_chain_batch_subprocess_rejects_partial_rpc_truth():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    body = json.dumps(
+        [{"jsonrpc": "2.0", "id": 1, "result": f"0x{1:064x}"}]
+    ).encode()
+
+    class PartialBatchHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), PartialBatchHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        with pytest.raises(
+            adapter_module.V2ReadUnavailable,
+            match="incomplete",
+        ):
+            adapter_module._json_rpc_batch_call_hard_deadline(
+                f"http://127.0.0.1:{server.server_port}",
+                [
+                    ("eth_call", [{"to": "0x1"}, "latest"]),
+                    ("eth_call", [{"to": "0x2"}, "latest"]),
+                ],
+                timeout_seconds=2.0,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1.0)
 
 
 def test_target_ctf_collateral_falls_back_to_chain_without_inventing_zero(tmp_path):
@@ -998,6 +1274,22 @@ def test_parallel_chain_collateral_guards_fail_loud_under_world_mutex(tmp_path):
             match="onchain.pusd_allowance_parallel",
         ):
             adapter._chain_collateral_allowance_micro()
+        production_adapter = PolymarketV2Adapter(
+            host="https://clob.polymarket.com",
+            funder_address="0x0000000000000000000000000000000000000001",
+            signer_key="test-key",
+            chain_id=137,
+            signature_type=3,
+            polygon_rpc_url="https://polygon.invalid",
+            q1_egress_evidence_path=tmp_path / "unused.txt",
+        )
+        with pytest.raises(
+            WorldMutexIOViolation,
+            match="onchain.batch_hard_deadline",
+        ):
+            production_adapter.get_ctf_collateral_payload(
+                token_ids=["123456789"]
+            )
     finally:
         mutex.release()
 

@@ -119,15 +119,12 @@ def prepare_collateral_snapshot_for_submit(
 
     fallback = load_latest_collateral_snapshot_read_only(conn)
     refresh_fallback = fallback
-    if action == "exit_submit" and token_id and (
-        fallback is None
-        or token_id not in fallback.ctf_token_balances
-        or token_id not in fallback.ctf_token_allowances
-    ):
-        # A fresh pUSD-only snapshot says nothing about this outcome token.
-        # Reusing it after a targeted read failure would collapse unknown CTF
-        # inventory into a known zero and misclassify the failure as
-        # ctf_tokens_insufficient.
+    if action == "exit_submit" and token_id:
+        # Submit-time SELL authority is a new chain witness, not a cache-age
+        # judgment. Reusing even a previously targeted snapshot after this
+        # read fails can authorize a sale against inventory or approvals that
+        # have since changed. Unknown remains DEGRADED and fails closed; the
+        # next redecision retries the exact token.
         refresh_fallback = None
     client = PolymarketClient()
     ensure_adapter = getattr(client, "_ensure_v2_adapter", None)

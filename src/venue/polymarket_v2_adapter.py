@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-07-29
 # Authority basis (2026-06-12): operator law 2026-06-10 ABSOLUTE — redeem submission
 #   FORBIDDEN. redeem() now raises REDEEM_SUBMISSION_FORBIDDEN unconditionally; the
 #   autonomous web3 broadcast body (eth_sendRawTransaction EOA path) was DELETED.
@@ -25,6 +25,7 @@ import importlib.metadata
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import threading
@@ -428,6 +429,7 @@ class PolymarketV2Adapter:
             if network_timeout_seconds is not None and float(network_timeout_seconds) > 0
             else None
         )
+        self._rpc_call_is_default = rpc_call is None
         if rpc_call is None:
             self._rpc_call = lambda rpc_url, method, params: _json_rpc_call(
                 rpc_url,
@@ -1689,6 +1691,151 @@ class PolymarketV2Adapter:
             "pusd_allowance_source": "chain_erc20_batch",
         }
 
+    def _get_chain_targeted_collateral_payload(
+        self,
+        *,
+        token_ids: list[str],
+    ) -> dict[str, Any]:
+        """Read submit-time pUSD and targeted CTF truth in one Polygon batch."""
+
+        if not self.polygon_rpc_url:
+            raise V2ReadUnavailable(
+                "polygon RPC is required for targeted collateral truth"
+            )
+        collateral, spenders = _collateral_allowance_contracts(self.chain_id)
+        unique_tokens = tuple(
+            dict.fromkeys(
+                token_id
+                for raw_token_id in token_ids
+                if (token_id := str(raw_token_id or "").strip())
+            )
+        )
+        calls: list[tuple[str, list[Any]]] = [
+            (
+                "eth_call",
+                [
+                    {
+                        "to": collateral,
+                        "data": "0x70a08231" + _abi_address(self.funder_address),
+                    },
+                    "latest",
+                ],
+            ),
+            *[
+                (
+                    "eth_call",
+                    [
+                        {
+                            "to": collateral,
+                            "data": (
+                                "0xdd62ed3e"
+                                + _abi_address(self.funder_address)
+                                + _abi_address(spender)
+                            ),
+                        },
+                        "latest",
+                    ],
+                )
+                for spender in spenders
+            ],
+        ]
+        for token_id in unique_tokens:
+            try:
+                token_value = int(token_id, 0)
+            except (TypeError, ValueError) as exc:
+                raise V2AdapterError(
+                    f"invalid targeted collateral token_id {token_id!r}"
+                ) from exc
+            if not 0 <= token_value < 2**256:
+                raise V2AdapterError(
+                    f"targeted collateral token_id outside uint256: {token_id!r}"
+                )
+            token_word = format(token_value, "064x")
+            calls.append(
+                (
+                    "eth_call",
+                    [
+                        {
+                            "to": POLYGON_CTF_ADDRESS,
+                            "data": (
+                                ERC1155_BALANCE_OF_SELECTOR
+                                + _abi_address(self.funder_address)
+                                + token_word
+                            ),
+                        },
+                        "latest",
+                    ],
+                )
+            )
+            calls.extend(
+                (
+                    "eth_call",
+                    [
+                        {
+                            "to": POLYGON_CTF_ADDRESS,
+                            "data": (
+                                ERC1155_IS_APPROVED_FOR_ALL_SELECTOR
+                                + _abi_address(self.funder_address)
+                                + _abi_address(exchange)
+                            ),
+                        },
+                        "latest",
+                    ],
+                )
+                for exchange in spenders
+            )
+
+        # The caller's submit-collateral guard is 20 seconds. Every underlying
+        # network operation must finish first; an equal/longer inner timeout
+        # merely leaks the worker after the outer guard fires.
+        timeout_seconds = min(self._network_timeout(8.0), 10.0)
+        values = _json_rpc_batch_call_hard_deadline(
+            self.polygon_rpc_url,
+            calls,
+            timeout_seconds=timeout_seconds,
+        )
+        expected = 3 + 3 * len(unique_tokens)
+        if len(values) != expected:
+            raise V2AdapterError(
+                f"targeted collateral batch returned {len(values)} results; "
+                f"expected {expected}"
+            )
+        quantities = [
+            _uint256_hex_data_int(value, context="targeted collateral batch")
+            for value in values
+        ]
+        pusd_balance, exchange_allowance, neg_risk_allowance = quantities[:3]
+        balances: dict[str, int] = {}
+        allowances: dict[str, int] = {}
+        offset = 3
+        for token_id in unique_tokens:
+            balance, exchange_approved, neg_risk_approved = quantities[
+                offset : offset + 3
+            ]
+            offset += 3
+            if exchange_approved not in {0, 1} or neg_risk_approved not in {0, 1}:
+                raise V2AdapterError(
+                    f"targeted collateral approvals must be canonical bools "
+                    f"for token_id={token_id}"
+                )
+            balances[token_id] = balance
+            allowances[token_id] = (
+                balance if exchange_approved and neg_risk_approved else 0
+            )
+        return {
+            "pusd_balance_micro": pusd_balance,
+            "pusd_allowance_micro": min(exchange_allowance, neg_risk_allowance),
+            "usdc_e_legacy_balance_micro": 0,
+            "ctf_token_balances_units": balances,
+            "ctf_token_allowances_units": allowances,
+            "authority_tier": "CHAIN",
+            "signature_type": self.signature_type,
+            "pusd_balance_source": "CHAIN",
+            "pusd_allowance_source": "chain_erc20_batch",
+            "ctf_balance_source": "chain_erc1155_batch",
+            "ctf_token_scope": "targeted",
+        }
+
     def _pusd_collateral_payload_from_raw(
         self,
         raw: dict[str, Any],
@@ -1828,6 +1975,13 @@ class PolymarketV2Adapter:
         snapshot. This targeted surface keeps sell preflight exact while making
         its runtime proportional to the order being submitted.
         """
+
+        # Production uses the adapter's bounded JSON-RPC transport. One ordered
+        # batch is both fresher and faster than serial CLOB cache reads followed
+        # by chain fallbacks. Custom rpc_call is retained as the deterministic
+        # unit-test seam for the legacy per-call proof below.
+        if self._rpc_call_is_default:
+            return self._get_chain_targeted_collateral_payload(token_ids=token_ids)
 
         try:
             raw = self._collateral_balance_allowance_raw(refresh_allowance=True)
@@ -3327,6 +3481,84 @@ def _json_rpc_batch_call(
             f"polygon rpc batch incomplete ids={sorted(by_id)} expected={sorted(expected_ids)}"
         )
     return [by_id[index] for index in range(1, len(calls) + 1)]
+
+
+def _json_rpc_batch_process_worker(
+    send_conn,
+    rpc_url: str,
+    calls: list[tuple[str, list[Any]]],
+    timeout_seconds: float,
+) -> None:
+    try:
+        result = _json_rpc_batch_call(
+            rpc_url,
+            calls,
+            timeout_seconds=timeout_seconds,
+        )
+        send_conn.send(("ok", result))
+    except BaseException as exc:
+        send_conn.send(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        send_conn.close()
+
+
+def _json_rpc_batch_call_hard_deadline(
+    rpc_url: str,
+    calls: list[tuple[str, list[Any]]],
+    *,
+    timeout_seconds: float,
+) -> list[Any]:
+    """Run a public RPC batch behind a killable total wall-clock deadline."""
+
+    _assert_no_world_mutex_held_for_io("onchain.batch_hard_deadline")
+    timeout = max(0.01, float(timeout_seconds))
+    deadline = time.monotonic() + timeout
+
+    def _remaining() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    def _stop_and_reap(process) -> None:
+        if not process.is_alive():
+            return
+        process.terminate()
+        process.join(timeout=min(0.25, _remaining()))
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=min(0.25, _remaining()))
+
+    context = multiprocessing.get_context("spawn")
+    receive_conn, send_conn = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_json_rpc_batch_process_worker,
+        args=(send_conn, rpc_url, calls, timeout),
+        name="zeus-targeted-collateral-rpc",
+        daemon=True,
+    )
+    try:
+        process.start()
+        send_conn.close()
+        # Reserve cleanup budget inside the same total deadline. The caller's
+        # outer guard is 20 seconds; this bounded subprocess must be reaped
+        # before that guard can abandon its worker.
+        poll_budget = max(0.0, _remaining() - min(0.5, timeout / 4.0))
+        if poll_budget <= 0.0 or not receive_conn.poll(poll_budget):
+            _stop_and_reap(process)
+            raise TimeoutError(
+                f"targeted collateral RPC exceeded {timeout:.1f}s hard deadline"
+            )
+        status, payload = receive_conn.recv()
+        process.join(timeout=min(0.25, _remaining()))
+        _stop_and_reap(process)
+        if status != "ok":
+            raise V2ReadUnavailable(f"targeted collateral RPC failed: {payload}")
+        return list(payload)
+    finally:
+        receive_conn.close()
+        try:
+            send_conn.close()
+        except OSError:
+            pass
+        _stop_and_reap(process)
 
 
 def _hex_data_bytes(value: Any, *, context: str) -> bytes:
