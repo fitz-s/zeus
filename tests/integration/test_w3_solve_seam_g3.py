@@ -1256,14 +1256,17 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
         ),
         current_time_provider=lambda: at + _dt.timedelta(seconds=2),
     )
-    assert global_batch_runtime.current_global_holding_coverage(
+    covered = global_batch_runtime.current_global_holding_coverage(
         **current,
         current_sell_book_witness_resolver=lambda _row: "sell-book-1",
-    ) == (evaluated, 42)
+    )
+    assert covered.outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.COVERED
+    assert covered.coverage == evaluated
+    assert covered.decision_log_id == 42
     assert global_batch_runtime.current_global_holding_coverage(
         **{**current, "probability_content_identity": "q-content-changed"},
         current_sell_book_witness_resolver=lambda _row: "sell-book-1",
-    ) is None
+    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT
     for changed_content in (
         "q-content-source-changed",
         "q-content-alpha-changed",
@@ -1272,22 +1275,26 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
         assert global_batch_runtime.current_global_holding_coverage(
             **{**current, "probability_content_identity": changed_content},
             current_sell_book_witness_resolver=lambda _row: "sell-book-1",
-        ) is None
+        ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT
     assert global_batch_runtime.current_global_holding_coverage(
         **{**current, "checked_at_utc": at + _dt.timedelta(seconds=31)},
         current_sell_book_witness_resolver=lambda _row: "sell-book-1",
-    ) is None
+    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.COVERAGE_EXPIRED
     assert global_batch_runtime.current_global_holding_coverage(
         **current,
         current_sell_book_witness_resolver=lambda _row: "sell-book-changed",
-    ) is None
+    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.BOOK
+    assert global_batch_runtime.current_global_holding_coverage(
+        **{**current, "current_wealth_economic_identity": "wealth-2"},
+        current_sell_book_witness_resolver=lambda _row: "sell-book-1",
+    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.WEALTH
     global_batch_runtime._invalidate_global_holding_coverage_for_wealth(
         "wealth-2"
     )
     assert global_batch_runtime.current_global_holding_coverage(
         **current,
         current_sell_book_witness_resolver=lambda _row: "sell-book-1",
-    ) is None
+    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED
 
     excluded = replace(
         evaluated,
@@ -1307,7 +1314,7 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
     assert global_batch_runtime.current_global_holding_coverage(
         **current,
         current_sell_book_witness_resolver=lambda _row: "sell-book-1",
-    ) is None
+    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.COVERAGE_PARTITION
 
 
 def test_probability_content_identity_excludes_only_receipt_time_and_certificate():

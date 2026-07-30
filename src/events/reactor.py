@@ -6389,8 +6389,17 @@ def request_global_auction_completion(
         )
         return (False, None) if return_request else False
     except OSError:
+        if return_request:
+            logging.getLogger("zeus.events.reactor").exception(
+                "held SELL reauction queue read failed before a durable "
+                "request could be accepted: position_id=%s",
+                str(position_id or "unknown"),
+            )
+            return False, None
         durable_request_exists = False
         held_request = None
+    if return_request and held_request is None:
+        return False, None
     if not already_due:
         logger = logging.getLogger("zeus.events.reactor")
         logger.warning(

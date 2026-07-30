@@ -2308,6 +2308,41 @@ def test_held_sell_completion_request_survives_wake_io_failure(monkeypatch):
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
+def test_typed_held_sell_completion_rejects_queue_read_failure(monkeypatch):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    published = []
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _at: (_ for _ in ()).throw(OSError("queue unavailable")),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **kwargs: published.append(kwargs),
+    )
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        accepted, request = reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id="position-queue-failed",
+            family=("Paris", "2026-07-30", "low"),
+            probability_content_identity="q-content-queue-failed",
+            held_token_id="token-no-queue-failed",
+            held_best_bid=0.12,
+            bid_observed_at="2026-07-30T08:00:00+00:00",
+            return_request=True,
+        )
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+    assert accepted is False
+    assert request is None
+    assert published == []
+
+
 def test_held_sell_reauction_typed_reject_receipt_completes_request(tmp_path):
     from src.runtime.reactor_wake import (
         HeldSellReauctionReceipt,
