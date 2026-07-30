@@ -1602,6 +1602,43 @@ def test_restart_completion_debt_preempts_continuous_ordinary_wakes(tmp_path):
     } == {("Paris", "2026-07-28", "low")}
 
 
+def test_exact_held_sell_debt_preempts_older_generic_completion_marker(tmp_path):
+    """A failed broad fairness cut cannot head-of-line block exact held capital."""
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="periodic_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="generic-completion-old",
+        published_at=datetime(2026, 7, 30, 8, 0, tzinfo=timezone.utc),
+    )
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="position-capital-at-risk",
+        family=("Paris", "2026-07-30", "low"),
+        probability_content_identity="q-current",
+        held_token_id="token-held",
+        held_best_bid=0.11,
+        bid_observed_at="2026-07-30T08:00:01+00:00",
+    )
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="exact-held-sell-new",
+        published_at=datetime(2026, 7, 30, 8, 0, 1, tzinfo=timezone.utc),
+        forecast_families=(request.family,),
+        held_sell_reauction_requests=(request,),
+    )
+
+    selected = reactor_wake.read_reactor_wake(path=path)
+
+    assert selected is not None
+    assert selected.wake_id == "exact-held-sell-new"
+    assert selected.held_sell_reauction_requests == (request,)
+
+
 def test_held_sell_completion_drain_is_bounded_and_position_fair(tmp_path):
     """Historical held-SELL anchors get one completion turn before duplicates."""
     from src.runtime import reactor_wake

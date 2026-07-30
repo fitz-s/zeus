@@ -781,12 +781,13 @@ def read_reactor_wake(
     """Read the queued fact with the shortest alpha clock first.
 
     Day0 observations can reverse value in milliseconds and always preempt.
-    A durable global-auction completion debt is next: it survives process
-    restart and ordinary fill, price, or probability streams cannot starve the
-    required capital cut. A confirmed fill changes the actual portfolio
-    endowment. Fill, price, and probability are otherwise joint material
-    inputs; their oldest unconsumed input gets one turn, so no continuous
-    stream can starve another.
+    A durable exact held-SELL completion debt is next: it survives process
+    restart and ordinary fill, price, probability, or generic monitor-fairness
+    streams cannot starve capital already at risk. A generic auction-completion
+    marker follows exact held obligations. A confirmed fill changes the actual
+    portfolio endowment. Fill, price, and probability are otherwise joint
+    material inputs; their oldest unconsumed input gets one turn, so no
+    continuous stream can starve another.
     Forecast hints carry incremental family scopes; selecting the newest hint
     does not lose older scopes because same-reason wakes are coalesced and
     acknowledgement remains exact.
@@ -798,6 +799,12 @@ def read_reactor_wake(
     ]
     for _queue_file, wake in reversed(queued):
         if wake.reason == "day0_extreme_event_committed":
+            return wake
+    for _queue_file, wake in queued:
+        if (
+            wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+            and wake.held_sell_reauction_requests
+        ):
             return wake
     for _queue_file, wake in queued:
         if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON:
