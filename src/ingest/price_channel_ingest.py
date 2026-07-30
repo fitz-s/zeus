@@ -1336,6 +1336,45 @@ def _edli_durable_fill_bridge_work_exists_read_only() -> bool:
         conn.close()
 
 
+def _edli_trade_fact_bridge_candidates_read_only():
+    """Discover bounded trade-fact bridge work before acquiring the WORLD writer."""
+    from src.events.edli_trade_fact_bridge import (
+        discover_absorbed_confirmed_fill_aggregate_ids,
+        discover_confirmed_trade_fact_candidates,
+        discover_rest_filled_orphan_trade_fact_candidates,
+    )
+    from src.state.db import (
+        ZEUS_WORLD_DB_PATH,
+        _zeus_trade_db_path,
+        get_trade_connection_read_only,
+        get_world_connection_read_only,
+    )
+
+    conn = get_trade_connection_read_only()
+    try:
+        attached = {
+            str(_row_get(row, "name") or "")
+            for row in conn.execute("PRAGMA database_list").fetchall()
+        }
+        if "world" not in attached:
+            world_uri = f"{ZEUS_WORLD_DB_PATH.resolve().as_uri()}?mode=ro"
+            conn.execute("ATTACH DATABASE ? AS world", (world_uri,))
+        confirmed_candidates = discover_confirmed_trade_fact_candidates(conn)
+        rest_orphan_candidates = discover_rest_filled_orphan_trade_fact_candidates(conn)
+    finally:
+        conn.close()
+    world_conn = get_world_connection_read_only()
+    try:
+        trade_uri = f"{_zeus_trade_db_path().resolve().as_uri()}?mode=ro"
+        world_conn.execute("ATTACH DATABASE ? AS trades", (trade_uri,))
+        absorbed_fill_aggregate_ids = discover_absorbed_confirmed_fill_aggregate_ids(
+            world_conn
+        )
+    finally:
+        world_conn.close()
+    return confirmed_candidates, rest_orphan_candidates, absorbed_fill_aggregate_ids
+
+
 # ---------------------------------------------------------------------------
 # THE DURABLE FILL BRIDGE SCAN — the persisted truth shared across the cutover
 # (moved verbatim from src/main.py). src.main's BOOT recovery imports THIS.
@@ -2043,37 +2082,65 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
     # Fail-safe: a bridge error must not crash the scheduler job — log and retry
     # next cycle (the EDLI events persist; the next durable scan re-runs).
     reconciled_trade_facts = 0
-    from src.state.db import get_world_connection_with_trades_required
-
-    conn = None
     try:
-        with _edli_price_channel_world_write_gate(
-            owner="price_channel_fill_bridge_reconcile"
-        ):
-            conn = get_world_connection_with_trades_required(write_class="live")
-            _bound_price_channel_sqlite_wait(
-                conn,
-                timeout_ms=PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS,
-            )
-            from src.events.edli_trade_fact_bridge import (
-                append_confirmed_trade_facts_to_edli,
-                append_rest_filled_orphan_trade_facts_to_edli,
-            )
-
-            reconciled_trade_facts += append_confirmed_trade_facts_to_edli(conn, now=now)
-            conn.commit()
-            reconciled_trade_facts += append_rest_filled_orphan_trade_facts_to_edli(
-                conn, now=now
-            )
-            conn.commit()
+        confirmed_candidates, rest_orphan_candidates, absorbed_fill_aggregate_ids = (
+            _edli_trade_fact_bridge_candidates_read_only()
+        )
     except Exception as exc:  # noqa: BLE001 - durable facts retry next repair cycle
-        if conn is not None:
-            conn.rollback()
         canonical_failure_reasons.append(FILL_BRIDGE_TRADE_FACT_PERSIST_FAILED)
-        logger.error("EDLI trade-fact bridge pass failed (non-fatal): %s", exc, exc_info=True)
-    finally:
-        if conn is not None:
-            conn.close()
+        logger.error(
+            "EDLI trade-fact bridge read-only discovery failed (non-fatal): %s",
+            exc,
+            exc_info=True,
+        )
+    else:
+        if (
+            confirmed_candidates
+            or rest_orphan_candidates
+            or absorbed_fill_aggregate_ids
+        ):
+            from src.state.db import get_world_connection_with_trades_required
+
+            conn = None
+            try:
+                with _edli_price_channel_world_write_gate(
+                    owner="price_channel_fill_bridge_reconcile"
+                ):
+                    conn = get_world_connection_with_trades_required(write_class="live")
+                    _bound_price_channel_sqlite_wait(
+                        conn,
+                        timeout_ms=PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS,
+                    )
+                    from src.events.edli_trade_fact_bridge import (
+                        append_confirmed_trade_facts_to_edli,
+                        append_rest_filled_orphan_trade_facts_to_edli,
+                    )
+
+                    reconciled_trade_facts += append_confirmed_trade_facts_to_edli(
+                        conn,
+                        now=now,
+                        candidates=confirmed_candidates,
+                        absorbed_fill_aggregate_ids=absorbed_fill_aggregate_ids,
+                    )
+                    reconciled_trade_facts += append_rest_filled_orphan_trade_facts_to_edli(
+                        conn,
+                        now=now,
+                        candidates=rest_orphan_candidates,
+                        absorbed_fill_aggregate_ids=(),
+                    )
+                    conn.commit()
+            except Exception as exc:  # noqa: BLE001 - durable facts retry next repair cycle
+                if conn is not None:
+                    conn.rollback()
+                canonical_failure_reasons.append(FILL_BRIDGE_TRADE_FACT_PERSIST_FAILED)
+                logger.error(
+                    "EDLI trade-fact bridge append failed (non-fatal): %s",
+                    exc,
+                    exc_info=True,
+                )
+            finally:
+                if conn is not None:
+                    conn.close()
 
     bridged_positions = 0
     try:

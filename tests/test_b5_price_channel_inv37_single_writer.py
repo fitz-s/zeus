@@ -231,11 +231,10 @@ def test_trade_gate_never_takes_world_mutex(monkeypatch):
     ]
 
 
-def test_m5_and_fill_bridge_cycles_serialize_on_production_world_trade_gate(
+def test_m5_progresses_while_fill_bridge_candidate_discovery_is_read_only(
     monkeypatch,
     tmp_path,
 ):
-    from src.events import edli_trade_fact_bridge
     from src.events import price_channel_redecision_router
     from src.ingest import price_channel_ingest as lane
     from src.state import db as state_db
@@ -278,8 +277,8 @@ def test_m5_and_fill_bridge_cycles_serialize_on_production_world_trade_gate(
         },
     )
 
-    bridge_scan_started = Event()
-    release_bridge_scan = Event()
+    bridge_discovery_started = Event()
+    release_bridge_discovery = Event()
     m5_gate_attempted = Event()
     m5_world_opened = Event()
 
@@ -289,7 +288,7 @@ def test_m5_and_fill_bridge_cycles_serialize_on_production_world_trade_gate(
             return []
 
     def _open_world(*args, **kwargs):  # noqa: ARG001
-        if bridge_scan_started.is_set():
+        if bridge_discovery_started.is_set():
             m5_world_opened.set()
         conn = sqlite3.connect(world_path)
         conn.row_factory = sqlite3.Row
@@ -301,16 +300,10 @@ def test_m5_and_fill_bridge_cycles_serialize_on_production_world_trade_gate(
         conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
         return conn
 
-    def _blocking_bridge_scan(
-        conn,  # noqa: ARG001
-        *,
-        now=None,  # noqa: ARG001
-        limit=1,  # noqa: ARG001
-        failure_reasons=None,  # noqa: ARG001
-    ):
-        bridge_scan_started.set()
-        assert release_bridge_scan.wait(timeout=1.0)
-        return 0
+    def _blocking_candidate_discovery():
+        bridge_discovery_started.set()
+        assert release_bridge_discovery.wait(timeout=1.0)
+        return (), (), ()
 
     monkeypatch.setattr(lane, "_edli_user_channel_reader", lambda _cfg: _EmptyUserReader())
     monkeypatch.setattr(
@@ -324,21 +317,11 @@ def test_m5_and_fill_bridge_cycles_serialize_on_production_world_trade_gate(
         _open_trade_with_world,
     )
     monkeypatch.setattr(
-        edli_trade_fact_bridge,
-        "append_confirmed_trade_facts_to_edli",
-        lambda conn, *, now: 0,
-    )
-    monkeypatch.setattr(
-        edli_trade_fact_bridge,
-        "append_rest_filled_orphan_trade_facts_to_edli",
-        lambda conn, *, now: 0,
-    )
-    monkeypatch.setattr(
         lane,
-        "_edli_durable_fill_bridge_work_exists_read_only",
-        lambda: True,
+        "_edli_trade_fact_bridge_candidates_read_only",
+        _blocking_candidate_discovery,
     )
-    monkeypatch.setattr(lane, "_edli_durable_fill_bridge_scan", _blocking_bridge_scan)
+    monkeypatch.setattr(lane, "_edli_durable_fill_bridge_work_exists_read_only", lambda: False)
     monkeypatch.setattr(
         price_channel_redecision_router,
         "_edli_position_fill_redecision_cycle",
@@ -347,21 +330,49 @@ def test_m5_and_fill_bridge_cycles_serialize_on_production_world_trade_gate(
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         repair_future = executor.submit(lane._edli_fill_bridge_repair_cycle)
-        assert bridge_scan_started.wait(timeout=1.0)
+        assert bridge_discovery_started.wait(timeout=1.0)
         m5_future = executor.submit(lane._edli_user_channel_reconcile_cycle)
         assert m5_gate_attempted.wait(timeout=1.0)
-        assert not m5_world_opened.wait(timeout=0.05)
-        release_bridge_scan.set()
+        assert m5_world_opened.wait(timeout=0.5)
+        release_bridge_discovery.set()
         repair_result = repair_future.result(timeout=1.0)
         m5_result = m5_future.result(timeout=1.0)
 
     assert repair_result["scheduler_failed"] is False
     assert m5_result["status"] == "m5_authority_proof_complete"
     bridge_leases = [
-        item for item in telemetry if item.owner == "price_channel_fill_bridge"
+        item
+        for item in telemetry
+        if item.owner == "price_channel_fill_bridge_reconcile"
     ]
-    assert len(bridge_leases) == 1
-    assert set(bridge_leases[0].db_set) == {"world", "trade"}
+    assert bridge_leases == []
+
+
+def test_empty_trade_fact_candidate_set_skips_world_writer(monkeypatch):
+    from src.events import price_channel_redecision_router
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    def _writer_opened(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("empty trade-fact candidate set must not open a WORLD writer")
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_trade_fact_bridge_candidates_read_only",
+        lambda: ((), (), ()),
+    )
+    monkeypatch.setattr(lane, "_edli_durable_fill_bridge_work_exists_read_only", lambda: False)
+    monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _writer_opened)
+    monkeypatch.setattr(
+        price_channel_redecision_router,
+        "_edli_position_fill_redecision_cycle",
+        lambda: 0,
+    )
+
+    result = lane._edli_fill_bridge_repair_cycle()
+
+    assert result["scheduler_failed"] is False
+    assert result["reconciled_trade_facts"] == 0
 
 
 def test_world_gate_releases_mutex_when_coordinator_times_out(monkeypatch):

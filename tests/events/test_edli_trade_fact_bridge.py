@@ -1,5 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-25
+# Last reused/audited: 2026-07-30
+# Authority basis: WS_USER confirmed-fill authority and fill-bridge TOCTOU repair.
 # Purpose: Lock EDLI fill-audit bridge from authenticated WS trade facts.
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import pytest
 from src.events.edli_trade_fact_bridge import (
     append_confirmed_trade_facts_to_edli,
     append_rest_filled_orphan_trade_facts_to_edli,
+    discover_confirmed_trade_fact_candidates,
 )
 from src.events.live_order_aggregate import LiveOrderAggregateLedger
 from src.state.db import init_schema
@@ -58,6 +60,38 @@ def test_confirmed_ws_trade_fact_appends_edli_user_trade_observed():
     assert payload["source_trade_fact_authority"] == "venue_trade_facts:WS_USER:CONFIRMED"
 
     assert append_confirmed_trade_facts_to_edli(conn, now=NOW) == 0
+
+
+def test_confirmed_candidate_is_revalidated_after_ws_append_race():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    _insert_command(conn)
+    append_trade_fact(
+        conn,
+        trade_id="trade-race",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="b" * 64,
+        raw_payload_json="{}",
+    )
+
+    candidates = discover_confirmed_trade_fact_candidates(conn)
+
+    assert len(candidates) == 1
+    assert append_confirmed_trade_facts_to_edli(conn, now=NOW) == 1
+    assert append_confirmed_trade_facts_to_edli(
+        conn, now=NOW, candidates=candidates
+    ) == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
+    ).fetchone()[0] == 1
 
 
 def test_confirmed_ws_trade_fact_uses_command_order_after_matched_submit_unknown():
