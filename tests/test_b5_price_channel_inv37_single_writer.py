@@ -624,6 +624,123 @@ def test_submit_ack_and_monitor_keep_their_own_foreground_write_opportunity():
     assert "max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS" in monitor_source
 
 
+def test_submit_ack_retry_persists_after_a_180ms_legacy_sqlite_lock(tmp_path):
+    """Post-venue ACK persistence retries the local fact write, never the venue call."""
+    from src.execution.executor import _retry_persist_on_db_lock
+
+    db_path = tmp_path / "submit-ack.db"
+    bootstrap = sqlite3.connect(db_path)
+    bootstrap.execute("CREATE TABLE facts (fact TEXT PRIMARY KEY)")
+    bootstrap.commit()
+    bootstrap.close()
+    lock_ready = threading.Event()
+
+    def _hold_legacy_writer() -> None:
+        holder = sqlite3.connect(db_path)
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("INSERT INTO facts (fact) VALUES ('holder')")
+        lock_ready.set()
+        time.sleep(0.18)
+        holder.commit()
+        holder.close()
+
+    holder = threading.Thread(target=_hold_legacy_writer, daemon=True)
+    holder.start()
+    assert lock_ready.wait(timeout=1.0)
+    writer = sqlite3.connect(db_path, timeout=0)
+    writer.execute("PRAGMA busy_timeout = 0")
+    try:
+        _retry_persist_on_db_lock(
+            writer,
+            lambda: (writer.execute("INSERT INTO facts (fact) VALUES ('submit-acked')"), writer.commit()),
+            what="submit_ack_lock_antibody",
+        )
+    finally:
+        writer.close()
+    holder.join(timeout=1.0)
+    check = sqlite3.connect(db_path)
+    try:
+        assert check.execute(
+            "SELECT 1 FROM facts WHERE fact = 'submit-acked'"
+        ).fetchone()
+    finally:
+        check.close()
+
+
+def test_background_fast_yield_releases_trade_gate_for_monitor_append(
+    tmp_path,
+    monkeypatch,
+):
+    """After a fast-yield quote failure, monitor's canonical lease can write next."""
+    from src.engine import cycle_runtime
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+    from src.state import write_coordinator
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    db_path = tmp_path / "monitor.db"
+    bootstrap = sqlite3.connect(db_path)
+    bootstrap.execute("CREATE TABLE facts (fact TEXT PRIMARY KEY)")
+    bootstrap.commit()
+    bootstrap.close()
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    lock_ready = threading.Event()
+    release_lock = threading.Event()
+
+    def _hold_legacy_writer() -> None:
+        holder = sqlite3.connect(db_path)
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("INSERT INTO facts (fact) VALUES ('holder')")
+        lock_ready.set()
+        assert release_lock.wait(timeout=1.0)
+        holder.commit()
+        holder.close()
+
+    holder = threading.Thread(target=_hold_legacy_writer, daemon=True)
+    holder.start()
+    assert lock_ready.wait(timeout=1.0)
+    background = sqlite3.connect(db_path, timeout=0)
+    try:
+        started = time.monotonic()
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            with lane._edli_price_channel_trade_write_gate(
+                owner="price_channel_market_quote"
+            ):
+                lane._bound_background_price_channel_sqlite_wait(background)
+                background.execute("INSERT INTO facts (fact) VALUES ('background')")
+        assert time.monotonic() - started < 0.15
+    finally:
+        background.close()
+
+    release_lock.set()
+    holder.join(timeout=1.0)
+    monitor = sqlite3.connect(db_path, timeout=0)
+    try:
+        with cycle_runtime._canonical_trade_write_lease(
+            monitor,
+            owner="monitor_canonical_append",
+            deadline_ms=50,
+            max_hold_ms=100,
+        ):
+            monitor.execute("INSERT INTO facts (fact) VALUES ('monitor-appended')")
+            monitor.commit()
+    finally:
+        monitor.close()
+    check = sqlite3.connect(db_path)
+    try:
+        assert check.execute(
+            "SELECT 1 FROM facts WHERE fact = 'monitor-appended'"
+        ).fetchone()
+    finally:
+        check.close()
+
+
 def test_fill_bridge_drains_a_bounded_backlog_per_tick():
     node = _func_node("_edli_durable_fill_bridge_scan")
     limit = next(arg for arg in node.args.kwonlyargs if arg.arg == "limit")
