@@ -191,6 +191,7 @@ def test_missing_extract_assets_fail_before_download_or_subprocess(tmp_path, mon
 
     missing_root = tmp_path / "missing" / "51 source data"
     runner_called = False
+    fetch_called = False
     paths = ecmwf_open_data.OpenDataPaths(
         raw_root=missing_root,
         asset_root=missing_root,
@@ -206,14 +207,20 @@ def test_missing_extract_assets_fail_before_download_or_subprocess(tmp_path, mon
         runner_called = True
         raise AssertionError("subprocess must not run without extractor assets")
 
+    def forbidden_fetch(*args, **kwargs):
+        nonlocal fetch_called
+        fetch_called = True
+        raise AssertionError("download must not run without extractor assets")
+
     result = ecmwf_open_data.collect_open_ens_cycle(
         track="mx2t6_high",
         run_date=date(2026, 6, 6),
         run_hour=0,
         now_utc=datetime(2026, 6, 6, 9, 0, tzinfo=timezone.utc),
-        skip_download=True,
+        skip_download=False,
         conn=_make_conn(tmp_path),
         _runner=forbidden_runner,
+        _fetch_impl=forbidden_fetch,
         _paths=paths,
     )
 
@@ -221,6 +228,7 @@ def test_missing_extract_assets_fail_before_download_or_subprocess(tmp_path, mon
     assert str(result["reason"]).startswith("MISSING_EXTRACT_ASSETS:")
     assert result["stages"][0]["status"] == "MISSING_EXTRACT_ASSETS"
     assert runner_called is False
+    assert fetch_called is False
 
 
 def test_extract_asset_paths_share_one_cycle_bundle():

@@ -58,6 +58,23 @@ def _runner_skip_extract_ingest(args, *, label: str, timeout: int) -> dict:
     return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
 
 
+def _make_paths(mod, tmp_path: Path):
+    root = tmp_path / "51_source_data"
+    extract_script = root / "scripts" / "extract_open_ens_localday.py"
+    manifest_path = root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
+    extract_script.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    extract_script.write_text("# test extractor\n")
+    manifest_path.write_text("{}")
+    return mod.OpenDataPaths(
+        raw_root=root,
+        asset_root=root,
+        extract_script=extract_script,
+        manifest_path=manifest_path,
+        origin="test",
+    )
+
+
 def _call_collect(
     *,
     fetch_impl,
@@ -73,7 +90,6 @@ def _call_collect(
     """
     import src.data.ecmwf_open_data as mod
 
-    monkeypatch.setattr(mod, "FIFTY_ONE_ROOT", tmp_path / "51_source_data")
     monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])  # 3 steps only
     if conn is None:
         conn = _make_conn()
@@ -86,6 +102,7 @@ def _call_collect(
         conn=conn,
         _fetch_impl=fetch_impl,
         _runner=_runner_skip_extract_ingest,
+        _paths=_make_paths(mod, tmp_path),
         now_utc=NOW_UTC,
     )
 
@@ -117,7 +134,6 @@ def test_all_ok_returns_SUCCESS_COMPLETE(tmp_path, monkeypatch):
             extract_called.append(label)
         return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
 
-    monkeypatch.setattr(mod, "FIFTY_ONE_ROOT", tmp_path / "51_source_data")
     monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
 
     result = mod.collect_open_ens_cycle(
@@ -128,6 +144,7 @@ def test_all_ok_returns_SUCCESS_COMPLETE(tmp_path, monkeypatch):
         conn=_make_conn(),
         _fetch_impl=fetch_impl,
         _runner=runner,
+        _paths=_make_paths(mod, tmp_path),
         now_utc=NOW_UTC,
     )
 
@@ -177,7 +194,6 @@ def test_some_404_returns_PARTIAL_PARTIAL_and_extract_fires(tmp_path, monkeypatc
             extract_called.append(label)
         return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
 
-    monkeypatch.setattr(mod, "FIFTY_ONE_ROOT", tmp_path / "51_source_data")
     monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
 
     result = mod.collect_open_ens_cycle(
@@ -188,6 +204,7 @@ def test_some_404_returns_PARTIAL_PARTIAL_and_extract_fires(tmp_path, monkeypatc
         conn=_make_conn(),
         _fetch_impl=fetch_impl,
         _runner=runner,
+        _paths=_make_paths(mod, tmp_path),
         now_utc=NOW_UTC,
     )
 
@@ -223,7 +240,6 @@ def test_all_404_returns_SKIPPED_NOT_RELEASED_and_extract_skipped(tmp_path, monk
             extract_called.append(label)
         return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
 
-    monkeypatch.setattr(mod, "FIFTY_ONE_ROOT", tmp_path / "51_source_data")
     monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
 
     result = mod.collect_open_ens_cycle(
@@ -234,6 +250,7 @@ def test_all_404_returns_SKIPPED_NOT_RELEASED_and_extract_skipped(tmp_path, monk
         conn=_make_conn(),
         _fetch_impl=fetch_impl,
         _runner=runner,
+        _paths=_make_paths(mod, tmp_path),
         now_utc=NOW_UTC,
     )
 
@@ -261,7 +278,6 @@ def test_non_404_retry_exhaustion_returns_FAILED_and_extract_skipped(tmp_path, m
             extract_called.append(label)
         return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
 
-    monkeypatch.setattr(mod, "FIFTY_ONE_ROOT", tmp_path / "51_source_data")
     monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
 
     result = mod.collect_open_ens_cycle(
@@ -272,6 +288,7 @@ def test_non_404_retry_exhaustion_returns_FAILED_and_extract_skipped(tmp_path, m
         conn=_make_conn(),
         _fetch_impl=fetch_impl,
         _runner=runner,
+        _paths=_make_paths(mod, tmp_path),
         now_utc=NOW_UTC,
     )
 
