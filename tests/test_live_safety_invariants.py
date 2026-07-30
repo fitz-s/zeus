@@ -5972,6 +5972,7 @@ def test_global_holding_partition_rejects_single_q_epoch_or_deadline_mismatch():
         status="EVALUATED",
         candidate_id="sell-current",
         sell_book_witness_identity="sell-book-current",
+        book_state="EXECUTABLE",
     )
     excluded = GlobalHoldingAuctionCoverage(
         position_id=second.position_id,
