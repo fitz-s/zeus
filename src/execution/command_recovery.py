@@ -21254,7 +21254,10 @@ def _reconcile_identity_bound_submitting_commands(
         summary["scanned"] += 1
         venue_order_id = str(row.get("venue_order_id") or "")
         point_order = point_orders.get(venue_order_id)
-        if point_order is None:
+        if not _identity_bound_positive_point_order(
+            point_order,
+            venue_order_id=venue_order_id,
+        ):
             summary["stayed"] += 1
             continue
         try:
