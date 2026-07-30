@@ -6246,7 +6246,10 @@ def request_global_auction_completion(
             if not inferred_book_state:
                 if held_best_bid is None:
                     inferred_book_state = "UNKNOWN"
-                elif float(held_best_bid) <= 0:
+                elif (
+                    not math.isfinite(float(held_best_bid))
+                    or not 0.05 <= float(held_best_bid) <= 0.95
+                ):
                     inferred_book_state = "NO_EXECUTABLE_BOOK"
                 elif not bid_observed_at:
                     inferred_book_state = "STALE"

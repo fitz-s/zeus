@@ -2166,6 +2166,57 @@ def test_held_sell_completion_request_persists_position_q_and_bid_witness(monkey
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
+@pytest.mark.parametrize(
+    ("held_best_bid", "expected_book_state"),
+    (
+        (0.03, "NO_EXECUTABLE_BOOK"),
+        (0.96, "NO_EXECUTABLE_BOOK"),
+        (0.98, "NO_EXECUTABLE_BOOK"),
+        (0.999, "NO_EXECUTABLE_BOOK"),
+        (0.05, "EXECUTABLE"),
+        (0.95, "EXECUTABLE"),
+    ),
+)
+def test_held_sell_completion_infers_submit_band_book_state(
+    monkeypatch,
+    held_best_bid,
+    expected_book_state,
+):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    wakes = []
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **kwargs: wakes.append(kwargs) or SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", lambda _at: ())
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        assert reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id=f"position-band-{held_best_bid}",
+            family=("Tokyo", "2026-07-30", "low"),
+            probability_content_identity="q-content-band",
+            held_token_id="token-band",
+            held_best_bid=held_best_bid,
+            bid_observed_at="2026-07-30T01:00:00+00:00",
+            schema_version=3,
+        ) is True
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+    assert len(wakes) == 1
+    request = wakes[0]["held_sell_reauction_requests"][0]
+    assert request.book_state == expected_book_state
+    assert request.held_best_bid == held_best_bid
+    assert request.probability_content_identity == "q-content-band"
+    assert request.held_token_id == "token-band"
+
+
 def test_held_sell_completion_request_survives_wake_io_failure(monkeypatch):
     from types import SimpleNamespace
 

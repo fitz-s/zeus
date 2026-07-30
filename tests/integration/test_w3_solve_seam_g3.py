@@ -25333,6 +25333,7 @@ def test_global_sell_jit_rejects_changed_day0_statistical_authority(monkeypatch)
         decision_time=_dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc),
         global_actuation=actuation,
         trade_conn=sqlite3.connect(":memory:"),
+        global_claim_conn=sqlite3.connect(":memory:"),
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
@@ -25366,8 +25367,29 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     expected_limit,
 ):
     from src.data.polymarket_request_governor import RequestPriority
+    from src.events.event_store import (
+        EventStore,
+        GLOBAL_WINNER_SUBMIT_FENCED,
+    )
+    from src.state.db import init_schema
 
-    event = _global_scope_event(city="Alpha", source_run_id="run-sell")
+    at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
+    source_event = _global_scope_event(city="Alpha", source_run_id="run-sell")
+    global_claim_conn = sqlite3.connect(":memory:")
+    global_claim_conn.row_factory = sqlite3.Row
+    init_schema(global_claim_conn)
+    event = global_batch_runtime._next_claim_carrier(
+        source_event,
+        targeted_at=at,
+        economic_identity="global-sell-world-claim",
+        payload=json.loads(source_event.payload_json),
+    )
+    claim_store = EventStore(global_claim_conn)
+    assert claim_store.prioritize_global_winner(event)
+    global_claimed_at = at.isoformat()
+    assert claim_store.claim(event.event_id, claimed_at=global_claimed_at)
+    global_claim_attempt_count = claim_store.attempt_count(event.event_id)
+    global_claim_conn.commit()
     actuation = _adapter_sell_actuation(
         event,
         selected_shares="6",
@@ -25493,12 +25515,17 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
 
     monkeypatch.setattr("src.execution.exit_lifecycle.execute_exit", execute_exit)
     conn = sqlite3.connect(":memory:")
-    at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM opportunity_event_processing"
+    ).fetchone()[0] == 0
     preflight = era._submit_current_global_sell(
         event,
         decision_time=at,
         global_actuation=actuation,
         trade_conn=conn,
+        global_claim_conn=global_claim_conn,
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
@@ -25512,11 +25539,14 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         decision_time=at,
         global_actuation=actuation,
         trade_conn=conn,
+        global_claim_conn=global_claim_conn,
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
         preflight_only=False,
         preflight_receipt=preflight,
+        global_claimed_at=global_claimed_at,
+        global_claim_attempt_count=global_claim_attempt_count,
     )
     assert receipt.submitted is True
     assert receipt.side_effect_status == "EXIT_SUBMITTED"
@@ -25534,6 +25564,36 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert _is_global_reduce_only_exit_receipt(receipt) is True
     assert _receipt_matches_event(event, receipt) is True
     assert len(exits) == 1
+    assert global_claim_conn.in_transaction is False
+    assert tuple(
+        global_claim_conn.execute(
+            """
+            SELECT processing_status, claimed_at, attempt_count, last_error
+              FROM opportunity_event_processing
+             WHERE consumer_name = ? AND event_id = ?
+            """,
+            (claim_store.consumer_name, event.event_id),
+        ).fetchone()
+    ) == (
+        "processing",
+        global_claimed_at,
+        global_claim_attempt_count,
+        GLOBAL_WINNER_SUBMIT_FENCED,
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM opportunity_event_processing"
+    ).fetchone()[0] == 0
+
+    fenced_connections = []
+
+    def record_fence_connection(fence_conn, *_args, **_kwargs):
+        fenced_connections.append(fence_conn)
+
+    monkeypatch.setattr(
+        era,
+        "_fence_global_target_claim_before_command",
+        record_fence_connection,
+    )
 
     def fail_before_venue(*_args, **_kwargs):
         raise RuntimeError("intent persistence failed")
@@ -25547,11 +25607,14 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         decision_time=at,
         global_actuation=actuation,
         trade_conn=conn,
+        global_claim_conn=global_claim_conn,
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
         preflight_only=False,
         preflight_receipt=preflight,
+        global_claimed_at=global_claimed_at,
+        global_claim_attempt_count=global_claim_attempt_count,
     )
     assert rejected.submitted is False
     assert rejected.proof_accepted is False
@@ -25578,11 +25641,14 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         decision_time=at,
         global_actuation=actuation,
         trade_conn=conn,
+        global_claim_conn=global_claim_conn,
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
         preflight_only=False,
         preflight_receipt=preflight,
+        global_claimed_at=global_claimed_at,
+        global_claim_attempt_count=global_claim_attempt_count,
     )
     assert unknown.submitted is True
     assert unknown.proof_accepted is True
@@ -25612,11 +25678,14 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         decision_time=at,
         global_actuation=actuation,
         trade_conn=conn,
+        global_claim_conn=global_claim_conn,
         forecast_conn=object(),
         topology_conn=object(),
         calibration_conn=object(),
         preflight_only=False,
         preflight_receipt=preflight,
+        global_claimed_at=global_claimed_at,
+        global_claim_attempt_count=global_claim_attempt_count,
     )
     assert deterministic_reject.submitted is False
     assert deterministic_reject.proof_accepted is False
@@ -25627,6 +25696,8 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         "GLOBAL_SELL_EXIT_REJECTED:RuntimeError:"
     )
     assert _is_global_reduce_only_exit_receipt(deterministic_reject) is False
+    assert fenced_connections == [global_claim_conn] * 3
+    assert global_claim_conn.in_transaction is False
 
     source = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
     assert source.index("if _global_sell_candidate(global_actuation) is not None") < source.index(

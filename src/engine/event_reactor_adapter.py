@@ -6438,6 +6438,7 @@ def event_bound_live_adapter_from_trade_conn(
             decision_time=decision_time,
             global_actuation=global_actuation,
             trade_conn=trade_conn,
+            global_claim_conn=live_cap_conn,
             forecast_conn=forecast_conn,
             topology_conn=topology_conn,
             calibration_conn=calibration_conn,
@@ -10920,6 +10921,7 @@ def _submit_current_global_sell(
     decision_time: datetime,
     global_actuation: object,
     trade_conn: sqlite3.Connection,
+    global_claim_conn: sqlite3.Connection | None,
     forecast_conn: sqlite3.Connection | None,
     topology_conn: sqlite3.Connection | None,
     calibration_conn: sqlite3.Connection | None,
@@ -10960,7 +10962,12 @@ def _submit_current_global_sell(
             reason="GLOBAL_PREFLIGHT_BINDING_TOKEN_INVALID",
             proof_accepted=False,
         )
-    if forecast_conn is None or topology_conn is None or calibration_conn is None:
+    if (
+        global_claim_conn is None
+        or forecast_conn is None
+        or topology_conn is None
+        or calibration_conn is None
+    ):
         return _global_sell_receipt(
             event,
             global_actuation=global_actuation,
@@ -11260,11 +11267,16 @@ def _submit_current_global_sell(
             )
             exit_evidence = ExitExecutionEvidence()
             _fence_global_target_claim_before_command(
-                trade_conn,
+                global_claim_conn,
                 event,
                 claimed_at=global_claimed_at,
                 attempt_count=global_claim_attempt_count,
             )
+            # The SELL command is owned by trade_conn, unlike the world-owned
+            # live-order aggregate used by the BUY path.  Persist the world claim
+            # fence before opening the independent trade write unit; a write
+            # transaction must never span the two canonical DBs.
+            global_claim_conn.commit()
             outcome = execute_exit(
                 portfolio,
                 position,
