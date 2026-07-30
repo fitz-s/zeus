@@ -17,6 +17,7 @@ import importlib
 import json
 import sqlite3
 import sys
+import threading
 import time
 import types
 from dataclasses import dataclass, field
@@ -924,6 +925,81 @@ def test_target_ctf_collateral_falls_back_to_chain_without_inventing_zero(tmp_pa
         )
         == 2
     )
+
+
+def test_target_ctf_chain_proof_reads_balance_and_approvals_concurrently(tmp_path):
+    from src.venue.polymarket_v2_adapter import (
+        ERC1155_BALANCE_OF_SELECTOR,
+        ERC1155_IS_APPROVED_FOR_ALL_SELECTOR,
+        PolymarketV2Adapter,
+    )
+
+    token_id = "123456789"
+    started = threading.Barrier(3)
+    callers: set[int] = set()
+    callers_lock = threading.Lock()
+
+    def rpc_call(_url, method, params):
+        assert method == "eth_call"
+        data = params[0]["data"]
+        with callers_lock:
+            callers.add(threading.get_ident())
+        started.wait(timeout=1.0)
+        if data.startswith(ERC1155_BALANCE_OF_SELECTOR):
+            return hex(13_000_000)
+        if data.startswith(ERC1155_IS_APPROVED_FOR_ALL_SELECTOR):
+            return hex(1)
+        raise AssertionError(data)
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: object(),
+    )
+
+    proof = adapter._chain_conditional_balance_allowance_raw(token_id)
+
+    assert proof["balance"] == "13000000"
+    assert proof["allowance"] == "13000000"
+    assert len(callers) == 3
+
+
+def test_parallel_chain_collateral_guards_fail_loud_under_world_mutex(tmp_path):
+    from src.state.db import WorldMutexIOViolation, world_write_mutex
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
+        rpc_call=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("world-mutex guard must preempt RPC")
+        ),
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: object(),
+    )
+
+    mutex = world_write_mutex()
+    mutex.acquire()
+    try:
+        with pytest.raises(WorldMutexIOViolation, match="onchain.ctf_parallel"):
+            adapter._chain_conditional_balance_allowance_raw("123456789")
+        with pytest.raises(
+            WorldMutexIOViolation,
+            match="onchain.pusd_allowance_parallel",
+        ):
+            adapter._chain_collateral_allowance_micro()
+    finally:
+        mutex.release()
 
 
 def test_target_ctf_collateral_keeps_dual_read_failure_unknown(tmp_path):

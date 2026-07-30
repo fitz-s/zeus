@@ -31,6 +31,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR
@@ -1969,32 +1970,40 @@ class PolymarketV2Adapter:
         if not self.polygon_rpc_url:
             raise V2ReadUnavailable("polygon_rpc_url required for CTF balance fallback")
         token_word = format(int(str(token_id), 0), "064x")
-        balance = _eth_call_uint(
-            self.polygon_rpc_url,
-            self._rpc_call,
-            to=POLYGON_CTF_ADDRESS,
-            data=(
-                ERC1155_BALANCE_OF_SELECTOR
-                + _abi_address(self.funder_address)
-                + token_word
-            ),
+        balance_data = (
+            ERC1155_BALANCE_OF_SELECTOR
+            + _abi_address(self.funder_address)
+            + token_word
         )
         _collateral, exchanges = _collateral_allowance_contracts(self.chain_id)
-        approvals = tuple(
-            bool(
-                _eth_call_uint(
-                    self.polygon_rpc_url,
-                    self._rpc_call,
-                    to=POLYGON_CTF_ADDRESS,
-                    data=(
-                        ERC1155_IS_APPROVED_FOR_ALL_SELECTOR
-                        + _abi_address(self.funder_address)
-                        + _abi_address(exchange)
-                    ),
-                )
-            )
+        approval_data = tuple(
+            ERC1155_IS_APPROVED_FOR_ALL_SELECTOR
+            + _abi_address(self.funder_address)
+            + _abi_address(exchange)
             for exchange in exchanges
         )
+
+        def _read(data: str) -> int:
+            return _eth_call_uint(
+                self.polygon_rpc_url,
+                self._rpc_call,
+                to=POLYGON_CTF_ADDRESS,
+                data=data,
+            )
+
+        # Assert on the caller thread before moving the blocking calls to
+        # workers; the world-mutex sentinel is thread-local.
+        _assert_no_world_mutex_held_for_io("onchain.ctf_parallel")
+        # balanceOf and both operator approvals are independent current facts.
+        # Reading them in one capture window avoids three serial RPC round trips
+        # on every SELL without changing the fail-closed proof.
+        with ThreadPoolExecutor(
+            max_workers=1 + len(approval_data),
+            thread_name_prefix="zeus-ctf-proof",
+        ) as pool:
+            values = list(pool.map(_read, (balance_data, *approval_data)))
+        balance, *approval_values = values
+        approvals = tuple(bool(value) for value in approval_values)
         # This targeted surface does not carry market negRisk identity, so it
         # can only certify execution allowance when both possible venue
         # operators are approved. The final submit remains authoritative.
@@ -2009,19 +2018,31 @@ class PolymarketV2Adapter:
     def _chain_collateral_allowance_micro(self) -> int | None:
         if not self.polygon_rpc_url:
             return None
+        # This guard must stay outside the fallback catch below: I/O under the
+        # world mutex is a structural violation, not an unavailable allowance.
+        _assert_no_world_mutex_held_for_io("onchain.pusd_allowance_parallel")
         try:
             collateral, spenders = _collateral_allowance_contracts(self.chain_id)
-            allowances = [
-                _eth_call_uint(
+            allowance_data = tuple(
+                "0xdd62ed3e"
+                + _abi_address(self.funder_address)
+                + _abi_address(spender)
+                for spender in spenders
+            )
+
+            def _read(data: str) -> int:
+                return _eth_call_uint(
                     self.polygon_rpc_url,
                     self._rpc_call,
                     to=collateral,
-                    data="0xdd62ed3e"
-                    + _abi_address(self.funder_address)
-                    + _abi_address(spender),
+                    data=data,
                 )
-                for spender in spenders
-            ]
+
+            with ThreadPoolExecutor(
+                max_workers=len(allowance_data),
+                thread_name_prefix="zeus-pusd-allowance",
+            ) as pool:
+                allowances = list(pool.map(_read, allowance_data))
             return min(allowances)
         except Exception as exc:
             logger.warning(
