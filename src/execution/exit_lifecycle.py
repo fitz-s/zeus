@@ -2755,7 +2755,7 @@ def _hard_fact_sell_authority_valid(
     conn: sqlite3.Connection | None,
     now: datetime,
 ) -> bool:
-    """Re-read current source evidence and recompute this position's bin death."""
+    """Re-read current evidence and recompute this position's semantic bin death."""
 
     from src.execution.day0_hard_fact_exit import (
         HardFactVerdict,
@@ -2805,7 +2805,6 @@ def _hard_fact_sell_authority_valid(
         and current.reason == authority.reason
         and current.metric == authority.metric
         and current.rounded_extreme == authority.rounded_extreme
-        and current.source == authority.source
         and expected.action == authority.action
         and expected.reason == authority.reason
         and expected.metric == authority.metric == metric

@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-20; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-06-20; last_reviewed=2026-07-30; last_reused=2026-07-30
 # Purpose: RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival
 #   (exit_pending_missing re-stamp loop, day0 static-close deferral, canonical
 #   EXIT_ORDER_POSTED dual-write, monitor-cadence watchdog).
 # Reuse: pytest tests/test_phase2_exit_emitter_revival.py
 # Created: 2026-06-20
-# Last reused or audited: 2026-07-03
+# Last reused or audited: 2026-07-30
 # Authority basis: /tmp/phase2_exit_emitter_diagnosis.md §4-§5 (Phase 2 of the
 #   Zeus lifecycle-alpha fix). RANK 2 of /tmp/lifecycle_alpha_diagnosis_2026-06-20.md.
 """RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival.
@@ -719,6 +719,58 @@ class TestCanonicalExitOrderPostedProvenance:
             conn=_db(),
             now=datetime(2026, 6, 20, 14, 0, tzinfo=timezone.utc),
         )
+
+    def test_hard_fact_verdict_identity_ignores_source_expansion(self, monkeypatch):
+        from src import config
+        from src.execution import day0_hard_fact_exit
+        from src.execution.day0_hard_fact_exit import hard_fact_bin_verdict
+        from src.execution.exit_lifecycle import _hard_fact_sell_authority_valid
+
+        pos = _make_position(
+            state="day0_window",
+            exit_state="",
+            bin_label="30-31°C",
+        )
+        authority = replace(
+            hard_fact_bin_verdict(
+                metric="high",
+                direction="buy_yes",
+                bin_low=30.0,
+                bin_high=31.0,
+                effective_extreme=32.0,
+            ),
+            source="wu_icao_history",
+        )
+        current = replace(authority, source="wu_api+wu_icao_history")
+        monkeypatch.setattr(config, "runtime_cities_by_name", lambda: {"London": object()})
+        monkeypatch.setattr(
+            day0_hard_fact_exit,
+            "evaluate_hard_fact_exit",
+            lambda **_kwargs: current,
+        )
+
+        def valid() -> bool:
+            return _hard_fact_sell_authority_valid(
+                pos,
+                authority,
+                conn=_db(),
+                now=datetime(2026, 6, 20, 14, 0, tzinfo=timezone.utc),
+            )
+
+        assert valid()
+        for current in (
+            replace(authority, action="HOLD_STRUCTURAL_WIN"),
+            replace(authority, reason="different semantic verdict"),
+            replace(authority, metric="low"),
+            replace(authority, rounded_extreme=33.0),
+        ):
+            assert not valid()
+
+        pos.bin_label = "31-32°C"
+        assert not valid()
+        pos.bin_label = "30-31°C"
+        pos.direction = "buy_no"
+        assert not valid()
 
     def test_spine_post_writes_canonical_exit_order_posted(self):
         from src.riskguard.risk_level import RiskLevel
