@@ -1,5 +1,5 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-07-30
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
 #   book) + docs/evidence/upstream_physical_2026_07_17/day0_latency_chain_measurement.md (the
 #   measured bottleneck is the ~40-min SCHEDULED posterior recompute cadence, HOP 2b p50 39.9 min
@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import json
 import importlib
+import multiprocessing
 import sqlite3
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -116,9 +118,13 @@ def _queue_config(tmp_path: Path) -> dict[str, object]:
     return {
         "forecast_db": tmp_path / "forecasts.db",
         "seed_dir": tmp_path / "seeds",
+        "seed_processed_dir": tmp_path / "seed_processed",
+        "seed_failed_dir": tmp_path / "seed_failed",
         "raw_manifest_dir": tmp_path / "raw",
         "request_dir": tmp_path / "requests",
         "inflight_dir": tmp_path / "inflight",
+        "processed_dir": tmp_path / "processed",
+        "failed_dir": tmp_path / "failed",
     }
 
 
@@ -198,6 +204,101 @@ def _prepare_forecast_db(tmp_path: Path) -> Path:
     conn.commit()
     conn.close()
     return db_path
+
+
+def _multiprocess_day0_ingest_owner(
+    cfg: dict[str, object],
+    reports,
+    release,
+    materializer_called,
+) -> None:
+    """Publish one exact Day0 seed from a process with no materialization authority."""
+
+    forecast_production._replacement_forecast_live_materialization_queue_config = (
+        lambda: cfg
+    )
+    seed_discovery._day0_observed_extreme_seed_payload = (
+        lambda **_kwargs: _day0_payload("2026-07-19T05:00:00+00:00")
+    )
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    cycle_advance.family_materializable_cycle = (
+        lambda *args, **kwargs: (cycle, ())
+    )
+
+    def _write_seed(_conn_arg, **kwargs):
+        path = Path(kwargs["output_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "day0_observed_extreme_observation_time": kwargs.get(
+                        "day0_observed_extreme_observation_time"
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    cycle_advance._build_and_write_advance_seed = _write_seed
+    materialization_queue._run_materialization_item = (
+        lambda _item: materializer_called.set()
+        or subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    )
+    reports.put(
+        cycle_advance._materialize_day0_extreme_updated_seed(
+            city="Shanghai",
+            target_date="2026-07-19",
+            metric="high",
+            computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+            held_position=False,
+        )
+    )
+    release.wait(5.0)
+
+
+def _multiprocess_forecast_materialization_owner(
+    seed_file: str,
+    dummy_files: tuple[str, ...],
+    running,
+    peak_running,
+    four_started,
+    exact_retry_started,
+    release,
+) -> None:
+    """Drain only inside the forecast-live owner under its existing four-worker cap."""
+
+    exact_path = Path(seed_file)
+
+    def _run_owned_item(item):
+        with running.get_lock():
+            running.value += 1
+            peak_running.value = max(peak_running.value, running.value)
+            if running.value == materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS:
+                four_started.set()
+        try:
+            if item.input_json == exact_path:
+                exact_retry_started.set()
+                item.input_json.unlink()
+            else:
+                assert release.wait(5.0)
+            return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        finally:
+            with running.get_lock():
+                running.value -= 1
+
+    materialization_queue._run_materialization_item = _run_owned_item
+    pending = [
+        materialization_queue._PendingMaterialization(
+            input_json=Path(path),
+            command=(),
+            request_payload=None,
+            marker_path=None,
+            attempt_fingerprint=None,
+        )
+        for path in (*dummy_files, seed_file)
+    ]
+    materialization_queue._run_materialization_batch(pending)
 
 
 def _fetch_enqueue_row(db_path: Path) -> sqlite3.Row:
@@ -389,6 +490,75 @@ def test_day0_extreme_bridge_enqueues_exactly_one_seed_and_dedups_same_observati
 
     row_after = _fetch_enqueue_row(cfg["forecast_db"])
     assert row_after["seed_file"] == first_seed_file
+
+
+def test_day0_ingest_process_only_publishes_seed_for_bounded_forecast_owner(
+    tmp_path,
+) -> None:
+    """Two live owners still expose only forecast-live's four materialization workers."""
+    _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    ctx = multiprocessing.get_context("spawn")
+    ingest_release = ctx.Event()
+    owner_release = ctx.Event()
+    four_started = ctx.Event()
+    exact_retry_started = ctx.Event()
+    ingest_materializer_called = ctx.Event()
+    reports = ctx.Queue()
+    running = ctx.Value("i", 0)
+    peak_running = ctx.Value("i", 0)
+
+    ingest_owner = ctx.Process(
+        target=_multiprocess_day0_ingest_owner,
+        args=(cfg, reports, ingest_release, ingest_materializer_called),
+        name="day0-ingest-owner",
+    )
+    ingest_owner.start()
+    report = reports.get(timeout=5.0)
+    seed_file = Path(report["seed_file"])
+    assert report["enqueued"] is True
+    assert seed_file.is_file()
+    assert not ingest_materializer_called.is_set()
+    assert not hasattr(
+        materialization_queue,
+        "enqueue_day0_exact_seed_fast_drain",
+    )
+
+    dummy_files = tuple(
+        str(tmp_path / f"normal-{index}.json")
+        for index in range(materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS)
+    )
+    forecast_owner = ctx.Process(
+        target=_multiprocess_forecast_materialization_owner,
+        args=(
+            str(seed_file),
+            dummy_files,
+            running,
+            peak_running,
+            four_started,
+            exact_retry_started,
+            owner_release,
+        ),
+        name="forecast-live-materialization-owner",
+    )
+    forecast_owner.start()
+    assert four_started.wait(5.0)
+    assert ingest_owner.is_alive()
+    assert forecast_owner.is_alive()
+    assert peak_running.value <= materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS
+    assert not exact_retry_started.is_set()
+    assert seed_file.is_file(), "saturated owner must leave the exact seed retryable"
+
+    owner_release.set()
+    assert exact_retry_started.wait(5.0)
+    forecast_owner.join(5.0)
+    assert forecast_owner.exitcode == 0
+    assert not seed_file.exists()
+    assert peak_running.value <= materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS
+
+    ingest_release.set()
+    ingest_owner.join(5.0)
+    assert ingest_owner.exitcode == 0
 
 
 def test_day0_extreme_bridge_advances_on_strictly_newer_observation_time(
