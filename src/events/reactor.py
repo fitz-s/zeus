@@ -6746,7 +6746,13 @@ def run_edli_event_reactor_cycle(
     from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
 
-    if get_current_level() != RiskLevel.GREEN:
+    held_sell_completion_cycle = bool(
+        completion_wake and producer_held_sell_reauction_requests
+    )
+    if (
+        get_current_level() != RiskLevel.GREEN
+        and not held_sell_completion_cycle
+    ):
         _log.info(
             "EDLI reactor skipped before runtime DB setup: new entries are globally blocked"
         )
@@ -7321,6 +7327,9 @@ def run_edli_event_reactor_cycle(
             ),
         )
 
+        entry_risk_gate = riskguard_allows_new_entries(
+            get_current_level=get_current_level
+        )
         reactor = OpportunityEventReactor(
             store,
             source_truth_gate=edli_source_truth_gate,
@@ -7328,8 +7337,18 @@ def run_edli_event_reactor_cycle(
                 trade_conn,
                 topology_conn=forecasts_conn,
             ),
-            riskguard_gate=riskguard_allows_new_entries(get_current_level=get_current_level),
-            cycle_entry_gate=lambda: get_current_level() == RiskLevel.GREEN,
+            # A typed held-SELL completion wake is an exit-capital decision, not
+            # entry authority.  Keep its globally comparable SELL/HOLD/CASH cut
+            # alive in reduce-only/YELLOW/ORANGE/RED operation.  The adapter's
+            # selection_completion_reserved path removes every BUY candidate;
+            # ordinary entry events retain both independent GREEN gates.
+            riskguard_gate=lambda event: (
+                held_sell_completion_cycle or entry_risk_gate(event)
+            ),
+            cycle_entry_gate=lambda: (
+                held_sell_completion_cycle
+                or get_current_level() == RiskLevel.GREEN
+            ),
             final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,
             regret_ledger=regret_ledger,

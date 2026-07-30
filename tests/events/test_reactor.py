@@ -903,10 +903,6 @@ def test_blocked_entry_cycle_returns_before_runtime_db_setup(monkeypatch):
     from src.riskguard.risk_level import RiskLevel
     from src.runtime import reactor_wake
 
-    class _Lock:
-        def locked(self):
-            return False
-
     monkeypatch.setattr(
         main,
         "_settings_section",
@@ -924,20 +920,16 @@ def test_blocked_entry_cycle_returns_before_runtime_db_setup(monkeypatch):
         lambda: pytest.fail("blocked entry cycle must not open the world DB"),
     )
 
-    assert run_edli_event_reactor_cycle(active_lock=_Lock()) is True
+    assert run_edli_event_reactor_cycle(active_lock=threading.Lock()) is True
 
 
-def test_blocked_entry_cycle_keeps_held_sell_completion_wake(monkeypatch):
+def test_blocked_entry_cycle_keeps_untyped_held_sell_completion_wake(monkeypatch):
     import src.main as main
     import src.state.db as db
     from src.events.reactor import run_edli_event_reactor_cycle
     from src.riskguard import riskguard
     from src.riskguard.risk_level import RiskLevel
     from src.runtime import reactor_wake
-
-    class _Lock:
-        def locked(self):
-            return False
 
     monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -963,13 +955,62 @@ def test_blocked_entry_cycle_keeps_held_sell_completion_wake(monkeypatch):
 
     assert (
         run_edli_event_reactor_cycle(
-            active_lock=_Lock(),
+            active_lock=threading.Lock(),
             producer_wake_reason=(
                 "held_sell_global_auction_completion_requested"
             ),
         )
         is False
     )
+
+
+@pytest.mark.parametrize("risk_level_name", ("YELLOW", "ORANGE", "RED"))
+def test_blocked_entry_cycle_still_runs_typed_held_sell_completion(
+    monkeypatch,
+    risk_level_name,
+):
+    """Entry risk posture must not disable reduce-only global exit selection."""
+
+    import src.main as main
+    import src.state.db as db
+    from src.events.reactor import run_edli_event_reactor_cycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    class ExitAuctionReached(RuntimeError):
+        pass
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        riskguard,
+        "get_current_level",
+        lambda: getattr(RiskLevel, risk_level_name),
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: (_ for _ in ()).throw(ExitAuctionReached()),
+    )
+
+    with pytest.raises(ExitAuctionReached):
+        run_edli_event_reactor_cycle(
+            active_lock=threading.Lock(),
+            producer_wake_reason=(
+                "held_sell_global_auction_completion_requested"
+            ),
+            producer_held_sell_reauction_requests=(object(),),
+        )
 
 
 def test_periodic_cycle_yields_to_already_pending_day0_before_runtime_db_setup(
