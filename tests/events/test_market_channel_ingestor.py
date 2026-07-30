@@ -1,12 +1,13 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-28
-# Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract.
+# Last reused/audited: 2026-07-29
+# Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract; background TRADE writer fast-yield hotfix.
 from __future__ import annotations
 
 import asyncio
 import json
 import sqlite3
 import threading
+import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 
@@ -2215,6 +2216,73 @@ def test_coalesced_quote_commit_failure_requeues_without_false_dedupe():
         "SELECT COUNT(*) FROM execution_feasibility_latest"
     ).fetchone()[0] == 2
     assert seen == [results[0].event_id]
+
+
+def test_real_trade_lock_rolls_back_and_retries_latest_quote(tmp_path):
+    """A real 25ms WAL timeout leaves the newest coalesced quote retryable."""
+    db_path = tmp_path / "trades.db"
+    conn = sqlite3.connect(db_path, timeout=0.025)
+    init_schema_trade_only(conn)
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    ensure_table(conn)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout = 25")
+    coalescer = EventCoalescer(max_market_keys=8)
+    ingestor = MarketChannelIngestor(
+        None,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        feasibility_conn=conn,
+        coalescer=coalescer,
+    )
+    assert ingestor.handle_message(
+        {
+            "event_type": "book",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "locked-latest-hash",
+            "timestamp": "1766789469958",
+        },
+        received_at="2026-05-24T10:00:00+00:00",
+    ) is None
+
+    holder = sqlite3.connect(db_path, timeout=0.025)
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("BEGIN IMMEDIATE")
+    started = time.monotonic()
+    try:
+        with ingestor.defer_market_event_sink():
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                ingestor.flush_coalesced(
+                    market_budget=1,
+                    commit=conn.commit,
+                    rollback=conn.rollback,
+                )
+        assert time.monotonic() - started < 0.5
+        assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
+        assert conn.execute(
+            "SELECT COUNT(*) FROM execution_feasibility_latest"
+        ).fetchone()[0] == 0
+    finally:
+        holder.rollback()
+        holder.close()
+
+    with ingestor.defer_market_event_sink():
+        results = ingestor.flush_coalesced(
+            market_budget=1,
+            commit=conn.commit,
+            rollback=conn.rollback,
+        )
+    assert len(results) == 1
+    assert coalescer.pending_counts() == {"lossless": 0, "market": 0}
+    assert conn.execute(
+        "SELECT book_hash_before FROM execution_feasibility_latest "
+        "WHERE token_id = 'token-1' AND direction = 'buy_yes'"
+    ).fetchone() == ("locked-latest-hash",)
+    conn.close()
 
 
 def test_quote_write_backpressure_retains_websocket_and_latest_event(monkeypatch):

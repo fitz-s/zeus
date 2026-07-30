@@ -301,6 +301,7 @@ def test_m5_and_fill_bridge_cycles_serialize_on_production_world_trade_gate(
         conn,  # noqa: ARG001
         *,
         now=None,  # noqa: ARG001
+        limit=1,  # noqa: ARG001
         failure_reasons=None,  # noqa: ARG001
     ):
         bridge_scan_started.set()
@@ -433,6 +434,7 @@ def test_live_quote_gate_has_millisecond_contention_budget(monkeypatch):
         }
     ]
     assert leases[0]["deadline_ms"] <= 25
+    assert leases[0]["max_hold_ms"] <= 100
 
 
 def test_held_quote_gate_wait_is_clamped_by_refresh_deadline(monkeypatch):
@@ -461,14 +463,10 @@ def test_held_quote_gate_wait_is_clamped_by_refresh_deadline(monkeypatch):
     ):
         pass
 
-    assert leases == [
-        {
-            "owner": "held-quote-budget-antibody",
-            "write_class": "live",
-            "deadline_ms": 750,
-            "max_hold_ms": lane.PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS,
-        }
-    ]
+    assert leases[0]["owner"] == "held-quote-budget-antibody"
+    assert leases[0]["write_class"] == "live"
+    assert 0 < leases[0]["deadline_ms"] <= 100
+    assert leases[0]["max_hold_ms"] <= 100
 
 
 def test_held_quote_sqlite_wait_is_clamped_by_hold_and_refresh_deadlines(
@@ -483,13 +481,13 @@ def test_held_quote_sqlite_wait_is_clamped_by_hold_and_refresh_deadlines(
             conn,
             deadline_monotonic=101.0,
         )
-        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 100
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 25
 
         lane._bound_held_quote_sqlite_wait(
             conn,
             deadline_monotonic=100.075,
         )
-        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 75
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 25
 
         with pytest.raises(TimeoutError, match="deadline elapsed before DB write"):
             lane._bound_held_quote_sqlite_wait(
@@ -498,6 +496,73 @@ def test_held_quote_sqlite_wait_is_clamped_by_hold_and_refresh_deadlines(
             )
     finally:
         conn.close()
+
+
+def test_background_price_channel_gate_caps_lease_deadline_and_hold(monkeypatch):
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+
+    leases: list[dict[str, int]] = []
+
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, *_args, **kwargs):
+            leases.append(kwargs)
+            yield
+
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+
+    with lane._PriceChannelWriteGate(
+        owner="fast-yield-bound-antibody",
+        scope="trade",
+        deadline_ms=2_000,
+        max_hold_ms=2_000,
+    ):
+        pass
+
+    assert leases[0]["deadline_ms"] == 100
+    assert leases[0]["max_hold_ms"] == 100
+
+
+def test_fill_bridge_processes_one_new_fill_per_tick():
+    node = _func_node("_edli_durable_fill_bridge_scan")
+    limit = next(arg for arg in node.args.kwonlyargs if arg.arg == "limit")
+    index = node.args.kwonlyargs.index(limit)
+    default = node.args.kw_defaults[index]
+    assert isinstance(default, ast.Constant)
+    assert default.value == 1
+
+    repair = _func_node("_edli_fill_bridge_repair_cycle")
+    calls = [
+        call
+        for call in ast.walk(repair)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "_edli_durable_fill_bridge_scan"
+    ]
+    assert len(calls) == 1
+    assert any(
+        keyword.arg == "limit"
+        and isinstance(keyword.value, ast.Constant)
+        and keyword.value.value == 1
+        for keyword in calls[0].keywords
+    )
+
+
+def test_price_channel_configures_sixteen_quote_flush_batch():
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest import price_channel_ingest as lane
+
+    prior = market_channel_ingestor.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE
+    try:
+        lane._configure_market_channel_quote_flush_batch()
+        assert market_channel_ingestor.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE == 16
+    finally:
+        market_channel_ingestor.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE = prior
 
 
 def test_held_quote_gate_never_enters_sql_after_absolute_deadline(

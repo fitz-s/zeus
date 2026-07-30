@@ -84,32 +84,15 @@ _SUBSTRATE_PRIORITY_REFRESH_CURSOR = 0
 _SUBSTRATE_GAMMA_REFRESH_CURSOR = 0
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 _NEW_FAMILY_CONDITION_IDS: set[str] = set()
-# The sidecar has a short freshness budget, but the outer write-coordinator
-# lease cannot be shorter than the row-level SQLite busy wait used by
-# market_scanner. Otherwise the coordinator fails first and the substrate lane
-# never reaches the bounded SQLite wait that was added to survive transient
-# zeus_trades.db writer contention. Live evidence after the sidecar split
-# showed 5s is still too brittle when executor, exit, and capital writers are
-# active; 8s keeps the wait bounded inside the 20s warm cadence while giving
-# scoped hot refresh a realistic chance to acquire the trade write lane.
-SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 8000
-SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 8000
-
-
-def _substrate_snapshot_sqlite_busy_floor_ms() -> int:
-    raw = os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS")
-    try:
-        value = int(raw) if raw is not None else 4000
-    except (TypeError, ValueError):
-        value = 4000
-    return max(1000, min(value, 30000))
+# Background substrate writes yield to the money path instead of waiting behind
+# a SQLite writer. Each durable row still has a short coordinator envelope, but
+# no background lease may turn transient contention into a seconds-long stall.
+SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 100
+SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 100
 
 
 def _substrate_snapshot_write_lease_deadline_default_ms() -> int:
-    return max(
-        SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
-        _substrate_snapshot_sqlite_busy_floor_ms() + 1000,
-    )
+    return SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS
 
 
 def _substrate_snapshot_write_lease_ms(
@@ -138,14 +121,14 @@ def _substrate_snapshot_trade_write_context_factory(owner: str):
             deadline_ms=_substrate_snapshot_write_lease_ms(
                 "substrate_snapshot_db_write_lease_deadline_ms",
                 _substrate_snapshot_write_lease_deadline_default_ms(),
-                minimum=_substrate_snapshot_sqlite_busy_floor_ms(),
-                maximum=30000,
+                minimum=1,
+                maximum=100,
             ),
             max_hold_ms=_substrate_snapshot_write_lease_ms(
                 "substrate_snapshot_db_write_max_hold_ms",
                 SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
-                minimum=_substrate_snapshot_sqlite_busy_floor_ms(),
-                maximum=10000,
+                minimum=1,
+                maximum=100,
             ),
         )
 

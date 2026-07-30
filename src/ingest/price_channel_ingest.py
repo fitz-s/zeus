@@ -157,14 +157,15 @@ def _write_market_channel_continuity(payload: dict[str, object]) -> None:
     tmp.write_text(json.dumps(proof, sort_keys=True), encoding="utf-8")
     tmp.replace(target)
 PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 25
-PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
-PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS = 250
+PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 100
+PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS = 100
 PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 25
-PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 2000
+PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 100
 PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS = 100
 PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS = 25
-PRICE_CHANNEL_REDECISION_WORLD_WRITE_BUDGET_MS = 750
+PRICE_CHANNEL_REDECISION_WORLD_WRITE_BUDGET_MS = 100
 PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS = 25
+PRICE_CHANNEL_QUOTE_FLUSH_BATCH_SIZE = 16
 PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
 PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS = 0.25
 M5_AUTHORITY_PROOF_CADENCE_SECONDS = 30
@@ -182,18 +183,15 @@ def _bound_price_channel_sqlite_wait(
 ) -> None:
     """Keep SQLite contention inside the price-channel writer hold budget.
 
-    The composed world+trade gate serializes every live writer behind this
-    process. A connection retaining the repo-wide 30s SQLite busy timeout can
-    therefore hold all three gates while waiting for a legacy writer, turning
-    ordinary backpressure into a cross-process deadlock. The gate's declared
-    1s maximum hold is only telemetry; make it executable for each attached
-    price-channel writer connection.
+    A connection retaining the repo-wide SQLite busy timeout can hold a
+    background lease behind a legacy writer. Keep every price-channel writer
+    on the 25ms fast-yield boundary instead.
     """
 
     budget_ms = (
-        PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS
+        PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS
         if timeout_ms is None
-        else max(0, int(timeout_ms))
+        else min(PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS, max(1, int(timeout_ms)))
     )
     conn.execute(f"PRAGMA busy_timeout = {budget_ms}")
 
@@ -211,7 +209,7 @@ def _bound_held_quote_sqlite_wait(
     remaining_ms = int(remaining * 1000.0)
     _bound_price_channel_sqlite_wait(
         conn,
-        timeout_ms=min(PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS, remaining_ms),
+        timeout_ms=min(PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS, remaining_ms),
     )
 
 
@@ -275,8 +273,8 @@ class _PriceChannelWriteGate:
     ) -> None:
         self._owner = owner
         self._scope = scope
-        self._deadline_ms = max(0, int(deadline_ms))
-        self._max_hold_ms = max(0, int(max_hold_ms))
+        self._deadline_ms = min(100, max(0, int(deadline_ms)))
+        self._max_hold_ms = min(100, max(0, int(max_hold_ms)))
         self._deadline_monotonic = deadline_monotonic
         self._on_enter = on_enter
         self._stack: contextlib.ExitStack | None = None
@@ -538,6 +536,16 @@ def _edli_price_channel_trade_write_context_factory(*, owner: str):
         )
 
     return _factory
+
+
+def _configure_market_channel_quote_flush_batch() -> None:
+    """Apply the P3 quote flush bound without widening the event-module API."""
+
+    from src.events.triggers import market_channel_ingestor
+
+    market_channel_ingestor.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE = (
+        PRICE_CHANNEL_QUOTE_FLUSH_BATCH_SIZE
+    )
 
 
 def _rest_quote_refresh_backpressure_result(
@@ -1320,7 +1328,7 @@ def _edli_durable_fill_bridge_scan(
     conn,
     *,
     now=None,
-    limit: int = 500,
+    limit: int = 1,
     already_bridged_repair_limit: int = 0,
     failure_reasons: list[str] | None = None,
 ) -> int:
@@ -2076,6 +2084,7 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                 bridged_positions += _edli_durable_fill_bridge_scan(
                     bridge_conn,
                     now=now,
+                    limit=1,
                     failure_reasons=canonical_failure_reasons,
                 )
                 bridge_conn.commit()
@@ -3644,6 +3653,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         return health
 
     def _runner() -> None:
+        _configure_market_channel_quote_flush_batch()
         from src.data.polymarket_client import PolymarketClient
         from src.events.event_coalescer import EventCoalescer
         from src.events.event_writer import EventWriter

@@ -153,98 +153,10 @@ def _snapshot_capture_busy_timeout_ms(
     remaining_candidates: int | None = None,
     priority_candidate: bool = False,
 ) -> int:
-    """Return the per-row SQLite wait budget for background substrate capture.
+    """Return the fixed fast-yield SQLite wait for background snapshot writes."""
 
-    Fitz #5 lock-CATEGORY kill (2026-06-08): this is the load-bearing budget that
-    decides whether a contended snapshot insert WAITS out a transient trade-DB
-    write lock or fails fast as "database is locked".  The trade DB
-    (executable_market_snapshots, db=trade) is written concurrently IN-PROCESS by
-    the executor submit path, the exit lifecycle, and the CollateralLedger
-    heartbeat — each on an independent connection, so the in-process write mutex
-    does not serialize them.  A WAL write lock therefore changes hands constantly.
-
-    The prior design clamped this to min(250 ms, remaining_per_cycle_ms).  Live
-    (zeus-live.err 2026-06-08 09:27:50) showed that under contention every insert
-    fail-fasted inside 250 ms → inserted=0 → executable_substrate_coverage=NONE →
-    the armed daemon had zero executable candidates and could not trade.  Worse,
-    as the per-cycle budget shrank the clamp collapsed toward a few milliseconds,
-    failing the LATE-cycle inserts the warmer most needs.
-
-    Fix: a DURABLE FLOOR (``ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS``,
-    default 1000 ms) that the shrinking per-cycle budget can NEVER pull below, so
-    a lock held briefly (<1 s) by another in-process writer is WAITED out instead
-    of raising.  The wait is still bounded by ``ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS``
-    (default 2000 ms) so one busy wait cannot consume the whole multi-row capture
-    window — the original budget-protection intent is preserved, just floored
-    above the fail-fast threshold.  The wall-clock per-cycle deadline (checked at
-    the top of the capture loop) remains the true outer bound on the cycle.
-    """
-
-    # 2026-06-16: the 1000ms floor / 2000ms ceiling was too short to win the zeus_trades.db
-    # WAL write lock under transient concurrent-writer contention (reactor claim/exit/poller
-    # commits). An external BEGIN IMMEDIATE probe acquired the lock in 0.91s, yet capture
-    # (floored at 1000ms under per-cycle budget pressure) gave up after ~1s -> inserted=0 ->
-    # fresh_executable_city_count=0 -> the spine starved of priceable families. Raise the
-    # floor to 4000ms (the durable minimum WAIT a contended insert gets regardless of the
-    # shrinking per-cycle budget) and the ceiling to 8000ms so a brief writer hold is WAITED
-    # out, not fail-fasted. Still bounded by the wall-clock per-cycle deadline.
-    configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", "8000"))
-    floor_ms = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "4000"))
-    progress_floor_ms = int(
-        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", "150")
-    )
-    priority_floor_candidate_cap = int(
-        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", "32")
-    )
-    # The per-cycle remaining budget may TIGHTEN the wait toward the configured
-    # ceiling, but it must never drop the wait below the durable floor: a contended
-    # insert that waits only a few ms is the exact failure that starved coverage.
-    remaining_ms = int(max(1.0, remaining_seconds * 1000.0))
-    if remaining_candidates is not None and remaining_candidates > 1:
-        priority_floor_scope = bool(
-            priority_candidate
-            and remaining_candidates <= max(1, priority_floor_candidate_cap)
-        )
-        split_priority_scope = bool(
-            priority_candidate
-            and remaining_candidates > max(1, priority_floor_candidate_cap)
-        )
-        split_batch_scope = bool(
-            not priority_candidate
-            or remaining_candidates > max(1, priority_floor_candidate_cap)
-        )
-    else:
-        priority_floor_scope = False
-        split_priority_scope = False
-        split_batch_scope = False
-    if priority_floor_scope:
-        # Live money-path scoped refreshes must wait out normal WAL contention even
-        # late in the cycle. Splitting a 2-row priority refresh down to 150ms after
-        # Gamma/CLOB prefetch consumed the reserve reproduced coverage=NONE.
-        share_ms = max(floor_ms, remaining_ms // max(1, remaining_candidates or 1))
-        return max(1, min(configured, share_ms))
-    if split_priority_scope or split_batch_scope:
-        # Live 2026-06-25: the batch warmer had 46 selected candidates and one
-        # locked insert consumed the 8s per-row ceiling, producing
-        # attempted=1 inserted=0 coverage=NONE. Batch substrate refresh is a
-        # coverage producer, not a single critical recapture; no one condition may
-        # spend the whole capture reserve. Split the remaining wall-clock budget
-        # across the remaining selected candidates while preserving a small
-        # non-zero wait so transient locks can still clear. Large priority batches
-        # are still batches: a broad redecision confirmation scope must make
-        # progress across families instead of letting the first locked row consume
-        # the whole tick.
-        #
-        # Live 2026-06-26: money-path confirmation refreshes commonly carry a
-        # family-sized priority scope (roughly 17-21 YES/NO orderbook rows). The
-        # old cap of 4 misclassified those scoped recaptures as broad batches,
-        # split the wait budget down to a few hundred ms, then failed every
-        # contended write with "database is locked". Keep the durable floor for
-        # normal priority scopes and split only oversized priority batches.
-        share_ms = max(progress_floor_ms, remaining_ms // max(1, remaining_candidates))
-        return max(1, min(configured, share_ms))
-    capped = min(configured, max(floor_ms, remaining_ms))
-    return max(floor_ms, capped)
+    del remaining_seconds, remaining_candidates, priority_candidate
+    return 25
 
 
 def _snapshot_capture_sqlite_lock_retries() -> int:
@@ -363,18 +275,9 @@ def _priority_direct_clob_prefetch_condition_limit() -> int:
 
 
 def _feasibility_prefetch_busy_timeout_ms() -> int:
-    """Bound local price-witness reads so they cannot starve snapshot writes."""
+    """Keep background candidate quote reads on the fast-yield boundary."""
 
-    try:
-        configured = int(
-            os.environ.get(
-                "ZEUS_MARKET_DISCOVERY_FEASIBILITY_PREFETCH_BUSY_TIMEOUT_MS",
-                "50",
-            )
-        )
-    except ValueError:
-        configured = 50
-    return max(1, configured)
+    return 25
 
 
 def _is_sqlite_locked_error(exc: BaseException) -> bool:

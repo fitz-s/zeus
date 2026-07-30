@@ -1,6 +1,6 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
-# Authority basis: Fitz #5 "database is locked" CATEGORY-kill on the trade-substrate
+# Last reused or audited: 2026-07-29
+# Authority basis: background TRADE writer fast-yield hotfix; Fitz #5 "database is locked" CATEGORY-kill on the trade-substrate
 #   path. Live evidence (zeus-live.err 2026-06-08 09:27:50): the EDLI market-substrate
 #   warm cycle inserted 0 snapshots ("executable_substrate_coverage_status: 'NONE'"),
 #   all failures "database is locked", because the per-row busy_timeout was clamped to
@@ -10,31 +10,20 @@
 #   CollateralLedger heartbeat all open independent trade connections), a 250 ms wait
 #   fails fast and the universe-wide executable substrate is never refreshed —
 #   starving the armed daemon of executable candidates so it cannot trade.
-"""Relationship antibody: warm-cycle substrate writer WAITS out contention.
+"""Relationship antibody: warm-cycle substrate writer fast-yields contention.
 
 CROSS-MODULE INVARIANT (the relationship, not a function):
   When ``refresh_executable_market_substrate_snapshots`` (the universe-wide
   executable_market_snapshots writer, owned by market_scanner) shares the trade
-  DB with ANOTHER writer that briefly holds the WAL write lock, the warm-cycle
-  insert must WAIT on its busy_timeout and COMMIT — it must NOT raise / record
-  "database is locked" and leave coverage at NONE.
-
-  The boundary that loses semantics in the bug: the caller (main.py
-  _refresh_pending_family_snapshots) hands market_scanner a trade connection
-  carrying the canonical 30 s PRAGMA busy_timeout, but the capture loop
-  (market_scanner.py:4062) OVERRODE it with min(250 ms, remaining). A short
-  competing lock therefore turned into a hard failure instead of a brief wait.
+  DB with an active writer, the background cycle must return after its 25ms
+  SQLite budget instead of holding a coordinator lease for seconds. The next
+  warm tick retries the deferred snapshot.
 
 Two tests:
-  R-WAIT (CONTENTION_WAITS_NOT_RAISES): a competing connection holds the trade-DB
-    write lock for ~0.4 s while the warm cycle runs. The warm-cycle capture
-    performs a REAL insert on the handed connection. With the contention fix the
-    insert WAITS and commits (inserted >= 1, coverage != NONE, no "database is
-    locked"). On the pre-fix 250 ms clamp this RED-fails (inserted == 0).
-  R-FLOOR (BUSY_TIMEOUT_NOT_SHRUNK_BELOW_FLOOR): the per-row capture wait budget
-    never collapses below a usable floor even when the remaining per-cycle budget
-    is small — so a contended late-cycle insert still waits long enough to win the
-    lock rather than fail-fast at a few milliseconds.
+  R-FAST-YIELD: a competing connection holds the trade-DB write lock while the
+    warm cycle runs. The warm-cycle capture performs a REAL insert and returns
+    promptly with a retryable lock failure rather than waiting out the lock.
+  R-BOUND: every candidate shape receives the fixed 25ms busy timeout.
 """
 from __future__ import annotations
 
@@ -158,12 +147,17 @@ def test_snapshot_persist_context_wraps_insert_and_commit(monkeypatch):
             events.append("exit")
             return False
 
-    def _fake_insert(conn, snapshot) -> None:
+    def _fake_insert(conn, snapshot, **_kwargs) -> None:
         events.append(("insert", snapshot.condition_id))
         conn.total_changes += 1
 
     monkeypatch.setattr(ms, "insert_snapshot", _fake_insert)
-    monkeypatch.setattr(ms, "_write_book_hash_transition", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        ms,
+        "_write_book_hash_transition",
+        lambda **_kwargs: None,
+        raising=False,
+    )
     monkeypatch.setattr(ms, "_prev_orderbook_hash_by_market", {})
 
     conn = _FakeConn()
@@ -205,6 +199,9 @@ def test_snapshot_persist_context_wraps_insert_and_commit(monkeypatch):
                 "neg_risk": False,
             }
 
+        def get_fee_rate_details(self, _token_id: str) -> dict:
+            return {"feeRate": "0.02"}
+
     ms.capture_executable_market_snapshot(
         conn,
         market=market,
@@ -225,26 +222,15 @@ def test_snapshot_persist_context_wraps_insert_and_commit(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R-WAIT: contention must produce a WAIT, not "database is locked"
+# R-FAST-YIELD: contention must return promptly and leave the next tick retryable.
 # ---------------------------------------------------------------------------
 
-def test_warm_cycle_capture_applies_floor_busy_timeout_to_handed_conn(tmp_path, monkeypatch):
-    """R-WAIT (deterministic): the effective PRAGMA busy_timeout ON THE HANDED
-    CONNECTION at the moment capture runs must be >= the usable floor, so a real
-    competing lock is WAITED out rather than fail-fasted.
-
-    This reads the connection's live ``PRAGMA busy_timeout`` from inside the
-    patched capture — the exact value the next ``insert_snapshot`` will use to
-    wait on the trade-DB write lock. The pre-fix loop clamped it to
-    min(250 ms, remaining) (market_scanner.py:4062), so this asserts the boundary
-    value directly with no timing race.
-
-    RED on pre-fix code: observed busy_timeout == 250 (or less). GREEN: >= floor.
-    """
+def test_warm_cycle_capture_applies_fast_yield_busy_timeout_to_handed_conn(tmp_path, monkeypatch):
+    """The handed snapshot connection receives the exact 25ms lock budget."""
     monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
     monkeypatch.delenv("ZEUS_DB_BUSY_TIMEOUT_MS", raising=False)
 
-    FLOOR_MS = 1000
+    BUSY_TIMEOUT_MS = 25
 
     db_path = tmp_path / "trade.db"
     _create_trade_db(db_path)
@@ -282,25 +268,13 @@ def test_warm_cycle_capture_applies_floor_busy_timeout_to_handed_conn(tmp_path, 
     )
 
     assert observed_busy_ms, "capture was never invoked"
-    assert min(observed_busy_ms) >= FLOOR_MS, (
-        "warm-cycle loop installed a busy_timeout below the usable floor on the "
-        f"trade connection: observed={observed_busy_ms}. A real competing write "
-        "lock would fail-fast as 'database is locked' instead of waiting."
-    )
+    assert set(observed_busy_ms) == {BUSY_TIMEOUT_MS}
     assert summary["inserted"] >= 1, summary
     conn.close()
 
 
-def test_warm_cycle_capture_waits_out_real_trade_db_contention(tmp_path, monkeypatch):
-    """R-WAIT (integration): a competing writer holding the trade-DB write lock
-    must NOT make the warm-cycle snapshot insert record 'database is locked'.
-
-    The capture is patched to a REAL insert on the handed connection so the
-    busy_timeout boundary is exercised against a real SQLite WAL write lock. The
-    lock is held longer than the entire pre-fix wait+retry budget
-    (250 ms × 3 attempts + retry sleeps ≈ <1 s) but well within a healthy wait, so
-    the buggy clamp fails and the fix waits and commits.
-    """
+def test_warm_cycle_capture_fast_yields_real_trade_db_contention(tmp_path, monkeypatch):
+    """A real WAL lock consumes only the 25ms background wait budget."""
     monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
     monkeypatch.delenv("ZEUS_DB_BUSY_TIMEOUT_MS", raising=False)
     # Remove the lock-retry escape hatch so the test isolates the busy_timeout
@@ -326,9 +300,8 @@ def test_warm_cycle_capture_waits_out_real_trade_db_contention(tmp_path, monkeyp
         other.execute("BEGIN IMMEDIATE")
         other.execute("INSERT INTO _lock_probe (v) VALUES (1)")
         lock_held.set()
-        # Hold longer than the buggy 250 ms clamp (so a clamped wait loses) but
-        # well under a healthy busy_timeout wait (so the fix wins).
-        time.sleep(0.7)
+        # Deliberately outlast the background 25ms fast-yield window.
+        time.sleep(0.2)
         other.commit()
         other.close()
 
@@ -351,6 +324,7 @@ def test_warm_cycle_capture_waits_out_real_trade_db_contention(tmp_path, monkeyp
     monkeypatch.setattr(ms, "capture_executable_market_snapshot", _real_insert_capture)
 
     markets = [_make_market(i) for i in range(1, 4)]
+    started = time.monotonic()
     summary = refresh_executable_market_substrate_snapshots(
         conn,
         markets=markets,
@@ -360,50 +334,29 @@ def test_warm_cycle_capture_waits_out_real_trade_db_contention(tmp_path, monkeyp
         max_outcomes=2,
         budget_seconds=30.0,
     )
+    elapsed = time.monotonic() - started
     holder.join(timeout=3.0)
 
     failure_errors = [f.get("error", "") for f in summary.get("failure_samples", [])]
-    assert not any("database is locked" in e.lower() for e in failure_errors), (
-        f"warm cycle recorded 'database is locked' under contention: {summary}"
-    )
-    assert summary["inserted"] >= 1, (
-        f"warm cycle inserted no snapshots under contention (coverage starvation): {summary}"
-    )
-    assert summary["executable_substrate_coverage_status"] != "NONE", (
-        f"executable substrate coverage collapsed to NONE under contention: {summary}"
-    )
+    assert elapsed < 0.5, f"background warm capture waited too long: {elapsed:.3f}s"
+    assert any("database is locked" in e.lower() for e in failure_errors), summary
     rows = conn.execute("SELECT COUNT(*) FROM executable_market_snapshots").fetchone()[0]
-    assert rows >= 1, f"no snapshot row durably committed: {rows}"
+    assert rows == summary["inserted"]
     conn.close()
 
 
 # ---------------------------------------------------------------------------
-# R-FLOOR: per-row capture busy_timeout must not collapse below a usable floor
+# R-BOUND: per-row capture busy_timeout is fixed at the fast-yield budget.
 # ---------------------------------------------------------------------------
 
-def test_capture_busy_timeout_not_shrunk_below_floor(monkeypatch):
-    """R-FLOOR: even with a tiny remaining per-cycle budget the per-row capture
-    wait budget stays at or above a usable floor, so a contended late-cycle insert
-    still waits long enough to win the lock instead of fail-fasting at a few ms.
-
-    Pre-fix: _snapshot_capture_busy_timeout_ms(remaining) returned
-    min(250, remaining_ms) — for remaining=0.02 s it returned 20 ms, so the very
-    inserts the daemon most needs (late-cycle, under contention) fail fastest.
-    """
+def test_capture_busy_timeout_is_fixed_fast_yield_budget(monkeypatch):
+    """Candidate count and remaining cycle budget cannot widen the 25ms wait."""
     monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
     monkeypatch.delenv("ZEUS_DB_BUSY_TIMEOUT_MS", raising=False)
 
-    FLOOR_MS = 1000  # a contended insert must be allowed to wait at least ~1 s
-
-    # Small remaining budget (late cycle, under pressure) must still yield a
-    # usable wait — not collapse to tens of milliseconds.
-    assert _snapshot_capture_busy_timeout_ms(0.02) >= FLOOR_MS, (
-        "per-row capture busy_timeout collapsed below the usable floor when the "
-        "remaining per-cycle budget was small — late-cycle contended inserts will "
-        "fail-fast as 'database is locked'"
-    )
-    assert _snapshot_capture_busy_timeout_ms(0.5) >= FLOOR_MS
-    assert _snapshot_capture_busy_timeout_ms(10.0) >= FLOOR_MS
+    assert _snapshot_capture_busy_timeout_ms(0.02) == 25
+    assert _snapshot_capture_busy_timeout_ms(0.5) == 25
+    assert _snapshot_capture_busy_timeout_ms(10.0) == 25
 
 
 def test_batch_capture_busy_timeout_splits_budget_across_remaining_candidates(monkeypatch):
@@ -416,9 +369,7 @@ def test_batch_capture_busy_timeout_splits_budget_across_remaining_candidates(mo
     single = _snapshot_capture_busy_timeout_ms(12.0)
     batch = _snapshot_capture_busy_timeout_ms(12.0, remaining_candidates=46)
 
-    assert single >= 4000
-    assert 0 < batch < single
-    assert batch >= 150
+    assert single == batch == 25
 
 
 def test_small_priority_capture_busy_timeout_splits_candidate_budget(monkeypatch):
@@ -436,8 +387,7 @@ def test_small_priority_capture_busy_timeout_splits_candidate_budget(monkeypatch
         priority_candidate=True,
     )
 
-    assert broad_batch < priority < 8000
-    assert priority == 6000
+    assert broad_batch == priority == 25
 
 
 def test_late_small_priority_capture_keeps_durable_floor(monkeypatch):
@@ -459,8 +409,7 @@ def test_late_small_priority_capture_keeps_durable_floor(monkeypatch):
         priority_candidate=False,
     )
 
-    assert priority >= 4000
-    assert broad < priority
+    assert priority == broad == 25
 
 
 def test_family_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
@@ -478,8 +427,7 @@ def test_family_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
         priority_candidate=True,
     )
 
-    assert broad_batch < priority_family
-    assert priority_family >= 4000
+    assert broad_batch == priority_family == 25
 
 
 def test_claim_priority_batch_capture_busy_timeout_keeps_durable_floor(monkeypatch):
@@ -496,7 +444,7 @@ def test_claim_priority_batch_capture_busy_timeout_keeps_durable_floor(monkeypat
         priority_candidate=True,
     )
 
-    assert priority_claim_batch >= 4000
+    assert priority_claim_batch == 25
 
 
 def test_large_priority_capture_busy_timeout_splits_batch_budget(monkeypatch):
@@ -514,8 +462,7 @@ def test_large_priority_capture_busy_timeout_splits_batch_budget(monkeypatch):
         priority_candidate=True,
     )
 
-    assert priority_batch == broad_batch
-    assert 0 < priority_batch < 4000
+    assert priority_batch == broad_batch == 25
 
 
 def test_multi_candidate_lock_retries_yield_to_next_candidate():
