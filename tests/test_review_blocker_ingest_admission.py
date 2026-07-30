@@ -518,6 +518,58 @@ def test_ogimet_tick_retries_missing_day0_event_from_committed_canonical_fact(tm
     check.close()
 
 
+@pytest.mark.parametrize(
+    ("city_name", "tick_name"),
+    (
+        ("Chicago", "_tick_wu_city"),
+        ("Karachi", "_tick_ogimet_city"),
+    ),
+)
+def test_obs_tick_source_tiers_forward_day0_admission_to_canonical_write(
+    monkeypatch,
+    city_name,
+    tick_name,
+):
+    """Every NOAA writer must publish its canonical fact and Day0 wake together."""
+
+    import scripts.obs_live_tick as obs_tick
+
+    observation = object()
+    admission = lambda _observation: True
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        obs_tick,
+        "fetch_wu_hourly" if tick_name == "_tick_wu_city" else "fetch_ogimet_hourly",
+        lambda **_kwargs: SimpleNamespace(failed=False, observations=[observation]),
+    )
+    monkeypatch.setattr(obs_tick, "_hourly_obs_to_v2_row", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(obs_tick, "_hourly_observation_prints", lambda *_args, **_kwargs: [])
+
+    def capture_write(_conn, _rows, _prints, **kwargs):
+        captured.update(kwargs)
+        kwargs["inserted_event_ids"].append("event-1")
+        kwargs["inserted_event_families"].append((city_name, "2026-07-29", "high"))
+        return 1
+
+    monkeypatch.setattr(obs_tick, "_write_rows", capture_write)
+
+    result = getattr(obs_tick, tick_name)(
+        city_name,
+        object(),
+        start_date=datetime(2026, 7, 29, tzinfo=UTC).date(),
+        end_date=datetime(2026, 7, 29, tzinfo=UTC).date(),
+        dry_run=False,
+        day0_family_admission=admission,
+    )
+
+    assert captured["day0_event_city"] == city_name
+    assert captured["day0_family_admission"] is admission
+    assert result.rows_written == 1
+    assert result.day0_event_ids == ("event-1",)
+    assert result.day0_event_families == ((city_name, "2026-07-29", "high"),)
+
+
 @pytest.mark.parametrize("job_name", ("_k2_obs_tick", "_k2_obs_fast_tick"))
 def test_noaa_obs_jobs_resolve_admission_then_commit_then_bridge(job_name):
     """Production schedulers must wire admission and the post-commit wake."""

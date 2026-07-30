@@ -393,10 +393,10 @@ scripts:
     required_helpers: [src.data.tier_resolver, src.data.observation_instants_writer, src.data.wu_hourly_client, src.data.ogimet_hourly_client, src.state.db_writer_lock]
     external_inputs: [WU historical.json, Ogimet METAR]
     target_db: state/zeus-world.db
-    write_targets: [observation_instants]
+    write_targets: [observation_instants, observation_prints, opportunity_events]
     observability: [state/obs_v2_live_tick_log.jsonl]
-    required_tests: [tests/test_obs_v2_writer.py]
-    notes: "Hourly rolling live writer invoked by src.ingest_main._k2_obs_tick; imported_at is captured only after the upstream fetch returns, and payload_hash must cover material extrema values so revised source facts enter revision history instead of same-hash material conflicts."
+    required_tests: [tests/test_obs_v2_writer.py, tests/test_review_blocker_ingest_admission.py]
+    notes: "Hourly rolling live writer invoked by src.ingest_main._k2_obs_tick; imported_at is captured only after the upstream fetch returns, payload_hash covers material extrema values, and every admitted WU/Ogimet canonical write transaction also publishes its DAY0_EXTREME_UPDATED wake so source-clock probability redecision cannot depend on a later catch-up scan."
   fill_obs_dst_gaps.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_writer, src.data.ogimet_hourly_client], external_inputs: [Ogimet METAR], target_db: state/zeus-world.db, write_targets: [observation_instants], observability: [state/obs_v2_dst_fill_log.jsonl], notes: "Targeted gap-fill for Tier 1 WU cities on DST-spring-forward days where WU archive has silent upstream holes. Uses Ogimet as authoritative NOAA-METAR mirror."}
 
   backfill_ogimet_metar.py:
