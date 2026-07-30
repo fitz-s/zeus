@@ -41,6 +41,41 @@ def _raw_payload_sha256(raw_payload: object) -> str:
     return hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()
 
 
+def _persisted_payload_sha256(
+    raw_payload: object,
+    provenance_json: object,
+) -> str:
+    """Return the persisted provider digest without weakening provenance.
+
+    Native observation writers may retain the provider body in ``raw_response``
+    or retain its exact SHA-256 in the mandatory ``provenance_json.payload_hash``
+    identity.  Both are durable provider-payload evidence; an absent body must
+    not erase the writer-validated digest.
+    """
+
+    raw_digest = _raw_payload_sha256(raw_payload)
+    if raw_digest:
+        return raw_digest
+    if not isinstance(provenance_json, str) or not provenance_json:
+        return ""
+    try:
+        provenance = json.loads(provenance_json)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(provenance, Mapping):
+        return ""
+    payload_hash = str(provenance.get("payload_hash") or "").strip().lower()
+    if payload_hash.startswith("sha256:"):
+        payload_hash = payload_hash.removeprefix("sha256:")
+    if len(payload_hash) != 64:
+        return ""
+    try:
+        int(payload_hash, 16)
+    except ValueError:
+        return ""
+    return payload_hash
+
+
 @dataclass(frozen=True)
 class ReplacementForecastCurrentTargetPlanRow:
     city: str
@@ -828,7 +863,8 @@ def _latest_authorized_day0_fact(
                        {optional_column('station_id')},
                        {optional_column('temp_unit')},
                        {optional_column('imported_at')},
-                       {optional_column('raw_response')}
+                       {optional_column('raw_response')},
+                       {optional_column('provenance_json')}
                   FROM observation_instants
                  WHERE city = ?
                    AND target_date = ?
@@ -869,6 +905,7 @@ def _latest_authorized_day0_fact(
                    station_id,
                    temp_unit,
                    raw_response,
+                   provenance_json,
                    COALESCE(imported_at, utc_timestamp) AS observation_available_at
               FROM authorized
              ORDER BY {instant_order},
@@ -890,8 +927,9 @@ def _latest_authorized_day0_fact(
                     "observation_available_at": str(
                         row["observation_available_at"] or row["observation_time"]
                     ),
-                    "raw_payload_sha256": _raw_payload_sha256(
-                        row["raw_response"]
+                    "raw_payload_sha256": _persisted_payload_sha256(
+                        row["raw_response"],
+                        row["provenance_json"],
                     ),
                 }
             )
@@ -1352,6 +1390,27 @@ def _latest_authorized_day0_fact(
     candidates = [fact for fact in facts if fact_extreme(fact) == best_extreme]
     winner = max(candidates, key=fact_time)
     winner_source = str(winner.get("observation_source") or "").strip().lower()
+    if not str(winner.get("raw_payload_sha256") or "").strip():
+        # The append-only observation_prints migration ledger can carry the
+        # same native source print without retaining its provider body.  The
+        # canonical observation row still owns the writer-validated payload
+        # digest. Preserve that exact digest across duplicate representations
+        # of the same source/extreme; absence on both surfaces remains absent.
+        provenance_candidates = [
+            fact
+            for fact in candidates
+            if (
+                str(fact.get("observation_source") or "").strip().lower()
+                == winner_source
+                and len(str(fact.get("raw_payload_sha256") or "").strip()) == 64
+            )
+        ]
+        if provenance_candidates:
+            winner = dict(winner)
+            winner["raw_payload_sha256"] = max(
+                provenance_candidates,
+                key=fact_time,
+            )["raw_payload_sha256"]
     same_source_facts = [
         fact
         for fact in facts
