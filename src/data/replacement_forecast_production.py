@@ -522,8 +522,14 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
         "seed_dir": _rooted_path(cfg.get("seed_dir"), base_dir / "seeds"),
         "seed_processed_dir": _rooted_path(cfg.get("seed_processed_dir"), base_dir / "seed_processed"),
         "seed_failed_dir": _rooted_path(cfg.get("seed_failed_dir"), base_dir / "seed_failed"),
-        "forecast_db": _rooted_path(forecast_db),
-        "raw_manifest_dir": _rooted_path(raw_manifest_dir),
+        "forecast_db": _rooted_path(
+            forecast_db,
+            STATE_DIR / "zeus-forecasts.db",
+        ),
+        "raw_manifest_dir": _rooted_path(
+            raw_manifest_dir,
+            base_dir / "raw_manifests",
+        ),
         "seed_discovery_limit": int(cfg.get("seed_discovery_limit_per_cycle") or cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 80),
         "request_dir": request_dir,
         "inflight_dir": (

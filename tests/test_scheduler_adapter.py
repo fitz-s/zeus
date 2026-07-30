@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-05-24; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Purpose: Executor-class assignment (no DB writer on file-only executor; UMA->backfill_db).
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-07-29
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -237,8 +237,9 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
 
 
 def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) -> None:
-    """Default materialization capacity must not under-drain the default seed burst."""
+    """Defaults keep both capacity and the canonical live repair lane available."""
     import src.data.replacement_forecast_production as prod
+    from src.config import STATE_DIR
 
     source = prod.settings._data if hasattr(prod.settings, "_data") else prod.settings
     monkeypatch.setitem(source, "replacement_forecast_live", {})
@@ -250,6 +251,10 @@ def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) 
     assert cfg["limit"] == 80
     assert cfg["poll_batch_limit"] == 8
     assert cfg["limit"] >= cfg["seed_limit"]
+    assert cfg["forecast_db"] == STATE_DIR / "zeus-forecasts.db"
+    assert cfg["raw_manifest_dir"] == (
+        STATE_DIR / "replacement_forecast_live" / "raw_manifests"
+    )
 
 
 def test_replacement_discovery_is_not_limited_by_poll_claim_size(
