@@ -1,6 +1,6 @@
 # Created: 2026-06-20
-# Last audited: 2026-07-29
-# Last reused/audited: 2026-07-29
+# Last audited: 2026-07-30
+# Last reused/audited: 2026-07-30
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). Quote projection
 #   writes TRADE only; derived redecision and NEW_MARKET_DISCOVERED facts write WORLD
 #   through independently coordinated lanes. TRADE quote refresh must never acquire
@@ -11,6 +11,8 @@ from __future__ import annotations
 import ast
 import contextlib
 import sqlite3
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
@@ -20,6 +22,8 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PRICE_CHANNEL_MODULE = _REPO_ROOT / "src" / "ingest" / "price_channel_ingest.py"
 _MARKET_CHANNEL_MODULE = _REPO_ROOT / "src" / "events" / "triggers" / "market_channel_ingestor.py"
+_EXECUTOR_MODULE = _REPO_ROOT / "src" / "execution" / "executor.py"
+_CYCLE_RUNTIME_MODULE = _REPO_ROOT / "src" / "engine" / "cycle_runtime.py"
 
 _REFRESH_FUNCS = (
     "_edli_refresh_held_position_quote_evidence",
@@ -465,8 +469,14 @@ def test_held_quote_gate_wait_is_clamped_by_refresh_deadline(monkeypatch):
 
     assert leases[0]["owner"] == "held-quote-budget-antibody"
     assert leases[0]["write_class"] == "live"
-    assert 0 < leases[0]["deadline_ms"] <= 100
-    assert leases[0]["max_hold_ms"] <= 100
+    assert leases == [
+        {
+            "owner": "held-quote-budget-antibody",
+            "write_class": "live",
+            "deadline_ms": 750,
+            "max_hold_ms": lane.PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS,
+        }
+    ]
 
 
 def test_held_quote_sqlite_wait_is_clamped_by_hold_and_refresh_deadlines(
@@ -481,13 +491,13 @@ def test_held_quote_sqlite_wait_is_clamped_by_hold_and_refresh_deadlines(
             conn,
             deadline_monotonic=101.0,
         )
-        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 25
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 100
 
         lane._bound_held_quote_sqlite_wait(
             conn,
             deadline_monotonic=100.075,
         )
-        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 25
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 75
 
         with pytest.raises(TimeoutError, match="deadline elapsed before DB write"):
             lane._bound_held_quote_sqlite_wait(
@@ -498,7 +508,7 @@ def test_held_quote_sqlite_wait_is_clamped_by_hold_and_refresh_deadlines(
         conn.close()
 
 
-def test_background_price_channel_gate_caps_lease_deadline_and_hold(monkeypatch):
+def test_foreground_price_channel_gate_preserves_explicit_lease_deadline_and_hold(monkeypatch):
     from src.ingest import price_channel_ingest as lane
     from src.state import write_coordinator
 
@@ -517,24 +527,110 @@ def test_background_price_channel_gate_caps_lease_deadline_and_hold(monkeypatch)
     )
 
     with lane._PriceChannelWriteGate(
-        owner="fast-yield-bound-antibody",
+        owner="foreground-deadline-antibody",
         scope="trade",
         deadline_ms=2_000,
         max_hold_ms=2_000,
     ):
         pass
 
-    assert leases[0]["deadline_ms"] == 100
-    assert leases[0]["max_hold_ms"] == 100
+    assert leases[0]["deadline_ms"] == 2_000
+    assert leases[0]["max_hold_ms"] == 2_000
 
 
-def test_fill_bridge_processes_one_new_fill_per_tick():
+@pytest.mark.parametrize(
+    ("owner", "scope"),
+    [
+        ("price_channel_user_inbox", "world"),
+        ("price_channel_fill_bridge", "world_trade"),
+    ],
+)
+def test_foreground_user_and_fill_writes_wait_out_short_sqlite_lock_and_persist(
+    tmp_path,
+    monkeypatch,
+    owner,
+    scope,
+):
+    """A 150--250ms legacy lock delays foreground truth; it does not drop it."""
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, *_args, **_kwargs):
+            yield
+
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+    db_path = tmp_path / f"{owner}.db"
+    bootstrap = sqlite3.connect(db_path)
+    bootstrap.execute("CREATE TABLE writes (owner TEXT PRIMARY KEY)")
+    bootstrap.commit()
+    bootstrap.close()
+    lock_ready = threading.Event()
+
+    def _hold_legacy_writer() -> None:
+        holder = sqlite3.connect(db_path)
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("INSERT INTO writes (owner) VALUES ('holder')")
+        lock_ready.set()
+        time.sleep(0.18)
+        holder.commit()
+        holder.close()
+
+    holder = threading.Thread(target=_hold_legacy_writer, daemon=True)
+    holder.start()
+    assert lock_ready.wait(timeout=1.0)
+    writer = sqlite3.connect(db_path, timeout=0)
+    try:
+        with lane._PriceChannelWriteGate(
+            owner=owner,
+            scope=scope,
+            deadline_ms=lane.PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=lane.PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+        ):
+            lane._bound_price_channel_sqlite_wait(
+                writer,
+                timeout_ms=lane.PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS,
+            )
+            writer.execute("INSERT INTO writes (owner) VALUES (?)", (owner,))
+            writer.commit()
+    finally:
+        writer.close()
+    holder.join(timeout=1.0)
+    check = sqlite3.connect(db_path)
+    try:
+        assert check.execute(
+            "SELECT 1 FROM writes WHERE owner = ?", (owner,)
+        ).fetchone()
+    finally:
+        check.close()
+
+
+def test_submit_ack_and_monitor_keep_their_own_foreground_write_opportunity():
+    """Price-channel fast-yield does not lower post-submit or monitor contracts."""
+    executor_source = _EXECUTOR_MODULE.read_text(encoding="utf-8")
+    monitor_source = _CYCLE_RUNTIME_MODULE.read_text(encoding="utf-8")
+
+    assert "def _retry_persist_on_db_lock(" in executor_source
+    assert "attempts: int = 4" in executor_source
+    assert "conn, _persist_entry_ack_facts, what=\"entry_ack_persistence\"" in executor_source
+    assert "conn, _persist_exit_ack_facts, what=\"exit_ack_persistence\"" in executor_source
+    assert "owner=\"monitor_canonical_append\"" in monitor_source
+    assert "deadline_ms=_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS" in monitor_source
+    assert "max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS" in monitor_source
+
+
+def test_fill_bridge_drains_a_bounded_backlog_per_tick():
     node = _func_node("_edli_durable_fill_bridge_scan")
     limit = next(arg for arg in node.args.kwonlyargs if arg.arg == "limit")
     index = node.args.kwonlyargs.index(limit)
     default = node.args.kw_defaults[index]
     assert isinstance(default, ast.Constant)
-    assert default.value == 1
+    assert default.value == 500
 
     repair = _func_node("_edli_fill_bridge_repair_cycle")
     calls = [
@@ -545,24 +641,28 @@ def test_fill_bridge_processes_one_new_fill_per_tick():
         and call.func.id == "_edli_durable_fill_bridge_scan"
     ]
     assert len(calls) == 1
-    assert any(
-        keyword.arg == "limit"
-        and isinstance(keyword.value, ast.Constant)
-        and keyword.value.value == 1
-        for keyword in calls[0].keywords
+    limit_keyword = next(keyword.value for keyword in calls[0].keywords if keyword.arg == "limit")
+    assert isinstance(limit_keyword, ast.Name)
+    assert limit_keyword.id == "FILL_BRIDGE_DRAIN_LIMIT_PER_TICK"
+
+
+def test_price_channel_passes_background_quote_batch_to_its_service_instance():
+    tree = ast.parse(_PRICE_CHANNEL_MODULE.read_text(encoding="utf-8"))
+    configured = [
+        keyword.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "MarketChannelOnlineService"
+        for keyword in node.keywords
+        if keyword.arg == "quote_flush_batch_size"
+    ]
+    assert len(configured) == 1
+    assert isinstance(configured[0], ast.Name)
+    assert configured[0].id == "PRICE_CHANNEL_BACKGROUND_QUOTE_FLUSH_BATCH_SIZE"
+    assert "_configure_market_channel_quote_flush_batch" not in _PRICE_CHANNEL_MODULE.read_text(
+        encoding="utf-8"
     )
-
-
-def test_price_channel_configures_sixteen_quote_flush_batch():
-    from src.events.triggers import market_channel_ingestor
-    from src.ingest import price_channel_ingest as lane
-
-    prior = market_channel_ingestor.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE
-    try:
-        lane._configure_market_channel_quote_flush_batch()
-        assert market_channel_ingestor.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE == 16
-    finally:
-        market_channel_ingestor.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE = prior
 
 
 def test_held_quote_gate_never_enters_sql_after_absolute_deadline(

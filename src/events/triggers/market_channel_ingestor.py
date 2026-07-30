@@ -1430,6 +1430,7 @@ class MarketChannelOnlineService:
     reload_token_metadata: TokenMetadataReload | None = None
     universe_refresh_interval_seconds: float = 15.0
     continuity_sink: Callable[[dict[str, Any]], None] | None = None
+    quote_flush_batch_size: int = MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE
     connected: bool = False
     gap_start: str | None = None
     refresh_action_count: int = 0
@@ -1493,6 +1494,7 @@ class MarketChannelOnlineService:
     depth_repair_failure_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
+        self.quote_flush_batch_size = max(1, int(self.quote_flush_batch_size))
         self._replace_seed_first_token_ids(self.seed_first_token_ids)
         repair_tokens = (
             self.seed_first_token_ids
@@ -2078,7 +2080,7 @@ class MarketChannelOnlineService:
                 with self.ingestor.defer_market_event_sink():
                     with write_gate:
                         self.ingestor.flush_coalesced(
-                            market_budget=MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE,
+                            market_budget=self.quote_flush_batch_size,
                             commit=commit,
                             rollback=rollback,
                         )
@@ -2709,7 +2711,7 @@ class MarketChannelOnlineService:
                                         with _quote_write_gate:
                                             if self.ingestor._coalescer is not None:
                                                 self.ingestor.flush_coalesced(
-                                                    market_budget=MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE,
+                                                    market_budget=self.quote_flush_batch_size,
                                                     commit=commit,
                                                     rollback=rollback,
                                                 )

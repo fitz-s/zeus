@@ -153,9 +153,47 @@ def _snapshot_capture_busy_timeout_ms(
     remaining_candidates: int | None = None,
     priority_candidate: bool = False,
 ) -> int:
-    """Return the fixed fast-yield SQLite wait for background snapshot writes."""
+    """Return the established foreground per-row SQLite wait budget."""
 
-    del remaining_seconds, remaining_candidates, priority_candidate
+    configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", "8000"))
+    floor_ms = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "4000"))
+    progress_floor_ms = int(
+        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", "150")
+    )
+    priority_floor_candidate_cap = int(
+        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", "32")
+    )
+    remaining_ms = int(max(1.0, remaining_seconds * 1000.0))
+    if remaining_candidates is not None and remaining_candidates > 1:
+        priority_floor_scope = bool(
+            priority_candidate
+            and remaining_candidates <= max(1, priority_floor_candidate_cap)
+        )
+        split_priority_scope = bool(
+            priority_candidate
+            and remaining_candidates > max(1, priority_floor_candidate_cap)
+        )
+        split_batch_scope = bool(
+            not priority_candidate
+            or remaining_candidates > max(1, priority_floor_candidate_cap)
+        )
+    else:
+        priority_floor_scope = False
+        split_priority_scope = False
+        split_batch_scope = False
+    if priority_floor_scope:
+        share_ms = max(floor_ms, remaining_ms // max(1, remaining_candidates or 1))
+        return max(1, min(configured, share_ms))
+    if split_priority_scope or split_batch_scope:
+        share_ms = max(progress_floor_ms, remaining_ms // max(1, remaining_candidates))
+        return max(1, min(configured, share_ms))
+    capped = min(configured, max(floor_ms, remaining_ms))
+    return max(floor_ms, capped)
+
+
+def _background_snapshot_capture_busy_timeout_ms() -> int:
+    """Fixed fast-yield wait reserved for broad, retried substrate capture."""
+
     return 25
 
 
@@ -4810,6 +4848,8 @@ def refresh_executable_market_substrate_snapshots(
     priority_token_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     force_refresh_token_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
+    background_snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
+    background_fast_yield: bool = False,
 ) -> dict[str, Any]:
     """Capture fresh executable snapshots for the live reader substrate.
 
@@ -5342,6 +5382,7 @@ def refresh_executable_market_substrate_snapshots(
         selected_token = _selected_token_for_direction(outcome, direction)
         prefetched_book = prefetched_books.get(selected_token) if selected_token else None
         priority_candidate = str(condition_id or "").strip() in priority_conditions
+        background_capture = bool(background_fast_yield and not priority_candidate)
         priority_candidate_serviced = (
             str(condition_id or "").strip() in priority_direct_clob_service_conditions
         )
@@ -5373,16 +5414,24 @@ def refresh_executable_market_substrate_snapshots(
                     batch_orderbook_supported=batch_orderbook_supported,
                     prefetched_books=prefetched_books,
                 )
-                effective_lock_retry_count = _snapshot_capture_effective_lock_retries(
-                    configured_retries=lock_retry_count,
-                    remaining_candidates=remaining_candidates,
+                effective_lock_retry_count = (
+                    0
+                    if background_capture
+                    else _snapshot_capture_effective_lock_retries(
+                        configured_retries=lock_retry_count,
+                        remaining_candidates=remaining_candidates,
+                    )
                 )
                 _set_busy_timeout_ms(
                     conn,
-                    _snapshot_capture_busy_timeout_ms(
-                        remaining_seconds,
-                        remaining_candidates=remaining_candidates,
-                        priority_candidate=priority_candidate,
+                    (
+                        _background_snapshot_capture_busy_timeout_ms()
+                        if background_capture
+                        else _snapshot_capture_busy_timeout_ms(
+                            remaining_seconds,
+                            remaining_candidates=remaining_candidates,
+                            priority_candidate=priority_candidate,
+                        )
                     ),
                 )
                 try:
@@ -5420,8 +5469,21 @@ def refresh_executable_market_substrate_snapshots(
                         # bin including illiquid (no-ask) tail bins so the FDR full-family
                         # proof can be assembled.  Illiquid bins are persisted non-tradeable.
                         tolerate_missing_book=True,
-                        persist_context_factory=snapshot_write_context_factory,
-                        commit_after_persist=snapshot_write_context_factory is not None,
+                        persist_context_factory=(
+                            background_snapshot_write_context_factory
+                            if background_capture
+                            and background_snapshot_write_context_factory is not None
+                            else snapshot_write_context_factory
+                        ),
+                        commit_after_persist=(
+                            (
+                                background_snapshot_write_context_factory
+                                if background_capture
+                                and background_snapshot_write_context_factory is not None
+                                else snapshot_write_context_factory
+                            )
+                            is not None
+                        ),
                         capture_trigger="PRIORITY_MARKER" if is_priority_capture else "DISCOVERY_SWEEP",
                     )
                     # EDLI live-probe WAL-lock fix (2026-05-31): COMMIT-PER-ITEM.
@@ -5442,7 +5504,15 @@ def refresh_executable_market_substrate_snapshots(
                     # per row releases the trade-DB WAL write lock and preserves the
                     # caller-managed single-connection transaction contract (no new connection,
                     # no cross-DB independent write).
-                    if snapshot_write_context_factory is None:
+                    if (
+                        (
+                            background_snapshot_write_context_factory
+                            if background_capture
+                            and background_snapshot_write_context_factory is not None
+                            else snapshot_write_context_factory
+                        )
+                        is None
+                    ):
                         conn.commit()
                     inserted += 1
                     inserted_cities.add(_snapshot_refresh_city_key(market))

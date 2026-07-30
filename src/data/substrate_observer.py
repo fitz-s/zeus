@@ -84,15 +84,29 @@ _SUBSTRATE_PRIORITY_REFRESH_CURSOR = 0
 _SUBSTRATE_GAMMA_REFRESH_CURSOR = 0
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 _NEW_FAMILY_CONDITION_IDS: set[str] = set()
-# Background substrate writes yield to the money path instead of waiting behind
-# a SQLite writer. Each durable row still has a short coordinator envelope, but
-# no background lease may turn transient contention into a seconds-long stall.
-SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 100
-SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 100
+# Priority confirmation/entry/exit capture retains its established foreground
+# envelope. Broad discovery capture explicitly opts into the separate fast-yield
+# context below.
+SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 8000
+SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 8000
+SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 100
+SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 100
+
+
+def _substrate_snapshot_sqlite_busy_floor_ms() -> int:
+    raw = os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS")
+    try:
+        value = int(raw) if raw is not None else 4000
+    except (TypeError, ValueError):
+        value = 4000
+    return max(1000, min(value, 30000))
 
 
 def _substrate_snapshot_write_lease_deadline_default_ms() -> int:
-    return SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS
+    return max(
+        SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
+        _substrate_snapshot_sqlite_busy_floor_ms() + 1000,
+    )
 
 
 def _substrate_snapshot_write_lease_ms(
@@ -121,15 +135,32 @@ def _substrate_snapshot_trade_write_context_factory(owner: str):
             deadline_ms=_substrate_snapshot_write_lease_ms(
                 "substrate_snapshot_db_write_lease_deadline_ms",
                 _substrate_snapshot_write_lease_deadline_default_ms(),
-                minimum=1,
-                maximum=100,
+                minimum=_substrate_snapshot_sqlite_busy_floor_ms(),
+                maximum=30000,
             ),
             max_hold_ms=_substrate_snapshot_write_lease_ms(
                 "substrate_snapshot_db_write_max_hold_ms",
                 SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
-                minimum=1,
-                maximum=100,
+                minimum=_substrate_snapshot_sqlite_busy_floor_ms(),
+                maximum=10000,
             ),
+        )
+
+    return _factory
+
+
+def _substrate_background_snapshot_trade_write_context_factory(owner: str):
+    """Return the explicit fast-yield context for broad substrate capture only."""
+
+    def _factory():
+        from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+
+        return default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner=owner,
+            write_class="live",
+            deadline_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
         )
 
     return _factory
@@ -2378,6 +2409,12 @@ def _refresh_pending_family_snapshots(
                     snapshot_write_context_factory=_substrate_snapshot_trade_write_context_factory(
                         "substrate_pending_family_snapshot_refresh"
                     ),
+                    background_snapshot_write_context_factory=(
+                        _substrate_background_snapshot_trade_write_context_factory(
+                            "substrate_pending_family_background_capture"
+                        )
+                    ),
+                    background_fast_yield=True,
                 )
         finally:
             write_conn.close()
@@ -2591,6 +2628,12 @@ def _market_discovery_cycle() -> None:
                     snapshot_write_context_factory=_substrate_snapshot_trade_write_context_factory(
                         "substrate_market_discovery_snapshot_refresh"
                     ),
+                    background_snapshot_write_context_factory=(
+                        _substrate_background_snapshot_trade_write_context_factory(
+                            "substrate_market_discovery_background_capture"
+                        )
+                    ),
+                    background_fast_yield=True,
                 )
                 conn.commit()
         finally:

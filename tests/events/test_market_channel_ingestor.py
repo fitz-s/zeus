@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-29
+# Last reused/audited: 2026-07-30
 # Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract; background TRADE writer fast-yield hotfix.
 from __future__ import annotations
 
@@ -62,6 +62,73 @@ def _metadata(token_id: str = "token-1", *, outcome_label: str = "YES") -> dict[
             executable_snapshot_id="snap-1",
         )
     }
+
+
+def test_quote_flush_batch_is_service_local_and_does_not_mutate_other_service():
+    """Background service batching cannot change an independently created service."""
+    from src.events.triggers import market_channel_ingestor as module
+
+    class _PendingCoalescer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def pending_counts(self) -> dict[str, int]:
+            self.calls += 1
+            return {"lossless": 1, "market": 0} if self.calls == 1 else {"lossless": 0, "market": 0}
+
+    def _flush_budget(service: MarketChannelOnlineService) -> list[int]:
+        service.ingestor._coalescer = _PendingCoalescer()
+        observed: list[int] = []
+        done = asyncio.Event()
+        wake = asyncio.Event()
+        initial_seed_done = asyncio.Event()
+        wake.set()
+        initial_seed_done.set()
+
+        def _flush(*, market_budget, **_kwargs) -> list[object]:
+            observed.append(market_budget)
+            done.set()
+            return []
+
+        service.ingestor.flush_coalesced = _flush  # type: ignore[method-assign]
+        asyncio.run(
+            service._flush_quote_projection_forever(
+                connection_done=done,
+                wake=wake,
+                initial_seed_done=initial_seed_done,
+                active_token_ids=set(),
+                write_gate=nullcontext(),
+                commit=None,
+                rollback=None,
+                logger=None,
+            )
+        )
+        return observed
+
+    conn_a, writer_a = _conn_writer()
+    conn_b, writer_b = _conn_writer()
+    try:
+        background = MarketChannelOnlineService(
+            MarketChannelIngestor(
+                writer_a,
+                active_token_ids=set(),
+                coalescer=EventCoalescer(),
+            ),
+            quote_flush_batch_size=16,
+        )
+        foreground = MarketChannelOnlineService(
+            MarketChannelIngestor(
+                writer_b,
+                active_token_ids=set(),
+                coalescer=EventCoalescer(),
+            ),
+        )
+        assert _flush_budget(background) == [16]
+        assert _flush_budget(foreground) == [module.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE]
+        assert module.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE == 128
+    finally:
+        conn_a.close()
+        conn_b.close()
 
 
 def test_execution_feasibility_schema_indexes_token_created_at():

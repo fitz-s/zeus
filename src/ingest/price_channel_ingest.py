@@ -157,15 +157,18 @@ def _write_market_channel_continuity(payload: dict[str, object]) -> None:
     tmp.write_text(json.dumps(proof, sort_keys=True), encoding="utf-8")
     tmp.replace(target)
 PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 25
-PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 100
-PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS = 100
+PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
+PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS = 250
+PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS = 250
 PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 25
-PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 100
+PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 2000
+PRICE_CHANNEL_CANDIDATE_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 2000
+PRICE_CHANNEL_FOREGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 2000
 PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS = 100
 PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS = 25
-PRICE_CHANNEL_REDECISION_WORLD_WRITE_BUDGET_MS = 100
+PRICE_CHANNEL_REDECISION_WORLD_WRITE_BUDGET_MS = 750
 PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS = 25
-PRICE_CHANNEL_QUOTE_FLUSH_BATCH_SIZE = 16
+PRICE_CHANNEL_BACKGROUND_QUOTE_FLUSH_BATCH_SIZE = 16
 PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
 PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS = 0.25
 M5_AUTHORITY_PROOF_CADENCE_SECONDS = 30
@@ -174,6 +177,7 @@ FILL_BRIDGE_TRADE_FACT_PERSIST_FAILED = "fill_bridge_trade_fact_persist_failed"
 FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED = (
     "fill_bridge_position_materialization_failed"
 )
+FILL_BRIDGE_DRAIN_LIMIT_PER_TICK = 500
 
 
 def _bound_price_channel_sqlite_wait(
@@ -181,19 +185,23 @@ def _bound_price_channel_sqlite_wait(
     *,
     timeout_ms: int | None = None,
 ) -> None:
-    """Keep SQLite contention inside the price-channel writer hold budget.
-
-    A connection retaining the repo-wide SQLite busy timeout can hold a
-    background lease behind a legacy writer. Keep every price-channel writer
-    on the 25ms fast-yield boundary instead.
-    """
+    """Apply the caller's explicit SQLite busy-wait budget."""
 
     budget_ms = (
-        PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS
+        PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS
         if timeout_ms is None
-        else min(PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS, max(1, int(timeout_ms)))
+        else max(0, int(timeout_ms))
     )
     conn.execute(f"PRAGMA busy_timeout = {budget_ms}")
+
+
+def _bound_background_price_channel_sqlite_wait(conn) -> None:
+    """Make only the continuously retried market quote producer fast-yield."""
+
+    _bound_price_channel_sqlite_wait(
+        conn,
+        timeout_ms=PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS,
+    )
 
 
 def _bound_held_quote_sqlite_wait(
@@ -209,7 +217,7 @@ def _bound_held_quote_sqlite_wait(
     remaining_ms = int(remaining * 1000.0)
     _bound_price_channel_sqlite_wait(
         conn,
-        timeout_ms=min(PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS, remaining_ms),
+        timeout_ms=min(PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS, remaining_ms),
     )
 
 
@@ -273,8 +281,8 @@ class _PriceChannelWriteGate:
     ) -> None:
         self._owner = owner
         self._scope = scope
-        self._deadline_ms = min(100, max(0, int(deadline_ms)))
-        self._max_hold_ms = min(100, max(0, int(max_hold_ms)))
+        self._deadline_ms = max(0, int(deadline_ms))
+        self._max_hold_ms = max(0, int(max_hold_ms))
         self._deadline_monotonic = deadline_monotonic
         self._on_enter = on_enter
         self._stack: contextlib.ExitStack | None = None
@@ -524,6 +532,8 @@ def _edli_price_channel_world_write_connection(*, owner: str):
 
 
 def _edli_price_channel_trade_write_context_factory(*, owner: str):
+    """Return the foreground snapshot writer context for reactive refreshes."""
+
     def _factory():
         from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
 
@@ -531,21 +541,28 @@ def _edli_price_channel_trade_write_context_factory(*, owner: str):
             (DBIdentity.TRADE,),
             owner=owner,
             write_class="live",
-            deadline_ms=PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
+            deadline_ms=PRICE_CHANNEL_FOREGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
             max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
         )
 
     return _factory
 
 
-def _configure_market_channel_quote_flush_batch() -> None:
-    """Apply the P3 quote flush bound without widening the event-module API."""
+def _edli_background_snapshot_trade_write_context_factory(*, owner: str):
+    """Return the fast-yield context used only by background invalidation."""
 
-    from src.events.triggers import market_channel_ingestor
+    def _factory():
+        from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
 
-    market_channel_ingestor.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE = (
-        PRICE_CHANNEL_QUOTE_FLUSH_BATCH_SIZE
-    )
+        return default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner=owner,
+            write_class="live",
+            deadline_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS,
+        )
+
+    return _factory
 
 
 def _rest_quote_refresh_backpressure_result(
@@ -1328,7 +1345,7 @@ def _edli_durable_fill_bridge_scan(
     conn,
     *,
     now=None,
-    limit: int = 1,
+    limit: int = 500,
     already_bridged_repair_limit: int = 0,
     failure_reasons: list[str] | None = None,
 ) -> int:
@@ -1793,7 +1810,10 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                 conn = get_world_connection_with_trades_required(
                     write_class="live"
                 )
-                _bound_price_channel_sqlite_wait(conn)
+                _bound_price_channel_sqlite_wait(
+                    conn,
+                    timeout_ms=PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS,
+                )
                 ledger = LiveOrderAggregateLedger(conn)
                 for message in user_messages:
                     _m5_authority_deadline_check(deadline_monotonic)
@@ -2031,7 +2051,10 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
             owner="price_channel_fill_bridge_reconcile"
         ):
             conn = get_world_connection_with_trades_required(write_class="live")
-            _bound_price_channel_sqlite_wait(conn)
+            _bound_price_channel_sqlite_wait(
+                conn,
+                timeout_ms=PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS,
+            )
             from src.events.edli_trade_fact_bridge import (
                 append_confirmed_trade_facts_to_edli,
                 append_rest_filled_orphan_trade_facts_to_edli,
@@ -2071,6 +2094,8 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
             with _PriceChannelWriteGate(
                 owner="price_channel_fill_bridge",
                 scope="world_trade",
+                deadline_ms=PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS,
+                max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
             ):
                 # The scan may write WORLD disposition and TRADE position rows
                 # through one attached connection. Hold both canonical writer
@@ -2078,13 +2103,16 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                 bridge_conn = get_trade_connection_with_world_required(
                     write_class="live"
                 )
-                _bound_price_channel_sqlite_wait(bridge_conn)
+                _bound_price_channel_sqlite_wait(
+                    bridge_conn,
+                    timeout_ms=PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS,
+                )
                 # Authoritative durable scan: heal ANY orphaned confirmed fill,
                 # including ones stranded by a prior restart / swallowed exception.
                 bridged_positions += _edli_durable_fill_bridge_scan(
                     bridge_conn,
                     now=now,
-                    limit=1,
+                    limit=FILL_BRIDGE_DRAIN_LIMIT_PER_TICK,
                     failure_reasons=canonical_failure_reasons,
                 )
                 bridge_conn.commit()
@@ -3228,7 +3256,10 @@ def _edli_refresh_candidate_priority_quote_evidence(
         # Candidate quote projection has the same TRADE-only ownership as held
         # quotes; WORLD event emission is a separate, bounded failure domain.
         conn = get_trade_connection(write_class="live")
-        _bound_price_channel_sqlite_wait(conn)
+        _bound_price_channel_sqlite_wait(
+            conn,
+            timeout_ms=PRICE_CHANNEL_CANDIDATE_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
+        )
 
         def _commit_quote_evidence() -> None:
             conn.commit()
@@ -3260,7 +3291,10 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
                 write_gate=_edli_price_channel_trade_write_gate(
-                    owner="price_channel_candidate_quote_refresh"
+                    owner="price_channel_candidate_quote_refresh",
+                    deadline_ms=(
+                        PRICE_CHANNEL_CANDIDATE_QUOTE_DB_WRITE_LEASE_DEADLINE_MS
+                    ),
                 ),
                 commit=_commit_quote_evidence,
                 logger=logger,
@@ -3653,7 +3687,6 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         return health
 
     def _runner() -> None:
-        _configure_market_channel_quote_flush_batch()
         from src.data.polymarket_client import PolymarketClient
         from src.events.event_coalescer import EventCoalescer
         from src.events.event_writer import EventWriter
@@ -3674,10 +3707,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         world_conn = get_world_connection(write_class="live")
         feasibility_conn = get_trade_connection(write_class="live")
         _bound_price_channel_sqlite_wait(world_conn)
-        _bound_price_channel_sqlite_wait(
-            feasibility_conn,
-            timeout_ms=PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS,
-        )
+        _bound_background_price_channel_sqlite_wait(feasibility_conn)
 
         def _commit_quote() -> None:
             feasibility_conn.commit()
@@ -3695,7 +3725,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             def _invalidate_snapshot_action(action: "MarketChannelAction") -> None:
                 from src.state.db import get_trade_connection
 
-                with _edli_price_channel_trade_write_context_factory(
+                with _edli_background_snapshot_trade_write_context_factory(
                     owner="price_channel_snapshot_invalidate"
                 )() as write_lease:
                     trade_conn = get_trade_connection(write_class="live")
@@ -3844,6 +3874,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     seed_first_token_ids=seed_first_token_ids,
                     depth_repair_token_ids=depth_repair_token_ids,
                     continuity_sink=_write_market_channel_continuity,
+                    quote_flush_batch_size=PRICE_CHANNEL_BACKGROUND_QUOTE_FLUSH_BATCH_SIZE,
                 )
                 run_market_channel_service_forever(
                     service,
