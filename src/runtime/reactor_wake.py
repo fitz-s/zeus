@@ -23,6 +23,10 @@ REACTOR_URGENT_WAKE_SUFFIX = ".urgent"
 HELD_SELL_REAUCTION_RECEIPT_SUFFIX = ".held-sell-reauction-receipts"
 HELD_SELL_REAUCTION_V2 = 2
 HELD_SELL_REAUCTION_V3 = 3
+POSITION_NO_LONGER_EXPOSED = "POSITION_NO_LONGER_EXPOSED"
+_HELD_SELL_TERMINAL_POSITION_PHASES = frozenset(
+    {"economically_closed", "settled", "admin_closed", "voided"}
+)
 _HELD_SELL_BOOK_STATES = frozenset(
     {"UNKNOWN", "NO_EXECUTABLE_BOOK", "STALE", "EXECUTABLE"}
 )
@@ -72,6 +76,10 @@ class HeldSellReauctionReceipt:
     generation: str
     status: str
     reason: str
+    lifecycle_phase: str = ""
+    chain_state: str = ""
+    chain_shares: float | None = None
+    settled_at: str = ""
     selection_epoch_identity: str = ""
     sell_book_witness_identity: str = ""
     schema_version: int = 1
@@ -934,6 +942,20 @@ def _held_sell_reauction_receipt_path(
     return _held_sell_reauction_receipt_dir(path) / f"{request_id}.json"
 
 
+def _terminal_no_longer_exposed_receipt_valid(
+    receipt: HeldSellReauctionReceipt,
+) -> bool:
+    """Validate the canonical terminal proof without inventing auction evidence."""
+
+    if receipt.status != POSITION_NO_LONGER_EXPOSED:
+        return False
+    if receipt.lifecycle_phase not in _HELD_SELL_TERMINAL_POSITION_PHASES:
+        return False
+    if receipt.chain_shares is None:
+        return True
+    return math.isfinite(receipt.chain_shares) and receipt.chain_shares >= 0.0
+
+
 def _read_held_sell_reauction_receipt(
     request_id: str,
     *,
@@ -951,6 +973,14 @@ def _read_held_sell_reauction_receipt(
             generation=str(payload["generation"]).strip(),
             status=str(payload["status"]).strip(),
             reason=str(payload["reason"]).strip(),
+            lifecycle_phase=str(payload.get("lifecycle_phase") or "").strip(),
+            chain_state=str(payload.get("chain_state") or "").strip(),
+            chain_shares=(
+                None
+                if payload.get("chain_shares") in (None, "")
+                else float(payload["chain_shares"])
+            ),
+            settled_at=str(payload.get("settled_at") or "").strip(),
             selection_epoch_identity=str(
                 payload.get("selection_epoch_identity") or ""
             ).strip(),
@@ -988,9 +1018,12 @@ def _read_held_sell_reauction_receipt(
         or not receipt.reason
     ):
         return None
-    if receipt.schema_version == 1 and receipt.status not in {"ACTUATED", "REJECTED"}:
+    if receipt.status == POSITION_NO_LONGER_EXPOSED:
+        if not _terminal_no_longer_exposed_receipt_valid(receipt):
+            return None
+    elif receipt.schema_version == 1 and receipt.status not in {"ACTUATED", "REJECTED"}:
         return None
-    if receipt.schema_version in {
+    elif receipt.schema_version in {
         HELD_SELL_REAUCTION_V2,
         HELD_SELL_REAUCTION_V3,
     } and (
@@ -1052,10 +1085,17 @@ def persist_held_sell_reauction_receipts(
                 )
                 or not receipt.reason
                 or (
-                    receipt.schema_version == 1
+                    receipt.status == POSITION_NO_LONGER_EXPOSED
+                    and not _terminal_no_longer_exposed_receipt_valid(receipt)
+                )
+                or (
+                    receipt.status != POSITION_NO_LONGER_EXPOSED
+                    and receipt.schema_version == 1
                     and receipt.status not in {"ACTUATED", "REJECTED"}
                 )
                 or (
+                    receipt.status != POSITION_NO_LONGER_EXPOSED
+                    and
                     receipt.schema_version in {
                         HELD_SELL_REAUCTION_V2,
                         HELD_SELL_REAUCTION_V3,
@@ -1141,8 +1181,13 @@ def held_sell_reauction_requests_completed(
                 }
                 and (
                     receipt.scope_identity != request.scope_identity
-                    or receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
-                    or not receipt.answered_probability_content_identity
+                    or (
+                        receipt.status != POSITION_NO_LONGER_EXPOSED
+                        and (
+                            receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
+                            or not receipt.answered_probability_content_identity
+                        )
+                    )
                 )
             )
             or (

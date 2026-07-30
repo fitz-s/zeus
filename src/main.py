@@ -4513,6 +4513,139 @@ def _acknowledge_edli_reactor_wake_batch(
     return True
 
 
+_HELD_SELL_NO_LONGER_EXPOSED_PHASES = frozenset(
+    {"economically_closed", "settled", "admin_closed", "voided"}
+)
+
+
+def _terminal_held_sell_reauction_receipts(
+    requests: tuple[object, ...],
+) -> tuple[object, ...]:
+    """Read one canonical trade snapshot and prove only explicit terminal requests done.
+
+    SCOPE: one held SELL request_id whose canonical position_id is in an explicit
+    no-exposure phase; a missing row, any non-terminal phase, or any read error
+    proves nothing. DRAIN: the wake listener persists this receipt before acking
+    and then drains only the remaining requests through the normal exact cut.
+    RESET: a new request identity/generation is a new obligation and cannot reuse
+    this receipt, while canonical non-terminal phases never enter this path.
+    """
+
+    from src.runtime.reactor_wake import (
+        POSITION_NO_LONGER_EXPOSED,
+        HeldSellReauctionReceipt,
+    )
+    from src.state.db import get_trade_connection_read_only
+
+    by_position: dict[str, list[object]] = {}
+    for request in requests:
+        position_id = str(getattr(request, "position_id", "") or "").strip()
+        if position_id:
+            by_position.setdefault(position_id, []).append(request)
+    if not by_position:
+        return ()
+
+    trade_ro = None
+    try:
+        trade_ro = get_trade_connection_read_only()
+        columns = {
+            str(row[1])
+            for row in trade_ro.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+        required = {
+            "position_id",
+            "phase",
+            "chain_state",
+            "chain_shares",
+            "settled_at",
+        }
+        if not required.issubset(columns):
+            logger.warning(
+                "held SELL terminal receipt deferred: canonical position_current "
+                "does not expose required proof columns"
+            )
+            return ()
+        placeholders = ",".join("?" for _ in by_position)
+        rows = trade_ro.execute(
+            f"""
+            SELECT position_id, phase, chain_state, chain_shares, settled_at
+              FROM position_current
+             WHERE position_id IN ({placeholders})
+            """,
+            tuple(by_position),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - truth-read failure must retain the wake
+        logger.warning(
+            "held SELL terminal receipt deferred: canonical trade read failed",
+            exc_info=True,
+        )
+        return ()
+    finally:
+        if trade_ro is not None:
+            try:
+                trade_ro.close()
+            except Exception:  # noqa: BLE001 - read-only close cannot prove completion
+                pass
+
+    proof_by_position = {
+        str(row[0] or "").strip(): (
+            str(row[1] or "").strip(),
+            str(row[2] or "").strip(),
+            row[3],
+            str(row[4] or "").strip(),
+        )
+        for row in rows
+    }
+    receipts: list[HeldSellReauctionReceipt] = []
+    for position_id, position_requests in by_position.items():
+        proof = proof_by_position.get(position_id)
+        if proof is None:
+            continue
+        lifecycle_phase, chain_state, raw_chain_shares, settled_at = proof
+        if lifecycle_phase not in _HELD_SELL_NO_LONGER_EXPOSED_PHASES:
+            continue
+        try:
+            chain_shares = (
+                None if raw_chain_shares is None else float(raw_chain_shares)
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                "held SELL terminal receipt deferred: invalid canonical chain_shares "
+                "position_id=%s",
+                position_id,
+            )
+            continue
+        for request in position_requests:
+            receipts.append(
+                HeldSellReauctionReceipt(
+                    request_id=str(getattr(request, "request_id", "") or ""),
+                    material_identity=str(
+                        getattr(request, "material_identity", "") or ""
+                    ),
+                    generation=str(getattr(request, "generation", "") or ""),
+                    schema_version=int(
+                        getattr(request, "schema_version", 1) or 1
+                    ),
+                    scope_identity=str(
+                        getattr(request, "scope_identity", "") or ""
+                    ),
+                    book_state=str(
+                        getattr(request, "book_state", "EXECUTABLE") or "EXECUTABLE"
+                    ),
+                    attempt_identity=str(
+                        getattr(request, "attempt_identity", "") or ""
+                    ),
+                    status=POSITION_NO_LONGER_EXPOSED,
+                    reason="CANONICAL_POSITION_TERMINAL_NO_LONGER_EXPOSED",
+                    lifecycle_phase=lifecycle_phase,
+                    chain_state=chain_state,
+                    chain_shares=chain_shares,
+                    settled_at=settled_at,
+                )
+            )
+    return tuple(receipts)
+
+
 def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
@@ -4522,8 +4655,10 @@ def _edli_reactor_wake_poll_once() -> bool:
         return False
 
     from src.runtime.reactor_wake import (
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
         coalescible_reactor_wakes,
         held_sell_reauction_requests_completed,
+        persist_held_sell_reauction_receipts,
         read_reactor_wake,
     )
 
@@ -4569,6 +4704,24 @@ def _edli_reactor_wake_poll_once() -> bool:
             for request in queued.held_sell_reauction_requests
         )
     )
+    pending_held_sell_reauction_requests = held_sell_reauction_requests
+    terminal_receipts = _terminal_held_sell_reauction_receipts(
+        held_sell_reauction_requests
+    )
+    if terminal_receipts:
+        if persist_held_sell_reauction_receipts(terminal_receipts):
+            terminal_request_ids = {
+                receipt.request_id for receipt in terminal_receipts
+            }
+            pending_held_sell_reauction_requests = tuple(
+                request
+                for request in held_sell_reauction_requests
+                if request.request_id not in terminal_request_ids
+            )
+        else:
+            logger.warning(
+                "held SELL terminal receipts could not persist; wake remains pending"
+            )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     forecast_wake = wake.reason == "forecast_posterior_advanced"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
@@ -4597,6 +4750,23 @@ def _edli_reactor_wake_poll_once() -> bool:
             return True
         if not wake_event_state.ready and not finished_day0_monitor:
             return False
+    if (
+        held_sell_reauction_requests
+        and not pending_held_sell_reauction_requests
+        and not wake_event_ids
+        and all(
+            queued.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON for queued in wakes
+        )
+    ):
+        if not held_sell_reauction_requests_completed(
+            held_sell_reauction_requests
+        ):
+            return False
+        return _acknowledge_edli_reactor_wake_batch(
+            wake,
+            wakes,
+            day0_wake=False,
+        )
     day0_target_families = None
     day0_requires_exit_monitor = False
     day0_monitor_succeeded = True
@@ -4703,9 +4873,9 @@ def _edli_reactor_wake_poll_once() -> bool:
             "producer_wake_event_ids": wake_event_ids,
             "producer_wake_families": wake_families,
         }
-        if held_sell_reauction_requests:
+        if pending_held_sell_reauction_requests:
             reactor_kwargs["producer_held_sell_reauction_requests"] = (
-                held_sell_reauction_requests
+                pending_held_sell_reauction_requests
             )
         ran = _edli_event_reactor_cycle(
             **reactor_kwargs,
