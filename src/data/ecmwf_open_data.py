@@ -58,6 +58,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -93,11 +94,70 @@ from src.state.source_run_repo import write_source_run
 
 logger = logging.getLogger(__name__)
 
-FIFTY_ONE_ROOT = PROJECT_ROOT / "51 source data"
+
+@dataclass(frozen=True)
+class OpenDataPaths:
+    raw_root: Path
+    asset_root: Path
+    extract_script: Path
+    manifest_path: Path
+    origin: str
+
+
+def _has_extract_assets(root: Path) -> bool:
+    return (
+        (root / "scripts" / "extract_open_ens_localday.py").is_file()
+        and (root / "docs" / "tigge_city_coordinate_manifest_full_latest.json").is_file()
+    )
+
+
+def _resolve_opendata_paths(
+    *,
+    source_root: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    legacy_external_root: Path | None = None,
+) -> OpenDataPaths:
+    """Bind raw storage and extractor assets once for one collection cycle.
+
+    The home-repo migration left the active OpenData cache under the new repo
+    while the extractor package remained in the external source-data checkout.
+    An explicit ZEUS_51_SOURCE_ROOT is a complete-root assertion and is never
+    silently bypassed. The unset-env migration bridge keeps current raw bytes
+    in place while selecting the external asset package only when both required
+    assets exist. The returned immutable bundle prevents per-stage path drift.
+    """
+    env = os.environ if environ is None else environ
+    configured = str(env.get("ZEUS_51_SOURCE_ROOT", "")).strip()
+    raw_root = Path(
+        configured or source_root or FIFTY_ONE_ROOT
+    ).expanduser().resolve()
+    if configured or _has_extract_assets(raw_root):
+        asset_root = raw_root
+        origin = "env_complete_root" if configured else "source_root_complete"
+    else:
+        fallback = (
+            legacy_external_root
+            if legacy_external_root is not None
+            else Path.home() / ".openclaw" / "workspace-venus" / "51 source data"
+        ).expanduser().resolve()
+        if _has_extract_assets(fallback):
+            asset_root = fallback
+            origin = "home_repo_migration_split"
+        else:
+            asset_root = raw_root
+            origin = "source_root_missing_assets"
+    return OpenDataPaths(
+        raw_root=raw_root,
+        asset_root=asset_root,
+        extract_script=asset_root / "scripts" / "extract_open_ens_localday.py",
+        manifest_path=asset_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json",
+        origin=origin,
+    )
+
+
+FIFTY_ONE_ROOT = (PROJECT_ROOT / "51 source data").resolve()
 # DOWNLOAD_SCRIPT deleted 2026-05-11: replaced by in-process parallel SDK fetch
 # (see PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md)
-EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"
-EXTRACT_MANIFEST_PATH = FIFTY_ONE_ROOT / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
 INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
 
 # ECMWF hang antibody #1 (2026-05-13) — eager-import ingest_grib_to_snapshots
@@ -501,10 +561,16 @@ def _step_hours_signature() -> str:
     return f"{min(STEP_HOURS)}to{max(STEP_HOURS)}_n{len(STEP_HOURS)}_h{digest}"
 
 
-def _download_output_path(*, run_date: date, run_hour: int, param: str) -> Path:
+def _download_output_path(
+    *,
+    run_date: date,
+    run_hour: int,
+    param: str,
+    raw_root: Path | None = None,
+) -> Path:
     steps_sig = _step_hours_signature()
     return (
-        FIFTY_ONE_ROOT
+        (raw_root or FIFTY_ONE_ROOT)
         / "raw"
         / "ecmwf_open_ens"
         / "ecmwf"
@@ -1474,6 +1540,7 @@ def collect_open_ens_cycle(
     conn=None,
     _runner=None,
     _fetch_impl=None,  # test seam: replaces _fetch_one_step; callable with same signature
+    _paths: OpenDataPaths | None = None,
     now_utc: datetime | None = None,
 ) -> dict:
     """Download + extract + ingest one Open Data ENS run for one track.
@@ -1545,10 +1612,45 @@ def collect_open_ens_cycle(
     source_run_id = f"{SOURCE_ID}:{track}:{cycle_date.isoformat()}T{cycle_hour:02d}Z"
     release_calendar_key = f"{SOURCE_ID}:{track}:{horizon_profile}"
 
+    paths = _paths or _resolve_opendata_paths()
     output_path = _download_output_path(
-        run_date=cycle_date, run_hour=cycle_hour, param=cfg["open_data_param"],
+        run_date=cycle_date,
+        run_hour=cycle_hour,
+        param=cfg["open_data_param"],
+        raw_root=paths.raw_root,
     )
     stages: list[dict] = []
+
+    if not skip_extract:
+        missing_extract_assets = [
+            str(path)
+            for path in (paths.extract_script, paths.manifest_path)
+            if not path.is_file()
+        ]
+        if missing_extract_assets:
+            reason = "MISSING_EXTRACT_ASSETS:" + ",".join(missing_extract_assets)
+            stage = {
+                "label": f"extract_assets_preflight_{track}",
+                "ok": False,
+                "status": "MISSING_EXTRACT_ASSETS",
+                "stderr_tail": reason,
+            }
+            logger.error("ecmwf_open_data: %s", reason)
+            return {
+                "status": "extract_failed",
+                "track": track,
+                "data_version": cfg["data_version"],
+                "reason": reason,
+                "stages": [stage],
+                "snapshots_inserted": 0,
+            }
+        if paths.asset_root != paths.raw_root:
+            logger.info(
+                "ecmwf_open_data: path_bundle origin=%s raw_root=%s asset_root=%s",
+                paths.origin,
+                paths.raw_root,
+                paths.asset_root,
+            )
 
     # download_observed_steps / _partial_cycle track which steps were actually
     # fetched so _write_source_authority_chain can set the authoritative
@@ -1801,11 +1903,11 @@ def collect_open_ens_cycle(
         extract = runner(
             [
                 _conda_python(),
-                str(EXTRACT_SCRIPT),
+                str(paths.extract_script),
                 "--grib-path", str(output_path),
                 "--track", cfg["ingest_track"],
-                "--output-root", str(FIFTY_ONE_ROOT / "raw"),
-                "--manifest-path", str(EXTRACT_MANIFEST_PATH),
+                "--output-root", str(paths.raw_root / "raw"),
+                "--manifest-path", str(paths.manifest_path),
             ],
             label=f"extract_{track}",
             timeout=extract_timeout_seconds,
@@ -1885,7 +1987,7 @@ def collect_open_ens_cycle(
             try:
                 with tempfile.TemporaryDirectory(prefix="zeus_opendata_cycle_") as scoped_tmp:
                     scoped_json_root, cycle_extract_dir, cycle_json_files = _build_cycle_scoped_json_root(
-                        raw_root=FIFTY_ONE_ROOT / "raw",
+                        raw_root=paths.raw_root / "raw",
                         extract_subdir=cfg["extract_subdir"],
                         run_date=cycle_date,
                         run_hour=cycle_hour,

@@ -14,12 +14,8 @@ intermediate files must not collide.  The filename pattern is:
 from __future__ import annotations
 
 import sqlite3
-import importlib.util
-import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
-
-import pytest
 
 from src.state.db import init_schema
 from src.state.schema.v2_schema import apply_canonical_schema
@@ -102,15 +98,24 @@ def test_cross_track_per_step_filenames_are_distinct(tmp_path, monkeypatch):
     assert len(low_files)  == 3, f"Expected 3 low files, got {len(low_files)}: {low_files}"
 
 
-def test_collect_open_ens_cycle_passes_repo_local_manifest(tmp_path, monkeypatch):
-    """OpenData extract must not rely on extractor defaults from an old checkout."""
+def test_collect_open_ens_cycle_passes_explicit_manifest(tmp_path, monkeypatch):
+    """OpenData extract binds the manifest to the selected extractor assets."""
     from src.data import ecmwf_open_data
 
     fifty_one_root = tmp_path / "51 source data"
     manifest_path = fifty_one_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
-    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
-    monkeypatch.setattr(ecmwf_open_data, "EXTRACT_SCRIPT", fifty_one_root / "scripts" / "extract_open_ens_localday.py")
-    monkeypatch.setattr(ecmwf_open_data, "EXTRACT_MANIFEST_PATH", manifest_path)
+    extract_script = fifty_one_root / "scripts" / "extract_open_ens_localday.py"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("{}")
+    extract_script.parent.mkdir(parents=True)
+    extract_script.write_text("# test extractor\n")
+    paths = ecmwf_open_data.OpenDataPaths(
+        raw_root=fifty_one_root,
+        asset_root=fifty_one_root,
+        extract_script=extract_script,
+        manifest_path=manifest_path,
+        origin="test",
+    )
 
     commands: list[list[str]] = []
 
@@ -126,6 +131,7 @@ def test_collect_open_ens_cycle_passes_repo_local_manifest(tmp_path, monkeypatch
         skip_download=True,
         conn=_make_conn(tmp_path),
         _runner=capture_extract,
+        _paths=paths,
     )
 
     assert result["status"] == "extract_failed"
@@ -136,28 +142,94 @@ def test_collect_open_ens_cycle_passes_repo_local_manifest(tmp_path, monkeypatch
     assert ".openclaw/workspace-venus" not in " ".join(cmd)
 
 
-def test_tigge_localday_common_manifest_default_is_repo_local():
-    """The extractor default manifest follows the checked-out 51 source data tree."""
-    module_path = (
-        Path(__file__).resolve().parents[1]
-        / "51 source data"
-        / "scripts"
-        / "tigge_local_calendar_day_common.py"
-    )
-    script_dir = str(module_path.parent)
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.syspath_prepend(script_dir)
-    spec = importlib.util.spec_from_file_location("tigge_local_calendar_day_common_under_test", module_path)
-    try:
-        assert spec is not None
-        assert spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
+def test_extract_assets_fall_back_without_moving_raw_storage(tmp_path):
+    """A migration fallback may supply code assets without changing raw_root."""
+    from src.data import ecmwf_open_data
 
-        expected_root = Path(__file__).resolve().parents[1] / "51 source data"
-        assert module.ROOT == expected_root
-        assert module.DEFAULT_MANIFEST == expected_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
-        assert ".openclaw/workspace-venus" not in str(module.DEFAULT_MANIFEST)
-    finally:
-        monkeypatch.undo()
+    source_root = tmp_path / "new-repo" / "51 source data"
+    legacy_root = tmp_path / "external" / "51 source data"
+    (legacy_root / "scripts").mkdir(parents=True)
+    (legacy_root / "docs").mkdir(parents=True)
+    (legacy_root / "scripts" / "extract_open_ens_localday.py").write_text("# extractor\n")
+    (legacy_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json").write_text("{}")
+
+    resolved = ecmwf_open_data._resolve_opendata_paths(
+        source_root=source_root,
+        environ={},
+        legacy_external_root=legacy_root,
+    )
+
+    assert resolved.raw_root == source_root.resolve()
+    assert resolved.asset_root == legacy_root.resolve()
+    assert resolved.origin == "home_repo_migration_split"
+
+
+def test_explicit_source_root_never_silently_falls_back(tmp_path):
+    """An explicit operator root fails closed when its extractor assets are absent."""
+    from src.data import ecmwf_open_data
+
+    source_root = tmp_path / "configured" / "51 source data"
+    legacy_root = tmp_path / "external" / "51 source data"
+    (legacy_root / "scripts").mkdir(parents=True)
+    (legacy_root / "docs").mkdir(parents=True)
+    (legacy_root / "scripts" / "extract_open_ens_localday.py").write_text("# extractor\n")
+    (legacy_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json").write_text("{}")
+
+    resolved = ecmwf_open_data._resolve_opendata_paths(
+        environ={"ZEUS_51_SOURCE_ROOT": str(source_root)},
+        legacy_external_root=legacy_root,
+    )
+
+    assert resolved.raw_root == source_root.resolve()
+    assert resolved.asset_root == source_root.resolve()
+    assert resolved.origin == "env_complete_root"
+
+
+def test_missing_extract_assets_fail_before_download_or_subprocess(tmp_path, monkeypatch):
+    """A broken asset root is an explicit failed job, not an opaque subprocess error."""
+    from src.data import ecmwf_open_data
+
+    missing_root = tmp_path / "missing" / "51 source data"
+    runner_called = False
+    paths = ecmwf_open_data.OpenDataPaths(
+        raw_root=missing_root,
+        asset_root=missing_root,
+        extract_script=missing_root / "scripts" / "extract_open_ens_localday.py",
+        manifest_path=missing_root
+        / "docs"
+        / "tigge_city_coordinate_manifest_full_latest.json",
+        origin="test_missing",
+    )
+
+    def forbidden_runner(*args, **kwargs):
+        nonlocal runner_called
+        runner_called = True
+        raise AssertionError("subprocess must not run without extractor assets")
+
+    result = ecmwf_open_data.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=date(2026, 6, 6),
+        run_hour=0,
+        now_utc=datetime(2026, 6, 6, 9, 0, tzinfo=timezone.utc),
+        skip_download=True,
+        conn=_make_conn(tmp_path),
+        _runner=forbidden_runner,
+        _paths=paths,
+    )
+
+    assert result["status"] == "extract_failed"
+    assert str(result["reason"]).startswith("MISSING_EXTRACT_ASSETS:")
+    assert result["stages"][0]["status"] == "MISSING_EXTRACT_ASSETS"
+    assert runner_called is False
+
+
+def test_extract_asset_paths_share_one_cycle_bundle():
+    """Script and manifest must come from the same selected asset package."""
+    from src.data import ecmwf_open_data
+
+    paths = ecmwf_open_data._resolve_opendata_paths()
+
+    assert paths.extract_script == paths.asset_root / "scripts" / "extract_open_ens_localday.py"
+    assert paths.manifest_path == (
+        paths.asset_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
+    )
