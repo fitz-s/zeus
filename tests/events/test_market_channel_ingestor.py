@@ -1800,6 +1800,9 @@ def test_bba_only_quote_queues_and_repairs_missing_depth(tmp_path):
     assert service._current_generation_depth_tokens == set()
 
     quote_flush_wake = asyncio.Event()
+    prior_cache = ingestor.quote_cache.get("token-1")
+    assert prior_cache is not None
+    assert prior_cache.depth_json is None
     written = asyncio.run(
         service._repair_missing_depth_once(
             active_token_ids={"token-1"},
@@ -1813,8 +1816,10 @@ def test_bba_only_quote_queues_and_repairs_missing_depth(tmp_path):
     assert written == 1
     assert fetch_batches == [["token-1"]]
     assert service._missing_depth_tokens == {"token-1"}
-    assert service._depth_repair_inflight_tokens == {"token-1"}
-    assert ingestor.quote_cache.get("token-1").depth_json is not None
+    # The repair is only prepared/enqueued here.  No cache or inflight state
+    # may claim durability until the coalesced TRADE append commits.
+    assert service._depth_repair_inflight_tokens == set()
+    assert ingestor.quote_cache.get("token-1") is prior_cache
     assert quote_flush_wake.is_set()
     assert conn.in_transaction is False
 
@@ -1831,7 +1836,8 @@ def test_bba_only_quote_queues_and_repairs_missing_depth(tmp_path):
         ingestor.flush_coalesced(commit=fail_commit, rollback=conn.rollback)
     assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
     assert service._missing_depth_tokens == {"token-1"}
-    assert service._depth_repair_inflight_tokens == {"token-1"}
+    assert service._depth_repair_inflight_tokens == set()
+    assert ingestor.quote_cache.get("token-1") is prior_cache
     assert independent.execute(
         "SELECT depth_before_json FROM execution_feasibility_latest "
         "WHERE token_id='token-1' AND direction='buy_yes'"
@@ -1854,7 +1860,8 @@ def test_bba_only_quote_queues_and_repairs_missing_depth(tmp_path):
             depth_repair_wake=asyncio.Event(),
         )
     )
-    assert service._missing_depth_tokens == set()
+    assert ingestor.quote_cache.get("token-1").depth_json is not None
+    assert service._missing_depth_tokens == {"token-1"}
     assert service._depth_repair_inflight_tokens == set()
     assert independent.execute(
         "SELECT depth_before_json FROM execution_feasibility_latest "
@@ -2285,6 +2292,103 @@ def test_coalesced_quote_commit_failure_requeues_without_false_dedupe():
     assert seen == [results[0].event_id]
 
 
+def test_coalesced_pending_watermark_keeps_newest_quote_through_requeue():
+    conn, writer = _conn_writer()
+    seen: list[str] = []
+    coalescer = EventCoalescer(max_market_keys=8)
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        coalescer=coalescer,
+        market_event_sink=lambda events: seen.extend(event.event_id for event in events),
+        market_event_sink_independently_coordinated=True,
+    )
+
+    def book(*, quote_seen_at: str, book_hash: str) -> dict[str, object]:
+        return {
+            "event_type": "book",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": book_hash,
+            "timestamp": quote_seen_at,
+        }
+
+    t2 = book(quote_seen_at="2026-07-30T12:00:02+00:00", book_hash="t2")
+    t1 = book(quote_seen_at="2026-07-30T12:00:01+00:00", book_hash="t1")
+    t3 = book(quote_seen_at="2026-07-30T12:00:03+00:00", book_hash="t3")
+    t3_event = ingestor.event_from_message(t3, received_at="2026-07-30T12:00:03+00:00")
+    assert t3_event is not None
+
+    assert ingestor.handle_message(t2, received_at="2026-07-30T12:00:02+00:00") is None
+    assert ingestor.handle_message(t1, received_at="2026-07-30T12:00:01+00:00") is None
+    assert ingestor._pending_quote_seen_at == {
+        "token-1": "2026-07-30T12:00:02+00:00"
+    }
+    assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
+
+    prepared = ingestor.prepare_coalesced_quote_flush(market_budget=1)
+    assert len(prepared.quotes) == 1
+    ingestor.write_prepared_quote_events(prepared.quotes)
+    conn.rollback()
+    assert ingestor.quote_cache.get("token-1") is None
+    assert ingestor._seen_quote_event_ids == set()
+    assert seen == []
+
+    assert ingestor.handle_message(t3, received_at="2026-07-30T12:00:03+00:00") is None
+    ingestor.requeue_prepared_coalesced_quotes(prepared)
+    assert ingestor._pending_quote_seen_at == {
+        "token-1": "2026-07-30T12:00:03+00:00"
+    }
+    assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
+
+    results = ingestor.flush_coalesced(commit=conn.commit, rollback=conn.rollback)
+
+    assert [result.event_id for result in results if result.inserted] == [t3_event.event_id]
+    assert conn.execute(
+        "SELECT DISTINCT book_hash_before FROM execution_feasibility_latest"
+    ).fetchall() == [("t3",)]
+    assert ingestor.quote_cache.get("token-1").book_hash == "t3"
+    assert ingestor._seen_quote_event_ids == {t3_event.event_id}
+    assert seen == [t3_event.event_id]
+
+
+def test_prepared_quote_rows_are_deterministic_from_event_clock():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    event = ingestor.event_from_message(
+        {
+            "event_type": "book",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "stable-event",
+            "timestamp": "2026-07-30T12:00:00+00:00",
+        },
+        received_at="2026-07-30T12:00:05+00:00",
+    )
+    assert event is not None
+
+    first = ingestor.prepare_quote_events((event,))
+    second = ingestor.prepare_quote_events((event,))
+
+    assert first == second
+    assert json.dumps(first[0].evidence_rows, sort_keys=True) == json.dumps(
+        second[0].evidence_rows,
+        sort_keys=True,
+    )
+    assert {
+        row["created_at"] for row in first[0].evidence_rows
+    } == {"2026-07-30T12:00:00+00:00"}
+
+
 def test_real_trade_lock_rolls_back_and_retries_latest_quote(tmp_path):
     """A real 25ms WAL timeout leaves the newest coalesced quote retryable."""
     db_path = tmp_path / "trades.db"
@@ -2518,6 +2622,11 @@ def test_quote_burst_coalesces_before_bounded_write_retry(monkeypatch):
     assert gate.enters <= 4
     assert service.quote_projection_backpressure_count == gate.enters - 1
     assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
+    # The bounded writer has not committed the retained latest quote, so the
+    # cache must not advertise phantom durability.  A later successful flush
+    # commits and then finalizes that exact coalesced quote.
+    assert ingestor.quote_cache.get("token-1") is None
+    ingestor.flush_coalesced(commit=conn.commit, rollback=conn.rollback)
     assert ingestor.quote_cache.get("token-1").book_hash == "burst-100"
 
 
@@ -2672,7 +2781,7 @@ def test_disconnect_transition_commits_after_rollback(monkeypatch):
     assert transitions == [("connected",), ("disconnected",)]
 
 
-def test_rest_seed_commits_deferred_sink_inside_world_writer_gate():
+def test_rest_seed_commits_then_publishes_deferred_sink_once_outside_writer_gate():
     conn, writer = _conn_writer()
     conn.execute("CREATE TABLE derived_sink_writes (event_id TEXT PRIMARY KEY)")
     order: list[str] = []
@@ -2692,12 +2801,14 @@ def test_rest_seed_commits_deferred_sink_inside_world_writer_gate():
             return False
 
     def sink(events) -> None:  # noqa: ANN001
-        assert held is True
+        assert held is False
+        assert conn.in_transaction is False
         order.append("sink")
         conn.executemany(
             "INSERT INTO derived_sink_writes(event_id) VALUES (?)",
             [(event.event_id,) for event in events],
         )
+        conn.commit()
 
     def commit() -> None:
         conn.commit()
@@ -2729,7 +2840,8 @@ def test_rest_seed_commits_deferred_sink_inside_world_writer_gate():
     )
 
     assert written == 1
-    assert order == ["enter", "sink", "commit", "exit"]
+    assert order == ["enter", "commit", "exit", "sink"]
+    assert order.count("sink") == 1
     assert conn.in_transaction is False
     assert conn.execute("SELECT COUNT(*) FROM derived_sink_writes").fetchone()[0] == 1
 
@@ -3346,6 +3458,79 @@ def test_reconnect_rest_seed_chunks_preserve_gap_snapshot_and_commit_progressive
     assert commit_counts == [4, 8, 10]
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
     assert service.connected is True
+    assert service.gap_start is None
+
+
+def test_reconnect_rest_seed_commit_failure_rolls_back_and_rebuilds_on_retry():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    emitted: list[str] = []
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=QuoteCache(),
+        market_event_sink=lambda events: emitted.extend(event.event_id for event in events),
+        market_event_sink_independently_coordinated=True,
+    )
+    fetch_calls: list[str] = []
+
+    def fetch(token_id: str) -> dict[str, object]:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "event_type": "book",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "retryable-reconnect-book",
+        }
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=fetch)
+    service.gap_start = "2026-07-30T11:58:00+00:00"
+
+    def locked_commit() -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    assert service.reconnect_rest_books_in_chunks(
+        token_ids={"token-1"},
+        received_at="2026-07-30T12:00:00+00:00",
+        write_gate=nullcontext(),
+        commit=locked_commit,
+        chunk_size=1,
+    ) == 0
+    assert service.rest_seed_backpressure_count == 1
+    assert service.rest_seed_backpressure_reason == "database is locked"
+    assert service.gap_start == "2026-07-30T11:58:00+00:00"
+    assert conn.in_transaction is False
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM market_channel_connectivity_events"
+    ).fetchone()[0] == 0
+    assert ingestor.quote_cache.get("token-1") is None
+    assert ingestor._seen_quote_event_ids == set()
+    assert emitted == []
+
+    assert service.reconnect_rest_books_in_chunks(
+        token_ids={"token-1"},
+        received_at="2026-07-30T12:00:00+00:00",
+        write_gate=nullcontext(),
+        commit=conn.commit,
+        chunk_size=1,
+    ) == 1
+    assert fetch_calls == ["token-1", "token-1"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM market_channel_connectivity_events"
+    ).fetchone()[0] == 1
+    assert ingestor.quote_cache.get("token-1").book_hash == "retryable-reconnect-book"
+    assert len(ingestor._seen_quote_event_ids) == 1
+    assert emitted == list(ingestor._seen_quote_event_ids)
     assert service.gap_start is None
 
 
