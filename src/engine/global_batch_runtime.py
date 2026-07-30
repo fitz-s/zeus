@@ -42,7 +42,11 @@ from src.engine.global_single_order_auction import (
 from src.engine.qkernel_spine_bridge import sell_action_authority_identity
 from src.events.candidate_binding import weather_family_id
 from src.events.opportunity_event import OpportunityEvent, make_opportunity_event
-from src.events.reactor import EventSubmissionReceipt, GlobalBatchSubmitResult
+from src.events.reactor import (
+    EventSubmissionReceipt,
+    GlobalBatchSubmitResult,
+    GlobalHeldSellCompletionCut,
+)
 from src.solve.solver import (
     CurrentFamilyProbabilityAuthority,
     ExecutableSellCurve,
@@ -4087,6 +4091,59 @@ def process_current_global_batch(
         return rebound(target)
 
     deferred_claim_event: OpportunityEvent | None = None
+    latest_selected: object | None = None
+
+    def held_sell_completion_cut(
+        *,
+        economic_cut_completed: bool,
+        outcome: str,
+        terminal_no_trade_reason: str = "",
+    ) -> GlobalHeldSellCompletionCut | None:
+        """Freeze held completion proof before cache invalidation or later epochs."""
+
+        if latest_selected is None:
+            return None
+        coverage = tuple(
+            getattr(latest_selected, "holding_coverage", ()) or ()
+        )
+        if not coverage:
+            return None
+        selected_position_id = None
+        selected_token_id = None
+        selected_candidate_id = None
+        candidate = getattr(
+            getattr(latest_selected, "decision", None), "candidate", None
+        )
+        if outcome == "ACTUATED":
+            candidate_id = str(getattr(candidate, "candidate_id", "") or "")
+            if str(getattr(candidate, "action", "") or "").upper() != "SELL":
+                outcome = "INCOMPLETE"
+            else:
+                matches = tuple(
+                    row
+                    for row in coverage
+                    if str(getattr(row, "status", "") or "") == "EVALUATED"
+                    and str(getattr(row, "candidate_id", "") or "")
+                    == candidate_id
+                    and str(getattr(row, "token_id", "") or "")
+                    == str(getattr(candidate, "token_id", "") or "")
+                )
+                if len(matches) == 1 and candidate_id:
+                    row = matches[0]
+                    selected_position_id = str(row.position_id)
+                    selected_token_id = str(row.token_id)
+                    selected_candidate_id = candidate_id
+                else:
+                    outcome = "INCOMPLETE"
+        return GlobalHeldSellCompletionCut(
+            holding_coverage=coverage,
+            economic_cut_completed=economic_cut_completed,
+            outcome=outcome,
+            selected_position_id=selected_position_id,
+            selected_token_id=selected_token_id,
+            selected_candidate_id=selected_candidate_id,
+            terminal_no_trade_reason=terminal_no_trade_reason,
+        )
 
     def release_selection_snapshot() -> None:
         """Detach and release exactly the snapshot generation owned by this cut."""
@@ -4110,6 +4167,7 @@ def process_current_global_batch(
             and next_claim_event.event_id != deferred_claim_event.event_id
         ):
             raise ValueError("GLOBAL_DEFERRED_CLAIM_IDENTITY_CONFLICT")
+        terminal_cut_completed = economic_cut_completed and effective_next_claim is None
         release_selection_snapshot()
         return GlobalBatchSubmitResult(
             receipts={
@@ -4126,10 +4184,17 @@ def process_current_global_batch(
             },
             winner_event_id=None,
             venue_submit_count=0,
-            economic_cut_completed=(
-                economic_cut_completed and effective_next_claim is None
-            ),
+            economic_cut_completed=terminal_cut_completed,
             next_claim_event=effective_next_claim,
+            held_sell_completion_cut=held_sell_completion_cut(
+                economic_cut_completed=terminal_cut_completed,
+                outcome=(
+                    "CAPITAL_REJECTED"
+                    if terminal_cut_completed
+                    else "INCOMPLETE"
+                ),
+                terminal_no_trade_reason=(reason if terminal_cut_completed else ""),
+            ),
         )
 
     try:
@@ -4907,6 +4972,7 @@ def process_current_global_batch(
                 initial_payoff_q_lcb_by_candidate or None
             ),
         )
+        latest_selected = selected
         initial_select_stage = (
             "select_fence" if preflight_winner is not None else "select_initial"
         )
@@ -4976,7 +5042,7 @@ def process_current_global_batch(
             wealth_reauction_audit = None
 
             def select_claimable_fallthrough() -> GlobalBatchSubmitResult | None:
-                nonlocal deferred_claim_event, selected, winner, winner_id
+                nonlocal deferred_claim_event, latest_selected, selected, winner, winner_id
                 while True:
                     fallthrough_epoch_identity = (
                         _selection_epoch_identity_with_preflight_exclusions(
@@ -5004,6 +5070,7 @@ def process_current_global_batch(
                         payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                         wealth_reauction_audit=wealth_reauction_audit,
                     )
+                    latest_selected = selected
                     log_stage(
                         "select_preflight_fallthrough",
                         families=len(prepared_by_event) - len(excluded_by_family),
@@ -5638,6 +5705,16 @@ def process_current_global_batch(
             economic_cut_completed=bool(
                 venue_delta == 1 and winner_receipt.submitted
             ),
+            held_sell_completion_cut=held_sell_completion_cut(
+                economic_cut_completed=bool(
+                    venue_delta == 1 and winner_receipt.submitted
+                ),
+                outcome=(
+                    "ACTUATED"
+                    if venue_delta == 1 and winner_receipt.submitted
+                    else "INCOMPLETE"
+                ),
+            ),
             # One durable frontier only. A successful submit's continuation
             # immediately re-runs the complete global universe against fresh
             # holdings/wealth/q/books, so it subsumes any unclaimed carrier
@@ -5678,6 +5755,10 @@ def process_current_global_batch(
                 winner_event_id=winner.event_id,
                 venue_submit_count=0,
                 economic_cut_completed=False,
+                held_sell_completion_cut=held_sell_completion_cut(
+                    economic_cut_completed=False,
+                    outcome="INCOMPLETE",
+                ),
             )
         return reject(f"GLOBAL_AUCTION_FAILED:{type(exc).__name__}:{exc}")
     finally:

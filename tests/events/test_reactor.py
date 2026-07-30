@@ -34,6 +34,7 @@ from src.events.opportunity_event import (
 from src.events.reactor import (
     EventSubmissionReceipt,
     GlobalBatchSubmitResult,
+    GlobalHeldSellCompletionCut,
     OpportunityEventReactor,
     ReactorConfig,
     ReactorResult,
@@ -57,6 +58,40 @@ def _store() -> tuple[sqlite3.Connection, EventStore]:
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     return conn, EventStore(conn)
+
+
+def _held_sell_completion_result(
+    *,
+    position_id: str,
+    token_id: str,
+    probability_content_identity: str,
+    outcome: str = "ACTUATED",
+    terminal_no_trade_reason: str = "",
+) -> ReactorResult:
+    coverage = SimpleNamespace(
+        position_id=position_id,
+        token_id=token_id,
+        status="EVALUATED",
+        candidate_id=f"candidate:{position_id}",
+        probability_content_identity=probability_content_identity,
+        selection_epoch_identity=f"epoch:{position_id}",
+        sell_book_witness_identity=f"book:{position_id}",
+    )
+    return ReactorResult(
+        global_held_sell_completion_cuts=[
+            GlobalHeldSellCompletionCut(
+                holding_coverage=(coverage,),
+                economic_cut_completed=outcome != "INCOMPLETE",
+                outcome=outcome,
+                selected_position_id=(position_id if outcome == "ACTUATED" else None),
+                selected_token_id=(token_id if outcome == "ACTUATED" else None),
+                selected_candidate_id=(
+                    f"candidate:{position_id}" if outcome == "ACTUATED" else None
+                ),
+                terminal_no_trade_reason=terminal_no_trade_reason,
+            )
+        ]
+    )
 
 
 def test_no_submit_claim_debt_drains_before_cycle_entry_gate():
@@ -1775,7 +1810,12 @@ def test_targeted_forecast_supersession_aborts_cycle_before_ack_boundary():
 
 
 def _global_batch_probe_reactor(
-    store, observations, *, incomplete=False, next_claim_event=None
+    store,
+    observations,
+    *,
+    incomplete=False,
+    next_claim_event=None,
+    held_sell_completion_cut=None,
 ):
     bound_claims = {"generations": {}, "attempt_counts": {}}
 
@@ -1826,6 +1866,7 @@ def _global_batch_probe_reactor(
             winner_event_id=None,
             venue_submit_count=0,
             next_claim_event=next_claim_event,
+            held_sell_completion_cut=held_sell_completion_cut,
         )
 
     observations.update(direct_submit_calls=0, batch_calls=0)
@@ -1843,6 +1884,30 @@ def _global_batch_probe_reactor(
         config=ReactorConfig(),
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
+
+
+def test_reactor_carries_immutable_held_sell_cut_from_global_batch_result():
+    _conn, store = _store()
+    event = _forecast_event("held-cut-transfer", target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    cut = _held_sell_completion_result(
+        position_id="held-cut-transfer",
+        token_id="token-held-cut-transfer",
+        probability_content_identity="q-held-cut-transfer",
+        outcome="INCOMPLETE",
+    ).global_held_sell_completion_cuts[0]
+    reactor = _global_batch_probe_reactor(
+        store,
+        {},
+        held_sell_completion_cut=cut,
+    )
+
+    result = reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=1,
+    )
+
+    assert result.global_held_sell_completion_cuts == [cut]
 
 
 def _terminal_surfaces(conn: sqlite3.Connection, event_id: str) -> dict[str, int]:
@@ -2561,8 +2626,6 @@ def test_lucknow_zero_bid_v3_obligation_is_durable_but_cannot_ack(tmp_path):
 
 def test_lucknow_no_book_generation_completes_only_from_fresh_same_q_book(monkeypatch, tmp_path):
     """A later book answers the V3 debt without reusing an old attempt."""
-    from types import SimpleNamespace
-
     from src.events import reactor
     from src.runtime.reactor_wake import (
         held_sell_reauction_requests_completed,
@@ -2596,18 +2659,13 @@ def test_lucknow_no_book_generation_completes_only_from_fresh_same_q_book(monkey
     assert fresh.attempt_identity != original.attempt_identity
     assert fresh.request_id != original.request_id
 
-    monkeypatch.setattr(
-        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
-        lambda **_kwargs: SimpleNamespace(
-            status="EVALUATED",
-            probability_content_identity="q-lucknow-current",
-            selection_epoch_identity="epoch-lucknow-fresh",
-            sell_book_witness_identity="book-lucknow-fresh",
-        ),
-    )
     receipts = reactor._held_sell_reauction_receipts_from_global_cut(
         requests=(original,),
-        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+        result=_held_sell_completion_result(
+            position_id=original.position_id,
+            token_id=original.held_token_id,
+            probability_content_identity="q-lucknow-current",
+        ),
     )
     assert len(receipts) == 1
     assert receipts[0].request_id == original.request_id
@@ -2624,7 +2682,11 @@ def test_lucknow_no_book_generation_completes_only_from_fresh_same_q_book(monkey
 
     fresh_receipts = reactor._held_sell_reauction_receipts_from_global_cut(
         requests=(fresh,),
-        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+        result=_held_sell_completion_result(
+            position_id=fresh.position_id,
+            token_id=fresh.held_token_id,
+            probability_content_identity="q-lucknow-current",
+        ),
     )
     assert persist_held_sell_reauction_receipts(
         fresh_receipts, path=tmp_path / "wake.json"
@@ -2807,21 +2869,13 @@ def test_v3_no_book_wake_upgrades_same_generation_on_fresh_superseding_q(monkeyp
         assert refreshed.request_id != original.request_id
         assert refreshed.probability_content_identity == "q-current-new"
 
-        monkeypatch.setattr(
-            "src.engine.global_batch_runtime.held_sell_reauction_coverage",
-            lambda **kwargs: (
-                kwargs["probability_content_identity"] == ""
-                and SimpleNamespace(
-                    status="EVALUATED",
-                    probability_content_identity="q-current-new",
-                    selection_epoch_identity="epoch-lucknow-current",
-                    sell_book_witness_identity="book-lucknow-current",
-                )
-            ),
-        )
         receipts = reactor._held_sell_reauction_receipts_from_global_cut(
             requests=(refreshed,),
-            result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+            result=_held_sell_completion_result(
+                position_id=refreshed.position_id,
+                token_id=refreshed.held_token_id,
+                probability_content_identity="q-current-new",
+            ),
         )
         assert receipts[0].answered_probability_content_identity == "q-current-new"
         assert reactor_wake.persist_held_sell_reauction_receipts(
@@ -2838,7 +2892,6 @@ def test_v3_no_book_wake_upgrades_same_generation_on_fresh_superseding_q(monkeyp
 
 
 def test_v3_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):
-    from types import SimpleNamespace
 
     from src.events import reactor
     from src.runtime.reactor_wake import make_held_sell_reauction_request
@@ -2856,16 +2909,15 @@ def test_v3_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):
     )
     monkeypatch.setattr(
         "src.engine.global_batch_runtime.held_sell_reauction_coverage",
-        lambda **_kwargs: SimpleNamespace(
-            status="EVALUATED",
-            probability_content_identity="q-karachi-current",
-            selection_epoch_identity="epoch-karachi",
-            sell_book_witness_identity="book-karachi",
-        ),
+        lambda **_kwargs: pytest.fail("receipt builder must not query global cache"),
     )
     actuated = reactor._held_sell_reauction_receipts_from_global_cut(
         requests=(request,),
-        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+        result=_held_sell_completion_result(
+            position_id=request.position_id,
+            token_id=request.held_token_id,
+            probability_content_identity="q-karachi-current",
+        ),
     )
     assert actuated[0].status == "ACTUATED"
     assert actuated[0].schema_version == 3
@@ -2874,9 +2926,12 @@ def test_v3_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):
 
     rejected = reactor._held_sell_reauction_receipts_from_global_cut(
         requests=(request,),
-        result=reactor.ReactorResult(
-            global_auction_completed_non_cancelled=1,
-            rejection_reasons=["GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"],
+        result=_held_sell_completion_result(
+            position_id=request.position_id,
+            token_id=request.held_token_id,
+            probability_content_identity="q-karachi-current",
+            outcome="CAPITAL_REJECTED",
+            terminal_no_trade_reason="GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES",
         ),
     )
     assert rejected[0].status == "CAPITAL_REJECTED"
@@ -2885,7 +2940,6 @@ def test_v3_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):
 
 
 def test_v3_excluded_or_unknown_q_global_cut_stays_pending(monkeypatch):
-    from types import SimpleNamespace
 
     from src.events import reactor
     from src.runtime.reactor_wake import make_held_sell_reauction_request
@@ -2901,14 +2955,176 @@ def test_v3_excluded_or_unknown_q_global_cut_stays_pending(monkeypatch):
         book_state="UNKNOWN",
         generation="karachi-no-book-generation",
     )
-    monkeypatch.setattr(
-        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
-        lambda **_kwargs: SimpleNamespace(status="EXCLUDED"),
-    )
     assert reactor._held_sell_reauction_receipts_from_global_cut(
         requests=(request,),
-        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+        result=_held_sell_completion_result(
+            position_id=request.position_id,
+            token_id=request.held_token_id,
+            probability_content_identity="",
+            outcome="INCOMPLETE",
+        ),
     ) == ()
+
+
+def test_held_sell_other_winner_never_emits_actuated_receipt():
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="held-target",
+        family=("Paris", "2026-07-30", "low"),
+        probability_content_identity="q-target",
+        held_token_id="token-target",
+        held_best_bid=0.18,
+        bid_observed_at="2026-07-30T08:00:00+00:00",
+        schema_version=3,
+        book_state="EXECUTABLE",
+    )
+    target = SimpleNamespace(
+        position_id=request.position_id,
+        token_id=request.held_token_id,
+        status="EVALUATED",
+        candidate_id="candidate-target",
+        probability_content_identity="q-target",
+        selection_epoch_identity="epoch-other",
+        sell_book_witness_identity="book-target",
+    )
+    other = SimpleNamespace(
+        position_id="held-other",
+        token_id="token-other",
+        status="EVALUATED",
+        candidate_id="candidate-other",
+        probability_content_identity="q-other",
+        selection_epoch_identity="epoch-other",
+        sell_book_witness_identity="book-other",
+    )
+    result = ReactorResult(
+        global_held_sell_completion_cuts=[
+            GlobalHeldSellCompletionCut(
+                holding_coverage=(target, other),
+                economic_cut_completed=True,
+                outcome="ACTUATED",
+                selected_position_id=other.position_id,
+                selected_token_id=other.token_id,
+                selected_candidate_id=other.candidate_id,
+            )
+        ]
+    )
+
+    assert reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,), result=result
+    ) == ()
+
+
+def test_terminal_position_without_current_coverage_keeps_durable_wake_pending(tmp_path):
+    """Exact-cut receipts cannot retire terminal-position stale debt."""
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="economically-closed-stale-debt",
+        family=("Paris", "2026-07-30", "low"),
+        probability_content_identity="q-terminal-debt",
+        held_token_id="token-terminal-debt",
+        held_best_bid=0.18,
+        bid_observed_at="2026-07-30T08:00:00+00:00",
+        schema_version=3,
+        book_state="EXECUTABLE",
+    )
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        held_sell_reauction_requests=(request,),
+    )
+
+    assert reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=_held_sell_completion_result(
+            position_id=request.position_id,
+            token_id=request.held_token_id,
+            probability_content_identity="q-terminal-debt",
+            outcome="INCOMPLETE",
+        ),
+    ) == ()
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (request,), path=path
+    )
+
+
+@pytest.mark.parametrize(
+    ("terminal_outcome", "terminal_reason", "expected_status"),
+    (
+        ("ACTUATED", "", "ACTUATED"),
+        (
+            "CAPITAL_REJECTED",
+            "GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES",
+            "CAPITAL_REJECTED",
+        ),
+    ),
+)
+def test_held_sell_multiwinner_waits_for_its_own_submit_or_final_cash(
+    terminal_outcome,
+    terminal_reason,
+    expected_status,
+):
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="held-multiwinner",
+        family=("Paris", "2026-07-30", "low"),
+        probability_content_identity="q-multiwinner",
+        held_token_id="token-multiwinner",
+        held_best_bid=0.18,
+        bid_observed_at="2026-07-30T08:00:00+00:00",
+        schema_version=3,
+        book_state="EXECUTABLE",
+    )
+    first_other = GlobalHeldSellCompletionCut(
+        holding_coverage=(
+            SimpleNamespace(
+                position_id=request.position_id,
+                token_id=request.held_token_id,
+                status="EVALUATED",
+                candidate_id="candidate-held",
+                probability_content_identity="q-multiwinner",
+                selection_epoch_identity="epoch-one",
+                sell_book_witness_identity="book-one",
+            ),
+            SimpleNamespace(
+                position_id="held-other-multiwinner",
+                token_id="token-other-multiwinner",
+                status="EVALUATED",
+                candidate_id="candidate-other-multiwinner",
+                probability_content_identity="q-other",
+                selection_epoch_identity="epoch-one",
+                sell_book_witness_identity="book-other",
+            ),
+        ),
+        economic_cut_completed=True,
+        outcome="ACTUATED",
+        selected_position_id="held-other-multiwinner",
+        selected_token_id="token-other-multiwinner",
+        selected_candidate_id="candidate-other-multiwinner",
+    )
+    terminal = _held_sell_completion_result(
+        position_id=request.position_id,
+        token_id=request.held_token_id,
+        probability_content_identity="q-multiwinner",
+        outcome=terminal_outcome,
+        terminal_no_trade_reason=terminal_reason,
+    ).global_held_sell_completion_cuts[0]
+
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=ReactorResult(
+            global_held_sell_completion_cuts=[first_other, terminal]
+        ),
+    )
+
+    assert [receipt.status for receipt in receipts] == [expected_status]
 
 
 def test_v3_old_generation_receipt_cannot_ack_new_generation(tmp_path):
@@ -2989,7 +3205,6 @@ def test_held_sell_reauction_request_round_trips_through_durable_wake(tmp_path):
 
 
 def test_held_sell_reauction_current_coverage_emits_actuation_receipt(monkeypatch):
-    from types import SimpleNamespace
 
     from src.events import reactor
     from src.runtime.reactor_wake import make_held_sell_reauction_request
@@ -3002,18 +3217,13 @@ def test_held_sell_reauction_current_coverage_emits_actuation_receipt(monkeypatc
         held_best_bid=0.11,
         bid_observed_at="2026-07-28T08:00:00+00:00",
     )
-    monkeypatch.setattr(
-        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
-        lambda **_kwargs: SimpleNamespace(
-            status="EVALUATED",
-            selection_epoch_identity="selection-epoch-covered",
-            sell_book_witness_identity="book-witness-covered",
-        ),
-    )
-
     receipts = reactor._held_sell_reauction_receipts_from_global_cut(
         requests=(request,),
-        result=reactor.ReactorResult(global_auction_completed_non_cancelled=1),
+        result=_held_sell_completion_result(
+            position_id=request.position_id,
+            token_id=request.held_token_id,
+            probability_content_identity="q-content-covered",
+        ),
     )
 
     assert len(receipts) == 1
@@ -3021,12 +3231,11 @@ def test_held_sell_reauction_current_coverage_emits_actuation_receipt(monkeypatc
     assert receipts[0].material_identity == request.material_identity
     assert receipts[0].generation == request.generation
     assert receipts[0].status == "ACTUATED"
-    assert receipts[0].selection_epoch_identity == "selection-epoch-covered"
-    assert receipts[0].sell_book_witness_identity == "book-witness-covered"
+    assert receipts[0].selection_epoch_identity == "epoch:position-covered"
+    assert receipts[0].sell_book_witness_identity == "book:position-covered"
 
 
 def test_held_sell_reauction_global_no_trade_emits_typed_reject(monkeypatch):
-    from types import SimpleNamespace
 
     from src.events import reactor
     from src.runtime.reactor_wake import make_held_sell_reauction_request
@@ -3039,16 +3248,14 @@ def test_held_sell_reauction_global_no_trade_emits_typed_reject(monkeypatch):
         held_best_bid=0.11,
         bid_observed_at="2026-07-28T08:00:00+00:00",
     )
-    monkeypatch.setattr(
-        "src.engine.global_batch_runtime.held_sell_reauction_coverage",
-        lambda **_kwargs: SimpleNamespace(status="EVALUATED"),
-    )
-
     receipts = reactor._held_sell_reauction_receipts_from_global_cut(
         requests=(request,),
-        result=reactor.ReactorResult(
-            global_auction_completed_non_cancelled=1,
-            rejection_reasons=["GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"],
+        result=_held_sell_completion_result(
+            position_id=request.position_id,
+            token_id=request.held_token_id,
+            probability_content_identity="q-content-no-trade",
+            outcome="CAPITAL_REJECTED",
+            terminal_no_trade_reason="GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES",
         ),
     )
 

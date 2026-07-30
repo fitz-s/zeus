@@ -18548,6 +18548,28 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         token_id="held-yes",
         held_shares=Decimal("5"),
     )
+    coverage = GlobalHoldingAuctionCoverage(
+        position_id=obligation.position_id,
+        family_key=family_key,
+        bin_id="21C",
+        condition_id=obligation.condition_id,
+        side=obligation.side,
+        token_id=obligation.token_id,
+        held_shares=obligation.held_shares,
+        ledger_snapshot_id="ledger",
+        probability_witness_identity="held-q",
+        probability_content_identity="q-content-held",
+        wealth_economic_identity="wealth-economic",
+        selection_epoch_identity="selection-held",
+        book_epoch_identity="venue",
+        selection_cut_at_utc=decision_at,
+        decision_at_utc=decision_at,
+        book_deadline_at_utc=decision_at + _dt.timedelta(seconds=30),
+        status="EVALUATED",
+        candidate_id="candidate-held",
+        sell_book_witness_identity="sell-book-held",
+        book_state="EXECUTABLE",
+    )
     selected_kwargs = {}
     stored_kwargs = {}
     monkeypatch.setattr(
@@ -18626,7 +18648,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             ),
             winner_event_id=None,
             actuation=None,
-            holding_coverage=(),
+            holding_coverage=(coverage,),
         )
 
     monkeypatch.setattr(
@@ -18670,6 +18692,9 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         "GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"
     )
     assert result.economic_cut_completed is True
+    assert result.held_sell_completion_cut is not None
+    assert result.held_sell_completion_cut.outcome == "CAPITAL_REJECTED"
+    assert result.held_sell_completion_cut.holding_coverage == (coverage,)
 
     selected_kwargs.clear()
     stored_kwargs.clear()

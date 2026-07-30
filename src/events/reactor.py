@@ -865,6 +865,12 @@ class ReactorResult:
     retried: int = 0
     # Exact epoch outcome, never inferred from aggregate rejection/retry counts.
     global_auction_completed_non_cancelled: int = 0
+    # Immutable held-SELL completion evidence emitted by each completed global
+    # epoch.  This deliberately survives process-local monitor coverage cache
+    # invalidation between selection, venue actuation, and later epochs.
+    global_held_sell_completion_cuts: list["GlobalHeldSellCompletionCut"] = field(
+        default_factory=list
+    )
     # VISIBILITY (2026-06-11 claim-storm incident): claim() lock bounces were
     # silently folded into ``retried`` — a 0/250 storm cycle was indistinguishable
     # from 250 honest snapshot-pending retries (reasons=[]). Counted separately so
@@ -893,6 +899,44 @@ class ReactorResult:
 
 
 @dataclass(frozen=True)
+class GlobalHeldSellCompletionCut:
+    """One immutable global-cut answer for held-SELL completion debt.
+
+    ``holding_coverage`` is the exact selection partition, not a later
+    process-cache lookup.  An ACTUATED outcome names the held SELL that crossed
+    the venue boundary; a CAPITAL_REJECTED outcome names a completed HOLD/CASH
+    cut.  INCOMPLETE cuts are evidence only and must not terminalize a wake.
+    """
+
+    holding_coverage: tuple[object, ...]
+    economic_cut_completed: bool
+    outcome: str
+    selected_position_id: str | None = None
+    selected_token_id: str | None = None
+    selected_candidate_id: str | None = None
+    terminal_no_trade_reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.outcome not in {"INCOMPLETE", "ACTUATED", "CAPITAL_REJECTED"}:
+            raise ValueError("GLOBAL_HELD_SELL_COMPLETION_OUTCOME_INVALID")
+        selected = (
+            str(self.selected_position_id or "").strip(),
+            str(self.selected_token_id or "").strip(),
+            str(self.selected_candidate_id or "").strip(),
+        )
+        if self.outcome == "ACTUATED" and (
+            not self.economic_cut_completed or not all(selected)
+        ):
+            raise ValueError("GLOBAL_HELD_SELL_ACTUATION_IDENTITY_INVALID")
+        if self.outcome == "CAPITAL_REJECTED" and (
+            not self.economic_cut_completed
+            or any(selected)
+            or not str(self.terminal_no_trade_reason or "").strip()
+        ):
+            raise ValueError("GLOBAL_HELD_SELL_CAPITAL_OUTCOME_INVALID")
+
+
+@dataclass(frozen=True)
 class GlobalBatchSubmitResult:
     """Opaque batch-actuation result: all events finalized, at most one venue call."""
 
@@ -902,6 +946,7 @@ class GlobalBatchSubmitResult:
     next_claim_event: OpportunityEvent | None = None
     continuation_event: OpportunityEvent | None = None
     economic_cut_completed: bool = False
+    held_sell_completion_cut: GlobalHeldSellCompletionCut | None = None
 
     def __post_init__(self) -> None:
         if self.venue_submit_count not in {0, 1}:
@@ -1701,6 +1746,24 @@ class OpportunityEventReactor:
                     finalized
                     and self._unknown_dead_letter_calls == dead_letters_before
                 )
+        if batch_result.held_sell_completion_cut is not None:
+            completion_cut = batch_result.held_sell_completion_cut
+            if (
+                completion_cut.economic_cut_completed
+                != batch_result.economic_cut_completed
+            ):
+                completion_cut = dataclass_replace(
+                    completion_cut,
+                    economic_cut_completed=False,
+                    outcome="INCOMPLETE",
+                    selected_position_id=None,
+                    selected_token_id=None,
+                    selected_candidate_id=None,
+                    terminal_no_trade_reason="",
+                )
+            result.global_held_sell_completion_cuts.append(
+                completion_cut
+            )
         return GlobalEpochOutcome(
             attempted=attempted,
             submitted=batch_result.venue_submit_count == 1,
@@ -6436,24 +6499,16 @@ def _held_sell_reauction_receipts_from_global_cut(
     requests: tuple[object, ...],
     result: object,
 ) -> tuple[object, ...]:
-    """Bind each durable held request to the exact global cut that answered it."""
+    """Bind each durable held request to the exact global cut that answered it.
 
-    if int(getattr(result, "global_auction_completed_non_cancelled", 0) or 0) <= 0:
-        return ()
-    from src.engine.global_batch_runtime import held_sell_reauction_coverage
+    A request absent from the current held-position coverage remains pending.
+    Terminal-position stale-debt retirement is a separate contract and must not
+    be inferred as an ACTUATED or CAPITAL_REJECTED completion here.
+    """
+
     from src.runtime.reactor_wake import HeldSellReauctionReceipt
 
     receipts: list[HeldSellReauctionReceipt] = []
-    global_no_trade_reason = next(
-        (
-            str(reason)
-            for reason in getattr(result, "rejection_reasons", ())
-            if str(reason).startswith(
-                ("GLOBAL_AUCTION_NO_TRADE:", "GLOBAL_PREFLIGHT_")
-            )
-        ),
-        "",
-    )
     for request in requests:
         receipt_identity = {
             "request_id": str(getattr(request, "request_id", "") or ""),
@@ -6466,29 +6521,84 @@ def _held_sell_reauction_receipts_from_global_cut(
             ),
         }
         request_schema_version = int(getattr(request, "schema_version", 1) or 1)
-        request_q = str(
-            getattr(request, "probability_content_identity", "") or ""
-        )
-        coverage = held_sell_reauction_coverage(
-            position_id=str(getattr(request, "position_id", "") or ""),
-            # A versioned trigger q is historical context. The terminal answer must
-            # use the fresh cut's current q, including a q supersession after
-            # an earlier no-book wake.
-            probability_content_identity=(
-                "" if request_schema_version >= 2 else request_q
-            ),
-            token_id=str(getattr(request, "held_token_id", "") or ""),
-            family=tuple(getattr(request, "family", ()) or ()),
-        )
-        if coverage is None:
-            continue
-        coverage_q = str(
-            getattr(coverage, "probability_content_identity", "") or ""
-        )
-        if request_schema_version >= 2 and not coverage_q:
-            continue
-        if coverage.status == "EVALUATED":
-            if global_no_trade_reason and request_schema_version < 2:
+        request_position_id = str(getattr(request, "position_id", "") or "")
+        request_token_id = str(getattr(request, "held_token_id", "") or "")
+        for cut in getattr(result, "global_held_sell_completion_cuts", ()):
+            coverage = next(
+                (
+                    row
+                    for row in tuple(getattr(cut, "holding_coverage", ()) or ())
+                    if str(getattr(row, "position_id", "") or "")
+                    == request_position_id
+                    and str(getattr(row, "token_id", "") or "")
+                    == request_token_id
+                ),
+                None,
+            )
+            if coverage is None:
+                continue
+            coverage_q = str(
+                getattr(coverage, "probability_content_identity", "") or ""
+            )
+            if request_schema_version >= 2 and not coverage_q:
+                continue
+            selection_epoch_identity = str(
+                getattr(coverage, "selection_epoch_identity", "") or ""
+            )
+            sell_book_witness_identity = str(
+                getattr(coverage, "sell_book_witness_identity", "") or ""
+            )
+            if (
+                str(getattr(coverage, "status", "") or "") != "EVALUATED"
+                or not selection_epoch_identity
+                or not sell_book_witness_identity
+            ):
+                continue
+            outcome = str(getattr(cut, "outcome", "") or "")
+            if outcome == "ACTUATED":
+                if (
+                    str(getattr(cut, "selected_position_id", "") or "")
+                    != request_position_id
+                    or str(getattr(cut, "selected_token_id", "") or "")
+                    != request_token_id
+                ):
+                    continue
+                receipts.append(
+                    HeldSellReauctionReceipt(
+                        **receipt_identity,
+                        schema_version=request_schema_version,
+                        scope_identity=str(
+                            getattr(request, "scope_identity", "") or ""
+                        ),
+                        book_state="EXECUTABLE",
+                        status="ACTUATED",
+                        reason="GLOBAL_AUCTION_CURRENT_HOLDING_COVERAGE_ACTUATED",
+                        selection_epoch_identity=selection_epoch_identity,
+                        sell_book_witness_identity=sell_book_witness_identity,
+                        answered_probability_content_identity=(
+                            coverage_q if request_schema_version >= 2 else ""
+                        ),
+                    )
+                )
+                break
+            if (
+                outcome != "CAPITAL_REJECTED"
+                or not bool(getattr(cut, "economic_cut_completed", False))
+            ):
+                continue
+            global_no_trade_reason = str(
+                getattr(cut, "terminal_no_trade_reason", "") or ""
+            )
+            economic_reason = global_no_trade_reason.removeprefix(
+                "GLOBAL_AUCTION_NO_TRADE:"
+            )
+            if economic_reason not in {
+                "CASH_DOMINATES",
+                "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+                "ROBUST_MAJORITY_LOSS",
+            }:
+                continue
+            if request_schema_version < 2:
                 receipts.append(
                     HeldSellReauctionReceipt(
                         **receipt_identity,
@@ -6499,46 +6609,7 @@ def _held_sell_reauction_receipts_from_global_cut(
                         ),
                     )
                 )
-                continue
-            selection_epoch_identity = str(
-                getattr(coverage, "selection_epoch_identity", "") or ""
-            )
-            sell_book_witness_identity = str(
-                getattr(coverage, "sell_book_witness_identity", "") or ""
-            )
-            if not selection_epoch_identity or not sell_book_witness_identity:
-                continue
-            if global_no_trade_reason:
-                if request_schema_version >= 2:
-                    economic_reason = global_no_trade_reason.removeprefix(
-                        "GLOBAL_AUCTION_NO_TRADE:"
-                    )
-                    if economic_reason not in {
-                        "CASH_DOMINATES",
-                        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
-                        "ROBUST_MAJORITY_LOSS",
-                    }:
-                        continue
-                    receipts.append(
-                        HeldSellReauctionReceipt(
-                            **receipt_identity,
-                            schema_version=request_schema_version,
-                            scope_identity=str(
-                                getattr(request, "scope_identity", "") or ""
-                            ),
-                            book_state="EXECUTABLE",
-                            status="CAPITAL_REJECTED",
-                            reason="GLOBAL_AUCTION_CAPITAL_REJECTED",
-                            selection_epoch_identity=selection_epoch_identity,
-                            sell_book_witness_identity=sell_book_witness_identity,
-                            capital_objective_proof=(
-                                "global_single_order_terminal_wealth:"
-                                f"{global_no_trade_reason}"
-                            ),
-                            answered_probability_content_identity=coverage_q,
-                        )
-                    )
-                    continue
+                break
             receipts.append(
                 HeldSellReauctionReceipt(
                     **receipt_identity,
@@ -6547,26 +6618,18 @@ def _held_sell_reauction_receipts_from_global_cut(
                         getattr(request, "scope_identity", "") or ""
                     ),
                     book_state="EXECUTABLE",
-                    status="ACTUATED",
-                    reason="GLOBAL_AUCTION_CURRENT_HOLDING_COVERAGE_ACTUATED",
+                    status="CAPITAL_REJECTED",
+                    reason="GLOBAL_AUCTION_CAPITAL_REJECTED",
                     selection_epoch_identity=selection_epoch_identity,
                     sell_book_witness_identity=sell_book_witness_identity,
-                    answered_probability_content_identity=(
-                        coverage_q if request_schema_version >= 2 else ""
+                    capital_objective_proof=(
+                        "global_single_order_terminal_wealth:"
+                        f"{global_no_trade_reason}"
                     ),
+                    answered_probability_content_identity=coverage_q,
                 )
             )
-        elif coverage.status == "EXCLUDED" and request_schema_version < 2:
-            receipts.append(
-                HeldSellReauctionReceipt(
-                    **receipt_identity,
-                    status="REJECTED",
-                    reason=(
-                        "GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:"
-                        f"{str(getattr(coverage, 'reason', '') or 'unspecified')}"
-                    ),
-                )
-            )
+            break
     return tuple(receipts)
 
 
