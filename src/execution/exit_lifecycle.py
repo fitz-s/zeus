@@ -31,15 +31,17 @@ from inspect import Parameter, signature
 from types import SimpleNamespace
 from typing import Callable, Optional
 
-from src.execution.collateral import check_sell_collateral
-from src.state.collateral_ledger import CollateralInsufficient
+# Compatibility exports for callers that patch the former lifecycle seam.
+# Submit-time authority is owned by executor.py below.
+from src.execution.collateral import check_sell_collateral  # noqa: F401
+from src.state.collateral_ledger import CollateralInsufficient  # noqa: F401
 from src.observability.counters import increment as _cnt_inc
 from src.execution.executor import (
     OrderResult,
     create_exit_order_intent,
     execute_exit_order,
     _exit_execution_authority_deadline_error,
-    _refresh_exit_collateral_snapshot_for_submit,
+    _refresh_exit_collateral_snapshot_for_submit,  # noqa: F401
 )
 from src.contracts.venue_submission_envelope import LIVE_ORDER_MIN_UNIT_PRICE
 from src.state.lifecycle_manager import (
@@ -4269,88 +4271,11 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=liquidity_reason, error=liquidity_error)
         return f"exit_blocked: {liquidity_error.removeprefix('exit_')}"
 
-    if conn is not None:
-        try:
-            _refresh_exit_collateral_snapshot_for_submit(
-                conn,
-                token_id=token_id,
-                shares=exit_intent.shares,
-            )
-        except CollateralInsufficient as exc:
-            collateral_reason = str(exc)
-            if _is_exit_transient_lock_error(collateral_reason):
-                active_exit = _active_exit_sell_for_lock(
-                    conn,
-                    position,
-                    token_id=token_id,
-                    clob=clob,
-                )
-                if active_exit is not None:
-                    return _adopt_active_exit_sell(
-                        position,
-                        active_exit,
-                        conn=conn,
-                        reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_LOCKED_COLLATERAL]",
-                    )
-            retry_reason = f"{exit_context.exit_reason} [COLLATERAL_REFRESH: {collateral_reason}]"
-            _mark_exit_retry(
-                position,
-                reason=retry_reason,
-                error=collateral_reason,
-                conn=conn,
-            )
-            if conn is not None:
-                log_pending_exit_recovery_event(
-                    conn,
-                    position,
-                    event_type="EXIT_ORDER_REJECTED",
-                    reason=retry_reason,
-                    error=collateral_reason,
-                )
-                log_exit_retry_event(conn, position, reason=retry_reason, error=collateral_reason)
-            return f"collateral_blocked: {collateral_reason}"
-        _commit_exit_write_boundary(conn, stage="collateral_refresh")
-
-    # Pre-sell collateral check (fail-closed)
-    can_sell, collateral_reason = check_sell_collateral(
-        position.entry_price,
-        exit_intent.shares,
-        clob,
-        token_id=token_id,
-        conn=conn,
-    )
-    if not can_sell:
-        if _is_exit_transient_lock_error(collateral_reason or ""):
-            active_exit = _active_exit_sell_for_lock(
-                conn,
-                position,
-                token_id=token_id,
-                clob=clob,
-            )
-            if active_exit is not None:
-                return _adopt_active_exit_sell(
-                    position,
-                    active_exit,
-                    conn=conn,
-                    reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_LOCKED_COLLATERAL]",
-                )
-        retry_reason = f"{exit_context.exit_reason} [COLLATERAL: {collateral_reason}]"
-        _mark_exit_retry(
-            position,
-            reason=retry_reason,
-            error=collateral_reason or "",
-            conn=conn,
-        )
-        if conn is not None:
-            log_pending_exit_recovery_event(
-                conn,
-                position,
-                event_type="EXIT_ORDER_REJECTED",
-                reason=retry_reason,
-                error=collateral_reason or "",
-            )
-            log_exit_retry_event(conn, position, reason=retry_reason, error=collateral_reason or "")
-        return f"collateral_blocked: {collateral_reason}"
+    # execute_exit_order owns the final targeted CTF refresh, persistence, and
+    # reservation immediately before command persistence.  A second lifecycle
+    # check here used the fetch-only preparation seam as if it had persisted,
+    # so a pUSD-only ledger could overwrite a successful chain preflight with
+    # false zero inventory.  Keep one submit-time collateral authority.
 
     current_market_price = exit_intent.current_market_price
     best_bid = exit_intent.best_bid

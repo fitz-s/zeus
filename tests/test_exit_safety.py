@@ -5204,7 +5204,7 @@ def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(mo
     assert portfolio.positions == [position]
 
 
-def test_live_exit_refreshes_collateral_before_sell_preflight(conn, monkeypatch):
+def test_live_exit_delegates_collateral_authority_to_executor(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import ExitContext, PortfolioState, Position
 
@@ -5244,24 +5244,35 @@ def test_live_exit_refreshes_collateral_before_sell_preflight(conn, monkeypatch)
                 "executable_snapshot_orderbook_top_bid": "0.49",
             },
         )
-
-    def fake_refresh(active_conn, **kwargs):
-        assert active_conn is conn
-        assert kwargs["token_id"] == "yes-token-001"
-        calls.append("refresh")
-        return {"component": "collateral_snapshot_refresh", "allowed": True}
-
-    def fake_check(*args, **kwargs):
-        assert calls == ["refresh"]
-        calls.append("check")
-        return False, "ctf_tokens_insufficient: token_id=yes-token-001 required=20 available=0"
-
-    monkeypatch.setattr(exit_lifecycle, "_refresh_exit_collateral_snapshot_for_submit", fake_refresh)
-    monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", fake_check)
     monkeypatch.setattr(
         exit_lifecycle,
-        "execute_exit_order",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("submit must not run")),
+        "_refresh_exit_collateral_snapshot_for_submit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("lifecycle must not run the executor's fetch-only collateral seam")
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("lifecycle must not re-check a different collateral snapshot")
+        ),
+    )
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **kwargs: (
+            calls.append(kwargs["token_id"])
+            or exit_lifecycle.OrderResult(
+                trade_id=kwargs["trade_id"],
+                status="rejected",
+                reason=(
+                    "ctf_tokens_insufficient: token_id=yes-token-001 "
+                    "required=20000000 available=0"
+                ),
+            )
+        ),
     )
 
     outcome = exit_lifecycle.execute_exit(
@@ -5272,14 +5283,13 @@ def test_live_exit_refreshes_collateral_before_sell_preflight(conn, monkeypatch)
         conn=conn,
     )
 
-    assert outcome.startswith("collateral_blocked: ctf_tokens_insufficient")
-    assert calls == ["refresh", "check"]
+    assert outcome.startswith("sell_error: ctf_tokens_insufficient")
+    assert calls == [YES_TOKEN]
     assert position.exit_state == "retry_pending"
 
 
-def test_live_exit_collateral_refresh_failure_retries_before_preflight(conn, monkeypatch):
+def test_live_exit_executor_collateral_refresh_failure_retries(conn, monkeypatch):
     from src.execution import exit_lifecycle
-    from src.state.collateral_ledger import CollateralInsufficient
     from src.state.portfolio import ExitContext, PortfolioState, Position
 
     position = Position(
@@ -5319,15 +5329,12 @@ def test_live_exit_collateral_refresh_failure_retries_before_preflight(conn, mon
         )
     monkeypatch.setattr(
         exit_lifecycle,
-        "_refresh_exit_collateral_snapshot_for_submit",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            CollateralInsufficient("collateral_refresh_failed: network")
+        "place_sell_order",
+        lambda **kwargs: exit_lifecycle.OrderResult(
+            trade_id=kwargs["trade_id"],
+            status="rejected",
+            reason="collateral_refresh_failed: network",
         ),
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "check_sell_collateral",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("preflight must not run")),
     )
 
     outcome = exit_lifecycle.execute_exit(
@@ -5338,7 +5345,7 @@ def test_live_exit_collateral_refresh_failure_retries_before_preflight(conn, mon
         conn=conn,
     )
 
-    assert outcome == "collateral_blocked: collateral_refresh_failed: network"
+    assert outcome == "sell_error: collateral_refresh_failed: network"
     assert position.exit_state == "retry_pending"
     assert position.last_exit_error == "collateral_refresh_failed: network"
 
