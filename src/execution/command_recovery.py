@@ -91,6 +91,7 @@ _LIVE_TICK_DB_PROGRESS_OPCODES = 1_000
 _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES = 4
 _LIVE_TICK_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS = 20.0
 _LIVE_TICK_IDENTITY_BOUND_ROTATION_SECONDS = 60
+_FULL_SWEEP_BUDGET_SECONDS = 45.0
 _RESTART_ACCOUNT_TRUTH_DEADLINE_ENV = (
     "ZEUS_RESTART_RECOVERY_ACCOUNT_TRUTH_DEADLINE_SECONDS"
 )
@@ -139,6 +140,20 @@ def _identity_bound_rotation_slot() -> int:
     return int(time.time() // _LIVE_TICK_IDENTITY_BOUND_ROTATION_SECONDS)
 
 
+def _full_sweep_budget_seconds() -> float:
+    raw = os.environ.get(
+        "ZEUS_FULL_RECOVERY_BUDGET_SECONDS",
+        str(_FULL_SWEEP_BUDGET_SECONDS),
+    )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = _FULL_SWEEP_BUDGET_SECONDS
+    if not value > 0.0:
+        value = _FULL_SWEEP_BUDGET_SECONDS
+    return min(value, 50.0)
+
+
 def _identity_bound_point_order_read_worker(
     send_conn,
     order_ids: list[str],
@@ -175,7 +190,7 @@ def _read_identity_bound_point_orders(
     order_ids: set[str],
     *,
     timeout_seconds: float | None = None,
-) -> tuple[dict[str, dict], bool]:
+) -> tuple[dict[str, dict | None], bool]:
     """Return bounded positive point reads, killing and reaping a wedged child.
 
     The child receives only exact IDs and performs no DB or venue mutation.  An
@@ -245,7 +260,8 @@ def _read_identity_bound_point_orders(
         return {
             order_id: payload
             for order_id, payload in raw_orders.items()
-            if order_id in order_ids and isinstance(payload, dict)
+            if order_id in order_ids
+            and (payload is None or isinstance(payload, dict))
         }, False
     finally:
         receive_conn.close()
@@ -20975,7 +20991,10 @@ def _recovery_apply_conn_factory(
     scope: str,
     deadline_monotonic: float | None = None,
 ):
-    if scope != "live_tick":
+    bounded_scope = scope == "live_tick" or (
+        scope == "full" and deadline_monotonic is not None
+    )
+    if not bounded_scope:
         return conn_factory
 
     def _nowait_conn():
@@ -21001,6 +21020,32 @@ def _recovery_apply_conn_factory(
     return _nowait_conn
 
 
+def _recovery_read_conn_factory(
+    conn_factory,
+    *,
+    deadline_monotonic: float | None,
+):
+    if deadline_monotonic is None:
+        return conn_factory
+
+    def _bounded_read_conn():
+        if time.monotonic() >= deadline_monotonic:
+            raise _LiveTickDBBudgetExhausted
+        conn = conn_factory()
+        try:
+            conn.execute("PRAGMA busy_timeout = 0")
+            conn.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline_monotonic),
+                _LIVE_TICK_DB_PROGRESS_OPCODES,
+            )
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    return _bounded_read_conn
+
+
 def _run_recovery_pass_with_lock_policy(
     label: str,
     fn,
@@ -21009,7 +21054,10 @@ def _run_recovery_pass_with_lock_policy(
     summary: dict,
     deadline_monotonic: float | None = None,
 ):
-    if scope == "live_tick" and (
+    bounded_scope = scope == "live_tick" or (
+        scope == "full" and deadline_monotonic is not None
+    )
+    if bounded_scope and (
         summary.get("db_lock_deferred") or summary.get("db_budget_deferred")
     ):
         return None
@@ -21030,7 +21078,7 @@ def _run_recovery_pass_with_lock_policy(
         except (BlockingIOError, sqlite3.OperationalError) as exc:
             message = str(exc)
             is_budget = (
-                scope == "live_tick"
+                bounded_scope
                 and deadline_monotonic is not None
                 and time.monotonic() >= deadline_monotonic
                 and isinstance(exc, sqlite3.OperationalError)
@@ -21056,13 +21104,14 @@ def _run_recovery_pass_with_lock_policy(
             )
             if not is_lock:
                 raise
-            if scope == "live_tick":
+            if bounded_scope:
                 summary["db_lock_deferred"] = True
                 summary["db_lock_deferred_at"] = label
                 summary["db_lock_deferred_count"] = 1
                 logger.info(
-                    "recovery: live_tick pass %s deferred on DB contention; "
+                    "recovery: bounded %s pass %s deferred on DB contention; "
                     "remaining apply work will retry next tick",
+                    scope,
                     label,
                 )
                 return None
@@ -21829,6 +21878,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         else conn_factory
     )
     live_tick_deadline = None
+    full_deadline = None
     if scope == "live_tick":
         raw_budget = os.environ.get(
             "ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS",
@@ -21845,10 +21895,23 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             live_tick_budget = _LIVE_TICK_DB_BUDGET_SECONDS
         summary["live_tick_db_budget_seconds"] = live_tick_budget
         live_tick_deadline = time.monotonic() + live_tick_budget
+    elif scope == "full":
+        full_budget = _full_sweep_budget_seconds()
+        summary["full_sweep_budget_seconds"] = full_budget
+        full_deadline = time.monotonic() + full_budget
+    apply_deadline = live_tick_deadline or full_deadline
     apply_conn_factory = _recovery_apply_conn_factory(
         conn_factory,
         scope=scope,
-        deadline_monotonic=live_tick_deadline,
+        deadline_monotonic=apply_deadline,
+    )
+    read_conn_factory = _recovery_read_conn_factory(
+        read_conn_factory,
+        # live_tick priority readers own their separate sub-deadlines; applying
+        # the tiny cumulative write budget here would suppress exact-order
+        # recovery before it starts. The full sweep alone needs one total
+        # read/network/apply deadline.
+        deadline_monotonic=full_deadline,
     )
 
     def _run_pass_with_lock_retry(label: str, fn):
@@ -21857,7 +21920,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             fn,
             scope=scope,
             summary=summary,
-            deadline_monotonic=live_tick_deadline,
+            deadline_monotonic=apply_deadline,
         )
 
     def _client_pass(
@@ -22726,17 +22789,57 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         return
 
     # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
-    with open_tracked(read_conn_factory, label="recovery.priming:snapshot") as conn:
-        priming = _collect_recovery_priming_keys(conn, scope=scope)
+    try:
+        with open_tracked(read_conn_factory, label="recovery.priming:snapshot") as conn:
+            priming = _collect_recovery_priming_keys(conn, scope=scope)
+    except _LiveTickDBBudgetExhausted:
+        summary["db_budget_deferred"] = True
+        summary["db_budget_deferred_at"] = "priming_snapshot"
+        summary["db_budget_deferred_count"] = 1
+        summary["scope"] = scope
+        summary["deferred_full_sweep"] = True
+        return
+    except sqlite3.OperationalError as exc:
+        if (
+            apply_deadline is None
+            or (
+                "locked" not in str(exc).lower()
+                and "interrupted" not in str(exc).lower()
+            )
+        ):
+            raise
+        summary["db_lock_deferred"] = True
+        summary["db_lock_deferred_at"] = "priming_snapshot"
+        summary["db_lock_deferred_count"] = 1
+        summary["scope"] = scope
+        summary["deferred_full_sweep"] = True
+        return
 
     # -- PHASE 2: NETWORK (no connection in scope) -----------------------------
     assert_no_open_connection("recovery.capture_venue_snapshot")
+    snapshot_kwargs = _account_truth_snapshot_kwargs(scope)
+    if scope == "full":
+        assert full_deadline is not None
+        snapshot_kwargs.update(
+            {
+                "order_ids": priming["order_ids"],
+                "idempotency_keys": priming["idempotency_keys"],
+                "condition_ids": priming["condition_ids"],
+                "deadline_monotonic": full_deadline,
+                "derive_orders_from_account_truth": True,
+            }
+        )
+    else:
+        snapshot_kwargs.update(
+            {
+                "order_ids": priming["order_ids"],
+                "idempotency_keys": priming["idempotency_keys"],
+                "condition_ids": priming["condition_ids"],
+            }
+        )
     venue_snapshot = capture_venue_read_snapshot(
         client,
-        order_ids=priming["order_ids"],
-        idempotency_keys=priming["idempotency_keys"],
-        condition_ids=priming["condition_ids"],
-        **_account_truth_snapshot_kwargs(scope),
+        **snapshot_kwargs,
     )
 
     # -- PHASE 3: APPLY (each pass on its own short bounded write connection) ---

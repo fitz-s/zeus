@@ -1259,6 +1259,36 @@ def test_full_recovery_preserves_lock_retry_schedule(monkeypatch):
     assert sleeps == [2.0, 5.0]
 
 
+def test_bounded_full_recovery_lock_contention_defers_without_sleep(monkeypatch):
+    from src.execution import command_recovery
+
+    summary = {}
+    monkeypatch.setattr(
+        command_recovery.time,
+        "sleep",
+        lambda _delay: pytest.fail("bounded full recovery must not sleep"),
+    )
+
+    result = command_recovery._run_recovery_pass_with_lock_policy(
+        "required_pass",
+        lambda: (_ for _ in ()).throw(
+            BlockingIOError(
+                "db_writer_lock(write_class=live) contended on test.writer-lock.live"
+            )
+        ),
+        scope="full",
+        summary=summary,
+        deadline_monotonic=command_recovery.time.monotonic() + 1.0,
+    )
+
+    assert result is None
+    assert summary == {
+        "db_lock_deferred": True,
+        "db_lock_deferred_at": "required_pass",
+        "db_lock_deferred_count": 1,
+    }
+
+
 def test_live_tick_does_not_swallow_unrelated_blocking_io():
     from src.execution import command_recovery
 
@@ -1298,6 +1328,47 @@ def test_live_tick_apply_factory_requests_two_layer_nowait():
         conn.close()
 
     assert calls == [{"blocking": False, "busy_timeout_ms": 0}]
+
+
+def test_bounded_full_apply_factory_requests_two_layer_nowait():
+    from src.execution import command_recovery
+
+    calls = []
+
+    def _factory(**kwargs):
+        calls.append(kwargs)
+        conn = sqlite3.connect(":memory:")
+        conn.execute(f"PRAGMA busy_timeout = {kwargs['busy_timeout_ms']}")
+        return conn
+
+    _factory.supports_nonblocking_flocks = True
+    full_factory = command_recovery._recovery_apply_conn_factory(
+        _factory,
+        scope="full",
+        deadline_monotonic=command_recovery.time.monotonic() + 1.0,
+    )
+
+    conn = full_factory()
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    assert calls == [{"blocking": False, "busy_timeout_ms": 0}]
+
+
+def test_bounded_recovery_read_factory_rejects_expired_deadline():
+    from src.execution import command_recovery
+
+    calls = []
+    read_factory = command_recovery._recovery_read_conn_factory(
+        lambda: calls.append("opened"),
+        deadline_monotonic=command_recovery.time.monotonic() - 1.0,
+    )
+
+    with pytest.raises(command_recovery._LiveTickDBBudgetExhausted):
+        read_factory()
+    assert calls == []
 
 
 def test_live_tick_apply_factory_interrupts_query_after_deadline(monkeypatch):
@@ -24280,8 +24351,8 @@ def test_edli_command_recovery_runs_fast_tick_and_periodic_full_sweep(monkeypatc
     monkeypatch.setattr(
         main,
         "_consume_edli_command_recovery_summary",
-        lambda summary, *, log_context: consumed.append(
-            (summary["scope"], log_context)
+        lambda summary, *, log_context: (
+            consumed.append((summary["scope"], log_context)) or True
         ),
     )
 
@@ -24295,3 +24366,189 @@ def test_edli_command_recovery_runs_fast_tick_and_periodic_full_sweep(monkeypatc
         ("live_tick", "edli_command_recovery.live_tick"),
     ]
     assert main._EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET == 7
+
+
+def test_edli_command_recovery_retries_full_bucket_after_returned_error(monkeypatch):
+    from src import main
+    from src.execution import command_recovery
+
+    scopes = []
+    full_calls = 0
+
+    def _reconcile(*, scope):
+        nonlocal full_calls
+        scopes.append(scope)
+        if scope == "full":
+            full_calls += 1
+            return {
+                "scope": scope,
+                "scanned": 1,
+                "advanced": 0,
+                "stayed": 0,
+                "errors": 1 if full_calls == 1 else 0,
+            }
+        return {
+            "scope": scope,
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
+    monkeypatch.setattr(main, "get_mode", lambda: "live")
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _job_name: False,
+    )
+    monkeypatch.setattr(main, "_edli_command_recovery_full_bucket", lambda: 11)
+    monkeypatch.setattr(main, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", None)
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        _reconcile,
+    )
+    monkeypatch.setattr(
+        main,
+        "_consume_edli_command_recovery_summary",
+        lambda _summary, *, log_context: True,
+    )
+
+    main._edli_command_recovery_cycle.__wrapped__()
+    assert main._EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET is None
+    main._edli_command_recovery_cycle.__wrapped__()
+
+    assert scopes == ["live_tick", "full", "live_tick", "full"]
+    assert main._EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET == 11
+
+
+def test_edli_command_recovery_retries_full_bucket_after_follow_through_failure(
+    monkeypatch,
+):
+    from src import main
+    from src.execution import command_recovery
+
+    scopes = []
+    follow_through = iter([True, False, True, True])
+    monkeypatch.setattr(main, "get_mode", lambda: "live")
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _job_name: False,
+    )
+    monkeypatch.setattr(main, "_edli_command_recovery_full_bucket", lambda: 13)
+    monkeypatch.setattr(main, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", None)
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda *, scope: scopes.append(scope)
+        or {
+            "scope": scope,
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_consume_edli_command_recovery_summary",
+        lambda _summary, *, log_context: next(follow_through),
+    )
+
+    main._edli_command_recovery_cycle.__wrapped__()
+    assert main._EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET is None
+    main._edli_command_recovery_cycle.__wrapped__()
+
+    assert scopes == ["live_tick", "full", "live_tick", "full"]
+    assert main._EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET == 13
+
+
+def test_command_recovery_follow_through_rejects_unconfigured_allocator(monkeypatch):
+    from src import main
+    from src.state import db, portfolio
+
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: conn)
+    monkeypatch.setattr(
+        portfolio,
+        "load_runtime_open_portfolio",
+        lambda _conn: object(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_refresh_global_allocator",
+        lambda _conn, *, portfolio_snapshot: {
+            "configured": False,
+            "fail_closed": True,
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_emit_command_recovery_redecision_continuations",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unconfigured allocator must stop follow-through"
+        ),
+    )
+
+    assert (
+        main._consume_edli_command_recovery_summary(
+            {"advanced": 1, "errors": 0},
+            log_context="test",
+        )
+        is False
+    )
+
+
+def test_command_recovery_follow_through_propagates_redecision_failure(monkeypatch):
+    from src import main
+
+    monkeypatch.setattr(
+        main,
+        "_emit_command_recovery_redecision_continuations",
+        lambda *_args, **_kwargs: False,
+    )
+
+    assert (
+        main._consume_edli_command_recovery_summary(
+            {"advanced": 0, "errors": 0},
+            log_context="test",
+        )
+        is False
+    )
+
+
+def test_command_recovery_follow_through_retries_world_mutex_contention(monkeypatch):
+    from src import main
+    from src.state import db
+
+    class Conn:
+        def set_progress_handler(self, *_args):
+            pass
+
+        def close(self):
+            pass
+
+    class Mutex:
+        def release(self):
+            raise AssertionError("unacquired mutex must not be released")
+
+    monkeypatch.setattr(db, "get_trade_connection_read_only", Conn)
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", Conn)
+    monkeypatch.setattr(db, "get_world_connection", Conn)
+    monkeypatch.setattr(db, "world_write_mutex", Mutex)
+    monkeypatch.setattr(
+        main,
+        "_terminal_no_fill_continuation_families",
+        lambda *_args: {("Tokyo", "2026-07-30", "high")},
+    )
+    monkeypatch.setattr(main, "_edli_acquire_mutex", lambda *_args, **_kwargs: False)
+
+    assert (
+        main._emit_command_recovery_redecision_continuations(
+            {"advanced": 0, "errors": 0},
+            log_context="test",
+            deadline_monotonic=main._time.monotonic() + 1.0,
+        )
+        is False
+    )

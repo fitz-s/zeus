@@ -4871,11 +4871,18 @@ def _edli_command_recovery_cycle() -> None:
     if full_bucket == _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET:
         return
     full_summary = reconcile_unresolved_commands(scope="full")
-    _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET = full_bucket
-    _consume_edli_command_recovery_summary(
+    follow_through_ok = _consume_edli_command_recovery_summary(
         full_summary,
         log_context="edli_command_recovery.full",
     )
+    if (
+        int(full_summary.get("errors", 0) or 0) == 0
+        and not full_summary.get("db_lock_deferred")
+        and not full_summary.get("db_budget_deferred")
+        and not full_summary.get("full_point_read_timed_out")
+        and follow_through_ok
+    ):
+        _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET = full_bucket
 
 
 def _edli_command_recovery_full_bucket(
@@ -4896,27 +4903,51 @@ def _consume_edli_command_recovery_summary(
     summary: dict,
     *,
     log_context: str,
-) -> None:
+) -> bool:
     """Apply allocator and redecision follow-through for one recovery scope."""
 
-    from src.state.db import get_trade_connection_with_world_required
+    from src.state.db import get_trade_connection_read_only
+    from src.state.portfolio import load_runtime_open_portfolio
 
     if summary.get("scanned"):
         logger.info("%s: %s", log_context, summary)
+    deadline = _time.monotonic() + 5.0
     if _command_recovery_summary_mutated_allocator_inputs(summary):
-        trade_conn = get_trade_connection_with_world_required(write_class=None)
         try:
-            allocator_refresh = _edli_refresh_global_allocator(trade_conn)
-        finally:
-            trade_conn.close()
+            trade_conn = get_trade_connection_read_only()
+            try:
+                trade_conn.set_progress_handler(
+                    lambda: int(_time.monotonic() >= deadline),
+                    1_000,
+                )
+                portfolio_snapshot = load_runtime_open_portfolio(trade_conn)
+                allocator_refresh = _edli_refresh_global_allocator(
+                    trade_conn,
+                    portfolio_snapshot=portfolio_snapshot,
+                )
+            finally:
+                trade_conn.close()
+        except Exception as exc:  # noqa: BLE001 - next minute owns continuation.
+            logger.warning(
+                "%s: allocator follow-through failed; full bucket remains retryable: %r",
+                log_context,
+                exc,
+            )
+            return False
         logger.info(
             "%s: refreshed allocator after recovery mutation: %s",
             log_context,
             allocator_refresh,
         )
-    _emit_command_recovery_redecision_continuations(
+        if (
+            isinstance(allocator_refresh, dict)
+            and allocator_refresh.get("configured") is False
+        ):
+            return False
+    return _emit_command_recovery_redecision_continuations(
         summary,
         log_context=log_context,
+        deadline_monotonic=deadline,
     )
 
 
@@ -5278,7 +5309,8 @@ def _emit_live_redecision_events_for_families(
     decision_time: datetime,
     received_at: str,
     origin: str,
-) -> int:
+    return_deferred: bool = False,
+) -> int | None:
     """Emit standard live redecision rows for already-live order management work."""
 
     if not families:
@@ -5310,7 +5342,7 @@ def _emit_live_redecision_events_for_families(
                 len(families),
                 emit_lock_timeout_s,
             )
-            return 0
+            return None if return_deferred else 0
         trig = ForecastSnapshotReadyTrigger(
             EventWriter(world),
             live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
@@ -5347,7 +5379,8 @@ def _emit_terminal_no_fill_redecision_continuations(
     *,
     decision_time: datetime,
     received_at: str,
-) -> int:
+    return_deferred: bool = False,
+) -> int | None:
     """Emit standard continuous redecision rows after no-fill terminal recovery."""
 
     return _emit_live_redecision_events_for_families(
@@ -5355,6 +5388,7 @@ def _emit_terminal_no_fill_redecision_continuations(
         decision_time=decision_time,
         received_at=received_at,
         origin="terminal_no_fill",
+        return_deferred=return_deferred,
     )
 
 
@@ -5395,9 +5429,10 @@ def _emit_command_recovery_redecision_continuations(
     summary: object,
     *,
     log_context: str,
-) -> None:
+    deadline_monotonic: float | None = None,
+) -> bool:
     if not isinstance(summary, dict):
-        return
+        return True
     try:
         from datetime import datetime, timezone
         from src.state.db import get_forecasts_connection_read_only, get_trade_connection_read_only
@@ -5405,6 +5440,12 @@ def _emit_command_recovery_redecision_continuations(
         trade_ro = get_trade_connection_read_only()
         forecasts_ro = get_forecasts_connection_read_only()
         try:
+            if deadline_monotonic is not None:
+                for conn in (trade_ro, forecasts_ro):
+                    conn.set_progress_handler(
+                        lambda: int(_time.monotonic() >= deadline_monotonic),
+                        1_000,
+                    )
             families = _terminal_no_fill_continuation_families(
                 summary,
                 trade_ro,
@@ -5426,7 +5467,10 @@ def _emit_command_recovery_redecision_continuations(
                 families,
                 decision_time=now,
                 received_at=now.isoformat(),
+                return_deferred=True,
             )
+            if emitted is None:
+                return False
             logger.info(
                 "%s: terminal no-fill/pre-submit continuation "
                 "families=%d acted_state_cleared=%d events_emitted=%d",
@@ -5435,6 +5479,7 @@ def _emit_command_recovery_redecision_continuations(
                 cleared,
                 emitted,
             )
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "%s: terminal no-fill/pre-submit continuation emit failed "
@@ -5442,6 +5487,7 @@ def _emit_command_recovery_redecision_continuations(
             log_context,
             exc,
         )
+        return False
 
 
 def _emit_rest_pull_redecisions(

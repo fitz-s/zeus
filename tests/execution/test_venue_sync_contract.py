@@ -294,6 +294,34 @@ def test_capture_snapshot_preserves_point_order_timeout_as_unknown():
         snapshot.get_order("order-1")
 
 
+def test_complete_account_snapshot_eliminates_full_point_order_reads():
+    from src.execution import venue_sync_contract as vsc
+
+    open_order = {"orderID": "order-live", "status": "LIVE"}
+
+    class Client:
+        def get_account_truth(self, *, deadline_monotonic):
+            assert deadline_monotonic > time.monotonic()
+            return type(
+                "Truth",
+                (),
+                {"open_orders": (open_order,), "trades": ()},
+            )()
+
+        def get_order(self, _order_id):
+            raise AssertionError("complete account truth must eliminate N point reads")
+
+    snapshot = vsc.capture_venue_read_snapshot(
+        Client(),
+        order_ids=["order-live", "order-absent"],
+        derive_orders_from_account_truth=True,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert snapshot.get_order("order-live") == open_order
+    assert snapshot.get_order("order-absent") is None
+
+
 def test_capture_snapshot_normalizes_exact_empty_point_order_shape_to_not_found():
     from src.execution import venue_sync_contract as vsc
     from src.venue.response_contracts import VenueResponseShapeError
@@ -3000,16 +3028,16 @@ def test_default_read_factory_does_not_take_writer_flocks(monkeypatch):
     calls = []
     conn = sqlite3.connect(":memory:")
 
-    def _required(*, write_class):
-        calls.append(write_class)
+    def _read_only():
+        calls.append("read_only")
         return conn
 
-    monkeypatch.setattr(db, "get_trade_connection_with_world_required", _required)
+    monkeypatch.setattr(db, "get_trade_connection_read_only", _read_only)
 
     read_conn = vsc.default_trade_read_conn_factory()
 
     assert read_conn is conn
-    assert calls == [None]
+    assert calls == ["read_only"]
 
 
 def test_recovery_waits_before_taking_trade_when_world_main_writer_is_active(

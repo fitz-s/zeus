@@ -62,11 +62,13 @@ same located-failure posture as ``assert_no_world_mutex_held_for_io``.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import logging
 import math
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping
 from typing import Callable, TypeVar
 
 from src.venue.polymarket_v2_adapter import IncompleteAccountTruthError
@@ -351,11 +353,11 @@ default_trade_conn_factory.supports_nonblocking_flocks = True  # type: ignore[at
 
 
 def default_trade_read_conn_factory() -> sqlite3.Connection:
-    """Canonical attached recovery read connection without writer flocks."""
+    """Bounded read-only recovery connection without cutover/writer flocks."""
 
-    from src.state.db import get_trade_connection_with_world_required
+    from src.state.db import get_trade_connection_read_only
 
-    return get_trade_connection_with_world_required(write_class=None)
+    return get_trade_connection_read_only()
 
 
 class SnapshotMissError(RuntimeError):
@@ -476,6 +478,8 @@ def capture_venue_read_snapshot(
     idempotency_keys=(),
     condition_ids=(),
     account_truth_deadline_seconds: float = _ACCOUNT_TRUTH_DEADLINE_SECONDS,
+    deadline_monotonic: float | None = None,
+    derive_orders_from_account_truth: bool = False,
 ) -> VenueReadSnapshot:
     """NETWORK phase: capture every venue read the apply phase will need.
 
@@ -511,6 +515,12 @@ def capture_venue_read_snapshot(
     if not math.isfinite(budget) or budget <= 0.0:
         raise ValueError("account_truth_deadline_seconds must be finite and positive")
     account_deadline = time.monotonic() + budget
+    if deadline_monotonic is not None:
+        account_deadline = min(account_deadline, float(deadline_monotonic))
+    if account_deadline <= time.monotonic():
+        raise IncompleteAccountTruthError(
+            "INCOMPLETE_ACCOUNT_TRUTH: recovery snapshot deadline exhausted"
+        )
     account_reader = getattr(account_source, "get_account_truth", None)
     if not callable(account_reader):
         raise IncompleteAccountTruthError(
@@ -528,25 +538,54 @@ def capture_venue_read_snapshot(
     trades = list(account_truth.trades)
 
     orders: dict = {}
-    get_order_source = next((getattr(source, "get_order", None) for source in venue_sources if callable(getattr(source, "get_order", None))), None)
-    if callable(get_order_source):
-        for oid in {str(o) for o in order_ids if str(o).strip()}:
-            try:
-                orders[oid] = get_order_source(oid)
-            except VenueResponseShapeError as exc:
-                logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
-                # The pinned CLOB SDK returns an exact empty object when a
-                # previously known order has been purged. Preserve every other
-                # shape failure as unknown; only this observed get_order shape
-                # is normalized to the wrapper's documented NOT_FOUND value.
-                orders[oid] = (
-                    None
-                    if exc.endpoint == "get_order" and exc.raw == {}
-                    else _CapturedVenueReadFailure(exc)
+    requested_order_ids = {str(o) for o in order_ids if str(o).strip()}
+    if derive_orders_from_account_truth:
+        for order in open_orders:
+            raw = getattr(order, "raw", None)
+            order_id = (
+                getattr(order, "order_id", None)
+                or (
+                    raw.get("order_id")
+                    or raw.get("orderID")
+                    or raw.get("id")
+                    if isinstance(raw, Mapping)
+                    else None
                 )
-            except Exception as exc:  # noqa: BLE001 — preserve timeout/auth/read failure.
-                logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
-                orders[oid] = _CapturedVenueReadFailure(exc)
+                or (
+                    order.get("order_id")
+                    or order.get("orderID")
+                    or order.get("id")
+                    if isinstance(order, Mapping)
+                    else None
+                )
+            )
+            if order_id is not None and str(order_id) in requested_order_ids:
+                orders[str(order_id)] = order
+        # get_account_truth completed all open-order and trade pages under one
+        # shared deadline. An ID absent from open orders is therefore not live;
+        # positive fills remain available through the same snapshot's trades.
+        for oid in requested_order_ids:
+            orders.setdefault(oid, None)
+    else:
+        get_order_source = next((getattr(source, "get_order", None) for source in venue_sources if callable(getattr(source, "get_order", None))), None)
+        if callable(get_order_source):
+            for oid in requested_order_ids:
+                try:
+                    orders[oid] = get_order_source(oid)
+                except VenueResponseShapeError as exc:
+                    logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
+                    # The pinned CLOB SDK returns an exact empty object when a
+                    # previously known order has been purged. Preserve every other
+                    # shape failure as unknown; only this observed get_order shape
+                    # is normalized to the wrapper's documented NOT_FOUND value.
+                    orders[oid] = (
+                        None
+                        if exc.endpoint == "get_order" and exc.raw == {}
+                        else _CapturedVenueReadFailure(exc)
+                    )
+                except Exception as exc:  # noqa: BLE001 — preserve timeout/auth/read failure.
+                    logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
+                    orders[oid] = _CapturedVenueReadFailure(exc)
 
     idempotency: dict = {}
     finder = next(
@@ -559,6 +598,9 @@ def capture_venue_read_snapshot(
     )
     if callable(finder):
         for key in {str(k) for k in idempotency_keys if str(k).strip()}:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                idempotency[key] = None
+                continue
             try:
                 idempotency[key] = finder(key)
             except Exception:  # noqa: BLE001
@@ -574,9 +616,27 @@ def capture_venue_read_snapshot(
         None,
     )
     if callable(market_getter):
+        try:
+            market_getter_accepts_timeout = (
+                "timeout" in inspect.signature(market_getter).parameters
+            )
+        except (TypeError, ValueError):
+            market_getter_accepts_timeout = False
         for cid in {str(c) for c in condition_ids if str(c).strip()}:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                market_info[cid] = None
+                continue
             try:
-                market_info[cid] = market_getter(cid)
+                remaining = (
+                    max(0.01, min(2.0, deadline_monotonic - time.monotonic()))
+                    if deadline_monotonic is not None
+                    else None
+                )
+                market_info[cid] = (
+                    market_getter(cid, timeout=remaining)
+                    if remaining is not None and market_getter_accepts_timeout
+                    else market_getter(cid)
+                )
             except Exception:  # noqa: BLE001
                 market_info[cid] = None
 
