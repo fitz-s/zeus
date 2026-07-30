@@ -900,19 +900,19 @@ class Position:
         in lifecycle, risk, or monitor logic."""
         return self.city == QUARANTINE_SENTINEL
 
-    def _held_side_robust_lower(
+    def _held_side_point_with_confidence(
         self, exit_context: ExitContext
     ) -> tuple[Decimal, bool]:
-        """Held-side robust lower bound q⁻ and whether evidence supports a stop.
+        """Held-side posterior-predictive mean q and confidence-carrier validity.
 
         The current-belief CI arrives already in held-side native space
         (cycle_runtime shifts the edge band by the held-side price into the same
-        space as ``p_posterior``), so the NO-side native flip q⁻_NO = 1−q⁺_YES has
-        happened upstream — ``current_ci[0]`` is the genuine held-side q⁻ and must
-        NOT be re-derived by complementing the YES bound here. Returns
+        space as ``p_posterior``), so the NO-side native flip has already happened
+        upstream. The fresh point is the fixed-action payoff probability; the CI
+        proves current confidence/freshness but must not replace that point. Returns
         ``(0, False)`` whenever belief is degraded, the fresh probability is stale
-        or non-finite, or the CI is missing/malformed: evidence is then not ok and
-        the law holds EVIDENCE_UNAVAILABLE unless a settlement lock decides.
+        or non-finite, or the CI carrier is missing/malformed: evidence is then not
+        ok and the law holds EVIDENCE_UNAVAILABLE unless a settlement lock decides.
         """
         if not exit_context.belief_available:
             return _ZERO_D, False
@@ -933,7 +933,7 @@ class Position:
             return _ZERO_D, False
         if not (0.0 <= lo <= point <= hi <= 1.0):
             return _ZERO_D, False
-        return Decimal(str(lo)), True
+        return Decimal(str(point)), True
 
     def _settlement_preimage_lock(self, exit_context: ExitContext) -> LockState:
         """Map the Day0 absorbing hard-fact authority to a settlement lock.
@@ -1020,12 +1020,12 @@ class Position:
         """Position knows how to exit ITSELF via the one predicted-bin stopping law.
 
         The verdict is the unified PR-1 optimal stop (COLLISION.md C3, ΔJ≡0):
-        SELL ⟺ net liquidation proceeds L(x) beat the robust hold value h·q⁻,
+        SELL ⟺ net liquidation proceeds L(x) beat the posterior-mean hold value h·q,
         evaluated over the bid-depth breakpoints by predicted_bin_law.exit_decision.
         There is no per-direction branch, no repeated-cycle (neg_edge_count)
         confirmation, no divergence / velocity / flash-crash / vig trigger, and no
         near-settlement price floor: a near-certain winner holds because its bid
-        sits below q⁻≈1, and a reversed bin sells because the bid beats q⁻. The
+        sits below q≈1, and a reversed bin sells because the bid beats q. The
         entry price / cost basis is sunk and never enters the verdict.
 
         Precedence is the law's: RiskGuard RED force-exits in every phase (the
@@ -1040,13 +1040,13 @@ class Position:
         ]
 
         held_shares = Decimal(str(self.effective_shares))
-        q_lcb, evidence_ok = self._held_side_robust_lower(exit_context)
+        q_mean, evidence_ok = self._held_side_point_with_confidence(exit_context)
         lock = self._settlement_preimage_lock(exit_context)
         bid_breakpoints = self._exit_bid_breakpoints(exit_context, held_shares)
 
         verdict = predicted_bin_law.exit_decision(
             held_shares=held_shares,
-            q_lcb=q_lcb,
+            q_mean=q_mean,
             bid_breakpoints=bid_breakpoints,
             exit_margin=_EXIT_TICK * held_shares,
             lock=lock,
