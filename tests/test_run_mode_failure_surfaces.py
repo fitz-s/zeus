@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-07-30
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-30; last_reused=2026-07-30
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -7092,14 +7092,13 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
 
     conn = ReadOnlyConnection()
 
-    main_module._held_position_monitor_active.set()
+    boot_at = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
+    observed_kwargs: dict[str, object] = {}
+
+    main_module._held_position_monitor_active.clear()
     main_module._held_position_monitor_bootstrap_complete.clear()
     main_module._held_position_monitor_bootstrap_last_check = 0.0
-    monkeypatch.setitem(
-        main_module._BOOT_STATE,
-        "ts",
-        datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc),
-    )
+    monkeypatch.setitem(main_module._BOOT_STATE, "ts", boot_at)
     monkeypatch.setattr(main_module.time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(
         db_module,
@@ -7109,7 +7108,7 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
     monkeypatch.setattr(
         cadence_module,
         "collect_monitor_cadence_evidence",
-        lambda *_args, **_kwargs: {
+        lambda *_args, **kwargs: observed_kwargs.update(kwargs) or {
             "open_position_count": 20,
             "fresh_position_count": 7,
             "future_monitor_event_count": 0,
@@ -7119,6 +7118,154 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
         assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
         assert main_module._held_position_monitor_bootstrap_complete.is_set()
         assert conn.closed is True
+        assert observed_kwargs["min_occurred_at"] == boot_at
+        assert observed_kwargs["strict_future"] is True
+        assert observed_kwargs["monitor_refreshed_only"] is True
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    (
+        {
+            "open_position_count": 1,
+            "fresh_position_count": 0,
+            "future_monitor_event_count": 0,
+        },
+        {
+            "open_position_count": 20,
+            "fresh_position_count": 6,
+            "future_monitor_event_count": 0,
+        },
+    ),
+)
+def test_reactor_bootstrap_stays_deferred_after_monitor_clear_without_required_post_boot_coverage(
+    monkeypatch,
+    evidence,
+) -> None:
+    from datetime import datetime, timezone
+
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._held_position_monitor_bootstrap_last_check = 0.0
+    monkeypatch.setitem(
+        main_module._BOOT_STATE,
+        "ts",
+        datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: evidence,
+    )
+    try:
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+        assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    (
+        {
+            "open_position_count": 1,
+            "fresh_position_count": 0,
+            "future_monitor_event_count": 0,
+        },
+        {
+            "open_position_count": 1,
+            "fresh_position_count": 0,
+            "future_monitor_event_count": 1,
+        },
+    ),
+)
+def test_reactor_bootstrap_rejects_pre_boot_or_near_future_canonical_evidence(
+    monkeypatch,
+    evidence,
+) -> None:
+    from datetime import datetime, timezone
+
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    boot_at = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
+    observed_kwargs: dict[str, object] = {}
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._held_position_monitor_bootstrap_last_check = 0.0
+    monkeypatch.setitem(main_module._BOOT_STATE, "ts", boot_at)
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **kwargs: observed_kwargs.update(kwargs) or evidence,
+    )
+    try:
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+        assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
+        assert observed_kwargs["min_occurred_at"] == boot_at
+        assert observed_kwargs["strict_future"] is True
+        assert observed_kwargs["monitor_refreshed_only"] is True
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_reactor_bootstrap_completes_vacuously_without_open_held_positions(
+    monkeypatch,
+) -> None:
+    from datetime import datetime, timezone
+
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._held_position_monitor_bootstrap_last_check = 0.0
+    monkeypatch.setitem(
+        main_module._BOOT_STATE,
+        "ts",
+        datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: {
+            "open_position_count": 0,
+            "fresh_position_count": 0,
+            "future_monitor_event_count": 0,
+        },
+    )
+    try:
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+        assert main_module._held_position_monitor_bootstrap_complete.is_set()
     finally:
         main_module._held_position_monitor_active.clear()
         main_module._held_position_monitor_bootstrap_complete.clear()

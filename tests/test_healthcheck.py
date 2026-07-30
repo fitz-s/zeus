@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-04-30; last_reviewed=2026-07-30; last_reused=2026-07-30
 # Purpose: Lock healthcheck relationship predicates for live daemon, launchd, entry capability, and settlement truth.
 # Reuse: Run when scripts/healthcheck.py health predicates or live readiness status fields change.
 # Created: 2026-04-30
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-30
 # Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; healthcheck live-only runtime contract; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 from __future__ import annotations
 import pytest
@@ -1687,6 +1687,154 @@ def test_monitor_cadence_status_accepts_fresh_monitor_refresh(monkeypatch, tmp_p
     assert result["ok"] is True
     assert result["issue"] is None
     assert result["open_position_count"] == 1
+
+
+def test_monitor_cadence_strict_future_rejects_near_future_monitor_event(tmp_path):
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+    db_path = tmp_path / "zeus_trades.db"
+    now = datetime.now(timezone.utc)
+    _init_monitor_cadence_db(db_path, monitor_at=now + timedelta(seconds=10))
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            strict_future=True,
+        )
+    finally:
+        conn.close()
+
+    assert evidence["fresh_position_count"] == 0
+    assert evidence["future_monitor_event_count"] == 1
+
+
+def test_monitor_cadence_post_boot_floor_rejects_pre_boot_monitor_event(tmp_path):
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+    db_path = tmp_path / "zeus_trades.db"
+    boot_at = datetime.now(timezone.utc)
+    _init_monitor_cadence_db(
+        db_path,
+        monitor_at=boot_at - timedelta(microseconds=1),
+    )
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=boot_at,
+            min_occurred_at=boot_at,
+        )
+    finally:
+        conn.close()
+
+    assert evidence["fresh_position_count"] == 0
+    assert evidence["stale_or_missing_position_count"] == 1
+
+
+@pytest.mark.parametrize("event_type", ("REVIEW_REQUIRED", "EXIT_ORDER_REJECTED"))
+def test_monitor_cadence_monitor_refreshed_only_rejects_post_boot_alternative_event(
+    tmp_path,
+    event_type,
+):
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+    db_path = tmp_path / "zeus_trades.db"
+    boot_at = datetime.now(timezone.utc)
+    _init_monitor_cadence_db(db_path, monitor_at=None)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("ALTER TABLE position_events ADD COLUMN payload_json TEXT")
+        payload = None
+        if event_type == "REVIEW_REQUIRED":
+            payload = json.dumps(
+                {
+                    "reason": "entry_authority_chain_absence_conflict",
+                    "review_state": "unresolved",
+                    "source": "chain_reconciliation",
+                }
+            )
+        else:
+            conn.execute("ALTER TABLE position_current ADD COLUMN order_status TEXT")
+            conn.execute("ALTER TABLE position_current ADD COLUMN exit_reason TEXT")
+            conn.execute(
+                """
+                UPDATE position_current
+                   SET phase = 'pending_exit', order_status = 'retry_pending'
+                 WHERE position_id = 'pos-1'
+                """
+            )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                payload_json
+            ) VALUES ('evt-alternative', 'pos-1', 3, ?, ?, ?)
+            """,
+            (event_type, (boot_at + timedelta(seconds=1)).isoformat(), payload),
+        )
+        conn.commit()
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=boot_at + timedelta(seconds=2),
+            min_occurred_at=boot_at,
+            monitor_refreshed_only=True,
+        )
+    finally:
+        conn.close()
+
+    assert evidence["fresh_position_count"] == 0
+    assert evidence["stale_or_missing_position_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("monitor_refreshed_only", "expected_fresh"),
+    ((False, 1), (True, 0)),
+)
+def test_monitor_cadence_monitor_refreshed_only_rejects_dust_without_monitor_event(
+    tmp_path,
+    monitor_refreshed_only,
+    expected_fresh,
+):
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+    db_path = tmp_path / "zeus_trades.db"
+    boot_at = datetime.now(timezone.utc)
+    _init_monitor_cadence_db(db_path, monitor_at=None)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("ALTER TABLE position_current ADD COLUMN order_status TEXT")
+        conn.execute("ALTER TABLE position_current ADD COLUMN exit_reason TEXT")
+        dust_reason = (
+            "[DUST: executable_snapshot_gate: size 3.1125 is below "
+            "snapshot min_order_size 5]"
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit', order_status = 'backoff_exhausted',
+                   shares = 3.1125, chain_shares = 3.1125,
+                   exit_reason = ?
+             WHERE position_id = 'pos-1'
+            """,
+            (dust_reason,),
+        )
+        conn.commit()
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=boot_at + timedelta(seconds=1),
+            min_occurred_at=boot_at,
+            monitor_refreshed_only=monitor_refreshed_only,
+        )
+    finally:
+        conn.close()
+
+    assert evidence["fresh_position_count"] == expected_fresh
+    assert evidence["stale_or_missing_position_count"] == 1 - expected_fresh
 
 
 def test_monitor_cadence_status_accepts_fresh_typed_review_management(

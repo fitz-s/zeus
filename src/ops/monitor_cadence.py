@@ -51,6 +51,8 @@ def collect_monitor_cadence_evidence(
     now: datetime,
     max_age_seconds: float | None = None,
     min_occurred_at: datetime | None = None,
+    strict_future: bool = False,
+    monitor_refreshed_only: bool = False,
     sample_limit: int = 25,
 ) -> dict[str, Any]:
     """Return per-position monitor cadence evidence for current money risk.
@@ -59,6 +61,10 @@ def collect_monitor_cadence_evidence(
     ``min_occurred_at`` is the post-start restart proof floor.  When both are
     supplied, a position must satisfy both.  Future-dated monitor events are
     reported separately because they are clock/data faults, not stale cadence.
+    ``strict_future`` rejects every event after ``now``; other consumers retain
+    the concurrent-write tolerance.
+    ``monitor_refreshed_only`` excludes non-monitor fallback authority from
+    coverage without changing the default health/preflight behavior.
     """
 
     position_columns = _table_columns(conn, "position_current")
@@ -88,8 +94,9 @@ def collect_monitor_cadence_evidence(
                     "restart_resolution": "settlement_harvester_or_chain_size_change",
                 }
             )
-            fresh_count += 1
-            continue
+            if not monitor_refreshed_only:
+                fresh_count += 1
+                continue
         monitor_event = _latest_monitor_refreshed_event(
             conn,
             str(position["position_id"]),
@@ -112,6 +119,11 @@ def collect_monitor_cadence_evidence(
             event_columns,
         )
         if not occurred_at:
+            if monitor_refreshed_only:
+                stale_or_missing.append(
+                    {**position_evidence, "last_monitor_refreshed_at": None}
+                )
+                continue
             if _review_required_event_is_fresh(
                 review_event,
                 now_utc=now_utc,
@@ -147,12 +159,16 @@ def collect_monitor_cadence_evidence(
             continue
         age_seconds = (now_utc - occurred_dt).total_seconds()
         position_evidence["age_seconds"] = round(age_seconds, 1)
-        if age_seconds < -MONITOR_CADENCE_FUTURE_TOLERANCE_SECONDS:
+        if age_seconds < (
+            0.0 if strict_future else -MONITOR_CADENCE_FUTURE_TOLERANCE_SECONDS
+        ):
             future_events.append(position_evidence)
         elif age_seconds < 0.0:
             fresh_count += 1
         elif min_occurred_utc is not None and occurred_dt < min_occurred_utc:
-            if _review_required_event_is_fresh(
+            if monitor_refreshed_only:
+                stale_or_missing.append(position_evidence)
+            elif _review_required_event_is_fresh(
                 review_event,
                 now_utc=now_utc,
                 max_age_seconds=max_age_seconds,
@@ -181,7 +197,9 @@ def collect_monitor_cadence_evidence(
                 else:
                     stale_or_missing.append(position_evidence)
         elif max_age_seconds is not None and age_seconds > float(max_age_seconds):
-            if _review_required_event_is_fresh(
+            if monitor_refreshed_only:
+                stale_or_missing.append(position_evidence)
+            elif _review_required_event_is_fresh(
                 review_event,
                 now_utc=now_utc,
                 max_age_seconds=max_age_seconds,

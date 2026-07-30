@@ -236,8 +236,6 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
     global _held_position_monitor_bootstrap_last_check
     if _held_position_monitor_bootstrap_complete.is_set():
         return True
-    if not _held_position_monitor_active.is_set():
-        return False
     now_monotonic = time.monotonic()
     if (
         now_monotonic - _held_position_monitor_bootstrap_last_check
@@ -257,6 +255,11 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
         boot_at = _BOOT_STATE.get("ts")
         if not isinstance(boot_at, datetime):
             return False
+        # SCOPE: this process's initial entry-reactor and market-discovery
+        # admission only. DRAIN: each bounded cadence read requires strict
+        # post-boot canonical evidence for the current open held positions.
+        # RESET: completion releases the bootstrap defer for this process;
+        # process restart initializes the completion Event clear and re-proves it.
         from src.ops.monitor_cadence import collect_monitor_cadence_evidence
         from src.state.db import get_trade_connection_read_only
 
@@ -265,7 +268,9 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
             evidence = collect_monitor_cadence_evidence(
                 conn,
                 now=datetime.now(timezone.utc),
-                min_occurred_at=boot_at - timedelta(seconds=5),
+                min_occurred_at=boot_at,
+                strict_future=True,
+                monitor_refreshed_only=True,
                 sample_limit=0,
             )
         finally:
@@ -273,10 +278,13 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
         if int(evidence.get("future_monitor_event_count") or 0) > 0:
             return False
         open_count = int(evidence.get("open_position_count") or 0)
-        required = min(open_count, max(2, (open_count + 2) // 3))
         fresh = int(evidence.get("fresh_position_count") or 0)
-        if fresh < required:
-            return False
+        if open_count == 0:
+            required = 0
+        else:
+            required = min(open_count, max(2, (open_count + 2) // 3))
+            if fresh <= 0 or fresh < required:
+                return False
         _held_position_monitor_bootstrap_complete.set()
         logger.info(
             "held-position monitor bootstrap coverage verified: "
