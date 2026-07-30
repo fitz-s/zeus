@@ -103,6 +103,25 @@ _forecast_exit_monitor_attempts_lock = threading.Lock()
 _forecast_exit_monitor_attempts: dict[str, bool | None] = {}
 _edli_reactor_wake_thread: threading.Thread | None = None
 _edli_last_reactor_wake_id: str | None = None
+
+
+@dataclass
+class _OneTurnWakeExclusion:
+    wake_id: str | None = None
+
+    def arm(self, wake_id: str) -> None:
+        self.wake_id = str(wake_id or "").strip() or None
+
+    def consume(self) -> frozenset[str]:
+        wake_id = self.wake_id
+        self.wake_id = None
+        return frozenset({wake_id}) if wake_id else frozenset()
+
+    def reset(self) -> None:
+        self.wake_id = None
+
+
+_edli_global_completion_yield = _OneTurnWakeExclusion()
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
         "edli_event_reactor",
@@ -3859,6 +3878,7 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     global _edli_last_reactor_wake_id
 
     _edli_last_reactor_wake_id = None
+    _edli_global_completion_yield.reset()
     _day0_urgent_wake_pending.clear()
     _day0_held_monitor_preempt_requested.clear()
 
@@ -4647,6 +4667,31 @@ def _terminal_held_sell_reauction_receipts(
     return tuple(receipts)
 
 
+def _yield_incomplete_global_completion_once(
+    wake: object,
+    pending_requests: tuple[object, ...],
+) -> None:
+    """Yield one selection turn after an incomplete held SELL exact cut.
+
+    SCOPE: only the selected global-completion wake_id; its durable file,
+    priority, and bytes are untouched. DRAIN: the next non-deferred listener
+    poll consumes the exclusion before selection, allowing one other queued
+    reason or one empty turn. RESET: consumption restores the wake on the
+    following turn, and listener initialization/restart clears process state.
+    """
+
+    from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+
+    if (
+        str(getattr(wake, "reason", "") or "")
+        == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        and pending_requests
+    ):
+        _edli_global_completion_yield.arm(
+            str(getattr(wake, "wake_id", "") or "")
+        )
+
+
 def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
@@ -4665,11 +4710,15 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
 
     excluded_wake_ids = _exit_monitor_excluded_wake_ids()
+    one_turn_yield_ids = _edli_global_completion_yield.consume()
     wake = (
         read_reactor_wake(exclude_wake_ids=excluded_wake_ids)
         if excluded_wake_ids
         else read_reactor_wake()
     )
+    if wake is not None and wake.wake_id in one_turn_yield_ids:
+        excluded_wake_ids = frozenset(excluded_wake_ids | one_turn_yield_ids)
+        wake = read_reactor_wake(exclude_wake_ids=excluded_wake_ids)
     if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
         return False
     wakes = tuple(
@@ -4919,12 +4968,20 @@ def _edli_reactor_wake_poll_once() -> bool:
             **reactor_kwargs,
         )
     if ran is not True:
+        _yield_incomplete_global_completion_once(
+            wake,
+            pending_held_sell_reauction_requests,
+        )
         return False
     if wake_event_ids and not _reactor_wake_events_finished(wake_event_ids):
         return False
     if held_sell_reauction_requests and not held_sell_reauction_requests_completed(
         held_sell_reauction_requests
     ):
+        _yield_incomplete_global_completion_once(
+            wake,
+            pending_held_sell_reauction_requests,
+        )
         return False
     if day0_wake and day0_requires_exit_monitor:
         _started, result = _day0_exit_monitor_attempt_state(wake.wake_id)

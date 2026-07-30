@@ -366,6 +366,11 @@ def _wake(*requests: reactor_wake.HeldSellReauctionRequest) -> reactor_wake.Reac
 def _install_listener_dependencies(monkeypatch, wake, order: list[str]) -> None:
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+    monkeypatch.setattr(
+        main,
+        "_edli_global_completion_yield",
+        main._OneTurnWakeExclusion(),
+    )
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         reactor_wake, "coalescible_reactor_wakes", lambda _wake: (wake,)
@@ -505,13 +510,24 @@ def test_oldest_active_wake_cannot_starve_later_terminal_queue_files(
     )
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
-    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
-    exact_cut_requests: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        main,
+        "_edli_global_completion_yield",
+        main._OneTurnWakeExclusion(),
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    selected_reasons: list[str] = []
 
     def _exact_cut(**kwargs):
-        requests = kwargs["producer_held_sell_reauction_requests"]
-        exact_cut_requests.append(tuple(request.position_id for request in requests))
-        return False
+        reason = kwargs["producer_wake_reason"]
+        selected_reasons.append(reason)
+        if reason == reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON:
+            requests = kwargs["producer_held_sell_reauction_requests"]
+            assert tuple(request.position_id for request in requests) == (
+                "oldest-active",
+            )
+            return False
+        return True
 
     monkeypatch.setattr(main, "_edli_event_reactor_cycle", _exact_cut)
     published_at = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
@@ -532,13 +548,28 @@ def test_oldest_active_wake_cannot_starve_later_terminal_queue_files(
             published_at=published_at + timedelta(microseconds=index),
             held_sell_reauction_requests=(request,),
         )
+    other_wakes = tuple(
+        reactor_wake.publish_reactor_wake(
+            source="test_producer",
+            reason=reason,
+            path=wake_path,
+            wake_id=f"wake-{reason}",
+            published_at=published_at + timedelta(microseconds=40 + index),
+        )
+        for index, reason in enumerate(
+            (
+                "position_fill_projected",
+                "market_price_advanced",
+                "forecast_posterior_advanced",
+            )
+        )
+    )
     active_queue_file = reactor_wake._wake_queue_target(
         active_wake, path=wake_path
     )
     active_bytes = active_queue_file.read_bytes()
 
-    for _ in range(3):
-        assert main._edli_reactor_wake_poll_once() is False
+    results = tuple(main._edli_reactor_wake_poll_once() for _ in range(8))
 
     remaining = reactor_wake.coalescible_reactor_wakes(
         reactor_wake.read_reactor_wake(path=wake_path),
@@ -547,7 +578,20 @@ def test_oldest_active_wake_cannot_starve_later_terminal_queue_files(
     )
     assert tuple(wake.wake_id for wake in remaining) == ("wake-active",)
     assert active_queue_file.read_bytes() == active_bytes
-    assert exact_cut_requests == [("oldest-active",)] * 3
+    assert results == (False, True, False, True, False, True, False, True)
+    assert selected_reasons == [
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        "position_fill_projected",
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        "market_price_advanced",
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        "forecast_posterior_advanced",
+    ]
+    assert all(
+        not reactor_wake._wake_queue_target(wake, path=wake_path).exists()
+        for wake in other_wakes
+    )
     assert all(
         reactor_wake.held_sell_reauction_requests_completed(
             (request,), path=wake_path
@@ -557,3 +601,94 @@ def test_oldest_active_wake_cannot_starve_later_terminal_queue_files(
     assert not reactor_wake.held_sell_reauction_requests_completed(
         (active,), path=wake_path
     )
+
+
+def test_global_completion_yield_preserves_day0_and_resets_without_work_or_restart(
+    monkeypatch, tmp_path: Path
+) -> None:
+    wake_path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
+    active = _request(position_id="active-only-yield", schema_version=3)
+    _install_trade_reader(
+        monkeypatch,
+        tmp_path,
+        (("active-only-yield", "active", "synced", 2.0, None),),
+    )
+    monkeypatch.setattr(
+        "src.config.state_path",
+        lambda filename: tmp_path / filename,
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main,
+        "_edli_global_completion_yield",
+        main._OneTurnWakeExclusion(),
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    exact_cut_count = 0
+    selected_reasons: list[str] = []
+
+    def _incomplete_exact_cut(**kwargs):
+        nonlocal exact_cut_count
+        reason = kwargs["producer_wake_reason"]
+        selected_reasons.append(reason)
+        if reason == "day0_extreme_event_committed":
+            return True
+        assert reason == reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        exact_cut_count += 1
+        return False
+
+    monkeypatch.setattr(main, "_edli_event_reactor_cycle", _incomplete_exact_cut)
+    monkeypatch.setattr(main, "_day0_wake_requires_exit_monitor", lambda _scope: False)
+    monkeypatch.setattr(
+        main, "_pending_held_day0_wake_families", lambda: frozenset()
+    )
+    wake = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id="wake-active-only-yield",
+        published_at=datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
+        held_sell_reauction_requests=(active,),
+    )
+    queue_file = reactor_wake._wake_queue_target(wake, path=wake_path)
+    queue_bytes = queue_file.read_bytes()
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert exact_cut_count == 1
+    day0_wake = reactor_wake.publish_reactor_wake(
+        source="day0_test_producer",
+        reason="day0_extreme_event_committed",
+        path=wake_path,
+        wake_id="wake-day0-during-global-yield",
+        published_at=datetime(2026, 7, 30, 12, 1, tzinfo=timezone.utc),
+    )
+    day0_queue_file = reactor_wake._wake_queue_target(
+        day0_wake, path=wake_path
+    )
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert exact_cut_count == 1
+    assert not day0_queue_file.exists()
+    assert queue_file.read_bytes() == queue_bytes
+    assert main._edli_reactor_wake_poll_once() is False
+    assert exact_cut_count == 2
+    assert main._edli_reactor_wake_poll_once() is False
+    assert exact_cut_count == 2
+    assert main._edli_reactor_wake_poll_once() is False
+    assert exact_cut_count == 3
+
+    main._edli_initialize_reactor_wake_cursor()
+    assert main._edli_reactor_wake_poll_once() is False
+    assert exact_cut_count == 4
+    assert main._edli_reactor_wake_poll_once() is False
+    assert exact_cut_count == 4
+    assert main._edli_reactor_wake_poll_once() is False
+    assert exact_cut_count == 5
+    assert selected_reasons[:3] == [
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        "day0_extreme_event_committed",
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+    ]
+    assert queue_file.read_bytes() == queue_bytes
+    assert reactor_wake.read_reactor_wake(path=wake_path) == wake
