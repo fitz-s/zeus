@@ -8193,9 +8193,15 @@ def test_live_heartbeat_runs_ws_gap_m5_sweep_without_closing_external_test_conn(
         ws_gap_guard.clear_for_test(observed_at=NOW)
 
 
-def test_cold_boot_m5_clear_releases_ws_gap_blocked_exit_retry(conn, monkeypatch):
+@pytest.mark.parametrize("read_raises", [False, True], ids=["clean_read", "read_error"])
+def test_cold_boot_m5_keeps_latch_and_exit_retry_blocked_without_authenticated_clear(conn, read_raises):
     import src.main as main_module
     from src.control import ws_gap_guard
+
+    class ReadFailingM5Adapter(FakeM5Adapter):
+        def get_open_orders(self):
+            self.calls.append(("get_open_orders", (), {}))
+            raise RuntimeError("injected fresh M5 read failure")
 
     seed_command(conn, size=5, side="SELL")
     conn.execute("UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = 'cmd-m5'")
@@ -8229,37 +8235,21 @@ def test_cold_boot_m5_clear_releases_ws_gap_blocked_exit_retry(conn, monkeypatch
             json.dumps({"error": "ws_gap=SUBSCRIBED:message_received; m5_reconcile_required=True"}),
         ),
     )
-    configure_subscribed_m5_latch()
-    authenticated_summary = ws_gap_guard.summary
-    summary_calls = 0
-
-    def _cold_boot_then_authenticated_summary(*, now=None):
-        nonlocal summary_calls
-        summary_calls += 1
-        if summary_calls == 1:
-            ws_gap_guard.configure_status(
-                ws_gap_guard.WSGapStatus(
-                    connected=True,
-                    last_message_at=NOW,
-                    subscription_state="AUTHED",
-                    gap_reason="fresh_authenticated_proof",
-                    m5_reconcile_required=True,
-                    updated_at=NOW,
-                )
-            )
-            return {
-                "subscription_state": "DISCONNECTED",
-                "gap_reason": "not_configured",
-                "last_success_at": None,
-                "m5_reconcile_required": True,
-                "entry": {"allow_submit": False},
-            }
-        return authenticated_summary(now=now)
-
-    monkeypatch.setattr(ws_gap_guard, "summary", _cold_boot_then_authenticated_summary)
+    conn.commit()
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=None,
+            subscription_state="DISCONNECTED",
+            gap_reason="not_configured",
+            m5_reconcile_required=True,
+            updated_at=NOW,
+        )
+    )
 
     try:
-        adapter = FakeM5Adapter(open_orders=[order(order_id="ord-m5")], trades=[], positions=[])
+        adapter_cls = ReadFailingM5Adapter if read_raises else FakeM5Adapter
+        adapter = adapter_cls(open_orders=[order(order_id="ord-m5")], trades=[], positions=[])
         result = main_module._run_ws_gap_reconcile_if_required(
             adapter,
             conn_factory=lambda: conn,
@@ -8270,30 +8260,25 @@ def test_cold_boot_m5_clear_releases_ws_gap_blocked_exit_retry(conn, monkeypatch
             "SELECT next_exit_retry_at FROM position_current WHERE position_id = ?",
             ("exit-ws-gap",),
         ).fetchone()[0]
-        assert result["status"] == "cleared"
-        assert result["exit_retries_released"] == 1
-        assert result["exit_retry_position_ids"] == ["exit-ws-gap"]
-        assert summary_calls == 2
-        assert [call[0] for call in adapter.calls] == ["get_open_orders", "get_trades", "get_positions"]
-        assert retry_at == NOW.isoformat()
-        release = conn.execute(
+        assert result["status"] == "failed_closed"
+        assert ws_gap_guard.status().m5_reconcile_required is True
+        assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is False
+        assert retry_at == (NOW + timedelta(minutes=40)).isoformat()
+        assert conn.execute(
             """
-            SELECT event_type, phase_before, phase_after, venue_status, payload_json
+            SELECT COUNT(*)
               FROM position_events
              WHERE position_id = ?
-             ORDER BY sequence_no DESC
-             LIMIT 1
+               AND event_type = 'EXIT_RETRY_RELEASED'
             """,
             ("exit-ws-gap",),
-        ).fetchone()
-        assert release["event_type"] == "EXIT_RETRY_RELEASED"
-        assert release["phase_before"] == "pending_exit"
-        assert release["phase_after"] == "pending_exit"
-        assert release["venue_status"] == "ready"
-        payload = json.loads(release["payload_json"])
-        assert payload["release_reason"] == "M5_WS_GAP_RECONCILE_CLEARED"
-        assert payload["previous_next_retry_at"] > NOW.isoformat()
-        assert payload["next_retry_at"] == NOW.isoformat()
+        ).fetchone()[0] == 0
+        if read_raises:
+            assert result["error"] == "injected fresh M5 read failure"
+            assert [call[0] for call in adapter.calls] == ["get_open_orders"]
+        else:
+            assert "cannot clear ws gap without healthy subscription" in result["error"]
+            assert [call[0] for call in adapter.calls] == ["get_open_orders", "get_trades", "get_positions"]
     finally:
         ws_gap_guard.clear_for_test(observed_at=NOW)
 
