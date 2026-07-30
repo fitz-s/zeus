@@ -111,6 +111,7 @@ def test_canonical_manifest_read_excludes_future_available_artifact() -> None:
         computed_at=datetime(2026, 7, 19, 6, 59, 59, 900000, tzinfo=UTC),
     )
     assert len(available) == 1
+    assert available[0].product_metadata["artifact_id"] == 1
     conn.close()
 
 
@@ -424,6 +425,7 @@ def _insert_materialized_day0_posterior(
         (
             json.dumps(
                 {
+                    "openmeteo_anchor_artifact_id": 1,
                     "day0_conditioning": {
                         "source": payload["day0_observed_extreme_source"],
                         "observation_time": payload[
@@ -2399,6 +2401,29 @@ def test_cycle_poll_catches_up_every_new_day0_identity_on_one_model_cycle(
     )
     assert identity is not None
     assert cycle_advance._latest_posterior_matches_day0_conditioning(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        identity=identity,
+        target_cycle_iso=cycle.isoformat(),
+        as_of=datetime(2026, 7, 19, 5, 3, tzinfo=UTC),
+    )
+    latest = conn.execute(
+        "SELECT MAX(posterior_id) FROM forecast_posteriors"
+    ).fetchone()[0]
+    provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (latest,),
+        ).fetchone()[0]
+    )
+    provenance["openmeteo_anchor_artifact_id"] = None
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), latest),
+    )
+    assert not cycle_advance._latest_posterior_matches_day0_conditioning(
         conn,
         city="Shanghai",
         target_date="2026-07-19",

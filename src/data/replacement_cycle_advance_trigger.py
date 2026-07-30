@@ -120,7 +120,7 @@ def _family_manifests_from_db(
 
     rows = conn.execute(
         """
-        SELECT source_id, product_id, data_version, artifact_path, sha256,
+        SELECT artifact_id, source_id, product_id, data_version, artifact_path, sha256,
                byte_size, source_cycle_time, source_available_at, captured_at,
                request_url, request_params_json, artifact_metadata_json,
                training_allowed
@@ -150,6 +150,8 @@ def _family_manifests_from_db(
             available_at = _parse_cycle(source_available_at)
             if available_at is None or available_at > decision_cut:
                 continue
+            product_metadata = json.loads(row["artifact_metadata_json"] or "{}")
+            product_metadata["artifact_id"] = int(row["artifact_id"])
             manifests.append(
                 RawForecastArtifactManifest(
                     source_id=str(row["source_id"]),
@@ -163,7 +165,7 @@ def _family_manifests_from_db(
                     captured_at=str(row["captured_at"]),
                     request_url=str(row["request_url"] or ""),
                     request_params=json.loads(row["request_params_json"] or "{}"),
-                    product_metadata=json.loads(row["artifact_metadata_json"] or "{}"),
+                    product_metadata=product_metadata,
                     training_allowed=bool(row["training_allowed"]),
                 )
             )
@@ -373,11 +375,15 @@ def _latest_posterior_matches_day0_conditioning(
         conditioning = _active_day0_provisional_or_conditioning(provenance)
         if conditioning is None:
             return False
+        anchor_artifact_id = int(
+            provenance.get("openmeteo_anchor_artifact_id") or 0
+        )
         consumed_cycle = _parse_cycle(
             row["source_cycle_time"] if hasattr(row, "keys") else row[1]
         )
         return (
-            consumed_cycle is not None
+            anchor_artifact_id > 0
+            and consumed_cycle is not None
             and consumed_cycle >= target_cycle
             and _day0_conditioning_identity(
                 source=conditioning.get("source"),
