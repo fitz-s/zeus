@@ -783,7 +783,7 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     # against venue state. Errors don't fail the cycle.
     try:
         from src.execution.command_recovery import reconcile_unresolved_commands
-        rec_summary = reconcile_unresolved_commands(conn)
+        rec_summary = reconcile_unresolved_commands(scope="live_tick")
         summary["command_recovery"] = rec_summary
     except Exception as exc:
         logger.error("command_recovery raised; continuing cycle: %s", exc, exc_info=True)

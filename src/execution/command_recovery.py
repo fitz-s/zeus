@@ -90,6 +90,7 @@ _LIVE_TICK_DB_PROGRESS_OPCODES = 1_000
 # as absent.
 _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES = 4
 _LIVE_TICK_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS = 20.0
+_LIVE_TICK_IDENTITY_BOUND_ROTATION_SECONDS = 60
 _RESTART_ACCOUNT_TRUTH_DEADLINE_ENV = (
     "ZEUS_RESTART_RECOVERY_ACCOUNT_TRUTH_DEADLINE_SECONDS"
 )
@@ -130,6 +131,12 @@ def _identity_bound_point_read_budget_seconds() -> float:
     # Leave scheduler headroom even if an operator has supplied an excessive
     # value; a timed-out point read is a continuation, never absence proof.
     return min(value, 30.0)
+
+
+def _identity_bound_rotation_slot() -> int:
+    """Return a crash-stable wall-clock slot for bounded candidate rotation."""
+
+    return int(time.time() // _LIVE_TICK_IDENTITY_BOUND_ROTATION_SECONDS)
 
 
 def _identity_bound_point_order_read_worker(
@@ -21189,33 +21196,94 @@ def _identity_bound_submitting_candidates(
     conn: sqlite3.Connection,
     *,
     limit: int = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES,
+    rotation_slot: int | None = None,
 ) -> tuple[list[dict], int]:
-    """Return bounded known-order submits plus the durable next-tick remainder.
+    """Return a bounded, crash-stable rotating slice of known-order submits.
 
     This is intentionally narrower than account-wide recovery.  A command that
     already names a venue order can obtain positive truth from that exact point
     read; a missing or failed point read is not absence proof and stays out of
     this lane.  The full account snapshot remains the sole authority for
-    account-wide negative/absence conclusions.
+    account-wide negative/absence conclusions.  Rotation derives from the
+    wall-clock tick rather than process memory, so a restart cannot reset the
+    cursor and permanently starve rows beyond the first batch.
     """
     if not _table_exists(conn, "venue_commands"):
         return [], 0
-    rows = conn.execute(
-        """
-        SELECT *
-          FROM venue_commands
+    candidate_limit = max(1, int(limit))
+    where_sql = """
          WHERE state = ?
            AND intent_kind IN ('ENTRY', 'EXIT')
            AND COALESCE(venue_order_id, '') != ''
+    """
+    total = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM venue_commands " + where_sql,
+            (CommandState.SUBMITTING.value,),
+        ).fetchone()[0]
+        or 0
+    )
+    if total <= 0:
+        return [], 0
+    slot = (
+        _identity_bound_rotation_slot()
+        if rotation_slot is None
+        else max(0, int(rotation_slot))
+    )
+    offset = (slot * candidate_limit) % total
+    order_sql = """
          ORDER BY CASE intent_kind WHEN 'EXIT' THEN 0 ELSE 1 END,
                   updated_at,
                   command_id
-         LIMIT ?
+    """
+
+    def _slice(slice_limit: int, slice_offset: int) -> list[dict]:
+        rows = conn.execute(
+            "SELECT * FROM venue_commands "
+            + where_sql
+            + order_sql
+            + " LIMIT ? OFFSET ?",
+            (
+                CommandState.SUBMITTING.value,
+                max(0, int(slice_limit)),
+                max(0, int(slice_offset)),
+            ),
+        ).fetchall()
+        return [_dict_row(row) for row in rows]
+
+    candidates = _slice(candidate_limit, offset)
+    if len(candidates) < min(candidate_limit, total):
+        candidates.extend(
+            _slice(min(candidate_limit, total) - len(candidates), 0)
+        )
+    return candidates, max(0, total - len(candidates))
+
+
+def _identity_bound_current_commands(
+    conn: sqlite3.Connection,
+    command_ids: set[str],
+) -> dict[str, dict]:
+    """Reload exactly the selected commands without re-running rotation."""
+
+    ordered_ids = sorted(command_id for command_id in command_ids if command_id)
+    if not ordered_ids:
+        return {}
+    placeholders = ",".join("?" for _ in ordered_ids)
+    rows = conn.execute(
+        f"""
+        SELECT *
+          FROM venue_commands
+         WHERE command_id IN ({placeholders})
+           AND state = ?
+           AND intent_kind IN ('ENTRY', 'EXIT')
+           AND COALESCE(venue_order_id, '') != ''
         """,
-        (CommandState.SUBMITTING.value, max(1, int(limit)) + 1),
+        (*ordered_ids, CommandState.SUBMITTING.value),
     ).fetchall()
-    candidates = [_dict_row(row) for row in rows[:limit]]
-    return candidates, max(0, len(rows) - len(candidates))
+    return {
+        str(row.get("command_id") or ""): row
+        for row in (_dict_row(raw) for raw in rows)
+    }
 
 
 def _identity_bound_positive_point_order(
@@ -21240,10 +21308,7 @@ def _reconcile_identity_bound_submitting_commands(
 ) -> dict:
     """Persist positive exact-order truth without consulting account absence data."""
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    current = {
-        str(row.get("command_id") or ""): row
-        for row in _identity_bound_submitting_candidates(conn)[0]
-    }
+    current = _identity_bound_current_commands(conn, command_ids)
     point_client = SimpleNamespace(
         get_order=lambda venue_order_id: point_orders.get(str(venue_order_id)),
     )
@@ -21275,16 +21340,17 @@ def _reconcile_identity_bound_submitting_commands(
                 summary["errors"] += 1
                 continue
             venue_status = _order_status(point_order)
-            matched_size = _point_order_matched_size(
-                point_order,
-                fallback=row.get("size"),
-                side=row.get("side"),
-            )
+            explicit_matched_size = _explicit_point_order_matched_size(point_order)
+            matched = _positive_decimal_or_none(explicit_matched_size)
+            requested = _positive_decimal_or_none(row.get("size"))
             if not (
                 _venue_status_can_carry_positive_match(venue_status)
-                and _positive_decimal_or_none(matched_size)
+                and matched is not None
+                and requested is not None
+                and matched <= requested
             ):
                 continue
+            matched_size = _decimal_text(matched)
             observed_at = _now_iso()
             event_type = _matched_event_type(
                 row,

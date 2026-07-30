@@ -23719,6 +23719,7 @@ def test_live_tick_identity_bound_matched_exit_outruns_account_snapshot(
                 "ord-exit": {
                     "orderID": "ord-exit",
                     "status": "MATCHED",
+                    "size_matched": "8.25",
                     "makingAmount": "8.25",
                     "takingAmount": "7.8375",
                     "transactionsHashes": ["0xidentity-bound-exit"],
@@ -24012,11 +24013,136 @@ def test_identity_bound_submit_candidates_are_bounded_with_durable_remainder(con
         _insert(conn, command_id=command_id)
         _advance_to_submitting(conn, command_id=command_id, venue_order_id=f"ord-{index}")
 
-    candidates, deferred = _identity_bound_submitting_candidates(conn, limit=4)
+    first, first_deferred = _identity_bound_submitting_candidates(
+        conn,
+        limit=4,
+        rotation_slot=0,
+    )
+    second, second_deferred = _identity_bound_submitting_candidates(
+        conn,
+        limit=4,
+        rotation_slot=1,
+    )
 
-    assert len(candidates) == 4
-    assert deferred == 1
-    assert all(candidate["state"] == "SUBMITTING" for candidate in candidates)
+    assert len(first) == len(second) == 4
+    assert first_deferred == second_deferred == 1
+    assert all(candidate["state"] == "SUBMITTING" for candidate in first + second)
+    assert {candidate["command_id"] for candidate in first + second} == {
+        f"cmd-bounded-{index}" for index in range(5)
+    }
+
+
+def test_identity_bound_rotation_recovers_fifth_matched_command_next_tick(conn):
+    from src.execution.command_recovery import (
+        _identity_bound_submitting_candidates,
+        _reconcile_identity_bound_submitting_commands,
+    )
+
+    for index in range(5):
+        command_id = f"cmd-rotate-{index}"
+        _insert(conn, command_id=command_id, size=10.0, price=0.5)
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=f"ord-rotate-{index}",
+        )
+
+    first, _ = _identity_bound_submitting_candidates(
+        conn,
+        limit=4,
+        rotation_slot=0,
+    )
+    first_ids = {str(row["command_id"]) for row in first}
+    first_summary = _reconcile_identity_bound_submitting_commands(
+        conn,
+        command_ids=first_ids,
+        point_orders={},
+    )
+    assert first_summary == {
+        "scanned": 4,
+        "advanced": 0,
+        "stayed": 4,
+        "errors": 0,
+    }
+
+    second, _ = _identity_bound_submitting_candidates(
+        conn,
+        limit=4,
+        rotation_slot=1,
+    )
+    second_ids = {str(row["command_id"]) for row in second}
+    newly_selected = second_ids - first_ids
+    assert newly_selected == {"cmd-rotate-4"}
+    second_summary = _reconcile_identity_bound_submitting_commands(
+        conn,
+        command_ids=second_ids,
+        point_orders={
+            "ord-rotate-4": {
+                "orderID": "ord-rotate-4",
+                "status": "MATCHED",
+                "size_matched": "10",
+                "price": "0.5",
+                "transactionsHashes": ["0xrotate-five"],
+            }
+        },
+    )
+
+    assert second_summary["advanced"] >= 2
+    assert _get_state(conn, "cmd-rotate-4") == "FILLED"
+
+
+@pytest.mark.parametrize(
+    "point_order",
+    (
+        {
+            "orderID": "ord-malformed",
+            "status": "MATCHED",
+            "transactionsHashes": ["0xmissing-size"],
+        },
+        {
+            "orderID": "ord-malformed",
+            "status": "MATCHED",
+            "size_matched": "10.01",
+            "transactionsHashes": ["0xoversized-fill"],
+        },
+    ),
+)
+def test_identity_bound_submit_requires_explicit_bounded_matched_size(
+    conn,
+    point_order,
+):
+    from src.execution.command_recovery import (
+        _reconcile_identity_bound_submitting_commands,
+    )
+
+    _insert(conn, command_id="cmd-malformed", size=10.0)
+    _advance_to_submitting(
+        conn,
+        command_id="cmd-malformed",
+        venue_order_id="ord-malformed",
+    )
+
+    summary = _reconcile_identity_bound_submitting_commands(
+        conn,
+        command_ids={"cmd-malformed"},
+        point_orders={"ord-malformed": point_order},
+    )
+
+    assert summary["advanced"] == 1
+    assert _get_state(conn, "cmd-malformed") == "ACKED"
+    assert [event["event_type"] for event in _get_events(conn, "cmd-malformed")] == [
+        "INTENT_CREATED",
+        "SUBMIT_REQUESTED",
+        "SUBMIT_ACKED",
+    ]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+        ("cmd-malformed",),
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?",
+        ("cmd-malformed",),
+    ).fetchone()[0] == 0
 
 class TestRecoveryCycleIntegration:
     """Assert cycle_runner invokes reconcile_unresolved_commands."""
@@ -24080,11 +24206,11 @@ class TestRecoveryCycleIntegration:
         assert "command_recovery" in cr_src, (
             "cycle_runner.py must reference command_recovery module (INV-31)"
         )
-        assert "reconcile_unresolved_commands(conn)" in cr_src, (
-            "cycle_runner.py must pass the already-open trade/world conn into command recovery"
+        assert 'reconcile_unresolved_commands(scope="live_tick")' in cr_src, (
+            "cycle_runner.py must use bounded short-connection live recovery"
         )
-        assert "reconcile_unresolved_commands()" not in cr_src, (
-            "cycle_runner.py must not let command recovery open a second trade/world connection"
+        assert "reconcile_unresolved_commands(conn)" not in cr_src, (
+            "cycle_runner.py must not run the unbounded caller-owned recovery sweep"
         )
         assert 'summary["command_recovery"]' in cr_src, (
             'cycle_runner.py must record summary["command_recovery"] result (INV-31)'
