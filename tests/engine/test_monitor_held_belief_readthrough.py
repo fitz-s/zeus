@@ -334,6 +334,170 @@ def test_readthrough_sqlite_work_is_interrupted_at_monitor_deadline(
     assert time.monotonic() - started < 1.0
 
 
+def test_day0_visibility_retry_recovers_raw_hwm_after_250ms(monkeypatch):
+    """A matching posterior published within the short budget restores fresh q."""
+    import src.engine.monitor_refresh as mr
+
+    clock = [10.0]
+    attempts = 0
+    build_deadlines: list[float] = []
+    snapshot = SimpleNamespace()
+
+    def build(*_args, deadline_monotonic, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        build_deadlines.append(deadline_monotonic)
+        if clock[0] < 10.25:
+            raise ValueError("GLOBAL_CURRENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM")
+        return snapshot
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_build_current_global_day0_family_snapshot", build)
+    monkeypatch.setattr(
+        mr,
+        "_materialize_current_global_day0_probability",
+        lambda position, built: (0.30, position, built is snapshot),
+    )
+    monkeypatch.setattr(mr.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mr.time, "sleep", sleep)
+
+    result = mr._refresh_current_global_day0_probability(
+        _pos(),
+        trade_conn=object(),
+        deadline_monotonic=11.0,
+    )
+
+    held_prob, refresh_pos, is_fresh = result
+    assert held_prob == pytest.approx(0.30)
+    assert refresh_pos is not None
+    assert is_fresh is True
+    assert attempts == 4
+    assert build_deadlines == pytest.approx([10.35, 10.35, 10.35, 10.35])
+    assert clock[0] == pytest.approx(10.3)
+
+
+def test_day0_visibility_retry_fails_closed_when_event_never_publishes(monkeypatch):
+    """Canonical observation without its Day0 event never reuses stale or market q."""
+    import src.engine.monitor_refresh as mr
+
+    clock = [20.0]
+    attempts = 0
+
+    def build(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise mr.ObservationUnavailableError(
+            mr._DAY0_CANONICAL_OBSERVATION_EVENT_NOT_VISIBLE
+        )
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_build_current_global_day0_family_snapshot", build)
+    monkeypatch.setattr(mr.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mr.time, "sleep", sleep)
+
+    with pytest.raises(
+        mr.ObservationUnavailableError,
+        match=mr._DAY0_CANONICAL_OBSERVATION_EVENT_NOT_VISIBLE,
+    ):
+        mr._refresh_current_global_day0_probability(
+            _pos(),
+            trade_conn=object(),
+            deadline_monotonic=95.0,
+        )
+
+    assert attempts == 4
+    assert clock[0] == pytest.approx(
+        20.0 + mr._DAY0_MATERIALIZATION_VISIBILITY_RETRY_BUDGET_SECONDS
+    )
+
+
+def test_day0_snapshot_build_sql_guard_interrupts_at_effective_deadline(monkeypatch):
+    """The build's SQLite boundary interrupts at its effective monitor deadline."""
+    import src.engine.monitor_refresh as mr
+
+    conn = sqlite3.connect(":memory:")
+    clock = [0.0]
+
+    def monotonic():
+        current = clock[0]
+        clock[0] += 0.001
+        return current
+    monkeypatch.setattr(mr.time, "monotonic", monotonic)
+    effective_deadline = mr._day0_materialization_visibility_retry_deadline(75.0)
+
+    with pytest.raises(mr._Day0SnapshotReadDeadlineExceeded):
+        with mr._day0_snapshot_sqlite_read_deadline(conn, effective_deadline):
+            conn.execute(
+                """
+                WITH RECURSIVE spin(value) AS (
+                    SELECT 1
+                    UNION ALL
+                    SELECT value + 1 FROM spin
+                )
+                SELECT SUM(value) FROM spin
+                """
+            ).fetchone()
+
+    conn.close()
+    assert effective_deadline == pytest.approx(0.35)
+    assert clock[0] < 0.5
+
+
+def test_day0_snapshot_tokens_use_closed_independent_trade_reader(monkeypatch):
+    """The snapshot bind read must never install a handler on shared trade_conn."""
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    class SharedTradeConnection(sqlite3.Connection):
+        def set_progress_handler(self, *_args, **_kwargs):
+            raise AssertionError("shared trade connection must not receive a handler")
+
+    class SnapshotTradeConnection(sqlite3.Connection):
+        closed = False
+
+        def close(self):
+            self.closed = True
+            super().close()
+
+    shared = sqlite3.connect(":memory:", factory=SharedTradeConnection)
+    snapshot = sqlite3.connect(":memory:", factory=SnapshotTradeConnection)
+    snapshot.row_factory = sqlite3.Row
+    snapshot.execute(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            captured_at TEXT,
+            snapshot_id TEXT
+        )
+        """
+    )
+    snapshot.execute(
+        """
+        INSERT INTO executable_market_snapshot_latest VALUES
+        ('condition-1', 'yes-1', 'no-1', '2026-07-30T00:00:00+00:00', 'snapshot-1')
+        """
+    )
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: snapshot)
+
+    rows = mr._read_current_global_day0_snapshot_tokens(
+        trade_conn=shared,
+        condition_ids=("condition-1",),
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    shared.close()
+    assert rows[0]["yes_token_id"] == "yes-1"
+    assert snapshot.closed is True
+
+
 def test_freshest_seed_skips_payload_without_target_local_day(tmp_path, monkeypatch):
     """Newest seed can be a poison file; read-through must pick the newest usable one."""
     import src.data.replacement_forecast_production as prod

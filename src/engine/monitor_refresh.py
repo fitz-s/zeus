@@ -22,6 +22,7 @@ import hashlib
 import json
 import threading
 import time
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -104,8 +105,14 @@ _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
 _HELD_MONITOR_DEADLINE_ATTR = "_zeus_held_monitor_deadline_monotonic"
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
 _DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS = 0.1
+_DAY0_MATERIALIZATION_VISIBILITY_RETRY_BUDGET_SECONDS = 0.35
+_DAY0_CANONICAL_OBSERVATION_EVENT_NOT_VISIBLE = (
+    "GLOBAL_DAY0_CANONICAL_OBSERVATION_EVENT_NOT_VISIBLE"
+)
 _DAY0_MATERIALIZATION_VISIBILITY_REASONS = frozenset(
     {
+        "REPLACEMENT_RAW_INPUT_HWM",
+        _DAY0_CANONICAL_OBSERVATION_EVENT_NOT_VISIBLE,
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
         "GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING",
@@ -161,9 +168,104 @@ class _Day0UnobservedPrefixUnavailable(ObservationUnavailableError):
     """The target local day has no canonical observation yet."""
 
 
+class _Day0SnapshotReadDeadlineExceeded(TimeoutError):
+    """The held-monitor deadline elapsed during a current Day0 SQLite read."""
+
+
 def _is_day0_materialization_visibility_gap(exc: Exception) -> bool:
     reason = str(exc)
     return any(code in reason for code in _DAY0_MATERIALIZATION_VISIBILITY_REASONS)
+
+
+def _day0_materialization_visibility_retry_deadline(
+    deadline_monotonic: float | None,
+) -> float:
+    """Bound one family's publish-visibility read-through below the cycle budget."""
+    retry_deadline = (
+        time.monotonic() + _DAY0_MATERIALIZATION_VISIBILITY_RETRY_BUDGET_SECONDS
+    )
+    if deadline_monotonic is not None:
+        retry_deadline = min(retry_deadline, deadline_monotonic)
+    return retry_deadline
+
+
+def _raise_if_day0_snapshot_read_deadline_elapsed(
+    deadline_monotonic: float | None,
+) -> None:
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise _Day0SnapshotReadDeadlineExceeded(
+            "monitor current global Day0 SQLite read deadline elapsed"
+        )
+
+
+@contextmanager
+def _day0_snapshot_sqlite_read_deadline(conn, deadline_monotonic: float | None):
+    """Bound one current-Day0 snapshot connection to the held-monitor deadline."""
+    if deadline_monotonic is None:
+        yield
+        return
+    _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
+    if not hasattr(conn, "set_progress_handler"):
+        yield
+        _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
+        return
+    remaining_ms = max(
+        0,
+        int((deadline_monotonic - time.monotonic()) * 1000.0),
+    )
+    previous_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+
+    def _deadline_expired() -> int:
+        return int(time.monotonic() >= deadline_monotonic)
+
+    conn.set_progress_handler(_deadline_expired, 1_000)
+    try:
+        yield
+        _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
+    except sqlite3.OperationalError as exc:
+        if time.monotonic() >= deadline_monotonic:
+            raise _Day0SnapshotReadDeadlineExceeded(
+                "monitor current global Day0 SQLite read deadline elapsed"
+            ) from exc
+        raise
+    finally:
+        try:
+            conn.set_progress_handler(None, 0)
+            conn.execute(f"PRAGMA busy_timeout = {int(previous_busy_timeout)}")
+        except Exception:  # noqa: BLE001 - close is the read-only connection backstop.
+            pass
+
+
+def _read_current_global_day0_snapshot_tokens(
+    *,
+    trade_conn,
+    condition_ids: tuple[str, ...],
+    deadline_monotonic: float | None,
+):
+    """Read current token bindings without changing the shared monitor connection."""
+    placeholders = ",".join("?" for _ in condition_ids)
+    query = f"""
+        SELECT condition_id, yes_token_id, no_token_id
+          FROM executable_market_snapshot_latest
+         WHERE condition_id IN ({placeholders})
+           AND yes_token_id IS NOT NULL
+           AND no_token_id IS NOT NULL
+         ORDER BY captured_at DESC, snapshot_id DESC
+    """
+    if not isinstance(trade_conn, sqlite3.Connection):
+        # Test doubles are not shared SQLite handles and cannot receive a progress
+        # handler. Production always takes the independent canonical reader below.
+        return trade_conn.execute(query, condition_ids).fetchall()
+
+    from src.state.db import get_trade_connection_read_only
+
+    token_conn = get_trade_connection_read_only()
+    try:
+        with _day0_snapshot_sqlite_read_deadline(token_conn, deadline_monotonic):
+            return token_conn.execute(query, condition_ids).fetchall()
+    finally:
+        token_conn.close()
 
 
 def install_monitor_orderbook_prefetch(
@@ -4609,6 +4711,7 @@ def _build_current_global_day0_family_snapshot(
     decision_time: datetime | None,
     cached_snapshots: tuple[_CurrentGlobalDay0FamilySnapshot, ...]
     | list[_CurrentGlobalDay0FamilySnapshot],
+    deadline_monotonic: float | None = None,
 ) -> _CurrentGlobalDay0FamilySnapshot:
     condition_id = _canonical_condition_id(position)
     if condition_id is None:
@@ -4629,10 +4732,20 @@ def _build_current_global_day0_family_snapshot(
     world = None
     forecasts = None
     try:
-        world = get_world_connection_read_only()
-        forecasts = get_forecasts_connection_read_only()
-        row = world.execute(
-            """
+        _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
+        with ExitStack() as sqlite_deadlines:
+            world = get_world_connection_read_only()
+            sqlite_deadlines.enter_context(
+                _day0_snapshot_sqlite_read_deadline(world, deadline_monotonic)
+            )
+            _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
+            forecasts = get_forecasts_connection_read_only()
+            sqlite_deadlines.enter_context(
+                _day0_snapshot_sqlite_read_deadline(forecasts, deadline_monotonic)
+            )
+            _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
+            row = world.execute(
+                """
             SELECT event_id, event_type, entity_key, source, observed_at,
                    available_at, received_at, causal_snapshot_id, payload_hash,
                    idempotency_key, priority, expires_at, payload_json,
@@ -4645,56 +4758,57 @@ def _build_current_global_day0_family_snapshot(
              ORDER BY available_at DESC
              LIMIT 1
             """,
-            (str(position.city), str(position.target_date), metric),
-        ).fetchone()
-        if row is None:
-            if not _target_day_has_canonical_observation(world, position):
-                raise _Day0UnobservedPrefixUnavailable(
-                    "current global Day0 family event unavailable: "
-                    "zero target-date canonical observations"
+                (str(position.city), str(position.target_date), metric),
+            ).fetchone()
+            _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
+            if row is None:
+                if not _target_day_has_canonical_observation(world, position):
+                    raise _Day0UnobservedPrefixUnavailable(
+                        "current global Day0 family event unavailable: "
+                        "zero target-date canonical observations"
+                    )
+                raise ObservationUnavailableError(
+                    _DAY0_CANONICAL_OBSERVATION_EVENT_NOT_VISIBLE
                 )
-            raise ObservationUnavailableError(
-                "current global Day0 family event unavailable despite "
-                "target-date canonical observation"
+            event = OpportunityEvent(**dict(row))
+            from src.engine.event_reactor_adapter import (
+                _CurrentProbabilityUse,
+                _prepare_current_global_probability_family,
             )
-        event = OpportunityEvent(**dict(row))
-        from src.engine.event_reactor_adapter import (
-            _CurrentProbabilityUse,
-            _prepare_current_global_probability_family,
-        )
 
-        day0_payload: dict[str, object] = {}
-        cache_metadata: dict[str, str] = {}
-        city = cities_by_name.get(str(position.city))
-        unobserved_prefix = bool(
-            city is not None
-            and not _target_day_has_canonical_observation(world, position)
-        )
-        try:
-            prepared = _prepare_current_global_probability_family(
-                event,
-                forecast_conn=forecasts,
-                topology_conn=forecasts,
-                observation_conn=world,
-                decision_time=now,
-                max_age=FRESHNESS_WINDOW_DEFAULT,
-                day0_payload_out=day0_payload,
-                cache_metadata_out=cache_metadata,
-                required_condition_id=condition_id,
-                allow_unobserved_day0_replacement=unobserved_prefix,
-                allow_provisional_day0_replacement=True,
-                probability_use=_CurrentProbabilityUse.HELD_MONITOR,
-            )
-        except ValueError as exc:
-            if (
-                str(exc) == "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING"
+            day0_payload: dict[str, object] = {}
+            cache_metadata: dict[str, str] = {}
+            city = cities_by_name.get(str(position.city))
+            unobserved_prefix = bool(
+                city is not None
                 and not _target_day_has_canonical_observation(world, position)
-            ):
-                raise _Day0UnobservedPrefixUnavailable(
-                    "current global Day0 probability unavailable: "
-                    "zero target-date canonical observations"
-                ) from exc
-            raise
+            )
+            try:
+                prepared = _prepare_current_global_probability_family(
+                    event,
+                    forecast_conn=forecasts,
+                    topology_conn=forecasts,
+                    observation_conn=world,
+                    decision_time=now,
+                    max_age=FRESHNESS_WINDOW_DEFAULT,
+                    day0_payload_out=day0_payload,
+                    cache_metadata_out=cache_metadata,
+                    required_condition_id=condition_id,
+                    allow_unobserved_day0_replacement=unobserved_prefix,
+                    allow_provisional_day0_replacement=True,
+                    probability_use=_CurrentProbabilityUse.HELD_MONITOR,
+                )
+            except ValueError as exc:
+                if (
+                    str(exc) == "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING"
+                    and not _target_day_has_canonical_observation(world, position)
+                ):
+                    raise _Day0UnobservedPrefixUnavailable(
+                        "current global Day0 probability unavailable: "
+                        "zero target-date canonical observations"
+                    ) from exc
+                raise
+            _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
     finally:
         if forecasts is not None:
             forecasts.close()
@@ -4708,18 +4822,11 @@ def _build_current_global_day0_family_snapshot(
         if set(token_map) != set(condition_ids):
             raise ValueError("monitor current family topology changed within cycle")
     else:
-        placeholders = ",".join("?" for _ in condition_ids)
-        token_rows = trade_conn.execute(
-            f"""
-            SELECT condition_id, yes_token_id, no_token_id
-              FROM executable_market_snapshot_latest
-             WHERE condition_id IN ({placeholders})
-               AND yes_token_id IS NOT NULL
-               AND no_token_id IS NOT NULL
-             ORDER BY captured_at DESC, snapshot_id DESC
-            """,
-            condition_ids,
-        ).fetchall()
+        token_rows = _read_current_global_day0_snapshot_tokens(
+            trade_conn=trade_conn,
+            condition_ids=condition_ids,
+            deadline_monotonic=deadline_monotonic,
+        )
         token_map = {}
         for token_row in token_rows:
             try:
@@ -4783,6 +4890,7 @@ def _refresh_current_global_day0_probability(
     trade_conn,
     decision_time: datetime | None = None,
     family_cache: _CurrentGlobalDay0FamilyCache | None = None,
+    deadline_monotonic: float | None = None,
 ) -> tuple[float, Position, bool] | None:
     """Read one held side from a cycle-scoped current family witness."""
 
@@ -4828,41 +4936,56 @@ def _refresh_current_global_day0_probability(
                 _cnt_inc("monitor_day0_family_failure_cache_hit_total")
                 raise _CachedCurrentGlobalDay0FamilyError(reason)
 
+    effective_deadline = _day0_materialization_visibility_retry_deadline(
+        deadline_monotonic
+    )
     try:
         snapshot = _build_current_global_day0_family_snapshot(
             position,
             trade_conn=trade_conn,
             decision_time=decision_time,
             cached_snapshots=cached_snapshots,
+            deadline_monotonic=effective_deadline,
         )
     except Exception as exc:
         if _is_day0_materialization_visibility_gap(exc):
             # SCOPE: this held city/date/metric only. DRAIN: the source-clock
             # materializer commits the matching posterior/readiness certificate.
-            # RESET: one new read-only connection pair sees that commit; otherwise
+            # RESET: a bounded read-only connection pair sees that commit; otherwise
             # the existing fail-closed cache/reseed path remains authoritative.
             _cnt_inc("monitor_day0_materialization_visibility_retry_total")
-            time.sleep(_DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS)
-            try:
-                snapshot = _build_current_global_day0_family_snapshot(
-                    position,
-                    trade_conn=trade_conn,
-                    decision_time=decision_time,
-                    cached_snapshots=cached_snapshots,
+            while time.monotonic() < effective_deadline:
+                remaining = effective_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(
+                    min(_DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS, remaining)
                 )
-            except Exception as retry_exc:
-                exc = retry_exc
-            else:
-                _cnt_inc(
-                    "monitor_day0_materialization_visibility_retry_recovered_total"
-                )
-                if family_cache is not None:
-                    family_cache.snapshots.setdefault(family_key, []).append(snapshot)
-                _cnt_inc("monitor_day0_family_snapshot_build_total")
-                return _materialize_current_global_day0_probability(
-                    position,
-                    snapshot,
-                )
+                if time.monotonic() >= effective_deadline:
+                    break
+                try:
+                    snapshot = _build_current_global_day0_family_snapshot(
+                        position,
+                        trade_conn=trade_conn,
+                        decision_time=decision_time,
+                        cached_snapshots=cached_snapshots,
+                        deadline_monotonic=effective_deadline,
+                    )
+                except Exception as retry_exc:
+                    exc = retry_exc
+                    if not _is_day0_materialization_visibility_gap(exc):
+                        break
+                else:
+                    _cnt_inc(
+                        "monitor_day0_materialization_visibility_retry_recovered_total"
+                    )
+                    if family_cache is not None:
+                        family_cache.snapshots.setdefault(family_key, []).append(snapshot)
+                    _cnt_inc("monitor_day0_family_snapshot_build_total")
+                    return _materialize_current_global_day0_probability(
+                        position,
+                        snapshot,
+                    )
         if (
             family_cache is not None
             and str(exc) != "GLOBAL_REQUIRED_CONDITION_BINDING_INVALID"
@@ -5121,6 +5244,7 @@ def monitor_probability_refresh(
                     pos,
                     trade_conn=conn,
                     family_cache=day0_family_cache,
+                    deadline_monotonic=deadline_monotonic,
                 )
             except Exception as exc:  # noqa: BLE001 - current authority fails closed
                 if isinstance(exc, _Day0UnobservedPrefixUnavailable):
