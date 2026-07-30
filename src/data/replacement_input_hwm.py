@@ -691,14 +691,24 @@ def _posterior_provenance_for_cycle(
     target_date: object,
     metric: str,
     posterior_source_cycle_time: object,
-) -> dict[str, object]:
+    posterior_computed_at: object | None = None,
+) -> dict[str, object] | None:
     table_ref = _authority_table_ref(conn, "forecast_posteriors")
     if table_ref is None:
-        return {}
+        return None
     columns = _table_ref_columns(conn, table_ref)
     required = {"city", "target_date", "temperature_metric", "source_cycle_time", "provenance_json"}
     if not required.issubset(columns):
-        return {}
+        return None
+    parsed_computed_at = _parse_source_cycle_utc(posterior_computed_at)
+    if posterior_computed_at not in (None, "") and parsed_computed_at is None:
+        return None
+    exact_computed_at = (
+        parsed_computed_at.isoformat() if parsed_computed_at is not None else None
+    )
+    if exact_computed_at is not None and "computed_at" not in columns:
+        return None
+    computed_predicate = "AND computed_at = ?" if exact_computed_at is not None else ""
     order_terms = []
     if "computed_at" in columns:
         order_terms.append("datetime(computed_at) DESC")
@@ -706,7 +716,7 @@ def _posterior_provenance_for_cycle(
         order_terms.append("posterior_id DESC")
     order_sql = ", ".join(order_terms) if order_terms else "rowid DESC"
     try:
-        row = conn.execute(
+        rows = conn.execute(
             f"""
             SELECT provenance_json
               FROM {table_ref}
@@ -714,15 +724,23 @@ def _posterior_provenance_for_cycle(
                AND target_date = ?
                AND temperature_metric = ?
                AND datetime(source_cycle_time) = datetime(?)
+               {computed_predicate}
              ORDER BY {order_sql}
-             LIMIT 1
+             LIMIT 2
             """,
-            (city, target_date, metric, str(posterior_source_cycle_time)),
-        ).fetchone()
+            (
+                city,
+                target_date,
+                metric,
+                str(posterior_source_cycle_time),
+                *((exact_computed_at,) if exact_computed_at is not None else ()),
+            ),
+        ).fetchall()
     except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return {}
-    if row is None:
-        return {}
+        return None
+    if not rows or (exact_computed_at is not None and len(rows) != 1):
+        return None
+    row = rows[0]
     try:
         raw = row["provenance_json"]
     except Exception:  # noqa: BLE001
@@ -730,8 +748,8 @@ def _posterior_provenance_for_cycle(
     try:
         provenance = json.loads(str(raw or "{}"))
     except (TypeError, ValueError):
-        return {}
-    return provenance if isinstance(provenance, dict) else {}
+        return None
+    return provenance if isinstance(provenance, dict) else None
 
 
 def _posterior_used_models_for_cycle(
@@ -1264,17 +1282,18 @@ def replacement_live_input_lag_reason(
     if posterior_cycle is None:
         return f"posterior_source_cycle_unparseable={posterior_source_cycle_time!s}"
     posterior_computed = _parse_source_cycle_utc(posterior_computed_at)
-    provenance = (
-        posterior_provenance
-        if posterior_provenance is not None
-        else _posterior_provenance_for_cycle(
+    provenance = posterior_provenance
+    if provenance is None:
+        provenance = _posterior_provenance_for_cycle(
             conn,
             city=city,
             target_date=target_date,
             metric=metric,
             posterior_source_cycle_time=posterior_source_cycle_time,
+            posterior_computed_at=posterior_computed_at,
         )
-    )
+        if provenance is None:
+            return "basis=posterior_provenance_unverifiable"
     rich_used_input_provenance = _provenance_has_current_value_serving(provenance)
     exact_serving_checked = False
     if rich_used_input_provenance:

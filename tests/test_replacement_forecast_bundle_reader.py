@@ -32,6 +32,10 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (
     SOURCE_ID as OPENMETEO_ANCHOR_SOURCE_ID,
 )
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, ReplacementForecastDependency, build_replacement_forecast_readiness
+from src.data.replacement_input_hwm import (
+    _exact_consumed_anchor_artifact_cycle,
+    replacement_live_input_lag_reason,
+)
 from src.state.schema.v2_schema import apply_canonical_schema
 
 
@@ -808,6 +812,166 @@ def test_raw_hwm_blocks_newer_anchor_than_exact_consumed_artifact(tmp_path) -> N
     assert result.ok is False
     assert "source_cycle_time_raw_forecast_artifacts_lag" in result.reason_code
     assert "consumed_anchor_cycle=2026-06-06T03:00:00+00:00" in result.reason_code
+
+
+def test_raw_hwm_lookup_binds_exact_same_cycle_materialization(tmp_path) -> None:
+    conn = _conn()
+    consumed: dict[str, dict[str, object]] = {}
+    for model in ("ecmwf_ifs", "gfs"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(3),
+            captured_at=_dt(3, 5),
+            source_available_at=_dt(3, 5),
+        )
+        consumed[model] = {
+            "raw_model_forecast_id": int(
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            ),
+            "served_cycle": _dt(3).isoformat(),
+            "captured_at": _dt(3, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    older_artifact_id = _insert_openmeteo_anchor_artifact(
+        conn,
+        tmp_path,
+        source_cycle_time=_dt(3),
+    )
+    older_id = _insert_posterior(
+        conn,
+        source_available_at=_dt(3, 5),
+        computed_at=_dt(3, 10),
+    )
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (
+            json.dumps(
+                _with_current_value_serving(
+                    consumed,
+                    anchor_artifact_id=older_artifact_id,
+                )
+            ),
+            older_id,
+        ),
+    )
+    newer_artifact_id = _insert_openmeteo_anchor_artifact(
+        conn,
+        tmp_path,
+        source_cycle_time=_dt(4),
+    )
+    newer_id = _insert_posterior(
+        conn,
+        source_available_at=_dt(4, 5),
+        computed_at=_dt(4, 10),
+    )
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (
+            json.dumps(
+                _with_current_value_serving(
+                    consumed,
+                    anchor_artifact_id=newer_artifact_id,
+                )
+            ),
+            newer_id,
+        ),
+    )
+
+    reason = replacement_live_input_lag_reason(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(5),
+        posterior_source_cycle_time=_dt(0),
+        posterior_computed_at=_dt(3, 10),
+    )
+
+    assert reason is not None
+    assert "source_cycle_time_raw_forecast_artifacts_lag" in reason
+    assert "consumed_anchor_cycle=2026-06-06T03:00:00+00:00" in reason
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected_basis"),
+    (
+        ("scope", "openmeteo_anchor_artifact_scope_mismatch"),
+        ("future", "openmeteo_anchor_artifact_causality_mismatch"),
+        ("hash", "openmeteo_anchor_artifact_payload_identity_mismatch"),
+        ("metadata", "openmeteo_anchor_artifact_metadata_unverifiable"),
+        ("coverage", "openmeteo_anchor_artifact_scope_mismatch"),
+    ),
+)
+def test_exact_anchor_artifact_validation_fails_closed(
+    tmp_path,
+    fault: str,
+    expected_basis: str,
+) -> None:
+    conn = _conn()
+    artifact_id = _insert_openmeteo_anchor_artifact(
+        conn,
+        tmp_path,
+        source_cycle_time=_dt(3),
+    )
+    row = conn.execute(
+        """
+        SELECT artifact_path, artifact_metadata_json
+        FROM raw_forecast_artifacts
+        WHERE artifact_id = ?
+        """,
+        (artifact_id,),
+    ).fetchone()
+    if fault == "scope":
+        metadata = json.loads(row["artifact_metadata_json"])
+        metadata["city"] = "Seoul"
+        conn.execute(
+            "UPDATE raw_forecast_artifacts SET artifact_metadata_json = ? WHERE artifact_id = ?",
+            (json.dumps(metadata), artifact_id),
+        )
+    elif fault == "future":
+        conn.execute(
+            "UPDATE raw_forecast_artifacts SET source_available_at = ? WHERE artifact_id = ?",
+            (_dt(6).isoformat(), artifact_id),
+        )
+    elif fault == "hash":
+        conn.execute(
+            "UPDATE raw_forecast_artifacts SET sha256 = ? WHERE artifact_id = ?",
+            ("f" * 64, artifact_id),
+        )
+    elif fault == "metadata":
+        conn.execute(
+            "UPDATE raw_forecast_artifacts SET artifact_metadata_json = 'not-json' WHERE artifact_id = ?",
+            (artifact_id,),
+        )
+    else:
+        payload = {
+            "hourly": {
+                "time": ["2026-06-08T00:00"],
+                "temperature_2m": [22.0],
+            }
+        }
+        payload_bytes = json.dumps(payload, sort_keys=True).encode()
+        path = row["artifact_path"]
+        with open(path, "wb") as handle:
+            handle.write(payload_bytes)
+        conn.execute(
+            "UPDATE raw_forecast_artifacts SET sha256 = ?, byte_size = ? WHERE artifact_id = ?",
+            (hashlib.sha256(payload_bytes).hexdigest(), len(payload_bytes), artifact_id),
+        )
+
+    reason, cycle = _exact_consumed_anchor_artifact_cycle(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(5),
+        provenance={"openmeteo_anchor_artifact_id": artifact_id},
+    )
+
+    assert cycle is None
+    assert reason is not None
+    assert expected_basis in reason
 
 
 def test_raw_hwm_accepts_exact_authoritative_previous_run_substitution() -> None:

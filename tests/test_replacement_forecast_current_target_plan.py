@@ -226,6 +226,26 @@ def test_day0_hwm_reseeds_qualified_fast_conditioning_by_exact_identity(
     assert reason is not None
     assert reason.startswith("basis=day0_fast_residual_hwm_lag")
 
+    for field, value in (
+        ("observed_extreme_c", 28.5),
+        ("observation_time", "2026-07-27T23:29:00+00:00"),
+    ):
+        mismatch = json.loads(json.dumps(composite))
+        mismatch["day0_provisional_observation"][
+            "fast_residual_likelihood"
+        ] = {"station_id": "ZBAA"}
+        mismatch["day0_provisional_observation"][field] = value
+        reason = _day0_observation_lag_reason(
+            conn,
+            city="Beijing",
+            target_date="2026-07-28",
+            temperature_metric="high",
+            decision_time=decision_time,
+            posterior_provenance_json=json.dumps(mismatch),
+        )
+        assert reason is not None
+        assert reason.startswith("basis=day0_fast_residual_hwm_lag")
+
     monkeypatch.setattr(
         current_target_plan,
         "latest_fast_station_conditioning",
