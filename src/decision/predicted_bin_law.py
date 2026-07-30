@@ -176,14 +176,12 @@ def _deepest_breakpoint(
 
 def exit_decision(
     held_shares: Decimal,
-    q_mean: Decimal | None = None,
-    bid_breakpoints: Sequence[tuple[Decimal, Decimal]] = (),
-    exit_margin: Decimal = _ZERO,
-    lock: LockState = LockState.NONE,
-    evidence_ok: bool = False,
-    riskguard_red: bool = False,
-    *,
-    q_lcb: Decimal | None = None,
+    q_mean: Decimal,
+    bid_breakpoints: Sequence[tuple[Decimal, Decimal]],
+    exit_margin: Decimal,
+    lock: LockState,
+    evidence_ok: bool,
+    riskguard_red: bool,
 ) -> ExitDecision:
     """The unified PR-1 optimal-stopping exit law (ΔJ≡0 special case).
 
@@ -205,17 +203,9 @@ def exit_decision(
        lock-folded posterior-predictive mean. SELL_REVERSAL at the argmax x iff
        it strictly wins; else HOLD. Equivalently SELL iff ``L(x) > x·q + M_x``.
 
-    ``q_lcb`` is a temporary keyword-only compatibility alias for existing pure-
-    law tests; production callers must bind ``q_mean`` to the current posterior-
-    predictive mean. It is intentionally not an alternate confidence path.
+    ``q_mean`` is intentionally the only payoff-probability parameter: confidence
+    tails cannot silently re-enter the fixed-action expectation through an alias.
     """
-    if q_mean is None:
-        if q_lcb is None:
-            raise TypeError("exit_decision requires q_mean")
-        q_mean = q_lcb
-    elif q_lcb is not None:
-        raise TypeError("exit_decision accepts q_mean or legacy q_lcb, not both")
-
     q = _locked_q_mean(q_mean, lock)
     hold_value = held_shares * q
 

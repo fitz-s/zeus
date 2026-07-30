@@ -111,11 +111,11 @@ def test_admissible_negative_ev_rejected():
 # exit_decision — value comparison                                             #
 # --------------------------------------------------------------------------- #
 
-def test_exit_holds_when_bid_below_robust_lower():
-    # q_lcb 0.90, best net bid 0.85 -> hold.
+def test_exit_holds_when_bid_below_posterior_mean():
+    # q_mean 0.90, best net bid 0.85 -> hold.
     d = exit_decision(
         held_shares=D("100"),
-        q_lcb=D("0.90"),
+        q_mean=D("0.90"),
         bid_breakpoints=[(D("100"), D("85.00"))],
         exit_margin=D("0.01"),
         lock=LockState.NONE,
@@ -129,10 +129,10 @@ def test_exit_holds_when_bid_below_robust_lower():
 
 
 def test_exit_sells_full_when_bid_dominates_hold():
-    # q_lcb 0.50, net bid 0.80 -> clean liquidation dominates.
+    # q_mean 0.50, net bid 0.80 -> clean liquidation dominates.
     d = exit_decision(
         held_shares=D("100"),
-        q_lcb=D("0.50"),
+        q_mean=D("0.50"),
         bid_breakpoints=[(D("100"), D("80.00"))],
         exit_margin=D("0.01"),
         lock=LockState.NONE,
@@ -147,10 +147,10 @@ def test_exit_sells_full_when_bid_dominates_hold():
 
 def test_exit_partial_argmax_picks_interior_breakpoint_when_bid_decays():
     # Marginal per-share: 0..20 @0.97, 20..50 @0.92 (both > q_lcb 0.90),
-    # 50..100 @0.80 (< q_lcb) -> optimal sells exactly 50, not 100.
+    # 50..100 @0.80 (< q_mean) -> optimal sells exactly 50, not 100.
     d = exit_decision(
         held_shares=D("100"),
-        q_lcb=D("0.90"),
+        q_mean=D("0.90"),
         bid_breakpoints=[
             (D("20"), D("19.40")),
             (D("50"), D("47.00")),
@@ -175,7 +175,7 @@ def test_exit_breakpoint_order_does_not_change_verdict():
     ]
     d = exit_decision(
         held_shares=D("100"),
-        q_lcb=D("0.90"),
+        q_mean=D("0.90"),
         bid_breakpoints=unordered,
         exit_margin=D("0.01"),
         lock=LockState.NONE,
@@ -188,7 +188,7 @@ def test_exit_breakpoint_order_does_not_change_verdict():
 def test_exit_no_bid_holds():
     d = exit_decision(
         held_shares=D("100"),
-        q_lcb=D("0.90"),
+        q_mean=D("0.90"),
         bid_breakpoints=[],
         exit_margin=D("0.01"),
         lock=LockState.NONE,
@@ -206,7 +206,7 @@ def test_exit_no_bid_holds():
 def test_red_preempts_guaranteed_lock_and_good_evidence():
     d = exit_decision(
         held_shares=D("100"),
-        q_lcb=D("0.95"),
+        q_mean=D("0.95"),
         bid_breakpoints=[(D("100"), D("50.00"))],
         exit_margin=D("0.01"),
         lock=LockState.GUARANTEED,
@@ -223,7 +223,7 @@ def test_red_preempts_evidence_gate():
     # evidence not ok + lock NONE would be EVIDENCE_UNAVAILABLE, but RED wins.
     d = exit_decision(
         held_shares=D("100"),
-        q_lcb=D("0.90"),
+        q_mean=D("0.90"),
         bid_breakpoints=[(D("100"), D("70.00"))],
         exit_margin=D("0.01"),
         lock=LockState.NONE,
@@ -237,7 +237,7 @@ def test_red_preempts_evidence_gate():
 def test_evidence_unavailable_only_when_lock_none():
     d = exit_decision(
         held_shares=D("100"),
-        q_lcb=D("0.90"),
+        q_mean=D("0.90"),
         bid_breakpoints=[(D("100"), D("95.00"))],
         exit_margin=D("0.01"),
         lock=LockState.NONE,
@@ -253,7 +253,7 @@ def test_guaranteed_lock_with_garbage_evidence_still_holds():
     # and the stale-evidence gate does NOT fire because lock != NONE.
     d = exit_decision(
         held_shares=D("100"),
-        q_lcb=D("0.10"),  # garbage; overridden by GUARANTEED fold to 1
+        q_mean=D("0.10"),  # garbage; overridden by GUARANTEED fold to 1
         bid_breakpoints=[(D("100"), D("99.50"))],
         exit_margin=D("0.01"),
         lock=LockState.GUARANTEED,
@@ -265,12 +265,12 @@ def test_guaranteed_lock_with_garbage_evidence_still_holds():
     assert d.value_kept == D("100")  # 100 * folded 1
 
 
-def test_impossible_lock_folds_qlcb_to_zero_and_sells_on_any_positive_bid():
+def test_impossible_lock_folds_mean_to_zero_and_sells_on_any_positive_bid():
     # Folded q_lcb = 0, tiny positive net proceeds beat the flat margin -> SELL,
     # even with stale evidence (lock authority bypasses the evidence gate).
     d = exit_decision(
         held_shares=D("100"),
-        q_lcb=D("0.50"),  # ignored; IMPOSSIBLE folds to 0
+        q_mean=D("0.50"),  # ignored; IMPOSSIBLE folds to 0
         bid_breakpoints=[(D("100"), D("3.00"))],
         exit_margin=D("0.01"),
         lock=LockState.IMPOSSIBLE,
@@ -318,10 +318,10 @@ def test_hysteresis_no_overlap_same_state_never_both_enter_and_exit():
     # Entry: q_lcb - ask - m_e = 0.87 - 0.88 - 0.01 < 0 -> not admissible.
     assert admissible(D("1"), q_in_band, ask, m) is False
 
-    # Exit: net bid 0.85 vs q_lcb 0.87 + m_x -> HOLD.
+    # Exit: net bid 0.85 vs q_mean 0.87 + m_x -> HOLD.
     d = exit_decision(
         held_shares=D("1"),
-        q_lcb=q_in_band,
+        q_mean=q_in_band,
         bid_breakpoints=[(D("1"), net_bid)],
         exit_margin=m,
         lock=LockState.NONE,
