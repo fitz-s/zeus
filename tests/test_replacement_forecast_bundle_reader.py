@@ -34,6 +34,7 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, ReplacementForecastDependency, build_replacement_forecast_readiness
 from src.data.replacement_input_hwm import (
     _exact_consumed_anchor_artifact_cycle,
+    _posterior_provenance_for_cycle,
     replacement_live_input_lag_reason,
 )
 from src.state.schema.v2_schema import apply_canonical_schema
@@ -891,6 +892,39 @@ def test_raw_hwm_lookup_binds_exact_same_cycle_materialization(tmp_path) -> None
     assert reason is not None
     assert "source_cycle_time_raw_forecast_artifacts_lag" in reason
     assert "consumed_anchor_cycle=2026-06-06T03:00:00+00:00" in reason
+
+
+def test_raw_hwm_lookup_rejects_ambiguous_timestamp_spellings() -> None:
+    conn = _conn()
+    first_id = _insert_posterior(conn, computed_at=_dt(3, 10))
+    second_id = _insert_posterior(conn, computed_at=_dt(3, 11))
+    conn.execute(
+        """
+        UPDATE forecast_posteriors
+           SET computed_at = ?, provenance_json = ?
+         WHERE posterior_id = ?
+        """,
+        ("2026-06-06T03:10:00Z", '{"row":"z"}', first_id),
+    )
+    conn.execute(
+        """
+        UPDATE forecast_posteriors
+           SET computed_at = ?, provenance_json = ?
+         WHERE posterior_id = ?
+        """,
+        ("2026-06-06T03:10:00+00:00", '{"row":"offset"}', second_id),
+    )
+
+    provenance = _posterior_provenance_for_cycle(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        posterior_source_cycle_time=_dt(0),
+        posterior_computed_at="2026-06-06T03:10:00Z",
+    )
+
+    assert provenance is None
 
 
 @pytest.mark.parametrize(

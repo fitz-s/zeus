@@ -2141,6 +2141,7 @@ def test_day0_drained_marker_with_active_provisional_posterior_does_not_reenqueu
         (
             json.dumps(
                 {
+                    "openmeteo_anchor_artifact_id": 1,
                     "day0_provisional_observation": {
                         "active": True,
                         "source": identity["day0_observed_extreme_source"],

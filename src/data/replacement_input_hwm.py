@@ -708,7 +708,6 @@ def _posterior_provenance_for_cycle(
     )
     if exact_computed_at is not None and "computed_at" not in columns:
         return None
-    computed_predicate = "AND computed_at = ?" if exact_computed_at is not None else ""
     order_terms = []
     if "computed_at" in columns:
         order_terms.append("datetime(computed_at) DESC")
@@ -718,29 +717,34 @@ def _posterior_provenance_for_cycle(
     try:
         rows = conn.execute(
             f"""
-            SELECT provenance_json
+            SELECT provenance_json, computed_at
               FROM {table_ref}
              WHERE city = ?
                AND target_date = ?
                AND temperature_metric = ?
                AND datetime(source_cycle_time) = datetime(?)
-               {computed_predicate}
              ORDER BY {order_sql}
-             LIMIT 2
             """,
-            (
-                city,
-                target_date,
-                metric,
-                str(posterior_source_cycle_time),
-                *((exact_computed_at,) if exact_computed_at is not None else ()),
-            ),
+            (city, target_date, metric, str(posterior_source_cycle_time)),
         ).fetchall()
     except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
         return None
-    if not rows or (exact_computed_at is not None and len(rows) != 1):
+    if not rows:
         return None
-    row = rows[0]
+    if exact_computed_at is not None:
+        exact_rows = []
+        for candidate in rows:
+            try:
+                candidate_computed_at = candidate["computed_at"]
+            except Exception:  # noqa: BLE001 - tuple row compatibility
+                candidate_computed_at = candidate[1]
+            if _parse_source_cycle_utc(candidate_computed_at) == parsed_computed_at:
+                exact_rows.append(candidate)
+        if len(exact_rows) != 1:
+            return None
+        row = exact_rows[0]
+    else:
+        row = rows[0]
     try:
         raw = row["provenance_json"]
     except Exception:  # noqa: BLE001
