@@ -2839,6 +2839,61 @@ def _positive_fill_trade_fact_summary(
     }
 
 
+def _confirmed_exit_trade_fact_summary(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+) -> dict:
+    """Summarize canonical authenticated confirmed EXIT fills."""
+
+    rows = conn.execute(
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ", "
+        + _economic_trade_fact_cte()
+        + """
+        SELECT trade_id, filled_size, fill_price, source, observed_at,
+               venue_timestamp
+          FROM economic_trade_fact
+         WHERE command_id = ?
+           AND venue_order_id = ?
+           AND state = 'CONFIRMED'
+           AND source IN ('REST', 'WS_USER')
+           AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+           AND CAST(COALESCE(fill_price, '0') AS REAL) > 0
+         ORDER BY trade_id
+        """,
+        (command_id, venue_order_id),
+    ).fetchall()
+    fills: list[tuple[Decimal, Decimal, str]] = []
+    for raw in rows:
+        fact = _dict_row(raw)
+        trade_id = str(fact.get("trade_id") or "").strip()
+        size = _positive_decimal_or_none(fact.get("filled_size"))
+        price = _positive_decimal_or_none(fact.get("fill_price"))
+        observed_at = str(
+            fact.get("venue_timestamp") or fact.get("observed_at") or ""
+        )
+        if not trade_id or size is None or price is None or _parse_ts(observed_at) is None:
+            continue
+        fills.append((size, price, observed_at))
+    filled = sum((item[0] for item in fills), Decimal("0"))
+    cost = sum((item[0] * item[1] for item in fills), Decimal("0"))
+    latest_at = max(
+        (item[2] for item in fills),
+        key=lambda value: _parse_ts(value),
+        default="",
+    )
+    return {
+        "count": len(fills),
+        "filled_size": _decimal_text(filled),
+        "fill_price": _decimal_text(cost / filled) if filled > 0 else "",
+        "authenticated_confirmed": bool(fills),
+        "observed_at": latest_at,
+    }
+
+
 def _latest_review_cancel_blocked_payload(conn: sqlite3.Connection, command_id: str) -> dict:
     if not _table_exists(conn, "venue_command_events"):
         return {}
@@ -10734,7 +10789,7 @@ def _matched_cancel_review_required_candidates(conn: sqlite3.Connection) -> list
     rows = conn.execute(
         """
         SELECT *
-          FROM venue_commands
+         FROM venue_commands
          WHERE state = 'REVIEW_REQUIRED'
            AND intent_kind = 'ENTRY'
            AND venue_order_id IS NOT NULL
@@ -10743,6 +10798,243 @@ def _matched_cancel_review_required_candidates(conn: sqlite3.Connection) -> list
         """
     ).fetchall()
     return [_dict_row(row) for row in rows]
+
+
+def _terminal_fak_partial_exit_review_candidates(
+    conn: sqlite3.Connection,
+) -> list[dict]:
+    if not _table_exists(conn, "venue_commands"):
+        return []
+    rows = conn.execute(
+        """
+        SELECT command.*,
+               envelope.order_type AS env_order_type
+          FROM venue_commands command
+          LEFT JOIN venue_submission_envelopes envelope
+            ON envelope.envelope_id = command.envelope_id
+         WHERE command.state = 'REVIEW_REQUIRED'
+           AND command.intent_kind = 'EXIT'
+           AND command.side = 'SELL'
+           AND command.venue_order_id IS NOT NULL
+           AND command.venue_order_id != ''
+         ORDER BY command.updated_at, command.command_id
+        """
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _review_required_terminal_fak_partial_exit_projection_matches(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    filled: Decimal,
+    reviewed_at: str,
+) -> bool:
+    """Require current Chain-backed residual exposure before releasing a SELL."""
+
+    requested = _positive_decimal_or_none(command.get("size"))
+    position_id = str(command.get("position_id") or "")
+    command_token_id = str(command.get("token_id") or "")
+    if requested is None or filled <= 0 or filled >= requested or not position_id:
+        return False
+    row = conn.execute(
+        """
+        SELECT phase, direction, token_id, no_token_id, shares, chain_state,
+               chain_shares, chain_seen_at
+          FROM position_current
+         WHERE position_id = ?
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    current = _dict_row(row)
+    if (
+        str(current.get("phase") or "")
+        not in {"active", "day0_window", "pending_exit"}
+        or str(current.get("chain_state") or "").lower() != "synced"
+        or not str(current.get("chain_seen_at") or "").strip()
+    ):
+        return False
+    held_token_id = str(
+        current.get("no_token_id")
+        if str(current.get("direction") or "").lower() == "buy_no"
+        else current.get("token_id")
+        or ""
+    )
+    if not command_token_id or held_token_id != command_token_id:
+        return False
+    shares = _decimal_or_none(current.get("shares"))
+    chain_shares = _decimal_or_none(current.get("chain_shares"))
+    expected_residual = requested - filled
+    tolerance = Decimal("0.011")
+    chain_seen = _parse_ts(current.get("chain_seen_at"))
+    review_seen = _parse_ts(reviewed_at)
+    return bool(
+        shares is not None
+        and chain_shares is not None
+        and chain_seen is not None
+        and review_seen is not None
+        and chain_seen > review_seen
+        and shares > 0
+        and abs(shares - expected_residual) <= tolerance
+        and abs(chain_shares - expected_residual) <= tolerance
+    )
+
+
+def _clear_review_required_terminal_fak_partial_exit(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    trade_summary: Mapping[str, object],
+) -> bool:
+    """Convert an exact terminal FAK partial review into non-live fill truth.
+
+    SCOPE: one EXIT/SELL command whose latest review was raised only because a
+    MATCHED point order arrived before its complete trade fact.
+    DRAIN: canonical confirmed trade facts, the persisted FAK point payload, and
+    a newer synced Chain residual must all agree on the exact partial fill.
+    RESET: one transaction records the terminal partial and advances
+    REVIEW_REQUIRED -> PARTIAL -> EXPIRED so only the positive residual remains.
+    """
+
+    if (
+        str(command.get("intent_kind") or "").upper() != "EXIT"
+        or str(command.get("side") or "").upper() != "SELL"
+        or str(command.get("env_order_type") or "").upper() != "FAK"
+    ):
+        return False
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    review_row = conn.execute(
+        """
+        SELECT occurred_at, payload_json
+          FROM venue_command_events
+         WHERE command_id = ?
+           AND event_type = 'REVIEW_REQUIRED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    review_row_dict = _dict_row(review_row)
+    review = _json_dict(review_row_dict.get("payload_json"))
+    reviewed_at = str(review_row_dict.get("occurred_at") or "")
+    if review.get("reason") != "partial_remainder_point_order_filled_without_full_trade_fact":
+        return False
+    point_order = review.get("point_order")
+    if not isinstance(point_order, Mapping):
+        return False
+    point = dict(point_order)
+    if (
+        _order_status(point) not in {"MATCHED", "FILLED"}
+        or str(_first_present(point, "order_type", "orderType") or "").upper() != "FAK"
+        or _extract_order_id(point) != venue_order_id
+        or str(_first_present(point, "side") or "").upper() != "SELL"
+        or str(_first_present(point, "asset_id", "assetId", "token_id") or "")
+        != str(command.get("token_id") or "")
+    ):
+        return False
+    requested = _positive_decimal_or_none(command.get("size"))
+    original = _positive_decimal_or_none(
+        _first_present(
+            point,
+            "original_size",
+            "originalSize",
+            "_v2_original_size",
+            "_v2_wire_original_size",
+        )
+    )
+    matched = _positive_decimal_or_none(
+        _point_order_matched_size(point, side=command.get("side"))
+    )
+    filled = _positive_decimal_or_none(trade_summary.get("filled_size"))
+    if (
+        requested is None
+        or original != requested
+        or matched is None
+        or filled != matched
+        or matched >= requested
+        or int(trade_summary.get("count") or 0) <= 0
+    ):
+        return False
+    if not _review_required_terminal_fak_partial_exit_projection_matches(
+        conn,
+        command=command,
+        filled=filled,
+        reviewed_at=reviewed_at,
+    ):
+        return False
+
+    observed_at = str(trade_summary.get("observed_at") or _now_iso())
+    terminal_payload = {
+        "reason": "terminal_fak_partial_exit_confirmed",
+        "proof_class": "terminal_partial_order_fact",
+        "command_id": command_id,
+        "venue_order_id": venue_order_id,
+        "matched_size": _decimal_text(filled),
+        "filled_size": _decimal_text(filled),
+        "remaining_size": "0",
+        "requested_size": _decimal_text(requested),
+        "point_order_status": _order_status(point),
+        "point_order": point,
+        "required_predicates": {
+            "terminal_order_remainder_zero": True,
+            "canonical_trade_facts_match_terminal_order_fact": True,
+            "cumulative_fill_below_requested_size": True,
+            "fak_order_not_live": True,
+            "synced_chain_residual_matches_unfilled_size": True,
+        },
+    }
+    safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+    sp_name = f"sp_terminal_fak_partial_exit_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        fact_id = _append_terminal_partial_order_fact(
+            conn,
+            venue_order_id=venue_order_id,
+            command_id=command_id,
+            matched_size=_decimal_text(filled),
+            source="REST",
+            observed_at=observed_at,
+            payload=terminal_payload,
+        )
+        order_fact = _dict_row(
+            conn.execute(
+                "SELECT * FROM venue_order_facts WHERE fact_id = ?",
+                (fact_id,),
+            ).fetchone()
+        )
+        if not _clear_review_required_terminal_partial(
+            conn,
+            command=command,
+            order_fact=order_fact,
+            trade_summary=trade_summary,
+        ):
+            raise RuntimeError(
+                f"terminal FAK partial EXIT review did not clear for {command_id}"
+            )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=CommandEventType.EXPIRED.value,
+            occurred_at=observed_at,
+            payload={
+                "reason": "terminal_fak_partial_exit_remainder_expired",
+                "proof_class": "terminal_partial_order_fact",
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "terminal_order_fact_id": fact_id,
+                "filled_size": _decimal_text(filled),
+                "remaining_size": "0",
+                "chain_residual_size": _decimal_text(requested - filled),
+            },
+        )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    return True
 
 
 def _clear_review_required_terminal_partial(
@@ -10840,18 +11132,45 @@ def _clear_review_required_terminal_partial(
 
 
 def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -> dict:
-    """Clear REVIEW_REQUIRED entries when canonical venue facts prove a fill.
+    """Clear REVIEW_REQUIRED commands when canonical venue facts prove a fill.
 
     This handles the live shape where a maker rest partially/near-fully fills,
     cancel-replace receives a venue NOT_CANCELED / matched-order response, and
     the command is left in REVIEW_REQUIRED even though canonical trade facts and
-    position_current may still await the slower chain mirror. An authenticated
-    full-fill trade fact bound to the exact command and venue order is already
-    venue truth, so command finality must not wait for chain projection. Other
+    position_current may still await the slower chain mirror. It also clears a
+    terminal FAK partial EXIT only when the persisted point order, canonical
+    confirmed trades, and synced Chain residual agree exactly. Other
     REVIEW_REQUIRED rows remain operator-visible.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for command in _terminal_fak_partial_exit_review_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(command.get("command_id") or "")
+        venue_order_id = str(command.get("venue_order_id") or "")
+        try:
+            trade_summary = _confirmed_exit_trade_fact_summary(
+                conn,
+                command_id=command_id,
+                venue_order_id=venue_order_id,
+            )
+            if _clear_review_required_terminal_fak_partial_exit(
+                conn,
+                command=command,
+                trade_summary=trade_summary,
+            ):
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: terminal FAK partial EXIT review recovery failed "
+                "for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+
     for command in _matched_cancel_review_required_candidates(conn):
         summary["scanned"] += 1
         command_id = str(command.get("command_id") or "")

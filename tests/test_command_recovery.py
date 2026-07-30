@@ -12749,6 +12749,194 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()[0] == 0
 
+    @pytest.mark.parametrize(
+        (
+            "chain_shares",
+            "chain_seen_at",
+            "command_order_type",
+            "point_order_type",
+            "expected_state",
+        ),
+        (
+            (4.0, "2026-04-26T00:09:00Z", "FAK", "FAK", "EXPIRED"),
+            (4.0, "2026-04-26T00:08:00Z", "FAK", "FAK", "REVIEW_REQUIRED"),
+            (4.0, "2026-04-26T00:07:00Z", "FAK", "FAK", "REVIEW_REQUIRED"),
+            (5.0, "2026-04-26T00:09:00Z", "FAK", "FAK", "REVIEW_REQUIRED"),
+            (4.0, "2026-04-26T00:09:00Z", "GTC", "GTC", "REVIEW_REQUIRED"),
+            (4.0, "2026-04-26T00:09:00Z", "GTC", "FAK", "REVIEW_REQUIRED"),
+        ),
+    )
+    def test_terminal_fak_partial_exit_review_releases_only_exact_chain_residual(
+        self,
+        conn,
+        chain_shares,
+        chain_seen_at,
+        command_order_type,
+        point_order_type,
+        expected_state,
+    ):
+        """A dead FAK order cannot block reauction after exact partial truth."""
+        _insert(
+            conn,
+            command_id="cmd-entry",
+            position_id="pos-001",
+            size=6.0,
+            price=0.31,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-entry",
+            venue_order_id="ord-entry",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            command_id="cmd-entry",
+            order_id="ord-entry",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'day0_window',
+                   shares = 4.0,
+                   cost_basis_usd = 1.24,
+                   size_usd = 1.24,
+                   entry_price = 0.31,
+                   chain_state = 'synced',
+                   chain_shares = ?,
+                   chain_seen_at = ?,
+                   order_status = 'filled'
+             WHERE position_id = 'pos-001'
+            """,
+            (chain_shares, chain_seen_at),
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            order_type=command_order_type,
+            size=6.0,
+            price=0.46,
+            created_at="2026-04-26T00:04:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit",
+            venue_order_id="ord-exit-partial",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "venue_order_id": "ord-exit-partial",
+                "trade_id": "trade-exit-partial",
+                "filled_size": "2",
+                "fill_price": "0.46",
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit-partial",
+            state="PARTIALLY_MATCHED",
+            matched_size="2",
+            remaining_size="4",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit-partial",
+            trade_id="trade-exit-partial",
+            state="CONFIRMED",
+            filled_size="2",
+            fill_price="0.46",
+            tx_hash="0xterminal-partial",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit-partial",
+            trade_id="0xterminal-partial",
+            state="CONFIRMED",
+            filled_size="2",
+            fill_price="0.46",
+            tx_hash="0xterminal-partial",
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+                "venue_order_id": "ord-exit-partial",
+                "point_order_status": "MATCHED",
+                "point_order": {
+                    "orderID": "ord-exit-partial",
+                    "status": "MATCHED",
+                    "order_type": point_order_type,
+                    "side": "SELL",
+                    "asset_id": "tok-001",
+                    "original_size": "6",
+                    "size_matched": "2",
+                    "price": "0.46",
+                },
+            },
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+        from src.execution.exit_safety import can_submit_replacement_sell
+
+        summary = reconcile_matched_cancel_review_required_entries(conn)
+
+        assert _get_state(conn, "cmd-exit") == expected_state
+        allowed, reason = can_submit_replacement_sell(conn, "pos-001", "tok-001")
+        assert allowed is (expected_state == "EXPIRED")
+        if expected_state == "EXPIRED":
+            assert reason is None
+            assert summary["advanced"] == 1
+            assert [
+                event["event_type"] for event in _get_events(conn, "cmd-exit")[-2:]
+            ] == ["PARTIAL_FILL_OBSERVED", "EXPIRED"]
+            terminal = conn.execute(
+                """
+                SELECT state, matched_size, remaining_size
+                  FROM venue_order_facts
+                 WHERE command_id = 'cmd-exit'
+                 ORDER BY local_sequence DESC
+                 LIMIT 1
+                """
+            ).fetchone()
+            assert dict(terminal) == {
+                "state": "PARTIALLY_MATCHED",
+                "matched_size": "2",
+                "remaining_size": "0",
+            }
+        else:
+            assert summary["advanced"] == 0
+            assert reason == (
+                "active_prior_exit_sell: state=REVIEW_REQUIRED command_id=cmd-exit"
+            )
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "day0_window",
+            "shares": 4.0,
+            "cost_basis_usd": 1.24,
+        }
+
     def test_already_canceled_exit_ambiguous_point_read_stays_review_required(
         self,
         conn,
