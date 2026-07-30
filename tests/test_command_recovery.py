@@ -23654,6 +23654,370 @@ class TestEdliAbsenceVenueCommandSync:
 # TestRecoveryCycleIntegration
 # ---------------------------------------------------------------------------
 
+
+def test_live_tick_identity_bound_matched_exit_outruns_account_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    """A bound MATCHED exit closes before a broad account snapshot can time out."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.state.db import init_schema, init_schema_trade_only
+
+    db_path = tmp_path / "identity-bound-matched-exit.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    init_collateral_schema(seed)
+    _insert(seed, command_id="cmd-entry", position_id="pos-identity", size=8.25, price=0.56)
+    _advance_to_acked(seed, command_id="cmd-entry", venue_order_id="ord-entry")
+    _seed_pending_entry_projection(seed, position_id="pos-identity", command_id="cmd-entry", order_id="ord-entry")
+    seed.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', shares = 8.25, chain_shares = 8.25,
+               cost_basis_usd = 4.62, entry_price = 0.56,
+               order_status = 'sell_pending_confirmation'
+         WHERE position_id = 'pos-identity'
+        """
+    )
+    _seed_full_exit_intent(seed, position_id="pos-identity", shares=8.25)
+    _insert(
+        seed,
+        command_id="cmd-exit",
+        position_id="pos-identity",
+        intent_kind="EXIT",
+        side="SELL",
+        size=8.25,
+        price=0.95,
+        token_id="tok-001",
+        created_at="2026-04-26T00:04:00Z",
+    )
+    _advance_to_submitting(seed, command_id="cmd-exit", venue_order_id="ord-exit")
+    seed.commit()
+    seed.close()
+
+    def _conn_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _conn_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "1")
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("broad account snapshot must be deferred"),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_read_identity_bound_point_orders",
+        lambda order_ids: (
+            {
+                "ord-exit": {
+                    "orderID": "ord-exit",
+                    "status": "MATCHED",
+                    "makingAmount": "8.25",
+                    "takingAmount": "7.8375",
+                    "transactionsHashes": ["0xidentity-bound-exit"],
+                }
+            },
+            False,
+        ),
+    )
+    client = MagicMock(spec_set=["get_order", "place_limit_order"])
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["identity_bound_inflight_fast"] == {
+        "scanned": 1,
+        "advanced": 2,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["venue_snapshot_deferred"] is True
+    assert summary["deferred_full_sweep"] is True
+    client.get_order.assert_not_called()
+    client.place_limit_order.assert_not_called()
+    verified = _conn_factory()
+    try:
+        assert _get_state(verified, "cmd-exit") == "FILLED"
+        position = verified.execute(
+            "SELECT phase, order_status, exit_price FROM position_current WHERE position_id = ?",
+            ("pos-identity",),
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "economically_closed",
+            "order_status": "sell_filled",
+            "exit_price": pytest.approx(0.95),
+        }
+        events = verified.execute(
+            "SELECT event_type FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no",
+            ("cmd-exit",),
+        ).fetchall()
+        assert [event["event_type"] for event in events] == [
+            "INTENT_CREATED",
+            "SUBMIT_REQUESTED",
+            "SUBMIT_ACKED",
+            "FILL_CONFIRMED",
+        ]
+        assert verified.execute(
+            "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?",
+            ("cmd-exit",),
+        ).fetchone()[0] == 1
+    finally:
+        verified.close()
+
+
+@pytest.mark.parametrize(
+    "point_orders",
+    (
+        {},
+        {"ord-not-found": {"orderID": "ord-not-found", "status": "NOT_FOUND"}},
+    ),
+)
+def test_identity_bound_submit_not_found_stays_without_absence_inference(
+    conn,
+    point_orders,
+):
+    from src.execution.command_recovery import _reconcile_identity_bound_submitting_commands
+
+    _insert(conn, command_id="cmd-not-found")
+    _advance_to_submitting(conn, command_id="cmd-not-found", venue_order_id="ord-not-found")
+
+    summary = _reconcile_identity_bound_submitting_commands(
+        conn,
+        command_ids={"cmd-not-found"},
+        point_orders=point_orders,
+    )
+
+    assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+    assert _get_state(conn, "cmd-not-found") == "SUBMITTING"
+    assert [event["event_type"] for event in _get_events(conn, "cmd-not-found")] == [
+        "INTENT_CREATED",
+        "SUBMIT_REQUESTED",
+    ]
+
+
+def test_unavailable_identity_submit_does_not_starve_durable_terminal_capital_release(
+    tmp_path,
+    monkeypatch,
+):
+    """A permanently unreadable submit cannot consume all live-tick recovery."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only
+
+    db_path = tmp_path / "identity-unavailable-fairness.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    _insert(seed, command_id="cmd-unreadable", position_id="pos-unreadable")
+    _advance_to_submitting(
+        seed,
+        command_id="cmd-unreadable",
+        venue_order_id="ord-unreadable",
+    )
+    _insert(seed, command_id="cmd-release", position_id="pos-release")
+    _advance_to_acked(seed, command_id="cmd-release", venue_order_id="ord-release")
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-release",
+        command_id="cmd-release",
+        order_id="ord-release",
+    )
+    _append_order_fact(
+        seed,
+        command_id="cmd-release",
+        order_id="ord-release",
+        state="CANCEL_CONFIRMED",
+        matched_size="0",
+        remaining_size="0",
+    )
+    seed.commit()
+    seed.close()
+
+    def _conn_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _conn_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "1")
+    monkeypatch.setattr(
+        command_recovery,
+        "_read_identity_bound_point_orders",
+        lambda _order_ids: ({}, False),
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("identity continuation must defer account snapshot"),
+    )
+    client = MagicMock(spec_set=["get_order", "place_limit_order"])
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["terminal_order_facts"]["advanced"] == 1
+    assert summary["venue_snapshot_deferred"] is True
+    client.get_order.assert_not_called()
+    client.place_limit_order.assert_not_called()
+    verified = _conn_factory()
+    try:
+        assert _get_state(verified, "cmd-unreadable") == "SUBMITTING"
+        assert [event["event_type"] for event in _get_events(verified, "cmd-unreadable")] == [
+            "INTENT_CREATED",
+            "SUBMIT_REQUESTED",
+        ]
+        assert _get_state(verified, "cmd-release") == "EXPIRED"
+    finally:
+        verified.close()
+
+
+def test_live_tick_identity_bound_hung_point_read_returns_with_continuation(
+    tmp_path,
+    monkeypatch,
+):
+    """A hung exact read is bounded and cannot turn into negative venue truth."""
+    import time as time_module
+
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only
+
+    db_path = tmp_path / "identity-bound-hung-read.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    _insert(seed, command_id="cmd-hung")
+    _advance_to_submitting(seed, command_id="cmd-hung", venue_order_id="ord-hung")
+    seed.commit()
+    seed.close()
+
+    def _conn_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _conn_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+    monkeypatch.setenv("ZEUS_LIVE_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS", "0.01")
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("hung priority read must defer broad sweep"),
+    )
+
+    class HungReceive:
+        def poll(self, _timeout):
+            return False
+
+        def close(self):
+            pass
+
+    class Send:
+        def close(self):
+            pass
+
+    class HungProcess:
+        def __init__(self, **_kwargs):
+            self.alive = True
+            self.terminate_calls = 0
+            self.kill_calls = 0
+            self.join_calls = 0
+
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminate_calls += 1
+
+        def kill(self):
+            self.kill_calls += 1
+            self.alive = False
+
+        def join(self, timeout):
+            assert timeout >= 0
+            self.join_calls += 1
+
+    class HungContext:
+        def __init__(self):
+            self.process = None
+
+        def Pipe(self, *, duplex):
+            assert duplex is False
+            return HungReceive(), Send()
+
+        def Process(self, **kwargs):
+            self.process = HungProcess(**kwargs)
+            return self.process
+
+    hung_context = HungContext()
+    monkeypatch.setattr(
+        command_recovery.multiprocessing,
+        "get_context",
+        lambda method: hung_context,
+    )
+    client = MagicMock(spec_set=["get_order", "place_limit_order"])
+
+    started = time_module.monotonic()
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=client,
+        scope="live_tick",
+    )
+    elapsed = time_module.monotonic() - started
+
+    assert elapsed < 0.15
+    assert summary["identity_bound_inflight_point_read_timed_out"] is True
+    assert hung_context.process.terminate_calls == 1
+    assert hung_context.process.kill_calls == 1
+    assert hung_context.process.join_calls == 2
+    client.get_order.assert_not_called()
+    client.place_limit_order.assert_not_called()
+    assert summary["identity_bound_inflight_fast"] == {
+        "scanned": 1,
+        "advanced": 0,
+        "stayed": 1,
+        "errors": 0,
+    }
+    verified = _conn_factory()
+    try:
+        assert _get_state(verified, "cmd-hung") == "SUBMITTING"
+        assert [event["event_type"] for event in _get_events(verified, "cmd-hung")] == [
+            "INTENT_CREATED",
+            "SUBMIT_REQUESTED",
+        ]
+    finally:
+        verified.close()
+
+
+def test_identity_bound_submit_candidates_are_bounded_with_durable_remainder(conn):
+    from src.execution.command_recovery import _identity_bound_submitting_candidates
+
+    for index in range(5):
+        command_id = f"cmd-bounded-{index}"
+        _insert(conn, command_id=command_id)
+        _advance_to_submitting(conn, command_id=command_id, venue_order_id=f"ord-{index}")
+
+    candidates, deferred = _identity_bound_submitting_candidates(conn, limit=4)
+
+    assert len(candidates) == 4
+    assert deferred == 1
+    assert all(candidate["state"] == "SUBMITTING" for candidate in candidates)
+
 class TestRecoveryCycleIntegration:
     """Assert cycle_runner invokes reconcile_unresolved_commands."""
 

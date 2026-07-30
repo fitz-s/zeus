@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import json
+import multiprocessing
 import os
 import re
 import sqlite3
@@ -82,6 +83,13 @@ class TerminalExitHeldTokenMismatch(RuntimeError):
 _RECOVERY_LOCK_RETRY_DELAYS = (2.0, 5.0, 10.0)
 _LIVE_TICK_DB_BUDGET_SECONDS = 0.1
 _LIVE_TICK_DB_PROGRESS_OPCODES = 1_000
+# A live recovery tick has a 60-second cadence.  Bound the identity-directed
+# point reads so one historical account sweep cannot make the scheduler miss
+# its next invocation.  Rows beyond this cap remain durably SUBMITTING with
+# their venue id and are the next tick's continuation; they are never treated
+# as absent.
+_LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES = 4
+_LIVE_TICK_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS = 20.0
 _RESTART_ACCOUNT_TRUTH_DEADLINE_ENV = (
     "ZEUS_RESTART_RECOVERY_ACCOUNT_TRUTH_DEADLINE_SECONDS"
 )
@@ -106,6 +114,139 @@ def _account_truth_snapshot_kwargs(scope: str) -> dict[str, object]:
             str(_RESTART_ACCOUNT_TRUTH_DEADLINE_SECONDS),
         )
     }
+
+
+def _identity_bound_point_read_budget_seconds() -> float:
+    raw = os.environ.get(
+        "ZEUS_LIVE_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS",
+        str(_LIVE_TICK_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS),
+    )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = _LIVE_TICK_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS
+    if not value > 0.0:
+        value = _LIVE_TICK_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS
+    # Leave scheduler headroom even if an operator has supplied an excessive
+    # value; a timed-out point read is a continuation, never absence proof.
+    return min(value, 30.0)
+
+
+def _identity_bound_point_order_read_worker(
+    send_conn,
+    order_ids: list[str],
+    timeout_seconds: float,
+) -> None:
+    """Read only the supplied venue orders in an isolated process.
+
+    This worker intentionally has no DB connection and never receives a
+    submission-capable parent client.  A caller may kill it after the batch
+    deadline without replaying a command or deriving absence from no response.
+    """
+    try:
+        from src.data.polymarket_client import PolymarketClient
+
+        point_orders: dict[str, dict | None] = {}
+        with PolymarketClient(public_http_timeout=timeout_seconds) as client:
+            for order_id in order_ids:
+                point_orders[order_id] = _venue_order_payload(client.get_order(order_id))
+        send_conn.send(json.dumps({"status": "ok", "orders": point_orders}, default=str))
+    except BaseException as exc:  # noqa: BLE001 - process boundary reports, parent continues.
+        try:
+            send_conn.send(
+                json.dumps(
+                    {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+                )
+            )
+        except BaseException:
+            pass
+    finally:
+        send_conn.close()
+
+
+def _read_identity_bound_point_orders(
+    order_ids: set[str],
+    *,
+    timeout_seconds: float | None = None,
+) -> tuple[dict[str, dict], bool]:
+    """Return bounded positive point reads, killing and reaping a wedged child.
+
+    The child receives only exact IDs and performs no DB or venue mutation.  An
+    unavailable, malformed, or timed-out response returns no point evidence;
+    the caller must retain the durable command as the next-tick continuation.
+    """
+    if not order_ids:
+        return {}, False
+    timeout = max(
+        0.01,
+        float(
+            timeout_seconds
+            if timeout_seconds is not None
+            else _identity_bound_point_read_budget_seconds()
+        ),
+    )
+    deadline = time.monotonic() + timeout
+
+    def _remaining() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    def _stop_and_reap(process) -> None:
+        if not process.is_alive():
+            return
+        process.terminate()
+        process.join(timeout=min(0.25, _remaining()))
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=min(0.25, _remaining()))
+
+    context = multiprocessing.get_context("spawn")
+    receive_conn, send_conn = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_identity_bound_point_order_read_worker,
+        args=(send_conn, sorted(order_ids), timeout),
+        name="zeus-command-recovery-point-read",
+        daemon=True,
+    )
+    try:
+        process.start()
+        send_conn.close()
+        # Keep cleanup within the hard deadline: a 60s scheduler must never
+        # retain a hung reader or wait for historical recovery work.
+        poll_budget = max(0.0, _remaining() - min(0.5, timeout / 4.0))
+        if poll_budget <= 0.0 or not receive_conn.poll(poll_budget):
+            _stop_and_reap(process)
+            logger.warning(
+                "recovery: identity-bound point batch exceeded %.2fs hard deadline",
+                timeout,
+            )
+            return {}, True
+        try:
+            message = json.loads(receive_conn.recv())
+        except (EOFError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning("recovery: identity-bound point batch returned no usable result: %s", exc)
+            return {}, False
+        process.join(timeout=min(0.25, _remaining()))
+        if not isinstance(message, dict) or message.get("status") != "ok":
+            logger.warning(
+                "recovery: identity-bound point batch failed: %s",
+                message.get("error") if isinstance(message, dict) else "invalid result",
+            )
+            return {}, False
+        raw_orders = message.get("orders")
+        if not isinstance(raw_orders, dict):
+            return {}, False
+        return {
+            order_id: payload
+            for order_id, payload in raw_orders.items()
+            if order_id in order_ids and isinstance(payload, dict)
+        }, False
+    finally:
+        receive_conn.close()
+        try:
+            send_conn.close()
+        except OSError:
+            pass
+        _stop_and_reap(process)
 
 
 # Venue status strings that indicate an order is no longer active
@@ -21044,6 +21185,163 @@ def _capital_blocking_cancel_commands(conn: sqlite3.Connection) -> list[dict]:
     return rows
 
 
+def _identity_bound_submitting_candidates(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES,
+) -> tuple[list[dict], int]:
+    """Return bounded known-order submits plus the durable next-tick remainder.
+
+    This is intentionally narrower than account-wide recovery.  A command that
+    already names a venue order can obtain positive truth from that exact point
+    read; a missing or failed point read is not absence proof and stays out of
+    this lane.  The full account snapshot remains the sole authority for
+    account-wide negative/absence conclusions.
+    """
+    if not _table_exists(conn, "venue_commands"):
+        return [], 0
+    rows = conn.execute(
+        """
+        SELECT *
+          FROM venue_commands
+         WHERE state = ?
+           AND intent_kind IN ('ENTRY', 'EXIT')
+           AND COALESCE(venue_order_id, '') != ''
+         ORDER BY CASE intent_kind WHEN 'EXIT' THEN 0 ELSE 1 END,
+                  updated_at,
+                  command_id
+         LIMIT ?
+        """,
+        (CommandState.SUBMITTING.value, max(1, int(limit)) + 1),
+    ).fetchall()
+    candidates = [_dict_row(row) for row in rows[:limit]]
+    return candidates, max(0, len(rows) - len(candidates))
+
+
+def _identity_bound_positive_point_order(
+    point_order: dict | None,
+    *,
+    venue_order_id: str,
+) -> bool:
+    """Accept only a positive point response that echoes the bound venue id."""
+    if not isinstance(point_order, dict):
+        return False
+    observed_order_id = str(_extract_order_id(point_order) or "")
+    if not observed_order_id or observed_order_id != venue_order_id:
+        return False
+    return _order_status(point_order) not in {"", "UNKNOWN", "NOT_FOUND"}
+
+
+def _reconcile_identity_bound_submitting_commands(
+    conn: sqlite3.Connection,
+    *,
+    command_ids: set[str],
+    point_orders: Mapping[str, dict],
+) -> dict:
+    """Persist positive exact-order truth without consulting account absence data."""
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    current = {
+        str(row.get("command_id") or ""): row
+        for row in _identity_bound_submitting_candidates(conn)[0]
+    }
+    point_client = SimpleNamespace(
+        get_order=lambda venue_order_id: point_orders.get(str(venue_order_id)),
+    )
+    for command_id in sorted(command_ids):
+        row = current.get(command_id)
+        if row is None:
+            continue
+        summary["scanned"] += 1
+        venue_order_id = str(row.get("venue_order_id") or "")
+        point_order = point_orders.get(venue_order_id)
+        if point_order is None:
+            summary["stayed"] += 1
+            continue
+        try:
+            outcome = _reconcile_row(
+                conn,
+                VenueCommand.from_row(row),
+                point_client,
+            )
+            if outcome == "advanced":
+                summary["advanced"] += 1
+            elif outcome == "stayed":
+                summary["stayed"] += 1
+                continue
+            else:
+                summary["errors"] += 1
+                continue
+            venue_status = _order_status(point_order)
+            matched_size = _point_order_matched_size(
+                point_order,
+                fallback=row.get("size"),
+                side=row.get("side"),
+            )
+            if not (
+                _venue_status_can_carry_positive_match(venue_status)
+                and _positive_decimal_or_none(matched_size)
+            ):
+                continue
+            observed_at = _now_iso()
+            event_type = _matched_event_type(
+                row,
+                matched_size,
+                venue_status=venue_status,
+            )
+            remaining_size = _matched_remaining_size(
+                row,
+                matched_size,
+                venue_status=venue_status,
+            )
+            payload = {
+                "reason": "identity_bound_submitting_point_order",
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "venue_status": venue_status,
+                "point_order": point_order,
+                "matched_size": matched_size,
+                "remaining_size": remaining_size,
+                "source_proof": {
+                    "source_commit": "runtime",
+                    "source_function": "command_recovery._capital_recovery_fast_pass",
+                    "source_reason": "identity_bound_positive_point_order",
+                },
+            }
+            append_order_fact(
+                conn,
+                venue_order_id=venue_order_id,
+                command_id=command_id,
+                state=_matched_order_fact_state(
+                    event_type=event_type,
+                    venue_status=venue_status,
+                    remaining_size=remaining_size,
+                ),
+                remaining_size=remaining_size,
+                matched_size=matched_size,
+                source="REST",
+                observed_at=observed_at,
+                venue_timestamp=observed_at,
+                raw_payload_hash=_payload_hash(payload),
+                raw_payload_json=payload,
+            )
+            fill_summary = reconcile_matched_order_facts(
+                conn,
+                point_client,
+                command_id=command_id,
+            )
+            summary["advanced"] += fill_summary["advanced"]
+            summary["stayed"] += fill_summary["stayed"]
+            summary["errors"] += fill_summary["errors"]
+        except Exception as exc:  # noqa: BLE001 - one command must not block peers.
+            logger.error(
+                "recovery: identity-bound submit command %s failed: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
 def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "full") -> dict:
     """SNAPSHOT phase helper: gather every venue-read key the apply passes will need.
 
@@ -21558,11 +21856,14 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         Venue reads remain bounded to the currently affected order ids and run
         with no DB connection open.
         """
-
+        identity_submit_deferred = 0
         with open_tracked(
             read_conn_factory,
             label="recovery.capital_recovery_fast:snapshot",
         ) as conn:
+            identity_submit_candidates, identity_submit_deferred = (
+                _identity_bound_submitting_candidates(conn)
+            )
             cancel_candidates = _capital_blocking_cancel_commands(conn)
             terminal_candidates = _terminal_point_order_candidates(conn)
             partial_candidates = (
@@ -21605,13 +21906,74 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                     obligation_states,
                 ).fetchone()
             )
+        if identity_submit_deferred:
+            summary["identity_bound_inflight_deferred"] = identity_submit_deferred
+        identity_submit_command_ids = {
+            str(row.get("command_id") or "")
+            for row in identity_submit_candidates
+        }
+        identity_submit_order_ids = {
+            str(row.get("venue_order_id") or "")
+            for row in identity_submit_candidates
+            if str(row.get("venue_order_id") or "")
+        }
+        identity_result = None
+        if identity_submit_candidates:
+            # Do not require account-wide truth here.  This lane accepts only
+            # a response that repeats the command's already-persisted order id;
+            # unavailable/NOT_FOUND responses remain durable continuations.
+            assert_no_open_connection("recovery.identity_bound_inflight_fast")
+            raw_point_orders, point_read_timed_out = _read_identity_bound_point_orders(
+                identity_submit_order_ids,
+            )
+            if point_read_timed_out:
+                summary["identity_bound_inflight_point_read_timed_out"] = True
+            point_orders = {
+                venue_order_id: point_order
+                for venue_order_id, point_order in raw_point_orders.items()
+                if _identity_bound_positive_point_order(
+                    point_order,
+                    venue_order_id=venue_order_id,
+                )
+            }
+            identity_deadline = time.monotonic() + max(live_tick_budget, 0.5)
+            identity_conn_factory = _recovery_apply_conn_factory(
+                conn_factory,
+                scope="live_tick",
+                deadline_monotonic=identity_deadline,
+            )
+            identity_result = _run_recovery_pass_with_lock_policy(
+                "identity_bound_inflight_fast",
+                lambda: run_three_phase(
+                    lambda conn: None,
+                    lambda _snap: point_orders,
+                    lambda conn, orders: _reconcile_identity_bound_submitting_commands(
+                        conn,
+                        command_ids=identity_submit_command_ids,
+                        point_orders=orders,
+                    ),
+                    conn_factory=identity_conn_factory,
+                    snapshot_conn_factory=read_conn_factory,
+                    label="recovery.identity_bound_inflight_fast",
+                ),
+                scope="live_tick",
+                summary=summary,
+                deadline_monotonic=identity_deadline,
+            )
+            if identity_result is not None:
+                _accumulate(summary, "identity_bound_inflight_fast", identity_result)
+            summary["identity_bound_inflight_priority_active"] = True
+            # A bounded exact-order continuation is the live-tick contract.
+            # Do not let unrelated cancel/terminal candidates re-enter the
+            # account-wide snapshot or historical point sweep after it.
+            return identity_result
         if (
             not cancel_candidates
             and not terminal_candidates
             and not partial_candidates
             and not terminal_obligation_open
         ):
-            return None
+            return identity_result
         cancel_command_ids = {
             str(row.get("command_id") or "") for row in cancel_candidates
         }
@@ -22246,6 +22608,15 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             summary["scope"] = scope
             summary["deferred_full_sweep"] = True
             return
+
+    if scope == "live_tick" and summary.get("identity_bound_inflight_priority_active"):
+        # Keep bounded DB-only capital drains fair even when one submit point
+        # read is permanently unavailable, then defer all account-wide and
+        # historical venue reads to the full sweep.
+        summary["scope"] = scope
+        summary["venue_snapshot_deferred"] = True
+        summary["deferred_full_sweep"] = True
+        return
 
     # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
     with open_tracked(read_conn_factory, label="recovery.priming:snapshot") as conn:
