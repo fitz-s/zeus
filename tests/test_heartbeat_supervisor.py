@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-30; last_reused=2026-07-30
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-30
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -2433,36 +2433,46 @@ def test_venue_background_maintenance_throttles_degraded_collateral_refresh_atte
     assert ledger.snapshot().authority_tier == "DEGRADED"
 
 
-def test_venue_background_m5_reconcile_defers_until_user_ws_configured():
+def test_venue_background_m5_reconcile_cold_boot_failure_keeps_latch(monkeypatch):
     from src import main
+    from src.execution import exchange_reconcile
 
     class BootingWSGuard:
+        m5_reconcile_required = True
+
         def summary(self, *, now=None):
             return {
                 "connected": False,
+                "last_success_at": None,
                 "subscription_state": "DISCONNECTED",
                 "gap_reason": "not_configured",
-                "m5_reconcile_required": True,
+                "m5_reconcile_required": self.m5_reconcile_required,
                 "entry": {"allow_submit": False},
             }
 
-    def fail_if_opened():
-        raise AssertionError("boot-time not_configured WS must not open the live DB")
+    class Connection:
+        def rollback(self):
+            pass
+
+    calls = []
+
+    def _failed_fresh_m5(adapter, conn, *, ws_guard, observed_at):
+        calls.append((adapter, conn, ws_guard, observed_at))
+        raise RuntimeError("fresh M5 unavailable")
+
+    monkeypatch.setattr(exchange_reconcile, "run_ws_gap_reconcile_and_clear", _failed_fresh_m5)
+    guard = BootingWSGuard()
 
     result = main._run_ws_gap_reconcile_if_required(
         object(),
-        conn_factory=fail_if_opened,
-        ws_guard=BootingWSGuard(),
+        conn_factory=Connection,
+        ws_guard=guard,
         now=datetime(2026, 5, 17, 10, 0, tzinfo=timezone.utc),
     )
 
-    assert result == {
-        "status": "deferred_ws_not_ready",
-        "reason": "ws_not_configured",
-        "subscription_state": "DISCONNECTED",
-        "gap_reason": "not_configured",
-        "m5_reconcile_required": True,
-    }
+    assert result == {"status": "failed_closed", "error": "fresh M5 unavailable"}
+    assert len(calls) == 1
+    assert guard.summary()["m5_reconcile_required"] is True
 
 
 def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(monkeypatch):

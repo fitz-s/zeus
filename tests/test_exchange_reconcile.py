@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-19
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Last reused/audited: 2026-07-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-30; last_reused=2026-07-30
 # Authority basis: first-principles same-position incremental fill aggregation
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -8193,11 +8193,11 @@ def test_live_heartbeat_runs_ws_gap_m5_sweep_without_closing_external_test_conn(
         ws_gap_guard.clear_for_test(observed_at=NOW)
 
 
-def test_m5_clear_releases_ws_gap_blocked_exit_retry(conn):
+def test_cold_boot_m5_clear_releases_ws_gap_blocked_exit_retry(conn, monkeypatch):
     import src.main as main_module
     from src.control import ws_gap_guard
 
-    seed_command(conn, size=5)
+    seed_command(conn, size=5, side="SELL")
     conn.execute("UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = 'cmd-m5'")
     conn.execute(
         """
@@ -8230,10 +8230,38 @@ def test_m5_clear_releases_ws_gap_blocked_exit_retry(conn):
         ),
     )
     configure_subscribed_m5_latch()
+    authenticated_summary = ws_gap_guard.summary
+    summary_calls = 0
+
+    def _cold_boot_then_authenticated_summary(*, now=None):
+        nonlocal summary_calls
+        summary_calls += 1
+        if summary_calls == 1:
+            ws_gap_guard.configure_status(
+                ws_gap_guard.WSGapStatus(
+                    connected=True,
+                    last_message_at=NOW,
+                    subscription_state="AUTHED",
+                    gap_reason="fresh_authenticated_proof",
+                    m5_reconcile_required=True,
+                    updated_at=NOW,
+                )
+            )
+            return {
+                "subscription_state": "DISCONNECTED",
+                "gap_reason": "not_configured",
+                "last_success_at": None,
+                "m5_reconcile_required": True,
+                "entry": {"allow_submit": False},
+            }
+        return authenticated_summary(now=now)
+
+    monkeypatch.setattr(ws_gap_guard, "summary", _cold_boot_then_authenticated_summary)
 
     try:
+        adapter = FakeM5Adapter(open_orders=[order(order_id="ord-m5")], trades=[], positions=[])
         result = main_module._run_ws_gap_reconcile_if_required(
-            FakeM5Adapter(open_orders=[order(order_id="ord-m5")], trades=[], positions=[]),
+            adapter,
             conn_factory=lambda: conn,
             now=NOW,
         )
@@ -8245,6 +8273,8 @@ def test_m5_clear_releases_ws_gap_blocked_exit_retry(conn):
         assert result["status"] == "cleared"
         assert result["exit_retries_released"] == 1
         assert result["exit_retry_position_ids"] == ["exit-ws-gap"]
+        assert summary_calls == 2
+        assert [call[0] for call in adapter.calls] == ["get_open_orders", "get_trades", "get_positions"]
         assert retry_at == NOW.isoformat()
         release = conn.execute(
             """
