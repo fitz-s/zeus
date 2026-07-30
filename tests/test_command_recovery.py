@@ -765,6 +765,32 @@ def test_day0_strategy_fallback_requires_locked_selected_payoff_for_capture():
     )
 
 
+def test_day0_strategy_repairs_explicit_capture_without_locked_payoff_truth():
+    from src.execution.command_recovery import _event_bound_strategy_key_from_payload
+
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {
+                "event_type": "DAY0_EXTREME_UPDATED",
+                "direction": "buy_no",
+                "strategy_key": "settlement_capture",
+            }
+        )
+        == "day0_nowcast_entry"
+    )
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {
+                "event_type": "DAY0_EXTREME_UPDATED",
+                "direction": "buy_no",
+                "strategy_key": "settlement_capture",
+                "day0_payoff_truth": "locked",
+            }
+        )
+        == "settlement_capture"
+    )
+
+
 def test_forecast_strategy_fallback_preserves_qkernel_semantics():
     from src.execution.command_recovery import _event_bound_strategy_key_from_payload
 

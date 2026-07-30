@@ -654,23 +654,23 @@ def _resolve_strategy_key_from_pre_submit(
     direction: str,
     metric: str,
 ) -> str:
-    """Resolve strategy identity from the EDLI money path, never by default."""
+    """Resolve strategy identity from evidence, never a stale explicit label."""
 
+    event_type = str(pre_submit.get("event_type") or "").strip()
     strategy_key = str(pre_submit.get("strategy_key") or "").strip()
-    if not strategy_key:
-        event_type = str(pre_submit.get("event_type") or "").strip()
-        if event_type == "DAY0_EXTREME_UPDATED":
-            if direction not in {"buy_yes", "buy_no"}:
-                raise EdliPositionBridgeError(
-                    f"EDLI_BRIDGE_STRATEGY_DIRECTION_UNKNOWN:{event_type}:direction={direction}"
-                )
-            strategy_key = (
-                "settlement_capture"
-                if str(pre_submit.get("day0_payoff_truth") or "").strip().lower()
-                == "locked"
-                else "day0_nowcast_entry"
+    if event_type == "DAY0_EXTREME_UPDATED":
+        if direction not in {"buy_yes", "buy_no"}:
+            raise EdliPositionBridgeError(
+                f"EDLI_BRIDGE_STRATEGY_DIRECTION_UNKNOWN:{event_type}:direction={direction}"
             )
-        elif event_type in {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}:
+        strategy_key = (
+            "settlement_capture"
+            if str(pre_submit.get("day0_payoff_truth") or "").strip().lower()
+            == "locked"
+            else "day0_nowcast_entry"
+        )
+    elif not strategy_key:
+        if event_type in {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}:
             if direction in {"buy_yes", "buy_no"}:
                 strategy_key = "forecast_qkernel_entry"
             else:
@@ -770,6 +770,9 @@ def _resolve_identity(events: list[tuple[str, dict[str, Any]]]) -> dict[str, Any
     if unit not in {"C", "F"}:
         raise EdliPositionBridgeError(f"EDLI_BRIDGE_UNIT_INVALID: {unit!r}")
 
+    event_type = str(pre_submit.get("event_type") or "").strip()
+    day0_payoff_truth = str(pre_submit.get("day0_payoff_truth") or "").strip().lower()
+
     return {
         "condition_id": condition_id,
         "token_id": token_id,
@@ -785,6 +788,11 @@ def _resolve_identity(events: list[tuple[str, dict[str, Any]]]) -> dict[str, Any
         "cluster": str(pre_submit.get("cluster") or city),
         "p_posterior": _pre_submit_posterior(pre_submit),
         "entry_ci_width": 0.0,
+        "entry_method": (
+            EntryMethod.DAY0_OBSERVATION.value
+            if event_type == "DAY0_EXTREME_UPDATED" and day0_payoff_truth == "locked"
+            else ""
+        ),
         "actionable_certificate_hash": str(
             pre_submit.get("expected_edge_source_certificate_hash")
             or pre_submit.get("actionable_certificate_hash")

@@ -127,6 +127,38 @@ def test_legacy_edli_same_day_high_buy_no_strategy_label_repairs_at_runtime():
     assert _runtime_strategy_key_from_projection_row(row) == "opening_inertia"
 
 
+def test_probabilistic_qkernel_capture_label_repairs_to_day0_nowcast():
+    from src.state.portfolio import _runtime_strategy_key_from_projection_row
+
+    row = {
+        "position_id": "legacy-day0-probability",
+        "strategy_key": "settlement_capture",
+        "entry_method": "qkernel_spine",
+        "direction": "buy_no",
+        "temperature_metric": "high",
+        "p_posterior": 0.86868,
+        "entry_ci_width": 0.64936,
+    }
+
+    assert _runtime_strategy_key_from_projection_row(row) == "day0_nowcast_entry"
+
+
+def test_deterministic_qkernel_capture_label_stays_capture():
+    from src.state.portfolio import _runtime_strategy_key_from_projection_row
+
+    row = {
+        "position_id": "locked-day0-payoff",
+        "strategy_key": "settlement_capture",
+        "entry_method": "qkernel_spine",
+        "direction": "buy_no",
+        "temperature_metric": "high",
+        "p_posterior": 1.0,
+        "entry_ci_width": 0.0,
+    }
+
+    assert _runtime_strategy_key_from_projection_row(row) == "settlement_capture"
+
+
 def test_repaired_opening_inertia_position_does_not_emit_review_fact():
     from src.state.portfolio import _invalid_strategy_review_fact_from_position
 

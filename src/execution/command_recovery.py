@@ -4335,15 +4335,9 @@ def _snapshot_trade_case_for_command(conn: sqlite3.Connection, command: dict, *,
 
 
 def _event_bound_strategy_key_from_payload(payload: dict) -> str:
-    strategy = str(payload.get("strategy_key") or "").strip()
-    if strategy:
-        return strategy
     event_type = str(payload.get("event_type") or "").strip()
     direction = str(payload.get("direction") or "").strip().lower()
-    if event_type in {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}:
-        if direction in {"buy_yes", "buy_no"}:
-            return "forecast_qkernel_entry"
-        return ""
+    strategy = str(payload.get("strategy_key") or "").strip()
     if event_type == "DAY0_EXTREME_UPDATED":
         if direction in {"buy_yes", "buy_no"}:
             return (
@@ -4352,6 +4346,13 @@ def _event_bound_strategy_key_from_payload(payload: dict) -> str:
                 == "locked"
                 else "day0_nowcast_entry"
             )
+        return ""
+    if strategy:
+        return strategy
+    if event_type in {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}:
+        if direction in {"buy_yes", "buy_no"}:
+            return "forecast_qkernel_entry"
+        return ""
     return ""
 
 

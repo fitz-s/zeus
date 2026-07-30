@@ -1304,12 +1304,35 @@ def _load_d6_field(row: dict, field_name: str, default: float = 0.0) -> float:
 
 
 def _runtime_strategy_key_from_projection_row(row: dict) -> str:
-    """Repair only the legacy EDLI forecast bridge label that predates strategy certs."""
+    """Repair projection labels that contradict their persisted probability."""
 
     strategy_key = str(row.get("strategy_key") or "")
     if strategy_key != "settlement_capture":
         return strategy_key
-    if str(row.get("entry_method") or "") != "ens_member_counting":
+    entry_method = str(row.get("entry_method") or "")
+    if entry_method == "qkernel_spine":
+        try:
+            q = float(row.get("p_posterior"))
+            ci_width = float(row.get("entry_ci_width"))
+        except (TypeError, ValueError):
+            q = math.nan
+            ci_width = math.nan
+        if (
+            math.isfinite(q)
+            and math.isfinite(ci_width)
+            and math.isclose(q, 1.0, abs_tol=1e-12)
+            and math.isclose(ci_width, 0.0, abs_tol=1e-12)
+        ):
+            return strategy_key
+        logger.warning(
+            "runtime repaired probabilistic Day0 strategy label: position_id=%s "
+            "settlement_capture -> day0_nowcast_entry q=%s ci_width=%s",
+            row.get("position_id") or row.get("trade_id") or "",
+            row.get("p_posterior"),
+            row.get("entry_ci_width"),
+        )
+        return "day0_nowcast_entry"
+    if entry_method != "ens_member_counting":
         return strategy_key
     if str(row.get("direction") or "").strip().lower() != "buy_no":
         return strategy_key
