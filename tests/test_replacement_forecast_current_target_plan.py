@@ -141,6 +141,7 @@ def test_day0_hwm_reseeds_qualified_fast_conditioning_by_exact_identity(
         observation_time="2026-07-27T23:30:00+00:00",
         sample_count=203,
         unit="C",
+        likelihood=SimpleNamespace(station_id="ZBAA"),
     )
     seen = {}
 
@@ -192,6 +193,38 @@ def test_day0_hwm_reseeds_qualified_fast_conditioning_by_exact_identity(
         decision_time=decision_time,
         posterior_provenance_json=json.dumps(current),
     ) is None
+
+    composite = {
+        "day0_provisional_observation": {
+            "active": True,
+            "source": "wu_api+same_station_fast_tail",
+            "observed_extreme_c": 29.0,
+            "observation_time": "2026-07-27T23:30:00+00:00",
+            "fast_residual_likelihood": {"station_id": "ZBAA"},
+        }
+    }
+    assert _day0_observation_lag_reason(
+        conn,
+        city="Beijing",
+        target_date="2026-07-28",
+        temperature_metric="high",
+        decision_time=decision_time,
+        posterior_provenance_json=json.dumps(composite),
+    ) is None
+
+    composite["day0_provisional_observation"]["fast_residual_likelihood"] = {
+        "station_id": "ZBAD"
+    }
+    reason = _day0_observation_lag_reason(
+        conn,
+        city="Beijing",
+        target_date="2026-07-28",
+        temperature_metric="high",
+        decision_time=decision_time,
+        posterior_provenance_json=json.dumps(composite),
+    )
+    assert reason is not None
+    assert reason.startswith("basis=day0_fast_residual_hwm_lag")
 
     monkeypatch.setattr(
         current_target_plan,

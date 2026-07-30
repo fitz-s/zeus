@@ -8,10 +8,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -25,6 +26,10 @@ from src.data.replacement_forecast_bundle_reader import (
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
     TRADEABLE_GRADE_QLCB_BASIS,
+)
+from src.data.openmeteo_ecmwf_ifs9_anchor import (
+    PRODUCT_ID as OPENMETEO_ANCHOR_PRODUCT_ID,
+    SOURCE_ID as OPENMETEO_ANCHOR_SOURCE_ID,
 )
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, ReplacementForecastDependency, build_replacement_forecast_readiness
 from src.state.schema.v2_schema import apply_canonical_schema
@@ -137,8 +142,12 @@ def _live_provenance() -> dict[str, object]:
 
 def _with_current_value_serving(
     consumed: dict[str, dict[str, object]],
+    *,
+    anchor_artifact_id: int | None = None,
 ) -> dict[str, object]:
     provenance = _live_provenance()
+    if anchor_artifact_id is not None:
+        provenance["openmeteo_anchor_artifact_id"] = anchor_artifact_id
     fusion = provenance["bayes_precision_fusion"]
     assert isinstance(fusion, dict)
     fusion.update(
@@ -277,6 +286,62 @@ def _insert_raw_model_forecast(
             "COVERED",
         ),
     )
+
+
+def _insert_openmeteo_anchor_artifact(
+    conn: sqlite3.Connection,
+    tmp_path,
+    *,
+    source_cycle_time: datetime,
+    city: str = "Shanghai",
+    target_date: str = "2026-06-07",
+    metric: str = "high",
+) -> int:
+    payload = tmp_path / (
+        f"openmeteo-{city}-{target_date}-{metric}-"
+        f"{source_cycle_time.strftime('%H%M')}.json"
+    )
+    payload_bytes = json.dumps(
+        {
+            "city": city,
+            "hourly": {
+                "time": [f"{target_date}T00:00", f"{target_date}T12:00"],
+                "temperature_2m": [22.0, 28.0],
+            },
+        },
+        sort_keys=True,
+    ).encode()
+    payload.write_bytes(payload_bytes)
+    available_at = source_cycle_time + timedelta(minutes=5)
+    conn.execute(
+        """
+        INSERT INTO raw_forecast_artifacts (
+            source_id, product_id, data_version, source_cycle_time,
+            source_available_at, captured_at, artifact_path, sha256,
+            byte_size, artifact_metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            OPENMETEO_ANCHOR_SOURCE_ID,
+            OPENMETEO_ANCHOR_PRODUCT_ID,
+            f"openmeteo_ecmwf_ifs9_anchor_localday_{metric}",
+            source_cycle_time.isoformat(),
+            available_at.isoformat(),
+            available_at.isoformat(),
+            str(payload),
+            hashlib.sha256(payload_bytes).hexdigest(),
+            len(payload_bytes),
+            json.dumps(
+                {
+                    "city": city,
+                    "target_date": target_date,
+                    "metric": metric,
+                    "openmeteo_payload_json": str(payload),
+                }
+            ),
+        ),
+    )
+    return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
 
 def test_replacement_bundle_reader_requires_baseline_executable_bundle() -> None:
@@ -575,10 +640,14 @@ def test_replacement_bundle_reader_enforce_raw_input_hwm_allows_fresh_serve() ->
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
 
 
-def test_raw_hwm_uses_exact_consumed_rows_not_carrier_cycle() -> None:
-    """A posterior carrier may be older than the exact current values it consumed."""
+def test_raw_hwm_uses_exact_anchor_artifact_not_model_serving_clock(tmp_path) -> None:
+    """The anchor artifact may be newer than the raw model row it accompanies."""
     conn = _conn()
-    posterior_id = _insert_posterior(conn)
+    posterior_id = _insert_posterior(
+        conn,
+        source_available_at=_dt(4, 5),
+        computed_at=_dt(4, 10),
+    )
     consumed: dict[str, dict[str, object]] = {}
     for model in ("ecmwf_ifs", "gfs"):
         _insert_raw_model_forecast(
@@ -595,7 +664,15 @@ def test_raw_hwm_uses_exact_consumed_rows_not_carrier_cycle() -> None:
             "captured_at": _dt(3, 5).isoformat(),
             "served_via": "single_runs",
         }
-    provenance = _with_current_value_serving(consumed)
+    anchor_artifact_id = _insert_openmeteo_anchor_artifact(
+        conn,
+        tmp_path,
+        source_cycle_time=_dt(4),
+    )
+    provenance = _with_current_value_serving(
+        consumed,
+        anchor_artifact_id=anchor_artifact_id,
+    )
     conn.execute(
         "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
         (json.dumps(provenance), posterior_id),
@@ -608,13 +685,129 @@ def test_raw_hwm_uses_exact_consumed_rows_not_carrier_cycle() -> None:
         city="Shanghai",
         target_date="2026-06-07",
         temperature_metric="high",
-        decision_time=_dt(4),
+        decision_time=_dt(5),
         current_bin_topology_hash="topology-hash",
         enforce_raw_input_hwm=True,
     )
 
     assert result.ok is True
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+
+
+def test_raw_hwm_fails_closed_when_available_anchor_has_no_consumed_id(
+    tmp_path,
+) -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_available_at=_dt(4, 5),
+        computed_at=_dt(4, 10),
+    )
+    consumed: dict[str, dict[str, object]] = {}
+    for model in ("ecmwf_ifs", "gfs"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(3),
+            captured_at=_dt(3, 5),
+            source_available_at=_dt(3, 5),
+        )
+        consumed[model] = {
+            "raw_model_forecast_id": int(
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            ),
+            "served_cycle": _dt(3).isoformat(),
+            "captured_at": _dt(3, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    _insert_openmeteo_anchor_artifact(
+        conn,
+        tmp_path,
+        source_cycle_time=_dt(4),
+    )
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(_with_current_value_serving(consumed)), posterior_id),
+    )
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(5),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+    )
+
+    assert result.ok is False
+    assert "openmeteo_anchor_artifact_provenance_unverifiable" in result.reason_code
+
+
+def test_raw_hwm_blocks_newer_anchor_than_exact_consumed_artifact(tmp_path) -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_available_at=_dt(3, 5),
+        computed_at=_dt(3, 10),
+    )
+    consumed: dict[str, dict[str, object]] = {}
+    for model in ("ecmwf_ifs", "gfs"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(3),
+            captured_at=_dt(3, 5),
+            source_available_at=_dt(3, 5),
+        )
+        consumed[model] = {
+            "raw_model_forecast_id": int(
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            ),
+            "served_cycle": _dt(3).isoformat(),
+            "captured_at": _dt(3, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    consumed_artifact_id = _insert_openmeteo_anchor_artifact(
+        conn,
+        tmp_path,
+        source_cycle_time=_dt(3),
+    )
+    _insert_openmeteo_anchor_artifact(
+        conn,
+        tmp_path,
+        source_cycle_time=_dt(4),
+    )
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (
+            json.dumps(
+                _with_current_value_serving(
+                    consumed,
+                    anchor_artifact_id=consumed_artifact_id,
+                )
+            ),
+            posterior_id,
+        ),
+    )
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(5),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+    )
+
+    assert result.ok is False
+    assert "source_cycle_time_raw_forecast_artifacts_lag" in result.reason_code
+    assert "consumed_anchor_cycle=2026-06-06T03:00:00+00:00" in result.reason_code
 
 
 def test_raw_hwm_accepts_exact_authoritative_previous_run_substitution() -> None:

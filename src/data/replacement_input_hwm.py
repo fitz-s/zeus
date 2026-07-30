@@ -22,6 +22,7 @@ names and signatures (``family=...``) so its existing call sites and tests
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -30,6 +31,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
+from pathlib import Path
 
 from src.data.market_topology_rows import (
     _database_names,
@@ -940,6 +942,173 @@ def _exact_current_value_serving_lag(
     return True, None, anchor[1] if anchor is not None else None
 
 
+def _exact_consumed_anchor_artifact_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+    provenance: Mapping[str, object],
+) -> tuple[str | None, datetime | None]:
+    """Return the exact OpenMeteo artifact cycle consumed by a posterior.
+
+    ``current_value_serving.ecmwf_ifs`` identifies the deterministic model row,
+    not the OpenMeteo anchor artifact.  The two clocks may legitimately straddle
+    a UTC cycle boundary.  HWM comparison therefore binds to the immutable
+    artifact id persisted by the materializer and rejects any unverifiable
+    identity instead of substituting a nearby model clock.
+    """
+
+    try:
+        artifact_id = int(provenance.get("openmeteo_anchor_artifact_id"))
+    except (TypeError, ValueError):
+        return "basis=openmeteo_anchor_artifact_provenance_unverifiable", None
+    if artifact_id <= 0:
+        return "basis=openmeteo_anchor_artifact_provenance_unverifiable", None
+
+    table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
+    if table_ref is None:
+        return "basis=openmeteo_anchor_artifact_table_unavailable", None
+    columns = frozenset(_table_ref_columns(conn, table_ref))
+    required = {
+        "artifact_id",
+        "source_id",
+        "product_id",
+        "data_version",
+        "source_cycle_time",
+        "source_available_at",
+        "captured_at",
+        "artifact_path",
+        "sha256",
+        "artifact_metadata_json",
+    }
+    if not required.issubset(columns):
+        return "basis=openmeteo_anchor_artifact_table_unverifiable", None
+
+    try:
+        row = conn.execute(
+            f"""
+            SELECT artifact_id, source_id, product_id, data_version,
+                   source_cycle_time, source_available_at, captured_at,
+                   artifact_path, sha256, artifact_metadata_json
+              FROM {table_ref}
+             WHERE artifact_id = ?
+             LIMIT 1
+            """,
+            (artifact_id,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - live authority gate fails closed
+        return "basis=openmeteo_anchor_artifact_lookup_failed", None
+    if row is None:
+        return (
+            f"basis=openmeteo_anchor_artifact_missing:artifact_id={artifact_id}",
+            None,
+        )
+    values = dict(row) if hasattr(row, "keys") else dict(
+        zip(
+            (
+                "artifact_id",
+                "source_id",
+                "product_id",
+                "data_version",
+                "source_cycle_time",
+                "source_available_at",
+                "captured_at",
+                "artifact_path",
+                "sha256",
+                "artifact_metadata_json",
+            ),
+            row,
+            strict=True,
+        )
+    )
+    normalized_metric = str(metric).strip().lower()
+    if (
+        str(values["source_id"]) != OPENMETEO_ANCHOR_SOURCE_ID
+        or str(values["product_id"]) != OPENMETEO_ANCHOR_PRODUCT_ID
+        or str(values["data_version"])
+        != f"openmeteo_ecmwf_ifs9_anchor_localday_{normalized_metric}"
+    ):
+        return (
+            "basis=openmeteo_anchor_artifact_identity_mismatch:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+
+    source_cycle = _parse_source_cycle_utc(values["source_cycle_time"])
+    source_available_at = _parse_source_cycle_utc(values["source_available_at"])
+    captured_at = _parse_source_cycle_utc(values["captured_at"])
+    decision_utc = decision_time.astimezone(UTC)
+    if (
+        source_cycle is None
+        or source_available_at is None
+        or captured_at is None
+        or source_cycle > decision_utc
+        or source_available_at > decision_utc
+        or captured_at > decision_utc
+    ):
+        return (
+            "basis=openmeteo_anchor_artifact_causality_mismatch:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+
+    artifact_path = Path(str(values["artifact_path"] or ""))
+    expected_sha = str(values["sha256"] or "").strip().lower()
+    try:
+        actual_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    except OSError:
+        return (
+            "basis=openmeteo_anchor_artifact_payload_unavailable:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+    if actual_sha != expected_sha:
+        return (
+            "basis=openmeteo_anchor_artifact_payload_identity_mismatch:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+
+    try:
+        metadata = json.loads(str(values["artifact_metadata_json"] or "{}"))
+    except (TypeError, ValueError):
+        metadata = None
+    if not isinstance(metadata, Mapping):
+        return (
+            "basis=openmeteo_anchor_artifact_metadata_unverifiable:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+    artifact_row = {
+        "artifact_city": metadata.get("city"),
+        "artifact_target_date": metadata.get("target_date"),
+        "artifact_metric": metadata.get("metric"),
+        "source_cycle_time": values["source_cycle_time"],
+        "artifact_path": values["artifact_path"],
+        "metadata_type": "object",
+        "payload_path_type": (
+            "text" if isinstance(metadata.get("openmeteo_payload_json"), str) else ""
+        ),
+        "payload_path": metadata.get("openmeteo_payload_json"),
+        "artifact_metadata_json": values["artifact_metadata_json"],
+    }
+    key = (str(city), str(target_date), normalized_metric)
+    validated_cycle = _artifact_cycles_from_rows(
+        (artifact_row,),
+        columns=columns,
+        requested_keys=frozenset((key,)),
+    ).get(key)
+    if validated_cycle != source_cycle:
+        return (
+            "basis=openmeteo_anchor_artifact_scope_mismatch:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+    return None, source_cycle
+
+
 def latest_used_raw_model_input_mark(
     conn: sqlite3.Connection,
     *,
@@ -1108,12 +1277,11 @@ def replacement_live_input_lag_reason(
     )
     rich_used_input_provenance = _provenance_has_current_value_serving(provenance)
     exact_serving_checked = False
-    consumed_anchor_cycle: datetime | None = None
     if rich_used_input_provenance:
         (
             exact_serving_checked,
             exact_serving_lag,
-            consumed_anchor_cycle,
+            _consumed_model_anchor_cycle,
         ) = _exact_current_value_serving_lag(
             conn,
             city=city,
@@ -1133,7 +1301,23 @@ def replacement_live_input_lag_reason(
         metric=metric,
         decision_time=decision_time,
     )
-    artifact_reference_cycle = consumed_anchor_cycle or posterior_cycle
+    artifact_reference_cycle = posterior_cycle
+    if artifact_cycle is not None and rich_used_input_provenance:
+        artifact_identity_lag, exact_anchor_cycle = (
+            _exact_consumed_anchor_artifact_cycle(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_time=decision_time,
+                provenance=provenance,
+            )
+        )
+        if artifact_identity_lag is not None:
+            return artifact_identity_lag
+        if exact_anchor_cycle is None:
+            return "basis=openmeteo_anchor_artifact_provenance_unverifiable"
+        artifact_reference_cycle = exact_anchor_cycle
     if artifact_cycle is not None and artifact_cycle > artifact_reference_cycle:
         lag_hours = (
             artifact_cycle - artifact_reference_cycle

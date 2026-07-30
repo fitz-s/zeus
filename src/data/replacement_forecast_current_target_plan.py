@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.data.day0_fast_obs import (
     FAST_OBS_SOURCE_ID,
+    FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
     latest_fast_station_conditioning,
     metar_observation_time_from_raw,
 )
@@ -1505,11 +1506,30 @@ def _day0_observation_lag_reason(
         else:
             served_source = ""
             served_extreme_c = float("nan")
+        same_station = True
+        if served_source == FAST_RESIDUAL_CONDITIONING_SOURCE_ID:
+            served_likelihood = (
+                conditioning.get("fast_residual_likelihood")
+                if isinstance(conditioning, Mapping)
+                else None
+            )
+            latest_likelihood = getattr(fast, "likelihood", None)
+            served_station = (
+                str(served_likelihood.get("station_id") or "").strip().upper()
+                if isinstance(served_likelihood, Mapping)
+                else ""
+            )
+            latest_station = str(
+                getattr(latest_likelihood, "station_id", "") or ""
+            ).strip().upper()
+            same_station = bool(served_station) and served_station == latest_station
         if latest_at.tzinfo is None:
             latest_at = latest_at.replace(tzinfo=timezone.utc)
         latest_at = latest_at.astimezone(timezone.utc)
         if (
-            served_source == FAST_OBS_SOURCE_ID
+            served_source
+            in {FAST_OBS_SOURCE_ID, FAST_RESIDUAL_CONDITIONING_SOURCE_ID}
+            and same_station
             and abs(served_extreme_c - fast.observed_extreme_c) <= 1e-9
             and served_at is not None
             and latest_at <= served_at
