@@ -22159,6 +22159,10 @@ class TestRecoveryResolutionTable:
         from src.execution.command_recovery import (
             reconcile_pending_exit_terminal_order_releases,
         )
+        from src.execution.exit_lifecycle import (
+            release_pending_exit_without_order_if_retryable,
+        )
+        from src.state.portfolio import Position
         from src.state.venue_command_repo import append_event
 
         position_id = "pos-filled-exit-slice"
@@ -22239,6 +22243,46 @@ class TestRecoveryResolutionTable:
             """,
             (position_id, order_id),
         )
+
+        runtime_position = Position(
+            trade_id=position_id,
+            market_id="cond-filled-exit-slice",
+            city="Karachi",
+            cluster="Asia",
+            target_date="2026-04-26",
+            bin_label="35C",
+            direction="buy_yes",
+            strategy_key="forecast_qkernel_entry",
+            size_usd=2.94,
+            entry_price=0.14,
+            shares=21.0,
+            chain_shares=21.0,
+            cost_basis_usd=2.94,
+            state="pending_exit",
+            pre_exit_state="day0_window",
+            exit_state="",
+            order_status="sell_pending_confirmation",
+            order_id="",
+            last_exit_order_id="",
+            token_id="tok-filled-exit-slice",
+            condition_id="cond-filled-exit-slice",
+            chain_state="synced",
+        )
+        assert (
+            release_pending_exit_without_order_if_retryable(
+                runtime_position,
+                conn=conn,
+            )
+            is False
+        )
+        assert runtime_position.state == "pending_exit"
+        assert conn.execute(
+            """
+            SELECT COUNT(*) FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+            """,
+            (position_id,),
+        ).fetchone()[0] == 0
 
         summary = reconcile_pending_exit_terminal_order_releases(conn)
 
@@ -22348,6 +22392,123 @@ class TestRecoveryResolutionTable:
             (position_id,),
         ).fetchone()
         assert json.loads(stored["payload_json"])["held_sell_reauction_obligation"] == obligation
+
+    def test_expired_partial_exit_debt_cannot_be_generic_released(self, conn):
+        """Monitor cannot clear the exact terminal remainder owned by V3 recovery."""
+        from src.execution.command_recovery import (
+            reconcile_pending_exit_terminal_order_releases,
+        )
+        from src.execution.exit_lifecycle import (
+            release_pending_exit_without_order_if_retryable,
+        )
+        from src.state.portfolio import Position
+        from src.state.venue_command_repo import append_event
+
+        position_id = "pos-expired-partial-exit-debt"
+        command_id = "cmd-expired-partial-exit-debt"
+        order_id = "ord-expired-partial-exit-debt"
+        token_id = "tok-expired-partial-exit-debt"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            intent_kind="EXIT",
+            token_id=token_id,
+            side="SELL",
+            size=13.0,
+            price=0.12,
+        )
+        _advance_to_partial(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="EXPIRED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={"venue_order_id": order_id},
+        )
+        _append_order_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            state="EXPIRED",
+            matched_size="13",
+            remaining_size="0",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, city, target_date, bin_label, direction,
+                shares, chain_shares, chain_state, chain_seen_at, strategy_key,
+                condition_id, token_id, order_id, order_status, updated_at,
+                temperature_metric
+            ) VALUES (
+                ?, 'pending_exit', 'Miami', '2026-04-26', '90F', 'buy_yes',
+                1.84, 1.84, 'synced', '2026-04-26T00:06:00Z',
+                'forecast_qkernel_entry', 'cond-expired-partial-exit-debt',
+                ?, ?, 'sell_pending_confirmation',
+                '2026-04-26T00:06:00Z', 'high'
+            )
+            """,
+            (position_id, token_id, order_id),
+        )
+        runtime_position = Position(
+            trade_id=position_id,
+            market_id="cond-expired-partial-exit-debt",
+            city="Miami",
+            cluster="US",
+            target_date="2026-04-26",
+            bin_label="90F",
+            direction="buy_yes",
+            strategy_key="forecast_qkernel_entry",
+            size_usd=0.22,
+            entry_price=0.12,
+            shares=1.84,
+            chain_shares=1.84,
+            cost_basis_usd=0.22,
+            state="pending_exit",
+            pre_exit_state="day0_window",
+            exit_state="",
+            order_status="sell_pending_confirmation",
+            order_id="",
+            last_exit_order_id="",
+            token_id=token_id,
+            condition_id="cond-expired-partial-exit-debt",
+            chain_state="synced",
+        )
+
+        assert (
+            release_pending_exit_without_order_if_retryable(
+                runtime_position,
+                conn=conn,
+            )
+            is False
+        )
+        assert runtime_position.state == "pending_exit"
+        assert reconcile_pending_exit_terminal_order_releases(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        event = conn.execute(
+            """
+            SELECT payload_json FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+            """,
+            (position_id,),
+        ).fetchone()
+        obligation = json.loads(event["payload_json"])[
+            "held_sell_reauction_obligation"
+        ]
+        assert obligation["schema_version"] == 3
+        assert obligation["position_id"] == position_id
+        assert obligation["held_token_id"] == token_id
+        assert obligation["residual_proof"]["command_id"] == command_id
+        assert obligation["residual_proof"]["residual_shares"] == 1.84
 
     @pytest.mark.parametrize(
         ("shares", "chain_shares", "chain_seen_at"),

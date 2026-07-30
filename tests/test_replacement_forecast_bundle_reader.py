@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-11
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Last reused/audited: 2026-07-29
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-29; last_reused=2026-07-29
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -21,6 +21,10 @@ from src.data.replacement_forecast_bundle_reader import (
     PRODUCT_ID,
     SOURCE_ID,
     read_replacement_forecast_bundle,
+)
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    TRADEABLE_GRADE_QLCB_BASIS,
 )
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, ReplacementForecastDependency, build_replacement_forecast_readiness
 from src.state.schema.v2_schema import apply_canonical_schema
@@ -114,6 +118,38 @@ def _dt(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 6, 6, hour, minute, tzinfo=UTC)
 
 
+def _live_provenance() -> dict[str, object]:
+    return {
+        "reader_test": True,
+        "replacement_q_mode": "FUSED_NORMAL_FULL",
+        "q_lcb_basis": TRADEABLE_GRADE_QLCB_BASIS,
+        "bin_topology_hash": "topology-hash",
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {
+                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                "shape_lag_hours": 0.0,
+                "stale_shape_reused": False,
+                "translation_applied": False,
+            }
+        },
+    }
+
+
+def _with_current_value_serving(
+    consumed: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    provenance = _live_provenance()
+    fusion = provenance["bayes_precision_fusion"]
+    assert isinstance(fusion, dict)
+    fusion.update(
+        {
+            "used_models": list(consumed),
+            "current_value_serving": consumed,
+        }
+    )
+    return provenance
+
+
 def _insert_posterior(
     conn: sqlite3.Connection,
     *,
@@ -154,7 +190,7 @@ def _insert_posterior(
                     "openmeteo_ifs9_anchor": "om9-run",
                 }
             ),
-            json.dumps({"reader_test": True, "replacement_q_mode": "FUSED_NORMAL_FULL", "bin_topology_hash": "topology-hash"}),
+            json.dumps(_live_provenance()),
             "Shanghai:2026-06-07:high:topology-hash",
             "topology-hash",
             "dependency-hash",
@@ -217,6 +253,7 @@ def _insert_raw_model_forecast(
     city: str = "Shanghai",
     target_date: str = "2026-06-07",
     metric: str = "high",
+    endpoint: str = "single_runs",
 ) -> None:
     conn.execute(
         """
@@ -236,7 +273,7 @@ def _insert_raw_model_forecast(
             captured_at.isoformat(),
             1,
             28.0,
-            "single_runs",
+            endpoint,
             "COVERED",
         ),
     )
@@ -538,27 +575,192 @@ def test_replacement_bundle_reader_enforce_raw_input_hwm_allows_fresh_serve() ->
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
 
 
+def test_raw_hwm_uses_exact_consumed_rows_not_carrier_cycle() -> None:
+    """A posterior carrier may be older than the exact current values it consumed."""
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+    consumed: dict[str, dict[str, object]] = {}
+    for model in ("ecmwf_ifs", "gfs"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(3),
+            captured_at=_dt(3, 5),
+            source_available_at=_dt(3, 5),
+        )
+        raw_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        consumed[model] = {
+            "raw_model_forecast_id": raw_id,
+            "served_cycle": _dt(3).isoformat(),
+            "captured_at": _dt(3, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    provenance = _with_current_value_serving(consumed)
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), posterior_id),
+    )
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+    )
+
+    assert result.ok is True
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+
+
+def test_raw_hwm_accepts_exact_authoritative_previous_run_substitution() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+    consumed: dict[str, dict[str, object]] = {}
+    for model, endpoint in (
+        ("ecmwf_ifs", "single_runs"),
+        ("gfs", "previous_runs"),
+    ):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(3),
+            captured_at=_dt(3, 5),
+            source_available_at=_dt(3, 5),
+            endpoint=endpoint,
+        )
+        consumed[model] = {
+            "raw_model_forecast_id": int(
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            ),
+            "served_cycle": _dt(3).isoformat(),
+            "captured_at": _dt(3, 5).isoformat(),
+            "served_via": endpoint,
+        }
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(_with_current_value_serving(consumed)), posterior_id),
+    )
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+    )
+
+    assert result.ok is True
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+
+
+def test_raw_hwm_blocks_when_exact_consumed_model_is_superseded() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+    consumed: dict[str, dict[str, object]] = {}
+    for model in ("ecmwf_ifs", "gfs"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(2),
+            captured_at=_dt(2, 5),
+            source_available_at=_dt(2, 5),
+        )
+        consumed[model] = {
+            "raw_model_forecast_id": int(
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            ),
+            "served_cycle": _dt(2).isoformat(),
+            "captured_at": _dt(2, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (
+            json.dumps(_with_current_value_serving(consumed)),
+            posterior_id,
+        ),
+    )
+    _insert_raw_model_forecast(
+        conn,
+        model="gfs",
+        source_cycle_time=_dt(3),
+        captured_at=_dt(3, 5),
+        source_available_at=_dt(3, 5),
+    )
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+    )
+
+    assert result.ok is False
+    assert "basis=used_raw_model_forecasts_superseded" in result.reason_code
+    assert "model=gfs" in result.reason_code
+
+
+def test_raw_hwm_fails_closed_on_unverifiable_current_value_provenance() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+    _insert_raw_model_forecast(
+        conn,
+        model="gfs",
+        source_cycle_time=_dt(0),
+        captured_at=_dt(0, 5),
+        source_available_at=_dt(0, 5),
+    )
+    provenance = _with_current_value_serving(
+        {
+            "gfs": {
+                "raw_model_forecast_id": int(
+                    conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                ),
+                "served_via": "single_runs",
+            }
+        }
+    )
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), posterior_id),
+    )
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+    )
+
+    assert result.ok is False
+    assert "current_value_serving_provenance_unverifiable" in result.reason_code
+
+
 def test_raw_hwm_reuses_bound_posterior_provenance(monkeypatch) -> None:
     import src.data.replacement_forecast_bundle_reader as reader
 
     conn = _conn()
     posterior_id = _insert_posterior(conn)
-    provenance = {
-        "reader_test": True,
-        "replacement_q_mode": "FUSED_NORMAL_FULL",
-        "bin_topology_hash": "topology-hash",
-        "bayes_precision_fusion": {
-            "used_models": ["ecmwf_ifs", "gfs"],
-            "current_value_serving": {
-                "ecmwf_ifs": {"raw_model_forecast_id": 1},
-                "gfs": {"raw_model_forecast_id": 2},
-            },
-        },
-    }
-    conn.execute(
-        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
-        (json.dumps(provenance), posterior_id),
-    )
+    consumed: dict[str, dict[str, object]] = {}
     for model in ("ecmwf_ifs", "gfs"):
         _insert_raw_model_forecast(
             conn,
@@ -567,6 +769,18 @@ def test_raw_hwm_reuses_bound_posterior_provenance(monkeypatch) -> None:
             captured_at=_dt(0, 5),
             source_available_at=_dt(0, 5),
         )
+        consumed[model] = {
+            "raw_model_forecast_id": int(
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            ),
+            "served_cycle": _dt(0).isoformat(),
+            "captured_at": _dt(0, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(_with_current_value_serving(consumed)), posterior_id),
+    )
     traced: list[str] = []
     provenance_parses = 0
     original_json_mapping = reader._json_mapping

@@ -13436,25 +13436,22 @@ def reconcile_partial_remainders(
     return summary
 
 
-def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> dict:
-    """Return held remainders with no live EXIT order to normal redecision.
+def _pending_exit_terminal_order_release_rows(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str | None = None,
+) -> tuple[list[sqlite3.Row], set[str]]:
+    """Return the exact candidates owned by terminal EXIT remainder recovery."""
 
-    A terminal command is not a resting order.  Preserve the real residual
-    exposure, but release ``pending_exit`` so the next monitor cycle decides
-    from a fresh book instead of polling the dead order forever.  A fully
-    filled selected slice is released only after a newer synced chain snapshot
-    proves that positive residual exposure remains.
-    """
-
-    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     if not all(
         _table_exists(conn, table)
         for table in ("venue_commands", "venue_order_facts", "position_current")
     ):
-        return summary
+        return [], set()
 
     pc_columns = _table_columns(conn, "position_current")
     pc_select = ", ".join(f"pc.{column} AS pc_{column}" for column in pc_columns)
+    position_predicate = "AND pc.position_id = ?" if position_id else ""
     rows = conn.execute(
         "WITH " + _canonical_order_truth_cte() + f"""
         SELECT cmd.command_id,
@@ -13502,6 +13499,7 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
            AND pc.phase = 'pending_exit'
            AND pc.order_status = 'sell_pending_confirmation'
            AND pc.order_id = cmd.venue_order_id
+           {position_predicate}
            AND NOT EXISTS (
                 SELECT 1
                   FROM venue_commands live
@@ -13518,8 +13516,59 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                    )
            )
          ORDER BY fact.observed_at, cmd.command_id
-        """
+        """,
+        (position_id,) if position_id else (),
     ).fetchall()
+    return rows, pc_columns
+
+
+def pending_exit_has_terminal_order_release_debt(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+) -> bool:
+    """Whether command recovery exclusively owns this pending-exit release.
+
+    SCOPE: one canonical pending-exit position with a terminal positive-fill
+    EXIT remainder and no newer live EXIT command.
+    DRAIN: command recovery writes the V3 held-sell reauction obligation on its
+    next live tick before releasing the position to normal redecision.
+    RESET: that append/project changes the phase away from ``pending_exit``;
+    fully closed or unproven remainders never satisfy the shared candidate law.
+    """
+
+    scoped_position_id = str(position_id or "").strip()
+    if not scoped_position_id:
+        return False
+    try:
+        rows, _ = _pending_exit_terminal_order_release_rows(
+            conn,
+            position_id=scoped_position_id,
+        )
+    except sqlite3.Error as exc:
+        logger.warning(
+            "recovery: terminal EXIT release-debt check failed closed for %s: %s",
+            scoped_position_id,
+            exc,
+        )
+        return True
+    return bool(rows)
+
+
+def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> dict:
+    """Return held remainders with no live EXIT order to normal redecision.
+
+    A terminal command is not a resting order.  Preserve the real residual
+    exposure, but release ``pending_exit`` so the next monitor cycle decides
+    from a fresh book instead of polling the dead order forever.  A fully
+    filled selected slice is released only after a newer synced chain snapshot
+    proves that positive residual exposure remains.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    rows, pc_columns = _pending_exit_terminal_order_release_rows(conn)
+    if not pc_columns:
+        return summary
 
     from src.state.ledger import append_many_and_project
     from src.state.projection import upsert_position_current

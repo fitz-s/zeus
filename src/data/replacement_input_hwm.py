@@ -790,6 +790,156 @@ def _provenance_has_current_value_serving(
     return isinstance(serving, dict) and bool(serving)
 
 
+def _exact_current_value_serving_lag(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+    posterior_computed_at: datetime | None,
+    provenance: Mapping[str, object],
+) -> tuple[bool, str | None, datetime | None]:
+    """Check rich current-value provenance against each model's latest row.
+
+    ``forecast_posteriors.source_cycle_time`` is the carrier/shape cycle.  A
+    source-clock posterior may intentionally consume newer, model-specific
+    deterministic values, recorded in ``current_value_serving``.  Comparing
+    those rows back to the carrier cycle makes a fully current posterior look
+    stale forever.  Exact raw-row identities are the narrower authority.
+    """
+
+    fusion = provenance.get("bayes_precision_fusion")
+    if not isinstance(fusion, Mapping):
+        return False, None, None
+    serving = fusion.get("current_value_serving")
+    used_models = _used_models_from_provenance(provenance)
+    if not isinstance(serving, Mapping) or not used_models:
+        return True, "basis=current_value_serving_provenance_unverifiable", None
+
+    consumed: dict[str, tuple[int, datetime, datetime | None]] = {}
+    for model in used_models:
+        item = serving.get(model)
+        if not isinstance(item, Mapping):
+            return (
+                True,
+                f"basis=current_value_serving_provenance_unverifiable:model={model}",
+                None,
+            )
+        try:
+            raw_id = int(item.get("raw_model_forecast_id"))
+        except (TypeError, ValueError):
+            return (
+                True,
+                f"basis=current_value_serving_provenance_unverifiable:model={model}",
+                None,
+            )
+        served_cycle = _parse_source_cycle_utc(item.get("served_cycle"))
+        if raw_id <= 0 or served_cycle is None:
+            return (
+                True,
+                f"basis=current_value_serving_provenance_unverifiable:model={model}",
+                None,
+            )
+        consumed[model] = (
+            raw_id,
+            served_cycle,
+            _parse_source_cycle_utc(item.get("captured_at")),
+        )
+        if (
+            posterior_computed_at is not None
+            and consumed[model][2] is not None
+            and consumed[model][2] > posterior_computed_at
+        ):
+            return (
+                True,
+                "basis=used_raw_model_forecasts_same_cycle_late_input:"
+                f"model={model}:"
+                f"consumed_raw_id={raw_id}:"
+                f"latest_raw_input_at={consumed[model][2].isoformat()}:"
+                f"posterior_computed_at={posterior_computed_at.isoformat()}",
+                consumed.get("ecmwf_ifs", (0, served_cycle, None))[1],
+            )
+
+    decision_iso = decision_time.astimezone(UTC).isoformat()
+    from src.data.replacement_current_value_serving import (
+        read_current_instrument_values,
+    )
+
+    selected = read_current_instrument_values(
+        conn,
+        city=city,
+        metric=metric,
+        target_date=str(target_date),
+        source_cycle_time_iso=max(
+            item[1] for item in consumed.values()
+        ).isoformat(),
+        include_station_sources=True,
+        decision_time_iso=decision_iso,
+    )
+    for model, (consumed_id, consumed_cycle, consumed_at) in consumed.items():
+        current = selected.get(model)
+        if current is None:
+            return (
+                True,
+                "basis=current_value_serving_raw_hwm_unavailable:"
+                f"model={model}:consumed_raw_id={consumed_id}",
+                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+            )
+        current_cycle = _parse_source_cycle_utc(current.served_cycle)
+        current_at = _parse_source_cycle_utc(current.captured_at)
+        latest_id = int(current.raw_model_forecast_id)
+        if current_cycle is None:
+            return (
+                True,
+                "basis=current_value_serving_raw_row_identity_mismatch:"
+                f"model={model}:consumed_raw_id={consumed_id}",
+                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+            )
+        if (
+            posterior_computed_at is not None
+            and current_at is not None
+            and current_at > posterior_computed_at
+        ):
+            return (
+                True,
+                "basis=used_raw_model_forecasts_same_cycle_late_input:"
+                f"model={model}:"
+                f"latest_raw_id={latest_id}:"
+                f"latest_raw_input_at={current_at.isoformat()}:"
+                f"posterior_computed_at={posterior_computed_at.isoformat()}",
+                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+            )
+        if latest_id == consumed_id:
+            if (
+                current_cycle != consumed_cycle
+                or (
+                    consumed_at is not None
+                    and current_at != consumed_at
+                )
+            ):
+                return (
+                    True,
+                    "basis=current_value_serving_raw_row_identity_mismatch:"
+                    f"model={model}:consumed_raw_id={consumed_id}",
+                    consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+                )
+            continue
+        return (
+            True,
+            "basis=used_raw_model_forecasts_superseded:"
+            f"model={model}:"
+            f"latest_raw_id={latest_id}:"
+            f"consumed_raw_id={consumed_id}:"
+            f"latest_raw_cycle={current_cycle.isoformat()}:"
+            f"consumed_raw_cycle={consumed_cycle.isoformat()}",
+            consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+        )
+
+    anchor = consumed.get("ecmwf_ifs")
+    return True, None, anchor[1] if anchor is not None else None
+
+
 def latest_used_raw_model_input_mark(
     conn: sqlite3.Connection,
     *,
@@ -957,6 +1107,47 @@ def replacement_live_input_lag_reason(
         )
     )
     rich_used_input_provenance = _provenance_has_current_value_serving(provenance)
+    exact_serving_checked = False
+    consumed_anchor_cycle: datetime | None = None
+    if rich_used_input_provenance:
+        (
+            exact_serving_checked,
+            exact_serving_lag,
+            consumed_anchor_cycle,
+        ) = _exact_current_value_serving_lag(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            decision_time=decision_time,
+            posterior_computed_at=posterior_computed,
+            provenance=provenance,
+        )
+        if exact_serving_lag is not None:
+            return exact_serving_lag
+
+    artifact_cycle = latest_raw_artifact_input_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    artifact_reference_cycle = consumed_anchor_cycle or posterior_cycle
+    if artifact_cycle is not None and artifact_cycle > artifact_reference_cycle:
+        lag_hours = (
+            artifact_cycle - artifact_reference_cycle
+        ).total_seconds() / 3600.0
+        return (
+            "basis=source_cycle_time_raw_forecast_artifacts_lag:"
+            f"latest_raw_cycle={artifact_cycle.isoformat()}:"
+            f"posterior_cycle={posterior_cycle.isoformat()}:"
+            f"consumed_anchor_cycle={artifact_reference_cycle.isoformat()}:"
+            f"lag_h={lag_hours:.2f}"
+        )
+    if exact_serving_checked:
+        return None
+
     used_raw_mark = latest_used_raw_model_input_mark(
         conn,
         city=city,
@@ -984,16 +1175,6 @@ def replacement_live_input_lag_reason(
             f"lag_s={lag_seconds:.0f}"
         )
     candidates = [
-        (
-            latest_raw_artifact_input_cycle(
-                conn,
-                city=city,
-                target_date=target_date,
-                metric=metric,
-                decision_time=decision_time,
-            ),
-            "source_cycle_time_raw_forecast_artifacts_lag",
-        ),
         (
             latest_raw_model_input_cycle(
                 conn,

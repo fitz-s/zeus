@@ -7453,6 +7453,16 @@ def release_pending_exit_without_order_if_retryable(
         return False
     if exit_state in _EXIT_LIFECYCLE_IN_FLIGHT_STATES and conn is None:
         return False
+    if conn is not None:
+        from src.execution.command_recovery import (
+            pending_exit_has_terminal_order_release_debt,
+        )
+
+        if pending_exit_has_terminal_order_release_debt(
+            conn,
+            position_id=str(getattr(position, "trade_id", "") or ""),
+        ):
+            return False
     previous_next_retry_at = str(getattr(position, "next_exit_retry_at", "") or "")
     previous_retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
     previous_error = str(getattr(position, "last_exit_error", "") or "")
