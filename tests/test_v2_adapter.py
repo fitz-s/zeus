@@ -872,6 +872,155 @@ def test_target_ctf_collateral_payload_does_not_enumerate_all_positions(tmp_path
     assert any("CONDITIONAL" in asset for asset in call_asset_types)
 
 
+def test_target_ctf_collateral_falls_back_to_chain_without_inventing_zero(tmp_path):
+    from src.venue.polymarket_v2_adapter import (
+        ERC1155_BALANCE_OF_SELECTOR,
+        ERC1155_IS_APPROVED_FOR_ALL_SELECTOR,
+        PolymarketV2Adapter,
+    )
+
+    token_id = "123456789"
+
+    class ConditionalReadUnavailable(FakeBalanceAllowanceClient):
+        def get_balance_allowance(self, params):
+            asset_type = str(getattr(params, "asset_type", "")).upper()
+            if "CONDITIONAL" in asset_type:
+                return {"balance": "0"}
+            return {"balance": "100000000", "allowance": "50000000"}
+
+    rpc_calls = []
+
+    def rpc_call(_url, method, params):
+        assert method == "eth_call"
+        data = params[0]["data"]
+        rpc_calls.append(data)
+        if data.startswith(ERC1155_BALANCE_OF_SELECTOR):
+            return hex(13_000_000)
+        if data.startswith(ERC1155_IS_APPROVED_FOR_ALL_SELECTOR):
+            return hex(1)
+        raise AssertionError(data)
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: ConditionalReadUnavailable(),
+    )
+
+    payload = adapter.get_ctf_collateral_payload(token_ids=[token_id])
+
+    assert payload["ctf_token_balances_units"] == {token_id: 13_000_000}
+    assert payload["ctf_token_allowances_units"] == {token_id: 13_000_000}
+    assert sum(data.startswith(ERC1155_BALANCE_OF_SELECTOR) for data in rpc_calls) == 1
+    assert (
+        sum(
+            data.startswith(ERC1155_IS_APPROVED_FOR_ALL_SELECTOR)
+            for data in rpc_calls
+        )
+        == 2
+    )
+
+
+def test_target_ctf_collateral_keeps_dual_read_failure_unknown(tmp_path):
+    from src.venue.polymarket_v2_adapter import (
+        PolymarketV2Adapter,
+        V2ReadUnavailable,
+    )
+
+    class ConditionalReadUnavailable(FakeBalanceAllowanceClient):
+        def get_balance_allowance(self, params):
+            asset_type = str(getattr(params, "asset_type", "")).upper()
+            if "CONDITIONAL" in asset_type:
+                raise TimeoutError("CLOB conditional read unavailable")
+            return {"balance": "100000000", "allowance": "50000000"}
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
+        rpc_call=lambda *_args: (_ for _ in ()).throw(TimeoutError("RPC unavailable")),
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: ConditionalReadUnavailable(),
+    )
+
+    with pytest.raises(V2ReadUnavailable, match="both CLOB and chain"):
+        adapter.get_ctf_collateral_payload(token_ids=["123456789"])
+
+
+@pytest.mark.parametrize(
+    "client_mode",
+    ("timeout", "missing_method", "construction_failure"),
+)
+def test_target_ctf_collateral_uses_chain_when_entire_clob_read_is_unavailable(
+    tmp_path,
+    monkeypatch,
+    client_mode,
+):
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    token_id = "123456789"
+
+    class FullClobTimeout(FakeBalanceAllowanceClient):
+        def get_balance_allowance(self, _params):
+            raise TimeoutError("CLOB balance endpoint unavailable")
+
+    client = FullClobTimeout() if client_mode == "timeout" else object()
+
+    def client_factory(**_kwargs):
+        if client_mode == "construction_failure":
+            raise RuntimeError("SDK construction failed")
+        return client
+    monkeypatch.setattr(
+        adapter_module,
+        "_json_rpc_batch_call",
+        lambda *_args, **_kwargs: [
+            "0x" + format(100_000_000, "064x"),
+            "0x" + format(90_000_000, "064x"),
+            "0x" + format(80_000_000, "064x"),
+        ],
+    )
+    rpc_calls = []
+
+    def rpc_call(_url, method, params):
+        assert method == "eth_call"
+        data = params[0]["data"]
+        rpc_calls.append(data)
+        if data.startswith(adapter_module.ERC1155_BALANCE_OF_SELECTOR):
+            return hex(13_000_000)
+        if data.startswith(adapter_module.ERC1155_IS_APPROVED_FOR_ALL_SELECTOR):
+            return hex(1)
+        raise AssertionError(data)
+
+    adapter = adapter_module.PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=client_factory,
+    )
+
+    payload = adapter.get_ctf_collateral_payload(token_ids=[token_id])
+
+    assert payload["authority_tier"] == "CHAIN"
+    assert payload["pusd_balance_micro"] == 100_000_000
+    assert payload["pusd_allowance_micro"] == 80_000_000
+    assert payload["ctf_token_balances_units"] == {token_id: 13_000_000}
+    assert payload["ctf_token_allowances_units"] == {token_id: 13_000_000}
+    assert rpc_calls
+
+
 def test_pusd_collateral_payload_can_skip_allowance_update_for_heartbeat(tmp_path):
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 

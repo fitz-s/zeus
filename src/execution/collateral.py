@@ -118,6 +118,17 @@ def prepare_collateral_snapshot_for_submit(
     )
 
     fallback = load_latest_collateral_snapshot_read_only(conn)
+    refresh_fallback = fallback
+    if action == "exit_submit" and token_id and (
+        fallback is None
+        or token_id not in fallback.ctf_token_balances
+        or token_id not in fallback.ctf_token_allowances
+    ):
+        # A fresh pUSD-only snapshot says nothing about this outcome token.
+        # Reusing it after a targeted read failure would collapse unknown CTF
+        # inventory into a known zero and misclassify the failure as
+        # ctf_tokens_insufficient.
+        refresh_fallback = None
     client = PolymarketClient()
     ensure_adapter = getattr(client, "_ensure_v2_adapter", None)
     raw_adapter = ensure_adapter() if callable(ensure_adapter) else client
@@ -128,7 +139,10 @@ def prepare_collateral_snapshot_for_submit(
         refresh_adapter,
         timeout_seconds=SUBMIT_COLLATERAL_REFRESH_TIMEOUT_SECONDS,
     )
-    snapshot = CollateralLedger.prepare_snapshot_from_adapter(adapter, fallback=fallback)
+    snapshot = CollateralLedger.prepare_snapshot_from_adapter(
+        adapter,
+        fallback=refresh_fallback,
+    )
     return PreparedCollateralSnapshot(
         snapshot=snapshot,
         persist=snapshot is not fallback,

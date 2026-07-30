@@ -1828,8 +1828,18 @@ class PolymarketV2Adapter:
         its runtime proportional to the order being submitted.
         """
 
-        raw = self._collateral_balance_allowance_raw(refresh_allowance=True)
-        payload = self._pusd_collateral_payload_from_raw(raw)
+        try:
+            raw = self._collateral_balance_allowance_raw(refresh_allowance=True)
+            payload = self._pusd_collateral_payload_from_raw(raw)
+        except Exception as clob_exc:
+            try:
+                payload = self.get_chain_pusd_collateral_payload()
+            except Exception as chain_exc:
+                raise V2ReadUnavailable(
+                    "targeted collateral base unavailable from both CLOB and chain: "
+                    f"clob={type(clob_exc).__name__}; "
+                    f"chain={type(chain_exc).__name__}"
+                ) from chain_exc
         balances: dict[str, int] = {}
         allowances: dict[str, int] = {}
         for token_id in dict.fromkeys(str(t or "").strip() for t in token_ids):
@@ -1902,10 +1912,20 @@ class PolymarketV2Adapter:
 
         if not token_id:
             return {}
-        client = self._sdk_client()
+        try:
+            client = self._sdk_client()
+        except Exception as clob_error:
+            try:
+                return self._chain_conditional_balance_allowance_raw(token_id)
+            except Exception as chain_exc:
+                raise V2ReadUnavailable(
+                    "conditional token balance unavailable from both CLOB and chain: "
+                    f"clob={type(clob_error).__name__}; "
+                    f"chain={type(chain_exc).__name__}"
+                ) from chain_exc
         get_balance_allowance = getattr(client, "get_balance_allowance", None)
         if not callable(get_balance_allowance):
-            return {}
+            return self._chain_conditional_balance_allowance_raw(token_id)
         try:
             from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
@@ -1921,15 +1941,70 @@ class PolymarketV2Adapter:
                 signature_type=self.signature_type,
             )
         try:
-            return dict(get_balance_allowance(params) or {})
-        except Exception as exc:
-            logger.debug(
-                "conditional balance allowance unavailable for token %s...%s: %s",
-                token_id[:8],
-                token_id[-4:],
-                exc,
+            raw = dict(get_balance_allowance(params) or {})
+            balance = _micro_int_or_none(raw.get("balance"))
+            if balance is not None and balance > 0:
+                return raw
+            clob_error: Exception = V2ReadUnavailable(
+                "conditional balance response missing or zero; "
+                "chain confirmation required"
             )
-            return {}
+        except Exception as exc:
+            clob_error = exc
+        try:
+            return self._chain_conditional_balance_allowance_raw(token_id)
+        except Exception as chain_exc:
+            raise V2ReadUnavailable(
+                "conditional token balance unavailable from both CLOB and chain: "
+                f"clob={type(clob_error).__name__}; "
+                f"chain={type(chain_exc).__name__}"
+            ) from chain_exc
+
+    def _chain_conditional_balance_allowance_raw(
+        self,
+        token_id: str,
+    ) -> dict[str, Any]:
+        """Read exact ERC-1155 inventory and exchange approvals from Polygon."""
+
+        if not self.polygon_rpc_url:
+            raise V2ReadUnavailable("polygon_rpc_url required for CTF balance fallback")
+        token_word = format(int(str(token_id), 0), "064x")
+        balance = _eth_call_uint(
+            self.polygon_rpc_url,
+            self._rpc_call,
+            to=POLYGON_CTF_ADDRESS,
+            data=(
+                ERC1155_BALANCE_OF_SELECTOR
+                + _abi_address(self.funder_address)
+                + token_word
+            ),
+        )
+        _collateral, exchanges = _collateral_allowance_contracts(self.chain_id)
+        approvals = tuple(
+            bool(
+                _eth_call_uint(
+                    self.polygon_rpc_url,
+                    self._rpc_call,
+                    to=POLYGON_CTF_ADDRESS,
+                    data=(
+                        ERC1155_IS_APPROVED_FOR_ALL_SELECTOR
+                        + _abi_address(self.funder_address)
+                        + _abi_address(exchange)
+                    ),
+                )
+            )
+            for exchange in exchanges
+        )
+        # This targeted surface does not carry market negRisk identity, so it
+        # can only certify execution allowance when both possible venue
+        # operators are approved. The final submit remains authoritative.
+        allowance = balance if approvals and all(approvals) else 0
+        return {
+            "balance": str(balance),
+            "allowance": str(allowance),
+            "authority_tier": "CHAIN",
+            "balance_source": "polygon_erc1155_balance_of",
+        }
 
     def _chain_collateral_allowance_micro(self) -> int | None:
         if not self.polygon_rpc_url:
@@ -3360,6 +3435,8 @@ CTF_GET_COLLECTION_ID_SELECTOR = "0x856296f7"
 # balanceOf(address account, uint256 id) ERC1155 selector.
 # keccak256('balanceOf(address,uint256)')[:4] — verified 2026-06-09.
 ERC1155_BALANCE_OF_SELECTOR = "0x00fdd58e"
+# isApprovedForAll(address,address) ERC1155 selector.
+ERC1155_IS_APPROVED_FOR_ALL_SELECTOR = "0xe985e9c5"
 # wcol() — NegRiskAdapter's wrapped-collateral token used as the CTF collateral
 # for ALL negRisk positions. negRisk position ERC1155 ids are derived from WCOL,
 # NOT pUSD. keccak256('wcol()')[:4] — verified 2026-06-09.

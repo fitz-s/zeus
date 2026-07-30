@@ -281,6 +281,52 @@ def test_exit_refresh_wrapper_uses_target_ctf_payload(monkeypatch):
     assert '"exit-token": 7000000' in row[0]
 
 
+def test_exit_prepare_does_not_reuse_pusd_only_snapshot_as_ctf_zero(monkeypatch):
+    from src.execution.collateral import prepare_collateral_snapshot_for_submit
+    from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    CollateralLedger(conn).set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=1_000_000,
+            pusd_allowance_micro=1_000_000,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime.now(timezone.utc),
+            authority_tier="CHAIN",
+        )
+    )
+
+    class _UnavailableTargetAdapter:
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == ["exit-token"]
+            raise TimeoutError("targeted CTF read unavailable")
+
+    class _StubClient:
+        def _ensure_v2_adapter(self):
+            return _UnavailableTargetAdapter()
+
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        lambda *a, **k: _StubClient(),
+    )
+
+    prepared = prepare_collateral_snapshot_for_submit(
+        conn,
+        action="exit_submit",
+        token_id="exit-token",
+        shares=7.0,
+    )
+
+    assert prepared.persist is True
+    assert prepared.snapshot.authority_tier == "DEGRADED"
+    assert prepared.adapter_error
+
+
 def test_exit_wrapper_refreshes_target_before_stale_pusd_only_rejection(monkeypatch):
     from src.execution.executor import _refresh_exit_collateral_snapshot_for_submit
     from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot

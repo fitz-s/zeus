@@ -11100,6 +11100,42 @@ def _submit_current_global_sell(
                     jit_candidate=current_candidate,
                 )
             if preflight_only:
+                from src.execution.collateral import (
+                    prepare_collateral_snapshot_for_submit,
+                )
+                from src.state.collateral_ledger import (
+                    CollateralInsufficient,
+                    assert_snapshot_allows_sell,
+                )
+
+                token_id = str(getattr(candidate, "token_id", "") or "")
+                shares = float(
+                    Decimal(str(getattr(decision, "shares", "0") or "0"))
+                )
+                prepared_collateral = prepare_collateral_snapshot_for_submit(
+                    trade_conn,
+                    action="exit_submit",
+                    token_id=token_id,
+                    shares=shares,
+                )
+                try:
+                    assert_snapshot_allows_sell(
+                        prepared_collateral.snapshot,
+                        token_id=token_id,
+                        size=shares,
+                    )
+                except CollateralInsufficient as exc:
+                    # SCOPE: this exact SELL token only. DRAIN: the batch
+                    # excludes it and re-solves the remaining actions in this
+                    # cut. RESET: the next cut re-reads targeted chain
+                    # inventory and approval before claim.
+                    return _global_sell_receipt(
+                        event,
+                        global_actuation=global_actuation,
+                        reason=f"GLOBAL_SELL_COLLATERAL_UNAVAILABLE:{exc}",
+                        proof_accepted=False,
+                        jit_candidate=current_candidate,
+                    )
                 return _global_sell_receipt(
                     event,
                     global_actuation=global_actuation,
@@ -11483,6 +11519,11 @@ def _global_preflight_block_status(reason: str) -> str:
         # An active exit makes only this exact position/side unavailable. The
         # current probability, book, and wealth epoch remain valid for every
         # other candidate, so exclude this SELL and re-run the same auction.
+        return "CANDIDATE_BLOCKED"
+    if reason.startswith("GLOBAL_SELL_COLLATERAL_UNAVAILABLE:"):
+        # Targeted chain inventory/approval governs only this exact SELL. The
+        # batch can safely compare the remaining BUY/SELL/HOLD/CASH actions,
+        # while the next cut retries this token with fresh chain truth.
         return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (

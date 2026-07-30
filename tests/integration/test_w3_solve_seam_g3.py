@@ -25436,11 +25436,14 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     )
 
     class Clob:
+        ctf_units = 10 * 1_000_000
+
         def __init__(self, **kwargs):
-            assert (
-                kwargs["public_request_priority"]
-                is RequestPriority.HELD_REDUCE_ONLY
-            )
+            if kwargs:
+                assert (
+                    kwargs["public_request_priority"]
+                    is RequestPriority.HELD_REDUCE_ONLY
+                )
 
         def __enter__(self):
             return self
@@ -25468,6 +25471,22 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             raise AssertionError(
                 f"legacy CLOB fee authority called for global SELL: {token_id}"
             )
+
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == ["yes-token"]
+            return {
+                "pusd_balance_micro": 100_000_000,
+                "pusd_allowance_micro": 100_000_000,
+                "usdc_e_legacy_balance_micro": 0,
+                "ctf_token_balances_units": {
+                    "yes-token": type(self).ctf_units,
+                },
+                "ctf_token_allowances_units": {
+                    "yes-token": type(self).ctf_units,
+                },
+                "authority_tier": "CHAIN",
+                "ctf_token_scope": "targeted",
+            }
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Clob)
     monkeypatch.setattr(
@@ -25534,6 +25553,27 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     )
     assert preflight.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
     assert preflight.proof_accepted is True
+    Clob.ctf_units = 0
+    blocked = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        global_claim_conn=global_claim_conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        preflight_only=True,
+        preflight_receipt=None,
+    )
+    assert blocked.submitted is False
+    assert blocked.venue_call_started is False
+    assert blocked.reason.startswith(
+        "GLOBAL_SELL_COLLATERAL_UNAVAILABLE:ctf_tokens_insufficient:"
+    )
+    assert era._global_preflight_block_status(blocked.reason) == "CANDIDATE_BLOCKED"
+    assert exits == []
+    Clob.ctf_units = 10 * 1_000_000
     receipt = era._submit_current_global_sell(
         event,
         decision_time=at,

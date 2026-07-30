@@ -497,27 +497,15 @@ class CollateralLedger:
     ) -> bool:
         snapshot = self.snapshot()
         selected_token = token_id or (intent.token_id if intent is not None else "")
-        required = _token_required_units(size if size is not None else getattr(intent, "target_size_usd", 0))
-        if not selected_token:
-            raise CollateralInsufficient("ctf_token_id_required")
-        if snapshot.authority_tier == "DEGRADED":
-            raise CollateralInsufficient("collateral_snapshot_degraded")
-        _assert_snapshot_fresh(snapshot)
-        available = snapshot.available_tokens(selected_token)
-        if available < required:
-            raise CollateralInsufficient(
-                f"ctf_tokens_insufficient: token_id={selected_token} "
-                f"required={required} available={available}"
-            )
-        allowance = int(snapshot.ctf_token_allowances.get(selected_token, 0))
-        available_allowance = snapshot.available_token_allowance(selected_token)
-        if available_allowance < required:
-            raise CollateralInsufficient(
-                f"ctf_allowance_insufficient: token_id={selected_token} "
-                f"required={required} available_allowance={available_allowance} "
-                f"allowance={allowance}"
-            )
-        return True
+        return assert_snapshot_allows_sell(
+            snapshot,
+            token_id=selected_token,
+            size=(
+                size
+                if size is not None
+                else getattr(intent, "target_size_usd", 0)
+            ),
+        )
 
     @staticmethod
     def sell_preflight_in_transaction(
@@ -536,25 +524,11 @@ class CollateralLedger:
             reserved_pusd_for_buys_micro=_reserved_pusd_for_connection(conn),
             reserved_tokens_for_sells=_reserved_tokens_for_connection(conn),
         )
-        required = _token_required_units(size)
-        if snapshot.authority_tier == "DEGRADED":
-            raise CollateralInsufficient("collateral_snapshot_degraded")
-        _assert_snapshot_fresh(snapshot)
-        available = snapshot.available_tokens(token_id)
-        if available < required:
-            raise CollateralInsufficient(
-                f"ctf_tokens_insufficient: token_id={token_id} "
-                f"required={required} available={available}"
-            )
-        allowance = int(snapshot.ctf_token_allowances.get(token_id, 0))
-        available_allowance = snapshot.available_token_allowance(token_id)
-        if available_allowance < required:
-            raise CollateralInsufficient(
-                f"ctf_allowance_insufficient: token_id={token_id} "
-                f"required={required} available_allowance={available_allowance} "
-                f"allowance={allowance}"
-            )
-        return True
+        return assert_snapshot_allows_sell(
+            snapshot,
+            token_id=token_id,
+            size=size,
+        )
 
     def reserve_pusd_for_buy(self, command_id: str, micro: int) -> None:
         """Reserve pUSD via a guarded single-statement CAS insert.
@@ -1421,6 +1395,38 @@ def _assert_snapshot_fresh(snapshot: CollateralSnapshot) -> None:
             f"age_seconds={age_seconds:.1f} "
             f"max_age_seconds={COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS:.1f}"
         )
+
+
+def assert_snapshot_allows_sell(
+    snapshot: CollateralSnapshot,
+    *,
+    token_id: str,
+    size: int | float,
+) -> bool:
+    """Validate one SELL against an already captured collateral snapshot."""
+
+    selected_token = str(token_id or "").strip()
+    if not selected_token:
+        raise CollateralInsufficient("ctf_token_id_required")
+    if snapshot.authority_tier == "DEGRADED":
+        raise CollateralInsufficient("collateral_snapshot_degraded")
+    _assert_snapshot_fresh(snapshot)
+    required = _token_required_units(size)
+    available = snapshot.available_tokens(selected_token)
+    if available < required:
+        raise CollateralInsufficient(
+            f"ctf_tokens_insufficient: token_id={selected_token} "
+            f"required={required} available={available}"
+        )
+    allowance = int(snapshot.ctf_token_allowances.get(selected_token, 0))
+    available_allowance = snapshot.available_token_allowance(selected_token)
+    if available_allowance < required:
+        raise CollateralInsufficient(
+            f"ctf_allowance_insufficient: token_id={selected_token} "
+            f"required={required} available_allowance={available_allowance} "
+            f"allowance={allowance}"
+        )
+    return True
 
 
 def _intent_worst_case_spend_micro(intent: ExecutionIntent) -> int:
