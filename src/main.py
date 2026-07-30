@@ -4513,27 +4513,24 @@ def _acknowledge_edli_reactor_wake_batch(
     return True
 
 
-_HELD_SELL_NO_LONGER_EXPOSED_PHASES = frozenset(
-    {"economically_closed", "settled", "admin_closed", "voided"}
-)
-
-
 def _terminal_held_sell_reauction_receipts(
     requests: tuple[object, ...],
 ) -> tuple[object, ...]:
-    """Read one canonical trade snapshot and prove only explicit terminal requests done.
+    """Read one canonical trade snapshot and prove only explicit SELL obligations done.
 
-    SCOPE: one held SELL request_id whose canonical position_id is in an explicit
-    no-exposure phase; a missing row, any non-terminal phase, or any read error
-    proves nothing. DRAIN: the wake listener persists this receipt before acking
-    and then drains only the remaining requests through the normal exact cut.
-    RESET: a new request identity/generation is a new obligation and cannot reuse
-    this receipt, while canonical non-terminal phases never enter this path.
+    SCOPE: one held SELL request_id whose canonical phase-specific chain proof
+    shows either exact zero tradeable shares or settlement ending only its SELL
+    obligation; missing/ambiguous rows and reads prove nothing. DRAIN: one
+    read-only batch query feeds idempotent receipts before exact per-wake ack,
+    while incomplete requests continue through the normal exact cut. RESET: a
+    new request material/generation/attempt identity is a new obligation and
+    cannot reuse a prior receipt; non-qualifying canonical proof stays pending.
     """
 
     from src.runtime.reactor_wake import (
         POSITION_NO_LONGER_EXPOSED,
         HeldSellReauctionReceipt,
+        held_sell_no_longer_exposed_reason,
     )
     from src.state.db import get_trade_connection_read_only
 
@@ -4602,18 +4599,22 @@ def _terminal_held_sell_reauction_receipts(
         if proof is None:
             continue
         lifecycle_phase, chain_state, raw_chain_shares, settled_at = proof
-        if lifecycle_phase not in _HELD_SELL_NO_LONGER_EXPOSED_PHASES:
-            continue
         try:
-            chain_shares = (
-                None if raw_chain_shares is None else float(raw_chain_shares)
-            )
+            chain_shares = float(raw_chain_shares)
         except (TypeError, ValueError):
             logger.warning(
                 "held SELL terminal receipt deferred: invalid canonical chain_shares "
                 "position_id=%s",
                 position_id,
             )
+            continue
+        reason = held_sell_no_longer_exposed_reason(
+            lifecycle_phase=lifecycle_phase,
+            chain_state=chain_state,
+            chain_shares=chain_shares,
+            settled_at=settled_at,
+        )
+        if reason is None:
             continue
         for request in position_requests:
             receipts.append(
@@ -4636,7 +4637,7 @@ def _terminal_held_sell_reauction_receipts(
                         getattr(request, "attempt_identity", "") or ""
                     ),
                     status=POSITION_NO_LONGER_EXPOSED,
-                    reason="CANONICAL_POSITION_TERMINAL_NO_LONGER_EXPOSED",
+                    reason=reason,
                     lifecycle_phase=lifecycle_phase,
                     chain_state=chain_state,
                     chain_shares=chain_shares,
@@ -4656,6 +4657,7 @@ def _edli_reactor_wake_poll_once() -> bool:
 
     from src.runtime.reactor_wake import (
         GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        acknowledge_reactor_wakes,
         coalescible_reactor_wakes,
         held_sell_reauction_requests_completed,
         persist_held_sell_reauction_receipts,
@@ -4689,6 +4691,55 @@ def _edli_reactor_wake_poll_once() -> bool:
     if completed_forecast_wakes:
         wakes = completed_forecast_wakes
         wake = wakes[0]
+    held_sell_reauction_requests = tuple(
+        dict.fromkeys(
+            request
+            for queued in wakes
+            for request in queued.held_sell_reauction_requests
+        )
+    )
+    terminal_receipts = _terminal_held_sell_reauction_receipts(
+        held_sell_reauction_requests
+    )
+    if terminal_receipts and not persist_held_sell_reauction_receipts(
+        terminal_receipts
+    ):
+        logger.warning(
+            "held SELL terminal receipts could not persist; wake remains pending"
+        )
+    durably_completed_wakes = tuple(
+        queued
+        for queued in wakes
+        if queued.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        and not queued.event_ids
+        and queued.held_sell_reauction_requests
+        and held_sell_reauction_requests_completed(
+            queued.held_sell_reauction_requests
+        )
+    )
+    if durably_completed_wakes:
+        if len(durably_completed_wakes) == len(wakes):
+            return _acknowledge_edli_reactor_wake_batch(
+                wake,
+                wakes,
+                day0_wake=False,
+            )
+        # Acknowledge only immutable queue files whose own request set has
+        # durable completion. An older active/mixed wake remains byte-for-byte
+        # pending while later terminal-only wakes make bounded queue progress.
+        if not acknowledge_reactor_wakes(durably_completed_wakes):
+            return False
+        completed_ids = {queued.wake_id for queued in durably_completed_wakes}
+        wakes = tuple(
+            queued for queued in wakes if queued.wake_id not in completed_ids
+        )
+        logger.info(
+            "EDLI reactor retired %d independently completed held SELL wakes",
+            len(durably_completed_wakes),
+        )
+        if not wakes:
+            return True
+        wake = wakes[0]
     wake_event_ids = tuple(
         dict.fromkeys(event_id for queued in wakes for event_id in queued.event_ids)
     )
@@ -4704,24 +4755,11 @@ def _edli_reactor_wake_poll_once() -> bool:
             for request in queued.held_sell_reauction_requests
         )
     )
-    pending_held_sell_reauction_requests = held_sell_reauction_requests
-    terminal_receipts = _terminal_held_sell_reauction_receipts(
-        held_sell_reauction_requests
+    pending_held_sell_reauction_requests = tuple(
+        request
+        for request in held_sell_reauction_requests
+        if not held_sell_reauction_requests_completed((request,))
     )
-    if terminal_receipts:
-        if persist_held_sell_reauction_receipts(terminal_receipts):
-            terminal_request_ids = {
-                receipt.request_id for receipt in terminal_receipts
-            }
-            pending_held_sell_reauction_requests = tuple(
-                request
-                for request in held_sell_reauction_requests
-                if request.request_id not in terminal_request_ids
-            )
-        else:
-            logger.warning(
-                "held SELL terminal receipts could not persist; wake remains pending"
-            )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     forecast_wake = wake.reason == "forecast_posterior_advanced"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"

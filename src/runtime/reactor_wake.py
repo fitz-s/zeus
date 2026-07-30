@@ -24,8 +24,39 @@ HELD_SELL_REAUCTION_RECEIPT_SUFFIX = ".held-sell-reauction-receipts"
 HELD_SELL_REAUCTION_V2 = 2
 HELD_SELL_REAUCTION_V3 = 3
 POSITION_NO_LONGER_EXPOSED = "POSITION_NO_LONGER_EXPOSED"
-_HELD_SELL_TERMINAL_POSITION_PHASES = frozenset(
-    {"economically_closed", "settled", "admin_closed", "voided"}
+SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO = (
+    "SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO"
+)
+SELL_OBLIGATION_ENDED_BY_SETTLEMENT_ONLY = (
+    "SELL_OBLIGATION_ENDED_BY_SETTLEMENT_ONLY"
+)
+SELL_OBLIGATION_ENDED_BY_ADMIN_CLOSE_WITH_CHAIN_ZERO = (
+    "SELL_OBLIGATION_ENDED_BY_ADMIN_CLOSE_WITH_CHAIN_ZERO"
+)
+SELL_OBLIGATION_ENDED_BY_VOID_WITH_CHAIN_ZERO = (
+    "SELL_OBLIGATION_ENDED_BY_VOID_WITH_CHAIN_ZERO"
+)
+_HELD_SELL_SETTLED_CHAIN_STATES = frozenset(
+    {
+        "synced",
+        "chain_present",
+        "chain_confirmed_zero",
+        "chain_absent_confirmed_position_unattributed",
+        "external_operator_closed",
+        "closed_exited",
+        "closed_redeemed",
+        "closed_worthless",
+    }
+)
+_HELD_SELL_CHAIN_ZERO_CLOSED_STATES = frozenset(
+    {
+        "chain_confirmed_zero",
+        "chain_absent_confirmed_position_unattributed",
+        "external_operator_closed",
+        "closed_exited",
+        "closed_redeemed",
+        "closed_worthless",
+    }
 )
 _HELD_SELL_BOOK_STATES = frozenset(
     {"UNKNOWN", "NO_EXECUTABLE_BOOK", "STALE", "EXECUTABLE"}
@@ -942,18 +973,63 @@ def _held_sell_reauction_receipt_path(
     return _held_sell_reauction_receipt_dir(path) / f"{request_id}.json"
 
 
+def held_sell_no_longer_exposed_reason(
+    *,
+    lifecycle_phase: str,
+    chain_state: str,
+    chain_shares: object,
+    settled_at: str,
+) -> str | None:
+    """Return the exact completion reason only for phase-specific canonical proof."""
+
+    phase = str(lifecycle_phase or "").strip()
+    state = str(chain_state or "").strip()
+    if isinstance(chain_shares, bool) or chain_shares is None:
+        return None
+    try:
+        shares = float(chain_shares)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(shares) or shares < 0.0:
+        return None
+
+    if phase == "economically_closed":
+        if state in {"chain_confirmed_zero", "synced"} and shares == 0.0:
+            return SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO
+        return None
+    if phase == "settled":
+        if (
+            state in _HELD_SELL_SETTLED_CHAIN_STATES
+            and str(settled_at or "").strip()
+        ):
+            return SELL_OBLIGATION_ENDED_BY_SETTLEMENT_ONLY
+        return None
+    if phase == "admin_closed":
+        if state in _HELD_SELL_CHAIN_ZERO_CLOSED_STATES and shares == 0.0:
+            return SELL_OBLIGATION_ENDED_BY_ADMIN_CLOSE_WITH_CHAIN_ZERO
+        return None
+    if phase == "voided":
+        if state in _HELD_SELL_CHAIN_ZERO_CLOSED_STATES and shares == 0.0:
+            return SELL_OBLIGATION_ENDED_BY_VOID_WITH_CHAIN_ZERO
+        return None
+    return None
+
+
 def _terminal_no_longer_exposed_receipt_valid(
     receipt: HeldSellReauctionReceipt,
 ) -> bool:
-    """Validate the canonical terminal proof without inventing auction evidence."""
+    """Validate canonical closure proof without inventing auction or redeem evidence."""
 
-    if receipt.status != POSITION_NO_LONGER_EXPOSED:
-        return False
-    if receipt.lifecycle_phase not in _HELD_SELL_TERMINAL_POSITION_PHASES:
-        return False
-    if receipt.chain_shares is None:
-        return True
-    return math.isfinite(receipt.chain_shares) and receipt.chain_shares >= 0.0
+    return (
+        receipt.status == POSITION_NO_LONGER_EXPOSED
+        and receipt.reason
+        == held_sell_no_longer_exposed_reason(
+            lifecycle_phase=receipt.lifecycle_phase,
+            chain_state=receipt.chain_state,
+            chain_shares=receipt.chain_shares,
+            settled_at=receipt.settled_at,
+        )
+    )
 
 
 def _read_held_sell_reauction_receipt(
