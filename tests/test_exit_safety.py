@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-29
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Last reused/audited: 2026-07-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-30; last_reused=2026-07-30
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -5071,6 +5071,158 @@ def test_live_exit_skips_fresh_snapshot_without_sell_bid_and_captures_new_one(
     assert context["executable_snapshot_id"] == "snap-exit-with-bid"
 
 
+def test_live_exit_recovers_missing_clob_for_fresh_snapshot_capture_idempotently(
+    conn,
+    monkeypatch,
+):
+    """A missing caller transport must not strand a sell with current authority."""
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        snapshot_id="snap-exit-stale-before-owned-client-recovery",
+        captured_at=_NOW - timedelta(minutes=10),
+        freshness_deadline=_NOW - timedelta(minutes=9),
+    )
+    position = Position(
+        trade_id="pos-exit-owned-client-recovery",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.04,
+        size_usd=10.0,
+        shares=250.0,
+    )
+    owned_clob = object()
+    captures: list[object] = []
+
+    monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client", lambda: owned_clob)
+    monkeypatch.setattr(
+        "src.data.market_scanner.get_sibling_outcomes",
+        lambda market_id: [
+            {
+                "market_id": market_id,
+                "condition_id": market_id,
+                "question_id": "question-test",
+                "token_id": YES_TOKEN,
+                "no_token_id": NO_TOKEN,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "gamma_market_raw": {
+                    "id": "gamma-test-current",
+                    "conditionId": market_id,
+                    "questionID": "question-test",
+                    "clobTokenIds": [YES_TOKEN, NO_TOKEN],
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr("src.data.market_scanner.get_last_scan_authority", lambda: "VERIFIED")
+
+    def fake_capture_snapshot(conn_arg, *, clob, captured_at, **_kwargs):
+        captures.append(clob)
+        return {
+            "executable_snapshot_id": _ensure_snapshot(
+                conn_arg,
+                token_id=YES_TOKEN,
+                no_token_id=NO_TOKEN,
+                selected_outcome_token_id=YES_TOKEN,
+                outcome_label="YES",
+                snapshot_id="snap-exit-owned-client-recovered",
+                captured_at=captured_at,
+                freshness_deadline=captured_at + timedelta(minutes=5),
+                orderbook_top_bid=Decimal("0.06"),
+                orderbook_top_ask=Decimal("0.07"),
+            ),
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "0.01",
+            "executable_snapshot_neg_risk": False,
+        }
+
+    monkeypatch.setattr("src.data.market_scanner.capture_executable_market_snapshot", fake_capture_snapshot)
+
+    first = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn,
+        None,
+        position,
+        YES_TOKEN,
+        now=_NOW,
+    )
+    second = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn,
+        None,
+        position,
+        YES_TOKEN,
+        now=_NOW,
+    )
+
+    assert first["executable_snapshot_id"] == "snap-exit-owned-client-recovered"
+    assert second["executable_snapshot_id"] == "snap-exit-owned-client-recovered"
+    assert captures == [owned_clob]
+
+
+def test_live_exit_missing_clob_fails_closed_when_owned_transport_is_unavailable(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-exit-owned-client-unavailable",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.04,
+        size_usd=10.0,
+        shares=250.0,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: (_ for _ in ()).throw(RuntimeError("transport unavailable")),
+    )
+    monkeypatch.setattr(
+        "src.data.market_scanner.capture_executable_market_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unavailable transport must not capture")
+        ),
+    )
+
+    context = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn,
+        None,
+        position,
+        YES_TOKEN,
+        now=_NOW,
+    )
+
+    assert context == {}
+
+
 def test_live_exit_identity_seed_does_not_reuse_stale_accepting_orders_as_tradability(
     conn,
     monkeypatch,
@@ -5592,6 +5744,13 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
         day0_active=True,
     )
 
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("fresh no-bid must not trigger transport recovery")
+        ),
+    )
     monkeypatch.setattr(
         exit_lifecycle,
         "_refresh_exit_collateral_snapshot_for_submit",

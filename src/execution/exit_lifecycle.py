@@ -5005,8 +5005,27 @@ def _latest_or_capture_exit_snapshot_context(
         now=now,
         require_sell_bid=False,
     )
-    if conn is None or clob is None or not token_id:
+    if conn is None or not token_id:
         return no_bid_context
+    if clob is None:
+        # A caller can carry valid exit authority without owning the public CLOB
+        # transport (for example, a targeted wake after its quote reader was
+        # released). Reacquire the process-owned held-monitor client only when
+        # there is no fresh no-bid fact to classify as liquidity. The capture
+        # below still performs the FC-03 submit-time market/orderbook reads; this
+        # is transport recovery, never quote reuse.
+        if no_bid_context:
+            return no_bid_context
+        try:
+            clob = _held_monitor_clob_client()
+        except Exception as exc:  # noqa: BLE001 - acquisition remains fail-closed
+            logger.warning(
+                "Exit executable snapshot transport recovery failed for %s token=%s: %s",
+                position.trade_id,
+                token_id,
+                exc,
+            )
+            return {}
 
     market_id = str(
         getattr(position, "market_id", "")
