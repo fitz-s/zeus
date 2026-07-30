@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from inspect import Parameter, signature
 from types import SimpleNamespace
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 # Compatibility exports for callers that patch the former lifecycle seam.
 # Submit-time authority is owned by executor.py below.
@@ -8370,6 +8370,22 @@ def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
     return record
 
 
+def _full_book_monitor_made_canonical_progress(
+    summary: Mapping[str, object],
+    *,
+    open_position_count: int,
+) -> bool:
+    """Whether one admitted full-book pass produced useful held coverage."""
+
+    if open_position_count <= 0:
+        return True
+    return (
+        int(summary.get("monitors") or 0) > 0
+        and int(summary.get("monitor_canonical_write_failed") or 0) == 0
+        and not bool(summary.get("held_monitor_preempted"))
+    )
+
+
 def run_exit_monitor_cycle(
     *,
     held_position_monitor_active: threading.Event,
@@ -8427,6 +8443,7 @@ def run_exit_monitor_cycle(
         return False
 
     summary: dict = {"monitors": 0, "exits": 0}
+    full_book_open_position_count = 0
     succeeded = False
     monitor_completion_marked = False
     # FIX 2c (2026-06-20): detect a lapsed MONITOR_REFRESHED cadence (whole-book
@@ -8459,6 +8476,8 @@ def run_exit_monitor_cycle(
                 )
             )
         monitor_portfolio = _portfolio_for_target_families(portfolio, target_families)
+        if target_families is None:
+            full_book_open_position_count = len(monitor_portfolio.positions)
         if target_families is not None:
             summary["targeted_exit_monitor"] = True
             summary["target_family_count"] = len(
@@ -8525,6 +8544,23 @@ def run_exit_monitor_cycle(
                 json_exports=[_export_portfolio, _export_tracker],
             )
             succeeded = "monitoring_error" not in summary
+            if (
+                succeeded
+                and target_families is None
+                and not _full_book_monitor_made_canonical_progress(
+                    summary,
+                    open_position_count=full_book_open_position_count,
+                )
+            ):
+                # SCOPE: this admitted periodic full-book pass only. DRAIN: a
+                # later pass writes at least one canonical MONITOR_REFRESHED
+                # tranche without preemption/write failure. RESET: that
+                # canonical progress (or zero current open positions) returns
+                # True so the dispatcher may clear its fairness debt.
+                summary["monitoring_error"] = (
+                    "FULL_BOOK_MONITOR_CANONICAL_PROGRESS_MISSING"
+                )
+                succeeded = False
             mark_held_position_monitor_complete()
             monitor_completion_marked = True
 

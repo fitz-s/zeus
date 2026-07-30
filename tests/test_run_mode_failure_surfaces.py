@@ -8257,6 +8257,33 @@ def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
         main_module._periodic_exit_monitor_day0_yielded.clear()
 
 
+def test_full_book_monitor_success_requires_canonical_progress() -> None:
+    from src.execution.exit_lifecycle import (
+        _full_book_monitor_made_canonical_progress,
+    )
+
+    assert _full_book_monitor_made_canonical_progress(
+        {"monitors": 0},
+        open_position_count=0,
+    )
+    assert _full_book_monitor_made_canonical_progress(
+        {"monitors": 1},
+        open_position_count=4,
+    )
+    assert not _full_book_monitor_made_canonical_progress(
+        {"monitors": 0},
+        open_position_count=4,
+    )
+    assert not _full_book_monitor_made_canonical_progress(
+        {"monitors": 1, "monitor_canonical_write_failed": 1},
+        open_position_count=4,
+    )
+    assert not _full_book_monitor_made_canonical_progress(
+        {"monitors": 1, "held_monitor_preempted": True},
+        open_position_count=4,
+    )
+
+
 def test_reactor_rechecks_monitor_priority_after_active_lock_claim() -> None:
     import inspect
     import src.events.reactor as reactor_module
