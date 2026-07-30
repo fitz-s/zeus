@@ -202,13 +202,14 @@ def test_no_regression_p4_daemon_and_plist_artifacts_exist():
     assert "POLYMARKET_CLOB_V2_SIGNATURE_TYPE" in plist
 
 
-def test_harvester_runs_on_daemon_start_then_keeps_hourly_cadence():
-    """A short-lived restart must still drain newly resolved held positions."""
+def test_harvester_runs_on_daemon_start_then_keeps_bounded_settlement_cadence():
+    """A short-lived restart and every later five-minute tick drain resolved positions."""
     call = _add_job_call(_P4_DAEMON, "harvester")
     assert call is not None
     keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
-    assert isinstance(keywords.get("hours"), ast.Constant)
-    assert keywords["hours"].value == 1
+    assert isinstance(keywords.get("minutes"), ast.Constant)
+    assert 0 < keywords["minutes"].value <= 5
+    assert "hours" not in keywords
     assert isinstance(keywords.get("max_instances"), ast.Constant)
     assert keywords["max_instances"].value == 1
     assert isinstance(keywords.get("coalesce"), ast.Constant)
