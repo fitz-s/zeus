@@ -6,6 +6,7 @@ import base64
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_FLOOR
+from enum import Enum
 import hashlib
 import json
 import logging
@@ -63,6 +64,34 @@ class _CurrentHoldingWitness:
     ledger_snapshot_id: str
     wealth_economic_identity: str
     held_shares: Decimal
+
+
+class GlobalHoldingCoverageOutcome(str, Enum):
+    """The precise authority result for one held SELL monitor handoff."""
+
+    COVERED = "COVERED"
+    PROBABILITY_CONTENT = "PROBABILITY_CONTENT"
+    WEALTH = "WEALTH"
+    BOOK = "BOOK"
+    COVERAGE_NOT_PUBLISHED = "COVERAGE_NOT_PUBLISHED"
+    COVERAGE_EXPIRED = "COVERAGE_EXPIRED"
+    COVERAGE_PARTITION = "COVERAGE_PARTITION"
+    REQUEST_REJECTED = "REQUEST_REJECTED"
+    DRAIN_PENDING = "DRAIN_PENDING"
+
+
+@dataclass(frozen=True)
+class CurrentGlobalHoldingCoverage:
+    """Typed monitor handoff; an absent lease is data, never ``None``."""
+
+    outcome: GlobalHoldingCoverageOutcome
+    reason: str
+    coverage: GlobalHoldingAuctionCoverage | None = None
+    decision_log_id: int | None = None
+
+    @property
+    def covered(self) -> bool:
+        return self.outcome is GlobalHoldingCoverageOutcome.COVERED
 
 
 UTC = timezone.utc
@@ -590,8 +619,27 @@ def current_global_holding_coverage(
     ]
     | None = None,
     current_time_provider: Callable[[], datetime] | None = None,
-) -> tuple[GlobalHoldingAuctionCoverage, int] | None:
-    """Return coverage only when every current position/wealth/book witness agrees."""
+) -> CurrentGlobalHoldingCoverage:
+    """Return the exact current authority outcome for one held SELL.
+
+    SCOPE: one position/token monitor handoff.  DRAIN: the monitor turns every
+    non-covered material SELL into a durable reauction request.  RESET: a
+    newly published exact cut returns ``COVERED``; no failure is represented as
+    a truthless ``None``.
+    """
+
+    def result(
+        outcome: GlobalHoldingCoverageOutcome,
+        reason: str,
+        coverage: GlobalHoldingAuctionCoverage | None = None,
+        decision_log_id: int | None = None,
+    ) -> CurrentGlobalHoldingCoverage:
+        return CurrentGlobalHoldingCoverage(
+            outcome=outcome,
+            reason=reason,
+            coverage=coverage,
+            decision_log_id=decision_log_id,
+        )
 
     if (
         checked_at_utc.tzinfo is None
@@ -615,58 +663,119 @@ def current_global_holding_coverage(
         or current_probability_content_identity_resolver is None
         or current_holding_witness_resolver is None
     ):
-        return None
+        return result(
+            (
+                GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT
+                if not str(probability_content_identity or "").strip()
+                else GlobalHoldingCoverageOutcome.COVERAGE_PARTITION
+            ),
+            "GLOBAL_HOLDING_COVERAGE_INPUT_INCOMPLETE",
+        )
     with _GLOBAL_HOLDING_COVERAGE_LOCK:
         lease = _GLOBAL_HOLDING_COVERAGE_BY_POSITION.get(str(position_id or ""))
         published_wealth_identity = _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY
         generation = _GLOBAL_HOLDING_COVERAGE_GENERATION
     if lease is None or lease.generation != generation:
-        return None
+        return result(
+            GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED,
+            "GLOBAL_HOLDING_COVERAGE_NOT_PUBLISHED",
+        )
     row = lease.row
     checked = checked_at_utc.astimezone(UTC)
+    if row.status != "EVALUATED":
+        return result(
+            GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
+            str(row.reason or "GLOBAL_HOLDING_COVERAGE_NOT_EVALUATED"),
+        )
+    if row.probability_content_identity != str(probability_content_identity or ""):
+        return result(
+            GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT,
+            "GLOBAL_HOLDING_COVERAGE_PROBABILITY_CONTENT_MISMATCH",
+        )
     if (
-        row.status != "EVALUATED"
-        or row.probability_content_identity
-        != str(probability_content_identity or "")
-        or row.family_key != family_key
+        row.family_key != family_key
         or str(row.bin_label or "") != bin_label
         or row.condition_id != condition_id
         or row.side != side
         or row.token_id != token_id
-        or Decimal(row.held_shares) != Decimal(held_shares)
+    ):
+        return result(
+            GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
+            "GLOBAL_HOLDING_COVERAGE_IDENTITY_MISMATCH",
+        )
+    if (
+        Decimal(row.held_shares) != Decimal(held_shares)
         or row.ledger_snapshot_id != current_ledger_snapshot_id
         or row.wealth_economic_identity != current_wealth_economic_identity
         or published_wealth_identity != current_wealth_economic_identity
-        or not str(row.sell_book_witness_identity or "").strip()
-        or checked < row.decision_at_utc.astimezone(UTC)
+    ):
+        return result(
+            GlobalHoldingCoverageOutcome.WEALTH,
+            "GLOBAL_HOLDING_COVERAGE_WEALTH_MISMATCH",
+        )
+    if not str(row.sell_book_witness_identity or "").strip():
+        return result(
+            GlobalHoldingCoverageOutcome.BOOK,
+            "GLOBAL_HOLDING_COVERAGE_BOOK_WITNESS_MISSING",
+        )
+    if (
+        checked < row.decision_at_utc.astimezone(UTC)
         or checked > row.book_deadline_at_utc.astimezone(UTC)
     ):
-        return None
+        return result(
+            GlobalHoldingCoverageOutcome.COVERAGE_EXPIRED,
+            "GLOBAL_HOLDING_COVERAGE_WINDOW_EXPIRED",
+        )
     try:
         current_sell_book_witness_identity = current_sell_book_witness_resolver(row)
+    except Exception:  # noqa: BLE001 - a book read is its own authority plane.
+        return result(
+            GlobalHoldingCoverageOutcome.BOOK,
+            "GLOBAL_HOLDING_COVERAGE_BOOK_RESOLUTION_FAILED",
+        )
+    if current_sell_book_witness_identity != row.sell_book_witness_identity:
+        return result(
+            GlobalHoldingCoverageOutcome.BOOK,
+            "GLOBAL_HOLDING_COVERAGE_BOOK_WITNESS_MISMATCH",
+        )
+    try:
         current_probability_content_identity = (
             current_probability_content_identity_resolver(row)
         )
+    except Exception:  # noqa: BLE001 - a q read is its own authority plane.
+        return result(
+            GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT,
+            "GLOBAL_HOLDING_COVERAGE_PROBABILITY_RESOLUTION_FAILED",
+        )
+    if current_probability_content_identity != row.probability_content_identity:
+        return result(
+            GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT,
+            "GLOBAL_HOLDING_COVERAGE_PROBABILITY_CONTENT_MISMATCH",
+        )
+    try:
         current_holding_witness = current_holding_witness_resolver(row)
         final_checked_at = (
             current_time_provider()
             if current_time_provider is not None
             else datetime.now(UTC)
         )
-    except Exception:  # noqa: BLE001 - missing current book preserves local authority
-        return None
+    except Exception:  # noqa: BLE001 - no current endowment is not a book fault.
+        return result(
+            GlobalHoldingCoverageOutcome.WEALTH,
+            "GLOBAL_HOLDING_COVERAGE_WEALTH_RESOLUTION_FAILED",
+        )
     if (
         final_checked_at.tzinfo is None
-        or current_sell_book_witness_identity != row.sell_book_witness_identity
-        or current_probability_content_identity
-        != row.probability_content_identity
         or current_holding_witness is None
         or current_holding_witness.ledger_snapshot_id != row.ledger_snapshot_id
         or current_holding_witness.wealth_economic_identity
         != row.wealth_economic_identity
         or Decimal(current_holding_witness.held_shares) != Decimal(row.held_shares)
     ):
-        return None
+        return result(
+            GlobalHoldingCoverageOutcome.WEALTH,
+            "GLOBAL_HOLDING_COVERAGE_WEALTH_WITNESS_MISMATCH",
+        )
     final_checked = final_checked_at.astimezone(UTC)
     with _GLOBAL_HOLDING_COVERAGE_LOCK:
         current_lease = _GLOBAL_HOLDING_COVERAGE_BY_POSITION.get(
@@ -683,8 +792,16 @@ def current_global_holding_coverage(
             or final_checked < row.decision_at_utc.astimezone(UTC)
             or final_checked > row.book_deadline_at_utc.astimezone(UTC)
         ):
-            return None
-    return row, lease.decision_log_id
+            return result(
+                GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED,
+                "GLOBAL_HOLDING_COVERAGE_PUBLISH_SUPERSEDED",
+            )
+    return result(
+        GlobalHoldingCoverageOutcome.COVERED,
+        "GLOBAL_HOLDING_COVERAGE_CURRENT",
+        coverage=row,
+        decision_log_id=lease.decision_log_id,
+    )
 
 
 def held_sell_reauction_coverage(

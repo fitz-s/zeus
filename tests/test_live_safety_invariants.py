@@ -5476,13 +5476,17 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         "_apply_family_monitor_overlay",
         lambda **kwargs: (kwargs["should_exit"], kwargs["exit_reason"]),
     )
+    from src.engine import global_batch_runtime
+
     monkeypatch.setattr(
         cycle_runtime,
         "_current_monitor_global_holding_coverage",
         lambda **kwargs: (
-            (
-                SimpleNamespace(selection_epoch_identity="epoch-current"),
-                77,
+            global_batch_runtime.CurrentGlobalHoldingCoverage(
+                outcome=global_batch_runtime.GlobalHoldingCoverageOutcome.COVERED,
+                reason="test-coverage",
+                coverage=SimpleNamespace(selection_epoch_identity="epoch-current"),
+                decision_log_id=77,
             )
             if has_position_coverage
             else None
@@ -5493,8 +5497,6 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         "_exit_evidence_gate_allows_statistical_exit",
         lambda **kwargs: (True, None),
     )
-    from src.engine import global_batch_runtime
-
     invalidations = []
     monkeypatch.setattr(
         global_batch_runtime,
@@ -5505,7 +5507,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     auction_completion_requests = []
     def request_global_completion(**kwargs):
         auction_completion_requests.append(kwargs)
-        return request_accepted
+        if not request_accepted:
+            return False
+        return True, SimpleNamespace(
+            request_id="request-global-auction-owned-sell"
+        )
 
     monkeypatch.setattr(
         event_reactor,
@@ -5586,6 +5592,24 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             else "global_auction_completion_request_failed"
         )
         assert request_status in pos.applied_validations
+        assert (
+            "global_auction_authority_outcome:COVERAGE_NOT_PUBLISHED"
+            in pos.applied_validations
+        )
+        assert (
+            "global_auction_completion_debt:"
+            + ("DRAIN_PENDING" if request_accepted else "REQUEST_REJECTED")
+        ) in pos.applied_validations
+        assert (
+            "global_auction_completion_monitor_identity:"
+            "global-auction-owned-sell:monitor_refreshed:"
+            "2026-07-14T18:00:00+00:00"
+        ) in pos.applied_validations
+        if request_accepted:
+            assert (
+                "global_auction_completion_request_id:"
+                "request-global-auction-owned-sell"
+            ) in pos.applied_validations
         request_summary_key = (
             "monitor_statistical_sell_auction_completion_requested"
             if request_accepted
@@ -5607,46 +5631,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 "held_token_id": "paris-no",
                 "held_best_bid": 0.49,
                 "bid_observed_at": "2026-07-14T18:00:00+00:00",
+                "return_request": True,
             }
         ]
         assert execute_calls == []
-        if outcome == "request_failed":
-            pos.last_exit_error = (
-                "global_sell_exit_executable_snapshot_unavailable"
-            )
-            auction_completion_requests.clear()
-
-            def recover_global_completion(**kwargs):
-                auction_completion_requests.append(kwargs)
-                return True
-
-            monkeypatch.setattr(
-                event_reactor,
-                "request_global_auction_completion",
-                recover_global_completion,
-            )
-            recovery_summary = {"monitors": 0, "exits": 0}
-            cycle_runtime.execute_monitoring_phase(
-                conn,
-                object(),
-                portfolio,
-                artifact,
-                type(
-                    "Tracker",
-                    (),
-                    {"record_exit": lambda self, position: None},
-                )(),
-                recovery_summary,
-                deps=deps,
-                run_exit_preflight=False,
-            )
-            assert recovery_summary[
-                "global_sell_snapshot_reauction_debts_recovered"
-            ] == 1
-            assert auction_completion_requests[0][
-                "force_new_generation"
-            ] is True
-            assert pos.last_exit_error == ""
     else:
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
         assert summary.get(
@@ -5724,6 +5712,7 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
         status="EVALUATED",
         candidate_id="sell-1",
         sell_book_witness_identity="sell-book-content-1",
+        book_state="EXECUTABLE",
     )
     global_batch_runtime._publish_global_holding_coverage(
         (coverage,),
@@ -5754,36 +5743,39 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
         current_time_provider=lambda: at + timedelta(seconds=2),
     )
 
-    assert global_batch_runtime.current_global_holding_coverage(
+    covered = global_batch_runtime.current_global_holding_coverage(
         **current,
         current_sell_book_witness_resolver=(
             lambda _row: "sell-book-content-1"
         ),
-    ) == (coverage, 42)
+    )
+    assert covered.outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.COVERED
+    assert covered.coverage == coverage
+    assert covered.decision_log_id == 42
     assert global_batch_runtime.current_global_holding_coverage(
         **{**current, "current_wealth_economic_identity": "wealth-2"},
         current_sell_book_witness_resolver=(
             lambda _row: "sell-book-content-1"
         ),
-    ) is None
+    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.WEALTH
     assert global_batch_runtime.current_global_holding_coverage(
         **{**current, "current_ledger_snapshot_id": "ledger-2"},
         current_sell_book_witness_resolver=(
             lambda _row: "sell-book-content-1"
         ),
-    ) is None
+    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.WEALTH
     assert global_batch_runtime.current_global_holding_coverage(
         **current,
         current_sell_book_witness_resolver=(
             lambda _row: "sell-book-content-price-wake"
         ),
-    ) is None
+    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.BOOK
     assert global_batch_runtime.current_global_holding_coverage(
         **{**current, "held_shares": Decimal("9.99")},
         current_sell_book_witness_resolver=(
             lambda _row: "sell-book-content-1"
         ),
-    ) is None
+    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.WEALTH
 
     global_batch_runtime._invalidate_global_holding_coverage()
     assert global_batch_runtime.current_global_holding_coverage(
@@ -5791,7 +5783,7 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
         current_sell_book_witness_resolver=(
             lambda _row: "sell-book-content-1"
         ),
-    ) is None
+    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED
 
 
 @pytest.mark.parametrize(
@@ -5865,6 +5857,7 @@ def test_global_holding_coverage_lease_revalidates_after_resolver_io(
         status="EVALUATED",
         candidate_id="sell-lease",
         sell_book_witness_identity="sell-book-lease",
+        book_state="EXECUTABLE",
     )
     def publish(decision_log_id):
         global_batch_runtime._publish_global_holding_coverage(
@@ -5918,7 +5911,7 @@ def test_global_holding_coverage_lease_revalidates_after_resolver_io(
         ),
     )
 
-    assert result is None
+    assert result.outcome is not global_batch_runtime.GlobalHoldingCoverageOutcome.COVERED
 
 
 def test_global_holding_partition_rejects_single_q_epoch_or_deadline_mismatch():

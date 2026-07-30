@@ -29,6 +29,7 @@ _HELD_SELL_BOOK_STATES = frozenset(
 GLOBAL_AUCTION_COMPLETION_WAKE_REASON = (
     "held_sell_global_auction_completion_requested"
 )
+GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT = 16
 URGENT_WAKE_REASONS = frozenset(
     {
         "day0_extreme_event_committed",
@@ -871,6 +872,31 @@ def coalescible_reactor_wakes(
             if wake.wake_id != selected.wake_id
             and wake.reason == selected.reason
         ]
+        # Completion wakes are durable debt, so preserving the queue is more
+        # important than attempting an unbounded monitor fan-out.  Serve one
+        # request per position before a second request for any position; the
+        # unselected wakes remain immutable for the next reactor turn.
+        by_position: list[ReactorWake] = []
+        deferred: list[ReactorWake] = []
+        positions = {
+            request.position_id
+            for request in selected.held_sell_reauction_requests
+        }
+        for wake in candidates:
+            wake_positions = {
+                request.position_id
+                for request in wake.held_sell_reauction_requests
+            }
+            if wake_positions and wake_positions.isdisjoint(positions):
+                by_position.append(wake)
+                positions.update(wake_positions)
+            else:
+                deferred.append(wake)
+        candidates = [*by_position, *deferred]
+        max_wakes = min(
+            max(1, int(max_wakes)),
+            GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT,
+        )
     else:
         for wake in queued[selected_index + 1 :]:
             if wake.reason == "forecast_posterior_advanced":

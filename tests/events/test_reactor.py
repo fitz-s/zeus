@@ -1567,6 +1567,52 @@ def test_restart_completion_debt_preempts_continuous_ordinary_wakes(tmp_path):
     } == {("Paris", "2026-07-28", "low")}
 
 
+def test_held_sell_completion_drain_is_bounded_and_position_fair(tmp_path):
+    """Historical held-SELL anchors get one completion turn before duplicates."""
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    anchors = (
+        "39a8fb42-e3a:monitor_refreshed:161",
+        "b0ddf606-f63:monitor_refreshed:269",
+        "d8b9e6b5-bc2:monitor_refreshed:433",
+        "e582b997-daf:monitor_refreshed:191",
+        "c25321a7-f17:monitor_refreshed:337",
+    )
+    position_ids = (*anchors, anchors[0], *(f"position-{index}" for index in range(20)))
+    for index, position_id in enumerate(position_ids):
+        request = reactor_wake.make_held_sell_reauction_request(
+            position_id=position_id,
+            family=("Paris", "2026-07-30", "low"),
+            probability_content_identity=f"q-{index}",
+            held_token_id=f"token-{index}",
+            held_best_bid=0.11,
+            bid_observed_at="2026-07-30T08:00:00+00:00",
+        )
+        reactor_wake.publish_reactor_wake(
+            source="held_position_monitor",
+            reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            path=path,
+            wake_id=f"completion-{index:02d}",
+            published_at=datetime(2026, 7, 30, 8, 0, index, tzinfo=timezone.utc),
+            forecast_families=(request.family,),
+            held_sell_reauction_requests=(request,),
+        )
+
+    selected = reactor_wake.read_reactor_wake(path=path)
+    assert selected is not None
+    batch = reactor_wake.coalescible_reactor_wakes(selected, path=path)
+    drained_positions = tuple(
+        request.position_id
+        for wake in batch
+        for request in wake.held_sell_reauction_requests
+    )
+
+    assert len(batch) == reactor_wake.GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT
+    assert len(drained_positions) == len(set(drained_positions))
+    assert set(anchors).issubset(drained_positions)
+
+
 def test_position_fill_wake_is_an_exact_targeted_reactor_fast_path():
     from src.events.reactor import run_edli_event_reactor_cycle
 

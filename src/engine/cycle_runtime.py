@@ -5124,8 +5124,22 @@ def _current_monitor_global_holding_coverage(
 ):
     """Resolve one monitor-epoch ledger and the current held-token book."""
 
+    from src.engine.global_batch_runtime import (
+        CurrentGlobalHoldingCoverage,
+        GlobalHoldingCoverageOutcome,
+    )
+
+    def unavailable(
+        outcome: GlobalHoldingCoverageOutcome,
+        reason: str,
+    ) -> CurrentGlobalHoldingCoverage:
+        return CurrentGlobalHoldingCoverage(outcome=outcome, reason=reason)
+
     if conn is None or checked_at_utc.tzinfo is None:
-        return None
+        return unavailable(
+            GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
+            "GLOBAL_HOLDING_COVERAGE_MONITOR_INPUT_INCOMPLETE",
+        )
     try:
         from src.contracts.executable_market_snapshot import (
             FRESHNESS_WINDOW_DEFAULT,
@@ -5168,7 +5182,10 @@ def _current_monitor_global_holding_coverage(
         ):
             wealth = wealth_witness_cache.get("witness")
             if wealth is None:
-                return None
+                return unavailable(
+                    GlobalHoldingCoverageOutcome.WEALTH,
+                    "GLOBAL_HOLDING_COVERAGE_WEALTH_UNAVAILABLE",
+                )
         else:
             try:
                 wealth = current_portfolio_wealth_witness(
@@ -5190,7 +5207,10 @@ def _current_monitor_global_holding_coverage(
             checked < wealth_captured_at
             or checked - wealth_captured_at > wealth.max_age
         ):
-            return None
+            return unavailable(
+                GlobalHoldingCoverageOutcome.WEALTH,
+                "GLOBAL_HOLDING_COVERAGE_WEALTH_EXPIRED",
+            )
         direction_raw = getattr(position, "direction", "")
         direction = str(
             getattr(direction_raw, "value", direction_raw) or ""
@@ -5202,14 +5222,20 @@ def _current_monitor_global_holding_coverage(
             side = "NO"
             token_id = str(getattr(position, "no_token_id", "") or "").strip()
         else:
-            return None
+            return unavailable(
+                GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
+                "GLOBAL_HOLDING_COVERAGE_SIDE_UNSUPPORTED",
+            )
         native_holdings = {
             str(token): Decimal(int(amount)) / Decimal("1000000")
             for token, amount in tuple(wealth.native_holdings_micro or ())
         }
         held_shares = native_holdings.get(token_id)
         if held_shares is None or held_shares <= 0:
-            return None
+            return unavailable(
+                GlobalHoldingCoverageOutcome.WEALTH,
+                "GLOBAL_HOLDING_COVERAGE_HELD_SHARES_UNAVAILABLE",
+            )
         condition_id = str(
             getattr(position, "condition_id", "") or ""
         ).strip()
@@ -5329,13 +5355,16 @@ def _current_monitor_global_holding_coverage(
             current_holding_witness_resolver=current_holding_witness,
             current_time_provider=current_time,
         )
-    except Exception as exc:  # noqa: BLE001 - incomplete witness preserves local exit
+    except Exception as exc:  # noqa: BLE001 - monitor remains read-only on failed truth.
         logger.debug(
             "global holding coverage current-witness resolution failed for %s: %s",
             getattr(position, "trade_id", "unknown"),
             exc,
         )
-        return None
+        return unavailable(
+            GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
+            "GLOBAL_HOLDING_COVERAGE_MONITOR_RESOLUTION_FAILED",
+        )
 
 
 def _execution_stub(candidate, decision, result, city, mode, *, deps):
@@ -6802,7 +6831,23 @@ def execute_monitoring_phase(
                 probability_receipt
             )
             held_token_id = _position_held_token_id(pos).strip()
-            global_holding_coverage = None
+            from src.engine.global_batch_runtime import (
+                CurrentGlobalHoldingCoverage,
+                GlobalHoldingCoverageOutcome,
+            )
+
+            global_holding_coverage = CurrentGlobalHoldingCoverage(
+                outcome=(
+                    GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT
+                    if not probability_content_identity
+                    else GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED
+                ),
+                reason=(
+                    "GLOBAL_HOLDING_COVERAGE_PROBABILITY_CONTENT_MISSING"
+                    if not probability_content_identity
+                    else "GLOBAL_HOLDING_COVERAGE_NOT_CHECKED"
+                ),
+            )
             if (
                 should_exit
                 and local_exit_trigger != "RED_FORCE_EXIT"
@@ -6829,7 +6874,7 @@ def execute_monitoring_phase(
                         coverage_checked_at = coverage_time()
                     except Exception:
                         coverage_checked_at = datetime.now(timezone.utc)
-                    global_holding_coverage = _current_monitor_global_holding_coverage(
+                    coverage_result = _current_monitor_global_holding_coverage(
                         conn=conn,
                         clob=clob,
                         portfolio=portfolio,
@@ -6841,13 +6886,21 @@ def execute_monitoring_phase(
                         current_time_provider=coverage_time,
                         wealth_witness_cache=monitor_wealth_witness_cache,
                     )
+                    # Runtime callers always return a typed result.  Keep this
+                    # narrow normalization for older injected test/runtime
+                    # seams while preventing a generic value from reaching the
+                    # monitor decision or canonical payload.
+                    if coverage_result is not None:
+                        global_holding_coverage = coverage_result
             if (
                 should_exit
                 and local_exit_trigger != "RED_FORCE_EXIT"
                 and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
-                and global_holding_coverage is not None
+                and global_holding_coverage.covered
             ):
-                coverage, coverage_receipt_id = global_holding_coverage
+                coverage = global_holding_coverage.coverage
+                coverage_receipt_id = global_holding_coverage.decision_log_id
+                assert coverage is not None and coverage_receipt_id is not None
                 should_exit = False
                 exit_reason = "GLOBAL_AUCTION_OWNS_REDUCE_ONLY_SELL"
                 pos.applied_validations = list(
@@ -6878,7 +6931,7 @@ def execute_monitoring_phase(
                     request_global_auction_completion,
                 )
 
-                completion_requested = request_global_auction_completion(
+                completion_result = request_global_auction_completion(
                     reason=(
                         "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
                     ),
@@ -6898,22 +6951,58 @@ def execute_monitoring_phase(
                     held_token_id=held_token_id,
                     held_best_bid=exit_context.best_bid,
                     bid_observed_at=str(getattr(pos, "last_monitor_at", "") or ""),
+                    return_request=True,
                 )
+                if isinstance(completion_result, tuple):
+                    completion_requested, completion_request = completion_result
+                else:
+                    completion_requested = bool(completion_result)
+                    completion_request = None
+                authority_outcome = (
+                    GlobalHoldingCoverageOutcome.DRAIN_PENDING
+                    if completion_requested
+                    else GlobalHoldingCoverageOutcome.REQUEST_REJECTED
+                )
+                monitor_identity = (
+                    f"{getattr(pos, 'trade_id', '')}:monitor_refreshed:"
+                    f"{getattr(pos, 'last_monitor_at', '')}"
+                )
+                request_id = str(
+                    getattr(completion_request, "request_id", "") or ""
+                ).strip()
                 should_exit = False
-                exit_reason = (
-                    "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
-                )
+                exit_reason = "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+                completion_validations = [
+                    (
+                        "global_auction_completion_requested"
+                        if completion_requested
+                        else "global_auction_completion_request_failed"
+                    ),
+                    (
+                        "global_auction_authority_outcome:"
+                        f"{global_holding_coverage.outcome.value}"
+                    ),
+                    (
+                        "global_auction_completion_debt:"
+                        f"{authority_outcome.value}"
+                    ),
+                    (
+                        "global_auction_completion_monitor_identity:"
+                        f"{monitor_identity}"
+                    ),
+                ]
+                if request_id:
+                    completion_validations.append(
+                        "global_auction_completion_request_id:"
+                        f"{request_id}"
+                    )
                 pos.applied_validations = list(
                     dict.fromkeys(
                         [
                             *(pos.applied_validations or []),
                             "local_statistical_sell_non_authoritative_record",
                             "global_statistical_sell_authority_unavailable",
-                            (
-                                "global_auction_completion_requested"
-                                if completion_requested
-                                else "global_auction_completion_request_failed"
-                            ),
+                            *completion_validations,
                         ]
                     )
                 )

@@ -6209,7 +6209,8 @@ def request_global_auction_completion(
     scope_identity: str = "",
     schema_version: int = 3,
     force_new_generation: bool = False,
-) -> bool:
+    return_request: bool = False,
+) -> bool | tuple[bool, object | None]:
     """Persistently reserve one complete global cut for a held SELL.
 
     Returns whether a matching durable wake already existed or was published.
@@ -6386,7 +6387,7 @@ def request_global_auction_completion(
             str(position_id or "unknown"),
             str(reason or "authority_unavailable"),
         )
-        return False
+        return (False, None) if return_request else False
     except OSError:
         durable_request_exists = False
         held_request = None
@@ -6417,8 +6418,8 @@ def request_global_auction_completion(
                 "held SELL global-auction wake publish failed; "
                 "durable completion was not accepted"
             )
-            return False
-    return True
+            return (False, held_request) if return_request else False
+    return (True, held_request) if return_request else True
 
 
 def _held_sell_reauction_receipts_from_global_cut(
@@ -7388,7 +7389,10 @@ def run_edli_event_reactor_cycle(
             ),
         )
         if producer_held_sell_reauction_requests:
-            from src.runtime.reactor_wake import persist_held_sell_reauction_receipts
+            from src.runtime.reactor_wake import (
+                held_sell_reauction_requests_completed,
+                persist_held_sell_reauction_receipts,
+            )
 
             held_sell_reauction_receipts = _held_sell_reauction_receipts_from_global_cut(
                 requests=producer_held_sell_reauction_requests,
@@ -7396,6 +7400,15 @@ def run_edli_event_reactor_cycle(
             )
             if held_sell_reauction_receipts and not persist_held_sell_reauction_receipts(
                 held_sell_reauction_receipts
+            ):
+                completion_wake_needs_retry = True
+            # A completed global cut is not completion authority for a wake
+            # until every request in that wake has its own immutable terminal
+            # receipt.  Keep the exact durable debt queued across witness,
+            # partition, and receipt-write failures; this is deliberately not
+            # folded into the generic monitor HOLD reason.
+            if not held_sell_reauction_requests_completed(
+                producer_held_sell_reauction_requests
             ):
                 completion_wake_needs_retry = True
         completion_satisfied = _settle_global_auction_monitor_fairness(
