@@ -70,7 +70,10 @@ from src.contracts.ensemble_snapshot_provenance import (
     validate_members_unit,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
-from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
+from src.contracts.snapshot_ingest_contract import (
+    normalize_low_boundary_evidence,
+    validate_snapshot_contract,
+)
 from src.contracts.tigge_snapshot_payload import ProvenanceViolation, TiggeSnapshotPayload
 from src.runtime.timeout_guard import run_with_timeout
 from src.state.canonical_write import commit_then_export
@@ -187,6 +190,8 @@ def _provenance_json(
             "forecast_window_block_reasons_json",
         }
     }
+    if isinstance(payload.get("boundary_normalization"), dict):
+        prov["boundary_normalization"] = payload["boundary_normalization"]
     return json.dumps(prov, ensure_ascii=False)
 
 
@@ -623,6 +628,7 @@ def ingest_json_file(
 
     # Use the validated dataclass's dict for downstream processing.
     payload = snapshot.to_json_dict()
+    payload = normalize_low_boundary_evidence(payload)
 
     data_version = str(payload.get("data_version", ""))
     # #38 / #362 version-eradication: OpenData extracted JSON artifacts carry the

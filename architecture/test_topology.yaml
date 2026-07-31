@@ -511,7 +511,7 @@ test_trust_policy:
     tests/test_executable_forecast_reader_member_floor.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_executable_forecast_bundle_selection.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
-    tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-07-30"}
     tests/test_opendata_release_calendar_selection.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_opendata_writes_v2_table.py: {created: "2026-05-02", last_used: "2026-05-03"}
     tests/test_opendata_future_target_contract.py: {created: "2026-05-03", last_used: "2026-05-03"}

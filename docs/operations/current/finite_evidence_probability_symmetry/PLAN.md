@@ -4,6 +4,40 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-30 Canonical LOW ENS boundary evidence
+
+Paris Jul-31 LOW and Shanghai Aug-1 LOW had current 12Z ECMWF ENS snapshots,
+but source-clock posterior materialization rejected both and walked back to
+stale shape evidence.  The snapshots carried only 18/51 and 2/51
+boundary-ambiguous members, respectively.  The out-of-repo Open Data extractor
+still stamped the retired any-member snapshot veto, while the canonical ingest
+contract already used a 26/51 majority rule.  Ingest validated the canonical
+decision but then persisted the producer's stale flag and derived forecast
+window evidence from it, so one obsolete producer boolean overruled the
+contract and broke continuous probability refresh.
+
+The hot-fix makes the ingest contract the single interpreter of LOW boundary
+evidence.  When per-member inner/boundary minima exist, it re-derives ambiguity
+with the strict physical rule `boundary_min < inner_min`; otherwise it uses the
+declared count, with the legacy flag only as the evidence-poor fallback.  The
+ingester consumes that normalized payload for training, DB flags, contract
+window attribution, and posterior selection.  Minority ambiguous members stay
+null and excluded from the ENS sample; genuine missing members and majority
+ambiguity remain fail-closed.  SCOPE is one city/date/metric ENS snapshot.
+DRAIN is the next normal re-ingest/materialization of that source cycle. RESET
+is a newer canonical snapshot identity.  No market-price belief, historical
+width fallback, stale-cycle extension, action threshold, or lifecycle rule is
+added.
+
+Acceptance requires an external-legacy-shaped 2/51 payload to persist as
+`boundary_ambiguous=0`, retain exactly two null members, contribute to the
+target extrema, and be selected as a six-hour stale current-evidence shape by
+an 18Z carrier. The raw evidence hash, artifact identity, canonical revision,
+and per-member decision reasons must remain auditable in provenance. A 26/51
+payload plus missing, NaN, and infinite extrema must remain blocked, followed
+by the focused ingest, materializer, source-contract, and live posterior
+receipts.
+
 ## 2026-07-29 WU fast evidence keeps provisional probability semantics
 
 The Seoul Jul-29 HIGH posterior labeled a qualified same-station

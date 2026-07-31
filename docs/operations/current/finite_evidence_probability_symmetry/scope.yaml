@@ -21,6 +21,7 @@ in_scope:
 - src/data/replacement_forecast_materialization_seed_builder.py
 - src/data/replacement_forecast_materialization_request_builder.py
 - src/contracts/replacement_pipeline_files.py
+- src/contracts/snapshot_ingest_contract.py
 - src/data/replacement_forecast_cycle_policy.py
 - src/data/replacement_forecast_bundle_reader.py
 - src/data/replacement_input_hwm.py
@@ -164,7 +165,9 @@ in_scope:
 - scripts/migrate_b071_token_suppression_to_history.py
 - scripts/deploy_live.py
 - scripts/materialize_replacement_forecast_live.py
+- scripts/ingest_grib_to_snapshots.py
 - scripts/obs_live_tick.py
+- tests/test_ingest_grib_source_run_context.py
 out_of_scope:
 - state/zeus-world.db
 - state/zeus-world.db-*
