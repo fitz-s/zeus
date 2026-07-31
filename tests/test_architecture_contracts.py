@@ -1,9 +1,9 @@
 # Created: 2026-04-02
-# Last reused/audited: 2026-05-22
-# Lifecycle: created=2026-04-02; last_reviewed=2026-05-22; last_reused=2026-05-22
+# Last reused/audited: 2026-07-31
+# Lifecycle: created=2026-04-02; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Protect architecture/schema contracts and high-sensitivity DB bootstrap invariants.
 # Reuse: Audit touched assertions against architecture manifests and scoped AGENTS before extending.
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel); Wave26 canonical position event env authority
+# Authority basis: midstream verdict v2 2026-04-23; Wave26 canonical position event env authority; docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 from __future__ import annotations
 
 import json
@@ -632,10 +632,11 @@ def _create_execution_fact_table(conn):
     conn.commit()
 
 
-def _create_outcome_fact_table(conn):
+def _create_outcome_fact_table(conn, *, schema=""):
+    target = f"{schema}.outcome_fact" if schema else "outcome_fact"
     conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS outcome_fact (
+        f"""
+        CREATE TABLE IF NOT EXISTS {target} (
             position_id TEXT PRIMARY KEY,
             strategy_key TEXT CHECK (strategy_key IN (
                 'settlement_capture',
@@ -2377,6 +2378,54 @@ def test_log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db():
         "strategy_key": "center_buy",
         "settled_at": "2026-04-03T01:00:00Z",
         "outcome": 1,
+    }
+    conn.close()
+
+
+def test_log_settlement_event_routes_outcome_fact_to_attached_trade_owner(tmp_path):
+    from src.state.db import log_outcome_fact, log_settlement_event
+
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    trades_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(forecasts_db)
+    conn.row_factory = sqlite3.Row
+    assert log_outcome_fact(
+        conn,
+        position_id="owner-unavailable",
+        outcome=0,
+    ) == {"status": "skipped_missing_owner", "table": "outcome_fact"}
+    conn.execute("ATTACH DATABASE ? AS trades", (str(trades_db),))
+    _create_outcome_fact_table(conn, schema="trades")
+
+    pos = _runtime_position(state="settled", chain_state="synced")
+    pos.last_exit_at = "2026-07-24T16:31:24Z"
+    pos.pnl = -49.0
+    conn.execute("SAVEPOINT settlement_cycle")
+    log_settlement_event(conn, pos, winning_bin="28°C", won=False, outcome=0)
+    conn.execute("ROLLBACK TO settlement_cycle")
+    conn.execute("RELEASE settlement_cycle")
+    assert conn.execute(
+        "SELECT 1 FROM trades.outcome_fact WHERE position_id = 'rt-pos-1'"
+    ).fetchone() is None
+
+    log_settlement_event(conn, pos, winning_bin="28°C", won=False, outcome=0)
+
+    assert conn.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE name = 'outcome_fact'"
+    ).fetchone() is None
+    outcome_row = conn.execute(
+        """
+        SELECT position_id, strategy_key, settled_at, pnl, outcome
+        FROM trades.outcome_fact
+        WHERE position_id = 'rt-pos-1'
+        """
+    ).fetchone()
+    assert dict(outcome_row) == {
+        "position_id": "rt-pos-1",
+        "strategy_key": "center_buy",
+        "settled_at": "2026-07-24T16:31:24Z",
+        "pnl": -49.0,
+        "outcome": 0,
     }
     conn.close()
 

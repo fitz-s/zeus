@@ -1,5 +1,5 @@
 # Created: prior to 2026-04-26
-# Last reused or audited: 2026-07-15
+# Last reused or audited: 2026-07-31
 # Authority basis: Zeus DB schema + world_write_mutex CATEGORY ANTIBODY.
 #   2026-06-08 thepath/audit-realign Fitz #5 lock-CATEGORY kill: _apply_busy_timeout
 #   helper + SQL-level PRAGMA busy_timeout in _connect()/get_connection() so a
@@ -11,6 +11,8 @@
 #   (283× advisory/2min in prod → WAL re-bloat). Phase 2: guard armed fatal (always
 #   raises, ZEUS_WORLD_MUTEX_IO_ADVISORY=1 to downgrade in emergency).
 #   Plan: architecture/world_mutex_io_offmutex_refactor_2026_06_04.md
+#   2026-07-31 finite_evidence_probability_symmetry: owner-qualified
+#   settlement outcome projection on forecasts-MAIN + attached-trades.
 """Zeus database schema and connection management.
 
 All tables enforce the 4-timestamp constraint where applicable.
@@ -10388,18 +10390,35 @@ def log_outcome_fact(
     if conn is None:
         logger.info("Outcome fact write skipped: no connection")
         return {"status": "skipped_no_connection", "table": "outcome_fact"}
-    if not _table_exists(conn, "outcome_fact"):
+
+    from src.state.owner_routed_write import owner_write_target
+
+    outcome_fact_target = owner_write_target(conn, "outcome_fact")
+    if outcome_fact_target is None:
+        logger.info("Outcome fact owner unavailable; skipping durable write")
+        return {"status": "skipped_missing_owner", "table": "outcome_fact"}
+    if "." in outcome_fact_target:
+        outcome_fact_schema, outcome_fact_table = outcome_fact_target.split(".", 1)
+        outcome_fact_exists = conn.execute(
+            f"""
+            SELECT 1
+              FROM {outcome_fact_schema}.sqlite_master
+             WHERE type = 'table'
+               AND name = ?
+            """,
+            (outcome_fact_table,),
+        ).fetchone() is not None
+    else:
+        outcome_fact_exists = _table_exists(conn, outcome_fact_target)
+    if not outcome_fact_exists:
         logger.info("Outcome fact table unavailable; skipping durable write")
         return {"status": "skipped_missing_table", "table": "outcome_fact"}
 
-    from src.state.owner_routed_write import require_owner_main
-    require_owner_main(conn, "outcome_fact")  # bare-write helper: fail-closed unless conn is trade-rooted
-
     current = conn.execute(
-        """
+        f"""
         SELECT entered_at, exited_at, settled_at, exit_reason, admin_exit_reason, decision_snapshot_id,
                pnl, outcome, hold_duration_hours, monitor_count, chain_corrections_count, strategy_key
-        FROM outcome_fact
+        FROM {outcome_fact_target}
         WHERE position_id = ?
         """,
         (position_id,),
@@ -10425,8 +10444,8 @@ def log_outcome_fact(
     stored_hold_hours = hold_duration_hours if hold_duration_hours is not None else (current["hold_duration_hours"] if current else None)
 
     conn.execute(
-        """
-        INSERT INTO outcome_fact (
+        f"""
+        INSERT INTO {outcome_fact_target} (
             position_id,
             strategy_key,
             entered_at,
