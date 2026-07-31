@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
 # Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S1
@@ -859,20 +859,22 @@ class TestPositionDecisionAttributionAppendHook:
         ).fetchall()
         assert [row[0] for row in rows] == ["cert-first", "cert-second"]
 
-    def test_live_exit_without_certificate_is_journaled_unattributable(
+    def test_exit_without_certificate_is_always_journaled_unattributable(
         self, conn, monkeypatch
     ):
-        monkeypatch.setenv("ZEUS_MODE", "live")
+        monkeypatch.delenv("ZEUS_ENTRY_Q_VERSION_STRICT", raising=False)
+        monkeypatch.delenv("ZEUS_MODE", raising=False)
+        monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
         _insert(
             conn,
-            command_id="cmd-live-orphan-exit",
-            position_id="pos-live-orphan-exit",
-            idempotency_key="idem-live-orphan-exit",
+            command_id="cmd-orphan-exit",
+            position_id="pos-orphan-exit",
+            idempotency_key="idem-orphan-exit",
             intent_kind="EXIT",
         )
         row = conn.execute(
             "SELECT resolution, resolution_reason FROM position_decision_attribution "
-            "WHERE command_id='cmd-live-orphan-exit'"
+            "WHERE command_id='cmd-orphan-exit'"
         ).fetchone()
         assert tuple(row) == (
             "UNATTRIBUTABLE",

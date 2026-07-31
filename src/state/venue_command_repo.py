@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-31
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
@@ -1442,7 +1442,7 @@ def insert_command(
                 intent_kind=intent_kind,
                 created_at=created_at,
             )
-        elif _strict_live_entry_q_version_required():
+        else:
             record_unattributable_command(
                 conn,
                 position_id=position_id,
