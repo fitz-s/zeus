@@ -1,6 +1,6 @@
 # Created: 2026-07-28
-# Last reused/audited: 2026-07-28 (FIX 1/2/3/4/5/8 deep-review corrections)
-# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Last reused/audited: 2026-07-31 (joint location-scale OOS diagnostic)
+# Lifecycle: created=2026-07-28; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Smoke-test scripts/fit_sigma_tau_calibration.py's fitting pipeline (query fence,
 #   local-date bucketing, settlement quantizer, log-domain MLE, OOS gate) against a synthetic
 #   fixture -- never the live DB.
@@ -884,3 +884,174 @@ def test_censored_log_prob_day0_row_differs_from_plain_normal() -> None:
     # the bin's mass to exactly 0.0 (log -> the -1e300 floor), while plain Normal would not.
     assert day0_log_p < plain_log_p
     assert day0_log_p == pytest.approx(math.log(1e-300))
+
+
+def test_joint_location_scale_oos_separates_bias_from_dispersion(tmp_path: Path) -> None:
+    """A stable center bias must be corrected as location, not paid for by widening."""
+    import numpy as np
+
+    path = tmp_path / "biased_current_evidence.db"
+    _mk_db(path)
+    conn = sqlite3.connect(str(path))
+    rng = np.random.default_rng(20260731)
+    settled = 25.0
+    true_bias = 1.2
+    true_scale = 1.35
+    sig = 1.0
+    for i in range(160):
+        target_date = (_dt.date(2025, 1, 1) + _dt.timedelta(days=i)).isoformat()
+        target_end = fitter._local_target_end_utc(target_date, "Asia/Shanghai")
+        source_cycle_time = (target_end - _dt.timedelta(hours=18)).isoformat()
+        residual = true_bias + float(rng.normal(0.0, true_scale * sig))
+        _insert_sett(
+            conn,
+            city="Shanghai",
+            target_date=target_date,
+            metric="high",
+            value=settled,
+            unit="C",
+        )
+        _insert_post(
+            conn,
+            city="Shanghai",
+            target_date=target_date,
+            metric="high",
+            computed_at=source_cycle_time,
+            source_cycle_time=source_cycle_time,
+            mu=settled - residual,
+            sig=sig,
+        )
+    conn.commit()
+    conn.close()
+
+    d, _stats = fitter.prep(str(path), since="2020-01-01")
+    result = fitter.location_scale_oos(
+        d[d["target_date"] < "2025-05-01"].copy(),
+        d[d["target_date"] >= "2025-05-01"].copy(),
+    )
+    assert result["passed"] is True
+    assert result["bias_c"] == pytest.approx(true_bias, abs=0.35)
+    assert result["scale"] == pytest.approx(true_scale, abs=0.35)
+    assert result["oos_mean_loglik_delta"] > fitter.OOS_MARGIN_NATS
+
+
+def test_joint_location_scale_refuses_small_holdout(fixture_db: Path) -> None:
+    d, _stats = fitter.prep(str(fixture_db), since="2020-01-01")
+    result = fitter.location_scale_oos(d.iloc[:-1].copy(), d.iloc[-1:].copy())
+    assert result["passed"] is False
+    assert result["reason"].startswith("INSUFFICIENT_EVENTS:")
+
+
+def test_market_relative_proper_scores_reward_the_better_distribution() -> None:
+    winner = 1
+    model = fitter._proper_scores([0.1, 0.8, 0.1], winner)
+    market = fitter._proper_scores([0.3, 0.4, 0.3], winner)
+    for score_name in ("brier", "log_loss", "rps"):
+        assert model[score_name] < market[score_name]
+
+
+def test_market_relative_report_uses_market_minus_model_skill(capsys) -> None:
+    rows = [
+        {
+            "target_date": "2026-07-29",
+            "unit": "C",
+            "metric": "high",
+            "day0": False,
+            "model": {"brier": 0.2, "log_loss": 0.3, "rps": 0.1},
+            "market": {"brier": 0.4, "log_loss": 0.5, "rps": 0.2},
+        },
+        {
+            "target_date": "2026-07-30",
+            "unit": "C",
+            "metric": "high",
+            "day0": True,
+            "model": {"brier": 0.4, "log_loss": 0.5, "rps": 0.2},
+            "market": {"brier": 0.2, "log_loss": 0.3, "rps": 0.1},
+        },
+    ]
+    report = fitter.market_relative_report(rows, {"scored_families": 2})
+    assert report["cohorts"]["day0=False"]["model_skill_brier"] == pytest.approx(
+        0.2
+    )
+    assert report["cohorts"]["day0=True"]["model_skill_brier"] == pytest.approx(
+        -0.2
+    )
+    assert report["cohorts"]["all"]["model_skill_brier"] == pytest.approx(0.0)
+    assert report["cohorts"]["all"][
+        "model_skill_brier_date_clustered_95ci"
+    ][0] < 0.0
+    assert report["cohorts"]["all"][
+        "model_skill_brier_date_clustered_95ci"
+    ][1] > 0.0
+    assert "[market-relative]" in capsys.readouterr().out
+
+
+def test_normalized_simplex_rejects_invalid_and_normalizes() -> None:
+    assert fitter._normalized_simplex([]) is None
+    assert fitter._normalized_simplex([0.0, 0.0]) is None
+    assert fitter._normalized_simplex([0.1, -0.1]) is None
+    assert fitter._normalized_simplex([2.0, 1.0]) == pytest.approx(
+        [2.0 / 3.0, 1.0 / 3.0]
+    )
+
+
+def test_market_bin_order_puts_shoulders_around_points() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE bins(event_id INTEGER, range_label TEXT, range_low REAL, range_high REAL)"
+    )
+    conn.executemany(
+        "INSERT INTO bins VALUES (?,?,?,?)",
+        [
+            (1, "35C or higher", 35.0, None),
+            (2, "30C", 30.0, 30.0),
+            (3, "27C or below", None, 27.0),
+        ],
+    )
+    rows = conn.execute("SELECT * FROM bins").fetchall()
+    ordered = sorted(rows, key=fitter._market_bin_order)
+    assert [row["event_id"] for row in ordered] == [3, 2, 1]
+
+
+def test_coherent_family_book_requires_overlapping_freshness() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE market_events(
+            event_id INTEGER, condition_id TEXT, range_label TEXT,
+            range_low REAL, range_high REAL
+        );
+        CREATE TABLE executable_market_snapshots(
+            condition_id TEXT, outcome_label TEXT,
+            orderbook_top_bid TEXT, orderbook_top_ask TEXT,
+            captured_at TEXT, freshness_deadline TEXT
+        );
+        INSERT INTO market_events VALUES
+            (1, 'a', '29C', 29, 29),
+            (2, 'b', '30C', 30, 30);
+        INSERT INTO executable_market_snapshots VALUES
+            ('a', 'YES', '0.2', '0.3', '2026-07-31T00:00:00+00:00', '2026-07-31T00:02:00+00:00'),
+            ('b', 'YES', '0.3', '0.4', '2026-07-31T00:01:00+00:00', '2026-07-31T00:03:00+00:00');
+        """
+    )
+    events = conn.execute("SELECT * FROM market_events ORDER BY event_id").fetchall()
+    coherent = fitter._coherent_family_book(
+        conn, events, "2026-07-31T00:05:00+00:00"
+    )
+    assert coherent is not None
+    evaluation_time, books = coherent
+    assert evaluation_time == "2026-07-31T00:01:00+00:00"
+    assert [mid for _row, mid in books] == pytest.approx([0.25, 0.35])
+
+    conn.execute(
+        "UPDATE executable_market_snapshots SET freshness_deadline = "
+        "'2026-07-31T00:00:30+00:00' WHERE condition_id = 'a'"
+    )
+    assert (
+        fitter._coherent_family_book(
+            conn, events, "2026-07-31T00:05:00+00:00"
+        )
+        is None
+    )

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-07-28
-# Last reused/audited: 2026-07-28 (deep-review corrections applied same day)
-# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Last reused/audited: 2026-07-31 (joint location-scale OOS diagnostic)
+# Lifecycle: created=2026-07-28; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Walk-forward fitter for the CURRENT-EVIDENCE (Day0) sigma-tau calibration artifact --
 #   the ONLY writer of state/sigma_tau_calibration.json, which the materializer reads fail-soft at
 #   the site formerly hardcoded to (1.0, 0.0, 0.0).
@@ -144,11 +144,12 @@ import urllib.parse
 import uuid
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize_scalar
-from scipy.stats import norm
+from scipy.optimize import minimize, minimize_scalar
+from scipy.stats import norm, t
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
@@ -163,6 +164,7 @@ from src.data.replacement_forecast_materializer import served_settlement_log_pro
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FCST_DEFAULT = os.path.join(REPO, "state", "zeus-forecasts.db")
+TRADES_DEFAULT = os.path.join(REPO, "state", "zeus_trades.db")
 SINCE_DEFAULT = "2026-07-11"  # live current-evidence era start (matches calib_curves reference)
 COMPONENTS_FENCE_TS = "2026-07-15T22:32:31+00:00"  # current_evidence_shape within/between/delta
                                                      # fields are 100% populated only from here on;
@@ -574,6 +576,141 @@ def fit_interval_censored_scale(
     return float(res.x)
 
 
+def _shifted_for_location(g: "pd.DataFrame", bias_c: float) -> "pd.DataFrame":
+    """Return the exact served-shape inputs after a common center displacement.
+
+    ``l``/``u`` are settlement-preimage edges relative to ``mu``.  Moving the
+    center by ``bias_c`` therefore subtracts the same displacement from both
+    relative edges.  Day0 rows additionally consume the absolute ``mu`` field
+    inside ``served_settlement_log_probability``; update it in the same copy so
+    the diagnostic cannot score a different transform from the serving seam.
+    """
+    shifted = g.copy()
+    shifted["l"] = shifted["l"] - bias_c
+    shifted["u"] = shifted["u"] - bias_c
+    shifted["mu"] = shifted["mu"] + bias_c
+    return shifted
+
+
+def _interval_censored_location_scale_negloglik(
+    params: "np.ndarray", g: "pd.DataFrame", w: "np.ndarray"
+) -> float:
+    bias_c, scale = map(float, params)
+    if not (math.isfinite(bias_c) and math.isfinite(scale) and scale > 0.0):
+        return math.inf
+    sigma = scale * g["sig"].values
+    if not np.all(np.isfinite(sigma)) or np.any(sigma <= 0.0):
+        return math.inf
+    log_p = _censored_log_prob(_shifted_for_location(g, bias_c), sigma)
+    if not np.all(np.isfinite(log_p)):
+        return math.inf
+    return float(-np.sum(w * log_p))
+
+
+def fit_interval_censored_location_scale(
+    g: "pd.DataFrame", w: "np.ndarray"
+) -> tuple[float, float]:
+    """Fit one common center displacement and one spread scale.
+
+    This is an offline diagnostic, not a live artifact writer.  The location
+    parameter is deliberately unbounded: a guessed temperature cap would hide
+    model failure.  Only the existing physically accepted sigma-scale interval
+    is bounded.  Non-convergence, non-finite output, or a scale pinned at that
+    interval is an explicit refusal.
+    """
+    w_sum = float(np.sum(w))
+    if not math.isfinite(w_sum) or w_sum <= 0.0:
+        raise FitFailure("location-scale fit has non-positive event weight")
+    bias0 = float(np.sum(w * g["z"].values) / w_sum)
+    res = minimize(
+        _interval_censored_location_scale_negloglik,
+        x0=np.asarray([bias0, 1.0], dtype=float),
+        args=(g, w),
+        method="L-BFGS-B",
+        bounds=((None, None), K_BOUNDS),
+    )
+    if not res.success:
+        raise FitFailure(f"location-scale optimizer did not converge: {res.message}")
+    bias_c, scale = map(float, res.x)
+    if not (
+        math.isfinite(bias_c)
+        and math.isfinite(scale)
+        and math.isfinite(float(res.fun))
+    ):
+        raise FitFailure(
+            f"location-scale optimizer returned non-finite output: x={res.x} fun={res.fun}"
+        )
+    if min(abs(scale - bound) for bound in K_BOUNDS) < _BOUND_PIN_TOL:
+        raise FitFailure(
+            f"location-scale optimizer pinned sigma scale: scale={scale} bounds={K_BOUNDS}"
+        )
+    return bias_c, scale
+
+
+def location_scale_oos(
+    train_sub: "pd.DataFrame", holdout_sub: "pd.DataFrame"
+) -> dict:
+    """Fit on prior target dates and score only later target dates.
+
+    Each settlement event has total weight one regardless of how many posterior
+    recomputes it produced.  The returned delta is mean log-likelihood(candidate)
+    minus mean log-likelihood(current); positive is improvement.
+    """
+    train = _add_event_weights(train_sub)
+    holdout = _add_event_weights(holdout_sub)
+    n_train = int(train["event_key"].nunique())
+    n_holdout = int(holdout["event_key"].nunique())
+    if n_train < MIN_GROUP_N or n_holdout < MIN_HOLDOUT_EVENTS:
+        return {
+            "passed": False,
+            "reason": (
+                f"INSUFFICIENT_EVENTS:train={n_train} holdout={n_holdout} "
+                f"required={MIN_GROUP_N}/{MIN_HOLDOUT_EVENTS}"
+            ),
+            "n_train_events": n_train,
+            "n_holdout_events": n_holdout,
+        }
+    try:
+        bias_c, scale = fit_interval_censored_location_scale(
+            train, train["event_weight"].values
+        )
+    except FitFailure as exc:
+        return {
+            "passed": False,
+            "reason": f"FIT_FAILED:{exc}",
+            "n_train_events": n_train,
+            "n_holdout_events": n_holdout,
+        }
+
+    w = holdout["event_weight"].values
+    current_ll = _censored_log_prob(holdout, holdout["sig"].values)
+    candidate_ll = _censored_log_prob(
+        _shifted_for_location(holdout, bias_c),
+        scale * holdout["sig"].values,
+    )
+    if not (
+        np.all(np.isfinite(current_ll))
+        and np.all(np.isfinite(candidate_ll))
+        and float(np.sum(w)) > 0.0
+    ):
+        return {
+            "passed": False,
+            "reason": "NON_FINITE_HOLDOUT_SCORE",
+            "n_train_events": n_train,
+            "n_holdout_events": n_holdout,
+        }
+    delta = float(np.sum(w * (candidate_ll - current_ll)) / np.sum(w))
+    return {
+        "passed": bool(math.isfinite(delta) and delta > OOS_MARGIN_NATS),
+        "bias_c": round(bias_c, 6),
+        "scale": round(scale, 6),
+        "oos_mean_loglik_delta": round(delta, 6),
+        "margin_required_nats": OOS_MARGIN_NATS,
+        "n_train_events": n_train,
+        "n_holdout_events": n_holdout,
+    }
+
+
 def fit_k_by_tau(sub: "pd.DataFrame") -> dict:
     """PRIMARY k(tau) = interval-censored MLE scale per tau bucket (event-weighted); a bucket with
     n_events < MIN_BUCKET_N is UNFITTED and inherits the group-global pooled k. A bucket whose own
@@ -926,16 +1063,403 @@ def validate(d: "pd.DataFrame", cutoff: str, *, tau_col: str, label: str) -> Non
         )
 
 
+def diagnose_location_scale(d: "pd.DataFrame", cutoff: str) -> dict:
+    """Print and return the date-blocked joint location-scale OOS verdict."""
+    report: dict = {}
+    print(f"[sigma-tau] joint-location-scale cutoff={cutoff}")
+    for unit, metric in GROUPS:
+        sub = d[
+            (d["unit_family"] == unit)
+            & (d["temperature_metric"] == metric)
+        ]
+        result = location_scale_oos(
+            sub[sub["target_date"] < cutoff].copy(),
+            sub[sub["target_date"] >= cutoff].copy(),
+        )
+        report.setdefault(unit, {})[metric] = result
+        if "oos_mean_loglik_delta" in result:
+            print(
+                f"  {unit}/{metric}: bias_c={result['bias_c']:+.4f} "
+                f"scale={result['scale']:.4f} "
+                f"delta={result['oos_mean_loglik_delta']:+.5f} "
+                f"GATE:{'PASS' if result['passed'] else 'REJECT'} "
+                f"n={result['n_train_events']}/{result['n_holdout_events']}"
+            )
+        else:
+            print(f"  {unit}/{metric}: REJECT ({result['reason']})")
+    return report
+
+
+def _finite_probability(value: object) -> float | None:
+    try:
+        if value is None or str(value).upper() in {"", "ABSENT"}:
+            return None
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and 0.0 <= parsed <= 1.0 else None
+
+
+def _normalized_simplex(values: list[float]) -> list[float] | None:
+    if not values or any(not math.isfinite(value) or value < 0.0 for value in values):
+        return None
+    total = float(sum(values))
+    if not math.isfinite(total) or total <= 0.0:
+        return None
+    return [value / total for value in values]
+
+
+def _proper_scores(probabilities: list[float], winner_index: int) -> dict:
+    """Categorical Brier, log loss, and ordered ranked probability score."""
+    if not 0 <= winner_index < len(probabilities):
+        raise ValueError("winner_index outside probability vector")
+    brier = sum(
+        (probability - (1.0 if index == winner_index else 0.0)) ** 2
+        for index, probability in enumerate(probabilities)
+    )
+    log_loss = -math.log(max(probabilities[winner_index], 1e-15))
+    cumulative_probability = 0.0
+    cumulative_outcome = 0.0
+    rps = 0.0
+    for index in range(max(0, len(probabilities) - 1)):
+        cumulative_probability += probabilities[index]
+        cumulative_outcome += 1.0 if index == winner_index else 0.0
+        rps += (cumulative_probability - cumulative_outcome) ** 2
+    return {
+        "brier": brier,
+        "log_loss": log_loss,
+        "rps": rps / max(1, len(probabilities) - 1),
+    }
+
+
+def _market_bin_won(event: sqlite3.Row, settlement_value: float) -> bool:
+    low = event["range_low"]
+    high = event["range_high"]
+    label = str(event["range_label"] or "").lower()
+    if "or below" in label:
+        bound = high if low is None else low
+        return bound is not None and settlement_value <= float(bound)
+    if "or higher" in label:
+        bound = low if high is None else high
+        return bound is not None and settlement_value >= float(bound)
+    if low is None:
+        return False
+    if high is not None:
+        return float(low) <= settlement_value <= float(high)
+    return settlement_value == float(low)
+
+
+def _market_bin_order(event: sqlite3.Row) -> tuple[float, float, int]:
+    """Physical order for RPS; never rely on database insertion order."""
+    label = str(event["range_label"] or "").lower()
+    low = event["range_low"]
+    high = event["range_high"]
+    if "or below" in label:
+        bound = high if low is None else low
+        return -math.inf, float(bound), int(event["event_id"])
+    if "or higher" in label:
+        bound = low if high is None else high
+        return float(bound), math.inf, int(event["event_id"])
+    return (
+        float(low) if low is not None else -math.inf,
+        float(high) if high is not None else float(low),
+        int(event["event_id"]),
+    )
+
+
+def _coherent_family_book(
+    conn: sqlite3.Connection,
+    events: list[sqlite3.Row],
+    before_iso: str,
+    *,
+    scan_limit: int = 200,
+) -> tuple[str, list[tuple[sqlite3.Row, float]]] | None:
+    """Latest clock covered by a fresh two-sided YES book for every bin."""
+    books_by_condition: list[list[tuple[sqlite3.Row, float]]] = []
+    candidate_times: set[str] = set()
+    for event in events:
+        rows = conn.execute(
+            """
+            SELECT orderbook_top_bid, orderbook_top_ask,
+                   captured_at, freshness_deadline
+              FROM executable_market_snapshots
+             WHERE condition_id = ?
+               AND outcome_label = 'YES'
+               AND captured_at <= ?
+             ORDER BY captured_at DESC
+             LIMIT ?
+            """,
+            (str(event["condition_id"]), before_iso, scan_limit),
+        ).fetchall()
+        valid: list[tuple[sqlite3.Row, float]] = []
+        for row in rows:
+            bid = _finite_probability(row["orderbook_top_bid"])
+            ask = _finite_probability(row["orderbook_top_ask"])
+            if bid is None or ask is None or bid > ask:
+                continue
+            valid.append((row, (bid + ask) / 2.0))
+            candidate_times.add(str(row["captured_at"]))
+        if not valid:
+            return None
+        books_by_condition.append(valid)
+
+    for evaluation_time in sorted(candidate_times, reverse=True):
+        selected: list[tuple[sqlite3.Row, float]] = []
+        for books in books_by_condition:
+            book = next(
+                (
+                    candidate
+                    for candidate in books
+                    if str(candidate[0]["captured_at"]) <= evaluation_time
+                    and str(candidate[0]["freshness_deadline"]) >= evaluation_time
+                ),
+                None,
+            )
+            if book is None:
+                break
+            selected.append(book)
+        if len(selected) == len(events):
+            return evaluation_time, selected
+    return None
+
+
+def market_relative_rows(
+    forecasts_path: str,
+    trades_path: str,
+    *,
+    since: str,
+) -> tuple[list[dict], dict]:
+    """Selection-free current-q vs same-family market proper-score rows.
+
+    One row is emitted per settled family, never per trade.  For every complete
+    family, the evaluation clock is the latest instant by which every bin had a
+    two-sided YES book before the local target-day end.  The q is the latest
+    current-evidence posterior computed no later than that clock.  Thus neither
+    entry selection nor fill outcome can choose the sample.
+    """
+    forecasts = _connect_ro(forecasts_path)
+    trades = _connect_ro(trades_path)
+    forecasts.row_factory = sqlite3.Row
+    trades.row_factory = sqlite3.Row
+    forecasts.execute("BEGIN")
+    trades.execute("BEGIN")
+    city_meta = _city_metadata()
+    coverage: dict[str, int] = defaultdict(int)
+    scored: list[dict] = []
+    try:
+        settlements = forecasts.execute(
+            """
+            SELECT city, target_date, temperature_metric,
+                   settlement_value, settlement_unit
+              FROM settlement_outcomes
+             WHERE authority = 'VERIFIED'
+               AND target_date >= ?
+               AND settlement_value IS NOT NULL
+               AND settlement_unit IS NOT NULL
+             ORDER BY target_date, city, temperature_metric
+            """,
+            (since[:10],),
+        ).fetchall()
+        coverage["settled_families"] = len(settlements)
+        for settlement in settlements:
+            city = str(settlement["city"])
+            metadata = city_meta.get(city)
+            if metadata is None:
+                coverage["unknown_city"] += 1
+                continue
+            target_end = _local_target_end_utc(
+                str(settlement["target_date"]), str(metadata["timezone"])
+            ).isoformat()
+            events = forecasts.execute(
+                """
+                SELECT event_id, condition_id, range_label, range_low, range_high
+                  FROM market_events
+                 WHERE city = ? AND target_date = ? AND temperature_metric = ?
+                   AND condition_id IS NOT NULL
+                 ORDER BY event_id
+                """,
+                (
+                    city,
+                    settlement["target_date"],
+                    settlement["temperature_metric"],
+                ),
+            ).fetchall()
+            events = sorted(events, key=_market_bin_order)
+            if len(events) < 2:
+                coverage["missing_family_topology"] += 1
+                continue
+
+            coherent_book = _coherent_family_book(trades, events, target_end)
+            if coherent_book is None:
+                coverage["no_coherent_book_in_suffix"] += 1
+                continue
+            evaluation_time, selected_books = coherent_book
+            market_mids = [book[1] for book in selected_books]
+
+            posterior = forecasts.execute(
+                """
+                SELECT posterior_id, computed_at, q_json, provenance_json
+                  FROM forecast_posteriors
+                 WHERE runtime_layer = 'live'
+                   AND city = ? AND target_date = ? AND temperature_metric = ?
+                   AND computed_at <= ?
+                   AND json_extract(
+                         provenance_json,
+                         '$.bayes_precision_fusion.current_evidence_shape'
+                       ) IS NOT NULL
+                 ORDER BY computed_at DESC
+                 LIMIT 1
+                """,
+                (
+                    city,
+                    settlement["target_date"],
+                    settlement["temperature_metric"],
+                    evaluation_time,
+                ),
+            ).fetchone()
+            if posterior is None:
+                coverage["no_causal_current_posterior"] += 1
+                continue
+            q_by_label = json.loads(str(posterior["q_json"]))
+            try:
+                model_raw = [
+                    float(q_by_label[str(event["range_label"])]) for event in events
+                ]
+            except (KeyError, TypeError, ValueError):
+                coverage["posterior_topology_mismatch"] += 1
+                continue
+            model = _normalized_simplex(model_raw)
+            market = _normalized_simplex(market_mids)
+            if model is None or market is None:
+                coverage["invalid_simplex"] += 1
+                continue
+
+            settlement_value = float(settlement["settlement_value"])
+            winners = [
+                _market_bin_won(event, settlement_value) for event in events
+            ]
+            if sum(winners) != 1:
+                coverage["winner_not_unique"] += 1
+                continue
+            winner_index = winners.index(True)
+            model_scores = _proper_scores(model, winner_index)
+            market_scores = _proper_scores(market, winner_index)
+            provenance = json.loads(str(posterior["provenance_json"]))
+            scored.append(
+                {
+                    "city": city,
+                    "target_date": str(settlement["target_date"]),
+                    "metric": str(settlement["temperature_metric"]),
+                    "unit": str(settlement["settlement_unit"]),
+                    "day0": bool(
+                        (provenance.get("day0_conditioning") or {}).get("active")
+                    ),
+                    "model": model_scores,
+                    "market": market_scores,
+                    "posterior_to_book_lag_seconds": (
+                        _dt.datetime.fromisoformat(evaluation_time)
+                        - _dt.datetime.fromisoformat(str(posterior["computed_at"]))
+                    ).total_seconds(),
+                }
+            )
+            coverage["scored_families"] += 1
+    finally:
+        forecasts.close()
+        trades.close()
+    return scored, dict(coverage)
+
+
+def market_relative_report(rows: list[dict], coverage: dict) -> dict:
+    """Print and return family-weighted model skill relative to the market."""
+    print(f"[market-relative] coverage={coverage}")
+    cohorts: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        cohorts["all"].append(row)
+        cohorts[f"{row['unit']}/{row['metric']}"].append(row)
+        cohorts[f"day0={row['day0']}"].append(row)
+    report: dict = {"coverage": coverage, "cohorts": {}}
+    for name in sorted(cohorts):
+        cohort = cohorts[name]
+        n = len(cohort)
+        result = {"n": n}
+        for score_name in ("brier", "log_loss", "rps"):
+            model_mean = sum(row["model"][score_name] for row in cohort) / n
+            market_mean = sum(row["market"][score_name] for row in cohort) / n
+            daily: dict[str, list[float]] = defaultdict(list)
+            for row in cohort:
+                daily[str(row["target_date"])].append(
+                    row["market"][score_name] - row["model"][score_name]
+                )
+            daily_skill = [
+                sum(values) / len(values) for values in daily.values()
+            ]
+            skill = market_mean - model_mean
+            if len(daily_skill) >= 2:
+                se = float(np.std(daily_skill, ddof=1) / math.sqrt(len(daily_skill)))
+                radius = float(t.ppf(0.975, len(daily_skill) - 1) * se)
+                ci = [skill - radius, skill + radius]
+            else:
+                ci = [None, None]
+            result[f"model_{score_name}"] = model_mean
+            result[f"market_{score_name}"] = market_mean
+            result[f"model_skill_{score_name}"] = skill
+            result[f"model_skill_{score_name}_date_clustered_95ci"] = ci
+        report["cohorts"][name] = result
+        print(
+            f"  {name}: n={n} "
+            f"skill(Brier/log/RPS)="
+            f"{result['model_skill_brier']:+.6f}/"
+            f"{result['model_skill_log_loss']:+.6f}/"
+            f"{result['model_skill_rps']:+.6f} "
+            f"Brier95%CI={result['model_skill_brier_date_clustered_95ci']}"
+        )
+    return report
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--fcst", default=FCST_DEFAULT, help="zeus-forecasts.db (forecast_posteriors + settlement_outcomes), opened ?mode=ro.")
     ap.add_argument("--since", default=SINCE_DEFAULT, help="ISO date/datetime floor on computed_at (live current-evidence era start).")
     ap.add_argument("--out", default=None, help="output sigma_tau_calibration.json path (REQUIRED unless --validate).")
     ap.add_argument("--validate", default=None, metavar="CUTOFF", help="read-only OOS diagnostic: fit on target_date<CUTOFF, validate on target_date>=CUTOFF. When combined with --out, this cutoff ALSO governs the shipped gate.")
+    ap.add_argument(
+        "--diagnose-location-scale",
+        action="store_true",
+        help=(
+            "with --validate, fit one common center displacement plus sigma scale "
+            "on prior dates and score only later dates; diagnostic only, never written "
+            "into the live sigma artifact"
+        ),
+    )
+    ap.add_argument(
+        "--market-relative-trades",
+        default=None,
+        metavar="ZEUS_TRADES_DB",
+        help=(
+            "read-only selection-free current-q vs same-time complete-family "
+            "market proper-score report using executable_market_snapshots"
+        ),
+    )
     args = ap.parse_args()
 
-    if args.out is None and args.validate is None:
-        ap.error("must supply --out (to write the artifact) or --validate CUTOFF (to report OOS numbers only)")
+    if (
+        args.out is None
+        and args.validate is None
+        and args.market_relative_trades is None
+    ):
+        ap.error(
+            "must supply --out, --validate CUTOFF, or --market-relative-trades"
+        )
+    if args.diagnose_location_scale and args.validate is None:
+        ap.error("--diagnose-location-scale requires --validate CUTOFF")
+
+    if args.market_relative_trades is not None:
+        rows, coverage = market_relative_rows(
+            args.fcst, args.market_relative_trades, since=args.since
+        )
+        market_relative_report(rows, coverage)
+        if args.out is None and args.validate is None:
+            return 0
 
     d, stats = prep(args.fcst, args.since)
     print(f"[sigma-tau] {stats}")
@@ -943,6 +1467,8 @@ def main() -> int:
     if args.validate is not None:
         validate(d, args.validate, tau_col="taut", label="PRIMARY(issue-clock)")
         validate(d, args.validate, tau_col="taut_decision", label="COMPARISON-ONLY(decision-clock)")
+        if args.diagnose_location_scale:
+            diagnose_location_scale(d, args.validate)
         if args.out is None:
             return 0
 
