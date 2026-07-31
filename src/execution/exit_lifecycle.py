@@ -315,6 +315,39 @@ _VENUE_OPEN_ORDER_TERMINAL_STATUSES = frozenset(
     }
 )
 _PENDING_EXIT_SCAN_CURSOR = 0
+_PENDING_EXIT_ISOLATABLE_REDUCTION_PRECONDITION_ERRORS = frozenset(
+    {
+        "reduction finality has an invalid confirmed fill size",
+        "intentional reduction would manufacture a full close",
+        "intentional reduction current exposure exceeds intent holding",
+        "intentional reduction current exposure is below fill target",
+    }
+)
+
+
+def _isolate_pending_exit_reduction_precondition(
+    stats: dict,
+    position: Position,
+    exc: RuntimeError,
+) -> bool:
+    """Keep one malformed pre-write reduction proof from aborting the scan."""
+
+    error = str(exc)
+    if error not in _PENDING_EXIT_ISOLATABLE_REDUCTION_PRECONDITION_ERRORS:
+        return False
+    position_id = str(getattr(position, "trade_id", "") or "")
+    logger.error(
+        "pending-exit reduction precondition rejected position_id=%s; "
+        "continuing scan: %s",
+        position_id,
+        error,
+    )
+    stats["pending_exit_position_errors"] = (
+        stats.get("pending_exit_position_errors", 0) + 1
+    )
+    stats.setdefault("pending_exit_position_error_ids", []).append(position_id)
+    stats["unchanged"] += 1
+    return True
 
 
 def _pending_exit_status_max_positions() -> int:
@@ -6502,15 +6535,22 @@ def check_pending_exits(
         fill = _exit_trade_fact_close_candidate(conn, pos)
         if fill is not None:
             if fill.get("closes_position") is False:
-                reduced = _complete_intentional_position_reduction(
-                    pos,
-                    intended_shares=Decimal(fill["intended_reduction_shares"]),
-                    confirmed_filled_shares=Decimal(fill["filled_size"]),
-                    fill_price=float(fill["fill_price"]),
-                    order_id=str(fill["venue_order_id"]),
-                    status=str(fill.get("fill_states") or "CONFIRMED"),
-                    conn=conn,
-                )
+                try:
+                    reduced = _complete_intentional_position_reduction(
+                        pos,
+                        intended_shares=Decimal(fill["intended_reduction_shares"]),
+                        confirmed_filled_shares=Decimal(fill["filled_size"]),
+                        fill_price=float(fill["fill_price"]),
+                        order_id=str(fill["venue_order_id"]),
+                        status=str(fill.get("fill_states") or "CONFIRMED"),
+                        conn=conn,
+                    )
+                except RuntimeError as exc:
+                    if _isolate_pending_exit_reduction_precondition(
+                        stats, pos, exc
+                    ):
+                        continue
+                    raise
                 stats["reduced"] = stats.get("reduced", 0) + int(reduced > 0)
                 stats["reduced_from_trade_fact"] = (
                     stats.get("reduced_from_trade_fact", 0) + int(reduced > 0)
@@ -6635,15 +6675,22 @@ def check_pending_exits(
         fill = _exit_trade_fact_close_candidate(conn, pos, exit_order_id=exit_order_id)
         if fill is not None:
             if fill.get("closes_position") is False:
-                reduced = _complete_intentional_position_reduction(
-                    pos,
-                    intended_shares=Decimal(fill["intended_reduction_shares"]),
-                    confirmed_filled_shares=Decimal(fill["filled_size"]),
-                    fill_price=float(fill["fill_price"]),
-                    order_id=exit_order_id,
-                    status=str(fill.get("fill_states") or "CONFIRMED"),
-                    conn=conn,
-                )
+                try:
+                    reduced = _complete_intentional_position_reduction(
+                        pos,
+                        intended_shares=Decimal(fill["intended_reduction_shares"]),
+                        confirmed_filled_shares=Decimal(fill["filled_size"]),
+                        fill_price=float(fill["fill_price"]),
+                        order_id=exit_order_id,
+                        status=str(fill.get("fill_states") or "CONFIRMED"),
+                        conn=conn,
+                    )
+                except RuntimeError as exc:
+                    if _isolate_pending_exit_reduction_precondition(
+                        stats, pos, exc
+                    ):
+                        continue
+                    raise
                 stats["reduced"] = stats.get("reduced", 0) + int(reduced > 0)
                 stats["reduced_from_trade_fact"] = (
                     stats.get("reduced_from_trade_fact", 0) + int(reduced > 0)
@@ -6808,15 +6855,22 @@ def check_pending_exits(
                 continue
             is_reduction = reduction_target is not None or adopted_reduction
             if is_reduction:
-                reduced = _complete_intentional_position_reduction(
-                    pos,
-                    intended_shares=intended_shares,
-                    confirmed_filled_shares=confirmed_shares,
-                    fill_price=actual_price,
-                    order_id=exit_order_id,
-                    status=status,
-                    conn=conn,
-                )
+                try:
+                    reduced = _complete_intentional_position_reduction(
+                        pos,
+                        intended_shares=intended_shares,
+                        confirmed_filled_shares=confirmed_shares,
+                        fill_price=actual_price,
+                        order_id=exit_order_id,
+                        status=status,
+                        conn=conn,
+                    )
+                except RuntimeError as exc:
+                    if _isolate_pending_exit_reduction_precondition(
+                        stats, pos, exc
+                    ):
+                        continue
+                    raise
                 stats["reduced"] = stats.get("reduced", 0) + int(reduced > 0)
                 continue
             closes_position = (

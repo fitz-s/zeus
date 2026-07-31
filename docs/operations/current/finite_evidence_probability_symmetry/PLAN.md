@@ -2454,3 +2454,31 @@ replacement-probability antibody, and this plan. Acceptance requires:
 - a balanced material violation beyond `1e-9` still fails closed;
 - focused replacement/Day0/global-witness tests, planning-lock, compile, diff,
   standard hot-fix landing, and post-restart fresh Ankara monitor evidence pass.
+
+## 2026-07-31 Pending-exit per-position failure isolation
+
+The seven-day full-loss reconstruction found repeated pending-exit scans ending
+at one malformed intentional-reduction proof. The held monitor continued, but
+the remaining positions in that bounded pending-exit batch did not reach fill
+polling or retry release. One bad position could therefore delay unrelated
+exits across repeated cycles.
+
+The repair isolates only the four reduction precondition failures that occur
+before runtime exposure or canonical projection changes. It records the
+position/error in scan stats and advances to the next position. Unknown errors
+and all projection/release failures after mutation still raise fail-closed.
+
+SCOPE is one malformed pending-exit position. DRAIN is the same bounded scan,
+which immediately advances to the next position and rotates on the following
+cycle. RESET is corrected canonical reduction intent/fill/holding evidence for
+the rejected position. No probability, sizing, entry, price-band, settlement,
+or lifecycle grammar changes.
+
+Allowed files are `src/execution/exit_lifecycle.py`,
+`tests/test_exit_safety.py`, and this plan. Acceptance requires:
+
+- a malformed full-close-shaped reduction cannot abort a later retry release;
+- all three reduction completion paths share the same narrow isolation rule;
+- unknown or post-mutation errors remain fail-closed;
+- focused exit-safety tests, compile, diff, hot-fix landing, loaded-SHA, and
+  post-restart health evidence pass.

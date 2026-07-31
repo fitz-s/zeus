@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-30
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-30; last_reused=2026-07-30
+# Last reused/audited: 2026-07-31
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -2765,6 +2765,108 @@ def test_pending_exit_status_poll_is_bounded_and_rotates(conn):
         "ord-pending-exit-budget-2",
         "ord-pending-exit-budget-3",
     ]
+
+
+def test_pending_exit_reduction_precondition_does_not_abort_later_retry(
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    malformed = Position(
+        trade_id="pos-malformed-reduction",
+        market_id="mkt-malformed-reduction",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=5.0,
+        entry_price=0.50,
+        shares=10.0,
+        cost_basis_usd=5.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        last_exit_order_id="ord-malformed-reduction",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+    )
+    retryable = Position(
+        trade_id="pos-retry-after-malformed",
+        market_id="mkt-retry-after-malformed",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="52-53°F",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=5.0,
+        entry_price=0.50,
+        shares=10.0,
+        cost_basis_usd=5.0,
+        state="pending_exit",
+        exit_state="retry_pending",
+        next_exit_retry_at="2000-01-01T00:00:00+00:00",
+        token_id=f"{YES_TOKEN}-retry",
+        no_token_id=f"{NO_TOKEN}-retry",
+    )
+
+    def trade_fact(_conn, position, *, exit_order_id=None):
+        if position.trade_id != malformed.trade_id:
+            return None
+        return {
+            "closes_position": False,
+            "intended_reduction_shares": "10",
+            "filled_size": "10",
+            "fill_price": "0.40",
+            "venue_order_id": exit_order_id or malformed.last_exit_order_id,
+            "fill_states": "CONFIRMED",
+        }
+
+    released = []
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_exit_trade_fact_close_candidate",
+        trade_fact,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_pending_retries",
+        lambda position, **_kwargs: released.append(position.trade_id) or True,
+    )
+    exit_lifecycle._PENDING_EXIT_SCAN_CURSOR = 0
+
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[malformed, retryable]),
+        object(),
+        max_positions=2,
+        cycle_budget_seconds=100.0,
+    )
+
+    assert stats["pending_exit_position_errors"] == 1
+    assert stats["pending_exit_position_error_ids"] == [malformed.trade_id]
+    assert stats["unchanged"] == 1
+    assert stats["retried"] == 1
+    assert released == [retryable.trade_id]
+    assert stats["pending_exit_positions_scanned"] == 2
+
+
+def test_pending_exit_reduction_isolation_rejects_post_mutation_error():
+    from types import SimpleNamespace
+
+    from src.execution import exit_lifecycle
+
+    stats = {"unchanged": 0}
+    assert (
+        exit_lifecycle._isolate_pending_exit_reduction_precondition(
+            stats,
+            SimpleNamespace(trade_id="pos-post-mutation-error"),
+            RuntimeError("confirmed reduction canonical projection failed"),
+        )
+        is False
+    )
+    assert stats == {"unchanged": 0}
 
 
 def test_exit_lifecycle_skips_inactive_position_before_order_status_check(conn):
