@@ -110,7 +110,7 @@ def _held_sell_completion_result(
         ("ordinary_probability", False, False, True, False),
     ),
 )
-def test_completion_reduce_only_scope_requires_current_held_exposure(
+def test_completion_mode_separates_fairness_from_reduce_only(
     wake_kind,
     completion_due,
     exact_held_completion,
@@ -118,7 +118,7 @@ def test_completion_reduce_only_scope_requires_current_held_exposure(
     expected_reduce_only,
 ):
     """Completion debt must not remove BUYs after its held capital is gone."""
-    from src.events.reactor import _global_auction_completion_requires_reduce_only
+    from src.events.reactor import _global_auction_completion_mode
 
     class _Rows:
         def fetchone(self):
@@ -130,11 +130,32 @@ def test_completion_reduce_only_scope_requires_current_held_exposure(
             return _Rows()
 
     assert wake_kind
-    assert _global_auction_completion_requires_reduce_only(
+    mode = _global_auction_completion_mode(
         completion_due=completion_due,
         exact_held_completion=exact_held_completion,
         trade_conn=_TradeConnection(),
-    ) is expected_reduce_only
+    )
+    assert mode.fairness_reserved is completion_due
+    assert mode.reduce_only is expected_reduce_only
+
+
+def test_exact_completion_exposure_read_failure_stays_reduce_only(caplog):
+    from src.events.reactor import _global_auction_completion_mode
+
+    class _TradeConnection:
+        def execute(self, _statement):
+            raise sqlite3.OperationalError("database is busy")
+
+    with caplog.at_level(logging.WARNING):
+        mode = _global_auction_completion_mode(
+            completion_due=True,
+            exact_held_completion=True,
+            trade_conn=_TradeConnection(),
+        )
+
+    assert mode.fairness_reserved is True
+    assert mode.reduce_only is True
+    assert "retaining reduce-only scope" in caplog.text
 
 
 def test_no_submit_claim_debt_drains_before_cycle_entry_gate():

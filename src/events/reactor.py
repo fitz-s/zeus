@@ -6694,12 +6694,18 @@ def _global_auction_monitor_cancellation_probe(
     return completion_due_at_start, _cancelled
 
 
-def _global_auction_completion_requires_reduce_only(
+@dataclass(frozen=True)
+class _GlobalAuctionCompletionMode:
+    fairness_reserved: bool
+    reduce_only: bool
+
+
+def _global_auction_completion_mode(
     *,
     completion_due: bool,
     exact_held_completion: bool,
     trade_conn: object,
-) -> bool:
+) -> _GlobalAuctionCompletionMode:
     """Reserve a completion cut for held capital only when it still exists.
 
     Generic fairness always keeps the complete BUY/SELL/HOLD/CASH feasible set.
@@ -6713,8 +6719,10 @@ def _global_auction_completion_requires_reduce_only(
     restores ordinary BUY selection for the completion cycle.
     """
 
-    if not completion_due or not exact_held_completion:
-        return False
+    if not completion_due:
+        return _GlobalAuctionCompletionMode(False, False)
+    if not exact_held_completion:
+        return _GlobalAuctionCompletionMode(True, False)
     try:
         row = trade_conn.execute(
             """
@@ -6732,8 +6740,8 @@ def _global_auction_completion_requires_reduce_only(
             "scope: %r",
             exc,
         )
-        return True
-    return row is not None
+        return _GlobalAuctionCompletionMode(True, True)
+    return _GlobalAuctionCompletionMode(True, row is not None)
 
 
 def _settle_global_auction_monitor_fairness(
@@ -7415,8 +7423,8 @@ def run_edli_event_reactor_cycle(
             held_position_monitor_pending,
             completion_due=completion_wake,
         )
-        _monitor_completion_requires_reduce_only = (
-            _global_auction_completion_requires_reduce_only(
+        _monitor_completion_mode = (
+            _global_auction_completion_mode(
                 completion_due=_monitor_completion_due_at_start,
                 exact_held_completion=held_sell_completion_cycle,
                 trade_conn=trade_conn,
@@ -7454,10 +7462,10 @@ def run_edli_event_reactor_cycle(
             producer_wake_published_at=producer_wake_published_at,
             selection_cancelled=_monitor_selection_cancelled,
             selection_completion_fairness_reserved=(
-                _monitor_completion_due_at_start
+                _monitor_completion_mode.fairness_reserved
             ),
             selection_completion_reserved=(
-                _monitor_completion_requires_reduce_only
+                _monitor_completion_mode.reduce_only
             ),
         )
 
