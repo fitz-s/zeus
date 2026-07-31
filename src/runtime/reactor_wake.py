@@ -783,11 +783,12 @@ def read_reactor_wake(
     Day0 observations can reverse value in milliseconds and always preempt.
     A durable exact held-SELL completion debt is next: it survives process
     restart and ordinary fill, price, probability, or generic monitor-fairness
-    streams cannot starve capital already at risk. A generic auction-completion
-    marker follows exact held obligations. A confirmed fill changes the actual
-    portfolio endowment. Fill, price, and probability are otherwise joint
-    material inputs; their oldest unconsumed input gets one turn, so no
-    continuous stream can starve another.
+    streams cannot starve capital already at risk. A confirmed fill changes the
+    actual portfolio endowment. Fill, price, and probability are otherwise
+    joint material inputs; their oldest unconsumed input gets one turn, so no
+    continuous stream can starve another. A generic auction-completion marker
+    follows those material inputs: without an exact held-SELL request, it must
+    not delay fresh executable evidence.
     Forecast hints carry incremental family scopes; selecting the newest hint
     does not lose older scopes because same-reason wakes are coalesced and
     acknowledgement remains exact.
@@ -807,9 +808,6 @@ def read_reactor_wake(
         ):
             return wake
     for _queue_file, wake in queued:
-        if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON:
-            return wake
-    for _queue_file, wake in queued:
         if wake.reason == "position_fill_projected":
             return wake
         if wake.reason == "market_price_advanced":
@@ -820,6 +818,9 @@ def read_reactor_wake(
                 for _candidate_file, candidate in reversed(queued)
                 if candidate.reason == "forecast_posterior_advanced"
             )
+    for _queue_file, wake in queued:
+        if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON:
+            return wake
     for _queue_file, wake in queued:
         return wake
     legacy = _read_reactor_wake_path(_wake_path(path))

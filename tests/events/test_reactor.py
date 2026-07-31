@@ -1616,71 +1616,67 @@ def test_reactor_wake_fill_is_bounded_fair_with_continuous_joint_inputs(tmp_path
     assert third.wake_id == "forecast-new"
 
 
-def test_restart_completion_debt_preempts_continuous_ordinary_wakes(tmp_path):
+def test_reactor_wake_priority_quadrants_keep_fresh_material_ahead_of_generic(
+    tmp_path,
+):
     from src.runtime import reactor_wake
 
     path = tmp_path / "wake.json"
-    reactor_wake.publish_reactor_wake(
+    generic = reactor_wake.publish_reactor_wake(
         source="periodic_monitor",
         reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
         path=path,
         wake_id="completion-generic",
         published_at=datetime(2026, 7, 28, 8, 0, tzinfo=timezone.utc),
     )
-    reactor_wake.publish_reactor_wake(
+    forecast = reactor_wake.publish_reactor_wake(
         source="forecast",
         reason="forecast_posterior_advanced",
         path=path,
-        wake_id="forecast-between",
+        wake_id="forecast-fresh",
         published_at=datetime(2026, 7, 28, 8, 0, 1, tzinfo=timezone.utc),
+        forecast_families=(("Paris", "2026-07-28", "high"),),
     )
-    reactor_wake.publish_reactor_wake(
-        source="price",
-        reason="market_price_advanced",
-        path=path,
-        wake_id="price-between",
-        published_at=datetime(2026, 7, 28, 8, 0, 1, 100000, tzinfo=timezone.utc),
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="position-capital-at-risk",
+        family=("Paris", "2026-07-28", "high"),
+        probability_content_identity="q-current",
+        held_token_id="token-held",
+        held_best_bid=0.11,
+        bid_observed_at="2026-07-28T08:00:02+00:00",
     )
-    reactor_wake.publish_reactor_wake(
-        source="fill",
-        reason="position_fill_projected",
-        path=path,
-        wake_id="fill-between",
-        published_at=datetime(2026, 7, 28, 8, 0, 1, 200000, tzinfo=timezone.utc),
-        event_ids=("fill-event",),
-    )
-    reactor_wake.publish_reactor_wake(
-        source="forecast",
-        reason="forecast_posterior_advanced",
-        path=path,
-        wake_id="forecast-later",
-        published_at=datetime(2026, 7, 28, 8, 0, 1, 300000, tzinfo=timezone.utc),
-    )
-    reactor_wake.publish_reactor_wake(
+    exact = reactor_wake.publish_reactor_wake(
         source="held_position_monitor",
         reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
         path=path,
-        wake_id="completion-family",
+        wake_id="completion-exact",
         published_at=datetime(2026, 7, 28, 8, 0, 2, tzinfo=timezone.utc),
-        forecast_families=(("Paris", "2026-07-28", "low"),),
+        forecast_families=(request.family,),
+        held_sell_reauction_requests=(request,),
+    )
+    day0 = reactor_wake.publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=path,
+        wake_id="day0-current",
+        published_at=datetime(2026, 7, 28, 8, 0, 3, tzinfo=timezone.utc),
     )
 
     selected = reactor_wake.read_reactor_wake(path=path)
     assert selected is not None
-    assert selected.wake_id == "completion-generic"
-    completion_batch = reactor_wake.coalescible_reactor_wakes(
-        selected,
-        path=path,
-    )
-    assert tuple(wake.wake_id for wake in completion_batch) == (
-        "completion-generic",
-        "completion-family",
-    )
-    assert {
-        family
-        for wake in completion_batch
-        for family in wake.forecast_families
-    } == {("Paris", "2026-07-28", "low")}
+    assert selected == day0  # Day0 > exact completion > material > generic.
+    assert reactor_wake.acknowledge_reactor_wake(selected, path=path)
+
+    selected = reactor_wake.read_reactor_wake(path=path)
+    assert selected == exact
+    assert reactor_wake.acknowledge_reactor_wake(selected, path=path)
+
+    selected = reactor_wake.read_reactor_wake(path=path)
+    assert selected == forecast
+    assert reactor_wake.acknowledge_reactor_wake(selected, path=path)
+
+    selected = reactor_wake.read_reactor_wake(path=path)
+    assert selected == generic
 
 
 def test_exact_held_sell_debt_preempts_older_generic_completion_marker(tmp_path):
