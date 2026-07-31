@@ -140,6 +140,12 @@ _EDLI_COMMAND_RECOVERY_FULL_CADENCE_SECONDS = 300.0
 _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET: int | None = None
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
+# The normal full-book monitor runs every 120s.  A separate 30s poll reconstructs
+# overdue work from canonical per-position MONITOR_REFRESHED events after one
+# missed tick plus 30s scheduling tolerance.  It does not create another
+# monitor writer: _exit_monitor_cycle retains the process-wide claim.
+HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS = 30.0
+HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS = 150.0
 # Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
 # APScheduler interval. The refresh wall-clock budget
 # (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS in src.data.substrate_observer) MUST be
@@ -7078,6 +7084,68 @@ def _exit_monitor_cycle(
         _held_position_monitor_claim.release()
 
 
+@_scheduler_job("exit_monitor_recovery")
+def _durable_held_position_monitor_recovery_cycle() -> bool:
+    """Re-drive a lost full-book monitor from canonical per-position evidence.
+
+    APScheduler coalescing and process restarts may erase an in-memory interval
+    tick.  Current open exposure plus its latest MONITOR_REFRESHED event is the
+    durable obligation; when any position exceeds the cadence deadline, this
+    independent executor retries the existing single-writer monitor lane.
+    """
+
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+    from src.state.db import get_trade_connection_read_only
+
+    def _evidence() -> dict[str, Any]:
+        conn = get_trade_connection_read_only()
+        try:
+            return collect_monitor_cadence_evidence(
+                conn,
+                now=datetime.now(timezone.utc),
+                max_age_seconds=HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS,
+                monitor_refreshed_only=True,
+                sample_limit=5,
+            )
+        finally:
+            conn.close()
+
+    overdue = _evidence()
+    overdue_count = int(overdue.get("stale_or_missing_position_count") or 0)
+    future_count = int(overdue.get("future_monitor_event_count") or 0)
+    if overdue_count <= 0 and future_count <= 0:
+        return True
+
+    # SCOPE: only current positive-exposure positions whose canonical monitor
+    # evidence is stale, missing, or invalid.  DRAIN: retry the existing
+    # full-book single-writer lane every 30s; a reactor handoff timeout arms the
+    # existing fairness debt so the next reactor tick yields.  RESET: every
+    # current position receives a fresh canonical MONITOR_REFRESHED event, or
+    # its lifecycle/exposure leaves the monitored set.  Because the predicate
+    # is rebuilt from the trade DB, restart cannot erase this obligation.
+    logger.warning(
+        "held-position monitor recovery debt: overdue=%d future=%d sample=%s",
+        overdue_count,
+        future_count,
+        overdue.get("stale_or_missing_positions")
+        or overdue.get("future_monitor_events")
+        or [],
+    )
+    _exit_monitor_cycle()
+
+    remaining = _evidence()
+    remaining_overdue = int(
+        remaining.get("stale_or_missing_position_count") or 0
+    )
+    remaining_future = int(remaining.get("future_monitor_event_count") or 0)
+    if remaining_overdue > 0 or remaining_future > 0:
+        raise RuntimeError(
+            "HELD_POSITION_MONITOR_RECOVERY_INCOMPLETE:"
+            f"overdue={remaining_overdue}:future={remaining_future}"
+        )
+    return True
+
+
 def main():
     _start = time.monotonic()  # F86: process start time for SIGTERM elapsed log
     boot_at = datetime.now(timezone.utc)
@@ -7383,6 +7451,7 @@ def main():
         scheduler_kwargs["executors"] = {
             "default": _APThreadPoolExecutor(20),
             "reactor": _APThreadPoolExecutor(2),
+            "monitor_recovery": _APThreadPoolExecutor(1),
             "observability": _APThreadPoolExecutor(1),
             "heartbeat": _APThreadPoolExecutor(2),
         }
@@ -7543,6 +7612,19 @@ def main():
         next_run_time=_utc_run_time_after(HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS),
         max_instances=1,
         coalesce=True,
+    )
+    scheduler.add_job(
+        _durable_held_position_monitor_recovery_cycle,
+        "interval",
+        seconds=HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS,
+        id="exit_monitor_recovery",
+        next_run_time=_utc_run_time_after(
+            HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS
+            + HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS
+        ),
+        max_instances=1,
+        coalesce=True,
+        executor="monitor_recovery",
     )
     scheduler.add_job(
         _write_heartbeat,
