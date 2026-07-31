@@ -145,7 +145,12 @@ def _positions_missing_attribution(conn) -> list[str]:
     rows = conn.execute(
         """
         SELECT position_id FROM position_current
-        WHERE position_id NOT IN (SELECT position_id FROM position_decision_attribution)
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM position_decision_attribution
+            WHERE position_decision_attribution.position_id = position_current.position_id
+              AND position_decision_attribution.intent_kind = 'ENTRY'
+        )
         """
     ).fetchall()
     return [str(r[0]) for r in rows]
@@ -159,7 +164,6 @@ def write_outcome(conn, outcome: BackfillOutcome, *, now_iso: str) -> None:
             resolution, resolution_reason, source, intent_kind, created_at,
             schema_version
         ) VALUES (?, ?, ?, ?, ?, ?, 'BACKFILL', 'ENTRY', ?, 1)
-        ON CONFLICT(position_id) DO NOTHING
         """,
         (
             uuid.uuid4().hex[:16],
