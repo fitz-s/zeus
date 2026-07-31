@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-30
+# Last reused or audited: 2026-07-31
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-30; last_reused=2026-07-30
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -5124,6 +5124,21 @@ def test_live_health_reconstructs_holding_v2_delta_and_reference() -> None:
     assert live_health._current_global_auction_holding_payload(
         conn,
         reference_summary,
+    ) == base_rows
+
+    common_reference_summary = {
+        "holding_auction_coverage_encoding": (
+            "zlib+base64+canonical-json-v2"
+        ),
+        "holding_auction_coverage_sha256": base_sha,
+        "payload_reference_fields": [field],
+        "payload_reference_decision_log_id": 1,
+        "payload_reference_mode": "global_single_order_auction",
+        "payload_reference_receipt_hash": "receipt-base",
+    }
+    assert live_health._current_global_auction_holding_payload(
+        conn,
+        common_reference_summary,
     ) == base_rows
     conn.close()
 

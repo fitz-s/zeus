@@ -2482,3 +2482,33 @@ Allowed files are `src/execution/exit_lifecycle.py`,
 - unknown or post-mutation errors remain fail-closed;
 - focused exit-safety tests, compile, diff, hot-fix landing, loaded-SHA, and
   post-restart health evidence pass.
+
+## 2026-07-31 Global-auction common holding reference
+
+Live health rejected a valid schema-19 global-auction delta receipt after the
+receipt writer compacted all heavy payload references onto one common base.
+The candidate reader already understood that compact form; the holding reader
+required a per-component map that the writer intentionally omits when one base
+serves every referenced component. This false corruption verdict degraded the
+runtime despite intact hashes and candidate evidence.
+
+The repair resolves holding coverage from either its explicit component record
+or the writer's common base identity, then applies the same receipt hash,
+component hash, encoding, payload-presence, and decode checks.
+
+SCOPE is read-only live-health reconstruction of one holding-coverage
+component. DRAIN is the next health evaluation of the latest complete auction
+receipt. RESET is a valid inline, delta, component-reference, or common-reference
+payload whose hashes reproduce exactly. Execution evidence, probability,
+selection, sizing, lifecycle, and venue action are unchanged.
+
+Allowed files are `src/control/live_health.py`,
+`tests/test_run_mode_failure_surfaces.py`, and this plan. Acceptance requires:
+
+- the producer's one-base common-reference compact form reconstructs holding
+  coverage;
+- component-specific references retain their existing validation;
+- the current canonical receipt no longer reports
+  `GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID`;
+- focused tests, planning lock, compile, diff, hot-fix landing, loaded-SHA, and
+  post-restart health evidence pass.

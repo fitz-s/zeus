@@ -5603,16 +5603,23 @@ def _current_global_auction_holding_payload(
         raise ValueError("HOLDING_PAYLOAD_REFERENCE_MISSING")
     references = summary.get("payload_reference_components", {})
     component = references.get(field, {}) if isinstance(references, dict) else {}
-    if not isinstance(component, dict) or not component:
-        raise ValueError("HOLDING_PAYLOAD_REFERENCE_COMPONENT_MISSING")
-    component_sha256 = str(component["sha256"])
+    if component:
+        row_id = int(component["decision_log_id"])
+        mode = str(component["mode"])
+        receipt_hash = str(component["receipt_hash"])
+        component_sha256 = str(component["sha256"])
+    else:
+        row_id = int(summary["payload_reference_decision_log_id"])
+        mode = str(summary["payload_reference_mode"])
+        receipt_hash = str(summary["payload_reference_receipt_hash"])
+        component_sha256 = str(summary[sha_field])
     if component_sha256 != str(summary[sha_field]):
         raise ValueError("HOLDING_PAYLOAD_REFERENCE_HASH_MISMATCH")
     reference_summary = _global_auction_component_reference_summary(
         conn,
-        row_id=int(component["decision_log_id"]),
-        mode=str(component["mode"]),
-        receipt_hash=str(component["receipt_hash"]),
+        row_id=row_id,
+        mode=mode,
+        receipt_hash=receipt_hash,
         component_sha256=component_sha256,
         payload_field=field,
         sha256_field=sha_field,
