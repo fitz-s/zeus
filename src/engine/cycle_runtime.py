@@ -6232,25 +6232,26 @@ def execute_monitoring_phase(
                     summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
                     continue
             if is_exit_cooldown_active(pos):
-                _record_monitor_hold_decision(
-                    conn,
-                    pos,
-                    artifact=artifact,
-                    deps=deps,
-                    summary=summary,
-                    reason="PENDING_EXIT_RETRY_COOLDOWN_ACTIVE",
-                    trigger="PENDING_EXIT_RETRY_COOLDOWN_ACTIVE",
-                    validation="pending_exit_retry_cooldown_monitor_hold",
-                    counter="monitor_pending_exit_retry_cooldown_holds",
+                # Cooldown throttles SELL resubmission, not observation or
+                # economic redecision.  Keep the position monitor-only so the
+                # fresh q/book path below still runs without placing a
+                # duplicate order.
+                pending_exit_monitor_only = True
+                summary["monitor_pending_exit_retry_cooldown_redecisions"] = (
+                    summary.get(
+                        "monitor_pending_exit_retry_cooldown_redecisions",
+                        0,
+                    )
+                    + 1
                 )
-                continue
-            if run_exit_preflight:
-                check_pending_retry_with_committed_global_reauction(pos)
-            if release_pending_exit_without_order_if_retryable(pos, conn=conn):
-                portfolio_dirty = True
-                summary["monitor_released_pending_exit_without_order"] = (
-                    summary.get("monitor_released_pending_exit_without_order", 0) + 1
-                )
+            else:
+                if run_exit_preflight:
+                    check_pending_retry_with_committed_global_reauction(pos)
+                if release_pending_exit_without_order_if_retryable(pos, conn=conn):
+                    portfolio_dirty = True
+                    summary["monitor_released_pending_exit_without_order"] = (
+                        summary.get("monitor_released_pending_exit_without_order", 0) + 1
+                    )
             if pos.state == "pending_exit":
                 pending_exit_monitor_only = True
                 summary["monitor_pending_exit_phase_evaluated"] = (
@@ -6282,7 +6283,7 @@ def execute_monitoring_phase(
                 counter="monitor_pending_exit_backoff_exhausted_holds",
             )
             continue
-        if is_exit_cooldown_active(pos):
+        if is_exit_cooldown_active(pos) and not pending_exit_monitor_only:
             _record_monitor_hold_decision(
                 conn,
                 pos,

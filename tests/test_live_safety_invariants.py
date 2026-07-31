@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-30; last_reused=2026-07-30
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-30
+# Last reused/audited: 2026-07-31
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -7654,9 +7654,13 @@ def test_pending_exit_chain_absent_positive_exposure_stays_open_for_exit_lifecyc
     assert get_open_positions(_make_portfolio(zero)) == []
 
 
-def test_pending_exit_retry_cooldown_emits_monitor_refresh_receipt():
+def test_pending_exit_retry_cooldown_refreshes_belief_without_duplicate_exit(
+    monkeypatch,
+):
+    from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime
     from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import ExitDecision, Position
     from src.state.db import init_schema
     from src.state.projection import upsert_position_current
 
@@ -7688,6 +7692,55 @@ def test_pending_exit_retry_cooldown_emits_monitor_refresh_receipt():
     pos.order_status = "retry_pending"
     upsert_position_current(conn, build_position_current_projection(pos))
     portfolio = _make_portfolio(pos)
+    refreshes = []
+    execute_calls = []
+
+    def refresh_position(_conn, _clob, position):
+        refreshes.append(position.trade_id)
+        position.last_monitor_at = "2026-07-02T20:20:00+00:00"
+        position.last_monitor_prob = 0.03
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = -0.08
+        position.last_monitor_market_price = 0.11
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = 0.10
+        position.last_monitor_best_ask = 0.12
+        position.last_monitor_market_vig = 1.02
+        return EdgeContext(
+            p_raw=np.array([]),
+            p_cal=np.array([]),
+            p_market=np.array([0.11]),
+            p_posterior=0.03,
+            forward_edge=-0.08,
+            alpha=0.0,
+            confidence_band_upper=0.04,
+            confidence_band_lower=0.02,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="snap-pending-exit-cooldown",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.0,
+        )
+
+    def evaluate_exit(_position, _context):
+        return ExitDecision(
+            True,
+            "RISK_RED_FORCE_EXIT",
+            trigger="RED_FORCE_EXIT",
+            selected_method="replacement_current_evidence",
+            applied_validations=["fresh_cooldown_redecision"],
+        )
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        refresh_position,
+    )
+    monkeypatch.setattr(Position, "evaluate_exit", evaluate_exit)
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **kwargs: execute_calls.append(kwargs),
+    )
     monitor_results = []
     artifact = type(
         "Artifact",
@@ -7721,11 +7774,18 @@ def test_pending_exit_retry_cooldown_emits_monitor_refresh_receipt():
         run_exit_preflight=False,
     )
 
-    assert portfolio_dirty is False
+    assert portfolio_dirty is True
     assert tracker_dirty is False
-    assert summary["monitor_pending_exit_retry_cooldown_holds"] == 1
+    assert refreshes == [pos.trade_id]
+    assert execute_calls == []
+    assert summary["monitor_pending_exit_retry_cooldown_redecisions"] == 1
+    assert summary["monitor_pending_exit_phase_evaluated"] == 1
+    assert summary["pending_exit_exit_signal_already_in_flight"] == 1
     assert summary["monitors"] == 1
-    assert monitor_results[0].exit_reason == "PENDING_EXIT_RETRY_COOLDOWN_ACTIVE"
+    assert monitor_results[0].fresh_prob == pytest.approx(0.03)
+    assert monitor_results[0].fresh_edge == pytest.approx(-0.08)
+    assert monitor_results[0].should_exit is True
+    assert monitor_results[0].exit_reason == "RISK_RED_FORCE_EXIT"
     event = conn.execute(
         """
         SELECT event_type, occurred_at, payload_json
@@ -7737,7 +7797,12 @@ def test_pending_exit_retry_cooldown_emits_monitor_refresh_receipt():
     assert event is not None
     assert event["occurred_at"] == "2026-07-02T20:20:00+00:00"
     payload = json.loads(event["payload_json"])
-    assert payload["exit_decision_reason"] == "PENDING_EXIT_RETRY_COOLDOWN_ACTIVE"
+    assert payload["last_monitor_prob"] == pytest.approx(0.03)
+    assert payload["last_monitor_prob_is_fresh"] is True
+    assert payload["last_monitor_market_price"] == pytest.approx(0.11)
+    assert payload["last_monitor_market_price_is_fresh"] is True
+    assert payload["exit_decision_should_exit"] is True
+    assert payload["exit_decision_reason"] == "RISK_RED_FORCE_EXIT"
 
     conn.close()
 

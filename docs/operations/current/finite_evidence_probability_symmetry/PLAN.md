@@ -4,6 +4,28 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-31 Exit cooldown preserves continuous redecision
+
+The seven-day full-loss replay found canonical `MONITOR_REFRESHED` events
+created during `pending_exit` retry cooldown by copying the position's previous
+probability and quote.  The new event timestamp made old evidence appear
+current while the monitor skipped `refresh_position -> evaluate_exit`
+entirely.  A retry cooldown is an actuation throttle; it is not authority to
+stop observing the probability curve or executable book.
+
+The hot-fix keeps a cooldown position in monitor-only mode.  Every normal held
+monitor turn still refreshes probability and quote and records the current
+economic exit decision, while the existing pending-exit guard prevents a
+second SELL from being submitted before the retry deadline.  SCOPE is the
+exact pending-exit position.  DRAIN is every held-monitor cycle.  RESET is
+cooldown expiry or terminal order reconciliation.  No probability formula,
+exit threshold, price band, order retry cadence, or global capital objective
+changes.
+
+Acceptance requires a pending-exit position with an active retry cooldown to
+consume a newly refreshed q/book, persist those facts as fresh, preserve the
+current exit signal, and make zero duplicate venue calls.
+
 ## 2026-07-30 Canonical LOW ENS boundary evidence
 
 Paris Jul-31 LOW and Shanghai Aug-1 LOW had current 12Z ECMWF ENS snapshots,
