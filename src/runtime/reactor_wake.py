@@ -901,6 +901,7 @@ def coalescible_reactor_wakes(
         return (selected,)
 
     candidates: list[ReactorWake] = []
+    reserved_completion_wake: ReactorWake | None = None
     if selected.reason in {
         "forecast_posterior_advanced",
         "market_price_advanced",
@@ -945,12 +946,8 @@ def coalescible_reactor_wakes(
         # Reserve the next bounded turn for the oldest generic completion marker
         # so a continuous stream of distinct held positions cannot starve its
         # SCOPE/DRAIN/RESET obligation; the rest keep position-fair exact order.
-        candidates = [
-            *generic[:1],
-            *by_position,
-            *deferred,
-            *generic[1:],
-        ]
+        reserved_completion_wake = generic[0] if generic else None
+        candidates = [*by_position, *deferred, *generic[1:]]
         max_wakes = min(
             max(1, int(max_wakes)),
             GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT,
@@ -967,6 +964,20 @@ def coalescible_reactor_wakes(
     wake_ids = {selected.wake_id}
     event_ids = set(selected.event_ids)
     families = set(selected.forecast_families)
+    if (
+        reserved_completion_wake is not None
+        and max_wakes > 1
+        and len(reserved_completion_wake.event_ids) <= max(1, int(max_event_ids))
+        and len(reserved_completion_wake.forecast_families)
+        <= max(1, int(max_forecast_families))
+    ):
+        # This is a second independently bounded completion turn, not extra
+        # scope charged to the selected exact-capital turn. Keeping the two
+        # budgets separate makes progress possible when each legal wake already
+        # occupies its own full scope; the invocation remains bounded by two
+        # per-axis budgets and GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT wakes.
+        wakes.append(reserved_completion_wake)
+        wake_ids.add(reserved_completion_wake.wake_id)
     for wake in candidates:
         if len(wakes) >= max(1, int(max_wakes)) or wake.wake_id in wake_ids:
             continue

@@ -1613,6 +1613,10 @@ def test_exact_held_sell_debt_preempts_older_generic_completion_marker(tmp_path)
         path=path,
         wake_id="generic-completion-old",
         published_at=datetime(2026, 7, 30, 8, 0, tzinfo=timezone.utc),
+        event_ids=tuple(f"event-{index}" for index in range(100)),
+        forecast_families=tuple(
+            (f"City-{index}", "2026-07-30", "high") for index in range(100)
+        ),
     )
     request = reactor_wake.make_held_sell_reauction_request(
         position_id="position-capital-at-risk",
