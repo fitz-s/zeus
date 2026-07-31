@@ -94,6 +94,40 @@ def _held_sell_completion_result(
     )
 
 
+@pytest.mark.parametrize(
+    ("wake_kind", "completion_due", "has_held_exposure", "expected_reduce_only"),
+    (
+        ("generic_no_exposure", True, False, False),
+        ("generic_held", True, True, True),
+        ("exact_terminal_no_exposure", True, False, False),
+        ("ordinary_probability", False, True, False),
+    ),
+)
+def test_completion_reduce_only_scope_requires_current_held_exposure(
+    wake_kind,
+    completion_due,
+    has_held_exposure,
+    expected_reduce_only,
+):
+    """Completion debt must not remove BUYs after its held capital is gone."""
+    from src.events.reactor import _global_auction_completion_requires_reduce_only
+
+    class _Rows:
+        def fetchone(self):
+            return (1,) if has_held_exposure else None
+
+    class _TradeConnection:
+        def execute(self, statement):
+            assert "FROM position_current" in statement
+            return _Rows()
+
+    assert wake_kind
+    assert _global_auction_completion_requires_reduce_only(
+        completion_due=completion_due,
+        trade_conn=_TradeConnection(),
+    ) is expected_reduce_only
+
+
 def test_no_submit_claim_debt_drains_before_cycle_entry_gate():
     conn, store = _store()
     event = _forecast_event("claim-drain-before-gate")

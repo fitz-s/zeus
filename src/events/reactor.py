@@ -6694,6 +6694,48 @@ def _global_auction_monitor_cancellation_probe(
     return completion_due_at_start, _cancelled
 
 
+def _global_auction_completion_requires_reduce_only(
+    *,
+    completion_due: bool,
+    trade_conn: object,
+) -> bool:
+    """Reserve a completion cut for held capital only when it still exists.
+
+    A generic monitor wake has no immutable held-SELL receipt to answer. When
+    its prior exposure has already reached a terminal state, forcing the next
+    auction into reduce-only scope produces no candidate and leaves the
+    fairness debt armed forever. Exact held-SELL requests still require their
+    existing receipt coverage; this helper only prevents absent exposure from
+    suppressing ordinary BUY selection.
+
+    SCOPE: this one completion auction. DRAIN: the next completion cycle
+    rereads canonical runtime-open positions. RESET: a successful empty read
+    restores ordinary BUY selection for the completion cycle.
+    """
+
+    if not completion_due:
+        return False
+    try:
+        row = trade_conn.execute(
+            """
+            SELECT 1
+              FROM position_current
+             WHERE phase IN ('active', 'day0_window', 'pending_exit')
+               AND COALESCE(chain_shares, shares, 0) > 0
+             LIMIT 1
+            """
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001
+        # Unknown exposure must stay reduce-only.
+        logging.getLogger("zeus.events.reactor").warning(
+            "global auction completion exposure read failed; retaining reduce-only "
+            "scope: %r",
+            exc,
+        )
+        return True
+    return row is not None
+
+
 def _settle_global_auction_monitor_fairness(
     *, completion_due_at_start: bool, result: object
 ) -> bool:
@@ -7373,6 +7415,12 @@ def run_edli_event_reactor_cycle(
             held_position_monitor_pending,
             completion_due=completion_wake,
         )
+        _monitor_completion_requires_reduce_only = (
+            _global_auction_completion_requires_reduce_only(
+                completion_due=_monitor_completion_due_at_start,
+                trade_conn=trade_conn,
+            )
+        )
         submit_adapter = event_bound_live_adapter_from_trade_conn(
             trade_conn,
             live_cap_conn=conn,
@@ -7405,7 +7453,7 @@ def run_edli_event_reactor_cycle(
             producer_wake_published_at=producer_wake_published_at,
             selection_cancelled=_monitor_selection_cancelled,
             selection_completion_reserved=(
-                _monitor_completion_due_at_start
+                _monitor_completion_requires_reduce_only
             ),
         )
 
