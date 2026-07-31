@@ -7430,6 +7430,15 @@ def run_edli_event_reactor_cycle(
                 trade_conn=trade_conn,
             )
         )
+        if (
+            get_current_level() != RiskLevel.GREEN
+            and not _monitor_completion_mode.reduce_only
+        ):
+            _log.info(
+                "EDLI reactor completion wake retained without BUY risk bypass: "
+                "no canonical runtime-open held exposure"
+            )
+            return not completion_wake
         submit_adapter = event_bound_live_adapter_from_trade_conn(
             trade_conn,
             live_cap_conn=conn,
@@ -7485,10 +7494,10 @@ def run_edli_event_reactor_cycle(
             # selection_completion_reserved path removes every BUY candidate;
             # ordinary entry events retain both independent GREEN gates.
             riskguard_gate=lambda event: (
-                held_sell_completion_cycle or entry_risk_gate(event)
+                _monitor_completion_mode.reduce_only or entry_risk_gate(event)
             ),
             cycle_entry_gate=lambda: (
-                held_sell_completion_cycle
+                _monitor_completion_mode.reduce_only
                 or get_current_level() == RiskLevel.GREEN
             ),
             final_intent_submit=submit_adapter,

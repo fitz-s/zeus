@@ -158,6 +158,23 @@ def test_exact_completion_exposure_read_failure_stays_reduce_only(caplog):
     assert "retaining reduce-only scope" in caplog.text
 
 
+def test_completion_risk_bypass_is_bound_to_reduce_only_mode():
+    from src.events.reactor import run_edli_event_reactor_cycle
+
+    source = inspect.getsource(run_edli_event_reactor_cycle)
+
+    assert (
+        "_monitor_completion_mode.reduce_only or entry_risk_gate(event)"
+        in source
+    )
+    assert (
+        "_monitor_completion_mode.reduce_only\n"
+        "                or get_current_level() == RiskLevel.GREEN"
+        in source
+    )
+    assert "held_sell_completion_cycle or entry_risk_gate(event)" not in source
+
+
 def test_no_submit_claim_debt_drains_before_cycle_entry_gate():
     conn, store = _store()
     event = _forecast_event("claim-drain-before-gate")
