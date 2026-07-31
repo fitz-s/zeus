@@ -8272,6 +8272,161 @@ def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
         main_module._periodic_exit_monitor_day0_yielded.clear()
 
 
+def test_durable_monitor_recovery_is_a_noop_with_fresh_canonical_coverage(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = ReadOnlyConnection()
+    observed_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", lambda: conn)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **kwargs: observed_kwargs.update(kwargs) or {
+            "stale_or_missing_position_count": 0,
+            "future_monitor_event_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_cycle",
+        lambda: pytest.fail("fresh canonical coverage must not run recovery"),
+    )
+
+    assert (
+        main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
+        is True
+    )
+    assert conn.closed is True
+    assert (
+        observed_kwargs["max_age_seconds"]
+        == main_module.HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS
+    )
+    assert observed_kwargs["monitor_refreshed_only"] is True
+
+
+def test_durable_monitor_recovery_requires_canonical_refresh_after_retry(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    evidence = iter(
+        (
+            {
+                "stale_or_missing_position_count": 1,
+                "stale_or_missing_positions": [{"position_id": "p-stale"}],
+                "future_monitor_event_count": 0,
+            },
+            {
+                "stale_or_missing_position_count": 0,
+                "future_monitor_event_count": 0,
+            },
+        )
+    )
+    calls: list[str] = []
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            calls.append("close")
+
+    monkeypatch.setattr(
+        db_module,
+        "get_trade_connection_read_only",
+        ReadOnlyConnection,
+    )
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: next(evidence),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_cycle",
+        lambda: calls.append("monitor") or True,
+    )
+
+    assert (
+        main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
+        is True
+    )
+    assert calls == ["close", "monitor", "close"]
+
+
+def test_durable_monitor_recovery_arms_fairness_debt_when_reactor_stays_busy(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class BusyReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return False
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    stale = {
+        "stale_or_missing_position_count": 1,
+        "stale_or_missing_positions": [{"position_id": "p-stale"}],
+        "future_monitor_event_count": 0,
+    }
+    main_module._periodic_held_position_monitor_fairness_debt.clear()
+    monkeypatch.setattr(
+        db_module,
+        "get_trade_connection_read_only",
+        ReadOnlyConnection,
+    )
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: stale,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("busy reactor must not admit monitor writer"),
+    )
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="HELD_POSITION_MONITOR_RECOVERY_INCOMPLETE",
+        ):
+            main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
+        assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor")
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+
+
+def test_durable_monitor_recovery_has_an_independent_scheduler_executor() -> None:
+    import inspect
+
+    import src.main as main_module
+
+    source = inspect.getsource(main_module.main)
+    assert '"monitor_recovery": _APThreadPoolExecutor(1)' in source
+    assert "executor=\"monitor_recovery\"" in source
+    assert "id=\"exit_monitor_recovery\"" in source
+
+
 def test_full_book_monitor_success_requires_canonical_progress() -> None:
     from src.execution.exit_lifecycle import (
         _full_book_monitor_made_canonical_progress,

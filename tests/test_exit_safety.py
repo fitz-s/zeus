@@ -4349,6 +4349,20 @@ def test_execute_exit_order_rejects_existing_idempotent_command_with_old_exit_sn
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
 
+        def bind_signed_submission_identity_persister(self, persister):
+            self.signed_identity_persister = persister
+
+        def get_collateral_payload(self):
+            units = _ctf_units(50.0)
+            return {
+                "pusd_balance_micro": 1_000_000_000,
+                "pusd_allowance_micro": 1_000_000_000,
+                "usdc_e_legacy_balance_micro": 0,
+                "ctf_token_balances_units": {YES_TOKEN: units},
+                "ctf_token_allowances_units": {YES_TOKEN: units},
+                "authority_tier": "CHAIN",
+            }
+
         def place_limit_order(self, **kwargs):
             calls.append(kwargs)
             return _fake_submit_result(self.bound_envelope, order_id=f"ord-{len(calls)}")
@@ -4545,6 +4559,20 @@ def test_execute_exit_order_rejects_idempotency_race_with_old_exit_snapshot_iden
     class FakeClient:
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.signed_identity_persister = persister
+
+        def get_collateral_payload(self):
+            units = _ctf_units(50.0)
+            return {
+                "pusd_balance_micro": 1_000_000_000,
+                "pusd_allowance_micro": 1_000_000_000,
+                "usdc_e_legacy_balance_micro": 0,
+                "ctf_token_balances_units": {YES_TOKEN: units},
+                "ctf_token_allowances_units": {YES_TOKEN: units},
+                "authority_tier": "CHAIN",
+            }
 
         def place_limit_order(self, **kwargs):
             calls.append(kwargs)
