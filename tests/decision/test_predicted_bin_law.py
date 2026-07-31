@@ -1,9 +1,10 @@
-# Lifecycle: created=2026-07-23; last_reviewed=2026-07-23; last_reused=never
+# Lifecycle: created=2026-07-23; last_reviewed=2026-07-30; last_reused=2026-07-30
 # Purpose: Exhaustive money-path unit coverage for src/decision/predicted_bin_law.py
 #   — the single predicted-bin entry/exit law. Antibodies for every spec-mandated
 #   trap: the native NO lower-bound flip, lock folding, strict entry break-even,
-#   the exit precedence chain (RED > lock > evidence > value), partial-exit argmax,
-#   hysteresis non-overlap, sunk-cost-free signatures, and Decimal purity.
+#   the exit precedence chain (RED > lock > evidence > posterior-mean value),
+#   partial-exit argmax, hysteresis non-overlap, sunk-cost-free signatures, and
+#   Decimal purity.
 # Authority basis: docs/operations/current/plans/ultimate_alpha_2026-07-23/
 #   {COLLISION.md (C3), FINAL_SPEC.md (§入场律/§离场律), DERIVATION.md (axiom)}.
 """Every predicted-bin-law behavior the plan documents, as a falsifiable test."""

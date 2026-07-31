@@ -924,6 +924,7 @@ def coalescible_reactor_wakes(
         # unselected wakes remain immutable for the next reactor turn.
         by_position: list[ReactorWake] = []
         deferred: list[ReactorWake] = []
+        generic: list[ReactorWake] = []
         positions = {
             request.position_id
             for request in selected.held_sell_reauction_requests
@@ -936,9 +937,20 @@ def coalescible_reactor_wakes(
             if wake_positions and wake_positions.isdisjoint(positions):
                 by_position.append(wake)
                 positions.update(wake_positions)
+            elif not wake_positions:
+                generic.append(wake)
             else:
                 deferred.append(wake)
-        candidates = [*by_position, *deferred]
+        # Exact capital debt remains first because ``selected`` is already fixed.
+        # Reserve the next bounded turn for the oldest generic completion marker
+        # so a continuous stream of distinct held positions cannot starve its
+        # SCOPE/DRAIN/RESET obligation; the rest keep position-fair exact order.
+        candidates = [
+            *generic[:1],
+            *by_position,
+            *deferred,
+            *generic[1:],
+        ]
         max_wakes = min(
             max(1, int(max_wakes)),
             GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT,

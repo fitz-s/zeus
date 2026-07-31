@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from inspect import Parameter, signature
 from types import SimpleNamespace
-from typing import Callable, Mapping, Optional
+from typing import Callable, Optional
 
 # Compatibility exports for callers that patch the former lifecycle seam.
 # Submit-time authority is owned by executor.py below.
