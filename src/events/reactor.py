@@ -6697,23 +6697,23 @@ def _global_auction_monitor_cancellation_probe(
 def _global_auction_completion_requires_reduce_only(
     *,
     completion_due: bool,
+    exact_held_completion: bool,
     trade_conn: object,
 ) -> bool:
     """Reserve a completion cut for held capital only when it still exists.
 
-    A generic monitor wake has no immutable held-SELL receipt to answer. When
-    its prior exposure has already reached a terminal state, forcing the next
-    auction into reduce-only scope produces no candidate and leaves the
-    fairness debt armed forever. Exact held-SELL requests still require their
-    existing receipt coverage; this helper only prevents absent exposure from
-    suppressing ordinary BUY selection.
+    Generic fairness always keeps the complete BUY/SELL/HOLD/CASH feasible set.
+    An exact held-SELL wake enters reduce-only only while canonical held capital
+    still exists. If that exposure has already become terminal, forcing an
+    empty reduce-only scope produces no candidate and leaves the debt armed
+    forever; the existing terminal receipt path still owns request completion.
 
     SCOPE: this one completion auction. DRAIN: the next completion cycle
     rereads canonical runtime-open positions. RESET: a successful empty read
     restores ordinary BUY selection for the completion cycle.
     """
 
-    if not completion_due:
+    if not completion_due or not exact_held_completion:
         return False
     try:
         row = trade_conn.execute(
@@ -7418,6 +7418,7 @@ def run_edli_event_reactor_cycle(
         _monitor_completion_requires_reduce_only = (
             _global_auction_completion_requires_reduce_only(
                 completion_due=_monitor_completion_due_at_start,
+                exact_held_completion=held_sell_completion_cycle,
                 trade_conn=trade_conn,
             )
         )
@@ -7452,6 +7453,9 @@ def run_edli_event_reactor_cycle(
             producer_wake_ids=producer_wake_ids,
             producer_wake_published_at=producer_wake_published_at,
             selection_cancelled=_monitor_selection_cancelled,
+            selection_completion_fairness_reserved=(
+                _monitor_completion_due_at_start
+            ),
             selection_completion_reserved=(
                 _monitor_completion_requires_reduce_only
             ),

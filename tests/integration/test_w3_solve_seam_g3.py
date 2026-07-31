@@ -6370,7 +6370,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         "_entry_global_submit_suppression_reason",
         lambda: entry_suppression_reason[0],
     )
-    def make_adapter(*, completion_reserved=False):
+    def make_adapter(*, completion_reserved=False, fairness_reserved=False):
         return era.event_bound_live_adapter_from_trade_conn(
             trade,
             get_current_level=lambda: era.RiskLevel.GREEN,
@@ -6381,6 +6381,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
                 "cycle-start portfolio must not back global selection wealth"
             ),
             auction_capital_authority=CapacityAuthority(),
+            selection_completion_fairness_reserved=fairness_reserved,
             selection_completion_reserved=completion_reserved,
         )
 
@@ -6435,6 +6436,12 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         _dt.datetime(2026, 7, 10, 8, 12, tzinfo=_dt.timezone.utc),
     )
     assert captured["buy_candidates_enabled"] is False
+    fairness_adapter = make_adapter(fairness_reserved=True)
+    fairness_adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 13, tzinfo=_dt.timezone.utc),
+    )
+    assert captured["buy_candidates_enabled"] is True
     urgent_revision["value"] = (7, 8, 9)
     urgent_reason["value"] = "forecast_posterior_advanced"
     assert captured["epoch_superseded"]() is False

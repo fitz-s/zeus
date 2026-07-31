@@ -6355,6 +6355,7 @@ def event_bound_live_adapter_from_trade_conn(
     producer_wake_ids: tuple[str, ...] = (),
     producer_wake_published_at: str | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
+    selection_completion_fairness_reserved: bool = False,
     selection_completion_reserved: bool = False,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
@@ -7260,7 +7261,10 @@ def event_bound_live_adapter_from_trade_conn(
                 _global_batch_wake_cutoff,
                 exclude_wake_ids=_global_batch_owned_wake_ids,
             )
-            if selection_completion_reserved:
+            if (
+                selection_completion_fairness_reserved
+                or selection_completion_reserved
+            ):
                 # SCOPE: one global auction cut after a held SELL or periodic
                 # monitor proved that prior work lacked current handoff.
                 # DRAIN: complete selection publishes the globally comparable

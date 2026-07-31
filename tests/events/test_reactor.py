@@ -95,17 +95,25 @@ def _held_sell_completion_result(
 
 
 @pytest.mark.parametrize(
-    ("wake_kind", "completion_due", "has_held_exposure", "expected_reduce_only"),
     (
-        ("generic_no_exposure", True, False, False),
-        ("generic_held", True, True, True),
-        ("exact_terminal_no_exposure", True, False, False),
-        ("ordinary_probability", False, True, False),
+        "wake_kind",
+        "completion_due",
+        "exact_held_completion",
+        "has_held_exposure",
+        "expected_reduce_only",
+    ),
+    (
+        ("generic_no_exposure", True, False, False, False),
+        ("generic_held", True, False, True, False),
+        ("exact_terminal_no_exposure", True, True, False, False),
+        ("exact_active_exposure", True, True, True, True),
+        ("ordinary_probability", False, False, True, False),
     ),
 )
 def test_completion_reduce_only_scope_requires_current_held_exposure(
     wake_kind,
     completion_due,
+    exact_held_completion,
     has_held_exposure,
     expected_reduce_only,
 ):
@@ -124,6 +132,7 @@ def test_completion_reduce_only_scope_requires_current_held_exposure(
     assert wake_kind
     assert _global_auction_completion_requires_reduce_only(
         completion_due=completion_due,
+        exact_held_completion=exact_held_completion,
         trade_conn=_TradeConnection(),
     ) is expected_reduce_only
 
