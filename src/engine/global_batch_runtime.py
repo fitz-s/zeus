@@ -104,6 +104,7 @@ _SLOW_BATCH_STAGE_SECONDS = 2.0
 _SLOW_BATCH_TOTAL_SECONDS = 5.0
 _WEALTH_REAUCTION_MAX_ATTEMPTS = 2
 _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS = 1
+_GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH = 8
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,7 @@ class _GlobalAuctionComponentRef:
     encoding: str
     sha256: str
     payload: object
+    delta_depth: int = 0
 
 
 @dataclass(frozen=True)
@@ -1225,6 +1227,13 @@ def _book_native_side_delta_receipt(
             row for key, row in current.items() if base.get(key) != row
         ),
     }
+    reconstructed = dict(base)
+    for key in payload["removed_keys"]:
+        reconstructed.pop(tuple(key), None)
+    for row in payload["upsert_rows"]:
+        reconstructed[tuple(row[:key_size])] = tuple(row)
+    if reconstructed != current:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_DELTA_MISMATCH")
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -1883,73 +1892,178 @@ def _stored_global_auction_payload_ref(
     ref = _GLOBAL_AUCTION_PAYLOAD_REFS.get(connection_key)
     if ref is None:
         return None
+    summary_cache: dict[tuple[int, str], Mapping[str, object] | None] = {}
+
+    def load_summary(row_id: int, mode: str) -> Mapping[str, object] | None:
+        key = (row_id, mode)
+        if key in summary_cache:
+            return summary_cache[key]
+        row = conn.execute(
+            "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+        if row is None or str(row[0]) != mode:
+            summary_cache[key] = None
+            return None
+        try:
+            artifact = json.loads(str(row[1] or ""))
+            summary = artifact["summary"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            summary_cache[key] = None
+            return None
+        if not isinstance(summary, Mapping):
+            summary_cache[key] = None
+            return None
+        summary_cache[key] = summary
+        return summary
+
     components = (
         (
             ref.audit_context,
             "audit_context_zlib_b64",
             "audit_context_encoding",
             "audit_context_sha256",
+            (
+                "audit_context_delta_zlib_b64",
+                "audit_context_delta_sha256",
+                "audit_context_base_decision_log_id",
+                "audit_context_base_mode",
+                "audit_context_base_receipt_hash",
+                "audit_context_base_sha256",
+            ),
         ),
         (
             ref.candidate,
             "candidate_evaluations_zlib_b64",
             "candidate_evaluation_encoding",
             "candidate_evaluations_sha256",
+            (
+                "candidate_evaluations_delta_zlib_b64",
+                "candidate_evaluations_delta_sha256",
+                "candidate_evaluations_base_decision_log_id",
+                "candidate_evaluations_base_mode",
+                "candidate_evaluations_base_receipt_hash",
+                "candidate_evaluations_base_sha256",
+            ),
         ),
         (
             ref.repair,
             "buy_minimum_marketable_repairs_zlib_b64",
             "buy_minimum_marketable_repair_encoding",
             "buy_minimum_marketable_repairs_sha256",
+            None,
         ),
         (
             ref.holding,
             "holding_auction_coverage_zlib_b64",
             "holding_auction_coverage_encoding",
             "holding_auction_coverage_sha256",
+            (
+                "holding_auction_coverage_delta_zlib_b64",
+                "holding_auction_coverage_delta_sha256",
+                "holding_auction_coverage_base_decision_log_id",
+                "holding_auction_coverage_base_mode",
+                "holding_auction_coverage_base_receipt_hash",
+                "holding_auction_coverage_base_sha256",
+            ),
         ),
         (
             ref.book,
             "book_native_side_states_zlib_b64",
             "book_native_side_encoding",
             "book_native_side_states_sha256",
+            (
+                "book_native_side_delta_zlib_b64",
+                "book_native_side_delta_sha256",
+                "book_native_side_base_decision_log_id",
+                "book_native_side_base_mode",
+                "book_native_side_base_receipt_hash",
+                "book_native_side_base_states_sha256",
+            ),
         ),
     )
-    components_by_row: dict[
-        int,
-        list[tuple[_GlobalAuctionComponentRef, str, str, str]],
-    ] = {}
-    for component in components:
-        components_by_row.setdefault(component[0].row_id, []).append(component)
-    for row_id, row_components in components_by_row.items():
-        row = conn.execute(
-            "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
-            (row_id,),
-        ).fetchone()
-        if row is None or any(
-            str(row[0]) != component.mode
-            for component, _, _, _ in row_components
-        ):
-            return None
-        try:
-            artifact = json.loads(str(row[1] or ""))
-            summary = artifact["summary"]
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError, zlib.error):
-            return None
-        if not isinstance(summary, Mapping):
-            return None
-        for component, payload_field, encoding_field, sha256_field in row_components:
+
+    def valid_component(
+        component: _GlobalAuctionComponentRef,
+        payload_field: str,
+        encoding_field: str,
+        sha256_field: str,
+        delta_fields: tuple[str, str, str, str, str, str] | None,
+    ) -> bool:
+        seen: set[int] = set()
+
+        def valid_row(
+            *,
+            row_id: int,
+            mode: str,
+            receipt_hash: str,
+            sha256: str,
+            depth: int,
+        ) -> bool:
+            if (
+                row_id in seen
+                or depth < 0
+                or depth > _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH
+            ):
+                return False
+            seen.add(row_id)
+            summary = load_summary(row_id, mode)
+            if (
+                summary is None
+                or str(summary.get("receipt_hash") or "") != receipt_hash
+                or str(summary.get(encoding_field) or "") != component.encoding
+                or str(summary.get(sha256_field) or "") != sha256
+            ):
+                return False
+            if payload_field in summary:
+                try:
+                    compressed = base64.b64decode(
+                        str(summary[payload_field]),
+                        validate=True,
+                    )
+                    if len(compressed) > 2_000_000:
+                        return False
+                    raw = zlib.decompress(compressed)
+                    if len(raw) > 10_000_000:
+                        return False
+                    json.loads(raw)
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                    zlib.error,
+                ):
+                    return False
+                return depth == 0 and hashlib.sha256(raw).hexdigest() == sha256
+            if delta_fields is None or depth == 0:
+                return False
+            (
+                delta_field,
+                delta_sha_field,
+                base_id_field,
+                base_mode_field,
+                base_receipt_hash_field,
+                base_sha_field,
+            ) = delta_fields
             try:
                 compressed = base64.b64decode(
-                    str(summary[payload_field]),
+                    str(summary[delta_field]),
                     validate=True,
                 )
                 if len(compressed) > 2_000_000:
-                    return None
+                    return False
                 raw = zlib.decompress(compressed)
                 if len(raw) > 10_000_000:
-                    return None
+                    return False
                 json.loads(raw)
+                base_id = int(summary[base_id_field])
+                base_mode = str(summary[base_mode_field])
+                base_receipt_hash = str(summary[base_receipt_hash_field])
+                base_sha256 = str(summary[base_sha_field])
+                declared_depth = int(
+                    summary[delta_field.replace("_zlib_b64", "_chain_depth")]
+                )
             except (
                 KeyError,
                 TypeError,
@@ -1957,15 +2071,32 @@ def _stored_global_auction_payload_ref(
                 json.JSONDecodeError,
                 zlib.error,
             ):
-                return None
+                return False
             if (
-                str(summary.get("receipt_hash") or "")
-                != component.receipt_hash
-                or str(summary.get(encoding_field) or "") != component.encoding
-                or str(summary.get(sha256_field) or "") != component.sha256
-                or hashlib.sha256(raw).hexdigest() != component.sha256
+                declared_depth != depth
+                or hashlib.sha256(raw).hexdigest()
+                != str(summary.get(delta_sha_field) or "")
             ):
-                return None
+                return False
+            return valid_row(
+                row_id=base_id,
+                mode=base_mode,
+                receipt_hash=base_receipt_hash,
+                sha256=base_sha256,
+                depth=depth - 1,
+            )
+
+        return valid_row(
+            row_id=component.row_id,
+            mode=component.mode,
+            receipt_hash=component.receipt_hash,
+            sha256=component.sha256,
+            depth=component.delta_depth,
+        )
+
+    for component in components:
+        if not valid_component(*component):
+            return None
     return ref
 
 
@@ -2666,7 +2797,9 @@ def _store_global_auction_receipt(
                 base_refs[audit_context_ref.row_id] = audit_context_ref
                 audit_context_exact_reference = True
             elif (
-                audit_context_identity[0] == audit_context_ref.encoding
+                audit_context_ref.delta_depth
+                < _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH
+                and audit_context_identity[0] == audit_context_ref.encoding
                 and isinstance(audit_context_ref.payload, Mapping)
             ):
                 audit_context_delta = _json_object_delta_receipt(
@@ -2692,9 +2825,26 @@ def _store_global_auction_receipt(
                             "audit_context_base_mode": audit_context_ref.mode,
                             "audit_context_base_receipt_hash": audit_context_ref.receipt_hash,
                             "audit_context_base_sha256": audit_context_ref.sha256,
+                            "audit_context_delta_chain_depth": (
+                                audit_context_ref.delta_depth + 1
+                            ),
                         }
                     )
                     base_refs[audit_context_ref.row_id] = audit_context_ref
+                else:
+                    for field in _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS:
+                        compact_receipt.pop(field, None)
+                    compact_receipt["audit_context_zlib_b64"] = receipt[
+                        "audit_context_zlib_b64"
+                    ]
+                    inline_fields.add("audit_context_zlib_b64")
+            else:
+                for field in _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS:
+                    compact_receipt.pop(field, None)
+                compact_receipt["audit_context_zlib_b64"] = receipt[
+                    "audit_context_zlib_b64"
+                ]
+                inline_fields.add("audit_context_zlib_b64")
 
             candidate_field = "candidate_evaluations_zlib_b64"
             candidate_ref = payload_ref.candidate
@@ -2714,9 +2864,11 @@ def _store_global_auction_receipt(
                     "sha256": candidate_ref.sha256,
                 }
                 base_refs[candidate_ref.row_id] = candidate_ref
-            elif candidate_identity[0] == candidate_ref.encoding and isinstance(
-                candidate_ref.payload,
-                Mapping,
+            elif (
+                candidate_ref.delta_depth
+                < _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH
+                and candidate_identity[0] == candidate_ref.encoding
+                and isinstance(candidate_ref.payload, Mapping)
             ):
                 candidate_delta = _candidate_evaluations_delta_receipt(
                     base=candidate_ref.payload,
@@ -2735,6 +2887,9 @@ def _store_global_auction_receipt(
                             "candidate_evaluations_base_mode": candidate_ref.mode,
                             "candidate_evaluations_base_receipt_hash": candidate_ref.receipt_hash,
                             "candidate_evaluations_base_sha256": candidate_ref.sha256,
+                            "candidate_evaluations_delta_chain_depth": (
+                                candidate_ref.delta_depth + 1
+                            ),
                         }
                     )
                     base_refs[candidate_ref.row_id] = candidate_ref
@@ -2785,9 +2940,11 @@ def _store_global_auction_receipt(
                     "sha256": holding_ref.sha256,
                 }
                 base_refs[holding_ref.row_id] = holding_ref
-            elif holding_identity[0] == holding_ref.encoding and isinstance(
-                holding_ref.payload,
-                Sequence,
+            elif (
+                holding_ref.delta_depth
+                < _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH
+                and holding_identity[0] == holding_ref.encoding
+                and isinstance(holding_ref.payload, Sequence)
             ):
                 holding_delta = _keyed_object_list_delta_receipt(
                     prefix="holding_auction_coverage",
@@ -2808,6 +2965,9 @@ def _store_global_auction_receipt(
                             "holding_auction_coverage_base_mode": holding_ref.mode,
                             "holding_auction_coverage_base_receipt_hash": holding_ref.receipt_hash,
                             "holding_auction_coverage_base_sha256": holding_ref.sha256,
+                            "holding_auction_coverage_delta_chain_depth": (
+                                holding_ref.delta_depth + 1
+                            ),
                         }
                     )
                     base_refs[holding_ref.row_id] = holding_ref
@@ -2836,9 +2996,11 @@ def _store_global_auction_receipt(
                     "sha256": book_ref.sha256,
                 }
                 base_refs[book_ref.row_id] = book_ref
-            elif book_identity[0] == book_ref.encoding and isinstance(
-                book_ref.payload,
-                Sequence,
+            elif (
+                book_ref.delta_depth
+                < _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH
+                and book_identity[0] == book_ref.encoding
+                and isinstance(book_ref.payload, Sequence)
             ):
                 book_delta = _book_native_side_delta_receipt(
                     base_rows=book_ref.payload,
@@ -2854,6 +3016,9 @@ def _store_global_auction_receipt(
                             "book_native_side_base_mode": book_ref.mode,
                             "book_native_side_base_receipt_hash": book_ref.receipt_hash,
                             "book_native_side_base_states_sha256": book_ref.sha256,
+                            "book_native_side_delta_chain_depth": (
+                                book_ref.delta_depth + 1
+                            ),
                         }
                     )
                     base_refs[book_ref.row_id] = book_ref
@@ -2915,12 +3080,17 @@ def _store_global_auction_receipt(
                 def component_ref(
                     *,
                     field: str,
+                    delta_field: str | None,
                     previous: _GlobalAuctionComponentRef,
                     encoding: str,
                     sha256: str,
                     payload: object,
                 ) -> _GlobalAuctionComponentRef:
-                    if field not in inline_fields:
+                    if field in inline_fields:
+                        delta_depth = 0
+                    elif delta_field is not None and delta_field in compact_receipt:
+                        delta_depth = previous.delta_depth + 1
+                    else:
                         return previous
                     return _GlobalAuctionComponentRef(
                         row_id=row_id,
@@ -2929,12 +3099,14 @@ def _store_global_auction_receipt(
                         encoding=encoding,
                         sha256=sha256,
                         payload=payload,
+                        delta_depth=delta_depth,
                     )
 
                 _GLOBAL_AUCTION_PAYLOAD_REFS[connection_key] = (
                     _GlobalAuctionPayloadRef(
                         candidate=component_ref(
                             field=candidate_field,
+                            delta_field="candidate_evaluations_delta_zlib_b64",
                             previous=candidate_ref,
                             encoding=candidate_identity[0],
                             sha256=candidate_identity[1],
@@ -2942,6 +3114,7 @@ def _store_global_auction_receipt(
                         ),
                         repair=component_ref(
                             field=repair_field,
+                            delta_field=None,
                             previous=repair_ref,
                             encoding=repair_identity[0],
                             sha256=repair_identity[1],
@@ -2949,6 +3122,7 @@ def _store_global_auction_receipt(
                         ),
                         holding=component_ref(
                             field=holding_field,
+                            delta_field="holding_auction_coverage_delta_zlib_b64",
                             previous=holding_ref,
                             encoding=holding_identity[0],
                             sha256=holding_identity[1],
@@ -2956,16 +3130,20 @@ def _store_global_auction_receipt(
                         ),
                         book=component_ref(
                             field=book_field,
+                            delta_field="book_native_side_delta_zlib_b64",
                             previous=book_ref,
                             encoding=book_identity[0],
                             sha256=book_identity[1],
                             payload=current_book_rows,
                         ),
-                        # Audit-context deltas stay anchored to the last
-                        # self-contained full receipt. That bounds the
-                        # reconstruction chain to one hop and makes a restart
-                        # fall back to a fresh full anchor.
-                        audit_context=audit_context_ref,
+                        audit_context=component_ref(
+                            field="audit_context_zlib_b64",
+                            delta_field="audit_context_delta_zlib_b64",
+                            previous=audit_context_ref,
+                            encoding=audit_context_identity[0],
+                            sha256=audit_context_identity[1],
+                            payload=audit_context,
+                        ),
                     )
                 )
                 _LOG.info(

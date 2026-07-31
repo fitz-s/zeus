@@ -5439,6 +5439,8 @@ _GLOBAL_AUCTION_RECEIPT_MODES = (
     "global_single_order_auction_delta",
     "global_single_order_auction_duplicate",
 )
+_GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH = 8
+_GLOBAL_AUCTION_REFERENCE_MAX_HOPS = 9
 _LATEST_GLOBAL_AUCTION_RECEIPT_SQL = """
     SELECT id, mode, artifact_json, timestamp
       FROM decision_log NOT INDEXED
@@ -5478,7 +5480,6 @@ def _global_auction_component_reference_summary(
     mode: str,
     receipt_hash: str,
     component_sha256: str,
-    payload_field: str,
     sha256_field: str,
 ) -> Mapping[str, object]:
     if mode not in _GLOBAL_AUCTION_RECEIPT_MODES:
@@ -5494,10 +5495,22 @@ def _global_auction_component_reference_summary(
     if (
         str(summary.get("receipt_hash") or "") != receipt_hash
         or str(summary.get(sha256_field) or "") != component_sha256
-        or payload_field not in summary
     ):
         raise ValueError("REFERENCE_IDENTITY")
     return summary
+
+
+def _next_global_auction_reference_hop(
+    *,
+    row_id: int,
+    visited: frozenset[int],
+    hops: int,
+) -> tuple[frozenset[int], int]:
+    if row_id in visited:
+        raise ValueError("REFERENCE_CYCLE")
+    if hops >= _GLOBAL_AUCTION_REFERENCE_MAX_HOPS:
+        raise ValueError("REFERENCE_DEPTH")
+    return visited | {row_id}, hops + 1
 
 
 def _global_auction_reference_summary(
@@ -5514,7 +5527,6 @@ def _global_auction_reference_summary(
         mode=mode,
         receipt_hash=receipt_hash,
         component_sha256=component_sha256,
-        payload_field="candidate_evaluations_zlib_b64",
         sha256_field="candidate_evaluations_sha256",
     )
 
@@ -5546,6 +5558,9 @@ def _decode_global_auction_holding_payload(
 def _current_global_auction_holding_payload(
     conn: object,
     summary: Mapping[str, object],
+    *,
+    _visited: frozenset[int] = frozenset(),
+    _hops: int = 0,
 ) -> list[dict[str, object]]:
     prefix = "holding_auction_coverage"
     field = f"{prefix}_zlib_b64"
@@ -5556,22 +5571,52 @@ def _current_global_auction_holding_payload(
 
     delta_field = f"{prefix}_delta_zlib_b64"
     if delta_field in summary:
+        try:
+            delta_depth = int(
+                summary.get(f"{prefix}_delta_chain_depth") or 1
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("REFERENCE_DEPTH") from exc
+        if not 1 <= delta_depth <= _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH:
+            raise ValueError("REFERENCE_DEPTH")
         if summary.get(f"{prefix}_delta_encoding") != (
             "zlib+base64+keyed-canonical-json-delta-v1"
         ):
             raise ValueError("HOLDING_DELTA_ENCODING")
+        base_row_id = int(summary[f"{prefix}_base_decision_log_id"])
+        visited, hops = _next_global_auction_reference_hop(
+            row_id=base_row_id,
+            visited=_visited,
+            hops=_hops,
+        )
         base_summary = _global_auction_component_reference_summary(
             conn,
-            row_id=int(summary[f"{prefix}_base_decision_log_id"]),
+            row_id=base_row_id,
             mode=str(summary[f"{prefix}_base_mode"]),
             receipt_hash=str(summary[f"{prefix}_base_receipt_hash"]),
             component_sha256=str(summary[f"{prefix}_base_sha256"]),
-            payload_field=field,
             sha256_field=sha_field,
         )
         if base_summary.get(encoding_field) != summary.get(encoding_field):
             raise ValueError("HOLDING_DELTA_BASE_ENCODING")
-        base = _decode_global_auction_holding_payload(base_summary)
+        base_delta_field = f"{prefix}_delta_zlib_b64"
+        if delta_depth == 1:
+            if base_delta_field in base_summary:
+                raise ValueError("REFERENCE_DEPTH")
+        elif (
+            base_delta_field not in base_summary
+            or int(
+                base_summary.get(f"{prefix}_delta_chain_depth") or 0
+            )
+            != delta_depth - 1
+        ):
+            raise ValueError("REFERENCE_DEPTH")
+        base = _current_global_auction_holding_payload(
+            conn,
+            base_summary,
+            _visited=visited,
+            _hops=hops,
+        )
         compressed = base64.b64decode(str(summary[delta_field]), validate=True)
         if len(compressed) > 2_000_000:
             raise ValueError("HOLDING_DELTA_COMPRESSED_PAYLOAD_TOO_LARGE")
@@ -5615,18 +5660,27 @@ def _current_global_auction_holding_payload(
         component_sha256 = str(summary[sha_field])
     if component_sha256 != str(summary[sha_field]):
         raise ValueError("HOLDING_PAYLOAD_REFERENCE_HASH_MISMATCH")
+    visited, hops = _next_global_auction_reference_hop(
+        row_id=row_id,
+        visited=_visited,
+        hops=_hops,
+    )
     reference_summary = _global_auction_component_reference_summary(
         conn,
         row_id=row_id,
         mode=mode,
         receipt_hash=receipt_hash,
         component_sha256=component_sha256,
-        payload_field=field,
         sha256_field=sha_field,
     )
     if reference_summary.get(encoding_field) != summary.get(encoding_field):
         raise ValueError("HOLDING_PAYLOAD_REFERENCE_ENCODING")
-    return _decode_global_auction_holding_payload(reference_summary)
+    return _current_global_auction_holding_payload(
+        conn,
+        reference_summary,
+        _visited=visited,
+        _hops=hops,
+    )
 
 
 def _global_auction_holding_authority_matches(
@@ -5719,6 +5773,9 @@ def _apply_global_auction_candidate_semantic_delta(
 def _current_global_auction_candidate_payload(
     conn: object,
     summary: Mapping[str, object],
+    *,
+    _visited: frozenset[int] = frozenset(),
+    _hops: int = 0,
 ) -> dict[str, object]:
     field = "candidate_evaluations_zlib_b64"
     if field in summary:
@@ -5726,6 +5783,14 @@ def _current_global_auction_candidate_payload(
 
     delta_field = "candidate_evaluations_delta_zlib_b64"
     if delta_field in summary:
+        try:
+            delta_depth = int(
+                summary.get("candidate_evaluations_delta_chain_depth") or 1
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("REFERENCE_DEPTH") from exc
+        if not 1 <= delta_depth <= _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH:
+            raise ValueError("REFERENCE_DEPTH")
         delta_encoding = str(
             summary.get("candidate_evaluations_delta_encoding") or ""
         )
@@ -5749,6 +5814,11 @@ def _current_global_auction_candidate_payload(
             ):
                 raise ValueError("DELTA_BASE_MODE_MISSING")
             base_mode = str(summary.get("payload_reference_mode") or "")
+        visited, hops = _next_global_auction_reference_hop(
+            row_id=base_row_id,
+            visited=_visited,
+            hops=_hops,
+        )
         base_summary = _global_auction_reference_summary(
             conn,
             row_id=base_row_id,
@@ -5760,7 +5830,26 @@ def _current_global_auction_candidate_payload(
             "candidate_evaluation_encoding"
         ):
             raise ValueError("DELTA_BASE_ENCODING")
-        base = _decode_global_auction_candidate_payload(base_summary)[0]
+        if delta_depth == 1:
+            if "candidate_evaluations_delta_zlib_b64" in base_summary:
+                raise ValueError("REFERENCE_DEPTH")
+        elif (
+            "candidate_evaluations_delta_zlib_b64" not in base_summary
+            or int(
+                base_summary.get(
+                    "candidate_evaluations_delta_chain_depth"
+                )
+                or 0
+            )
+            != delta_depth - 1
+        ):
+            raise ValueError("REFERENCE_DEPTH")
+        base = _current_global_auction_candidate_payload(
+            conn,
+            base_summary,
+            _visited=visited,
+            _hops=hops,
+        )
         compressed = base64.b64decode(str(summary[delta_field]), validate=True)
         if len(compressed) > 2_000_000:
             raise ValueError("DELTA_COMPRESSED_PAYLOAD_TOO_LARGE")
@@ -5814,6 +5903,11 @@ def _current_global_auction_candidate_payload(
         component_sha256 = str(summary["candidate_evaluations_sha256"])
     if component_sha256 != str(summary["candidate_evaluations_sha256"]):
         raise ValueError("PAYLOAD_REFERENCE_HASH_MISMATCH")
+    visited, hops = _next_global_auction_reference_hop(
+        row_id=row_id,
+        visited=_visited,
+        hops=_hops,
+    )
     reference_summary = _global_auction_reference_summary(
         conn,
         row_id=row_id,
@@ -5825,7 +5919,12 @@ def _current_global_auction_candidate_payload(
         "candidate_evaluation_encoding"
     ):
         raise ValueError("PAYLOAD_REFERENCE_ENCODING")
-    return _decode_global_auction_candidate_payload(reference_summary)[0]
+    return _current_global_auction_candidate_payload(
+        conn,
+        reference_summary,
+        _visited=visited,
+        _hops=hops,
+    )
 
 
 def _latest_global_auction_candidate_counts(

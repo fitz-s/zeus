@@ -19,6 +19,7 @@ import zlib
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Mapping
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -28,6 +29,7 @@ import src.engine.qkernel_spine_bridge as bridge
 import src.engine.event_reactor_adapter as era
 import src.engine.global_batch_runtime as global_batch_runtime
 import src.engine.global_auction_universe as universe
+from src.control import live_health
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
     _qkernel_global_mean_buy_rejection_reason,
@@ -1860,6 +1862,421 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
         ).fetchone()["artifact_json"]
     ) < len(rows[0]["artifact_json"])
     conn.close()
+
+
+def test_global_auction_receipt_bounded_delta_chain_write_amplification(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(global_batch_runtime, "_GLOBAL_AUCTION_PAYLOAD_REFS", {})
+    at = _dt.datetime(2026, 7, 31, 6, 0, tzinfo=_dt.timezone.utc)
+    families = tuple(f"family-{index}" for index in range(96))
+    evaluations = tuple(
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id=f"candidate-{index}-{side.lower()}",
+            family_key=family_key,
+            bin_id=f"bin-{index}",
+            condition_id=f"condition-{index}",
+            side=side,
+            token_id=f"token-{index}-{side.lower()}",
+            action="BUY",
+            status="REJECTED",
+            rejection_reason="NO_ASK",
+        )
+        for index, family_key in enumerate(families)
+        for side in ("YES", "NO")
+    )
+
+    def blob(label: str) -> str:
+        return "".join(
+            hashlib.sha256(f"{label}-{part}".encode()).hexdigest()
+            for part in range(8)
+        )
+
+    book_states = tuple(
+        (
+            family_key,
+            f"bin-{index}",
+            f"condition-{index}",
+            side,
+            f"token-{index}-{side.lower()}",
+            "EXECUTABLE",
+            blob(f"book-{index}-{side.lower()}"),
+            f"event-{index}",
+            f"gamma-{index}",
+        )
+        for index, family_key in enumerate(families)
+        for side in ("YES", "NO")
+    )
+
+    def current(step: int) -> tuple[object, tuple[tuple[str, ...], ...]]:
+        changed_evaluations = tuple(
+            replace(
+                row,
+                rejection_reason=(
+                    f"VENUE_NOT_EXECUTABLE:{step}"
+                    if index == 0
+                    else "VENUE_NOT_EXECUTABLE"
+                ),
+            )
+            if index < len(evaluations) // 2
+            else row
+            for index, row in enumerate(evaluations)
+        )
+        rejection_reasons = {
+            row.candidate_id: row.rejection_reason for row in changed_evaluations
+        }
+        decision = GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+            rejection_reasons=rejection_reasons,
+            candidate_evaluations=changed_evaluations,
+            candidate_input_count=len(changed_evaluations),
+        )
+        changed_books = tuple(
+            (
+                *row[:6],
+                (
+                    blob(f"book-step-{step}")
+                    if index == 0
+                    else blob(f"changed-{index}")
+                ),
+                *row[7:],
+            )
+            if index < (len(book_states) * 2) // 5
+            else row
+            for index, row in enumerate(book_states)
+        )
+        return SimpleNamespace(decision=decision), changed_books
+
+    def create_conn(path):
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE decision_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mode TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                artifact_json TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                env TEXT NOT NULL
+            )
+            """
+        )
+        return conn
+
+    def store(
+        conn,
+        *,
+        suffix: str,
+        selected: object,
+        states: tuple[tuple[str, ...], ...],
+    ) -> int:
+        row_id = global_batch_runtime._store_global_auction_receipt(
+            conn,
+            selected=selected,
+            selection_epoch_identity=f"epoch-{suffix}",
+            selection_cut_at_utc=at,
+            decision_at_utc=at + _dt.timedelta(seconds=1),
+            probability_manifest=tuple(
+                (family, f"q-{suffix}-{index}")
+                for index, family in enumerate(families)
+            ),
+            full_scope_identity="full-scope",
+            full_scope_family_keys=families,
+            probability_ineligible_by_family={},
+            book_epoch_identity=f"book-{suffix}",
+            book_asset_count=len(families),
+            book_asset_states=states,
+            wealth_witness=SimpleNamespace(
+                witness_identity=f"wealth-{suffix}",
+                economic_identity="wealth-current",
+            ),
+            fractional_kelly_multiplier=Decimal("0.25"),
+            book_captured_at_utc=at,
+            book_max_age=_dt.timedelta(seconds=30),
+        )
+        assert row_id is not None
+        return row_id
+
+    def run(path, *, fixed_anchor: bool):
+        conn = create_conn(path)
+        base_decision = GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+            rejection_reasons={
+                row.candidate_id: row.rejection_reason for row in evaluations
+            },
+            candidate_evaluations=evaluations,
+            candidate_input_count=len(evaluations),
+        )
+        store(
+            conn,
+            suffix="anchor",
+            selected=SimpleNamespace(decision=base_decision),
+            states=book_states,
+        )
+        key = global_batch_runtime._decision_log_connection_key(conn)
+        anchor_ref = global_batch_runtime._GLOBAL_AUCTION_PAYLOAD_REFS[key]
+        rows = []
+        for step in range(1, 9):
+            if fixed_anchor:
+                global_batch_runtime._GLOBAL_AUCTION_PAYLOAD_REFS[key] = anchor_ref
+            selected, states = current(step)
+            row_id = store(
+                conn,
+                suffix=f"step-{step}",
+                selected=selected,
+                states=states,
+            )
+            row = conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+            summary = json.loads(row["artifact_json"])["summary"]
+            rows.append((row_id, len(row["artifact_json"]), summary))
+        return conn, rows
+
+    fixed_conn, fixed_rows = run(tmp_path / "fixed.db", fixed_anchor=True)
+    rolling_conn, rolling_rows = run(tmp_path / "rolling.db", fixed_anchor=False)
+    fixed_bytes = sum(row[1] for row in fixed_rows)
+    rolling_bytes = sum(row[1] for row in rolling_rows)
+    assert rolling_bytes <= fixed_bytes * 0.65
+    assert [
+        row[2]["candidate_evaluations_delta_chain_depth"]
+        for row in rolling_rows
+    ] == list(range(1, 9))
+    assert [
+        row[2]["book_native_side_delta_chain_depth"] for row in rolling_rows
+    ] == list(range(1, 9))
+    assert [
+        row[2]["audit_context_delta_chain_depth"] for row in rolling_rows
+    ] == list(range(1, 9))
+
+    def reconstruct_book(
+        summary: Mapping[str, object],
+        seen: frozenset[int] = frozenset(),
+    ) -> list[list[str]]:
+        if "book_native_side_states_zlib_b64" in summary:
+            payload = json.loads(
+                zlib.decompress(
+                    base64.b64decode(
+                        str(summary["book_native_side_states_zlib_b64"])
+                    )
+                )
+            )
+            return payload["rows"]
+        base_id = int(summary["book_native_side_base_decision_log_id"])
+        assert base_id not in seen
+        row = rolling_conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (base_id,),
+        ).fetchone()
+        assert row is not None
+        base_summary = json.loads(row["artifact_json"])["summary"]
+        base_rows = reconstruct_book(base_summary, seen | {base_id})
+        current = {tuple(row[:5]): row for row in base_rows}
+        delta = json.loads(
+            zlib.decompress(
+                base64.b64decode(
+                    str(summary["book_native_side_delta_zlib_b64"])
+                )
+            )
+        )
+        for key in delta["removed_keys"]:
+            current.pop(tuple(key))
+        for row in delta["upsert_rows"]:
+            current[tuple(row[:5])] = row
+        return sorted(current.values())
+
+    for _, _, summary in rolling_rows:
+        candidates = live_health._current_global_auction_candidate_payload(
+            rolling_conn,
+            summary,
+        )
+        assert hashlib.sha256(
+            global_batch_runtime._canonical_json_bytes(candidates)
+        ).hexdigest() == summary["candidate_evaluations_sha256"]
+        reconstructed_books = {
+            "fields": list(global_batch_runtime._BOOK_NATIVE_SIDE_STATE_FIELDS),
+            "rows": reconstruct_book(summary),
+        }
+        assert hashlib.sha256(
+            global_batch_runtime._canonical_json_bytes(reconstructed_books)
+        ).hexdigest() == summary["book_native_side_states_sha256"]
+
+    selected, states = current(9)
+    boundary_id = store(
+        rolling_conn,
+        suffix="step-9",
+        selected=selected,
+        states=states,
+    )
+    boundary_summary = json.loads(
+        rolling_conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (boundary_id,),
+        ).fetchone()["artifact_json"]
+    )["summary"]
+    assert "candidate_evaluations_zlib_b64" in boundary_summary
+    assert "book_native_side_states_zlib_b64" in boundary_summary
+    rolling_ref = global_batch_runtime._GLOBAL_AUCTION_PAYLOAD_REFS[
+        global_batch_runtime._decision_log_connection_key(rolling_conn)
+    ]
+    assert rolling_ref.candidate.delta_depth == 0
+    assert rolling_ref.book.delta_depth == 0
+    assert rolling_ref.audit_context.delta_depth == 0
+
+    holding_conn = create_conn(tmp_path / "holding.db")
+    holding_payload = [
+        {
+            "position_id": f"position-{index:02d}",
+            "status": "EXCLUDED",
+            "reason": "PROBABILITY_AUTHORITY_UNAVAILABLE:0",
+            "stable_evidence": blob(f"holding-{index}"),
+        }
+        for index in range(32)
+    ]
+    holding_raw = global_batch_runtime._canonical_json_bytes(holding_payload)
+    holding_summary: Mapping[str, object] = {
+        "receipt_hash": "holding-receipt-0",
+        "holding_auction_coverage_encoding": (
+            "zlib+base64+canonical-json-v2"
+        ),
+        "holding_auction_coverage_sha256": hashlib.sha256(
+            holding_raw
+        ).hexdigest(),
+        "holding_auction_coverage_zlib_b64": base64.b64encode(
+            zlib.compress(holding_raw, level=9)
+        ).decode("ascii"),
+    }
+    holding_conn.execute(
+        """
+        INSERT INTO decision_log
+            (mode, started_at, completed_at, artifact_json, timestamp, env)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "global_single_order_auction",
+            at.isoformat(),
+            at.isoformat(),
+            json.dumps({"summary": holding_summary}),
+            at.isoformat(),
+            "live",
+        ),
+    )
+    base_id = int(holding_conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    base_mode = "global_single_order_auction"
+    base_hash = "holding-receipt-0"
+    base_sha = str(holding_summary["holding_auction_coverage_sha256"])
+    for step in range(1, 9):
+        current_holding = [dict(row) for row in holding_payload]
+        current_holding[0]["reason"] = (
+            f"PROBABILITY_AUTHORITY_UNAVAILABLE:{step}"
+        )
+        current_sha = hashlib.sha256(
+            global_batch_runtime._canonical_json_bytes(current_holding)
+        ).hexdigest()
+        delta = global_batch_runtime._keyed_object_list_delta_receipt(
+            prefix="holding_auction_coverage",
+            key_field="position_id",
+            base_rows=holding_payload,
+            current_rows=current_holding,
+            expected_sha256=current_sha,
+        )
+        receipt_hash = f"holding-receipt-{step}"
+        holding_summary = {
+            "receipt_hash": receipt_hash,
+            "holding_auction_coverage_encoding": (
+                "zlib+base64+canonical-json-v2"
+            ),
+            "holding_auction_coverage_sha256": current_sha,
+            **delta,
+            "holding_auction_coverage_base_decision_log_id": base_id,
+            "holding_auction_coverage_base_mode": base_mode,
+            "holding_auction_coverage_base_receipt_hash": base_hash,
+            "holding_auction_coverage_base_sha256": base_sha,
+            "holding_auction_coverage_delta_chain_depth": step,
+        }
+        holding_conn.execute(
+            """
+            INSERT INTO decision_log
+                (mode, started_at, completed_at, artifact_json, timestamp, env)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "global_single_order_auction_delta",
+                at.isoformat(),
+                at.isoformat(),
+                json.dumps({"summary": holding_summary}),
+                at.isoformat(),
+                "live",
+            ),
+        )
+        base_id = int(
+            holding_conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        )
+        base_mode = "global_single_order_auction_delta"
+        base_hash = receipt_hash
+        base_sha = current_sha
+        holding_payload = current_holding
+        reconstructed = live_health._current_global_auction_holding_payload(
+            holding_conn,
+            holding_summary,
+        )
+        assert reconstructed == holding_payload
+    over_depth = dict(holding_summary)
+    over_depth["holding_auction_coverage_delta_chain_depth"] = 9
+    with pytest.raises(ValueError, match="REFERENCE_DEPTH"):
+        live_health._current_global_auction_holding_payload(
+            holding_conn,
+            over_depth,
+        )
+    missing_base = dict(holding_summary)
+    missing_base["holding_auction_coverage_base_decision_log_id"] = 999_999
+    missing_base["holding_auction_coverage_delta_chain_depth"] = 1
+    with pytest.raises(ValueError, match="REFERENCE_ROW"):
+        live_health._current_global_auction_holding_payload(
+            holding_conn,
+            missing_base,
+        )
+    cyclic = dict(holding_summary)
+    cyclic.update(
+        {
+            "holding_auction_coverage_base_decision_log_id": base_id,
+            "holding_auction_coverage_base_mode": (
+                "global_single_order_auction_delta"
+            ),
+            "holding_auction_coverage_base_receipt_hash": base_hash,
+            "holding_auction_coverage_base_sha256": base_sha,
+            "holding_auction_coverage_delta_chain_depth": 1,
+        }
+    )
+    holding_conn.execute(
+        "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+        (json.dumps({"summary": cyclic}), base_id),
+    )
+    with pytest.raises(ValueError, match="REFERENCE_(?:CYCLE|DEPTH)"):
+        live_health._current_global_auction_holding_payload(
+            holding_conn,
+            cyclic,
+        )
+
+    fixed_conn.close()
+    rolling_conn.close()
+    holding_conn.close()
 
 
 def test_global_auction_holding_delta_reconstructs_current_epoch_exactly():
