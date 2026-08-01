@@ -8520,11 +8520,22 @@ def _terminal_partial_entry_obligation_proven(
     canonical_orders: list[dict],
     command_bound_projection: bool,
 ) -> bool:
-    """Prove a terminal partial entry has no unaccounted future side effect."""
+    """Prove a terminal partial entry has no unaccounted future side effect.
+
+    SCOPE: one ENTRY obligation backed by an exact terminal partial fill.
+    DRAIN: command, order, trade, execution, and position projections agree.
+    RESET: PARTIAL/CANCELLED, or the typed FAK remainder-expiry event, proves
+    that no unmatched shares can later become venue exposure.
+    """
 
     command_state = str(command.get("command_state") or "").upper()
     if (
-        command_state not in {CommandState.PARTIAL.value, CommandState.CANCELLED.value}
+        command_state
+        not in {
+            CommandState.PARTIAL.value,
+            CommandState.CANCELLED.value,
+            CommandState.EXPIRED.value,
+        }
         or not command_bound_projection
         or not canonical_orders
     ):
@@ -8533,6 +8544,22 @@ def _terminal_partial_entry_obligation_proven(
     venue_order_id = str(command.get("venue_order_id") or "")
     if not command_id or not venue_order_id:
         return False
+    if command_state == CommandState.EXPIRED.value:
+        fak_remainder_expired = conn.execute(
+            """
+            SELECT 1
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = 'EXPIRED'
+               AND json_valid(payload_json)
+               AND json_extract(payload_json, '$.reason') =
+                   'terminal_fak_partial_entry_remainder_expired'
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        if fak_remainder_expired is None:
+            return False
     if command_state == CommandState.CANCELLED.value:
         cancel_ack = conn.execute(
             """

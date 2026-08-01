@@ -12335,6 +12335,7 @@ class TestRecoveryResolutionTable:
 
         from src.execution.command_recovery import (
             reconcile_matched_cancel_review_required_entries,
+            reconcile_terminal_entry_exposure_obligations,
         )
 
         summary = reconcile_matched_cancel_review_required_entries(conn)
@@ -13191,6 +13192,20 @@ class TestRecoveryResolutionTable:
             size=6.0,
             price=0.31,
         )
+        from src.state.entry_exposure_obligation import (
+            open_entry_exposure_obligation,
+        )
+
+        open_entry_exposure_obligation(
+            conn,
+            command_id="cmd-entry-fak-partial",
+            owner_domain="trade",
+            token_id="tok-001",
+            condition_id="condition-test",
+            shares=6.0,
+            cost_basis_usd=1.86,
+            now="2026-04-26T00:00:00Z",
+        )
         _advance_to_acked(
             conn,
             command_id="cmd-entry-fak-partial",
@@ -13258,6 +13273,7 @@ class TestRecoveryResolutionTable:
 
         from src.execution.command_recovery import (
             reconcile_matched_cancel_review_required_entries,
+            reconcile_terminal_entry_exposure_obligations,
         )
 
         summary = reconcile_matched_cancel_review_required_entries(conn)
@@ -13295,6 +13311,20 @@ class TestRecoveryResolutionTable:
             "cost_basis_usd": 1.24,
             "order_status": "partial",
         }
+        obligation = reconcile_terminal_entry_exposure_obligations(conn)
+        assert obligation == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            """
+            SELECT status
+              FROM entry_exposure_obligations
+             WHERE command_id = 'cmd-entry-fak-partial'
+            """
+        ).fetchone()[0] == "RESOLVED"
 
     def test_already_canceled_exit_ambiguous_point_read_stays_review_required(
         self,
