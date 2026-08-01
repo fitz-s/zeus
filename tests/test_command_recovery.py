@@ -9315,6 +9315,133 @@ class TestRecoveryResolutionTable:
             "cancel_ack_plus_zero_pending_projection"
         )
 
+    def test_cancel_acked_no_fill_fact_and_orphan_reset_ignore_other_order_position_shares(
+        self, conn
+    ):
+        from src.execution.exchange_reconcile import record_finding
+        from src.execution.command_recovery import (
+            reconcile_cancel_ack_terminal_no_fill_facts,
+            reconcile_stale_terminal_no_fill_findings,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.35, price=0.60)
+        _advance_to_acked(conn, venue_order_id="ord-cancelled")
+        _seed_pending_entry_projection(conn, order_id="ord-cancelled")
+        _append_order_fact(
+            conn,
+            order_id="ord-cancelled",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10.35",
+            source="REST",
+        )
+        conn.execute(
+            "UPDATE position_current SET phase='active', shares=157, "
+            "cost_basis_usd=59.66, order_status='filled' WHERE position_id='pos-001'"
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={"venue_order_id": "ord-cancelled"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={"venue_order_id": "ord-cancelled", "venue_status": "CANCELED"},
+        )
+        finding = record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id="ord-cancelled",
+            context="ws_gap",
+            evidence={"trade_enumeration_available": True},
+            recorded_at="2026-04-26T00:05:30Z",
+        )
+
+        assert reconcile_cancel_ack_terminal_no_fill_facts(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert reconcile_stale_terminal_no_fill_findings(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd FROM position_current "
+            "WHERE position_id='pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 157.0,
+            "cost_basis_usd": 59.66,
+        }
+        terminal = conn.execute(
+            "SELECT state, matched_size, raw_payload_json FROM venue_order_facts "
+            "WHERE command_id='cmd-001' ORDER BY local_sequence DESC LIMIT 1"
+        ).fetchone()
+        assert terminal["state"] == "CANCEL_CONFIRMED"
+        assert Decimal(str(terminal["matched_size"])) == Decimal("0")
+        assert json.loads(terminal["raw_payload_json"])["proof_class"] == (
+            "cancel_ack_plus_command_no_fill"
+        )
+        assert conn.execute(
+            "SELECT resolution FROM exchange_reconcile_findings WHERE finding_id=?",
+            (finding.finding_id,),
+        ).fetchone()["resolution"] == "command_recovery_terminal_no_fill"
+
+    def test_cancel_acked_no_fill_fake_venue_fact_cannot_materialize_terminal_authority(
+        self, conn
+    ):
+        from src.execution.command_recovery import reconcile_cancel_ack_terminal_no_fill_facts
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.35, price=0.60)
+        _advance_to_acked(conn, venue_order_id="ord-cancelled")
+        _seed_pending_entry_projection(conn, order_id="ord-cancelled")
+        _append_order_fact(
+            conn,
+            order_id="ord-cancelled",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10.35",
+            source="FAKE_VENUE",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={"venue_order_id": "ord-cancelled"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={"venue_order_id": "ord-cancelled", "venue_status": "CANCELED"},
+        )
+
+        assert reconcile_cancel_ack_terminal_no_fill_facts(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        latest = conn.execute(
+            "SELECT state, source FROM venue_order_facts WHERE command_id='cmd-001' "
+            "ORDER BY local_sequence DESC LIMIT 1"
+        ).fetchone()
+        assert dict(latest) == {"state": "LIVE", "source": "FAKE_VENUE"}
+
     def test_cancel_acked_zero_fill_without_position_projection_voids_unprojected_entry(
         self,
         conn,

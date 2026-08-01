@@ -1793,6 +1793,8 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
         and _table_exists(conn, "position_current")
     ):
         return []
+    sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
+    source_placeholders = ",".join("?" for _ in sources)
     sql = (
         """
         WITH candidate_commands AS (
@@ -1804,6 +1806,8 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
                 cmd.position_id AS position_id,
                 pc.position_id AS projected_position_id,
                 pc.phase AS projected_phase,
+                pc.shares AS projected_shares,
+                pc.cost_basis_usd AS projected_cost_basis_usd,
                 (
                     SELECT MAX(event.occurred_at)
                       FROM venue_command_events event
@@ -1817,14 +1821,6 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
                AND cmd.state IN ('CANCELLED', 'EXPIRED')
                AND cmd.venue_order_id IS NOT NULL
                AND cmd.venue_order_id != ''
-               AND (
-                    pc.position_id IS NULL
-                    OR (
-                        pc.phase = 'pending_entry'
-                        AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
-                        AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
-                    )
-               )
                AND EXISTS (
                     SELECT 1
                       FROM venue_command_events event
@@ -1834,7 +1830,7 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
         ),
         """
         + _canonical_order_truth_cte(command_scope_cte="candidate_commands")
-        + """
+        + f"""
         SELECT
             cmd.command_id AS command_id,
             cmd.venue_order_id AS venue_order_id,
@@ -1843,6 +1839,8 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
             cmd.position_id AS position_id,
             cmd.projected_position_id AS projected_position_id,
             cmd.projected_phase AS projected_phase,
+            cmd.projected_shares AS projected_shares,
+            cmd.projected_cost_basis_usd AS projected_cost_basis_usd,
             cmd.terminal_event_occurred_at AS terminal_event_occurred_at,
             fact.fact_id AS latest_order_fact_id,
             fact.state AS latest_order_fact_state,
@@ -1854,6 +1852,7 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
             ON fact.command_id = cmd.command_id
            AND fact.venue_order_id = cmd.venue_order_id
          WHERE CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0
+           AND fact.source IN ({source_placeholders})
            AND NOT EXISTS (
                 SELECT 1
                   FROM venue_trade_facts trade
@@ -1871,7 +1870,7 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
          ORDER BY cmd.terminal_event_occurred_at, cmd.command_id
         """
     )
-    rows = conn.execute(sql).fetchall()
+    rows = conn.execute(sql, sources).fetchall()
     return [_dict_row(row) for row in rows]
 
 
@@ -13152,10 +13151,9 @@ def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dic
     """Materialize terminal no-fill order facts from already-acked cancels.
 
     A CANCEL_ACKED command event is venue-side evidence that the entry order left
-    the book. If the local command has no positive trade facts and its
-    pending_entry projection has zero exposure, the missing terminal order fact is
-    a stale read-model gap. Append that fact so the existing terminal-order-fact
-    reducer can void the pending entry projection.
+    the book. If that exact command has no positive trade facts, the missing
+    terminal order fact is a stale read-model gap. Position exposure is not part of
+    this command fact: other orders may own the same position's existing shares.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -13173,6 +13171,12 @@ def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dic
             continue
         occurred_at = str(row.get("terminal_event_occurred_at") or _now_iso())
         has_projection = bool(str(row.get("projected_position_id") or "").strip())
+        zero_pending_projection = (
+            has_projection
+            and str(row.get("projected_phase") or "") == "pending_entry"
+            and _decimal_is_zero(row.get("projected_shares"))
+            and _decimal_is_zero(row.get("projected_cost_basis_usd"))
+        )
         remaining_size = str(
             row.get("latest_order_fact_remaining_size")
             or row.get("command_size")
@@ -13182,8 +13186,12 @@ def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dic
             "reason": "cancel_ack_terminal_no_fill",
             "proof_class": (
                 "cancel_ack_plus_zero_pending_projection"
-                if has_projection
-                else "cancel_ack_plus_zero_unprojected_entry"
+                if zero_pending_projection
+                else (
+                    "cancel_ack_plus_zero_unprojected_entry"
+                    if not has_projection
+                    else "cancel_ack_plus_command_no_fill"
+                )
             ),
             "command_id": command_id,
             "venue_order_id": venue_order_id,
@@ -13199,8 +13207,11 @@ def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dic
                 "cancel_or_expire_event_observed": True,
                 "latest_order_fact_matches_command_order": True,
                 "latest_order_fact_no_fill": True,
-                "pending_entry_projection_zero_exposure": has_projection,
+                "pending_entry_projection_zero_exposure": zero_pending_projection,
                 "position_projection_absent": not has_projection,
+                "position_projection_not_required_for_command_fact": (
+                    has_projection and not zero_pending_projection
+                ),
                 "no_positive_trade_facts": True,
                 "no_existing_terminal_order_fact": True,
             },
