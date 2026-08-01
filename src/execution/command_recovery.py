@@ -18987,10 +18987,19 @@ def _confirmed_entry_trade_fact_summary(
                fact.trade_id,
                fact.filled_size,
                fact.fill_price,
+               fact.raw_payload_json,
                fact.source,
                fact.observed_at,
-               fact.venue_timestamp
+               fact.venue_timestamp,
+               cmd.token_id,
+               envelope.yes_token_id,
+               envelope.no_token_id,
+               envelope.selected_outcome_token_id
           FROM economic_trade_fact fact
+          JOIN venue_commands cmd
+            ON cmd.command_id = fact.command_id
+          JOIN venue_submission_envelopes envelope
+            ON envelope.envelope_id = cmd.envelope_id
          WHERE fact.command_id = ?
            AND fact.venue_order_id = ?
            AND fact.state = 'CONFIRMED'
@@ -19005,15 +19014,39 @@ def _confirmed_entry_trade_fact_summary(
     sources: set[str] = set()
     trade_ids: list[str] = []
     fact_ids: list[int] = []
+    from src.execution.exchange_reconcile import (
+        _json_mapping,
+        _taker_buy_trade_economics,
+        _trade_payload_for_maker_economics,
+    )
+
     for raw in rows:
         fact = _dict_row(raw)
-        size = _positive_decimal_or_none(fact.get("filled_size"))
-        price = _positive_decimal_or_none(fact.get("fill_price"))
+        exact_taker = _taker_buy_trade_economics(
+            _trade_payload_for_maker_economics(
+                _json_mapping(fact.get("raw_payload_json"))
+            ),
+            venue_order_id=venue_order_id,
+            selected_token_id=str(
+                fact.get("selected_outcome_token_id")
+                or fact.get("token_id")
+                or ""
+            ),
+            yes_token_id=str(fact.get("yes_token_id") or ""),
+            no_token_id=str(fact.get("no_token_id") or ""),
+        )
+        if exact_taker is None:
+            size = _positive_decimal_or_none(fact.get("filled_size"))
+            price = _positive_decimal_or_none(fact.get("fill_price"))
+            exact_cost = size * price if size is not None and price is not None else None
+        else:
+            size, exact_cost = exact_taker
+            price = exact_cost / size
         trade_id = str(fact.get("trade_id") or "").strip()
-        if size is None or price is None or not trade_id:
+        if size is None or price is None or exact_cost is None or not trade_id:
             continue
         filled += size
-        cost += size * price
+        cost += exact_cost
         trade_ids.append(trade_id)
         fact_ids.append(int(fact["trade_fact_id"]))
         sources.add(str(fact.get("source") or "").upper())

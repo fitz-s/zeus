@@ -3204,6 +3204,190 @@ def test_entry_fill_economics_uses_canonical_trade_fact_over_later_weaker_fact(c
     ) == (Decimal("2.5"), Decimal("0.40"), Decimal("1.000"))
 
 
+def test_taker_fak_mixed_maker_legs_preserve_exact_cash_and_reproject(conn):
+    from src.execution.command_recovery import _confirmed_entry_trade_fact_summary
+    from src.execution.exchange_reconcile import (
+        _ensure_entry_fill_position_event,
+        reconcile_recorded_maker_fill_economics,
+    )
+    from src.state.venue_command_repo import append_trade_fact as append
+
+    command_id = "cmd-taker-fak-exact-cost"
+    order_id = "ord-taker-fak-exact-cost"
+    position_id = "pos-taker-fak-exact-cost"
+    yes_token = "taker-fak-yes"
+    no_token = "taker-fak-no"
+    filled = "154.634357"
+    exact_cost = (
+        Decimal("24.74") * Decimal("0.38")
+        + Decimal("129.894357")
+        * (Decimal("1") - Decimal("0.6100000017706697"))
+    )
+    exact_price = exact_cost / Decimal(filled)
+    snapshot_id = _ensure_snapshot(
+        conn,
+        token_id=yes_token,
+        no_token_id=no_token,
+        selected_outcome_token_id=no_token,
+        outcome_label="NO",
+        snapshot_id="snap-taker-fak-exact-cost",
+    )
+    envelope_id = _ensure_envelope(
+        conn,
+        token_id=no_token,
+        yes_token_id=yes_token,
+        no_token_id=no_token,
+        side="BUY",
+        price=0.39,
+        size=154.0,
+        order_type="FAK",
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, created_at, updated_at, q_version
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ENTRY', ?, ?, 'BUY', ?, ?, ?, 'FILLED', ?, ?, ?)
+        """,
+        (
+            command_id,
+            snapshot_id,
+            envelope_id,
+            position_id,
+            "dec-taker-fak-exact-cost",
+            "idem-taker-fak-exact-cost",
+            "condition-m5",
+            no_token,
+            154.0,
+            0.39,
+            order_id,
+            NOW.isoformat(),
+            NOW.isoformat(),
+            "q-taker-fak-exact-cost",
+        ),
+    )
+    seed_position_baseline(conn, position_id=position_id, order_id=order_id)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET direction = 'buy_no', token_id = ?, no_token_id = ?
+         WHERE position_id = ?
+        """,
+        (yes_token, no_token, position_id),
+    )
+    append(
+        conn,
+        trade_id="trade-taker-fak-exact-cost",
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="MATCHED",
+        filled_size=filled,
+        fill_price=str(exact_price),
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(b"exact-fak-point-order").hexdigest(),
+        raw_payload_json={
+            "reason": "authenticated_fak_point_order_exact_economics",
+            "filled_size": filled,
+            "fill_price": str(exact_price),
+        },
+    )
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?", (command_id,)
+        ).fetchone()
+    )
+    _ensure_entry_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id=order_id,
+        filled_size=filled,
+        fill_price=str(exact_price),
+        observed_at=NOW,
+    )
+
+    raw = {
+        "id": "trade-taker-fak-exact-cost",
+        "status": "CONFIRMED",
+        "trader_side": "TAKER",
+        "side": "BUY",
+        "asset_id": no_token,
+        "taker_order_id": order_id,
+        "size": filled,
+        "price": "0.39",
+        "maker_orders": [
+            {
+                "asset_id": no_token,
+                "matched_amount": "24.74",
+                "price": "0.38",
+                "side": "SELL",
+            },
+            {
+                "asset_id": yes_token,
+                "matched_amount": "129.894357",
+                "price": "0.6100000017706697",
+                "side": "BUY",
+            },
+        ],
+    }
+    append(
+        conn,
+        trade_id="trade-taker-fak-exact-cost",
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size=filled,
+        fill_price="0.39",
+        source="REST",
+        observed_at=NOW + timedelta(seconds=1),
+        raw_payload_hash=hashlib.sha256(
+            json.dumps(raw, sort_keys=True).encode()
+        ).hexdigest(),
+        raw_payload_json=raw,
+    )
+
+    confirmed = _confirmed_entry_trade_fact_summary(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+    )
+    assert Decimal(confirmed["filled_size"]) == Decimal(filled)
+    assert Decimal(confirmed["fill_price"]) == exact_price
+
+    summary = reconcile_recorded_maker_fill_economics(
+        conn, observed_at=NOW + timedelta(seconds=2)
+    )
+
+    assert summary["corrected"] == 1
+    assert summary["projected"] == 1
+    projection = conn.execute(
+        """
+        SELECT shares, entry_price, cost_basis_usd
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert Decimal(str(projection["shares"])) == Decimal(filled)
+    assert abs(Decimal(str(projection["entry_price"])) - exact_price) < Decimal(
+        "0.000000000000001"
+    )
+    assert abs(Decimal(str(projection["cost_basis_usd"])) - exact_cost) < Decimal(
+        "0.00000000000001"
+    )
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'ENTRY_ORDER_FILLED'
+           AND order_id = ?
+        """,
+        (position_id, order_id),
+    ).fetchone()[0] == 1
+
+
 @pytest.mark.parametrize(
     "order_fact_source",
     ["REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN"],
