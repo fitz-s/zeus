@@ -9077,6 +9077,27 @@ def test_exit_fill_receipt_rejects_out_of_band_price(price):
     assert _extract_fill_price({"avgPrice": price}) is None
 
 
+@pytest.mark.parametrize("price", ["0.049", "0.951", "0.999"])
+def test_reconcile_and_recovery_reject_out_of_band_fill_projection(price):
+    from src.execution.command_recovery import _append_exit_order_fill_projection
+    from src.execution.exchange_reconcile import _missing_trade_fill_economics
+
+    assert _missing_trade_fill_economics(
+        state="CONFIRMED",
+        filled_size="1",
+        fill_price=price,
+    ) == ("fill_price",)
+    assert not _append_exit_order_fill_projection(
+        None,
+        command={"command_id": "cmd-bad-fill", "intent_kind": "EXIT"},
+        venue_order_id="order-bad-fill",
+        matched_size="1",
+        fill_price=price,
+        observed_at="2026-08-01T18:00:00Z",
+        event_type="FILL_CONFIRMED",
+    )
+
+
 def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.execution.exit_lifecycle import execute_exit

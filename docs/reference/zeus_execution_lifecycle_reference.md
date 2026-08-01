@@ -554,7 +554,8 @@ minimum size, identity, tradeability, fees/depth, and economic proof remain
 additional requirements and cannot waive the band (INV-43).
 
 Venue-reported fill prices are independently range-checked before normal fill or
-economic-close projection. An out-of-band receipt is retained as abnormal venue
+economic-close projection, and the durable trade-fact journal rejects an
+out-of-band fill before persistence. The raw receipt remains external chain/venue
 truth but cannot become ordinary lifecycle economics. Likewise, an open SELL may
 be adopted as an existing exit only when its price, GTC/GTD type, and post-only
 flag are all explicit and legal; an unproved matching open order is canceled.

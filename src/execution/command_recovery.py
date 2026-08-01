@@ -2877,6 +2877,19 @@ def _append_exit_order_fill_projection(
         return False
     if str(command.get("intent_kind") or "").upper() != "EXIT":
         return False
+    bounded_fill_price = _positive_decimal_or_none(fill_price)
+    if (
+        bounded_fill_price is None
+        or not LIVE_ORDER_MIN_UNIT_PRICE
+        <= bounded_fill_price
+        <= LIVE_ORDER_MAX_UNIT_PRICE
+    ):
+        logger.critical(
+            "recovery: blocked out-of-band exit fill projection command=%s price=%s",
+            command.get("command_id"),
+            fill_price,
+        )
+        return False
     try:
         projected = _exchange_reconcile._ensure_exit_fill_position_event(
             conn,

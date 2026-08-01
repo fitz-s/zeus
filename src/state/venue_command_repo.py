@@ -4215,6 +4215,17 @@ def append_trade_fact(
         raise ValueError(
             f"{state} trade fact requires positive finite fill economics"
         )
+    if state in _TRADE_FILL_ECONOMICS_STATES:
+        # INV-47 SCOPE: only this abnormal trade fact is rejected.
+        # DRAIN: chain/venue recovery may retain and alert on the raw receipt.
+        # RESET: no latch is stored; an in-band fill fact persists immediately.
+        try:
+            _assert_persistable_live_unit_price(fill_price)
+        except ValueError as exc:
+            raise ValueError(
+                f"{state} trade fact fill price outside absolute live band: "
+                f"fill_price={fill_price}"
+            ) from exc
     source = _validate_source(source)
     observed_at_s = _validate_observed_at(observed_at)
     venue_timestamp_s = (

@@ -6415,6 +6415,8 @@ def _exit_trade_fact_close_candidate(
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
                {order_clause}
              GROUP BY cmd.command_id, cmd.venue_order_id, cmd.size, cmd.state
+             HAVING MIN(CAST(fact.fill_price AS REAL)) >= 0.05
+                AND MAX(CAST(fact.fill_price AS REAL)) <= 0.95
              ORDER BY datetime(observed_at) DESC, cmd.updated_at DESC, cmd.command_id DESC
              LIMIT 1
             """,
@@ -6468,7 +6470,7 @@ def _exit_trade_fact_close_candidate(
     ):
         return None
     fill_price = fill_notional / filled_size
-    if fill_price <= 0 or fill_price > 1:
+    if not LIVE_ORDER_MIN_UNIT_PRICE <= fill_price <= LIVE_ORDER_MAX_UNIT_PRICE:
         return None
     return {
         "command_id": str(row["command_id"] or ""),
