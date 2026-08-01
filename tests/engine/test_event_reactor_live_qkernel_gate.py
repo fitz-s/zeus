@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-31
+# Last reused/audited: 2026-08-01
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -2054,6 +2054,64 @@ def test_global_taker_action_fresh_revalidation_never_downgrades_to_maker():
         fresh_best_bid=0.59,
         fresh_best_ask=0.60,
         tick_size=0.01,
+        decision_time=datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc),
+    ) == "NO_TRADE"
+
+
+def test_global_maker_action_fresh_revalidation_never_upgrades_to_taker():
+    cert = dict(
+        _global_current_qkernel_cert(side="NO"),
+        global_execution_mode="MAKER_REST",
+        global_limit_price="0.41",
+        global_fill_probability=0.19,
+        global_fill_probability_source="rest_then_cross_deadline_prior_v1",
+        global_rest_deadline_minutes=20.0,
+        global_probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        selection_guard_basis="CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+        selection_guard_q_safe=0.70,
+        global_expected_delta_log_wealth=0.01,
+        global_expected_ev_usd=11.0,
+    )
+    cert.update(
+        global_proposal_expected_delta_log_wealth=(
+            0.01 * 0.19
+        ),
+        global_proposal_expected_ev_usd=(
+            11.0 * 0.19
+        ),
+    )
+    _seal_current_qkernel_cert(cert)
+    actionable = {
+        "direction": "buy_no",
+        "q_lcb_5pct": cert["payoff_q_lcb"],
+        "c_fee_adjusted": cert["cost"],
+        "rest_then_cross_policy": "REST_DEFAULT",
+        "qkernel_execution_economics": cert,
+    }
+    snapshot = SimpleNamespace(
+        payload={"market_end_at": "2026-07-22T09:30:00+00:00"}
+    )
+
+    assert era._fresh_rest_then_cross_mode(
+        actionable_payload=actionable,
+        executable_snapshot=snapshot,
+        fresh_best_bid=0.46,
+        fresh_best_ask=0.52,
+        tick_size=0.001,
+        decision_time=datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc),
+    ) == "MAKER"
+
+    non_positive = dict(cert, global_proposal_expected_delta_log_wealth=0.0)
+    _seal_current_qkernel_cert(non_positive)
+    assert era._fresh_rest_then_cross_mode(
+        actionable_payload={
+            **actionable,
+            "qkernel_execution_economics": non_positive,
+        },
+        executable_snapshot=snapshot,
+        fresh_best_bid=0.46,
+        fresh_best_ask=0.52,
+        tick_size=0.001,
         decision_time=datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc),
     ) == "NO_TRADE"
 

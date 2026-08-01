@@ -30,7 +30,7 @@ from src.solve.solver import (
     GlobalSingleOrderDecision,
     GlobalSingleOrderSellCandidate,
     PortfolioWealthWitness,
-    global_candidate_from_native,
+    global_candidates_from_native,
     global_sell_candidate_from_holding,
     select_global_single_order,
 )
@@ -738,8 +738,8 @@ def select_prepared_global_auction(
         if book_epoch is None:
             for seed in getattr(prepared, "candidate_seeds", ()):
                 try:
-                    candidates.append(
-                        global_candidate_from_native(
+                    candidates.extend(
+                        global_candidates_from_native(
                             seed.native_candidate,
                             probability_witness=probability,
                             ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
@@ -858,8 +858,8 @@ def select_prepared_global_auction(
                 ),
             )
             try:
-                candidates.append(
-                    global_candidate_from_native(
+                candidates.extend(
+                    global_candidates_from_native(
                         native,
                         probability_witness=probability,
                         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,

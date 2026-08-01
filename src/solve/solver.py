@@ -1443,8 +1443,18 @@ class GlobalSingleOrderCandidate:
     executable_cost_curve: ExecutableCostCurve
     resolution_identity: str
     native_bid_levels: tuple[BookLevel, ...] = ()
-    execution_mode: Literal["TAKER_LIMIT"] = "TAKER_LIMIT"
+    execution_mode: Literal["TAKER_LIMIT", "MAKER_REST"] = "TAKER_LIMIT"
+    proposal_cost_curve: ExecutableCostCurve | None = None
+    fill_probability: float = 1.0
+    fill_probability_source: str = "immediate_taker"
+    rest_deadline_minutes: float | None = None
     eligibility_reason: GlobalEligibilityReason | None = None
+
+    @property
+    def economic_cost_curve(self) -> ExecutableCostCurve:
+        """The conditional-on-fill curve scored by the capital objective."""
+
+        return self.proposal_cost_curve or self.executable_cost_curve
 
     def __post_init__(self) -> None:
         if self.side not in {"YES", "NO"}:
@@ -1473,8 +1483,58 @@ class GlobalSingleOrderCandidate:
             or self.execution_curve_identity != curve_identity
         ):
             object.__setattr__(self, "eligibility_reason", "BOOK_CERTIFICATE_MISMATCH")
-        if self.execution_mode != "TAKER_LIMIT":
-            raise ValueError("global single-order candidates must be immediate taker-limit assets")
+        economic_curve = self.economic_cost_curve
+        if (
+            self.execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}
+            or (
+                (
+                    economic_curve.token_id != self.token_id
+                    or economic_curve.side != self.side
+                )
+                and self.eligibility_reason != "BOOK_CERTIFICATE_MISMATCH"
+            )
+            or not math.isfinite(float(self.fill_probability))
+            or not 0.0 < float(self.fill_probability) <= 1.0
+            or not str(self.fill_probability_source or "").strip()
+        ):
+            raise ValueError("global single-order execution proposal is invalid")
+        if self.execution_mode == "TAKER_LIMIT" and (
+            self.proposal_cost_curve is not None
+            or self.fill_probability != 1.0
+            or self.rest_deadline_minutes is not None
+        ):
+            raise ValueError("taker proposal cannot carry passive execution terms")
+        if self.execution_mode == "MAKER_REST" and (
+            self.proposal_cost_curve is None
+            or self.rest_deadline_minutes is None
+            or not math.isfinite(float(self.rest_deadline_minutes))
+            or float(self.rest_deadline_minutes) <= 0.0
+            or len(economic_curve.levels) != 1
+            or economic_curve.levels[0].price
+            >= self.executable_cost_curve.levels[0].price
+        ):
+            raise ValueError("maker proposal must be finite, passive, and deadline-bound")
+
+
+def _global_native_candidate_id(
+    *,
+    probability_witness: FamilyPayoffWitness,
+    native: Any,
+    binding: OutcomeTokenBinding,
+    expected_token: str,
+    execution_mode: str,
+    proposal_identity: str,
+) -> str:
+    return _hash(
+        probability_witness.family_key,
+        str(native.hypothesis_id),
+        binding.bin_id,
+        binding.condition_id,
+        str(native.side),
+        expected_token,
+        execution_mode,
+        proposal_identity,
+    )
 
 
 def global_candidate_from_native(
@@ -1486,7 +1546,36 @@ def global_candidate_from_native(
     native_bid_levels: Sequence[BookLevel] = (),
     eligibility_reason: GlobalEligibilityReason | None = None,
 ) -> GlobalSingleOrderCandidate:
-    """Materialize one order only after proving payoff/token membership."""
+    """Materialize the immediate-taker proposal after proving token membership."""
+
+    return global_candidates_from_native(
+        native,
+        probability_witness=probability_witness,
+        ledger_snapshot_id=ledger_snapshot_id,
+        book_captured_at_utc=book_captured_at_utc,
+        native_bid_levels=native_bid_levels,
+        eligibility_reason=eligibility_reason,
+        include_maker=False,
+    )[0]
+
+
+def global_candidates_from_native(
+    native: Any,
+    *,
+    probability_witness: FamilyPayoffWitness,
+    ledger_snapshot_id: str,
+    book_captured_at_utc: datetime,
+    native_bid_levels: Sequence[BookLevel] = (),
+    eligibility_reason: GlobalEligibilityReason | None = None,
+    include_maker: bool = True,
+) -> tuple[GlobalSingleOrderCandidate, ...]:
+    """Materialize current taker and passive-rest proposals for one native claim.
+
+    Both proposals retain the same immutable full book as their execution
+    authority.  The maker proposal has a separate, single-price conditional-fill
+    curve so Kelly and cross-family ranking use the price that would actually be
+    paid, without relabeling the public ask ladder as passive liquidity.
+    """
 
     if getattr(native, "no_trade_reason", None) is not None:
         raise ValueError("native no-trade candidate is not globally executable")
@@ -1516,15 +1605,7 @@ def global_candidate_from_native(
         and eligibility_reason is None
     ):
         eligibility_reason = "DETERMINISTIC_PAYOFF_NOT_PROVED"
-    return GlobalSingleOrderCandidate(
-        candidate_id=_hash(
-            probability_witness.family_key,
-            str(native.hypothesis_id),
-            binding.bin_id,
-            binding.condition_id,
-            str(native.side),
-            str(expected_token),
-        ),
+    common = dict(
         family_key=probability_witness.family_key,
         bin_id=binding.bin_id,
         condition_id=binding.condition_id,
@@ -1540,6 +1621,93 @@ def global_candidate_from_native(
         native_bid_levels=tuple(native_bid_levels),
         eligibility_reason=eligibility_reason,
     )
+    taker = GlobalSingleOrderCandidate(
+        candidate_id=_global_native_candidate_id(
+            probability_witness=probability_witness,
+            native=native,
+            binding=binding,
+            expected_token=str(expected_token),
+            execution_mode="TAKER_LIMIT",
+            proposal_identity=executable_curve_identity(curve),
+        ),
+        **common,
+    )
+    if not include_maker:
+        return (taker,)
+
+    from src.strategy.live_inference.mode_consistent_ev import (
+        MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+        MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+        MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+        maker_limit_price,
+    )
+
+    point_q = family_payoff_point_q(
+        probability_witness,
+        bin_id=binding.bin_id,
+        side=str(native.side),
+    )
+    best_bid = max(
+        (Decimal(level.price) for level in native_bid_levels),
+        default=None,
+    )
+    best_ask = curve.levels[0].price
+    maker_limit = (
+        maker_limit_price(
+            best_bid=(float(best_bid) if best_bid is not None else None),
+            best_ask=float(best_ask),
+            tick_size=float(curve.min_tick),
+            reservation=float(point_q),
+        )
+        if point_q is not None
+        else None
+    )
+    if maker_limit is None:
+        return (taker,)
+    maker_price = Decimal(str(maker_limit))
+    if not (
+        LIVE_ORDER_MIN_UNIT_PRICE <= maker_price <= LIVE_ORDER_MAX_UNIT_PRICE
+        and maker_price < best_ask
+    ):
+        return (taker,)
+    maker_fee = curve.fee_model
+    if isinstance(curve.fee_details, Mapping) and bool(
+        curve.fee_details.get("feeSchedule_taker_only")
+    ):
+        maker_fee = FeeModel(fee_rate=Decimal("0"))
+    maker_capacity = max(
+        curve.min_order_size,
+        sum((Decimal(level.size) for level in curve.levels), Decimal("0")),
+    )
+    maker_curve = ExecutableCostCurve(
+        token_id=curve.token_id,
+        side=curve.side,
+        snapshot_id=curve.snapshot_id,
+        book_hash=curve.book_hash,
+        levels=(BookLevel(price=maker_price, size=maker_capacity),),
+        fee_model=maker_fee,
+        min_tick=curve.min_tick,
+        min_order_size=curve.min_order_size,
+        quote_ttl=curve.quote_ttl,
+        fee_details=curve.fee_details,
+    )
+    maker = GlobalSingleOrderCandidate(
+        candidate_id=_global_native_candidate_id(
+            probability_witness=probability_witness,
+            native=native,
+            binding=binding,
+            expected_token=str(expected_token),
+            execution_mode="MAKER_REST",
+            proposal_identity=executable_curve_identity(maker_curve),
+        ),
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=maker_curve,
+        fill_probability=MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+        fill_probability_source=MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+        rest_deadline_minutes=MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+        **common,
+    )
+    return (taker, maker)
 
 
 @dataclass(frozen=True)
@@ -2429,6 +2597,12 @@ class GlobalSingleOrderCandidateEvaluation:
     token_id: str
     action: Literal["BUY", "SELL"]
     status: Literal["REJECTED", "SCORED", "SELECTED"]
+    execution_mode: Literal["NOT_APPLICABLE", "TAKER_LIMIT", "MAKER_REST"] = (
+        "TAKER_LIMIT"
+    )
+    fill_probability: float = 1.0
+    fill_probability_source: str = "immediate_taker"
+    rest_deadline_minutes: float | None = None
     position_id: str | None = None
     held_shares: Decimal = Decimal("0")
     sell_probability_functional: str | None = None
@@ -2445,6 +2619,7 @@ class GlobalSingleOrderCandidateEvaluation:
     capital_action_mode: Literal[
         "UNSCORED",
         "SETTLEMENT_LOCKED_BUY",
+        "CONTINGENT_MAKER_REST_BUY",
         "IMMEDIATE_REDUCE_ONLY_SELL",
     ] = "UNSCORED"
     buy_sizing_mode: Literal[
@@ -2470,6 +2645,9 @@ class GlobalSingleOrderCandidateEvaluation:
     buy_rejection_economics: GlobalAnyBuyRejectionEconomics | None = None
 
     def __post_init__(self) -> None:
+        if self.action == "SELL" and self.execution_mode == "TAKER_LIMIT":
+            object.__setattr__(self, "execution_mode", "NOT_APPLICABLE")
+            object.__setattr__(self, "fill_probability_source", "not_applicable")
         if self.action == "SELL" and all(
             value is None
             for value in (
@@ -2523,6 +2701,34 @@ class GlobalSingleOrderCandidateEvaluation:
             or self.sell_action_authority_identity is not None
         ):
             raise ValueError("BUY evaluation cannot carry a held-position binding")
+        if self.action == "BUY" and (
+            self.execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}
+            or not math.isfinite(float(self.fill_probability))
+            or not 0.0 < float(self.fill_probability) <= 1.0
+            or not str(self.fill_probability_source or "").strip()
+            or (
+                self.execution_mode == "TAKER_LIMIT"
+                and (
+                    self.fill_probability != 1.0
+                    or self.rest_deadline_minutes is not None
+                )
+            )
+            or (
+                self.execution_mode == "MAKER_REST"
+                and (
+                    self.rest_deadline_minutes is None
+                    or self.rest_deadline_minutes <= 0.0
+                )
+            )
+        ):
+            raise ValueError("BUY evaluation execution proposal is invalid")
+        if self.action == "SELL" and (
+            self.execution_mode != "NOT_APPLICABLE"
+            or self.fill_probability != 1.0
+            or self.fill_probability_source != "not_applicable"
+            or self.rest_deadline_minutes is not None
+        ):
+            raise ValueError("SELL evaluation cannot carry BUY execution terms")
         if self.sell_point_counterfactual is not None and self.action != "SELL":
             raise ValueError("only SELL evaluations may carry point counterfactuals")
         if (
@@ -2680,7 +2886,11 @@ class GlobalSingleOrderCandidateEvaluation:
         if self.buy_rejection_economics is not None:
             raise ValueError("non-rejected candidate cannot carry rejection economics")
         expected_action_mode = (
-            "SETTLEMENT_LOCKED_BUY"
+            (
+                "CONTINGENT_MAKER_REST_BUY"
+                if self.execution_mode == "MAKER_REST"
+                else "SETTLEMENT_LOCKED_BUY"
+            )
             if self.action == "BUY"
             else "IMMEDIATE_REDUCE_ONLY_SELL"
         )
@@ -2823,6 +3033,7 @@ class GlobalSingleOrderDecision:
     capital_action_mode: Literal[
         "UNSCORED",
         "SETTLEMENT_LOCKED_BUY",
+        "CONTINGENT_MAKER_REST_BUY",
         "IMMEDIATE_REDUCE_ONLY_SELL",
     ] = "UNSCORED"
     buy_sizing_mode: Literal[
@@ -3047,7 +3258,7 @@ class GlobalSingleOrderDecision:
             }
         else:
             raw_min = _single_order_min_marketable_shares(
-                self.candidate.executable_cost_curve
+                self.candidate.economic_cost_curve
             )
             legal_min = (
                 _single_order_venue_legal_neighbor(
@@ -3129,7 +3340,12 @@ class GlobalSingleOrderDecision:
             or (
                 not internal_score
                 and (
-                    self.capital_action_mode != "SETTLEMENT_LOCKED_BUY"
+                    self.capital_action_mode
+                    != (
+                        "CONTINGENT_MAKER_REST_BUY"
+                        if self.candidate.execution_mode == "MAKER_REST"
+                        else "SETTLEMENT_LOCKED_BUY"
+                    )
                     or self.resolution_at_utc is None
                     or self.resolution_at_utc.tzinfo is None
                     or self.capital_lock_hours is None
@@ -3216,6 +3432,20 @@ def _global_candidate_evaluations(
                     token_id=candidate.token_id,
                     action=action,
                     status="REJECTED",
+                    execution_mode=(
+                        "NOT_APPLICABLE" if is_sell else candidate.execution_mode
+                    ),
+                    fill_probability=(
+                        1.0 if is_sell else candidate.fill_probability
+                    ),
+                    fill_probability_source=(
+                        "not_applicable"
+                        if is_sell
+                        else candidate.fill_probability_source
+                    ),
+                    rest_deadline_minutes=(
+                        None if is_sell else candidate.rest_deadline_minutes
+                    ),
                     position_id=position_id,
                     held_shares=held_shares,
                     sell_probability_functional=(
@@ -3252,6 +3482,20 @@ def _global_candidate_evaluations(
                 side=candidate.side,
                 token_id=candidate.token_id,
                 action=action,
+                execution_mode=(
+                    "NOT_APPLICABLE" if is_sell else candidate.execution_mode
+                ),
+                fill_probability=(
+                    1.0 if is_sell else candidate.fill_probability
+                ),
+                fill_probability_source=(
+                    "not_applicable"
+                    if is_sell
+                    else candidate.fill_probability_source
+                ),
+                rest_deadline_minutes=(
+                    None if is_sell else candidate.rest_deadline_minutes
+                ),
                 status=(
                     "SELECTED"
                     if candidate.candidate_id == winner_id
@@ -3587,7 +3831,7 @@ def _single_order_execution_boundary(
         raise ValueError("single-order execution boundary requires positive shares")
     limit_price: Decimal | None = None
     raw_cost = Decimal("0")
-    for level in candidate.executable_cost_curve.levels:
+    for level in candidate.economic_cost_curve.levels:
         take = min(level.size, remaining)
         if take > 0:
             limit_price = level.price
@@ -3597,7 +3841,7 @@ def _single_order_execution_boundary(
             break
     if remaining > Decimal("1e-18") or limit_price is None:
         raise ValueError("single-order execution boundary exceeds executable depth")
-    all_in_limit = candidate.executable_cost_curve.fee_model.all_in_price(limit_price)
+    all_in_limit = candidate.economic_cost_curve.fee_model.all_in_price(limit_price)
     return limit_price, raw_cost / Decimal(shares), Decimal(shares) * all_in_limit
 
 
@@ -3618,10 +3862,10 @@ def _single_order_venue_legal_neighbor(
     direction = "buy_yes" if candidate.side == "YES" else "buy_no"
     # Each normalization is monotone and can cross a ladder boundary only once;
     # one final pass proves stability at the last reached boundary.
-    for _ in range(len(candidate.executable_cost_curve.levels) + 2):
+    for _ in range(len(candidate.economic_cost_curve.levels) + 2):
         try:
             limit_price, _, _ = _single_order_execution_boundary(candidate, current)
-            tick = candidate.executable_cost_curve.min_tick
+            tick = candidate.economic_cost_curve.min_tick
             price_decimals = abs(tick.normalize().as_tuple().exponent)
             scale = 10 ** price_decimals
             price_units = int(round(float(limit_price) * scale))
@@ -3710,7 +3954,7 @@ def _single_order_metrics(
     """
 
     cost = _single_order_cost(
-        candidate.executable_cost_curve,
+        candidate.economic_cost_curve,
         shares,
         enforce_venue_minimum=enforce_venue_minimum,
     )
@@ -3804,7 +4048,7 @@ def plan_family_joint_buy_targets(
             candidate_caps.append(Decimal("0"))
             continue
         valid_capital_limits.append(limit)
-        curve = candidate.executable_cost_curve
+        curve = candidate.economic_cost_curve
         try:
             max_shares = _single_order_max_shares_by_cost(
                 curve,
@@ -3862,13 +4106,13 @@ def plan_family_joint_buy_targets(
     minimum_costs: list[Decimal] = []
     for candidate in candidates:
         minimum = _single_order_min_marketable_shares(
-            candidate.executable_cost_curve
+            candidate.economic_cost_curve
         )
         if minimum is None:
             continue
         try:
             minimum_costs.append(
-                _single_order_cost(candidate.executable_cost_curve, minimum)
+                _single_order_cost(candidate.economic_cost_curve, minimum)
             )
         except ValueError:
             continue
@@ -3934,7 +4178,7 @@ def plan_family_joint_buy_targets(
             else None
         )
         raw_min = _single_order_min_marketable_shares(
-            candidate.executable_cost_curve
+            candidate.economic_cost_curve
         )
         legal_min = (
             _single_order_venue_legal_neighbor(
@@ -3959,7 +4203,7 @@ def plan_family_joint_buy_targets(
 
     fractional_cost = sum(
         (
-            _single_order_cost(candidates[index].executable_cost_curve, shares)
+            _single_order_cost(candidates[index].economic_cost_curve, shares)
             for index, shares in desired
         ),
         Decimal("0"),
@@ -3974,7 +4218,7 @@ def plan_family_joint_buy_targets(
         w_end = w0.copy()
         for index, shares in pairs:
             candidate = candidates[index]
-            cost = _single_order_cost(candidate.executable_cost_curve, shares)
+            cost = _single_order_cost(candidate.economic_cost_curve, shares)
             column = bins.index(candidate.bin_id)
             claim: NDArray[np.float64] = np.ones(len(bins), dtype=np.float64)
             if candidate.side == "YES":
@@ -3995,7 +4239,7 @@ def plan_family_joint_buy_targets(
         for index, shares in desired
     }
     standalone_cost = {
-        index: _single_order_cost(candidates[index].executable_cost_curve, shares)
+        index: _single_order_cost(candidates[index].economic_cost_curve, shares)
         for index, shares in desired
     }
     ranked = sorted(
@@ -4022,7 +4266,7 @@ def plan_family_joint_buy_targets(
     )
     full_cost = sum(
         (
-            _single_order_cost(candidates[index].executable_cost_curve, shares)
+            _single_order_cost(candidates[index].economic_cost_curve, shares)
             for index, shares in full_pairs
         ),
         Decimal("0"),
@@ -4128,7 +4372,7 @@ def _single_order_continuous_optimum(
 
     best = (0.0, 0.0, 0.0, Decimal("0"), Decimal("0"))
     probes = _single_order_stationary_probes(
-        candidate.executable_cost_curve,
+        candidate.economic_cost_curve,
         robust_q=Decimal(str(robust_q)),
         wealth_floor_usd=wealth_floor_usd,
         wealth_ceiling_usd=wealth_ceiling_usd,
@@ -4190,8 +4434,8 @@ def _buy_rejection_economics(
         return None
     if not all(math.isfinite(value) for value in (robust_du, robust_ev, efficiency)):
         return None
-    minimum_unit_cost = candidate.executable_cost_curve.fee_model.all_in_price(
-        candidate.executable_cost_curve.levels[0].price
+    minimum_unit_cost = candidate.economic_cost_curve.fee_model.all_in_price(
+        candidate.economic_cost_curve.levels[0].price
     )
     try:
         return GlobalBuyRejectionEconomics(
@@ -4259,18 +4503,18 @@ def _score_global_single_order(
     )
     spend_limit = min(Decimal(capital_limit_usd), affordability_limit)
     capacity_max_shares = _single_order_max_shares(
-        candidate.executable_cost_curve,
+        candidate.economic_cost_curve,
         spend_limit_usd=spend_limit,
     )
     optimization_limit = (
         spend_limit if multiplier == Decimal("1") else affordability_limit
     )
     raw_max_shares = _single_order_max_shares(
-        candidate.executable_cost_curve,
+        candidate.economic_cost_curve,
         spend_limit_usd=optimization_limit,
     )
     raw_min_shares = _single_order_min_marketable_shares(
-        candidate.executable_cost_curve
+        candidate.economic_cost_curve
     )
     if (
         raw_min_shares is None
@@ -4309,11 +4553,11 @@ def _score_global_single_order(
     legal_min_shares = venue_legal_neighbor(raw_min_shares, at_most=False)
     if legal_min_shares is None:
         legal_min_shares = raw_min_shares
-    minimum_unit_cost = candidate.executable_cost_curve.fee_model.all_in_price(
-        candidate.executable_cost_curve.levels[0].price
+    minimum_unit_cost = candidate.economic_cost_curve.fee_model.all_in_price(
+        candidate.economic_cost_curve.levels[0].price
     )
-    minimum_limit_price = candidate.executable_cost_curve.levels[0].price
-    maximum_limit_price = candidate.executable_cost_curve.levels[-1].price
+    minimum_limit_price = candidate.economic_cost_curve.levels[0].price
+    maximum_limit_price = candidate.economic_cost_curve.levels[-1].price
     if (
         minimum_limit_price > LIVE_ORDER_MAX_UNIT_PRICE
         or maximum_limit_price < LIVE_ORDER_MIN_UNIT_PRICE
@@ -4359,7 +4603,7 @@ def _score_global_single_order(
         )
 
     raw_probes = _single_order_stationary_probes(
-        candidate.executable_cost_curve,
+        candidate.economic_cost_curve,
         robust_q=Decimal(str(robust_q)),
         wealth_floor_usd=wealth_floor_usd,
         wealth_ceiling_usd=wealth_ceiling_usd,
@@ -4537,7 +4781,7 @@ def _score_global_single_order(
         projected_probes: set[Decimal] = set()
     else:
         fractional_raw_probes = _single_order_stationary_probes(
-            candidate.executable_cost_curve,
+            candidate.economic_cost_curve,
             robust_q=Decimal(str(robust_q)),
             wealth_floor_usd=wealth_floor_usd,
             wealth_ceiling_usd=wealth_ceiling_usd,
@@ -5322,14 +5566,33 @@ def _expected_growth_comparison(
         expected_ev = loss_q * float(terminal.loss_payoff_usd) + favorable_q * float(
             terminal.win_payoff_usd
         )
+    fill_probability = (
+        float(candidate.fill_probability)
+        if isinstance(candidate, GlobalSingleOrderCandidate)
+        else 1.0
+    )
+    effective_lock_hours = capital_lock_hours
+    expected_cost = float(score.cost_usd)
+    if isinstance(candidate, GlobalSingleOrderCandidate) and (
+        candidate.execution_mode == "MAKER_REST"
+    ):
+        assert candidate.rest_deadline_minutes is not None
+        rest_hours = float(candidate.rest_deadline_minutes) / 60.0
+        effective_lock_hours = (
+            fill_probability * capital_lock_hours
+            + (1.0 - fill_probability) * rest_hours
+        )
+        expected_du *= fill_probability
+        expected_ev *= fill_probability
+        expected_cost *= fill_probability
     return ExpectedGrowthComparison(
         probability_basis="POSTERIOR_PREDICTIVE_MEAN",
         probability_witness_identity=probability_witness.witness_identity,
         expected_delta_log_wealth=expected_du,
         expected_ev_usd=expected_ev,
-        capital_lock_hours=capital_lock_hours,
-        expected_log_growth_per_hour=expected_du / capital_lock_hours,
-        expected_capital_efficiency=expected_du / float(score.cost_usd),
+        capital_lock_hours=effective_lock_hours,
+        expected_log_growth_per_hour=expected_du / effective_lock_hours,
+        expected_capital_efficiency=expected_du / expected_cost,
     )
 
 
@@ -5495,12 +5758,12 @@ def _global_buy_fdr_feasible_share_cap(
     ):
         return None
     raw_min = _single_order_min_marketable_shares(
-        candidate.executable_cost_curve
+        candidate.economic_cost_curve
     )
     raw_max = sum(
         (
             Decimal(level.size)
-            for level in candidate.executable_cost_curve.levels
+            for level in candidate.economic_cost_curve.levels
             if level.price <= LIVE_ORDER_MAX_UNIT_PRICE
         ),
         Decimal("0"),
@@ -5523,7 +5786,7 @@ def _global_buy_fdr_feasible_share_cap(
     def passes(shares: Decimal) -> bool:
         try:
             average_cost = (
-                _single_order_cost(candidate.executable_cost_curve, shares)
+                _single_order_cost(candidate.economic_cost_curve, shares)
                 / shares
             )
         except (ArithmeticError, ValueError):
@@ -5797,6 +6060,7 @@ def select_global_single_order(
         family_key: str,
         action_mode: Literal[
             "SETTLEMENT_LOCKED_BUY",
+            "CONTINGENT_MAKER_REST_BUY",
             "IMMEDIATE_REDUCE_ONLY_SELL",
         ],
     ) -> tuple[GlobalSingleOrderDecision | None, str | None]:
@@ -5828,11 +6092,12 @@ def select_global_single_order(
                 score,
                 capital_action_mode=action_mode,
                 resolution_at_utc=resolution_at,
-                capital_lock_hours=capital_lock_hours,
+                capital_lock_hours=expected_growth.capital_lock_hours,
                 robust_log_growth_per_hour=(
                     None
                     if mean_action
-                    else score.robust_delta_log_wealth / capital_lock_hours
+                    else score.robust_delta_log_wealth
+                    / expected_growth.capital_lock_hours
                 ),
                 expected_growth=expected_growth,
             ),
@@ -5886,16 +6151,16 @@ def select_global_single_order(
                 side=candidate.side,
             )
             minimum_unit_cost = (
-                candidate.executable_cost_curve.fee_model.all_in_price(
-                    candidate.executable_cost_curve.levels[0].price
+                candidate.economic_cost_curve.fee_model.all_in_price(
+                    candidate.economic_cost_curve.levels[0].price
                 )
             )
             if (
                 payoff_probability_mean is not None
                 and payoff_probability_mean > float(minimum_unit_cost)
-                and candidate.executable_cost_curve.levels[0].price
+                and candidate.economic_cost_curve.levels[0].price
                 <= LIVE_ORDER_MAX_UNIT_PRICE
-                and candidate.executable_cost_curve.levels[-1].price
+                and candidate.economic_cost_curve.levels[-1].price
                 >= LIVE_ORDER_MIN_UNIT_PRICE
             ):
                 fdr_share_cap = _global_buy_fdr_feasible_share_cap(
@@ -5909,7 +6174,7 @@ def select_global_single_order(
                     try:
                         fdr_buy_capital_limit_by_id[candidate.candidate_id] = (
                             _single_order_cost(
-                                candidate.executable_cost_curve,
+                                candidate.economic_cost_curve,
                                 fdr_share_cap,
                             )
                         )
@@ -6199,6 +6464,11 @@ def select_global_single_order(
                 probability_witnesses.get(candidate.family_key),
                 JointOutcomeProbabilityWitness,
             )
+            # Execution modes are mutually exclusive proposals for the same
+            # settlement claim, not two assets. Keep the established joint
+            # family vector claim-unique; passive proposals compete separately
+            # on fill-weighted expected growth after exact single-claim sizing.
+            and candidate.execution_mode == "TAKER_LIMIT"
         ):
             joint_buy_candidates_by_family.setdefault(
                 candidate.family_key, []
@@ -6264,7 +6534,11 @@ def select_global_single_order(
             score, horizon_reason = bind_capital_horizon(
                 score,
                 family_key=candidate.family_key,
-                action_mode="SETTLEMENT_LOCKED_BUY",
+                action_mode=(
+                    "CONTINGENT_MAKER_REST_BUY"
+                    if candidate.execution_mode == "MAKER_REST"
+                    else "SETTLEMENT_LOCKED_BUY"
+                ),
             )
             if score is None:
                 assert horizon_reason is not None
@@ -6390,7 +6664,7 @@ def select_global_single_order(
             assert q_samples is not None and payoff_probability_mean is not None
             try:
                 target_cost = _single_order_cost(
-                    primary.executable_cost_curve,
+                    primary.economic_cost_curve,
                     target.shares,
                 )
                 fixed = _score_global_single_order_buy_expected(
@@ -6423,7 +6697,11 @@ def select_global_single_order(
             fixed, horizon_reason = bind_capital_horizon(
                 fixed,
                 family_key=family_key,
-                action_mode="SETTLEMENT_LOCKED_BUY",
+                action_mode=(
+                    "CONTINGENT_MAKER_REST_BUY"
+                    if primary.execution_mode == "MAKER_REST"
+                    else "SETTLEMENT_LOCKED_BUY"
+                ),
             )
             if fixed is None:
                 rejections[primary_id] = str(

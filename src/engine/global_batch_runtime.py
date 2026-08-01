@@ -920,7 +920,7 @@ def _global_preflight_exhaustion_reason(
     *,
     excluded_by_family: Mapping[str, str],
     excluded_by_candidate: Mapping[
-        tuple[str, str, str, str, str], str
+        tuple[str, str, str, str, str, str], str
     ],
 ) -> str:
     """Separate a proved CASH/HOLD optimum from an unfinished auction."""
@@ -944,6 +944,14 @@ def _global_preflight_exhaustion_reason(
         f"{base}:{reason}:families={len(excluded_by_family)}:"
         f"candidates={len(excluded_by_candidate)}"
     )
+
+
+def _global_candidate_execution_mode(candidate: object) -> str:
+    """Normalize pre-mode recovery candidates onto the live proposal identity."""
+
+    action = str(getattr(candidate, "action", "BUY") or "BUY").upper()
+    default = "TAKER_LIMIT" if action == "BUY" else "NOT_APPLICABLE"
+    return str(getattr(candidate, "execution_mode", default) or default).upper()
 
 
 _COMPLETE_ECONOMIC_NO_TRADE_REASONS = frozenset(
@@ -1151,8 +1159,6 @@ def _book_native_side_receipt(
         tuple(str(value) for value in row[1:6])
         for row in buy_candidate_index
     )
-    if len(candidate_keys) != len(set(candidate_keys)):
-        raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_BOOK_KEY_DUPLICATE")
     excluded_families = set(excluded_by_family)
     executable_keys = {
         row[:5]
@@ -1288,6 +1294,7 @@ _BUY_CANDIDATE_INDEX_KEY_FIELDS = (
     "condition_id",
     "side",
     "token_id",
+    "execution_mode",
 )
 
 
@@ -1302,16 +1309,19 @@ def _buy_candidate_index_map(
         if (
             not isinstance(raw_row, Sequence)
             or isinstance(raw_row, (str, bytes))
-            or len(raw_row) != 6
+            or len(raw_row) not in {6, 7}
         ):
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
         candidate_id = str(raw_row[0] or "")
         key = tuple(str(value or "") for value in raw_row[1:])
+        if len(raw_row) == 6:
+            key = (*key, "TAKER_LIMIT")
         if (
             not candidate_id
             or candidate_id in candidate_ids
             or not all(key)
             or key[3] not in {"YES", "NO"}
+            or key[5] not in {"TAKER_LIMIT", "MAKER_REST"}
             or key in mapped
         ):
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
@@ -1422,7 +1432,7 @@ def _apply_candidate_evaluations_delta(
         for raw_key in removed_buy_values:
             key = _delta_key(
                 raw_key,
-                size=5,
+                size=len(_BUY_CANDIDATE_INDEX_KEY_FIELDS),
                 error="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
             )
             if key in removed_buy_keys:
@@ -1442,7 +1452,7 @@ def _apply_candidate_evaluations_delta(
                 )
             key = _delta_key(
                 patch.get("key"),
-                size=5,
+                size=len(_BUY_CANDIDATE_INDEX_KEY_FIELDS),
                 error="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
             )
             candidate_id = str(patch.get("candidate_id") or "")
@@ -2218,7 +2228,7 @@ def _store_global_auction_receipt(
     fractional_kelly_multiplier: Decimal,
     excluded_by_family: Mapping[str, str] | None = None,
     excluded_by_candidate: Mapping[
-        tuple[str, str, str, str, str], str
+        tuple[str, str, str, str, str, str], str
     ] | None = None,
     book_captured_at_utc: datetime | None = None,
     book_max_age: timedelta | None = None,
@@ -2423,6 +2433,7 @@ def _store_global_auction_receipt(
             str(row.get("condition_id") or ""),
             str(row.get("side") or ""),
             str(row.get("token_id") or ""),
+            str(row.get("execution_mode") or ""),
         ]
         for row in buy_rows
     )
@@ -2430,7 +2441,9 @@ def _store_global_auction_receipt(
         len(buy_candidate_index) == len(buy_rows)
         and len({row[0] for row in buy_candidate_index}) == len(buy_rows)
         and all(
-            all(value for value in row) and row[4] in {"YES", "NO"}
+            all(value for value in row)
+            and row[4] in {"YES", "NO"}
+            and row[6] in {"TAKER_LIMIT", "MAKER_REST"}
             for row in buy_candidate_index
         )
     )
@@ -2527,6 +2540,7 @@ def _store_global_auction_receipt(
             "condition_id",
             "side",
             "token_id",
+            "execution_mode",
         ],
         "buy_candidate_index": buy_candidate_index,
     }
@@ -2581,7 +2595,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 19,
+        "schema_version": 20,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -2617,6 +2631,9 @@ def _store_global_auction_receipt(
                 "bin_id": key[2],
                 "side": key[3],
                 "token_id": key[4],
+                "execution_mode": (
+                    key[5] if len(key) > 5 else "TAKER_LIMIT"
+                ),
                 "reason": reason,
             }
             for key, reason in sorted((excluded_by_candidate or {}).items())
@@ -3739,7 +3756,7 @@ def _selection_epoch_identity_with_preflight_exclusions(
     selection_epoch_identity: str,
     excluded_by_family: Mapping[str, str],
     excluded_by_candidate: Mapping[
-        tuple[str, str, str, str, str], str
+        tuple[str, str, str, str, str, str], str
     ] | None = None,
     payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
     | None = None,
@@ -4844,7 +4861,7 @@ def process_current_global_batch(
             attempt_selection_epoch_identity: str = selection_epoch_identity,
             preflight_excluded_by_family: Mapping[str, str] | None = None,
             preflight_excluded_by_candidate: Mapping[
-                tuple[str, str, str, str, str], str
+                tuple[str, str, str, str, str, str], str
             ]
             | None = None,
             payoff_q_lcb_by_candidate: Mapping[
@@ -4883,10 +4900,12 @@ def process_current_global_batch(
                         str(asset.bin_id),
                         str(asset.side),
                         str(asset.token_id),
+                        execution_mode,
                     )
                     for asset in tuple(
                         getattr(attempt_book_epoch, "assets", ()) or ()
                     )
+                    for execution_mode in ("TAKER_LIMIT", "MAKER_REST")
                 } | {
                     (
                         "SELL",
@@ -4894,6 +4913,7 @@ def process_current_global_batch(
                         str(asset.bin_id),
                         str(asset.side),
                         str(asset.token_id),
+                        "NOT_APPLICABLE",
                     )
                     for asset in tuple(
                         getattr(attempt_book_epoch, "sell_assets", ()) or ()
@@ -4909,6 +4929,7 @@ def process_current_global_batch(
                     str(getattr(candidate, "bin_id", "") or ""),
                     str(getattr(candidate, "side", "") or ""),
                     str(getattr(candidate, "token_id", "") or ""),
+                    _global_candidate_execution_mode(candidate),
                 )
                 reason = excluded_candidates.get(key)
                 if reason is not None:
@@ -5211,7 +5232,7 @@ def process_current_global_batch(
             )
             excluded_by_family: dict[str, str] = {}
             excluded_by_candidate: dict[
-                tuple[str, str, str, str, str], str
+                tuple[str, str, str, str, str, str], str
             ] = {}
             payoff_q_lcb_by_candidate: dict[
                 tuple[str, str, str, str], float
@@ -5574,6 +5595,7 @@ def process_current_global_batch(
                         str(getattr(candidate, "bin_id", "") or ""),
                         str(getattr(candidate, "side", "") or ""),
                         str(getattr(candidate, "token_id", "") or ""),
+                        _global_candidate_execution_mode(candidate),
                     )
                     if (
                         not all(candidate_key)
@@ -5601,10 +5623,15 @@ def process_current_global_batch(
                                         str(getattr(asset, "bin_id", "") or ""),
                                         str(getattr(asset, "side", "") or ""),
                                         str(getattr(asset, "token_id", "") or ""),
+                                        execution_mode,
                                     )
                                     for asset in tuple(
                                         getattr(attempt_book_epoch, "assets", ())
                                         or ()
+                                    )
+                                    for execution_mode in (
+                                        "TAKER_LIMIT",
+                                        "MAKER_REST",
                                     )
                                     if str(
                                         getattr(asset, "family_key", "") or ""
@@ -5625,10 +5652,15 @@ def process_current_global_batch(
                                         str(getattr(asset, "bin_id", "") or ""),
                                         str(getattr(asset, "side", "") or ""),
                                         str(getattr(asset, "token_id", "") or ""),
+                                        execution_mode,
                                     )
                                     for asset in tuple(
                                         getattr(attempt_book_epoch, "assets", ())
                                         or ()
+                                    )
+                                    for execution_mode in (
+                                        "TAKER_LIMIT",
+                                        "MAKER_REST",
                                     )
                                 }
                             )

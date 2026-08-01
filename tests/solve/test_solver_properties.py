@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-29
-# Lifecycle: created=2026-07-03; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Last reused/audited: 2026-08-01
+# Lifecycle: created=2026-07-03; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -4311,12 +4311,58 @@ def test_global_single_order_endowment_bound_is_below_every_frechet_coupling():
         assert bound <= true_du + 1e-15
 
 
-def test_global_single_order_rejects_contingent_maker_asset_shape():
-    with pytest.raises(ValueError, match="immediate taker-limit"):
+def test_global_single_order_rejects_unbound_maker_asset_shape():
+    with pytest.raises(ValueError, match="execution proposal is invalid"):
         replace(
             _global_candidate(candidate_id="c", family="f", side="YES", q=0.70),
             execution_mode="MAKER",  # type: ignore[arg-type]
         )
+
+
+def test_global_maker_rest_competes_on_fill_weighted_capital_time():
+    taker = _global_candidate(
+        candidate_id="taker",
+        family="execution-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+    proposal_curve = replace(
+        taker.executable_cost_curve,
+        levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+    )
+    maker = replace(
+        taker,
+        candidate_id="maker",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=proposal_curve,
+        fill_probability=0.19,
+        fill_probability_source="measured_deadline_fill_probability_v1",
+        rest_deadline_minutes=20.0,
+    )
+
+    decision = _global_select(
+        (taker, maker),
+        cap="20",
+        resolution_hours_by_family={"execution-family": 24.0},
+    )
+
+    assert decision.candidate == maker
+    assert decision.capital_action_mode == "CONTINGENT_MAKER_REST_BUY"
+    assert decision.limit_price == Decimal("0.30")
+    assert decision.shares <= (
+        decision.fractional_kelly_target_shares
+        - decision.current_token_shares
+    )
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.capital_lock_hours == pytest.approx(
+        0.19 * 24.0 + 0.81 * (20.0 / 60.0)
+    )
+    conditional_du = decision.expected_terminal_wealth.expected_delta_log_wealth
+    assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(
+        0.19 * conditional_du
+    )
 
 
 def test_var_nonconcave_where_cvar_stays_concave():

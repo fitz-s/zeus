@@ -1467,7 +1467,7 @@ def _global_book_receipt_token_pairs(
             compressed_b64,
         ) = receipt_row
         if (
-            schema_version not in {12, 13, 14, 15, 16, 17, 18, 19}
+            schema_version not in {12, 13, 14, 15, 16, 17, 18, 19, 20}
             or coverage_status != "COMPLETE"
             or coverage_complete != 1
             or encoding != "zlib+base64+canonical-json-v1"
@@ -5221,17 +5221,16 @@ def _global_current_entry_feasibility_rejection_reason(
     strategy_policy_conn: sqlite3.Connection | None = None,
     strategy_policy_cache: dict[str, str | None] | None = None,
 ) -> str | None:
-    """Reject BUY actions the global taker-limit solver cannot execute.
+    """Reject BUY execution proposals that current policy cannot execute.
 
     The auction still owns economic selection through current q bounds, fees,
     depth, robust utility, Kelly, wealth, and caps.  The strategy registry owns
     the narrower domain license: a BUY below its declared native entry-price
-    floor is not part of that strategy's feasible set. The global candidate
-    contract is explicitly immediate ``TAKER_LIMIT``; therefore an out-of-band,
-    one-sided, or spread-forbidden book is not a maker opportunity here. A
-    future maker proposal must compete as its own fill-contingent action rather
-    than being invented after this taker action wins. SELL compares against HOLD
-    and does not consume BUY authority.
+    floor is not part of that strategy's feasible set. Taker and passive-rest
+    proposals are distinct auction assets: spread admissibility applies only to
+    the former, while the latter must carry its own non-crossing price and
+    fill/no-fill economics. SELL compares against HOLD and does not consume BUY
+    authority.
     """
 
     action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
@@ -5240,6 +5239,9 @@ def _global_current_entry_feasibility_rejection_reason(
     if action != "BUY":
         return "GLOBAL_ENTRY_FEASIBILITY_ACTION_INVALID"
     side = str(getattr(candidate, "side", "") or "").strip().upper()
+    execution_mode = str(
+        getattr(candidate, "execution_mode", "TAKER_LIMIT") or "TAKER_LIMIT"
+    ).strip().upper()
     curve = getattr(candidate, "executable_cost_curve", None)
     levels = tuple(getattr(curve, "levels", ()) or ())
     if side not in {"YES", "NO"} or not levels:
@@ -5254,24 +5256,40 @@ def _global_current_entry_feasibility_rejection_reason(
         assert_live_order_unit_price(best_ask)
     except (TypeError, ValueError) as exc:
         return f"GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:{exc}"
-    bid_levels = tuple(getattr(candidate, "native_bid_levels", ()) or ())
-    try:
-        best_bid = max(Decimal(level.price) for level in bid_levels)
-    except (ArithmeticError, AttributeError, TypeError, ValueError):
-        return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
-    if not best_bid.is_finite() or not Decimal("0") < best_bid < Decimal("1"):
-        return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
-    from src.strategy.live_inference.mode_consistent_ev import (
-        taker_spread_guard_reason,
+    proposal_curve = getattr(candidate, "economic_cost_curve", None)
+    proposal_price = (
+        Decimal(proposal_curve.levels[0].price)
+        if proposal_curve is not None and proposal_curve.levels
+        else best_ask
     )
+    if execution_mode == "TAKER_LIMIT":
+        bid_levels = tuple(getattr(candidate, "native_bid_levels", ()) or ())
+        try:
+            best_bid = max(Decimal(level.price) for level in bid_levels)
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+        if not best_bid.is_finite() or not Decimal("0") < best_bid < Decimal("1"):
+            return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+        from src.strategy.live_inference.mode_consistent_ev import (
+            taker_spread_guard_reason,
+        )
 
-    taker_rejection = taker_spread_guard_reason(
-        float(best_bid),
-        float(best_ask),
-        max_relative_spread=_taker_max_relative_spread(),
-    )
-    if taker_rejection is not None:
-        return f"GLOBAL_ENTRY_TAKER_INADMISSIBLE:{taker_rejection}"
+        taker_rejection = taker_spread_guard_reason(
+            float(best_bid),
+            float(best_ask),
+            max_relative_spread=_taker_max_relative_spread(),
+        )
+        if taker_rejection is not None:
+            return f"GLOBAL_ENTRY_TAKER_INADMISSIBLE:{taker_rejection}"
+    elif execution_mode == "MAKER_REST":
+        try:
+            assert_live_order_unit_price(proposal_price)
+        except (TypeError, ValueError) as exc:
+            return f"GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:{exc}"
+        if proposal_price >= best_ask:
+            return "GLOBAL_ENTRY_MAKER_NOT_PASSIVE"
+    else:
+        return "GLOBAL_ENTRY_EXECUTION_MODE_INVALID"
     normalized_strategy = str(strategy_key or "").strip()
     if normalized_strategy:
         if strategy_policy_conn is not None:
@@ -5293,10 +5311,10 @@ def _global_current_entry_feasibility_rejection_reason(
                 return strategy_block
         floors = _event_bound_strategy_live_quality_floors(normalized_strategy)
         floor = Decimal(str(floors["min_entry_price"]))
-        if best_ask + Decimal("1e-12") < floor:
+        if proposal_price + Decimal("1e-12") < floor:
             return (
                 "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
-                f"strategy={normalized_strategy}:ask={best_ask}:floor={floor}"
+                f"strategy={normalized_strategy}:price={proposal_price}:floor={floor}"
             )
     return None
 
@@ -11802,20 +11820,25 @@ def _global_preflight_entry_jit_receipt(
             )
         shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
         limit = Decimal(str(getattr(decision, "limit_price", "0") or "0"))
-        executable_shares = sum(
-            (
-                level.size
-                for level in current_candidate.executable_cost_curve.levels
-                if level.price <= limit
-            ),
-            Decimal("0"),
-        )
-        if shares <= 0 or executable_shares + Decimal("1e-9") < shares:
-            raise ValueError(
-                "GLOBAL_BUY_JIT_SELECTED_SIZE_INFEASIBLE:"
-                f"token_id={candidate.token_id}:limit_price={limit}:"
-                f"required_shares={shares}:executable_shares={executable_shares}"
+        if shares <= 0:
+            raise ValueError("GLOBAL_BUY_JIT_SELECTED_SIZE_INVALID")
+        if str(getattr(candidate, "execution_mode", "") or "").upper() == (
+            "TAKER_LIMIT"
+        ):
+            executable_shares = sum(
+                (
+                    level.size
+                    for level in current_candidate.executable_cost_curve.levels
+                    if level.price <= limit
+                ),
+                Decimal("0"),
             )
+            if executable_shares + Decimal("1e-9") < shares:
+                raise ValueError(
+                    "GLOBAL_BUY_JIT_SELECTED_SIZE_INFEASIBLE:"
+                    f"token_id={candidate.token_id}:limit_price={limit}:"
+                    f"required_shares={shares}:executable_shares={executable_shares}"
+                )
     except Exception as exc:  # noqa: BLE001 - typed fail-closed preflight receipt
         return dataclass_replace(
             receipt,
@@ -11945,6 +11968,29 @@ def _global_preflight_candidate_mode_receipt(
             passive_maker_context=None,
         )
         assert_live_order_unit_price(limit_price)
+        economics = receipt.qkernel_execution_economics
+        selected_limit = (
+            _optional_float(economics.get("global_limit_price"))
+            if isinstance(economics, Mapping)
+            else None
+        )
+        if selected_limit is None or not math.isclose(
+            float(limit_price),
+            selected_limit,
+            rel_tol=0.0,
+            abs_tol=max(float(curve.min_tick) / 2.0, 1e-12),
+        ):
+            return dataclass_replace(
+                receipt,
+                submitted=False,
+                side_effect_status="NO_SUBMIT",
+                reason=(
+                    "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:"
+                    "MAKER_LIMIT_SUPERSEDED:"
+                    f"selected={selected_limit}:current={limit_price}"
+                ),
+                proof_accepted=False,
+            )
     except (TypeError, ValueError) as exc:
         return dataclass_replace(
             receipt,
@@ -11971,6 +12017,7 @@ def _reusable_global_preflight_jit_candidate(
     ):
         return None
     identity_fields = (
+        "candidate_id",
         "family_key",
         "bin_id",
         "condition_id",
@@ -11981,6 +12028,7 @@ def _reusable_global_preflight_jit_candidate(
         "ledger_snapshot_id",
         "book_snapshot_id",
         "execution_curve_identity",
+        "execution_mode",
     )
     if any(
         str(getattr(current_candidate, field, "") or "")
@@ -12479,16 +12527,25 @@ def _positive_global_current_objective(cert: Mapping[str, Any]) -> bool:
         cert.get("global_probability_functional")
         == "POSTERIOR_PREDICTIVE_MEAN"
     )
+    proposal_mean = (
+        mean_action
+        and str(cert.get("global_execution_mode") or "").strip().upper()
+        == "MAKER_REST"
+    )
     delta_log_wealth = _optional_float(
         cert.get(
-            "global_expected_delta_log_wealth"
+            "global_proposal_expected_delta_log_wealth"
+            if proposal_mean
+            else "global_expected_delta_log_wealth"
             if mean_action
             else "global_robust_delta_log_wealth"
         )
     )
     ev = _optional_float(
         cert.get(
-            "global_expected_ev_usd"
+            "global_proposal_expected_ev_usd"
+            if proposal_mean
+            else "global_expected_ev_usd"
             if mean_action
             else "global_robust_ev_usd"
         )
@@ -12635,6 +12692,36 @@ def _bind_global_current_state_economics_to_proof(
             ),
             taker_forbidden_reason=None,
             p_fill_lcb=1.0,
+        )
+    elif str(cert.get("global_execution_mode") or "").strip().upper() == (
+        "MAKER_REST"
+    ):
+        maker_limit = _optional_float(cert.get("global_limit_price"))
+        fill_probability = _optional_float(
+            cert.get("global_fill_probability")
+        )
+        deadline = _optional_float(cert.get("global_rest_deadline_minutes"))
+        source = str(
+            cert.get("global_fill_probability_source") or ""
+        ).strip()
+        if (
+            maker_limit is None
+            or fill_probability is None
+            or not 0.0 < fill_probability <= 1.0
+            or deadline is None
+            or deadline <= 0.0
+            or not source
+        ):
+            raise ValueError("GLOBAL_MAKER_REST_ECONOMICS_INVALID")
+        replacement.update(
+            execution_mode_intent="MAKER",
+            rest_then_cross_policy="REST_DEFAULT",
+            maker_limit_price=maker_limit,
+            maker_fill_probability=fill_probability,
+            maker_fill_probability_source=source,
+            rest_escalation_deadline_minutes=deadline,
+            taker_forbidden_reason=None,
+            p_fill_lcb=fill_probability,
         )
     return dataclass_replace(
         proof,
@@ -12907,6 +12994,12 @@ def _global_buy_prefix_certificate_for_proof(
 
     from src.solve.solver import global_buy_fak_prefix_certificate
 
+    selected_candidate = getattr(decision, "candidate", None)
+    if str(
+        getattr(selected_candidate, "execution_mode", "") or ""
+    ).strip().upper() == "MAKER_REST":
+        return {}
+
     try:
         return global_buy_fak_prefix_certificate(
             decision,
@@ -13051,7 +13144,7 @@ def _global_actuation_selected_proof(
     global_execution_mode = str(
         getattr(candidate, "execution_mode", "") or ""
     ).strip().upper()
-    if global_execution_mode != "TAKER_LIMIT":
+    if global_execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}:
         raise ValueError("GLOBAL_ACTUATION_EXECUTION_MODE_INVALID")
     cert = _global_current_state_economics_seed(proof)
     cert.update(
@@ -13086,6 +13179,17 @@ def _global_actuation_selected_proof(
             ),
             "global_candidate_id": candidate.candidate_id,
             "global_execution_mode": global_execution_mode,
+            "global_fill_probability": float(
+                getattr(candidate, "fill_probability", 1.0)
+            ),
+            "global_fill_probability_source": str(
+                getattr(candidate, "fill_probability_source", "") or ""
+            ),
+            "global_rest_deadline_minutes": getattr(
+                candidate,
+                "rest_deadline_minutes",
+                None,
+            ),
             "global_condition_id": candidate.condition_id,
             "global_token_id": candidate.token_id,
             "global_family_key": candidate.family_key,
@@ -13112,6 +13216,34 @@ def _global_actuation_selected_proof(
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         }
     )
+    expected_growth = getattr(decision, "expected_growth", None)
+    if global_execution_mode == "MAKER_REST" and expected_growth is None:
+        raise ValueError("GLOBAL_MAKER_REST_COMPARISON_MISSING")
+    if expected_growth is not None:
+        cert.update(
+            {
+                "global_proposal_expected_delta_log_wealth": (
+                    expected_growth.expected_delta_log_wealth
+                ),
+                "global_proposal_expected_ev_usd": (
+                    expected_growth.expected_ev_usd
+                ),
+                "global_proposal_expected_log_growth_per_hour": (
+                    expected_growth.expected_log_growth_per_hour
+                ),
+                "global_proposal_expected_capital_efficiency": (
+                    expected_growth.expected_capital_efficiency
+                ),
+                "global_proposal_capital_lock_hours": (
+                    expected_growth.capital_lock_hours
+                ),
+                "global_proposal_fill_semantics": (
+                    "FILL_WEIGHTED_ZERO_CONTINUATION_LOWER_BOUND"
+                    if global_execution_mode == "MAKER_REST"
+                    else "IMMEDIATE_FILL"
+                ),
+            }
+        )
     if getattr(decision, "expected_terminal_wealth", None) is not None:
         expected_terminal = decision.expected_terminal_wealth
         cert.update(
@@ -16808,6 +16940,16 @@ def _fresh_rest_then_cross_mode(
     if (
         isinstance(economics, Mapping)
         and str(economics.get("global_execution_mode") or "").strip().upper()
+        == "MAKER_REST"
+    ):
+        return (
+            "MAKER"
+            if _positive_global_current_objective(economics)
+            else "NO_TRADE"
+        )
+    if (
+        isinstance(economics, Mapping)
+        and str(economics.get("global_execution_mode") or "").strip().upper()
         == "TAKER_LIMIT"
     ):
         mean_action = (
@@ -17753,22 +17895,10 @@ def _build_live_execution_command_certificates(
         fresh_best_ask = _optional_float(authority_witness.current_best_ask)
         best_bid = _optional_float(quote_payload.get("best_bid"))
         best_ask = _optional_float(quote_payload.get("best_ask"))
-        # Mode redecision at the live submit boundary: proof mode is not decorative, but
-        # a MAKER proof is only a resting plan. If the same rest-then-cross policy now
-        # says the fresh book should be crossed, the builder may upgrade to TAKER and
-        # must then pass taker quality, pre-submit revalidation, live-cap, and executor
-        # certificates on that same fresh book. If the policy now says MAKER, the
-        # builder rebuilds through passive-maker walls. Missing/unknown modes still
-        # fail closed because those are unproven submit economics.
-        # SINGLE MODE AUTHORITY (twin-authority #9, 2026-06-11 live): the proof
-        # mode comes from the K4.0 rest-then-cross policy; the validator's fresh
-        # mode MUST come from the SAME policy evaluated on the FRESH book —
-        # otherwise the two doctrines disagree systematically and every plan
-        # aborts MODE_FLIPPED. The old bug was two independent doctrines: proof
-        # mode from rest-then-cross, then a separate late EV override. The repair is
-        # one doctrine, not forced maker: both proof and fresh validation use the
-        # same conservative q/q_exec bound, spread/fee law, maker haircut, and
-        # mode-consistent EV margin.
+        # The globally ranked execution mode is part of the proposal identity.
+        # Fresh submit truth may supersede that proposal, never rewrite it into
+        # the opposite mode without a new global auction. The maker branch below
+        # still rebuilds the exact passive price and proves post-only non-crossing.
         _fresh_mode = _fresh_rest_then_cross_mode(
             actionable_payload=actionable.payload,
             executable_snapshot=executable_snapshot,

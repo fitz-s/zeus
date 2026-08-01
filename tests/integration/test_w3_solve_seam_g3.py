@@ -556,6 +556,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 "20C",
                 "YES",
                 "token-buy",
+                "TAKER_LIMIT",
             ): "jit depth insufficient"
         },
     )
@@ -592,7 +593,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 19
+    assert summary["schema_version"] == 20
     assert summary["wealth_reauction"] == {
         "attempt": 1,
         "previous_wealth_economic_identity": "wealth-economics-old",
@@ -637,6 +638,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "bin_id": "20C",
             "side": "YES",
             "token_id": "token-buy",
+            "execution_mode": "TAKER_LIMIT",
             "reason": "jit depth insufficient",
         }
     ]
@@ -774,6 +776,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         "condition_id",
         "side",
         "token_id",
+        "execution_mode",
     ]
     assert candidate_evaluations["buy_candidate_index"] == [
         [
@@ -783,6 +786,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "condition-buy",
             "YES",
             "token-buy",
+            "TAKER_LIMIT",
         ]
     ]
     assert summary["buy_condition_membership_count"] == 1
@@ -1044,6 +1048,7 @@ def test_candidate_delta_keys_high_cardinality_indexes_instead_of_rewriting():
             f"condition-{index // 2}",
             "YES" if index % 2 == 0 else "NO",
             f"token-{index}",
+            "TAKER_LIMIT" if index % 3 else "MAKER_REST",
         ]
 
     count = 1_024
@@ -1082,6 +1087,7 @@ def test_candidate_delta_keys_high_cardinality_indexes_instead_of_rewriting():
             "condition_id",
             "side",
             "token_id",
+            "execution_mode",
         ],
         "buy_candidate_index": sorted(base_index),
     }
@@ -8982,7 +8988,7 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
             (row_id,),
         ).fetchone()[0]
     )["summary"]
-    assert stored["schema_version"] == 19
+    assert stored["schema_version"] == 20
     probabilities = {
         "family": SimpleNamespace(
             family_key="family",
@@ -12303,7 +12309,7 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
     assert stable is receipt
 
 
-@pytest.mark.parametrize(("fresh_mode", "valid"), (("MAKER", True), ("", False)))
+@pytest.mark.parametrize(("fresh_mode", "valid"), (("TAKER", True), ("", False)))
 def test_global_preflight_mode_redecision_preserves_valid_and_falls_through_unproven(
     monkeypatch, fresh_mode, valid,
 ):
@@ -12390,6 +12396,58 @@ def test_global_preflight_mode_redecision_preserves_valid_and_falls_through_unpr
         "SUBMIT_ABORTED_MODE_FLIPPED:proof_mode=TAKER:fresh_mode=None:"
     )
     assert era._global_preflight_block_status(revalidated.reason) == "CANDIDATE_BLOCKED"
+
+
+def test_global_maker_winner_keeps_auction_mode_and_revalidates_exact_limit(
+    monkeypatch,
+):
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
+    curve = ExecutableCostCurve(
+        token_id="token-a",
+        side="NO",
+        snapshot_id="selected-book",
+        book_hash="selected-hash",
+        levels=(BookLevel(price=Decimal("0.52"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        direction="buy_no",
+        q_lcb_5pct=0.76,
+        c_fee_adjusted=0.41,
+        execution_mode_intent="MAKER",
+        rest_then_cross_policy="REST_DEFAULT",
+        qkernel_execution_economics={
+            "global_execution_mode": "MAKER_REST",
+            "global_limit_price": "0.41",
+        },
+        proof_accepted=True,
+        decision_proof_bundle=SimpleNamespace(
+            executable_snapshot=SimpleNamespace(payload={})
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_positive_global_current_objective",
+        lambda _economics: True,
+    )
+
+    stable = era._global_preflight_candidate_mode_receipt(
+        event,
+        receipt,
+        current_candidate=SimpleNamespace(executable_cost_curve=curve),
+        fresh_best_bid=0.46,
+        fresh_best_ask=0.52,
+        checked_at_utc=at,
+    )
+
+    assert stable is receipt
 
 
 def test_global_preflight_falls_through_non_actionable_winner_before_mode_redecision(
@@ -15374,6 +15432,35 @@ def test_global_current_buy_no_receipt_separates_action_and_point_parents():
     assert era._event_bound_execution_probability_pair(rebound) == pytest.approx(
         (0.8, 0.7)
     )
+
+    maker = era._bind_global_current_state_economics_to_proof(
+        proof,
+        {
+            "side": "NO",
+            "payoff_q_point": 0.75,
+            "payoff_q_lcb": 0.7,
+            "payoff_q_action": 0.8,
+            "edge_lcb": 0.2,
+            "edge_expected": 0.3,
+            "false_edge_rate": 0.1,
+            "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+            "global_execution_mode": "MAKER_REST",
+            "global_limit_price": 0.41,
+            "global_fill_probability": 0.19,
+            "global_fill_probability_source": "rest_then_cross_deadline_prior_v1",
+            "global_rest_deadline_minutes": 20.0,
+        },
+    )
+
+    assert maker.execution_mode_intent == "MAKER"
+    assert maker.rest_then_cross_policy == "REST_DEFAULT"
+    assert maker.maker_limit_price == pytest.approx(0.41)
+    assert maker.maker_fill_probability == pytest.approx(0.19)
+    assert maker.maker_fill_probability_source == (
+        "rest_then_cross_deadline_prior_v1"
+    )
+    assert maker.rest_escalation_deadline_minutes == pytest.approx(20.0)
+    assert maker.p_fill_lcb == pytest.approx(0.19)
 
 
 def test_current_global_day0_payload_replaces_local_transform_and_provenance():

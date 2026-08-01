@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-31; last_reused=2026-07-31
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-31
+# Last reused/audited: 2026-08-01
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -6932,7 +6932,7 @@ def test_holding_coverage_receipt_compresses_and_references_exact_payload(
     raw = zlib.decompress(
         base64.b64decode(first["holding_auction_coverage_zlib_b64"])
     )
-    assert first["schema_version"] == 19
+    assert first["schema_version"] == 20
     assert "holding_auction_coverage" not in first
     assert json.loads(raw) == [
         {
