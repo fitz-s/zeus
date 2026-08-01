@@ -2835,6 +2835,7 @@ def _ensure_envelope(
         outcome_label=outcome_label,
         side=side,
         order_type=order_type,
+        post_only=order_type in {"GTC", "GTD"},
         price=price,
         size=size,
         raw_response_json=raw_response_json,
@@ -7394,7 +7395,9 @@ class TestRecoveryResolutionTable:
         assert after_count == 1
         assert after_markets == ("mkt-001",)
 
-    def test_expired_terminal_no_fill_entry_resolves_late_m5_local_orphan_finding(self, conn, mock_client):
+    def test_expired_terminal_no_fill_entry_resolves_late_m5_finding_with_existing_position(
+        self, conn, mock_client
+    ):
         from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
 
         _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
@@ -7413,6 +7416,10 @@ class TestRecoveryResolutionTable:
 
         assert _get_state(conn, "cmd-001") == "EXPIRED"
         assert first_summary["advanced"] == 1
+        conn.execute(
+            "UPDATE position_current SET phase='active', shares=157, "
+            "cost_basis_usd=59.66, order_status='filled' WHERE position_id='pos-001'"
+        )
         finding = record_finding(
             conn,
             kind="local_orphan_order",
@@ -7443,6 +7450,61 @@ class TestRecoveryResolutionTable:
             "resolution": "command_recovery_terminal_no_fill",
             "resolved_by": "src.execution.command_recovery",
         }
+
+    def test_local_orphan_reset_binds_finding_and_unique_command_identity(self, conn):
+        from src.execution.command_recovery import _resolve_m5_local_orphan_findings
+
+        _insert(conn, command_id="cmd-owner", position_id="pos-owner")
+        conn.execute(
+            "UPDATE venue_commands SET venue_order_id='ord-shared' "
+            "WHERE command_id='cmd-owner'"
+        )
+        for second, (finding_id, context) in enumerate(
+            (("finding-owner", "ws_gap"), ("finding-sibling", "periodic")), start=1
+        ):
+            conn.execute(
+                """
+                INSERT INTO exchange_reconcile_findings (
+                    finding_id, kind, subject_id, context, evidence_json, recorded_at
+                ) VALUES (?, 'local_orphan_order', 'ord-shared', ?, '{}', ?)
+                """,
+                (finding_id, context, f"2026-04-26T00:07:0{second}Z"),
+            )
+
+        assert _resolve_m5_local_orphan_findings(
+            conn,
+            command_id="cmd-owner",
+            venue_order_id="ord-shared",
+            resolved_at="2026-04-26T00:08:00Z",
+            resolution="command_recovery_terminal_no_fill",
+            finding_id="finding-owner",
+        ) == 1
+        rows = conn.execute(
+            "SELECT finding_id, resolved_at FROM exchange_reconcile_findings "
+            "ORDER BY finding_id"
+        ).fetchall()
+        assert {row["finding_id"]: row["resolved_at"] for row in rows} == {
+            "finding-owner": "2026-04-26T00:08:00Z",
+            "finding-sibling": None,
+        }
+
+        _insert(conn, command_id="cmd-other", position_id="pos-other")
+        conn.execute(
+            "UPDATE venue_commands SET venue_order_id='ord-shared' "
+            "WHERE command_id='cmd-other'"
+        )
+        assert _resolve_m5_local_orphan_findings(
+            conn,
+            command_id="cmd-owner",
+            venue_order_id="ord-shared",
+            resolved_at="2026-04-26T00:09:00Z",
+            resolution="command_recovery_terminal_no_fill",
+            finding_id="finding-sibling",
+        ) == 0
+        assert conn.execute(
+            "SELECT resolved_at FROM exchange_reconcile_findings "
+            "WHERE finding_id='finding-sibling'"
+        ).fetchone()["resolved_at"] is None
 
     def test_cancel_unknown_review_required_terminal_with_trade_match_stays_blocked(self, conn, mock_client):
         _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.05)
@@ -9077,7 +9139,7 @@ class TestRecoveryResolutionTable:
             order_id="ord-partial",
             state="MATCHED",
             filled_size="1.25",
-            fill_price="0.01",
+            fill_price="0.05",
         )
         _insert_decision_log_trade_case_for_recovery(conn)
 

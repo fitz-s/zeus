@@ -1908,6 +1908,11 @@ def _local_orphan_no_fill_candidates(conn: sqlite3.Connection) -> list[dict]:
            AND fact.venue_order_id = cmd.venue_order_id
          WHERE finding.kind = 'local_orphan_order'
            AND finding.resolved_at IS NULL
+           AND 1 = (
+                SELECT COUNT(*)
+                  FROM venue_commands owner
+                 WHERE owner.venue_order_id = finding.subject_id
+           )
            AND cmd.intent_kind = 'ENTRY'
            AND cmd.state IN (?, ?)
            AND (
@@ -1943,9 +1948,6 @@ def _stale_local_orphan_terminal_no_fill_candidates(conn: sqlite3.Connection) ->
             cmd.command_id AS command_id,
             cmd.venue_order_id AS venue_order_id,
             cmd.state AS command_state,
-            pc.phase AS position_phase,
-            pc.shares AS position_shares,
-            pc.cost_basis_usd AS position_cost_basis_usd,
             fact.fact_id AS order_fact_id,
             fact.state AS order_fact_state,
             fact.observed_at AS order_fact_observed_at,
@@ -1955,17 +1957,12 @@ def _stale_local_orphan_terminal_no_fill_candidates(conn: sqlite3.Connection) ->
           FROM exchange_reconcile_findings finding
           JOIN venue_commands cmd
             ON cmd.venue_order_id = finding.subject_id
-          LEFT JOIN position_current pc
-            ON pc.position_id = cmd.position_id
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
          WHERE finding.kind = 'local_orphan_order'
            AND finding.resolved_at IS NULL
            AND cmd.intent_kind = 'ENTRY'
            AND cmd.state IN ('CANCELLED', 'EXPIRED')
-           AND pc.phase = 'voided'
-           AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
-           AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
            AND fact.state IN ({state_placeholders})
            AND fact.source IN ({source_placeholders})
            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0
@@ -10121,6 +10118,7 @@ def reconcile_terminal_order_facts(
             try:
                 resolved_findings = _resolve_m5_local_orphan_findings(
                     conn,
+                    command_id=command_id,
                     venue_order_id=order_id,
                     resolved_at=occurred_at,
                     resolution="command_recovery_terminal_no_fill",
@@ -12930,22 +12928,46 @@ def _matching_trades_for_command(
 def _resolve_m5_local_orphan_findings(
     conn: sqlite3.Connection,
     *,
+    command_id: str,
     venue_order_id: str,
     resolved_at: str,
     resolution: str,
+    finding_id: str | None = None,
 ) -> int:
     if not _table_exists(conn, "exchange_reconcile_findings"):
         return 0
-    rows = conn.execute(
+    owner = conn.execute(
         """
+        SELECT COUNT(*) AS total_count,
+               SUM(CASE WHEN command_id = ? THEN 1 ELSE 0 END) AS owner_count
+          FROM venue_commands
+         WHERE venue_order_id = ?
+        """,
+        (command_id, venue_order_id),
+    ).fetchone()
+    owner_row = _dict_row(owner) if owner else {}
+    if (
+        int(owner_row.get("total_count", 0) or 0) != 1
+        or int(owner_row.get("owner_count", 0) or 0) != 1
+    ):
+        return 0
+    identity_clause = "AND finding_id = ?" if finding_id is not None else ""
+    params: tuple[object, ...] = (
+        (venue_order_id, finding_id)
+        if finding_id is not None
+        else (venue_order_id,)
+    )
+    rows = conn.execute(
+        f"""
         SELECT finding_id
           FROM exchange_reconcile_findings
          WHERE kind = 'local_orphan_order'
            AND subject_id = ?
            AND resolved_at IS NULL
+           {identity_clause}
          ORDER BY recorded_at, finding_id
         """,
-        (venue_order_id,),
+        params,
     ).fetchall()
     if not rows:
         return 0
@@ -13307,9 +13329,11 @@ def reconcile_stale_terminal_no_fill_findings(conn: sqlite3.Connection) -> dict:
                 continue
             resolved = _resolve_m5_local_orphan_findings(
                 conn,
+                command_id=command_id,
                 venue_order_id=venue_order_id,
                 resolved_at=str(row.get("order_fact_observed_at") or _now_iso()),
                 resolution="command_recovery_terminal_no_fill",
+                finding_id=str(row.get("finding_id") or ""),
             )
             summary["advanced"] += resolved
         except Exception as exc:
@@ -14274,6 +14298,7 @@ def reconcile_partial_remainders(
                     )
                 resolved_findings = _resolve_m5_local_orphan_findings(
                     conn,
+                    command_id=command_id,
                     venue_order_id=venue_order_id,
                     resolved_at=now,
                     resolution="command_recovery_expired_partial_remainder",
@@ -15254,6 +15279,7 @@ def _review_required_cancel_unknown_live_order_recovery(
             )
             resolved_findings = _resolve_m5_local_orphan_findings(
                 conn,
+                command_id=cmd.command_id,
                 venue_order_id=venue_order_id,
                 resolved_at=now,
                 resolution=resolution,
@@ -15457,6 +15483,7 @@ def _review_required_cancel_unknown_live_order_recovery(
                     )
                     resolved_findings = _resolve_m5_local_orphan_findings(
                         conn,
+                        command_id=cmd.command_id,
                         venue_order_id=venue_order_id,
                         resolved_at=now,
                         resolution="command_recovery_terminal_no_fill",
