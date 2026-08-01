@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Purpose: Materialize replacement live forecast posteriors and publish commit wakes.
 # Reuse: Inspect forecast materialization and reactor-wake contracts before changing.
 """Materialize Open-Meteo ECMWF IFS 9km + Bayes fusion posterior."""
@@ -56,6 +56,20 @@ def _forecast_writer_lock():
 
     with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE):
         yield
+
+
+def _attach_world_read_only(conn) -> None:
+    """Expose current observation truth without widening the forecast write lock."""
+
+    from src.state.db import ZEUS_WORLD_DB_PATH
+
+    attached = {
+        str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    if "world" in attached:
+        return
+    world_uri = f"{ZEUS_WORLD_DB_PATH.resolve().as_uri()}?mode=ro"
+    conn.execute("ATTACH DATABASE ? AS world", (world_uri,))
 
 
 @dataclass(frozen=True)
@@ -363,6 +377,7 @@ def _materialize(
 
         owned_conn = get_forecasts_connection(write_class=None)
         try:
+            _attach_world_read_only(owned_conn)
             return _materialize(
                 input_json,
                 commit=commit,
@@ -664,6 +679,7 @@ def main(argv: list[str] | None = None) -> int:
 
         conn = get_forecasts_connection(write_class=None)
         try:
+            _attach_world_read_only(conn)
             schema_ready = False
             if args.commit:
                 try:

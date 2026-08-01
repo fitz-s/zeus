@@ -2130,6 +2130,32 @@ def test_materialize_script_template_requires_precision_metadata() -> None:
     assert template["precision_metadata_json"] == "openmeteo_precision_metadata.json"
 
 
+def test_materialize_script_attaches_world_observations_read_only(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+    import src.state.db as state_db
+
+    forecasts_path = tmp_path / "forecasts.db"
+    world_path = tmp_path / "world.db"
+    world = sqlite3.connect(world_path)
+    world.execute("CREATE TABLE observation_prints (value_native REAL NOT NULL)")
+    world.execute("INSERT INTO observation_prints VALUES (8.0)")
+    world.commit()
+    world.close()
+    conn = sqlite3.connect(forecasts_path)
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_path)
+
+    cli._attach_world_read_only(conn)
+
+    assert conn.execute(
+        "SELECT value_native FROM world.observation_prints"
+    ).fetchone()[0] == 8.0
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        conn.execute("INSERT INTO world.observation_prints VALUES (9.0)")
+    conn.close()
+
+
 def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
     tmp_path, monkeypatch, capsys
 ) -> None:
@@ -2152,6 +2178,7 @@ def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
         "get_forecasts_connection",
         lambda **_kwargs: conn,
     )
+    monkeypatch.setattr(cli, "_attach_world_read_only", lambda _conn: None)
 
     @contextmanager
     def _writer_lock():
@@ -2238,6 +2265,7 @@ def test_materialize_script_batch_prepares_schema_before_first_input_error(
         "get_forecasts_connection",
         lambda **_kwargs: conn,
     )
+    monkeypatch.setattr(cli, "_attach_world_read_only", lambda _conn: None)
 
     @contextmanager
     def _writer_lock():
