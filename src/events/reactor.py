@@ -11422,6 +11422,14 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 decision_time=received_at,
                 forecast_only_admissible=True,
             )
+            # Entry admission is forecast-phase scoped; management of an order
+            # Zeus already submitted is not.  Day0 maker rests must remain
+            # enumerable after the family leaves forecast-only admission, or a
+            # live order silently disappears from cancel/reprice re-decision.
+            management_beliefs = _all_latest_beliefs(
+                world_ro,
+                decision_time=received_at,
+            )
             beliefs, screened_belief_keys, total_beliefs = _edli_redecision_screen_belief_batch(
                 all_beliefs,
                 max_families=rd_cap,
@@ -11468,7 +11476,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             open_rests = _edli_open_maker_rests_for_screen(
                 trade_ro,
                 world_ro,
-                beliefs=all_beliefs,
+                beliefs=management_beliefs,
             )
             entry_refresh_condition_scope = entry_substrate_refresh_scope(
                 trade_ro,
@@ -11484,7 +11492,10 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 decision_time=received_at,
             )
             entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
-            open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, all_beliefs)
+            open_rest_condition_scope = _edli_open_rest_condition_scope(
+                open_rests,
+                management_beliefs,
+            )
             rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
         finally:
             try:
@@ -11673,6 +11684,10 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     decision_time=received_at,
                     forecast_only_admissible=True,
                 )
+                management_beliefs = _all_latest_beliefs(
+                    world_ro,
+                    decision_time=received_at,
+                )
                 beliefs = _edli_filter_beliefs_to_family_keys(
                     all_beliefs,
                     screened_belief_keys,
@@ -11707,7 +11722,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 open_rests = _edli_open_maker_rests_for_screen(
                     trade_ro,
                     world_ro,
-                    beliefs=all_beliefs,
+                    beliefs=management_beliefs,
                 )
                 rest_pulls = screen_resting_orders(
                     world_ro,

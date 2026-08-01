@@ -1,5 +1,6 @@
 # Created: 2026-06-16
-# Last audited: 2026-06-16
+# Last reused or audited: 2026-08-01
+# Lifecycle: created=2026-06-16; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Authority basis: maker rest cancellation must continue through the same live
 #   redecision event type as price and terminal-no-fill management. The caller
 #   half harvests confirmed-cancelled rests, recovers each family from venue
@@ -252,15 +253,17 @@ def test_open_rest_screen_keeps_active_local_commands_with_open_venue_fact():
 
 
 def test_redecision_screen_manages_open_rests_outside_entry_fair_batch():
-    """Entry fair-batching must not starve already-submitted maker-rest management."""
+    """Entry phase filters must not erase already-submitted Day0 maker rests."""
 
     from src.events import reactor
 
     source = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
 
-    assert source.count("beliefs=all_beliefs") >= 2
+    assert source.count("management_beliefs = _all_latest_beliefs(") >= 2
+    assert source.count("beliefs=management_beliefs") >= 2
     assert "_edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)" not in source
-    assert "_edli_open_rest_condition_scope(open_rests, all_beliefs)" in source
+    assert "forecast_only_admissible=True" in source
+    assert "_edli_open_rest_condition_scope(\n                open_rests,\n                management_beliefs," in source
 
 
 def test_emit_routes_through_standard_live_redecision(monkeypatch):
