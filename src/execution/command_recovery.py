@@ -9284,6 +9284,67 @@ def _position_current_for_terminal_order(
     return _dict_row(row)
 
 
+def _existing_position_for_incremental_terminal_no_fill(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    order_id: str,
+) -> dict | None:
+    """Return the filled position targeted by a separate zero-fill entry order."""
+
+    if not _table_exists(conn, "position_current"):
+        return None
+    position_id = str(command.get("position_id") or "").strip()
+    if not position_id or not order_id:
+        return None
+    row = conn.execute(
+        "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    current = _dict_row(row)
+    current_order_id = str(current.get("order_id") or "").strip()
+    if current_order_id and current_order_id.lower() == order_id.lower():
+        return None
+    if str(current.get("phase") or "") not in {"active", "day0_window", "pending_exit"}:
+        return None
+    if not (
+        _decimal_is_positive(current.get("shares"))
+        or _decimal_is_positive(current.get("chain_shares"))
+    ):
+        return None
+
+    hydrated = _hydrate_command_execution_identity(conn, command)
+    direction = str(current.get("direction") or "").strip()
+    command_direction = _direction_from_command_tokens(hydrated)
+    held_token_id = str(
+        current.get("no_token_id") if direction == "buy_no" else current.get("token_id")
+    ).strip()
+    command_token_id = str(hydrated.get("token_id") or "").strip()
+    current_condition_id = str(current.get("condition_id") or "").strip()
+    command_condition_id = str(
+        hydrated.get("env_condition_id")
+        or hydrated.get("snapshot_condition_id")
+        or hydrated.get("market_id")
+        or ""
+    ).strip()
+    if not all(
+        (
+            direction in {"buy_yes", "buy_no"},
+            command_direction == direction,
+            held_token_id,
+            held_token_id == command_token_id,
+            current_condition_id,
+            current_condition_id == command_condition_id,
+        )
+    ):
+        raise ValueError(
+            "incremental terminal no-fill command does not exactly match existing exposure"
+        )
+    return current
+
+
 _WEATHER_EVENT_SLUG_RE = re.compile(
     r"^(?P<metric>highest|lowest)-temperature-in-(?P<city>.+)-on-"
     r"(?P<month>[a-z]+)-(?P<day>\d{1,2})-(?P<year>\d{4})$"
@@ -9546,6 +9607,22 @@ def _append_entry_order_voided_projection(
     from src.state.ledger import append_many_and_project
 
     order_id = str(order_fact.get("order_fact_venue_order_id") or command.get("venue_order_id") or "")
+    existing_position = _existing_position_for_incremental_terminal_no_fill(
+        conn,
+        command=command,
+        order_id=order_id,
+    )
+    if existing_position is not None:
+        logger.info(
+            "recovery: terminal no-fill incremental entry preserved position %s "
+            "shares=%s chain_shares=%s command=%s order=%s",
+            existing_position.get("position_id"),
+            existing_position.get("shares"),
+            existing_position.get("chain_shares"),
+            command.get("command_id"),
+            order_id,
+        )
+        return
     try:
         current = _position_current_for_terminal_order(conn, command=command, order_id=order_id)
     except MissingPositionCurrentForTerminalOrder:

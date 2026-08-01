@@ -8061,6 +8061,89 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
         assert current["order_status"] == "canceled"
 
+    def test_incremental_terminal_no_fill_preserves_existing_filled_position(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=151.5, price=0.34)
+        _seed_pending_entry_projection(
+            conn,
+            command_id="cmd-filled",
+            order_id="ord-filled",
+        )
+        _append_test_filled_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-filled",
+            order_id="ord-filled",
+            shares=157.0,
+            cost_basis_usd=59.66,
+            size_usd=59.66,
+            entry_price=0.38,
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET chain_state = 'synced',
+                   chain_shares = 157.0,
+                   chain_avg_price = 0.38,
+                   chain_cost_basis_usd = 59.66
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _advance_to_cancel_pending(conn, venue_order_id="ord-increment")
+        _append_order_fact(
+            conn,
+            order_id="ord-increment",
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="151.5",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_order_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_id,
+                   order_status, chain_state, chain_shares
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 157.0,
+            "cost_basis_usd": 59.66,
+            "entry_price": 0.38,
+            "order_id": "ord-filled",
+            "order_status": "filled",
+            "chain_state": "synced",
+            "chain_shares": 157.0,
+        }
+        position_events = conn.execute(
+            """
+            SELECT event_type, command_id, order_id
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+        assert [dict(row) for row in position_events] == [
+            {"event_type": "POSITION_OPEN_INTENT", "command_id": "cmd-filled", "order_id": None},
+            {"event_type": "ENTRY_ORDER_POSTED", "command_id": "cmd-filled", "order_id": "ord-filled"},
+            {"event_type": "ENTRY_ORDER_FILLED", "command_id": "cmd-filled", "order_id": "ord-filled"},
+        ]
+
     def test_terminal_no_fill_order_fact_can_collect_redecision_continuation(
         self,
         conn,
