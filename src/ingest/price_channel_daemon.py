@@ -291,6 +291,10 @@ def main() -> None:
         "edli_live_order_events reachable under the sanctioned path"
     )
 
+    # Prove the booted process identity before network-derived subscription setup can
+    # delay scheduler startup.  The scheduler keeps this same heartbeat current below.
+    _write_price_channel_heartbeat()
+
     # SIGTERM → graceful shutdown.
     signal.signal(signal.SIGTERM, _graceful_shutdown)
 

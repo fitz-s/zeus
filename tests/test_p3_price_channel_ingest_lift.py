@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-29 (isolated M5 authority proof cadence)
+# Last reused or audited: 2026-07-31 (boot identity precedes network setup)
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
@@ -95,6 +95,25 @@ def test_market_channel_bootstrap_separates_entry_and_held_exit_metadata() -> No
         and keyword.value.value == "exit"
         for keyword in exit_calls[0].keywords
     )
+
+
+def test_price_channel_daemon_writes_boot_identity_before_ws_setup() -> None:
+    tree = ast.parse(_PRICE_CHANNEL_DAEMON.read_text(encoding="utf-8"))
+    main = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    calls = {
+        call.func.id: call.lineno
+        for call in ast.walk(main)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id
+        in {"_write_price_channel_heartbeat", "_start_user_channel_ingestor"}
+    }
+
+    assert calls["_write_price_channel_heartbeat"] < calls["_start_user_channel_ingestor"]
 
 
 def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> None:
