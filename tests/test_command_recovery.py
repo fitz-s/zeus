@@ -18193,6 +18193,17 @@ class TestRecoveryResolutionTable:
                 filled_size=size,
                 fill_price="0.34",
             )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={
+                "reason": "authenticated_entry_trade_fact_committed",
+                "proof_class": "canonical_confirmed_trade_facts_exact_order",
+                "filled_size": "101.976966",
+            },
+        )
         _append_order_fact(
             conn,
             order_id=order_id,
@@ -18244,6 +18255,87 @@ class TestRecoveryResolutionTable:
         assert partial["matched_size"] == "101.976966"
         assert partial["remaining_size"] == "0"
         assert expired["unfilled_size"] == "0.023034"
+
+    def test_terminal_gtc_multileg_quantization_dust_confirms_fill(self, conn):
+        """A sub-centish share tail is venue dust, not live exposure."""
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+        from src.state.venue_command_repo import append_event
+
+        order_id = "ord-terminal-gtc-dust"
+        _insert(conn, size=243.0, price=0.19, order_type="GTC")
+        _seed_pending_entry_projection(conn)
+        _advance_to_acked(conn, venue_order_id=order_id)
+        sizes = ("101.634563", "1.36", *("20" for _ in range(7)))
+        for index, size in enumerate(sizes):
+            _append_trade_fact(
+                conn,
+                order_id=order_id,
+                trade_id=f"trade-terminal-dust-{index}",
+                state="CONFIRMED",
+                filled_size=size,
+                fill_price="0.19",
+            )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={
+                "reason": "authenticated_entry_trade_fact_committed",
+                "proof_class": "canonical_confirmed_trade_facts_exact_order",
+                "filled_size": "242.994563",
+            },
+        )
+        _append_order_fact(
+            conn,
+            order_id=order_id,
+            state="MATCHED",
+            matched_size="242.994563",
+            remaining_size="0.005437",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+                "venue_order_id": order_id,
+                "point_order_status": "MATCHED",
+                "point_order": {
+                    "id": order_id,
+                    "status": "MATCHED",
+                    "order_type": "GTC",
+                    "original_size": "243",
+                    "size_matched": "242.994563",
+                    "side": "BUY",
+                    "asset_id": "tok-001",
+                },
+                "proof_class": "point_order_filled_requires_complete_fill_fact_authority",
+            },
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'day0_window',
+                   shares = 355.51,
+                   chain_shares = 355.51,
+                   chain_state = 'synced'
+             WHERE position_id = 'pos-001'
+            """
+        )
+
+        summary = reconcile_matched_cancel_review_required_entries(conn)
+
+        assert summary == {"scanned": 2, "advanced": 1, "stayed": 1, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        event = _get_events(conn, "cmd-001")[-1]
+        assert event["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == "authenticated_trade_fact_full_fill"
+        assert payload["filled_size"] == "242.994563"
 
     def test_filled_entry_execution_fact_repair_preserves_position_increments(
         self,

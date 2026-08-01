@@ -11352,6 +11352,7 @@ def _clear_review_required_terminal_partial_entry(
         or matched is None
         or filled != matched
         or matched >= requested
+        or requested - matched < Decimal("0.01")
         or int(trade_summary.get("count") or 0) <= 0
     ):
         return False
@@ -11794,9 +11795,9 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
             if already_canceled_outcome not in {"stayed", "advanced"}:
                 summary["errors"] += 1
                 continue
-            trade_summary = _positive_fill_trade_fact_summary(
+            trade_summary = _confirmed_bound_trade_fact_summary(
                 conn,
-                command_id,
+                command_id=command_id,
                 venue_order_id=venue_order_id,
             )
             filled_size = str(trade_summary.get("filled_size") or "0")
