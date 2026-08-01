@@ -10266,6 +10266,22 @@ def reconcile_matched_order_facts(
                 summary["errors"] += 1
                 continue
             event_type = _matched_event_type(row, matched_size, venue_status=venue_status)
+            if (
+                review_required_command
+                and event_type == CommandEventType.PARTIAL_FILL_OBSERVED.value
+                and str(row.get("intent_kind") or "").upper() == "EXIT"
+                and str(row.get("side") or "").upper() == "SELL"
+                and str(
+                    _first_present(point_order or {}, "order_type", "orderType")
+                    or ""
+                ).upper()
+                == "FAK"
+            ):
+                # SCOPE: one terminal FAK EXIT already in REVIEW_REQUIRED.
+                # DRAIN: the later Chain-aware review pass owns this exact shape.
+                # RESET: that pass proves the residual and emits PARTIAL->EXPIRED.
+                summary["stayed"] += 1
+                continue
             command_already_terminal = (
                 str(row.get("state") or "").upper() in _TERMINAL_POSITIVE_MATCH_COMMAND_STATES
             )

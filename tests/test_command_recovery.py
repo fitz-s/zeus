@@ -13099,9 +13099,29 @@ class TestRecoveryResolutionTable:
         )
 
         from src.execution.command_recovery import (
+            reconcile_matched_order_facts,
             reconcile_matched_cancel_review_required_entries,
         )
         from src.execution.exit_safety import can_submit_replacement_sell
+
+        if command_order_type == point_order_type == "FAK":
+            point_order = {
+                "orderID": "ord-exit-partial",
+                "status": "MATCHED",
+                "order_type": "FAK",
+                "side": "SELL",
+                "asset_id": "tok-001",
+                "original_size": point_original_size,
+                "size_matched": filled_size,
+                "price": "0.46",
+                "trades": ["trade-exit-partial"],
+            }
+            generic = reconcile_matched_order_facts(
+                conn,
+                SimpleNamespace(get_order=lambda _order_id: point_order),
+            )
+            assert generic["errors"] == 0
+            assert _get_state(conn, "cmd-exit") == "REVIEW_REQUIRED"
 
         summary = reconcile_matched_cancel_review_required_entries(conn)
 
