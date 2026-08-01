@@ -3335,6 +3335,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
     assert current_day0_payload == {}
     assert len(preparation_calls) == 1
     assert preparation_calls[0]["required_condition_id"] == "c0"
+    assert preparation_calls[0]["allow_partial_deterministic"] is False
     assert preparation_calls[0]["allow_unobserved_day0_replacement"] is False
     assert preparation_calls[0]["allow_provisional_day0_replacement"] is False
 
@@ -3382,6 +3383,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
     )
     assert sell_rebound.probability_witness is selected
     assert len(preparation_calls) == 2
+    assert preparation_calls[1]["allow_partial_deterministic"] is True
     assert preparation_calls[1]["allow_unobserved_day0_replacement"] is True
     assert preparation_calls[1]["allow_provisional_day0_replacement"] is True
 
@@ -3433,6 +3435,83 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
             decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
         )
     assert "fields=yes_point_q" in caplog.text
+    conn.close()
+
+
+def test_global_sell_jit_deterministic_hard_fact_supersedes_statistical_selection(
+    monkeypatch,
+):
+    from src.solve.solver import deterministic_bin_payoff_witness_identity
+
+    event = _global_scope_event(city="Alpha", source_run_id="run-hard-fact-jit")
+    actuation = _adapter_sell_actuation(
+        event,
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="mature",
+        exit_authority_reason="day0_high_extreme_post_peak",
+    )
+    selected = actuation.probability_witness
+    captured_at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
+    binding = OutcomeTokenBinding(
+        bin_id="20C",
+        condition_id="condition-1",
+        yes_token_id="yes-token",
+        no_token_id="no-token",
+    )
+    fields = {
+        "family_key": selected.family_key,
+        "bindings": (binding,),
+        "exact_yes_payoffs": (("20C", 1),),
+        "q_version": "q-hard-fact",
+        "resolution_identity": "resolution-hard-fact",
+        "topology_identity": "topology-hard-fact",
+        "posterior_identity_hash": "posterior-hard-fact",
+        "source_truth_identity": "source-hard-fact",
+        "authority_certificate_hash": "authority-hard-fact",
+        "band_alpha": 0.05,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": captured_at,
+    }
+    deterministic = DeterministicBinPayoffWitness(
+        **fields,
+        max_age=_dt.timedelta(minutes=5),
+        witness_identity=deterministic_bin_payoff_witness_identity(**fields),
+    )
+    preparation_calls = []
+
+    def current_family(*_args, **kwargs):
+        preparation_calls.append(dict(kwargs))
+        return bridge.PreparedGlobalFamily(
+            decision_id="current-hard-fact",
+            probability_witness=deterministic,
+            candidate_seeds=(),
+            day0_exit_authority_status="mature",
+            day0_exit_authority_reason="day0_deterministic_bin_payoff",
+            sell_action_authority_identity="hard-fact-sell-authority",
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        current_family,
+    )
+    conn = sqlite3.connect(":memory:")
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED",
+    ):
+        era._current_global_actuation_prepared_family(
+            event,
+            global_actuation=actuation,
+            forecast_conn=conn,
+            topology_conn=conn,
+            observation_conn=conn,
+            decision_time=captured_at,
+        )
+
+    assert preparation_calls[0]["required_condition_id"] == "condition-1"
+    assert preparation_calls[0]["allow_partial_deterministic"] is True
     conn.close()
 
 
@@ -26164,6 +26243,7 @@ def _adapter_sell_actuation(
     probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
     exit_authority_status="not_applicable",
     exit_authority_reason="non_day0_family",
+    min_tick="0.01",
 ):
     at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
     curve = ExecutableSellCurve(
@@ -26176,7 +26256,7 @@ def _adapter_sell_actuation(
             for price, size in bid_levels
         ),
         fee_model=FeeModel(fee_rate=Decimal("0")),
-        min_tick=Decimal("0.01"),
+        min_tick=Decimal(min_tick),
         min_order_size=Decimal("5"),
         quote_ttl=_dt.timedelta(seconds=30),
     )
@@ -26873,23 +26953,31 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
     ) == "global_sell_execution_authority_required"
 
 
-def test_global_sell_execution_authority_requires_a_legal_passive_price():
+@pytest.mark.parametrize(
+    ("best_bid", "tick"),
+    (("0.95", "0.01"), ("0.999", "0.001")),
+)
+def test_global_sell_execution_authority_requires_a_legal_passive_price(
+    best_bid,
+    tick,
+):
     from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
 
     event = _global_scope_event(city="Alpha", source_run_id="run-maker-band")
     actuation = _adapter_sell_actuation(
         event,
         selected_shares="6",
-        bid_levels=(("0.95", "10"),),
+        bid_levels=((best_bid, "10"),),
+        min_tick=tick,
     )
     jit = era._global_sell_candidate_from_raw_book(
         actuation.decision.candidate,
         {
             "asset_id": "yes-token",
-            "tick_size": "0.01",
+            "tick_size": tick,
             "min_order_size": "5",
-            "bids": [{"price": "0.95", "size": "10"}],
-            "asks": [{"price": "0.96", "size": "10"}],
+            "bids": [{"price": best_bid, "size": "10"}],
+            "asks": [],
         },
         captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
     )
@@ -26904,7 +26992,7 @@ def test_global_sell_execution_authority_requires_a_legal_passive_price():
     ):
         authority.maker_limit_price()
     assert era._global_preflight_block_status(
-        "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:best_bid=0.95:tick=0.01"
+        f"GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:best_bid={best_bid}:tick={tick}"
     ) == "CANDIDATE_BLOCKED"
 
 

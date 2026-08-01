@@ -13631,8 +13631,15 @@ def _current_global_actuation_prepared_family(
         max_age=FRESHNESS_WINDOW_DEFAULT,
         day0_payload_out=current_day0_payload,
         required_condition_id=required_condition_id,
-        allow_partial_deterministic=isinstance(
-            selected, DeterministicBinPayoffWitness
+        # Submit-time truth may become stronger than selection-time truth.  A
+        # reduce-only SELL selected from a statistical witness must therefore
+        # permit the current resolver to materialize a newly available partial
+        # deterministic payoff for this exact held condition.  The content
+        # mismatch below then supersedes the stale SELL instead of letting it
+        # liquidate a claim that current hard fact proves will pay $1.
+        allow_partial_deterministic=(
+            isinstance(selected, DeterministicBinPayoffWitness)
+            or probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
         ),
         allow_unobserved_day0_replacement=(
             probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
