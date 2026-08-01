@@ -1,5 +1,6 @@
 # Created: 2026-06-21
 # Last reused or audited: 2026-08-01
+# Lifecycle: created=2026-06-21; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Authority basis: docs/evidence/live_order_pathology/2026-06-21_forward_chain_diagnosis.md
 #   "CHOSEN FIX (consult-validated, two layers)" — LAYER 2 monitor read-through.
 """ANTIBODY: stale held belief must recover without blocking portfolio monitoring.
@@ -140,6 +141,169 @@ def test_readthrough_insufficient_inputs_failclose_with_durable_belief_debt(monk
     assert "high" in marker
     # The existing reseed repair lane still fires (NOT a silent freeze).
     assert reseed_called == [("Karachi", "2026-06-12", "high")]
+
+
+def test_monitor_read_unavailable_stays_evidence_unavailable_then_recovers(
+    monkeypatch,
+    tmp_path,
+):
+    """Real selector/HWM/belief reads fail closed once, then recover."""
+    import src.engine.monitor_refresh as mr
+    import src.engine.position_belief as pb
+    from src.data.replacement_forecast_cycle_policy import (
+        CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    )
+
+    decision_now = datetime(2026, 6, 6, 4, tzinfo=timezone.utc)
+    source_cycle = datetime(2026, 6, 6, 0, tzinfo=timezone.utc)
+    captured_at = source_cycle + timedelta(minutes=5)
+    computed_at = decision_now - timedelta(hours=1)
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    conn = sqlite3.connect(forecasts_db)
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, computed_at TEXT, q_json TEXT,
+            q_lcb_json TEXT, q_ucb_json TEXT, source_cycle_time TEXT,
+            runtime_layer TEXT, source_id TEXT, posterior_method TEXT,
+            provenance_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY,
+            model TEXT, city TEXT, target_date TEXT, metric TEXT,
+            source_cycle_time TEXT, source_available_at TEXT, captured_at TEXT,
+            lead_days INTEGER, forecast_value_c REAL, endpoint TEXT,
+            coverage_status TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_cycle_time TEXT, captured_at TEXT,
+            source_available_at TEXT, artifact_metadata_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts VALUES
+        (1, 'gfs', 'Karachi', '2026-06-12', 'high', ?, ?, ?, 1, 37.0,
+         'single_runs', 'COVERED')
+        """,
+        (
+            source_cycle.isoformat(),
+            captured_at.isoformat(),
+            captured_at.isoformat(),
+        ),
+    )
+    provenance = {
+        "bayes_precision_fusion": {
+            "used_models": ["gfs"],
+            "current_value_serving": {
+                "gfs": {
+                    "raw_model_forecast_id": 1,
+                    "served_cycle": source_cycle.isoformat(),
+                    "captured_at": captured_at.isoformat(),
+                    "served_via": "single_runs",
+                }
+            },
+            "current_evidence_shape": {
+                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            },
+        },
+        "q_bootstrap_samples_basis": (
+            "global_simplex_current_finite_moment_evidence_v3"
+        ),
+        "q_bootstrap_samples_by_bin": {BIN: [0.25, 0.25]},
+    }
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "p-current-serving",
+            "Karachi",
+            "2026-06-12",
+            "high",
+            computed_at.isoformat(),
+            json.dumps({BIN: 0.25}),
+            json.dumps({BIN: 0.20}),
+            json.dumps({BIN: 0.30}),
+            source_cycle.isoformat(),
+            "live",
+            pb.LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+            "openmeteo_ecmwf_ifs9_bayes_fusion",
+            json.dumps(provenance),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    fault = {"armed": True}
+
+    class InterruptOnceConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            normalized = " ".join(str(sql).split()).lower()
+            if fault["armed"] and "endpoint in (?, ?)" in normalized:
+                fault["armed"] = False
+                raise sqlite3.OperationalError("interrupted")
+            return super().execute(sql, parameters)
+
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        kwargs["factory"] = InterruptOnceConnection
+        return real_connect(*args, **kwargs)
+
+    real_load = pb.load_replacement_belief
+    observed_beliefs = []
+
+    def load(**kwargs):
+        belief = real_load(
+            **kwargs,
+            db_path=str(forecasts_db),
+            now=decision_now,
+        )
+        observed_beliefs.append(belief)
+        return belief
+
+    monkeypatch.setattr(pb.sqlite3, "connect", connect)
+    monkeypatch.setattr(pb, "load_replacement_belief", load)
+    monkeypatch.setattr(mr, "_attempt_held_belief_readthrough", lambda *a, **k: None)
+    monkeypatch.setattr(
+        mr,
+        "_enqueue_single_family_belief_reseed_failsoft",
+        lambda **_kw: None,
+    )
+
+    pos = _pos()
+    first_prob, first_pos, first_fresh = mr.monitor_probability_refresh(
+        pos, conn=None, city=object(), target_d=None,
+    )
+    assert first_prob == pytest.approx(pos.p_posterior)
+    assert first_fresh is False
+    assert "BELIEF_AUTHORITY_FAULT" in first_pos.applied_validations
+    assert observed_beliefs[0] is not None
+    assert observed_beliefs[0].fresh is False
+    assert observed_beliefs[0].raw_input_lag_reason == (
+        "basis=current_value_serving_read_unavailable:sqlite_error=interrupted"
+    )
+
+    second_prob, second_pos, second_fresh = mr.monitor_probability_refresh(
+        pos, conn=None, city=object(), target_d=None,
+    )
+    assert second_prob == pytest.approx(0.75)
+    assert second_fresh is True
+    assert observed_beliefs[1] is not None
+    assert observed_beliefs[1].fresh is True
+    assert observed_beliefs[1].raw_input_lag_reason is None
+    assert getattr(second_pos, "_replacement_current_evidence_held_bounds") == pytest.approx(
+        (0.70, 0.80)
+    )
 
 
 def test_bounded_monitor_defers_sync_readthrough_to_independent_producer(monkeypatch):

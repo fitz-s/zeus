@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11  (Task #40 freshness/row-selection fix)
+# Last reused or audited: 2026-08-01  (typed SQLite read-unavailable hotfix)
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — generalize the gem_global
 #   previous_runs exception (edc598b440 / K2 2026-06-09) into the operator law 没有新的就用老的
 #   applied to fusion membership: a provider absent from single_runs at the selected cycle serves
@@ -66,6 +66,58 @@ PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS = 24.0
 
 SERVED_VIA_SINGLE_RUNS = "single_runs"
 SERVED_VIA_PREVIOUS_RUNS = "previous_runs"
+
+
+class CurrentValueServingReadUnavailable(sqlite3.OperationalError):
+    """The current-value SQLite read was interrupted or otherwise unavailable."""
+
+
+def _is_transient_sqlite_read_error(exc: sqlite3.OperationalError) -> bool:
+    transient_codes = {
+        code
+        for code in (
+            getattr(sqlite3, "SQLITE_BUSY", None),
+            getattr(sqlite3, "SQLITE_LOCKED", None),
+            getattr(sqlite3, "SQLITE_INTERRUPT", None),
+        )
+        if isinstance(code, int)
+    }
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and (error_code & 0xFF) in transient_codes:
+        return True
+    if getattr(exc, "sqlite_errorname", None) in {
+        "SQLITE_BUSY",
+        "SQLITE_LOCKED",
+        "SQLITE_INTERRUPT",
+    }:
+        return True
+
+    message = str(exc).strip().lower()
+    if message in {
+        "interrupted",
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+        "database is busy",
+        "sqlite_read_deadline_exceeded",
+        "sqlite_read_cancelled",
+        "sqlite_read_canceled",
+    }:
+        return True
+    return any(
+        message.startswith(prefix) and bool(message.removeprefix(prefix).strip())
+        for prefix in (
+            "database table is locked:",
+            "database schema is locked:",
+        )
+    )
+
+
+def _raise_typed_read_unavailable(exc: sqlite3.OperationalError) -> None:
+    if _is_transient_sqlite_read_error(exc):
+        raise CurrentValueServingReadUnavailable(str(exc)) from exc
+    raise exc
+
 
 # 删了0.25 (2026-07-01): a model whose previous_runs product is a DIFFERENT (coarser) physical product
 # than its live single_runs — NOT just an older run of the same product. ECMWF's OM previous-runs feed
@@ -145,19 +197,15 @@ def read_current_instrument_values(
     Without it, the historical carrier-bound behavior is unchanged.
 
     LEAD_DAYS IS NOT A FILTER: the served row reports its real lead bucket, which names the
-    history residual variance for that value. Legacy reads remain fail-soft; source-clock and
-    station-authority SQLite failures propagate because UNKNOWN truth is not an empty family.
+    history residual variance for that value. Every SQLite read failure propagates because
+    UNKNOWN truth is not an empty family; only a successful empty selection returns ``{}``.
     """
     try:
         columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(raw_model_forecasts)")
         }
-    except sqlite3.OperationalError:
-        if decision_time_iso is not None or include_station_sources:
-            raise
-        return {}
-    except Exception:
-        return {}
+    except sqlite3.OperationalError as exc:
+        _raise_typed_read_unavailable(exc)
     has_captured_at = "captured_at" in columns
     has_source_available_at = "source_available_at" in columns
     captured_select = ", captured_at" if has_captured_at else ""
@@ -195,12 +243,8 @@ def read_current_instrument_values(
                 """,
                 (city, metric, target_date, source_cycle_time_iso, endpoint),
             ).fetchall()
-        except sqlite3.OperationalError:
-            if decision_time_iso is not None or include_station_sources:
-                raise
-            return []
-        except Exception:
-            return []
+        except sqlite3.OperationalError as exc:
+            _raise_typed_read_unavailable(exc)
 
     out: dict[str, ServedInstrumentValue] = {}
 
@@ -266,14 +310,12 @@ def read_current_instrument_values(
                     ]
                 ),
             ).fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
             # A cancelled/deadline-bounded read is UNKNOWN authority, not an
             # honestly empty provider set.  Propagate it so the held monitor can
             # classify its SQLite deadline and retry/reseed without relabelling
             # every consumed raw row as missing.
-            raise
-        except Exception:
-            return {}
+            _raise_typed_read_unavailable(exc)
         for row in rows:
             try:
                 rid = int(row[0])
@@ -373,10 +415,8 @@ def read_current_instrument_values(
                 """,
                 (city, metric, target_date, SERVED_VIA_SINGLE_RUNS),
             ).fetchall()
-        except sqlite3.OperationalError:
-            raise
-        except Exception:
-            station_rows = []
+        except sqlite3.OperationalError as exc:
+            _raise_typed_read_unavailable(exc)
         # This is an OVERRIDE tier, not a first-match-wins fallback: a station model's own-cycle
         # freshest row must ALWAYS replace whatever the ceiling-bound passes above already parked
         # in `out` (even a stale <= ceiling row) — gating on `model in out` here was the steady-

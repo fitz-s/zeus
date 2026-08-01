@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-29
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Last reused/audited: 2026-08-01
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -33,9 +33,19 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (
 )
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, ReplacementForecastDependency, build_replacement_forecast_readiness
 from src.data.replacement_input_hwm import (
+    ReplacementInputHwmReadUnavailable,
+    _exact_current_value_serving_lag,
     _exact_consumed_anchor_artifact_cycle,
     _posterior_provenance_for_cycle,
+    latest_raw_artifact_input_cycle,
+    latest_raw_model_input_cycle,
+    latest_used_raw_model_input_mark,
+    prime_frozen_replacement_artifact_hwm,
     replacement_live_input_lag_reason,
+)
+from src.data.replacement_current_value_serving import (
+    CurrentValueServingReadUnavailable,
+    read_current_instrument_values,
 )
 from src.state.schema.v2_schema import apply_canonical_schema
 
@@ -643,6 +653,515 @@ def test_replacement_bundle_reader_enforce_raw_input_hwm_allows_fresh_serve() ->
 
     assert result.ok is True
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+
+
+def test_current_value_serving_sqlite_interrupt_is_typed_and_chained() -> None:
+    conn = _conn()
+    _insert_raw_model_forecast(
+        conn,
+        model="gfs",
+        source_cycle_time=_dt(0),
+        captured_at=_dt(0, 5),
+        source_available_at=_dt(0, 5),
+    )
+    conn.set_progress_handler(lambda: 1, 1)
+
+    with pytest.raises(CurrentValueServingReadUnavailable) as raised:
+        read_current_instrument_values(
+            conn,
+            city="Shanghai",
+            metric="high",
+            target_date="2026-06-07",
+            source_cycle_time_iso=_dt(0).isoformat(),
+            include_station_sources=True,
+            decision_time_iso=_dt(4).isoformat(),
+        )
+
+    assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
+    assert str(raised.value.__cause__) == "interrupted"
+    assert str(raised.value) == "interrupted"
+    assert isinstance(raised.value, sqlite3.OperationalError)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "database is locked",
+        "database is busy",
+        "sqlite_read_deadline_exceeded",
+        "sqlite_read_cancelled",
+    ],
+)
+def test_current_value_serving_transient_read_is_typed_and_chained(message: str) -> None:
+    conn = _conn()
+
+    class FaultingConnection:
+        def execute(self, sql, params=()):
+            if "datetime(source_cycle_time)" in sql:
+                raise sqlite3.OperationalError(message)
+            return conn.execute(sql, params)
+
+    with pytest.raises(CurrentValueServingReadUnavailable) as raised:
+        read_current_instrument_values(
+            FaultingConnection(),
+            city="Shanghai",
+            metric="high",
+            target_date="2026-06-07",
+            source_cycle_time_iso=_dt(0).isoformat(),
+            decision_time_iso=_dt(4).isoformat(),
+        )
+
+    assert str(raised.value) == message
+    assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
+    assert str(raised.value.__cause__) == message
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["no such table: raw_model_forecasts", "no such column: captured_at", "near SELECT: syntax error"],
+)
+def test_current_value_serving_schema_errors_are_not_retyped(message: str) -> None:
+    conn = _conn()
+
+    class FaultingConnection:
+        def execute(self, sql, params=()):
+            if "datetime(source_cycle_time)" in sql:
+                raise sqlite3.OperationalError(message)
+            return conn.execute(sql, params)
+
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        read_current_instrument_values(
+            FaultingConnection(),
+            city="Shanghai",
+            metric="high",
+            target_date="2026-06-07",
+            source_cycle_time_iso=_dt(0).isoformat(),
+            decision_time_iso=_dt(4).isoformat(),
+        )
+
+    assert type(raised.value) is sqlite3.OperationalError
+    assert str(raised.value) == message
+    assert raised.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("needle", "message", "typed"),
+    [
+        ("pragma table_info", "interrupted", True),
+        ("from raw_model_forecasts", "database is locked", True),
+        ("pragma table_info", "no such table: raw_model_forecasts", False),
+        ("from raw_model_forecasts", "no such column: forecast_value_c", False),
+    ],
+)
+def test_legacy_current_value_reads_never_turn_sqlite_faults_into_empty(
+    needle: str,
+    message: str,
+    typed: bool,
+) -> None:
+    conn = _conn()
+
+    class FaultingConnection:
+        def execute(self, sql, params=()):
+            if needle in " ".join(str(sql).split()).lower():
+                raise sqlite3.OperationalError(message)
+            return conn.execute(sql, params)
+
+    expected = CurrentValueServingReadUnavailable if typed else sqlite3.OperationalError
+    with pytest.raises(expected) as raised:
+        read_current_instrument_values(
+            FaultingConnection(),
+            city="Shanghai",
+            metric="high",
+            target_date="2026-06-07",
+            source_cycle_time_iso=_dt(0).isoformat(),
+        )
+
+    assert str(raised.value) == message
+    if typed:
+        assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
+    else:
+        assert type(raised.value) is sqlite3.OperationalError
+        assert raised.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "no such table: deadline",
+        "no such column: busy",
+        'near "interrupted": syntax error',
+        "constraint failed after request cancelled",
+    ],
+)
+def test_transient_words_inside_programming_errors_are_not_retyped(
+    message: str,
+) -> None:
+    conn = _conn()
+
+    class FaultingConnection:
+        def execute(self, sql, params=()):
+            if "datetime(source_cycle_time)" in sql:
+                raise sqlite3.OperationalError(message)
+            return conn.execute(sql, params)
+
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        read_current_instrument_values(
+            FaultingConnection(),
+            city="Shanghai",
+            metric="high",
+            target_date="2026-06-07",
+            source_cycle_time_iso=_dt(0).isoformat(),
+            decision_time_iso=_dt(4).isoformat(),
+        )
+
+    assert type(raised.value) is sqlite3.OperationalError
+    assert str(raised.value) == message
+    assert raised.value.__cause__ is None
+
+
+class _FaultingHwmConnection:
+    def __init__(self, conn: sqlite3.Connection, *, needle: str, message: str):
+        self._conn = conn
+        self._needle = needle.lower()
+        self._message = message
+
+    def execute(self, sql, params=()):
+        normalized = " ".join(str(sql).split()).lower()
+        if self._needle in normalized:
+            raise sqlite3.OperationalError(self._message)
+        return self._conn.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "no such table: deadline",
+        "no such column: busy",
+        'near "interrupted": syntax error',
+    ],
+)
+def test_hwm_transient_words_inside_schema_errors_are_not_retyped(
+    message: str,
+) -> None:
+    conn = _conn()
+    faulting = _FaultingHwmConnection(
+        conn,
+        needle="having count(distinct model)",
+        message=message,
+    )
+
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        latest_raw_model_input_cycle(
+            faulting,
+            city="Shanghai",
+            target_date="2026-06-07",
+            metric="high",
+            decision_time=_dt(4),
+        )
+
+    assert type(raised.value) is sqlite3.OperationalError
+    assert str(raised.value) == message
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["sqlite_read_deadline_exceeded", "sqlite_read_cancelled"],
+)
+def test_hwm_owned_read_sentinels_are_typed(message: str) -> None:
+    conn = _conn()
+    faulting = _FaultingHwmConnection(
+        conn,
+        needle="having count(distinct model)",
+        message=message,
+    )
+
+    with pytest.raises(ReplacementInputHwmReadUnavailable) as raised:
+        latest_raw_model_input_cycle(
+            faulting,
+            city="Shanghai",
+            target_date="2026-06-07",
+            metric="high",
+            decision_time=_dt(4),
+        )
+
+    assert str(raised.value) == message
+    assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
+
+
+@pytest.mark.parametrize(
+    ("helper", "needle"),
+    [
+        ("raw_model", "having count(distinct model)"),
+        ("raw_artifact", "pragma data_version"),
+        ("provenance", "select provenance_json, computed_at"),
+    ],
+)
+def test_hwm_read_programming_faults_are_not_absence(
+    helper: str,
+    needle: str,
+) -> None:
+    conn = _conn()
+
+    class FaultingConnection:
+        def execute(self, sql, params=()):
+            if needle in " ".join(str(sql).split()).lower():
+                raise RuntimeError("read programming fault")
+            return conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(conn, name)
+
+    faulting = FaultingConnection()
+    with pytest.raises(RuntimeError, match="read programming fault"):
+        if helper == "raw_model":
+            latest_raw_model_input_cycle(
+                faulting,
+                city="Shanghai",
+                target_date="2026-06-07",
+                metric="high",
+                decision_time=_dt(4),
+            )
+        elif helper == "raw_artifact":
+            latest_raw_artifact_input_cycle(
+                faulting,
+                city="Shanghai",
+                target_date="2026-06-07",
+                metric="high",
+                decision_time=_dt(4),
+            )
+        else:
+            _posterior_provenance_for_cycle(
+                faulting,
+                city="Shanghai",
+                target_date="2026-06-07",
+                metric="high",
+                posterior_source_cycle_time=_dt(0),
+                posterior_computed_at=_dt(3, 5),
+            )
+
+
+def test_frozen_artifact_hwm_batch_fault_does_not_fall_back_to_scalar(
+    monkeypatch,
+) -> None:
+    import src.data.replacement_input_hwm as hwm
+
+    conn = _conn()
+    conn.commit()
+    conn.execute("BEGIN")
+
+    def fail_batch(*_args, **_kwargs):
+        raise RuntimeError("batch programming fault")
+
+    monkeypatch.setattr(hwm, "_batch_artifact_cycles", fail_batch)
+    with pytest.raises(RuntimeError, match="batch programming fault"):
+        prime_frozen_replacement_artifact_hwm(
+            conn,
+            requests=(("Shanghai", "2026-06-07", "high"),),
+            decision_time=_dt(4),
+        )
+
+
+@pytest.mark.parametrize(
+    ("helper", "needle", "basis"),
+    [
+        ("provenance", "select provenance_json, computed_at", "posterior_provenance_hwm_read_unavailable"),
+        ("raw_model", "having count(distinct model)", "raw_model_input_hwm_read_unavailable"),
+        ("raw_artifact", "from raw_forecast_artifacts", "raw_artifact_input_hwm_read_unavailable"),
+        ("used_raw", "and model in (", "used_raw_model_input_hwm_read_unavailable"),
+    ],
+)
+def test_hwm_helpers_keep_locked_reads_distinct_from_absence(
+    helper: str,
+    needle: str,
+    basis: str,
+) -> None:
+    conn = _conn()
+    faulting = _FaultingHwmConnection(
+        conn,
+        needle=needle,
+        message="database is locked",
+    )
+    common = {
+        "conn": faulting,
+        "city": "Shanghai",
+        "target_date": "2026-06-07",
+        "metric": "high",
+    }
+
+    with pytest.raises(ReplacementInputHwmReadUnavailable) as raised:
+        if helper == "provenance":
+            _posterior_provenance_for_cycle(
+                **common,
+                posterior_source_cycle_time=_dt(0),
+                posterior_computed_at=_dt(0, 5),
+            )
+        elif helper == "raw_model":
+            latest_raw_model_input_cycle(
+                **common,
+                decision_time=_dt(4),
+            )
+        elif helper == "raw_artifact":
+            latest_raw_artifact_input_cycle(
+                **common,
+                decision_time=_dt(4),
+            )
+        else:
+            latest_used_raw_model_input_mark(
+                **common,
+                decision_time=_dt(4),
+                posterior_source_cycle_time=_dt(0),
+                posterior_provenance={"used_models": ["gfs"]},
+            )
+
+    assert raised.value.basis == basis
+    assert str(raised.value) == "database is locked"
+    assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
+
+
+@pytest.mark.parametrize(
+    ("helper", "needle"),
+    [
+        ("provenance", "select provenance_json, computed_at"),
+        ("raw_model", "having count(distinct model)"),
+        ("raw_artifact", "from raw_forecast_artifacts"),
+        ("used_raw", "and model in ("),
+    ],
+)
+def test_hwm_helpers_do_not_retype_schema_errors(helper: str, needle: str) -> None:
+    conn = _conn()
+    faulting = _FaultingHwmConnection(
+        conn,
+        needle=needle,
+        message="no such column: broken_hwm_column",
+    )
+    common = {
+        "conn": faulting,
+        "city": "Shanghai",
+        "target_date": "2026-06-07",
+        "metric": "high",
+    }
+
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        if helper == "provenance":
+            _posterior_provenance_for_cycle(
+                **common,
+                posterior_source_cycle_time=_dt(0),
+                posterior_computed_at=_dt(0, 5),
+            )
+        elif helper == "raw_model":
+            latest_raw_model_input_cycle(
+                **common,
+                decision_time=_dt(4),
+            )
+        elif helper == "raw_artifact":
+            latest_raw_artifact_input_cycle(
+                **common,
+                decision_time=_dt(4),
+            )
+        else:
+            latest_used_raw_model_input_mark(
+                **common,
+                decision_time=_dt(4),
+                posterior_source_cycle_time=_dt(0),
+                posterior_provenance={"used_models": ["gfs"]},
+            )
+
+    assert type(raised.value) is sqlite3.OperationalError
+    assert str(raised.value) == "no such column: broken_hwm_column"
+
+
+def test_raw_hwm_does_not_label_current_value_read_failure_as_raw_unavailable(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+    consumed = {
+        "gfs": {
+            "raw_model_forecast_id": 1,
+            "served_cycle": _dt(0).isoformat(),
+            "captured_at": _dt(0, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    }
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(_with_current_value_serving(consumed)), posterior_id),
+    )
+
+    import src.data.replacement_current_value_serving as serving
+
+    def fail_read(*_args, **_kwargs):
+        cause = sqlite3.OperationalError("interrupted")
+        raise CurrentValueServingReadUnavailable(str(cause)) from cause
+
+    monkeypatch.setattr(serving, "read_current_instrument_values", fail_read)
+    with pytest.raises(ReplacementInputHwmReadUnavailable) as blocked:
+        _exact_current_value_serving_lag(
+            conn,
+            city="Shanghai",
+            target_date="2026-06-07",
+            metric="high",
+            decision_time=_dt(4),
+            posterior_computed_at=_dt(0, 5),
+            provenance=_with_current_value_serving(consumed),
+        )
+    assert isinstance(blocked.value.__cause__, CurrentValueServingReadUnavailable)
+    assert isinstance(blocked.value.__cause__.__cause__, sqlite3.OperationalError)
+    assert str(blocked.value) == "interrupted"
+
+    reason = replacement_live_input_lag_reason(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(4),
+        posterior_source_cycle_time=_dt(0),
+        posterior_computed_at=_dt(0, 5),
+        posterior_provenance=_with_current_value_serving(consumed),
+    )
+
+    assert reason == (
+        "basis=current_value_serving_read_unavailable:sqlite_error=interrupted"
+    )
+    assert "raw_hwm_unavailable" not in reason
+
+
+def test_raw_hwm_successful_empty_selection_still_reports_raw_unavailable() -> None:
+    conn = _conn()
+    consumed = {
+        "gfs": {
+            "raw_model_forecast_id": 1,
+            "served_cycle": _dt(0).isoformat(),
+            "captured_at": _dt(0, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    }
+    assert read_current_instrument_values(
+        conn,
+        city="Shanghai",
+        metric="high",
+        target_date="2026-07-07",
+        source_cycle_time_iso=_dt(0).isoformat(),
+        include_station_sources=True,
+        decision_time_iso=_dt(4).isoformat(),
+    ) == {}
+
+    reason = replacement_live_input_lag_reason(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-07",
+        metric="high",
+        decision_time=_dt(4),
+        posterior_source_cycle_time=_dt(0),
+        posterior_computed_at=_dt(0, 5),
+        posterior_provenance=_with_current_value_serving(consumed),
+    )
+
+    assert reason is not None
+    assert reason.startswith("basis=current_value_serving_raw_hwm_unavailable:")
 
 
 def test_raw_hwm_uses_exact_anchor_artifact_not_model_serving_clock(tmp_path) -> None:

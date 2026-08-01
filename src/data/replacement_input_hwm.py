@@ -1,5 +1,5 @@
 # Created: 2026-07-02
-# Last reused/audited: 2026-07-02
+# Last reused/audited: 2026-08-01
 # Authority basis: architecture/invariants.yaml
 #   section 1 row "q_version + input HWMs (A1)".
 """Shared read-time raw-input high-water-mark (HWM) lag check.
@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from contextvars import ContextVar
@@ -44,7 +43,89 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (
 )
 
 UTC = timezone.utc
-_LOG = logging.getLogger(__name__)
+
+
+class ReplacementInputHwmReadUnavailable(sqlite3.OperationalError):
+    """The exact raw-input HWM read could not establish current authority."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        basis: str = "replacement_input_hwm_read_unavailable",
+    ) -> None:
+        super().__init__(message)
+        self.basis = basis
+
+    def blocker_reason(self) -> str:
+        return f"basis={self.basis}:sqlite_error={self}"
+
+
+def _is_transient_sqlite_read_error(exc: sqlite3.OperationalError) -> bool:
+    transient_codes = {
+        code
+        for code in (
+            getattr(sqlite3, "SQLITE_BUSY", None),
+            getattr(sqlite3, "SQLITE_LOCKED", None),
+            getattr(sqlite3, "SQLITE_INTERRUPT", None),
+        )
+        if isinstance(code, int)
+    }
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and (error_code & 0xFF) in transient_codes:
+        return True
+    if getattr(exc, "sqlite_errorname", None) in {
+        "SQLITE_BUSY",
+        "SQLITE_LOCKED",
+        "SQLITE_INTERRUPT",
+    }:
+        return True
+
+    message = str(exc).strip().lower()
+    if message in {
+        "interrupted",
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+        "database is busy",
+        "sqlite_read_deadline_exceeded",
+        "sqlite_read_cancelled",
+        "sqlite_read_canceled",
+    }:
+        return True
+    return any(
+        message.startswith(prefix) and bool(message.removeprefix(prefix).strip())
+        for prefix in (
+            "database table is locked:",
+            "database schema is locked:",
+        )
+    )
+
+
+def _raise_hwm_read_unavailable(
+    exc: sqlite3.OperationalError,
+    *,
+    basis: str,
+) -> None:
+    if _is_transient_sqlite_read_error(exc):
+        raise ReplacementInputHwmReadUnavailable(
+            str(exc),
+            basis=basis,
+        ) from exc
+    raise exc
+
+
+def _hwm_table_ref_columns(
+    conn: sqlite3.Connection,
+    table_ref: str,
+) -> frozenset[str]:
+    try:
+        return frozenset(_table_ref_columns(conn, table_ref))
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="replacement_input_hwm_schema_read_unavailable",
+        )
 
 
 @dataclass(frozen=True)
@@ -89,10 +170,19 @@ def _authority_table_ref(conn: sqlite3.Connection, table_name: str) -> str | Non
         if "world" in attached:
             if _table_ref_exists(conn, f"world.{table_name}"):
                 return f"world.{table_name}"
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        pass
-    if _table_ref_exists(conn, table_name):
-        return table_name
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="replacement_input_hwm_table_lookup_unavailable",
+        )
+    try:
+        if _table_ref_exists(conn, table_name):
+            return table_name
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="replacement_input_hwm_table_lookup_unavailable",
+        )
     return None
 
 
@@ -108,7 +198,7 @@ def latest_raw_model_input_cycle(
     table_ref = _authority_table_ref(conn, "raw_model_forecasts")
     if table_ref is None:
         return None
-    columns = _table_ref_columns(conn, table_ref)
+    columns = _hwm_table_ref_columns(conn, table_ref)
     required = {"model", "city", "target_date", "metric", "source_cycle_time"}
     if not required.issubset(columns):
         return None
@@ -147,8 +237,11 @@ def latest_raw_model_input_cycle(
             """,
             tuple([*params, decision_iso]),
         ).fetchone()
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return None
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="raw_model_input_hwm_read_unavailable",
+        )
     if row is None:
         return None
     try:
@@ -180,7 +273,7 @@ def latest_raw_artifact_input_cycle(
     table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
     if table_ref is None:
         return None
-    columns = _table_ref_columns(conn, table_ref)
+    columns = _hwm_table_ref_columns(conn, table_ref)
     required = {
         "source_cycle_time",
         "captured_at",
@@ -192,7 +285,16 @@ def latest_raw_artifact_input_cycle(
     if {"source_id", "product_id"}.issubset(columns):
         try:
             data_version_row = conn.execute("PRAGMA data_version").fetchone()
+        except sqlite3.OperationalError as exc:
+            _raise_hwm_read_unavailable(
+                exc,
+                basis="raw_artifact_input_hwm_read_unavailable",
+            )
+        try:
             data_version = int(data_version_row[0]) if data_version_row is not None else -1
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None
+        try:
             return _raw_artifact_cycle_for_frozen_request(
                 conn,
                 table_ref,
@@ -202,8 +304,11 @@ def latest_raw_artifact_input_cycle(
                 data_version,
                 conn.total_changes,
             )
-        except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-            return None
+        except sqlite3.OperationalError as exc:
+            _raise_hwm_read_unavailable(
+                exc,
+                basis="raw_artifact_input_hwm_read_unavailable",
+            )
     predicates = [
         "json_extract(artifact_metadata_json, '$.city') = ?",
         "json_extract(artifact_metadata_json, '$.target_date') = ?",
@@ -229,7 +334,16 @@ def latest_raw_artifact_input_cycle(
     if conn.in_transaction:
         try:
             data_version_row = conn.execute("PRAGMA data_version").fetchone()
+        except sqlite3.OperationalError as exc:
+            _raise_hwm_read_unavailable(
+                exc,
+                basis="raw_artifact_input_hwm_read_unavailable",
+            )
+        try:
             data_version = int(data_version_row[0]) if data_version_row is not None else -1
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None
+        try:
             cached = dict(
                 _raw_artifact_cycles_for_frozen_target(
                     conn,
@@ -242,8 +356,11 @@ def latest_raw_artifact_input_cycle(
                     conn.total_changes,
                 )
             )
-        except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-            return None
+        except sqlite3.OperationalError as exc:
+            _raise_hwm_read_unavailable(
+                exc,
+                basis="raw_artifact_input_hwm_read_unavailable",
+            )
         return cached.get(city)
     try:
         rows = conn.execute(
@@ -257,8 +374,11 @@ def latest_raw_artifact_input_cycle(
             """,
             tuple([*params, decision_iso]),
         ).fetchall()
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return None
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="raw_artifact_input_hwm_read_unavailable",
+        )
     for row in rows:
         try:
             raw_value = row["source_cycle_time"]
@@ -554,7 +674,7 @@ def _batch_artifact_cycles(
     table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
     if table_ref is None:
         return True, {}
-    columns = frozenset(_table_ref_columns(conn, table_ref))
+    columns = _hwm_table_ref_columns(conn, table_ref)
     required = {
         "source_cycle_time",
         "captured_at",
@@ -660,8 +780,13 @@ def prime_frozen_replacement_artifact_hwm(
             requests=normalized,
             decision_iso=decision_iso,
         )
-    except Exception as exc:  # noqa: BLE001 - scalar fail-closed fallback remains authoritative
-        _LOG.warning("frozen artifact HWM prime failed; using scalar reads: %s", exc)
+    except ReplacementInputHwmReadUnavailable:
+        raise
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="raw_artifact_input_hwm_read_unavailable",
+        )
 
     token = _FROZEN_INPUT_HWM.set(
         _FrozenInputHwm(
@@ -696,7 +821,7 @@ def _posterior_provenance_for_cycle(
     table_ref = _authority_table_ref(conn, "forecast_posteriors")
     if table_ref is None:
         return None
-    columns = _table_ref_columns(conn, table_ref)
+    columns = _hwm_table_ref_columns(conn, table_ref)
     required = {"city", "target_date", "temperature_metric", "source_cycle_time", "provenance_json"}
     if not required.issubset(columns):
         return None
@@ -727,8 +852,11 @@ def _posterior_provenance_for_cycle(
             """,
             (city, target_date, metric, str(posterior_source_cycle_time)),
         ).fetchall()
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return None
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="posterior_provenance_hwm_read_unavailable",
+        )
     if not rows:
         return None
     if exact_computed_at is not None:
@@ -890,17 +1018,23 @@ def _exact_current_value_serving_lag(
         read_current_instrument_values,
     )
 
-    selected = read_current_instrument_values(
-        conn,
-        city=city,
-        metric=metric,
-        target_date=str(target_date),
-        source_cycle_time_iso=max(
-            item[1] for item in consumed.values()
-        ).isoformat(),
-        include_station_sources=True,
-        decision_time_iso=decision_iso,
-    )
+    try:
+        selected = read_current_instrument_values(
+            conn,
+            city=city,
+            metric=metric,
+            target_date=str(target_date),
+            source_cycle_time_iso=max(
+                item[1] for item in consumed.values()
+            ).isoformat(),
+            include_station_sources=True,
+            decision_time_iso=decision_iso,
+        )
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="current_value_serving_read_unavailable",
+        )
     for model, (consumed_id, consumed_cycle, consumed_at) in consumed.items():
         current = selected.get(model)
         if current is None:
@@ -992,7 +1126,7 @@ def _exact_consumed_anchor_artifact_cycle(
     table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
     if table_ref is None:
         return "basis=openmeteo_anchor_artifact_table_unavailable", None
-    columns = frozenset(_table_ref_columns(conn, table_ref))
+    columns = _hwm_table_ref_columns(conn, table_ref)
     required = {
         "artifact_id",
         "source_id",
@@ -1020,8 +1154,11 @@ def _exact_consumed_anchor_artifact_cycle(
             """,
             (artifact_id,),
         ).fetchone()
-    except Exception:  # noqa: BLE001 - live authority gate fails closed
-        return "basis=openmeteo_anchor_artifact_lookup_failed", None
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="anchor_artifact_hwm_read_unavailable",
+        )
     if row is None:
         return (
             f"basis=openmeteo_anchor_artifact_missing:artifact_id={artifact_id}",
@@ -1159,7 +1296,7 @@ def latest_used_raw_model_input_mark(
     table_ref = _authority_table_ref(conn, "raw_model_forecasts")
     if table_ref is None:
         return None
-    columns = _table_ref_columns(conn, table_ref)
+    columns = _hwm_table_ref_columns(conn, table_ref)
     required = {"model", "city", "target_date", "metric", "source_cycle_time"}
     if not required.issubset(columns):
         return None
@@ -1205,8 +1342,11 @@ def latest_used_raw_model_input_mark(
             """,
             tuple([*params, decision_iso]),
         ).fetchone()
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return None
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="used_raw_model_input_hwm_read_unavailable",
+        )
     if row is None:
         return None
     try:
@@ -1271,7 +1411,7 @@ def latest_live_input_cycle(
     return max(candidates, key=lambda item: item[0])
 
 
-def replacement_live_input_lag_reason(
+def _replacement_live_input_lag_reason(
     conn: sqlite3.Connection,
     *,
     city: str,
@@ -1431,3 +1571,33 @@ def replacement_live_input_lag_reason(
         f"posterior_cycle={posterior_cycle.isoformat()}:"
         f"lag_h={lag_hours:.2f}"
     )
+
+
+def replacement_live_input_lag_reason(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+    posterior_source_cycle_time: object,
+    posterior_computed_at: object | None = None,
+    posterior_provenance: Mapping[str, object] | None = None,
+) -> str | None:
+    """Return lag/absence state, or a dedicated blocker for transient read loss."""
+
+    try:
+        return _replacement_live_input_lag_reason(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            decision_time=decision_time,
+            posterior_source_cycle_time=posterior_source_cycle_time,
+            posterior_computed_at=posterior_computed_at,
+            posterior_provenance=posterior_provenance,
+        )
+    except ReplacementInputHwmReadUnavailable as exc:
+        # A retryable SQLite failure is UNKNOWN authority, never honest absence.
+        # Consumers treat every non-None reason as fail-closed stale evidence.
+        return exc.blocker_reason()
