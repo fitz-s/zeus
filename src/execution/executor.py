@@ -3160,6 +3160,38 @@ def _buy_order_notional_micro(intent: ExecutionIntent, shares: float) -> int:
     return int(notional.to_integral_value(rounding=ROUND_CEILING))
 
 
+def _entry_buy_venue_submit_shares(
+    intent: ExecutionIntent,
+    *,
+    target_shares: float,
+) -> float:
+    """Return the SDK BUY size while preserving the economic share target.
+
+    Polymarket LIMIT BUY signs ``makerAmount = size * limit``.  FAK therefore
+    fixes quote cash, not selected-token shares: submitting the Kelly target as
+    SDK ``size`` spends ``target * limit`` and walks beyond that target whenever
+    the JIT curve's VWAP is better than the limit.  Recapture binds
+    ``target_size_usd`` to the venue-legal JIT sweep cash for the target.  Divide
+    that cash by the unchanged limit only at the wire boundary; all Kelly,
+    exposure, and expected-utility checks continue to use ``target_shares``.
+    """
+
+    target = Decimal(str(target_shares))
+    limit = Decimal(str(intent.limit_price))
+    if target <= 0 or limit <= 0:
+        raise ValueError("entry BUY target shares and limit must be positive")
+    if str(getattr(intent, "submit_order_type", "") or "").upper() != "FAK":
+        return float(target)
+    cash = Decimal(str(intent.target_size_usd))
+    wire = cash / limit
+    if cash <= 0 or wire <= 0 or wire > target:
+        raise ValueError(
+            "FAK fixed-cash binding is outside the economic share target: "
+            f"cash={cash} wire_size={wire} target_shares={target} limit={limit}"
+        )
+    return float(wire)
+
+
 def _assert_collateral_allows_buy(
     intent: ExecutionIntent,
     *,
@@ -5699,6 +5731,46 @@ def _recapture_fresh_entry_snapshot_if_needed(
                 f"depth_status={sweep.depth_status} average_price={sweep.average_price} "
                 f"filled_shares={getattr(sweep, 'filled_shares', None)}"
             )
+        if fak_prefix_authorized:
+            from src.contracts.execution_intent import (
+                quantize_submit_shares_for_venue_at_most,
+            )
+
+            gross_notional = Decimal(
+                str(getattr(sweep, "gross_notional", "0") or "0")
+            )
+            if gross_notional <= 0:
+                raise ValueError(
+                    "recaptured FAK sweep lacks positive gross notional"
+                )
+            raw_wire_size = gross_notional / Decimal(str(fresh_limit_price))
+            wire_size = quantize_submit_shares_for_venue_at_most(
+                final_intent.direction,
+                raw_wire_size,
+                final_limit_price=Decimal(str(fresh_limit_price)),
+                order_type="FAK",
+                tick_size=Decimal(str(fresh.min_tick_size)),
+            )
+            wire_cash = wire_size * Decimal(str(fresh_limit_price))
+            if wire_size < Decimal(str(fresh.min_order_size)):
+                raise ValueError(
+                    "recaptured FAK fixed-cash size is below fresh min order: "
+                    f"wire_size={wire_size} min_order_size={fresh.min_order_size}"
+                )
+            if wire_cash < MIN_MARKETABLE_BUY_NOTIONAL_USD:
+                raise ValueError(
+                    "recaptured FAK fixed cash is below venue minimum: "
+                    f"cash={wire_cash} min_notional={MIN_MARKETABLE_BUY_NOTIONAL_USD}"
+                )
+            if wire_cash > gross_notional:
+                raise ValueError(
+                    "recaptured FAK fixed cash exceeds JIT target sweep: "
+                    f"cash={wire_cash} sweep={gross_notional}"
+                )
+            legacy_intent = replace(
+                legacy_intent,
+                target_size_usd=float(wire_cash),
+            )
     return replace(
         legacy_intent,
         limit_price=fresh_limit_price,
@@ -7363,7 +7435,22 @@ def _live_order(
             order_role="entry",
             command_state="REJECTED",
         )
-    required_pusd_micro = _buy_order_notional_micro(intent, shares)
+    try:
+        venue_submit_shares = _entry_buy_venue_submit_shares(
+            intent,
+            target_shares=shares,
+        )
+    except ValueError as exc:
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason=f"fak_fixed_cash_binding:{exc}",
+            submitted_price=intent.limit_price,
+            shares=shares,
+            order_role="entry",
+            command_state="REJECTED",
+        )
+    required_pusd_micro = _buy_order_notional_micro(intent, venue_submit_shares)
 
     # -----------------------------------------------------------------------
     # Phase 2: build — pure, no I/O (INV-30)
@@ -7375,7 +7462,7 @@ def _live_order(
         token_id=intent.token_id,
         side="BUY",
         price=intent.limit_price,
-        size=shares,
+        size=venue_submit_shares,
         intent_kind=IntentKind.ENTRY,
     )
     command_id = uuid.uuid4().hex[:16]
@@ -7558,7 +7645,7 @@ def _live_order(
         )
         amount_precision_error = _venue_submit_amount_precision_rejection_reason(
             intent,
-            shares=shares,
+            shares=venue_submit_shares,
             order_type=effective_order_type,
         )
         if amount_precision_error is not None:
@@ -7627,7 +7714,7 @@ def _live_order(
             token_id=intent.token_id,
             side="BUY",
             price=intent.limit_price,
-            size=shares,
+            size=venue_submit_shares,
             exclude_idempotency_key=idem.value,
         )
         if economic_unknown_row is not None:
@@ -7915,7 +8002,7 @@ def _live_order(
                 token_id=intent.token_id,
                 side="BUY",
                 price=intent.limit_price,
-                size=shares,
+                size=venue_submit_shares,
                 order_type=effective_order_type,
                 post_only=submit_post_only,
                 captured_at=now_str,
@@ -8018,7 +8105,7 @@ def _live_order(
                 market_id=intent.market_id,
                 token_id=intent.token_id,
                 side="BUY",
-                size=shares,
+                size=venue_submit_shares,
                 price=intent.limit_price,
                 created_at=now_str,
                 q_version=entry_q_version,
@@ -8391,10 +8478,11 @@ def _live_order(
             )
 
         logger.info(
-            "LIVE ORDER: %s token=%s...%s @ %.3f limit, %.2f shares, timeout=%ds",
+            "LIVE ORDER: %s token=%s...%s @ %.3f limit, target=%.2f shares, "
+            "wire_size=%.4f, timeout=%ds",
             intent.direction.value,
             intent.token_id[:8], intent.token_id[-4:],
-            intent.limit_price, shares, timeout,
+            intent.limit_price, shares, venue_submit_shares, timeout,
         )
         if pre_submit_envelope is not None and hasattr(client, "bind_submission_envelope"):
             client.bind_submission_envelope(pre_submit_envelope)
@@ -8412,7 +8500,7 @@ def _live_order(
             result = client.place_limit_order(
                 token_id=intent.token_id,
                 price=intent.limit_price,
-                size=shares,
+                size=venue_submit_shares,
                 side="BUY",  # Always BUY
                 order_type=effective_order_type,
             )
@@ -8741,12 +8829,12 @@ def _live_order(
         order_fact_state = _venue_submit_order_fact_state(
             result,
             matched_size=matched_size,
-            submitted_size=shares,
+            submitted_size=venue_submit_shares,
             side="BUY",
         )
         remaining_size = _venue_submit_remaining_size(
             result,
-            shares,
+            venue_submit_shares,
             matched_size=matched_size,
             side="BUY",
         )
@@ -8787,7 +8875,7 @@ def _live_order(
                             matched_size = point_matched
                             remaining_size = _venue_submit_remaining_size(
                                 fill_evidence,
-                                shares,
+                                venue_submit_shares,
                                 matched_size=matched_size,
                                 side="BUY",
                             )
@@ -8802,14 +8890,14 @@ def _live_order(
             order_fact_state = _venue_submit_order_fact_state(
                 fill_evidence,
                 matched_size=matched_size,
-                submitted_size=shares,
+                submitted_size=venue_submit_shares,
                 side="BUY",
             )
             fill_trade_id = next(iter(trade_ids), None)
             if fill_trade_id:
                 fill_event_type = (
                     "FILL_CONFIRMED"
-                    if _venue_fill_covers_submit(matched_size, shares)
+                    if _venue_fill_covers_submit(matched_size, venue_submit_shares)
                     else "PARTIAL_FILL_OBSERVED"
                 )
             if fill_event_type and fill_price is None:
@@ -9123,7 +9211,7 @@ def _live_order(
                 direction="BUY",
                 market=intent.market_id,
                 price=intent.limit_price,
-                size_usd=float(shares * intent.limit_price),
+                size_usd=required_pusd_micro / 1_000_000.0,
                 strategy="live_order",
                 edge=float(intent.decision_edge),
                 mode=get_mode(),

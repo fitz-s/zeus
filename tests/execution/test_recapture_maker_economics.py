@@ -31,6 +31,7 @@ class _LegacyIntent:
     executable_snapshot_min_order_size: float = 5.0
     executable_snapshot_neg_risk: bool = False
     limit_price: float = 0.14
+    target_size_usd: float = 1.4
 
 
 def _final_intent(
@@ -111,6 +112,7 @@ def _fresh_snapshot(*, top_ask, provenance_source=None, depth_json="{}"):
         snapshot_id="snap-fresh",
         executable_snapshot_hash="hash-fresh",
         selected_outcome_token_id="tok-no",
+        outcome_label="NO",
         min_tick_size=0.01,
         min_order_size=5.0,
         fee_details={"fee_rate_fraction": "0.05"},
@@ -360,7 +362,8 @@ def test_certified_fak_accepts_positive_partial_depth_at_submit_recapture(
         lambda **_k: SimpleNamespace(
             depth_status="DEPTH_INSUFFICIENT",
             average_price=Decimal("0.14"),
-            filled_shares=Decimal("3.25"),
+            filled_shares=Decimal("8.25"),
+            gross_notional=Decimal("1.155"),
         ),
     )
 
@@ -377,6 +380,47 @@ def test_certified_fak_accepts_positive_partial_depth_at_submit_recapture(
     )
 
     assert out.executable_snapshot_id == "snap-fresh"
+
+
+def test_certified_fak_binds_fixed_cash_to_jit_target_sweep(_patched_recapture):
+    """A BUY FAK must not spend target_shares * limit past the Kelly target."""
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    target = Decimal("97.5")
+    limit = Decimal("0.38")
+    depth = (
+        '{"asks":['
+        '{"price":"0.30","size":"18.1"},'
+        '{"price":"0.32","size":"10"},'
+        '{"price":"0.33","size":"20"},'
+        '{"price":"0.35","size":"10"},'
+        '{"price":"0.36","size":"10"},'
+        '{"price":"0.37","size":"15"},'
+        '{"price":"0.38","size":"96.59"}],'
+        '"bids":[{"price":"0.27","size":"7"}]}'
+    )
+    _patched_recapture["fresh"] = _fresh_snapshot(
+        top_ask=Decimal("0.30"),
+        depth_json=depth,
+    )
+
+    out = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(limit_price=float(limit), target_size_usd=float(target * limit)),
+        _final_intent(
+            post_only=False,
+            limit=float(limit),
+            order_type="FAK",
+            qkernel_execution_economics=_buy_fak_economics(
+                shares=target,
+                limit=limit,
+            ),
+        ),
+        conn=object(),
+        submitted_shares=float(target),
+    )
+
+    assert out.target_size_usd == pytest.approx(33.25)
+    assert out.target_size_usd < float(target * limit)
 
 
 def test_certified_fak_rejects_fresh_tick_above_certified_limit(

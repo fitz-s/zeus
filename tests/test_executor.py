@@ -13,6 +13,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
+from types import SimpleNamespace
 
 import pytest
 
@@ -646,6 +647,20 @@ class TestExecutor:
         assert captured["shares"] == pytest.approx(10.00)
         assert captured["intent"].limit_price == pytest.approx(0.33)
         assert captured["intent"].target_size_usd == pytest.approx(10.00 * 0.33)
+
+    def test_fak_wire_size_uses_jit_cash_without_changing_kelly_target(self):
+        from src.execution.executor import _entry_buy_venue_submit_shares
+
+        intent = SimpleNamespace(
+            submit_order_type="FAK",
+            target_size_usd=33.25,
+            limit_price=0.38,
+        )
+
+        assert _entry_buy_venue_submit_shares(
+            intent,
+            target_shares=97.5,
+        ) == pytest.approx(87.5)
 
     def test_execute_final_intent_rejects_buy_notional_below_venue_minimum(self, monkeypatch):
         final_intent = _final_execution_intent(
