@@ -944,7 +944,11 @@ def test_boot_fast_releases_review_required_exit_mutex_before_scheduler(
     def _fail_capture(*args, **kwargs):
         raise AssertionError("boot_fast must not call capture_venue_read_snapshot")
 
-    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _conn_factory,
+    )
     monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
 
     client = MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"])
@@ -24597,7 +24601,9 @@ def test_unavailable_identity_submit_does_not_starve_durable_terminal_capital_re
     monkeypatch.setattr(
         venue_sync_contract,
         "capture_venue_read_snapshot",
-        lambda *_args, **_kwargs: pytest.fail("identity continuation must defer account snapshot"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "identity continuation must defer account snapshot"
+        ),
     )
     client = MagicMock(spec_set=["get_order", "place_limit_order"])
 
@@ -24620,6 +24626,94 @@ def test_unavailable_identity_submit_does_not_starve_durable_terminal_capital_re
         assert _get_state(verified, "cmd-release") == "EXPIRED"
     finally:
         verified.close()
+
+
+def test_proven_fill_obligation_releases_before_identity_point_read(
+    tmp_path,
+    monkeypatch,
+):
+    """Already-proven fill capital releases before any venue continuation."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only
+
+    db_path = tmp_path / "pre-network-fill-obligation.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    _insert(seed, command_id="cmd-unreadable", position_id="pos-unreadable")
+    _advance_to_submitting(
+        seed,
+        command_id="cmd-unreadable",
+        venue_order_id="ord-unreadable",
+    )
+    _insert(seed, command_id="cmd-release", position_id="pos-release")
+    _open_test_entry_obligation(seed, "cmd-release")
+    _append_test_entry_fill(seed, "cmd-release", with_trade=True)
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-release",
+        command_id="cmd-release",
+        order_id="order-cmd-release",
+    )
+    _append_test_filled_entry_projection(
+        seed,
+        position_id="pos-release",
+        command_id="cmd-release",
+        order_id="order-cmd-release",
+    )
+    seed.commit()
+    seed.close()
+
+    def _conn_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _point_read(_order_ids):
+        observed = _conn_factory()
+        try:
+            assert observed.execute(
+                "SELECT status FROM entry_exposure_obligations "
+                "WHERE command_id = 'cmd-release'"
+            ).fetchone()[0] == "RESOLVED"
+        finally:
+            observed.close()
+        return {}, False
+
+    _conn_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(
+        command_recovery,
+        "_read_identity_bound_point_orders",
+        _point_read,
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("identity continuation must defer account snapshot"),
+    )
+    client = MagicMock(spec_set=["get_order", "place_limit_order"])
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["terminal_entry_exposure_obligations_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["identity_bound_inflight_fast"] == {
+        "scanned": 1,
+        "advanced": 0,
+        "stayed": 1,
+        "errors": 0,
+    }
+    client.get_order.assert_not_called()
+    client.place_limit_order.assert_not_called()
 
 
 def test_live_tick_identity_bound_hung_point_read_returns_with_continuation(

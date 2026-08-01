@@ -22590,6 +22590,31 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 )
         if identity_submit_deferred:
             summary["identity_bound_inflight_deferred"] = identity_submit_deferred
+        preexisting_obligation_result = None
+        if terminal_obligation_open:
+            obligation_deadline = time.monotonic() + max(live_tick_budget, 0.5)
+            obligation_conn_factory = _recovery_apply_conn_factory(
+                conn_factory,
+                scope="live_tick",
+                deadline_monotonic=obligation_deadline,
+            )
+            preexisting_obligation_result = _run_recovery_pass_with_lock_policy(
+                "terminal_entry_exposure_obligations_fast",
+                lambda: run_db_only_pass(
+                    reconcile_terminal_entry_exposure_obligations,
+                    conn_factory=obligation_conn_factory,
+                    label="recovery.terminal_entry_exposure_obligations_fast",
+                ),
+                scope="live_tick",
+                summary=summary,
+                deadline_monotonic=obligation_deadline,
+            )
+            if preexisting_obligation_result is not None:
+                _accumulate(
+                    summary,
+                    "terminal_entry_exposure_obligations_fast",
+                    preexisting_obligation_result,
+                )
         identity_submit_command_ids = {
             str(row.get("command_id") or "")
             for row in identity_submit_candidates
@@ -22648,14 +22673,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             # A bounded exact-order continuation is the live-tick contract.
             # Do not let unrelated cancel/terminal candidates re-enter the
             # account-wide snapshot or historical point sweep after it.
-            return identity_result
-        if (
-            not cancel_candidates
-            and not terminal_candidates
-            and not partial_candidates
-            and not terminal_obligation_open
-        ):
-            return stale_terminal_finding_result
+            return identity_result or preexisting_obligation_result
+        if not cancel_candidates and not terminal_candidates and not partial_candidates:
+            return stale_terminal_finding_result or preexisting_obligation_result
         cancel_command_ids = {
             str(row.get("command_id") or "") for row in cancel_candidates
         }
@@ -22800,6 +22820,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 )
         return (
             stale_terminal_finding_result
+            or preexisting_obligation_result
             or cancel_result
             or partial_result
             or obligation_result
