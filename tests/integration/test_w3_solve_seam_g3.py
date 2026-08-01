@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-30
+# Last reused/audited: 2026-08-01
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -15284,6 +15284,63 @@ def test_global_actuation_rebinds_only_selected_buy_no_admission(missing_reason)
         "day0_conditioned_replacement_global_probability_v1"
     )
     assert current_typed[1] is sibling
+
+
+def test_global_actuation_rebinds_day0_probability_type_without_cap_rows():
+    witness = _current_global_book_probability()
+    family, proofs, _ = _corpus()[0]
+    binding = witness.bindings[0]
+    proof = next(
+        row
+        for row in proofs
+        if str(row.candidate.condition_id) == binding.condition_id
+        and row.direction == "buy_no"
+    )
+    sibling = next(
+        row
+        for row in proofs
+        if str(row.candidate.condition_id) == binding.condition_id
+        and row.direction == "buy_yes"
+    )
+    candidate = SimpleNamespace(
+        candidate_id="selected-no",
+        family_key=witness.family_key,
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side="NO",
+        token_id=binding.no_token_id,
+        probability_witness_identity=witness.witness_identity,
+    )
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="provisional-conditioned-day0",
+        probability_witness=witness,
+        candidate_seeds=(),
+        candidate_payoff_q_lcb_caps=(),
+    )
+
+    rebound = era._global_actuation_current_admission_proofs(
+        proofs=(proof, sibling),
+        global_actuation=SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate)
+        ),
+        prepared_global_family=prepared,
+        family=family,
+        day0_payload={
+            "_edli_q_source": "day0_conditioned_replacement",
+            "q_source": "day0_conditioned_replacement",
+            "probability_authority": (
+                "day0_conditioned_replacement_global_probability_v1"
+            ),
+        },
+    )
+
+    assert rebound[0].q_source == "day0_conditioned_replacement"
+    assert rebound[0].probability_authority == (
+        "day0_conditioned_replacement_global_probability_v1"
+    )
+    assert rebound[0].q_posterior == proof.q_posterior
+    assert rebound[0].q_lcb_5pct == proof.q_lcb_5pct
+    assert rebound[1] is sibling
 
 
 def test_global_current_buy_no_receipt_separates_action_and_point_parents():

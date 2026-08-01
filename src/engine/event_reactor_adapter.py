@@ -13199,7 +13199,7 @@ def _global_actuation_current_admission_proofs(
     cap_rows = tuple(
         getattr(prepared_global_family, "candidate_payoff_q_lcb_caps", ()) or ()
     )
-    if candidate is None or witness is None or not cap_rows:
+    if candidate is None or witness is None or (not cap_rows and not day0_payload):
         return proofs
     side = str(getattr(candidate, "side", "") or "").strip().upper()
     direction = {"YES": "buy_yes", "NO": "buy_no"}.get(side)
@@ -13247,6 +13247,11 @@ def _global_actuation_current_admission_proofs(
             selected,
             q_source=current_q_source,
             probability_authority=current_probability_authority,
+        )
+    if not cap_rows:
+        return tuple(
+            selected if proof is selected_proof else proof
+            for proof in proofs
         )
     missing_reason = str(getattr(selected, "missing_reason", "") or "")
     if not missing_reason.startswith(
