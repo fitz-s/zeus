@@ -2792,8 +2792,24 @@ def _pending_entry_endowments(
     incremental fill is included in an unchanged aggregate balance.
     """
 
+    event_columns = {
+        str(row[1])
+        for row in trade_conn.execute(
+            "PRAGMA table_info(venue_command_events)"
+        ).fetchall()
+    }
+    fixed_cash_fak_sql = (
+        """MAX(
+                   CASE WHEN event.event_type = 'SUBMIT_REQUESTED'
+                              AND json_valid(event.payload_json)
+                              AND UPPER(json_extract(event.payload_json, '$.order_type')) = 'FAK'
+                        THEN 1 ELSE 0 END
+               ) AS fixed_cash_fak"""
+        if "payload_json" in event_columns
+        else "0 AS fixed_cash_fak"
+    )
     rows = trade_conn.execute(
-        """
+        f"""
         SELECT obligation.command_id,
                obligation.status,
                obligation.token_id,
@@ -2811,7 +2827,8 @@ def _pending_entry_endowments(
                MAX(
                    CASE WHEN event.event_type = 'FILL_CONFIRMED'
                         THEN event.occurred_at END
-               ) AS fill_confirmed_at
+               ) AS fill_confirmed_at,
+               {fixed_cash_fak_sql}
           FROM entry_exposure_obligations obligation
           LEFT JOIN venue_commands command
             ON command.command_id = obligation.command_id
@@ -2858,6 +2875,7 @@ def _pending_entry_endowments(
         intent_kind = str(row[12] or "").strip().upper()
         command_state = str(row[13] or "").strip().upper()
         fill_confirmed_at_raw = str(row[14] or "").strip()
+        fixed_cash_fak = bool(row[15])
         try:
             shares = Decimal(str(row[3]))
             cost = Decimal(str(row[4]))
@@ -2883,7 +2901,18 @@ def _pending_entry_endowments(
             or cost < 0
             or command_size <= 0
             or command_price <= 0
-            or shares - command_size > Decimal("0.000001")
+            or (
+                fixed_cash_fak
+                and (
+                    shares < command_size
+                    or abs(cost - command_size * command_price)
+                    > Decimal("0.000001")
+                )
+            )
+            or (
+                not fixed_cash_fak
+                and shares - command_size > Decimal("0.000001")
+            )
         ):
             raise ValueError("CURRENT_WEALTH_ENTRY_OBLIGATION_INVALID")
         obligation_ids.add(command_id)

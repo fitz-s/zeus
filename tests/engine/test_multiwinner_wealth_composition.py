@@ -92,6 +92,16 @@ def _witness(conn: sqlite3.Connection):
     )
 
 
+def test_wealth_witness_reads_legacy_event_schema_without_payload_json():
+    conn = _wealth_conn()
+
+    assert "payload_json" not in {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(venue_command_events)").fetchall()
+    }
+    assert _witness(conn).spendable_cash_usd == Decimal("25")
+
+
 def test_family_joint_never_spends_fixed_fraction_above_kelly_target():
     """Minimum marketability cannot override the shared fractional-Kelly target."""
     family = "family-joint-weak-edge"

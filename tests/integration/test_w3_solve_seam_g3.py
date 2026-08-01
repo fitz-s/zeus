@@ -17121,7 +17121,8 @@ def test_global_selection_counts_open_entry_without_granting_sell_inventory():
         "UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'command-a'"
     )
     conn.execute(
-        "INSERT INTO venue_command_events VALUES (?,?,?)",
+        "INSERT INTO venue_command_events "
+        "(command_id,event_type,occurred_at) VALUES (?,?,?)",
         ("command-a", "FILL_CONFIRMED", "2026-07-17T05:44:30+00:00"),
     )
     position.shares = Decimal("39.1")
@@ -17832,7 +17833,8 @@ def _wealth_test_conn(
         CREATE TABLE venue_command_events (
             command_id TEXT,
             event_type TEXT,
-            occurred_at TEXT
+            occurred_at TEXT,
+            payload_json TEXT
         );
         CREATE TABLE entry_exposure_obligations (
             command_id TEXT PRIMARY KEY,
@@ -18577,6 +18579,168 @@ def test_current_portfolio_wealth_witness_bounds_inflight_buy_reservation():
     assert witness.wealth_floor_usd == Decimal("25.5")
     assert witness.wealth_ceiling_usd == Decimal("29.0")
     assert probe_inflight_buy_ambiguity(reserved) is False
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_pending"),
+    (
+        ("OPEN", (("cmd", "token-1", 105_200_000),)),
+        ("RESOLVED", ()),
+    ),
+)
+def test_current_portfolio_wealth_accepts_fixed_cash_fak_target_above_wire_size(
+    status, expected_pending
+):
+    decision_at = _dt.datetime(2026, 8, 1, 9, 44, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at)
+    conn.execute(
+        "UPDATE collateral_ledger_snapshots "
+        "SET pusd_balance_micro = 100000000, pusd_allowance_micro = 100000000"
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+        ("cmd", "position-1", "token-1", "BUY", 94.8, 0.45, "ENTRY", "FILLED"),
+    )
+    conn.execute(
+        "INSERT INTO venue_command_events "
+        "(command_id,event_type,occurred_at,payload_json) VALUES (?,?,?,?)",
+        (
+            "cmd",
+            "SUBMIT_REQUESTED",
+            decision_at.isoformat(),
+            json.dumps({"order_type": "FAK"}),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO entry_exposure_obligations VALUES (?,?,?,?,?,?,?)",
+        ("cmd", status, "token-1", 105.2, 42.66, 0, decision_at.isoformat()),
+    )
+
+    witness = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=PortfolioState(
+            authority="canonical_db",
+            authority_scope="runtime_exposure",
+        ),
+    )
+
+    assert witness.pending_entry_endowments_micro == expected_pending
+
+
+def test_current_portfolio_wealth_rejects_non_fak_target_above_command_size():
+    decision_at = _dt.datetime(2026, 8, 1, 9, 44, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at)
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+        ("cmd", "position-1", "token-1", "BUY", 94.8, 0.45, "ENTRY", "FILLED"),
+    )
+    conn.execute(
+        "INSERT INTO entry_exposure_obligations VALUES (?,?,?,?,?,?,?)",
+        ("cmd", "RESOLVED", "token-1", 105.2, 42.66, 0, decision_at.isoformat()),
+    )
+
+    with pytest.raises(ValueError, match="CURRENT_WEALTH_ENTRY_OBLIGATION_INVALID"):
+        current_portfolio_wealth_witness(
+            conn,
+            decision_at_utc=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            portfolio_state=PortfolioState(
+                authority="canonical_db",
+                authority_scope="runtime_exposure",
+            ),
+        )
+
+
+@pytest.mark.parametrize("target", (94.7999995, 94.8))
+def test_current_portfolio_wealth_enforces_fixed_cash_fak_target_floor(target):
+    decision_at = _dt.datetime(2026, 8, 1, 9, 44, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at)
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+        ("cmd", "position-1", "token-1", "BUY", 94.8, 0.45, "ENTRY", "FILLED"),
+    )
+    conn.execute(
+        "INSERT INTO venue_command_events "
+        "(command_id,event_type,occurred_at,payload_json) VALUES (?,?,?,?)",
+        (
+            "cmd",
+            "SUBMIT_REQUESTED",
+            decision_at.isoformat(),
+            json.dumps({"order_type": "FAK"}),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO entry_exposure_obligations VALUES (?,?,?,?,?,?,?)",
+        (
+            "cmd",
+            "RESOLVED",
+            "token-1",
+            target,
+            42.66,
+            0,
+            decision_at.isoformat(),
+        ),
+    )
+
+    if target < 94.8:
+        with pytest.raises(
+            ValueError, match="CURRENT_WEALTH_ENTRY_OBLIGATION_INVALID"
+        ):
+            current_portfolio_wealth_witness(
+                conn,
+                decision_at_utc=decision_at,
+                max_age=_dt.timedelta(seconds=30),
+                portfolio_state=PortfolioState(
+                    authority="canonical_db",
+                    authority_scope="runtime_exposure",
+                ),
+            )
+    else:
+        current_portfolio_wealth_witness(
+            conn,
+            decision_at_utc=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            portfolio_state=PortfolioState(
+                authority="canonical_db",
+                authority_scope="runtime_exposure",
+            ),
+        )
+
+
+def test_current_portfolio_wealth_rejects_fixed_cash_fak_cost_mismatch():
+    decision_at = _dt.datetime(2026, 8, 1, 9, 44, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at)
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+        ("cmd", "position-1", "token-1", "BUY", 94.8, 0.45, "ENTRY", "FILLED"),
+    )
+    conn.execute(
+        "INSERT INTO venue_command_events "
+        "(command_id,event_type,occurred_at,payload_json) VALUES (?,?,?,?)",
+        (
+            "cmd",
+            "SUBMIT_REQUESTED",
+            decision_at.isoformat(),
+            json.dumps({"order_type": "FAK"}),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO entry_exposure_obligations VALUES (?,?,?,?,?,?,?)",
+        ("cmd", "RESOLVED", "token-1", 105.2, 42.67, 0, decision_at.isoformat()),
+    )
+
+    with pytest.raises(ValueError, match="CURRENT_WEALTH_ENTRY_OBLIGATION_INVALID"):
+        current_portfolio_wealth_witness(
+            conn,
+            decision_at_utc=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            portfolio_state=PortfolioState(
+                authority="canonical_db",
+                authority_scope="runtime_exposure",
+            ),
+        )
 
 
 def test_current_portfolio_wealth_witness_refuses_unbounded_inflight_buy():
