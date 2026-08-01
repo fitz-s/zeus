@@ -1279,7 +1279,7 @@ def _apply_json_object_delta(
     return result
 
 
-_CANDIDATE_SEMANTIC_KEY_FIELDS = (
+_LEGACY_CANDIDATE_SEMANTIC_KEY_FIELDS = (
     "action",
     "family_key",
     "bin_id",
@@ -1287,6 +1287,10 @@ _CANDIDATE_SEMANTIC_KEY_FIELDS = (
     "side",
     "token_id",
     "position_id",
+)
+_CANDIDATE_SEMANTIC_KEY_FIELDS = (
+    *_LEGACY_CANDIDATE_SEMANTIC_KEY_FIELDS,
+    "execution_mode",
 )
 _BUY_CANDIDATE_INDEX_KEY_FIELDS = (
     "family_key",
@@ -1371,19 +1375,27 @@ def _delta_key(raw_key: object, *, size: int, error: str) -> tuple[str, ...]:
     return key
 
 
-def _candidate_semantic_key(row: Mapping[str, object]) -> str:
+def _candidate_semantic_key(
+    row: Mapping[str, object],
+    *,
+    fields: Sequence[str] = _CANDIDATE_SEMANTIC_KEY_FIELDS,
+) -> str:
     """Identify one action slot without its per-epoch causal certificate."""
 
     return json.dumps(
-        [str(row.get(field) or "") for field in _CANDIDATE_SEMANTIC_KEY_FIELDS],
+        [str(row.get(field) or "") for field in fields],
         separators=(",", ":"),
     )
 
 
 def _candidate_detail_map(
     rows: Sequence[Mapping[str, object]],
+    *,
+    fields: Sequence[str] = _CANDIDATE_SEMANTIC_KEY_FIELDS,
 ) -> dict[str, dict[str, object]]:
-    mapped = {_candidate_semantic_key(row): dict(row) for row in rows}
+    mapped = {
+        _candidate_semantic_key(row, fields=fields): dict(row) for row in rows
+    }
     if len(mapped) != len(rows):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_SEMANTIC_KEY_DUPLICATE")
     return mapped
@@ -1398,6 +1410,18 @@ def _apply_candidate_evaluations_delta(
     top_level = delta.get("top_level")
     detail_delta = delta.get("detailed")
     if not isinstance(top_level, Mapping) or not isinstance(detail_delta, Mapping):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    raw_semantic_fields = detail_delta.get("semantic_key_fields")
+    if not isinstance(raw_semantic_fields, Sequence) or isinstance(
+        raw_semantic_fields,
+        (str, bytes),
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    semantic_fields = tuple(str(field or "") for field in raw_semantic_fields)
+    if semantic_fields not in {
+        _LEGACY_CANDIDATE_SEMANTIC_KEY_FIELDS,
+        _CANDIDATE_SEMANTIC_KEY_FIELDS,
+    }:
         raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
     indexed_delta = delta.get("buy_candidate_index")
     condition_delta = delta.get("buy_condition_side_masks")
@@ -1523,7 +1547,7 @@ def _apply_candidate_evaluations_delta(
     base_rows = base.get("detailed")
     if not isinstance(base_rows, Sequence):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
-    rows = _candidate_detail_map(base_rows)
+    rows = _candidate_detail_map(base_rows, fields=semantic_fields)
     for key in detail_delta.get("removed_keys", ()):
         rows.pop(str(key), None)
     patches = detail_delta.get("patches", ())
@@ -1552,7 +1576,7 @@ def _apply_candidate_evaluations_delta(
             row.update(
                 (str(field), value) for field, value in replacements.items()
             )
-        if _candidate_semantic_key(row) != key:
+        if _candidate_semantic_key(row, fields=semantic_fields) != key:
             raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_SEMANTIC_KEY_CHANGED")
         rows[key] = row
     result["detailed"] = [rows[key] for key in sorted(rows)]

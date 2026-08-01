@@ -960,6 +960,30 @@ def test_compact_buy_rejection_group_ranks_posterior_mean_frontier():
     assert "_frontier_growth" not in compact["frontier"]["economics"]
 
 
+def test_candidate_semantic_key_distinguishes_maker_and_taker_proposals():
+    common = {
+        "action": "BUY",
+        "family_key": "family-a",
+        "bin_id": "32C",
+        "condition_id": "condition-a",
+        "side": "YES",
+        "token_id": "token-a",
+        "position_id": None,
+    }
+    rows = (
+        {**common, "candidate_id": "taker", "execution_mode": "TAKER_LIMIT"},
+        {**common, "candidate_id": "maker", "execution_mode": "MAKER_REST"},
+    )
+
+    mapped = global_batch_runtime._candidate_detail_map(rows)
+
+    assert len(mapped) == 2
+    assert {row["candidate_id"] for row in mapped.values()} == {
+        "taker",
+        "maker",
+    }
+
+
 def test_candidate_semantic_delta_does_not_rewrite_stable_action_slots():
     def payload(epoch: str) -> dict[str, object]:
         detailed = [

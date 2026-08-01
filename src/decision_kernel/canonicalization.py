@@ -159,6 +159,18 @@ _QKERNEL_BUY_FAK_PREFIX_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_buy_fak_full_robust_ev_usd",
 )
 
+_QKERNEL_MAKER_REST_IDENTITY_FIELDS: tuple[str, ...] = (
+    "global_fill_probability",
+    "global_fill_probability_source",
+    "global_rest_deadline_minutes",
+    "global_proposal_expected_delta_log_wealth",
+    "global_proposal_expected_ev_usd",
+    "global_proposal_expected_log_growth_per_hour",
+    "global_proposal_expected_capital_efficiency",
+    "global_proposal_capital_lock_hours",
+    "global_proposal_fill_semantics",
+)
+
 
 def qkernel_current_state_identity_hash(economics: Mapping[str, Any]) -> str:
     """Recomputable identity for the current-posterior execution certificate."""
@@ -168,6 +180,8 @@ def qkernel_current_state_identity_hash(economics: Mapping[str, Any]) -> str:
         fields = tuple(
             field for field in fields if field != "global_execution_mode"
         )
+    elif economics.get("global_execution_mode") == "MAKER_REST":
+        fields += _QKERNEL_MAKER_REST_IDENTITY_FIELDS
     if "global_buy_fak_prefix_semantics" in economics:
         fields += _QKERNEL_BUY_FAK_PREFIX_IDENTITY_FIELDS
     return stable_hash(
@@ -370,20 +384,26 @@ def qkernel_global_current_state_rejection_reason(
             return field
     if economics.get("global_optimum_semantics") != "CUT_TIME_GLOBAL_OPTIMUM":
         return "global_optimum_semantics"
-    if (
-        "global_execution_mode" in economics
-        and economics.get("global_execution_mode") != "TAKER_LIMIT"
-    ):
+    execution_mode = economics.get("global_execution_mode")
+    if execution_mode is not None and execution_mode not in {
+        "TAKER_LIMIT",
+        "MAKER_REST",
+    }:
         return "global_execution_mode"
     functional = str(
         economics.get("global_probability_functional")
         or "LOWER_CVAR_PARAMETER_DRAWS"
     ).strip()
     if functional == "POSTERIOR_PREDICTIVE_MEAN":
-        return _qkernel_global_mean_buy_rejection_reason(
+        mean_reason = _qkernel_global_mean_buy_rejection_reason(
             economics,
             direction=direction,
         )
+        if mean_reason is not None:
+            return mean_reason
+        if execution_mode == "MAKER_REST":
+            return _qkernel_global_maker_rest_rejection_reason(economics)
+        return None
     if functional != "LOWER_CVAR_PARAMETER_DRAWS":
         return "global_probability_functional"
     numeric: dict[str, float] = {}
@@ -524,6 +544,89 @@ def qkernel_global_current_state_rejection_reason(
         )
         if prefix_reason is not None:
             return f"global_buy_fak:{prefix_reason}"
+    return None
+
+
+def _qkernel_global_maker_rest_rejection_reason(
+    economics: Mapping[str, Any],
+) -> str | None:
+    """Bind a passive proposal to its fill-weighted capital objective."""
+
+    fields = (
+        "global_fill_probability",
+        "global_rest_deadline_minutes",
+        "global_limit_price",
+        "global_expected_fill_price_before_fee",
+        "global_expected_delta_log_wealth",
+        "global_expected_ev_usd",
+        "global_expected_capital_efficiency",
+        "global_proposal_expected_delta_log_wealth",
+        "global_proposal_expected_ev_usd",
+        "global_proposal_expected_log_growth_per_hour",
+        "global_proposal_expected_capital_efficiency",
+        "global_proposal_capital_lock_hours",
+    )
+    try:
+        numeric = {field: float(economics.get(field)) for field in fields}
+    except (TypeError, ValueError):
+        return "maker_numeric_field_invalid"
+    if not all(math.isfinite(value) for value in numeric.values()):
+        return "maker_numeric_field_non_finite"
+    fill_probability = numeric["global_fill_probability"]
+    deadline = numeric["global_rest_deadline_minutes"]
+    limit = numeric["global_limit_price"]
+    fill_price = numeric["global_expected_fill_price_before_fee"]
+    proposal_du = numeric["global_proposal_expected_delta_log_wealth"]
+    proposal_ev = numeric["global_proposal_expected_ev_usd"]
+    proposal_growth = numeric["global_proposal_expected_log_growth_per_hour"]
+    proposal_efficiency = numeric["global_proposal_expected_capital_efficiency"]
+    proposal_lock = numeric["global_proposal_capital_lock_hours"]
+    if not str(economics.get("global_fill_probability_source") or "").strip():
+        return "global_fill_probability_source"
+    if economics.get("global_proposal_fill_semantics") != (
+        "FILL_WEIGHTED_ZERO_CONTINUATION_LOWER_BOUND"
+    ):
+        return "global_proposal_fill_semantics"
+    if not (
+        0.0 < fill_probability <= 1.0
+        and deadline > 0.0
+        and 0.05 <= limit <= 0.95
+        and math.isclose(fill_price, limit, rel_tol=0.0, abs_tol=1e-12)
+        and float(economics["cost"]) + 1e-12 >= limit
+        and proposal_du > 0.0
+        and proposal_ev > 0.0
+        and proposal_growth > 0.0
+        and proposal_efficiency > 0.0
+        and proposal_lock > 0.0
+    ):
+        return "maker_execution_envelope"
+    if not (
+        math.isclose(
+            proposal_du,
+            numeric["global_expected_delta_log_wealth"] * fill_probability,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(
+            proposal_ev,
+            numeric["global_expected_ev_usd"] * fill_probability,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(
+            proposal_growth,
+            proposal_du / proposal_lock,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(
+            proposal_efficiency,
+            numeric["global_expected_capital_efficiency"],
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        return "maker_objective_identity"
     return None
 
 

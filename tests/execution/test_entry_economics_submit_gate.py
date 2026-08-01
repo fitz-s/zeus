@@ -1,5 +1,5 @@
 # Created: 2026-07-01
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-08-01
 # Authority basis: current q-kernel final-entry economics and selected-side probability quality law.
 from __future__ import annotations
 
@@ -1285,6 +1285,64 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
         qkernel_execution_economics=economics,
     )
     assert taker_quality["allowed"] is True
+
+
+def test_current_state_mean_maker_binds_fill_weighted_objective():
+    fill_probability = 0.19
+    capital_lock_hours = 2.0
+    economics = _current_state_mean_buy_econ(
+        global_execution_mode="MAKER_REST",
+        global_fill_probability=fill_probability,
+        global_fill_probability_source="rest_then_cross_deadline_prior_v1",
+        global_rest_deadline_minutes=20.0,
+        global_proposal_fill_semantics=(
+            "FILL_WEIGHTED_ZERO_CONTINUATION_LOWER_BOUND"
+        ),
+    )
+    proposal_du = (
+        economics["global_expected_delta_log_wealth"] * fill_probability
+    )
+    economics.update(
+        global_proposal_expected_delta_log_wealth=proposal_du,
+        global_proposal_expected_ev_usd=(
+            economics["global_expected_ev_usd"] * fill_probability
+        ),
+        global_proposal_expected_log_growth_per_hour=(
+            proposal_du / capital_lock_hours
+        ),
+        global_proposal_expected_capital_efficiency=(
+            economics["global_expected_capital_efficiency"]
+        ),
+        global_proposal_capital_lock_hours=capital_lock_hours,
+    )
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+
+    assert (
+        qkernel_global_current_state_rejection_reason(
+            economics,
+            direction="buy_yes",
+        )
+        is None
+    )
+
+    tampered = dict(
+        economics,
+        global_proposal_expected_ev_usd=(
+            economics["global_proposal_expected_ev_usd"] + 0.01
+        ),
+    )
+    tampered["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        tampered
+    )
+    assert (
+        qkernel_global_current_state_rejection_reason(
+            tampered,
+            direction="buy_yes",
+        )
+        == "maker_objective_identity"
+    )
 
 
 @pytest.mark.parametrize(
