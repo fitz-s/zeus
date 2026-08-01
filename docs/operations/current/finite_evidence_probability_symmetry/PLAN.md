@@ -2120,6 +2120,32 @@ Acceptance requires:
   evidence that Tel Aviv current-state remaining-window probabilities become
   fresh before evaluating exits.
 
+## 2026-07-31 Day0 raw-provenance family isolation
+
+The live global auction currently fails before selection when one Day0 family
+has a current settlement-channel extreme but no verifiable raw-payload digest.
+Rejecting that probability is correct; promoting the family-local evidence gap
+to `GLOBAL_PREPARED_FAMILY_INCOMPLETE` across every otherwise independent
+weather family is not.
+
+The correction types `GLOBAL_DAY0_RAW_PROVENANCE_MISSING` as unavailable for
+that weather family. The family remains excluded from BUY, SELL, HOLD, and
+submit-time probability authority until a fresh canonical fact carries a real
+raw digest. Other complete families remain eligible for the same global
+capital auction.
+
+SCOPE is exactly one city x target-date x metric family lacking raw Day0
+provenance. DRAIN is the existing current-q family exclusion followed by the
+same-epoch global auction over complete families. RESET is the next fresh
+canonical Day0 fact for that family whose raw payload has a valid SHA-256,
+which makes normal probability preparation succeed. No digest is synthesized,
+no probability or Kelly law changes, and no venue order is forced.
+
+Acceptance requires a two-family adapter antibody proving the incomplete
+family is typed ineligible while the complete sibling family can win and
+actuate; the focused W3 seam, compile, lint, diff, hot-fix landing, loaded SHA,
+and a new complete live auction receipt must all be verified.
+
 ## 2026-07-27 Boot event-claim recovery under world-writer contention
 
 The post-auction-fix restart proved a runtime continuity defect: prerequisite

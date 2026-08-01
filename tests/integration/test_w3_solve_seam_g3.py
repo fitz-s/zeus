@@ -20990,6 +20990,14 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             ),
             True,
         ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_RAW_PROVENANCE_MISSING"
+            ),
+            True,
+        ),
     ),
 )
 def test_global_batch_excludes_typed_current_q_ineligible_family(
@@ -21110,6 +21118,8 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                         "GLOBAL_DAY0_PROVISIONAL_REVISION_"
                         "LIKELIHOOD_UNAVAILABLE"
                     )
+                if "RAW_PROVENANCE_MISSING" in ineligible_reason:
+                    raise ValueError("GLOBAL_DAY0_RAW_PROVENANCE_MISSING")
                 raise ValueError(
                     "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
                     "REPLACEMENT_RAW_INPUT_HWM:"
@@ -21126,14 +21136,18 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
         if (
             "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
             or "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
+            or "RAW_PROVENANCE_MISSING" in ineligible_reason
         ):
             held_receipt = captured["prepare_held_event"](event_a, decision_at)
             assert held_receipt.prepared_global_family is None
-            reason_suffix = (
-                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
-                if "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
-                else "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
-            )
+            if "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason:
+                reason_suffix = (
+                    "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+                )
+            elif "RAW_PROVENANCE_MISSING" in ineligible_reason:
+                reason_suffix = "GLOBAL_DAY0_RAW_PROVENANCE_MISSING"
+            else:
+                reason_suffix = "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
             assert held_receipt.reason == (
                 "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
                 f"FamilyAuthorityUnavailable:{reason_suffix}"
@@ -21171,6 +21185,7 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
         if (
             "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
             or "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
+            or "RAW_PROVENANCE_MISSING" in ineligible_reason
         )
         else 1
     )
