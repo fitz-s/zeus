@@ -2146,6 +2146,33 @@ family is typed ineligible while the complete sibling family can win and
 actuate; the focused W3 seam, compile, lint, diff, hot-fix landing, loaded SHA,
 and a new complete live auction receipt must all be verified.
 
+## 2026-08-01 Current-truth-only capital selection
+
+The first complete post-recovery auction proved that every in-band candidate
+was removed before economics and Fractional Kelly by settled-Brier
+`risk_action:gate` rows. That historical score is valid learning telemetry but
+is not part of the replacement probability authority: current provider center,
+current target-specific ENS shape and disagreement, current portfolio wealth,
+and the executable book are the decision-time truth.
+
+The correction keeps settled Brier, lineage binding, and strategy breakdown in
+the canonical RiskGuard receipt, but removes settled Brier and historical edge
+compression from RiskLevel and durable strategy-gate emission. Current missing
+probability semantics, source identity, collateral/exposure truth, operator
+controls, executable-price law, fees, depth, and Kelly remain behavioral.
+
+SCOPE is entry selection and submit for the current global auction; held
+monitoring and reduce-only exits are unchanged. DRAIN is the next RiskGuard tick,
+which expires obsolete automatic gates, followed by the next same-cut global
+auction. RESET is unnecessary because a settled-history veto is no longer a
+live state; a current truth loss still fails closed through its existing
+authority-specific gate. No order is forced and CASH remains an equal candidate.
+
+Acceptance requires a red-before-green RiskGuard antibody, full RiskGuard and
+W3 regressions, standard hot-fix deployment, expired Brier risk actions, and a
+new complete receipt proving all in-band YES/NO candidates reached economics
+and Fractional Kelly before CASH or one unique order won.
+
 ## 2026-07-27 Boot event-claim recovery under world-writer contention
 
 The post-auction-fix restart proved a runtime continuity defect: prerequisite

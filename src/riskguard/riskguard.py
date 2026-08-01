@@ -3074,17 +3074,13 @@ def _tick_once() -> RiskLevel:
         portfolio_brier_thin_sample = (
             0 < len(p_forecasts) < _STRATEGY_BRIER_MIN_SAMPLE
         )
-        # A pooled probability score has no more authority than its evidence.
-        # One confident loss can exceed the RED threshold, but it cannot prove
-        # that every current candidate is unsafe.  Keep the raw score/level for
-        # learning and operator telemetry; only let it actuate RiskGuard once
-        # the same minimum evidence floor used by strategy attribution exists.
-        portfolio_brier_level = (
-            RiskLevel.GREEN
-            if portfolio_brier_thin_sample
-            else portfolio_brier_raw_level
-        )
-        brier_level = portfolio_brier_level
+        # Settled Brier grades frozen past decisions. It is learning telemetry,
+        # not current decision-time truth, so it may not veto a replacement q
+        # built from the current source shape or refresh a self-perpetuating
+        # strategy gate. Current probability/source identity failures remain
+        # behavioral through probability_semantics_level below.
+        portfolio_brier_level = RiskLevel.GREEN
+        brier_level = RiskLevel.GREEN
         brier_strategy_breakdown = _strategy_brier_breakdown(brier_actuating_rows, thresholds) if p_forecasts else {
             "by_strategy": {},
             "by_mechanism": {},
@@ -3093,12 +3089,8 @@ def _tick_once() -> RiskLevel:
             "classified_count": 0,
         }
         brier_strategy_localization: dict[str, object] = {
-            "status": "not_applicable",
-            "reason": (
-                "portfolio_brier_thin_sample_no_verdict"
-                if portfolio_brier_thin_sample
-                else "portfolio_brier_green"
-            ),
+            "status": "record_only_current_truth_selection",
+            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
         }
         settlement_quality_level = RiskLevel.GREEN
         if settlement_rows and not settlement_economic_ready_rows:
@@ -3118,76 +3110,6 @@ def _tick_once() -> RiskLevel:
                 "forecast_qkernel_entry",
                 "probability_semantics_authority_unavailable",
             )
-        degraded_brier_strategies = brier_strategy_breakdown.get("degraded_strategies", {})
-        clean_brier_attribution = (
-            isinstance(degraded_brier_strategies, dict)
-            and bool(degraded_brier_strategies)
-            and int(brier_strategy_breakdown.get("unclassified_count", 0) or 0) == 0
-            and all(
-                str(strategy) in CANONICAL_STRATEGY_KEYS
-                for strategy in degraded_brier_strategies
-            )
-        )
-
-        def _append_brier_degraded_gate_reasons() -> None:
-            for strategy, payload in sorted(degraded_brier_strategies.items()):
-                if not isinstance(payload, dict):
-                    continue
-                cohort = payload.get("cohort")
-                cohort_suffix = f",cohort={cohort}" if cohort else ""
-                _append_reason(
-                    recommended_strategy_gate_reasons,
-                    str(strategy),
-                    (
-                        "brier_degraded("
-                        f"level={payload.get('level')},"
-                        f"brier={payload.get('brier')},"
-                        f"sample={payload.get('sample_size')}"
-                        f"{cohort_suffix}"
-                        ")"
-                    ),
-                )
-
-        if portfolio_brier_level == RiskLevel.YELLOW and clean_brier_attribution:
-            brier_strategy_localization = {
-                "status": "pending_durable_strategy_gate",
-                "gated_strategies": sorted(str(strategy) for strategy in degraded_brier_strategies),
-            }
-            _append_brier_degraded_gate_reasons()
-        elif (
-            portfolio_brier_level in {RiskLevel.ORANGE, RiskLevel.RED}
-            and clean_brier_attribution
-        ):
-            # Strong-level localization (live incident 2026-07-04,
-            # opening_inertia
-            # trailing-30d Brier 0.322 froze healthy strategies for ~30 trailing
-            # days). Unlike YELLOW, ORANGE/RED localization additionally requires
-            # (checked after the durable bookkeeping write below): a
-            # read-after-write CONFIRMED active gate per degraded strategy, and
-            # the residual (non-gated) portfolio itself recomputing to GREEN.
-            # Until both are confirmed this stays "pending" and the level below
-            # remains the global portfolio_brier_level (fail closed). SCOPE:
-            # exact canonical strategy keys. DRAIN: every RiskGuard tick
-            # recomputes the settled window. RESET: durable strategy actions
-            # expire when the recomputed strategy verdict clears.
-            strength = portfolio_brier_level.value.lower()
-            brier_strategy_localization = {
-                "status": f"pending_durable_strategy_gate_{strength}",
-                "gated_strategies": sorted(str(strategy) for strategy in degraded_brier_strategies),
-            }
-            _append_brier_degraded_gate_reasons()
-        elif portfolio_brier_level != RiskLevel.GREEN:
-            brier_strategy_localization = {
-                "status": "not_localized",
-                "reason": "portfolio_brier_requires_global_level",
-                "portfolio_brier_level": portfolio_brier_level.value,
-                "unclassified_count": int(brier_strategy_breakdown.get("unclassified_count", 0) or 0),
-                "degraded_strategy_count": (
-                    len(degraded_brier_strategies)
-                    if isinstance(degraded_brier_strategies, dict)
-                    else 0
-                ),
-            }
         # execution_quality_level stays GREEN: a low maker fill-rate is NOT a
         # risk condition (2026-07-05, INV-05). REMOVED the assignment that set
         # execution_quality_level=YELLOW + recommended tighten_risk when
@@ -3201,12 +3123,9 @@ def _tick_once() -> RiskLevel:
         # branches (tighten_risk control append; execution-quality localization;
         # the YELLOW alert) are now inert — execution_quality_level can no longer
         # be YELLOW. Collapsing that dead apparatus is tracked as a follow-up.
-        strategy_signal_level = RiskLevel.YELLOW if (edge_compression_alerts or strategy_tracker_error) else RiskLevel.GREEN
-        for alert in edge_compression_alerts:
-            if not alert.startswith("EDGE_COMPRESSION: "):
-                continue
-            strategy = alert.split(": ", 1)[1].split(" edge", 1)[0]
-            _append_reason(recommended_strategy_gate_reasons, strategy, "edge_compression")
+        # Tracker edge compression summarizes past decisions and stays learning
+        # telemetry. Current executable edge is recomputed inside the auction.
+        strategy_signal_level = RiskLevel.GREEN
         # execution_decay is NOT a per-strategy selection gate (2026-07-05,
         # INV-05 advisory-risk-forbidden). REMOVED: the fill-rate loop that
         # appended execution_decay(...) to recommended_strategy_gate_reasons and
@@ -3219,9 +3138,8 @@ def _tick_once() -> RiskLevel:
         #      to overpay; re-decision pulls on book drift) as "decay". It
         #      penalizes correct behavior — low maker-fill is EXPECTED for a
         #      maker-patient strategy, not a defect.
-        #   3. Calibration failure (the real risk) is caught by brier_degraded
-        #      (settled Brier) and edge_compression, which STILL gate above.
-        #      execution_decay measured fills, not calibration — orthogonal.
+        #   3. Current probability/source authority and executable economics
+        #      already fail closed; execution_decay measured fills, not either.
         #   4. It self-perpetuated: gate -> strategy quiet -> no terminals ->
         #      frozen window -> re-gate, blocking the only fat-edge strategy
         #      (forecast_qkernel_entry) every cycle and starving the
@@ -3514,7 +3432,7 @@ def _tick_once() -> RiskLevel:
                 # Kept as an explicit alias of portfolio_brier_level/brier_level
                 # so downstream consumers see a coherent, self-describing pair
                 # regardless of which localization branch (if any) fired.
-                "brier_all_strategies_level": portfolio_brier_level.value,
+                "brier_all_strategies_level": portfolio_brier_raw_level.value,
                 "brier_active_portfolio_level": brier_level.value,
                 "localized_orange_scope": localized_orange_scope,
                 "localized_red_scope": localized_red_scope,
