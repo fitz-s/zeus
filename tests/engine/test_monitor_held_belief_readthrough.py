@@ -142,6 +142,50 @@ def test_readthrough_insufficient_inputs_failclose_with_durable_belief_debt(monk
     assert reseed_called == [("Karachi", "2026-06-12", "high")]
 
 
+def test_bounded_monitor_defers_sync_readthrough_to_independent_producer(monkeypatch):
+    """One stale family cannot retain the portfolio monitor in Python fusion."""
+    import src.engine.monitor_refresh as mr
+    import src.engine.position_belief as pb
+
+    monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: _stale_belief())
+    monkeypatch.setattr(
+        mr,
+        "_attempt_held_belief_readthrough",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("bounded portfolio monitor must not run synchronous fusion")
+        ),
+    )
+    reseed_called = []
+    monkeypatch.setattr(
+        mr,
+        "_enqueue_single_family_belief_reseed_failsoft",
+        lambda **kw: reseed_called.append(kw) or None,
+    )
+
+    pos = _pos()
+    prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+        pos,
+        conn=None,
+        city=object(),
+        target_d=None,
+        deadline_monotonic=123.0,
+    )
+
+    assert prob == pytest.approx(pos.p_posterior)
+    assert refresh_pos is pos
+    assert is_fresh is False
+    assert reseed_called == [
+        {"city": "Karachi", "target_date": "2026-06-12", "metric": "high"}
+    ]
+    assert "replacement_belief_readthrough_deferred_to_independent_producer" in (
+        pos.applied_validations
+    )
+    assert any(
+        "bounded_monitor_reseed_required" in validation
+        for validation in pos.applied_validations
+    )
+
+
 def test_readthrough_does_not_itself_decide_an_exit(monkeypatch):
     """NO FALSE EXIT: a fresh recompute only supplies belief; the monitor returns
     a probability + is_fresh, never an exit verdict. The CI separation conservatism

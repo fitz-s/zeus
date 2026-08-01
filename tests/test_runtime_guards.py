@@ -12482,7 +12482,7 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
     portfolio = PortfolioState(positions=[pos])
     artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
     summary = {"monitors": 0, "exits": 0, "risk_level": RiskLevel.ORANGE.value}
-    captured = {}
+    auction_requests = []
 
     def _refresh_position(conn, clob, refreshed_pos):
         refreshed_pos.last_monitor_market_price = 0.43
@@ -12491,6 +12491,7 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
         refreshed_pos.last_monitor_best_ask = 0.43
         refreshed_pos.last_monitor_prob = 0.62
         refreshed_pos.last_monitor_prob_is_fresh = True
+        refreshed_pos.last_monitor_edge = 0.21
         return types.SimpleNamespace(
             p_market=np.array([0.43]),
             p_posterior=0.62,
@@ -12499,13 +12500,34 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
             forward_edge=0.21,
         )
 
-    def _execute_exit(**kwargs):
-        captured["exit_context"] = kwargs["exit_context"]
-        captured["position"] = kwargs["position"]
-        return "sell_pending: orange"
-
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
-    monkeypatch.setattr("src.execution.exit_lifecycle.execute_exit", _execute_exit)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_orange_favorable_exit_decision",
+        lambda position, context, decision: ExitDecision(
+            True,
+            "ORANGE_FAVORABLE_EXIT",
+            urgency="normal",
+            trigger="ORANGE_FAVORABLE_EXIT",
+            selected_method=position.selected_method or position.entry_method,
+            applied_validations=[
+                *list(position.applied_validations or []),
+                "risk_orange",
+                "orange_favorable_bid_gate",
+                "orange_favorable_net_exit_gate",
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("ORANGE statistical SELL must not use local authority")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.events.reactor.request_global_auction_completion",
+        lambda **kwargs: auction_requests.append(kwargs) or True,
+    )
 
     p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
         conn=None,
@@ -12520,13 +12542,20 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
     assert p_dirty is True
     assert t_dirty is False
     assert summary["risk_orange_favorable_exits"] == 1
-    assert summary["exits"] == 1
-    assert artifact.monitor_results[0].should_exit is True
-    assert artifact.monitor_results[0].exit_reason == "ORANGE_FAVORABLE_EXIT"
+    assert summary["exits"] == 0
+    assert summary["monitor_statistical_sells_blocked_without_global_authority"] == 1
+    assert summary["monitor_statistical_sell_auction_completion_requested"] == 1
+    assert artifact.monitor_results[0].should_exit is False
+    assert artifact.monitor_results[0].exit_reason == (
+        "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+    )
     assert artifact.monitor_results[0].fresh_prob == pytest.approx(0.62)
     assert artifact.monitor_results[0].fresh_edge == pytest.approx(0.21)
-    assert captured["exit_context"].exit_reason == "ORANGE_FAVORABLE_EXIT"
-    assert captured["position"].exit_trigger == "ORANGE_FAVORABLE_EXIT"
+    assert len(auction_requests) == 1
+    assert auction_requests[0]["reason"] == (
+        "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+    )
+    assert auction_requests[0]["position_id"] == "orange-favorable"
     assert "orange_favorable_bid_gate" in pos.applied_validations
     assert "orange_favorable_net_exit_gate" in pos.applied_validations
 

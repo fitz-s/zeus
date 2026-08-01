@@ -1348,6 +1348,33 @@ def _attempt_held_belief_readthrough(
         return None
 
 
+def _attempt_held_belief_readthrough_outside_bounded_monitor(
+    pos: "Position", *, city, target_d, metric: str,
+    decision_now: datetime | None = None,
+    deadline_monotonic: float | None = None,
+) -> tuple[float, float, float] | None:
+    """Keep synchronous fusion outside the portfolio monitor critical path.
+
+    The live held-position monitor always supplies a cycle deadline.  Python work
+    inside the fusion stack cannot be interrupted by SQLite's progress handler,
+    so attempting it inline can retain every later position past that deadline.
+    A bounded monitor therefore fails closed and lets the independent reseed /
+    materialization producer publish authority for the next re-decision.  Direct
+    unbounded callers retain the diagnostic read-through behavior.
+    """
+
+    if deadline_monotonic is not None:
+        return None
+    return _attempt_held_belief_readthrough(
+        pos,
+        city=city,
+        target_d=target_d,
+        metric=metric,
+        decision_now=decision_now,
+        deadline_monotonic=None,
+    )
+
+
 def _record_nowcast_write_success() -> None:
     global _nowcast_consecutive_write_failures
     _nowcast_consecutive_write_failures = 0
@@ -5143,7 +5170,7 @@ def _refresh_day0_monitor_probability(
         if unobserved_prefix is not None:
             return unobserved_prefix
 
-        readthrough_belief = _attempt_held_belief_readthrough(
+        readthrough_belief = _attempt_held_belief_readthrough_outside_bounded_monitor(
             pos,
             city=city,
             target_d=target_d,
@@ -5418,7 +5445,8 @@ def monitor_probability_refresh(
     # If it yields a fresh posterior, the exit organ regains a fresh same-authority
     # belief THIS cycle (so CI_SEPARATED_REVERSAL can arm); if not, we fail-close as
     # before AND record a durable, retryable belief_debt marker (never a silent freeze).
-    readthrough_belief = _attempt_held_belief_readthrough(
+    readthrough_deferred_to_producer = deadline_monotonic is not None
+    readthrough_belief = _attempt_held_belief_readthrough_outside_bounded_monitor(
         pos,
         city=city,
         target_d=target_d,
@@ -5449,6 +5477,11 @@ def monitor_probability_refresh(
             metric=_metric_for_family, pos=fresh_pos,
         )
         return float(readthrough_prob), fresh_pos, True
+    if readthrough_deferred_to_producer:
+        _append_monitor_validation(
+            pos,
+            "replacement_belief_readthrough_deferred_to_independent_producer",
+        )
     _set_monitor_probability_fresh(pos, False)
     _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
     _append_monitor_validation(pos, "legacy_belief_substitution_suppressed")
@@ -5457,7 +5490,12 @@ def monitor_probability_refresh(
     # never silently frozen. The reseed below is the repair lane.
     _record_belief_debt(
         pos, city=str(pos.city), target_date=str(pos.target_date),
-        metric=_metric_for_family, reason="readthrough_inputs_insufficient",
+        metric=_metric_for_family,
+        reason=(
+            "bounded_monitor_reseed_required"
+            if readthrough_deferred_to_producer
+            else "readthrough_inputs_insufficient"
+        ),
     )
     _enqueue_single_family_belief_reseed_failsoft(
         city=str(pos.city),

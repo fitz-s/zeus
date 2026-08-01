@@ -3511,6 +3511,10 @@ _GLOBAL_AUCTION_STATISTICAL_SELL_TRIGGERS = frozenset(
         "EDGE_REVERSAL",
         "BUY_NO_EDGE_EXIT",
         "BUY_NO_NEAR_EXIT",
+        # ORANGE is a risk-state override, not local execution authority.  Its
+        # favorable-exit proposal still needs the global auction's current
+        # depth, fees, wealth and correlated-endowment comparison before SELL.
+        "ORANGE_FAVORABLE_EXIT",
         # ultimate_alpha 2026-07-24: the unified stopping-law sell proposes and
         # the global auction actuates — evaluate_exit's L(x) sees only the
         # top-of-book bid, while the auction values the sell against the real
