@@ -25050,6 +25050,156 @@ def test_global_batch_reauctions_until_current_curve_stabilizes(monkeypatch):
     assert result.receipts[event.event_id].submitted is True
 
 
+def test_global_batch_unstable_curve_falls_through_to_executable_sell(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    family_key = scope.family_keys[0]
+    witness = SimpleNamespace(
+        family_key=family_key,
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="q-a",
+    )
+    prepared = SimpleNamespace(probability_witness=witness)
+    buy_candidates = tuple(
+        _global_test_buy_candidate(
+            family_key=family_key,
+            probability_witness_identity=witness.witness_identity,
+            book_identity=f"book-{index}",
+            price=price,
+            captured_at=decision_at,
+            candidate_id=f"unstable-buy-{index}",
+        )
+        for index, price in enumerate(("0.40", "0.41", "0.42", "0.43"))
+    )
+    sell_candidate = SimpleNamespace(
+        candidate_id="executable-sell",
+        action="SELL",
+        family_key=family_key,
+        bin_id="held-bin",
+        condition_id="held-condition",
+        side="NO",
+        token_id="held-token",
+        execution_mode="NOT_APPLICABLE",
+    )
+    buy_selections = iter(
+        SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                actuation_identity=f"buy-actuation-{index}",
+                wealth_witness_identity="wealth",
+            ),
+        )
+        for index, candidate in enumerate(buy_candidates[:3])
+    )
+    sell_selection = SimpleNamespace(
+        decision=SimpleNamespace(candidate=sell_candidate, no_trade_reason=None),
+        winner_event_id=event.event_id,
+        actuation=SimpleNamespace(
+            actuation_identity="sell-actuation",
+            wealth_witness_identity="wealth",
+        ),
+    )
+    initial_book = _global_test_candidate_book(
+        buy_candidates[0], epoch_captured_at=decision_at
+    )
+    calls = {"select": 0, "preflight": 0, "venue": 0}
+    exclusions = []
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth",
+            economic_identity="wealth-economics",
+        ),
+    )
+
+    def select(*_, **kwargs):
+        calls["select"] += 1
+        rejection = kwargs["candidate_policy_rejection_resolver"](
+            buy_candidates[0]
+        )
+        exclusions.append(rejection)
+        return sell_selection if rejection else next(buy_selections)
+
+    monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", select)
+
+    def preflight(_event, actuation, *_):
+        calls["preflight"] += 1
+        if actuation is sell_selection.actuation:
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="STABLE", binding_token="sell-binding"
+            )
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="CURVE_SUPERSEDED",
+            replacement_candidate=buy_candidates[calls["preflight"]],
+            reason=f"curve moved {calls['preflight']}",
+        )
+
+    def actuate(_event, actuation, _at, token, _authority):
+        assert actuation is sell_selection.actuation
+        assert token == "sell-binding"
+        calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            event.event_id,
+            event.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
+        preflight_winner=preflight,
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            actuate
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=lambda probabilities, _at: (
+            probabilities,
+            initial_book,
+        ),
+    )
+
+    assert calls == {"select": 4, "preflight": 4, "venue": 1}
+    assert exclusions[:3] == [None, None, None]
+    assert exclusions[3] == (
+        "GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:"
+        "GLOBAL_WINNER_CURVE_UNSTABLE_THIS_EPOCH:attempts=3:curve moved 3"
+    )
+    assert result.winner_event_id == event.event_id
+    assert result.venue_submit_count == 1
+    assert result.receipts[event.event_id].submitted is True
+
+
 def test_global_batch_stable_preflight_cannot_cross_epoch_deadline(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")

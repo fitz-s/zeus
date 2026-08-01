@@ -104,6 +104,7 @@ _SLOW_BATCH_STAGE_SECONDS = 2.0
 _SLOW_BATCH_TOTAL_SECONDS = 5.0
 _WEALTH_REAUCTION_MAX_ATTEMPTS = 2
 _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS = 1
+_CURVE_SUPERSESSION_MAX_ATTEMPTS_PER_CANDIDATE = 2
 _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH = 8
 
 
@@ -5261,6 +5262,9 @@ def process_current_global_batch(
             payoff_q_lcb_by_candidate: dict[
                 tuple[str, str, str, str], float
             ] = dict(initial_payoff_q_lcb_by_candidate)
+            curve_supersession_count_by_candidate: dict[
+                tuple[str, str, str, str, str, str], int
+            ] = {}
             wealth_reauction_count = 0
             wealth_reauction_audit = None
 
@@ -5719,26 +5723,69 @@ def process_current_global_batch(
                     candidate = selected.decision.candidate
                     if candidate is None:
                         return reject("GLOBAL_REAUCTION_SELECTED_CANDIDATE_MISSING")
-                    try:
-                        next_book_epoch = _book_epoch_with_replacement_candidate(
-                            attempt_book_epoch,
-                            candidate,
-                            preflight.replacement_candidate,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - invalid JIT evidence blocks
-                        return reject(
-                            "GLOBAL_REAUCTION_CURVE_OVERLAY_FAILED:"
-                            f"{type(exc).__name__}:{exc}"
-                        )
+                    candidate_key = (
+                        str(getattr(candidate, "action", "BUY") or "BUY").upper(),
+                        str(getattr(candidate, "family_key", "") or ""),
+                        str(getattr(candidate, "bin_id", "") or ""),
+                        str(getattr(candidate, "side", "") or ""),
+                        str(getattr(candidate, "token_id", "") or ""),
+                        _global_candidate_execution_mode(candidate),
+                    )
                     if (
-                        next_book_epoch.witness_identity
-                        == attempt_book_epoch.witness_identity
+                        not all(candidate_key)
+                        or candidate_key[0] not in {"BUY", "SELL"}
+                        or candidate_key[3] not in {"YES", "NO"}
                     ):
-                        return reject(
-                            "GLOBAL_REAUCTION_CURVE_NO_PROGRESS:"
+                        return reject("GLOBAL_REAUCTION_CURVE_CANDIDATE_INVALID")
+                    curve_supersession_count = (
+                        curve_supersession_count_by_candidate.get(candidate_key, 0)
+                        + 1
+                    )
+                    curve_supersession_count_by_candidate[candidate_key] = (
+                        curve_supersession_count
+                    )
+                    if (
+                        curve_supersession_count
+                        > _CURVE_SUPERSESSION_MAX_ATTEMPTS_PER_CANDIDATE
+                    ):
+                        reason = (
+                            "GLOBAL_WINNER_CURVE_UNSTABLE_THIS_EPOCH:"
+                            f"attempts={curve_supersession_count}:"
                             f"{preflight.reason or preflight.status}"
                         )
-                    attempt_book_epoch = next_book_epoch
+                        excluded_by_candidate[candidate_key] = reason
+                        preflight_candidate_ineligible_by_event[winner_id] = (
+                            f"{getattr(candidate, 'candidate_id', '')}:{reason}"
+                        )
+                        _LOG.warning(
+                            "global batch unstable curve candidate excluded: "
+                            "candidate=%s event=%s attempts=%d excluded=%d",
+                            getattr(candidate, "candidate_id", ""),
+                            winner_id,
+                            curve_supersession_count,
+                            len(excluded_by_candidate),
+                        )
+                    else:
+                        try:
+                            next_book_epoch = _book_epoch_with_replacement_candidate(
+                                attempt_book_epoch,
+                                candidate,
+                                preflight.replacement_candidate,
+                            )
+                        except Exception as exc:  # noqa: BLE001 - invalid JIT evidence blocks
+                            return reject(
+                                "GLOBAL_REAUCTION_CURVE_OVERLAY_FAILED:"
+                                f"{type(exc).__name__}:{exc}"
+                            )
+                        if (
+                            next_book_epoch.witness_identity
+                            == attempt_book_epoch.witness_identity
+                        ):
+                            return reject(
+                                "GLOBAL_REAUCTION_CURVE_NO_PROGRESS:"
+                                f"{preflight.reason or preflight.status}"
+                            )
+                        attempt_book_epoch = next_book_epoch
                 elif preflight.status == "PROBABILITY_TIGHTENED":
                     tightening = preflight.probability_tightening
                     candidate = selected.decision.candidate
