@@ -2085,6 +2085,7 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
             outcome_label=outcome_label,
             side=side,
             order_type=order_type,
+            post_only=order_type in {"GTC", "GTD"},
             price=price,
             size=size,
         )
@@ -2869,6 +2870,7 @@ def _make_envelope(
     outcome_label: str = "YES",
     side: str = "BUY",
     order_type: str = "GTC",
+    post_only: bool = False,
     price: float | Decimal = 0.5,
     size: float | Decimal = 10.0,
     raw_response_json: str | None = None,
@@ -2899,7 +2901,7 @@ def _make_envelope(
         price=Decimal(str(price)),
         size=Decimal(str(size)),
         order_type=order_type,
-        post_only=False,
+        post_only=post_only,
         tick_size=Decimal("0.01"),
         min_order_size=Decimal("0.01"),
         neg_risk=False,
@@ -13325,6 +13327,100 @@ class TestRecoveryResolutionTable:
              WHERE command_id = 'cmd-entry-fak-partial'
             """
         ).fetchone()[0] == "RESOLVED"
+
+    @pytest.mark.parametrize(
+        ("proof_class", "expected_advanced", "expected_status"),
+        [
+            ("confirmed_fill_plus_point_order_terminal_remainder", 1, "RESOLVED"),
+            ("unproved_terminal_remainder", 0, "OPEN"),
+        ],
+    )
+    def test_terminal_gtc_partial_entry_expiry_releases_obligation(
+        self,
+        conn,
+        mock_client,
+        proof_class,
+        expected_advanced,
+        expected_status,
+    ):
+        """A proven vanished GTC remainder must not reserve its full stake."""
+        _insert(conn, size=10.0, price=0.50, order_type="GTC")
+        _open_test_entry_obligation(conn, "cmd-001")
+        _advance_to_acked(conn, venue_order_id="ord-gtc-partial")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-gtc-partial",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-gtc-partial",
+            state="PARTIALLY_MATCHED",
+            matched_size="4",
+            remaining_size="0",
+            raw_payload_json={
+                "proof_class": "terminal_partial_order_fact",
+                "status": "CANCELED",
+                "order_id": "ord-gtc-partial",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-gtc-partial",
+            trade_id="trade-gtc-partial",
+            state="CONFIRMED",
+            filled_size="4",
+            fill_price="0.50",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-gtc-partial",
+                "filled_size": "4",
+                "fill_price": "0.50",
+            },
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_projection_repairs,
+            reconcile_terminal_entry_exposure_obligations,
+        )
+
+        assert reconcile_filled_entry_projection_repairs(conn, mock_client) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="EXPIRED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={
+                "reason": "partial_remainder_absent_from_exchange_open_orders",
+                "proof_class": proof_class,
+                "venue_order_id": "ord-gtc-partial",
+                "positive_fill_size": "4",
+            },
+        )
+
+        assert reconcile_terminal_entry_exposure_obligations(conn) == {
+            "scanned": 1,
+            "advanced": expected_advanced,
+            "stayed": 1 - expected_advanced,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
+        ).fetchone()[0] == expected_status
 
     def test_already_canceled_exit_ambiguous_point_read_stays_review_required(
         self,

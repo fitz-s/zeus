@@ -8558,20 +8558,31 @@ def _terminal_partial_entry_obligation_proven(
     if not command_id or not venue_order_id:
         return False
     if command_state == CommandState.EXPIRED.value:
-        fak_remainder_expired = conn.execute(
+        terminal_remainder_expired = conn.execute(
             """
-            SELECT 1
+            SELECT json_extract(payload_json, '$.reason') AS reason,
+                   json_extract(payload_json, '$.proof_class') AS proof_class
               FROM venue_command_events
              WHERE command_id = ?
                AND event_type = 'EXPIRED'
                AND json_valid(payload_json)
-               AND json_extract(payload_json, '$.reason') =
-                   'terminal_fak_partial_entry_remainder_expired'
+               AND json_extract(payload_json, '$.reason') IN (
+                   'terminal_fak_partial_entry_remainder_expired',
+                   'partial_remainder_absent_from_exchange_open_orders'
+               )
+             ORDER BY sequence_no DESC
              LIMIT 1
             """,
             (command_id,),
         ).fetchone()
-        if fak_remainder_expired is None:
+        if terminal_remainder_expired is None:
+            return False
+        expired = _dict_row(terminal_remainder_expired)
+        if (
+            expired.get("reason") == "partial_remainder_absent_from_exchange_open_orders"
+            and expired.get("proof_class")
+            != "confirmed_fill_plus_point_order_terminal_remainder"
+        ):
             return False
     if command_state == CommandState.CANCELLED.value:
         cancel_ack = conn.execute(
