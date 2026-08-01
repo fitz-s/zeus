@@ -8418,6 +8418,44 @@ def test_durable_monitor_recovery_arms_fairness_debt_when_reactor_stays_busy(
         main_module._periodic_held_position_monitor_fairness_debt.clear()
 
 
+def test_periodic_monitor_handoff_clears_fairness_debt_before_incomplete_scan(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class IdleReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    was_bootstrap_complete = (
+        main_module._held_position_monitor_bootstrap_complete.is_set()
+    )
+    main_module._held_position_monitor_bootstrap_complete.set()
+    main_module._periodic_held_position_monitor_fairness_debt.set()
+    main_module._day0_urgent_wake_pending.clear()
+    main_module._day0_held_monitor_preempt_requested.clear()
+    main_module._periodic_exit_monitor_day0_yielded.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", lambda **_kwargs: False)
+
+    try:
+        with pytest.raises(RuntimeError, match="EXIT_MONITOR_CYCLE_INCOMPLETE"):
+            main_module._exit_monitor_cycle.__wrapped__()
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert not main_module._defer_for_held_position_monitor("edli_event_reactor")
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+        if not was_bootstrap_complete:
+            main_module._held_position_monitor_bootstrap_complete.clear()
+
+
 def test_durable_monitor_recovery_has_an_independent_scheduler_executor() -> None:
     import inspect
 

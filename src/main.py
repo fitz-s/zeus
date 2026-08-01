@@ -324,9 +324,11 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
         return False
 
     # SCOPE: a timed-out periodic full-book monitor blocks only EDLI reactor
-    # admission. DRAIN: the next successful periodic full-book coverage clears
-    # the debt. RESET: process restart, or that successful coverage; targeted,
-    # urgent, and status-only monitor runs cannot clear it.
+    # admission. DRAIN: the next periodic full-book monitor that successfully
+    # acquires the reactor handoff clears the debt before scanning positions.
+    # RESET: process restart, or that successful handoff; incomplete per-position
+    # evidence stays fail-closed for that position but cannot freeze unrelated
+    # entry families after the concurrency debt has already been paid.
     if (
         job_name == "edli_event_reactor"
         and _periodic_held_position_monitor_fairness_debt.is_set()
@@ -7065,6 +7067,12 @@ def _exit_monitor_cycle(
             )
             return False
         _edli_reactor_active_lock.release()
+        if periodic_full_book:
+            # Fairness debt buys the monitor one reactor-free handoff, not a
+            # globally exclusive full-book scan. Once the handoff succeeds the
+            # concurrency obligation is satisfied even if a later position is
+            # missing fresh belief authority and the scan returns incomplete.
+            _periodic_held_position_monitor_fairness_debt.clear()
         _held_position_monitor_handoff_pending.clear()
         if urgent_forecast and _day0_exit_monitor_priority_pending():
             logger.info(
@@ -7125,8 +7133,6 @@ def _exit_monitor_cycle(
             # without a Python exception while every position was deferred for
             # missing executable books; that is not coverage.
             _periodic_exit_monitor_day0_yielded.clear()
-        if periodic_full_book:
-            _periodic_held_position_monitor_fairness_debt.clear()
         return True
     finally:
         if not urgent_fact:
