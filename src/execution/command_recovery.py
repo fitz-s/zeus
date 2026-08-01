@@ -11161,7 +11161,7 @@ def _matched_cancel_review_required_candidates(conn: sqlite3.Connection) -> list
     return [_dict_row(row) for row in rows]
 
 
-def _terminal_fak_partial_entry_review_candidates(
+def _terminal_partial_entry_review_candidates(
     conn: sqlite3.Connection,
 ) -> list[dict]:
     if not _table_exists(conn, "venue_commands"):
@@ -11178,7 +11178,7 @@ def _terminal_fak_partial_entry_review_candidates(
            AND command.side = 'BUY'
            AND command.venue_order_id IS NOT NULL
            AND command.venue_order_id != ''
-           AND UPPER(COALESCE(envelope.order_type, '')) = 'FAK'
+           AND UPPER(COALESCE(envelope.order_type, '')) IN ('FAK', 'GTC', 'GTD')
            AND EXISTS (
                 SELECT 1
                   FROM venue_command_events review
@@ -11280,15 +11280,15 @@ def _review_required_terminal_fak_partial_exit_projection_matches(
     )
 
 
-def _clear_review_required_terminal_fak_partial_entry(
+def _clear_review_required_terminal_partial_entry(
     conn: sqlite3.Connection,
     *,
     command: Mapping[str, object],
     trade_summary: Mapping[str, object],
 ) -> bool:
-    """Reduce a terminal FAK BUY review to its exact fill plus expired remainder.
+    """Reduce a terminal BUY review to its exact fill plus expired remainder.
 
-    SCOPE: one ENTRY/BUY FAK command whose persisted point order is terminal.
+    SCOPE: one ENTRY/BUY command whose persisted point order is terminal.
     DRAIN: the point order and canonical confirmed trade facts must agree on the
     exact positive fill and prove that the unmatched prefix cannot remain live.
     RESET: one transaction records the terminal partial, projects only its
@@ -11298,7 +11298,8 @@ def _clear_review_required_terminal_fak_partial_entry(
     if (
         str(command.get("intent_kind") or "").upper() != "ENTRY"
         or str(command.get("side") or "").upper() != "BUY"
-        or str(command.get("env_order_type") or "").upper() != "FAK"
+        or str(command.get("env_order_type") or "").upper()
+        not in {"FAK", "GTC", "GTD"}
     ):
         return False
     command_id = str(command.get("command_id") or "")
@@ -11324,7 +11325,7 @@ def _clear_review_required_terminal_fak_partial_entry(
     if (
         _order_status(point) not in {"MATCHED", "FILLED"}
         or str(_first_present(point, "order_type", "orderType") or "").upper()
-        != "FAK"
+        != str(command.get("env_order_type") or "").upper()
         or _extract_order_id(point) != venue_order_id
         or str(_first_present(point, "side") or "").upper() != "BUY"
         or str(_first_present(point, "asset_id", "assetId", "token_id") or "")
@@ -11375,7 +11376,7 @@ def _clear_review_required_terminal_fak_partial_entry(
         },
     }
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
-    sp_name = f"sp_terminal_fak_partial_entry_{safe_command_id}"
+    sp_name = f"sp_terminal_partial_entry_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
         fact_id = _append_terminal_partial_order_fact(
@@ -11724,7 +11725,7 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    for command in _terminal_fak_partial_entry_review_candidates(conn):
+    for command in _terminal_partial_entry_review_candidates(conn):
         summary["scanned"] += 1
         command_id = str(command.get("command_id") or "")
         venue_order_id = str(command.get("venue_order_id") or "")
@@ -11734,7 +11735,7 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
                 command_id=command_id,
                 venue_order_id=venue_order_id,
             )
-            if _clear_review_required_terminal_fak_partial_entry(
+            if _clear_review_required_terminal_partial_entry(
                 conn,
                 command=command,
                 trade_summary=trade_summary,

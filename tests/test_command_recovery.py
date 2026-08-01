@@ -18173,6 +18173,78 @@ class TestRecoveryResolutionTable:
             "cumulative_fill_below_requested_size": True,
         }
 
+    def test_terminal_gtc_multileg_partial_expires_unfilled_remainder(self, conn):
+        """A terminal maker order may fill through many exact trade legs."""
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+        from src.state.venue_command_repo import append_event
+
+        order_id = "ord-terminal-gtc-multileg"
+        _insert(conn, size=102.0, price=0.34, order_type="GTC")
+        _seed_pending_entry_projection(conn)
+        _advance_to_acked(conn, venue_order_id=order_id)
+        for index, size in enumerate(("72.28", "7.272726", "15.151514", "7.272726")):
+            _append_trade_fact(
+                conn,
+                order_id=order_id,
+                trade_id=f"trade-terminal-gtc-{index}",
+                state="CONFIRMED",
+                filled_size=size,
+                fill_price="0.34",
+            )
+        _append_order_fact(
+            conn,
+            order_id=order_id,
+            state="PARTIALLY_MATCHED",
+            matched_size="101.976966",
+            remaining_size="0.023034",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+                "venue_order_id": order_id,
+                "point_order_status": "MATCHED",
+                "point_order": {
+                    "id": order_id,
+                    "status": "MATCHED",
+                    "order_type": "GTC",
+                    "original_size": "102",
+                    "size_matched": "101.976966",
+                    "side": "BUY",
+                    "asset_id": "tok-001",
+                },
+                "proof_class": "point_order_filled_requires_complete_fill_fact_authority",
+            },
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'day0_window',
+                   shares = 116.516966,
+                   chain_shares = 116.516966,
+                   chain_state = 'synced'
+             WHERE position_id = 'pos-001'
+            """
+        )
+
+        summary = reconcile_matched_cancel_review_required_entries(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        events = _get_events(conn, "cmd-001")
+        assert events[-2]["event_type"] == "PARTIAL_FILL_OBSERVED"
+        assert events[-1]["event_type"] == "EXPIRED"
+        partial = json.loads(events[-2]["payload_json"])
+        expired = json.loads(events[-1]["payload_json"])
+        assert partial["matched_size"] == "101.976966"
+        assert partial["remaining_size"] == "0"
+        assert expired["unfilled_size"] == "0.023034"
+
     def test_filled_entry_execution_fact_repair_preserves_position_increments(
         self,
         conn,
