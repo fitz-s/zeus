@@ -371,6 +371,11 @@ def _install_listener_dependencies(monkeypatch, wake, order: list[str]) -> None:
         "_edli_global_completion_yield",
         main._OneTurnWakeExclusion(),
     )
+    monkeypatch.setattr(
+        main,
+        "_edli_day0_post_monitor_yield",
+        main._OneTurnWakeExclusion(),
+    )
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         reactor_wake, "coalescible_reactor_wakes", lambda _wake: (wake,)
@@ -692,3 +697,99 @@ def test_global_completion_yield_preserves_day0_and_resets_without_work_or_resta
     ]
     assert queue_file.read_bytes() == queue_bytes
     assert reactor_wake.read_reactor_wake(path=wake_path) == wake
+
+
+def test_completed_day0_monitor_yields_one_turn_to_exact_held_sell_debt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    wake_path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
+    request = _request(position_id="capital-debt-behind-day0", schema_version=3)
+    monkeypatch.setattr(
+        "src.config.state_path",
+        lambda filename: tmp_path / filename,
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main,
+        "_edli_global_completion_yield",
+        main._OneTurnWakeExclusion(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_day0_post_monitor_yield",
+        main._OneTurnWakeExclusion(),
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    selected_reasons: list[str] = []
+
+    monkeypatch.setattr(main, "_day0_wake_requires_exit_monitor", lambda _scope: True)
+    monkeypatch.setattr(
+        main,
+        "_day0_exit_monitor_attempt_state",
+        lambda _wake_id: (True, True),
+    )
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _event_ids: main._ReactorWakeEventState(
+            ready=True,
+            finished=False,
+        ),
+    )
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: False)
+    monkeypatch.setattr(
+        reactor_wake,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: False,
+    )
+
+    def _cycle(**kwargs):
+        selected_reasons.append(kwargs["producer_wake_reason"])
+        if (
+            kwargs["producer_wake_reason"]
+            == reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        ):
+            assert kwargs["producer_held_sell_reauction_requests"] == (request,)
+        return False
+
+    monkeypatch.setattr(main, "_edli_event_reactor_cycle", _cycle)
+    published_at = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+    held_wake = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id="wake-capital-debt",
+        published_at=published_at,
+        held_sell_reauction_requests=(request,),
+    )
+    day0_wake = reactor_wake.publish_reactor_wake(
+        source="day0_test_producer",
+        reason="day0_extreme_event_committed",
+        path=wake_path,
+        wake_id="wake-day0-monitor-complete",
+        published_at=published_at + timedelta(seconds=1),
+        event_ids=("event-day0-incomplete",),
+        forecast_families=(request.family,),
+    )
+    held_bytes = reactor_wake._wake_queue_target(
+        held_wake, path=wake_path
+    ).read_bytes()
+    day0_bytes = reactor_wake._wake_queue_target(
+        day0_wake, path=wake_path
+    ).read_bytes()
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert main._edli_reactor_wake_poll_once() is False
+    assert selected_reasons == [
+        "day0_extreme_event_committed",
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+    ]
+    assert (
+        reactor_wake._wake_queue_target(held_wake, path=wake_path).read_bytes()
+        == held_bytes
+    )
+    assert (
+        reactor_wake._wake_queue_target(day0_wake, path=wake_path).read_bytes()
+        == day0_bytes
+    )

@@ -7618,20 +7618,28 @@ def event_bound_live_adapter_from_trade_conn(
                 actuation=actuation,
                 decision_time=at,
             )
-            receipt = _global_preflight_entry_authority_receipt(
-                event,
-                receipt,
-                decision_time=at,
-                live_cap_conn=live_cap_conn or trade_conn,
+            decision = getattr(actuation, "decision", None)
+            candidate = getattr(decision, "candidate", None)
+            action = str(getattr(candidate, "action", "") or "").upper()
+            sell_preflight = (
+                action == "SELL"
+                or str(receipt.reason or "").startswith("GLOBAL_SELL_")
             )
-            receipt = _global_preflight_entry_jit_receipt(
-                event,
-                receipt,
-                global_actuation=actuation,
-                book_quote_provider=pre_submit_book_quote_provider,
-                current_candidate_override=jit_candidate,
-                checked_at_utc=datetime.now(UTC),
-            )
+            if not sell_preflight:
+                receipt = _global_preflight_entry_authority_receipt(
+                    event,
+                    receipt,
+                    decision_time=at,
+                    live_cap_conn=live_cap_conn or trade_conn,
+                )
+                receipt = _global_preflight_entry_jit_receipt(
+                    event,
+                    receipt,
+                    global_actuation=actuation,
+                    book_quote_provider=pre_submit_book_quote_provider,
+                    current_candidate_override=jit_candidate,
+                    checked_at_utc=datetime.now(UTC),
+                )
             if receipt.global_jit_candidate is not None:
                 pending_preflight_jit_candidate = receipt.global_jit_candidate
             reason = str(receipt.reason or "")
@@ -7924,6 +7932,45 @@ def event_bound_live_adapter_from_trade_conn(
                 missing_held_binding_families = (
                     _missing_held_binding_families(probability_slice)
                 )
+                if missing_held_binding_families and not force_current_gamma:
+                    valid_slice = {
+                        family_key: witness
+                        for family_key, witness in probability_slice.items()
+                        if family_key not in missing_held_binding_families
+                    }
+                    rebound = (
+                        _bind(
+                            valid_slice,
+                            mode=mode,
+                            metadata_sink=metadata_sink,
+                        )
+                        if valid_slice
+                        else {}
+                    )
+                    missing_slice = {
+                        family_key: probability_slice[family_key]
+                        for family_key in missing_held_binding_families
+                    }
+                    missing_metadata = {} if metadata_sink is not None else None
+                    try:
+                        repaired = _bind(
+                            missing_slice,
+                            mode=mode,
+                            metadata_sink=missing_metadata,
+                            force_current_gamma=True,
+                        )
+                    except (RequestAdmissionDenied, TimeoutError, ValueError) as exc:
+                        logging.getLogger(__name__).warning(
+                            "global reduce-only binding repair unavailable for "
+                            "%d held families; preserving the valid held cut: %s",
+                            len(missing_held_binding_families),
+                            exc,
+                        )
+                    else:
+                        rebound.update(repaired)
+                        if metadata_sink is not None and missing_metadata is not None:
+                            metadata_sink.update(missing_metadata)
+                    return rebound
                 force_current_gamma = (
                     force_current_gamma
                     or bool(missing_held_binding_families)

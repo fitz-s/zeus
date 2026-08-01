@@ -16710,6 +16710,30 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     assert unavailable == {}
     assert unavailable_metadata == {}
 
+    no_local_identity = _global_book_metadata_conn(original)
+    no_local_identity.execute("DELETE FROM executable_market_snapshot_latest")
+    no_local_identity.execute("DELETE FROM executable_market_snapshots")
+    no_local_metadata = {}
+    no_local = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={original.family_key: original},
+        get_gamma_event=lambda _slug: pytest.fail(
+            "reduce-only identity debt must not block on Gamma"
+        ),
+        get_gamma_markets=lambda _conditions: pytest.fail(
+            "reduce-only identity debt must not block on Gamma"
+        ),
+        get_clob_market=lambda _condition_id: pytest.fail(
+            "CLOB metadata requires a persisted token binding"
+        ),
+        trade_conn=no_local_identity,
+        checked_at_utc=at,
+        metadata_sink=no_local_metadata,
+        required_token_ids=frozenset({held_token}),
+    )
+    assert no_local == {}
+    assert no_local_metadata == {}
+
     requested_tokens = []
     times = iter((at, at + _dt.timedelta(seconds=1)))
     held_epoch = capture_current_global_book_epoch(
@@ -20807,7 +20831,7 @@ def test_global_batch_preempts_after_preflight_before_actuation(monkeypatch):
     )
 
 
-def test_live_adapter_stable_preflight_survives_routine_monitor_handoff(
+def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_handoff(
     monkeypatch,
 ):
     import src.runtime.reactor_wake as reactor_wake
@@ -20847,12 +20871,16 @@ def test_live_adapter_stable_preflight_survives_routine_monitor_handoff(
     monkeypatch.setattr(
         era,
         "_global_preflight_entry_authority_receipt",
-        lambda _event, receipt, **_kwargs: receipt,
+        lambda *_args, **_kwargs: pytest.fail(
+            "reduce-only SELL must not run BUY entry authority"
+        ),
     )
     monkeypatch.setattr(
         era,
         "_global_preflight_entry_jit_receipt",
-        lambda _event, receipt, **_kwargs: receipt,
+        lambda *_args, **_kwargs: pytest.fail(
+            "reduce-only SELL must not compare the BUY ASK curve"
+        ),
     )
     adapter = era.event_bound_live_adapter_from_trade_conn(
         sqlite3.connect(":memory:"),
@@ -20880,7 +20908,10 @@ def test_live_adapter_stable_preflight_survives_routine_monitor_handoff(
     assert cancelled() is True
     result = preflight(
         event,
-        SimpleNamespace(actuation_identity="actuation-1"),
+        SimpleNamespace(
+            actuation_identity="actuation-1",
+            decision=SimpleNamespace(candidate=SimpleNamespace(action="SELL")),
+        ),
         decision_at,
         authority,
     )
@@ -20890,7 +20921,10 @@ def test_live_adapter_stable_preflight_survives_routine_monitor_handoff(
 
     preflight(
         event,
-        SimpleNamespace(actuation_identity="actuation-2"),
+        SimpleNamespace(
+            actuation_identity="actuation-2",
+            decision=SimpleNamespace(candidate=SimpleNamespace(action="SELL")),
+        ),
         decision_at,
         authority,
     )

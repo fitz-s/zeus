@@ -1595,6 +1595,14 @@ def bind_current_global_probability_tokens(
         if family_key not in local_metadata_family_keys
         and family_key not in clob_attempted_family_keys
     }
+    if required_tokens is not None:
+        # A reduce-only cut may use current CLOB tradeability over a persisted
+        # token binding, but it must not make every held SELL depend on Gamma
+        # discovery. Families without enough local identity to query CLOB are
+        # excluded from this cut and retried after their snapshot drain repairs
+        # them; other held families remain executable.
+        clob_attempted_family_keys.update(remote_work_by_family)
+        remote_work_by_family = {}
 
     from concurrent.futures import ThreadPoolExecutor
     from src.data.market_scanner import _boolish_market_field, _extract_outcomes

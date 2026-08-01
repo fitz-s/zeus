@@ -123,6 +123,7 @@ class _OneTurnWakeExclusion:
 
 
 _edli_global_completion_yield = _OneTurnWakeExclusion()
+_edli_day0_post_monitor_yield = _OneTurnWakeExclusion()
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
         "edli_event_reactor",
@@ -3907,6 +3908,7 @@ def _edli_initialize_reactor_wake_cursor() -> None:
 
     _edli_last_reactor_wake_id = None
     _edli_global_completion_yield.reset()
+    _edli_day0_post_monitor_yield.reset()
     _day0_urgent_wake_pending.clear()
     _day0_held_monitor_preempt_requested.clear()
 
@@ -4720,6 +4722,31 @@ def _yield_incomplete_global_completion_once(
         )
 
 
+def _yield_incomplete_day0_after_monitor_once(
+    wake: object,
+    *,
+    monitor_succeeded: bool,
+) -> None:
+    """Let one queued capital obligation run after a Day0 monitor succeeds.
+
+    SCOPE: only the selected Day0 wake_id after its held-position monitor has
+    completed; the durable wake and its entry/event work remain unchanged.
+    DRAIN: the next listener poll excludes that wake for one selection turn,
+    allowing exact held SELL debt to own a reduce-only auction cut. RESET: the
+    exclusion is consumed once, then the Day0 wake immediately regains normal
+    priority; listener initialization/restart also clears process state.
+    """
+
+    if (
+        str(getattr(wake, "reason", "") or "")
+        == "day0_extreme_event_committed"
+        and monitor_succeeded
+    ):
+        _edli_day0_post_monitor_yield.arm(
+            str(getattr(wake, "wake_id", "") or "")
+        )
+
+
 def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
@@ -4738,7 +4765,10 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
 
     excluded_wake_ids = _exit_monitor_excluded_wake_ids()
-    one_turn_yield_ids = _edli_global_completion_yield.consume()
+    one_turn_yield_ids = frozenset(
+        _edli_global_completion_yield.consume()
+        | _edli_day0_post_monitor_yield.consume()
+    )
     wake = (
         read_reactor_wake(exclude_wake_ids=excluded_wake_ids)
         if excluded_wake_ids
@@ -5000,8 +5030,16 @@ def _edli_reactor_wake_poll_once() -> bool:
             wake,
             pending_held_sell_reauction_requests,
         )
+        _yield_incomplete_day0_after_monitor_once(
+            wake,
+            monitor_succeeded=day0_monitor_succeeded,
+        )
         return False
     if wake_event_ids and not _reactor_wake_events_finished(wake_event_ids):
+        _yield_incomplete_day0_after_monitor_once(
+            wake,
+            monitor_succeeded=day0_monitor_succeeded,
+        )
         return False
     if held_sell_reauction_requests and not held_sell_reauction_requests_completed(
         held_sell_reauction_requests
