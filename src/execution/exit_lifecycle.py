@@ -288,9 +288,6 @@ EXIT_LIQUIDITY_WAIT_COOLDOWN_SECONDS = 120
 _EXIT_LIQUIDITY_WAIT_ERRORS = frozenset(
     {"exit_no_executable_bid", "exit_no_in_band_bid"}
 )
-_GLOBAL_SELL_FAK_ZERO_FILL_REAUCTION_ERROR = (
-    "global_sell_venue_fak_no_match_zero_fill_reauction"
-)
 _ACTIVE_EXIT_SELL_STATES = frozenset(
     {
         "INTENT_CREATED",
@@ -487,64 +484,11 @@ def _is_global_sell_snapshot_reauction_error(error: object) -> bool:
     """True when a global SELL must discard its stale executable certificate."""
 
     normalized = str(error or "").lower()
-    return (
-        normalized == _GLOBAL_SELL_FAK_ZERO_FILL_REAUCTION_ERROR
-        or normalized.startswith(
-            (
-                "global_sell_exit_executable_snapshot_unavailable",
-                "global_sell_exit_executable_snapshot_error:",
-            )
+    return normalized.startswith(
+        (
+            "global_sell_exit_executable_snapshot_unavailable",
+            "global_sell_exit_executable_snapshot_error:",
         )
-    )
-
-
-def _global_sell_reauction_error_after_rejected_submit(
-    *,
-    global_authorized: bool,
-    sell_result: OrderResult,
-) -> tuple[str, dict[str, object]]:
-    """Classify direct executor evidence of a zero-fill FAK race."""
-
-    # SCOPE: one global-authorized statistical FAK SELL with definitive zero fill.
-    # DRAIN: immediate retry release persists a new exact re-auction obligation.
-    # RESET: that generation receives an ACTUATED or CAPITAL_REJECTED receipt.
-    normalized = str(sell_result.reason or "")
-    if (
-        global_authorized
-        and sell_result.status == "rejected"
-        and sell_result.venue_call_started is True
-        and str(sell_result.submitted_order_type or "").strip().upper() == "FAK"
-        and normalized == "venue_fak_no_match_400"
-    ):
-        return (
-            _GLOBAL_SELL_FAK_ZERO_FILL_REAUCTION_ERROR,
-            {
-                "side_effect_boundary_crossed": sell_result.venue_call_started,
-                "venue_ack_received": sell_result.venue_ack_received,
-                "venue_zero_fill_confirmed": True,
-                "original_error": normalized,
-                "submitted_order_type": sell_result.submitted_order_type,
-                "command_id": str(sell_result.command_id or ""),
-                "command_state": str(sell_result.command_state or ""),
-                "idempotency_key": str(sell_result.idempotency_key or ""),
-            },
-        )
-    return normalized, {}
-
-
-def _confirmed_global_sell_zero_fill_reauction(
-    error: object,
-    evidence: Mapping[str, object] | None,
-) -> bool:
-    """Require direct executor boundary facts before bypassing retry backoff."""
-
-    return bool(
-        str(error or "") == _GLOBAL_SELL_FAK_ZERO_FILL_REAUCTION_ERROR
-        and evidence
-        and evidence.get("side_effect_boundary_crossed") is True
-        and evidence.get("venue_zero_fill_confirmed") is True
-        and str(evidence.get("submitted_order_type") or "").upper() == "FAK"
-        and evidence.get("original_error") == "venue_fak_no_match_400"
     )
 
 
@@ -1302,6 +1246,10 @@ class GlobalSellExecutionAuthority:
             "exit_authority_status",
             "exit_authority_reason",
             "sell_action_authority_identity",
+            "execution_mode",
+            "fill_probability",
+            "fill_probability_source",
+            "rest_deadline_minutes",
         )
         if any(
             getattr(selected, field) != getattr(jit_candidate, field)
@@ -1342,7 +1290,8 @@ class GlobalSellExecutionAuthority:
             or expected_growth.expected_ev_usd <= 0.0
         ):
             raise ValueError("GLOBAL_SELL_EXECUTION_ECONOMICS_INVALID")
-        proceeds, _vwap, limit = curve.proceeds_for_shares(decision.shares)
+        proposal = jit_candidate.economic_sell_curve
+        proceeds, _vwap, limit = proposal.proceeds_for_shares(decision.shares)
         if proceeds < decision.cash_proceeds_usd or limit < decision.limit_price:
             raise ValueError("GLOBAL_SELL_EXECUTION_ECONOMICS_WORSENED")
         deadline = jit_candidate.book_captured_at_utc + curve.quote_ttl
@@ -1366,6 +1315,12 @@ class GlobalSellExecutionAuthority:
             jit_candidate.exit_authority_status,
             jit_candidate.exit_authority_reason,
             jit_candidate.sell_action_authority_identity,
+            jit_candidate.execution_mode,
+            jit_candidate.fill_probability,
+            jit_candidate.fill_probability_source,
+            jit_candidate.rest_deadline_minutes,
+            proposal.levels[0].price,
+            proposal.levels[0].size,
             deadline.isoformat(),
             decision.shares,
             decision.limit_price,
@@ -1396,7 +1351,7 @@ class GlobalSellExecutionAuthority:
             raise ValueError("GLOBAL_SELL_EXECUTION_AUTHORITY_IDENTITY_MISMATCH")
 
     def maker_limit_price(self) -> Decimal:
-        """Return the nearest legal passive SELL price above the JIT best bid."""
+        """Return the exact maker price already bound into JIT economics."""
 
         from src.contracts.venue_submission_envelope import (
             assert_live_order_unit_price,
@@ -1404,7 +1359,12 @@ class GlobalSellExecutionAuthority:
 
         curve = self.jit_candidate.executable_sell_curve
         best_bid = Decimal(curve.levels[0].price)
-        limit = best_bid + Decimal(curve.min_tick)
+        try:
+            limit = Decimal(self.jit_candidate.economic_sell_curve.levels[0].price)
+        except (AttributeError, IndexError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:proposal_missing"
+            ) from exc
         try:
             bounded = assert_live_order_unit_price(limit)
         except ValueError as exc:
@@ -1414,6 +1374,8 @@ class GlobalSellExecutionAuthority:
             ) from exc
         if bounded <= best_bid:
             raise ValueError("GLOBAL_SELL_MAKER_PRICE_NOT_PASSIVE")
+        if bounded != best_bid + Decimal(curve.min_tick):
+            raise ValueError("GLOBAL_SELL_MAKER_PRICE_NOT_NEAREST_TICK")
         return bounded
 
 
@@ -2866,6 +2828,7 @@ def _global_sell_capital_certificate_error(
         "jit_curve_identity": jit.execution_curve_identity,
         "execution_mode": "MAKER_REST",
         "submit_order_type": "GTC",
+        "fill_probability_source": candidate.fill_probability_source,
     }
     if any(
         str(certificate.get(field) or "") != str(expected)
@@ -2879,6 +2842,8 @@ def _global_sell_capital_certificate_error(
         "selected_cash_proceeds_usd": decision.cash_proceeds_usd,
         "economic_limit_price": decision.limit_price,
         "exact_limit_price": authority.maker_limit_price(),
+        "fill_probability": candidate.fill_probability,
+        "rest_deadline_minutes": candidate.rest_deadline_minutes,
         "expected_comparison_delta_log_wealth": (
             decision.expected_growth.expected_delta_log_wealth
         ),
@@ -4299,6 +4264,10 @@ def _execute_live_exit(
                 preliminary_error,
             )
             return f"exit_blocked: {preliminary_error}"
+    if global_authorized and str(exit_intent.submit_order_type or "").upper() != "GTC":
+        # Global statistical SELL has one execution grammar: the exact maker
+        # proposal ranked by the auction. No downstream caller may revive FAK.
+        return "exit_blocked: global_sell_gtc_required"
     _record_exit_intent_before_execution_gates(conn, position, exit_intent)
 
     try:
@@ -4662,7 +4631,6 @@ def _execute_live_exit(
 
         if sell_result.status == "rejected":
             sell_error = sell_result.reason or "sell_rejected"
-            reauction_evidence: dict[str, object] = {}
             if _is_exit_transient_lock_error(sell_error):
                 active_exit = _active_exit_sell_for_lock(
                     conn,
@@ -4697,19 +4665,12 @@ def _execute_live_exit(
                     )
                     log_exit_retry_event(conn, position, reason=dust_reason, error=sell_error)
                 return f"sell_blocked_dust: {sell_error}"
-            sell_error, reauction_evidence = (
-                _global_sell_reauction_error_after_rejected_submit(
-                    global_authorized=global_authorized,
-                    sell_result=sell_result,
-                )
-            )
             retry_reason = f"{exit_context.exit_reason} [SELL_ERROR: {sell_error}]"
             _mark_exit_retry(
                 position,
                 reason=retry_reason,
                 error=sell_error,
                 conn=conn,
-                reauction_evidence=reauction_evidence,
             )
             if conn is not None:
                 log_pending_exit_recovery_event(
@@ -7845,7 +7806,7 @@ def _exit_command_row_for_order(
     try:
         return conn.execute(
             """
-            SELECT command_id, price, size, venue_order_id
+            SELECT command_id, price, size, venue_order_id, created_at
               FROM venue_commands
              WHERE venue_order_id = ?
                AND position_id = ?
@@ -7886,6 +7847,42 @@ def _pending_exit_reprice_reason(
     return ""
 
 
+def _global_sell_rest_deadline_reason(
+    *,
+    conn: sqlite3.Connection | None,
+    position: Position,
+    order_id: str,
+    command_created_at: object,
+    now: datetime,
+) -> str:
+    """Expire one global maker SELL at the horizon used by its auction score."""
+
+    payload = _canonical_exit_intent_payload(conn, position, order_id=order_id)
+    if not isinstance(payload, dict) or payload.get("exit_intent_reason") != (
+        "GLOBAL_CAPITAL_OPTIMAL_SELL"
+    ):
+        return ""
+    certificate = payload.get("exit_intent_capital_certificate")
+    if not isinstance(certificate, dict) or (
+        str(certificate.get("execution_mode") or "").upper() != "MAKER_REST"
+    ):
+        # INV-47 SCOPE: only this global SELL rest lacks its ranked horizon.
+        # DRAIN: cancel acknowledgement releases the position for re-auction.
+        # RESET: a new maker intent carries a finite deadline certificate.
+        return "GLOBAL_SELL_REST_DEADLINE_AUTHORITY_MISSING"
+    minutes = _positive_decimal(certificate.get("rest_deadline_minutes"))
+    source = str(certificate.get("fill_probability_source") or "").strip()
+    created_at = _parse_iso(str(command_created_at or ""))
+    if minutes is None or not source or created_at is None:
+        return "GLOBAL_SELL_REST_DEADLINE_AUTHORITY_MISSING"
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    deadline = created_at.astimezone(timezone.utc) + timedelta(
+        minutes=float(minutes)
+    )
+    return "GLOBAL_SELL_REST_DEADLINE_ELAPSED" if now >= deadline else ""
+
+
 def _cancel_stale_pending_exit_for_reprice(
     *,
     conn: sqlite3.Connection | None,
@@ -7910,13 +7907,29 @@ def _cancel_stale_pending_exit_for_reprice(
         resting_price = float(row["price"] if isinstance(row, sqlite3.Row) else row[1])
     except (TypeError, ValueError):
         return False
-    best_bid, best_ask = _top_book_for_pending_exit_reprice(clob, token_id)
-    reason = _pending_exit_reprice_reason(
-        resting_price=resting_price,
-        best_bid=best_bid,
-        best_ask=best_ask,
-        min_tick=0.001,
+    order_id = str(
+        row["venue_order_id"] if isinstance(row, sqlite3.Row) else row[3]
     )
+    command_created_at = (
+        row["created_at"] if isinstance(row, sqlite3.Row) else row[4]
+    )
+    reason = _global_sell_rest_deadline_reason(
+        conn=conn,
+        position=position,
+        order_id=order_id,
+        command_created_at=command_created_at,
+        now=_utcnow(),
+    )
+    best_bid: float | None = None
+    best_ask: float | None = None
+    if not reason:
+        best_bid, best_ask = _top_book_for_pending_exit_reprice(clob, token_id)
+        reason = _pending_exit_reprice_reason(
+            resting_price=resting_price,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            min_tick=0.001,
+        )
     if not reason:
         return False
 
@@ -8003,7 +8016,6 @@ def _mark_exit_retry(
     error: str = "",
     cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
     conn: sqlite3.Connection | None = None,
-    reauction_evidence: Mapping[str, object] | None = None,
 ) -> None:
     """Transition position to retry_pending with exponential backoff."""
     _mark_pending_exit(position)
@@ -8014,17 +8026,10 @@ def _mark_exit_retry(
             "global_sell_exit_executable_snapshot_error:",
         )
     )
-    post_submit_zero_fill = _confirmed_global_sell_zero_fill_reauction(
-        error,
-        reauction_evidence,
-    )
-    if snapshot_reauction or post_submit_zero_fill:
-        # The global auction owns this statistical SELL. Either snapshot capture
-        # stopped before command persistence, or the venue confirmed that a FAK
-        # crossed the side-effect boundary but filled zero after its book
-        # vanished. In both cases the old q/book/wealth certificate must not be
-        # replayed. Make the position immediately releasable; the monitor commits
-        # that release and requests a new complete global auction.
+    if snapshot_reauction:
+        # The global auction owns this statistical SELL. Snapshot capture stopped
+        # before command persistence, so the old q/book/wealth certificate must
+        # not be replayed. Release only this position to a new complete auction.
         position.last_exit_error = error[:500]
         position.exit_state = "retry_pending"
         position.order_status = "retry_pending"
@@ -8036,33 +8041,7 @@ def _mark_exit_retry(
             error=error,
             event_type="EXIT_ORDER_REJECTED",
             extra_payload={
-                "status": (
-                    "global_sell_zero_fill_reauction_pending"
-                    if post_submit_zero_fill
-                    else "global_sell_snapshot_reauction_pending"
-                ),
-                "side_effect_boundary_crossed": post_submit_zero_fill,
-                "venue_zero_fill_confirmed": bool(
-                    (reauction_evidence or {}).get("venue_zero_fill_confirmed")
-                ),
-                "original_error": str(
-                    (reauction_evidence or {}).get("original_error") or ""
-                ),
-                "venue_ack_received": bool(
-                    (reauction_evidence or {}).get("venue_ack_received")
-                ),
-                "submitted_order_type": str(
-                    (reauction_evidence or {}).get("submitted_order_type") or ""
-                ),
-                "command_id": str(
-                    (reauction_evidence or {}).get("command_id") or ""
-                ),
-                "command_state": str(
-                    (reauction_evidence or {}).get("command_state") or ""
-                ),
-                "idempotency_key": str(
-                    (reauction_evidence or {}).get("idempotency_key") or ""
-                ),
+                "status": "global_sell_snapshot_reauction_pending",
                 "retry_count": int(
                     getattr(position, "exit_retry_count", 0) or 0
                 ),

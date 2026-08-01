@@ -272,7 +272,7 @@ def global_single_order_actuation_identity(
     economics_identity = _global_decision_economics_identity(decision)
     action = str(getattr(candidate, "action", "BUY") or "BUY")
     curve = (
-        candidate.executable_sell_curve
+        candidate.economic_sell_curve
         if action == "SELL"
         else candidate.executable_cost_curve
     )
@@ -281,6 +281,12 @@ def global_single_order_actuation_identity(
             action,
             candidate.position_id,
             candidate.held_shares,
+            candidate.execution_mode,
+            candidate.fill_probability,
+            candidate.fill_probability_source,
+            candidate.rest_deadline_minutes,
+            candidate.economic_sell_curve.levels[0].price,
+            candidate.economic_sell_curve.levels[0].size,
             candidate.probability_functional,
             candidate.exit_authority_status,
             candidate.exit_authority_reason,
@@ -356,7 +362,7 @@ def global_single_order_economic_identity(
         raise ValueError("global economic identity probability family mismatch")
     action = str(getattr(candidate, "action", "BUY") or "BUY")
     curve = (
-        candidate.executable_sell_curve
+        candidate.economic_sell_curve
         if action == "SELL"
         else candidate.executable_cost_curve
     )
@@ -365,6 +371,10 @@ def global_single_order_economic_identity(
             action,
             candidate.position_id,
             candidate.held_shares,
+            candidate.execution_mode,
+            candidate.fill_probability,
+            candidate.fill_probability_source,
+            candidate.rest_deadline_minutes,
             candidate.probability_functional,
             candidate.exit_authority_status,
             candidate.exit_authority_reason,

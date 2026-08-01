@@ -99,6 +99,7 @@ from src.solve.solver import (
     joint_probability_content_identity,
     joint_probability_witness_identity,
     portfolio_wealth_identity,
+    passive_sell_proposal_curve,
     select_global_single_order,
     _score_global_single_order,
 )
@@ -111,6 +112,11 @@ from src.contracts.executable_market_snapshot import (
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.semantic_types import Direction
 from src.strategy import utility_ranker
+from src.strategy.live_inference.mode_consistent_ev import (
+    MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+    MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+    MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+)
 from src.state.collateral_ledger import (
     CollateralLedger,
     CollateralSnapshot,
@@ -125,6 +131,22 @@ from src.types.market import Bin
 from tests.support import qkernel_family_fixtures as R
 
 _BRIDGE_PATH = bridge.__file__
+
+
+def _explicit_sell_maker_terms(
+    curve: ExecutableSellCurve,
+    *,
+    capacity: Decimal,
+) -> dict[str, object]:
+    return {
+        "proposal_sell_curve": passive_sell_proposal_curve(
+            curve,
+            capacity=capacity,
+        ),
+        "fill_probability": MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+        "fill_probability_source": MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+        "rest_deadline_minutes": MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+    }
 
 
 def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison():
@@ -242,6 +264,10 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             token_id="token-sell",
             action="SELL",
             status="REJECTED",
+            execution_mode="MAKER_REST",
+            fill_probability=0.19,
+            fill_probability_source="test_measured_maker_fill",
+            rest_deadline_minutes=20.0,
             position_id="position-sell",
             held_shares=Decimal("12.34"),
             rejection_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
@@ -251,7 +277,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             robust_delta_log_wealth=-0.01,
             robust_ev_usd=-1.106,
             capital_efficiency=-0.004273504273504274,
-            capital_action_mode="IMMEDIATE_REDUCE_ONLY_SELL",
+            capital_action_mode="CONTINGENT_MAKER_REST_SELL",
             resolution_at_utc=at + _dt.timedelta(days=2),
             capital_lock_hours=48.0,
             robust_log_growth_per_hour=-0.01 / 48.0,
@@ -829,7 +855,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert sell_evaluation["robust_delta_log_wealth"] == -0.01
     assert sell_evaluation["robust_ev_usd"] == -1.106
     assert sell_evaluation["capital_action_mode"] == (
-        "IMMEDIATE_REDUCE_ONLY_SELL"
+        "CONTINGENT_MAKER_REST_SELL"
     )
     assert sell_evaluation["sell_point_counterfactual"]["status"] == "POSITIVE"
     assert sell_evaluation["sell_point_counterfactual"][
@@ -3368,6 +3394,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         ledger_snapshot_id="selected-ledger",
         executable_sell_curve=sell_curve,
         resolution_identity="selected-resolution",
+        **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("1")),
     )
     sell_actuation = SimpleNamespace(
         probability_witness=selected,
@@ -5041,6 +5068,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
         ledger_snapshot_id="held-prefix-ledger",
         executable_sell_curve=sell_curve,
         resolution_identity=str(witness.resolution_identity),
+        **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("1")),
     )
     current, _payload = era._current_global_actuation_prepared_family(
         event,
@@ -17076,6 +17104,7 @@ def test_global_candidate_endowment_projects_correlated_family_holdings_exactly(
             ledger_snapshot_id="ledger-current",
             executable_sell_curve=sell_curve,
             resolution_identity="resolution-family",
+            **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("5")),
         ),
         probability_witness=SimpleNamespace(bin_ids=("a", "b", "c")),
         holdings_snapshot=holdings,
@@ -17797,7 +17826,7 @@ def test_two_prepared_families_choose_one_globally_unique_order():
         side="YES",
         snapshot_id="actual-sell-book",
         book_hash="actual-sell-book-hash",
-        levels=(BookLevel(price=Decimal("0.95"), size=Decimal("10")),),
+        levels=(BookLevel(price=Decimal("0.94"), size=Decimal("10")),),
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.01"),
         min_order_size=Decimal("1"),
@@ -26310,13 +26339,16 @@ def _adapter_sell_actuation(
         ledger_snapshot_id="ledger-1",
         executable_sell_curve=curve,
         resolution_identity="resolution-1",
+        **_explicit_sell_maker_terms(curve, capacity=Decimal("10")),
         probability_functional=probability_functional,
         exit_authority_status=exit_authority_status,
         exit_authority_reason=exit_authority_reason,
     )
     selected = Decimal(selected_shares)
-    proceeds, expected_fill_price, deepest_bid = curve.proceeds_for_shares(selected)
-    limit_price = min(deepest_bid, Decimal("0.95"))
+    proposal_curve = candidate.economic_sell_curve
+    proceeds, expected_fill_price, limit_price = proposal_curve.proceeds_for_shares(
+        selected
+    )
     loss_at_risk = selected - proceeds
     robust_q = 0.70
     loss_after = Decimal("110") - selected + proceeds
@@ -26325,14 +26357,24 @@ def _adapter_sell_actuation(
         float(win_after / Decimal("100"))
     )
     robust_ev = float(proceeds) - (1.0 - robust_q) * float(selected)
+    fill_probability = float(candidate.fill_probability)
+    rest_hours = float(candidate.rest_deadline_minutes) / 60.0
+    effective_lock_hours = fill_probability * 24.0 + (
+        1.0 - fill_probability
+    ) * rest_hours
     expected_growth = ExpectedGrowthComparison(
         probability_basis="POSTERIOR_PREDICTIVE_MEAN",
         probability_witness_identity="probability-1",
-        expected_delta_log_wealth=float(robust_du),
-        expected_ev_usd=robust_ev,
-        capital_lock_hours=24.0,
-        expected_log_growth_per_hour=float(robust_du) / 24.0,
-        expected_capital_efficiency=float(robust_du) / float(loss_at_risk),
+        expected_delta_log_wealth=float(robust_du) * fill_probability,
+        expected_ev_usd=robust_ev * fill_probability,
+        capital_lock_hours=effective_lock_hours,
+        expected_log_growth_per_hour=(
+            float(robust_du) * fill_probability / effective_lock_hours
+        ),
+        expected_capital_efficiency=(
+            float(robust_du) * fill_probability
+            / (float(loss_at_risk) * fill_probability)
+        ),
     )
     mean_sell = probability_functional == "POSTERIOR_PREDICTIVE_MEAN"
     robust_terminal = BinaryTerminalWealthCertificate(
@@ -26366,11 +26408,11 @@ def _adapter_sell_actuation(
             0.0 if mean_sell else float(robust_du) / float(loss_at_risk)
         ),
         no_trade_reason=None,
-        capital_action_mode="IMMEDIATE_REDUCE_ONLY_SELL",
+        capital_action_mode="CONTINGENT_MAKER_REST_SELL",
         resolution_at_utc=at + _dt.timedelta(hours=24),
-        capital_lock_hours=24.0,
+        capital_lock_hours=effective_lock_hours,
         robust_log_growth_per_hour=(
-            None if mean_sell else float(robust_du) / 24.0
+            None if mean_sell else float(robust_du) / effective_lock_hours
         ),
         limit_price=limit_price,
         expected_fill_price_before_fee=expected_fill_price,
@@ -26421,6 +26463,119 @@ def _adapter_sell_actuation(
         wealth_economic_identity=wealth_economic_identity,
         economic_identity=economic_identity,
     )
+
+
+@pytest.mark.parametrize(
+    ("age_minutes", "certificate", "expected_reason"),
+    (
+        (
+            19,
+            {
+                "execution_mode": "MAKER_REST",
+                "rest_deadline_minutes": 20,
+                "fill_probability_source": "KM_MEASURED",
+            },
+            "",
+        ),
+        (
+            20,
+            {
+                "execution_mode": "MAKER_REST",
+                "rest_deadline_minutes": 20,
+                "fill_probability_source": "KM_MEASURED",
+            },
+            "GLOBAL_SELL_REST_DEADLINE_ELAPSED",
+        ),
+        (1, {}, "GLOBAL_SELL_REST_DEADLINE_AUTHORITY_MISSING"),
+    ),
+)
+def test_global_sell_rest_deadline_matches_ranked_no_fill_horizon(
+    monkeypatch, age_minutes, certificate, expected_reason
+):
+    from src.execution import exit_lifecycle
+
+    now = _dt.datetime(2026, 8, 1, 20, 0, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_canonical_exit_intent_payload",
+        lambda *_args, **_kwargs: {
+            "exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL",
+            "exit_intent_capital_certificate": certificate,
+        },
+    )
+
+    reason = exit_lifecycle._global_sell_rest_deadline_reason(
+        conn=None,
+        position=SimpleNamespace(trade_id="position-1"),
+        order_id="maker-order-1",
+        command_created_at=(now - _dt.timedelta(minutes=age_minutes)).isoformat(),
+        now=now,
+    )
+
+    assert reason == expected_reason
+
+
+def test_elapsed_global_sell_rest_cancels_without_book_dependency(monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.execution import exit_safety
+
+    position = SimpleNamespace(trade_id="position-1")
+    retries: list[tuple[str, str, int]] = []
+    canceled: list[str] = []
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_exit_command_row_for_order",
+        lambda *_args, **_kwargs: (
+            "command-1",
+            "0.61",
+            "10",
+            "maker-order-1",
+            "2026-08-01T19:30:00+00:00",
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_global_sell_rest_deadline_reason",
+        lambda **_kwargs: "GLOBAL_SELL_REST_DEADLINE_ELAPSED",
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_top_book_for_pending_exit_reprice",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("elapsed rest must not depend on a fresh book")
+        ),
+    )
+    monkeypatch.setattr(
+        exit_safety,
+        "request_cancel_for_command",
+        lambda _conn, _command_id, cancel: (
+            cancel("maker-order-1"),
+            SimpleNamespace(status="CANCELED", reason=""),
+        )[1],
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_mark_exit_retry",
+        lambda _position, *, reason, error, cooldown_seconds, conn: retries.append(
+            (reason, error, cooldown_seconds)
+        ),
+    )
+    clob = SimpleNamespace(cancel_order=lambda order_id: canceled.append(order_id))
+
+    assert exit_lifecycle._cancel_stale_pending_exit_for_reprice(
+        conn=object(),
+        position=position,
+        clob=clob,
+        token_id="yes-token",
+    )
+    assert canceled == ["maker-order-1"]
+    assert retries == [
+        (
+            "GLOBAL_SELL_REST_DEADLINE_ELAPSED",
+            "resting_price=0.610000;best_bid=none;best_ask=none",
+            0,
+        )
+    ]
 
 
 def test_global_sell_jit_rejects_changed_day0_statistical_authority(monkeypatch):
@@ -26620,7 +26775,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         assert intent.close_position is False
         assert intent.submit_order_type == "GTC"
         assert intent.capital_certificate["execution_mode"] == "MAKER_REST"
-        assert intent.capital_certificate["economic_limit_price"] == "0.50"
+        assert intent.capital_certificate["economic_limit_price"] == "0.61"
         assert intent.capital_certificate["exact_limit_price"] == "0.61"
         assert intent.capital_certificate["held_shares"] == "10.006602"
         assert intent.capital_certificate["sellable_shares"] == "10"
@@ -26907,6 +27062,9 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         "jit_curve_identity": jit.execution_curve_identity,
         "execution_mode": "MAKER_REST",
         "submit_order_type": "GTC",
+        "fill_probability": candidate.fill_probability,
+        "fill_probability_source": candidate.fill_probability_source,
+        "rest_deadline_minutes": candidate.rest_deadline_minutes,
         "robust_delta_log_wealth": decision.robust_delta_log_wealth,
         "robust_ev_usd": decision.robust_ev_usd,
         "expected_comparison_delta_log_wealth": (
@@ -27001,7 +27159,6 @@ def test_global_sell_execution_authority_requires_a_legal_passive_price(
     actuation = _adapter_sell_actuation(
         event,
         selected_shares="6",
-        bid_levels=((best_bid, "10"),),
         min_tick=tick,
     )
     jit = era._global_sell_candidate_from_raw_book(
@@ -27015,16 +27172,14 @@ def test_global_sell_execution_authority_requires_a_legal_passive_price(
         },
         captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
     )
-    authority = GlobalSellExecutionAuthority.from_current(
-        actuation=actuation,
-        jit_candidate=jit,
-    )
-
     with pytest.raises(
         ValueError,
-        match="GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE",
+        match="global SELL maker proposal is unavailable",
     ):
-        authority.maker_limit_price()
+        GlobalSellExecutionAuthority.from_current(
+            actuation=actuation,
+            jit_candidate=jit,
+        )
     assert era._global_preflight_block_status(
         f"GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:best_bid={best_bid}:tick={tick}"
     ) == "CANDIDATE_BLOCKED"
@@ -27189,7 +27344,7 @@ def test_global_sell_jit_overlay_replaces_same_book_buy_and_sell_curves():
     )
 
 
-def test_global_sell_uses_complement_probability_and_every_fak_prefix_is_positive():
+def test_global_sell_uses_complement_probability_and_every_maker_prefix_is_positive():
     event = _global_scope_event(city="Alpha", source_run_id="run-sell")
     actuation = _adapter_sell_actuation(event)
     witness = SimpleNamespace(
@@ -27204,7 +27359,7 @@ def test_global_sell_uses_complement_probability_and_every_fak_prefix_is_positiv
     ) == pytest.approx(0.75)
 
     decision = actuation.decision
-    curve = decision.candidate.executable_sell_curve
+    curve = decision.candidate.economic_sell_curve
     for cents in range(1, 1001):
         shares = Decimal(cents) / Decimal("100")
         remaining = shares
@@ -27248,7 +27403,7 @@ def test_exact_sell_limit_is_audited_and_off_tick_is_rejected_before_submit(
     audit = _exit_intent_audit_payload(
         ExitIntent(
             trade_id="position-1",
-            reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+            reason="EDGE_REVERSAL",
             token_id="yes-token",
             shares=10.0,
             current_market_price=0.54,

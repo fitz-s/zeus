@@ -8268,18 +8268,15 @@ def test_restart_republishes_unbound_v3_residual_with_same_generation_until_term
     ("pre_exit_state", "day0_entered_at"),
     (("holding", ""), ("day0_window", "2026-07-28T00:00:00+00:00")),
 )
-def test_global_fak_zero_fill_releases_without_generic_backoff(
-    conn,
+def test_global_fak_zero_fill_is_not_special_reauction_authority(
     pre_exit_state,
     day0_entered_at,
 ):
-    from src.engine.lifecycle_events import build_position_current_projection
     from src.execution import exit_lifecycle
     from src.state.portfolio import Position
-    from src.state.projection import upsert_position_current
 
     position = Position(
-        trade_id=f"pos-global-fak-zero-fill-{pre_exit_state}",
+        trade_id=f"pos-global-fak-rejected-{pre_exit_state}",
         market_id=f"condition-{pre_exit_state}",
         city="Paris",
         cluster="Paris",
@@ -8305,108 +8302,24 @@ def test_global_fak_zero_fill_releases_without_generic_backoff(
         exit_state="exit_intent",
         exit_retry_count=3,
     )
-    upsert_position_current(conn, build_position_current_projection(position))
 
-    definitive_zero_fill = exit_lifecycle.OrderResult(
-        trade_id=position.trade_id,
-        status="rejected",
-        reason="venue_fak_no_match_400",
-        command_id=f"cmd-{pre_exit_state}",
-        command_state="REJECTED",
-        idempotency_key=f"idem-{pre_exit_state}",
-        venue_call_started=True,
-        venue_ack_received=False,
-        submitted_order_type="FAK",
+    assert not exit_lifecycle._is_global_sell_snapshot_reauction_error(
+        "global_sell_venue_fak_no_match_zero_fill_reauction"
     )
-    error, evidence = (
-        exit_lifecycle._global_sell_reauction_error_after_rejected_submit(
-            global_authorized=True,
-            sell_result=definitive_zero_fill,
-        )
-    )
-    assert error == "global_sell_venue_fak_no_match_zero_fill_reauction"
-    for global_authorized, changes in (
-        (False, {}),
-        (True, {"venue_call_started": False}),
-        (True, {"submitted_order_type": "GTC"}),
-        (True, {"status": "unknown_side_effect"}),
-    ):
-        unchanged, rejected_evidence = (
-            exit_lifecycle._global_sell_reauction_error_after_rejected_submit(
-                global_authorized=global_authorized,
-                sell_result=replace(definitive_zero_fill, **changes),
-            )
-        )
-        assert unchanged == "venue_fak_no_match_400"
-        assert rejected_evidence == {}
-
     exit_lifecycle._mark_exit_retry(
         position,
         reason="GLOBAL_CAPITAL_OPTIMAL_SELL [SELL_ERROR]",
-        error=error,
-        conn=conn,
-        reauction_evidence=evidence,
+        error="venue_fak_no_match_400",
     )
-    conn.commit()
 
     assert position.exit_state == "retry_pending"
-    assert position.exit_retry_count == 3
-    assert datetime.fromisoformat(position.next_exit_retry_at) <= (
-        datetime.now(timezone.utc) + timedelta(seconds=1)
+    assert position.exit_retry_count == 4
+    assert position.last_exit_error == "venue_fak_no_match_400"
+    assert datetime.fromisoformat(position.next_exit_retry_at) > datetime.now(
+        timezone.utc
     )
-    rejected = conn.execute(
-        """
-        SELECT payload_json
-          FROM position_events
-         WHERE position_id = ?
-           AND event_type = 'EXIT_ORDER_REJECTED'
-         ORDER BY sequence_no DESC
-         LIMIT 1
-        """,
-        (position.trade_id,),
-    ).fetchone()
-    payload = json.loads(rejected["payload_json"])
-    assert payload["status"] == "global_sell_zero_fill_reauction_pending"
-    assert payload["side_effect_boundary_crossed"] is True
-    assert payload["venue_zero_fill_confirmed"] is True
-    assert payload["original_error"] == "venue_fak_no_match_400"
-    assert payload["submitted_order_type"] == "FAK"
-    assert payload["command_id"] == f"cmd-{pre_exit_state}"
-    assert payload["command_state"] == "REJECTED"
-    assert payload["idempotency_key"] == f"idem-{pre_exit_state}"
 
-    requests = []
-    assert exit_lifecycle.check_pending_retries(
-        position,
-        conn=conn,
-        global_sell_reauction_requester=lambda released, force_new: (
-            requests.append((released.trade_id, force_new)) or False
-        ),
-    ) is True
-    assert position.state == pre_exit_state
-    assert position.exit_retry_count == 0
-    assert requests == []
-    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
-    if conn.in_transaction:
-        conn.commit()
-    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
-        position,
-        conn=conn,
-        requester=lambda released, force_new: (
-            requests.append((released.trade_id, force_new)) or True
-        ),
-    )
-    assert requests == [(position.trade_id, True)]
-    assert not exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
-    assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
-        position,
-        conn=conn,
-        requester=lambda *_args: requests.append(("duplicate", True)) or True,
-    )
-    assert requests == [(position.trade_id, True)]
-
-
-def test_execute_live_global_fak_zero_fill_uses_direct_boundary_facts(
+def test_live_global_sell_rejects_fak_before_snapshot_or_venue(
     conn,
     monkeypatch,
 ):
@@ -8418,9 +8331,9 @@ def test_execute_live_global_fak_zero_fill_uses_direct_boundary_facts(
     from src.state.projection import upsert_position_current
 
     position = Position(
-        trade_id="pos-global-fak-submit-path",
-        market_id="condition-global-fak-submit-path",
-        condition_id="condition-global-fak-submit-path",
+        trade_id="pos-global-fak-rejected",
+        market_id="condition-global-fak-rejected",
+        condition_id="condition-global-fak-rejected",
         city="Beijing",
         cluster="Beijing",
         target_date="2026-07-31",
@@ -8463,7 +8376,7 @@ def test_execute_live_global_fak_zero_fill_uses_direct_boundary_facts(
         SimpleNamespace(
             book_captured_at_utc=datetime.now(timezone.utc),
             executable_sell_curve=SimpleNamespace(
-                book_hash="book-global-fak-submit-path",
+                book_hash="book-global-fak-rejected",
                 quote_ttl=timedelta(seconds=30),
             ),
         ),
@@ -8476,34 +8389,16 @@ def test_execute_live_global_fak_zero_fill_uses_direct_boundary_facts(
     )
     monkeypatch.setattr(
         exit_lifecycle,
-        "_global_sell_capital_certificate_error",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
         "_latest_or_capture_exit_snapshot_context",
-        lambda *args, **kwargs: {
-            "executable_snapshot_id": "snap-global-fak-submit-path",
-            "executable_snapshot_min_order_size": "5",
-            "executable_snapshot_orderbook_top_bid": "0.50",
-            "execution_authority_deadline_utc": (
-                datetime.now(timezone.utc) + timedelta(seconds=30)
-            ).isoformat(),
-        },
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("global FAK must be rejected before snapshot capture")
+        ),
     )
     monkeypatch.setattr(
         exit_lifecycle,
         "place_sell_order",
-        lambda **kwargs: exit_lifecycle.OrderResult(
-            trade_id=kwargs["trade_id"],
-            status="rejected",
-            reason="venue_fak_no_match_400",
-            command_id="cmd-global-fak-submit-path",
-            command_state="REJECTED",
-            idempotency_key="idem-global-fak-submit-path",
-            venue_call_started=True,
-            venue_ack_received=False,
-            submitted_order_type=kwargs["submit_order_type"],
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("global FAK must be rejected before venue submit")
         ),
     )
 
@@ -8520,26 +8415,9 @@ def test_execute_live_global_fak_zero_fill_uses_direct_boundary_facts(
         hard_fact_authority=None,
     )
 
-    assert result == (
-        "sell_error: global_sell_venue_fak_no_match_zero_fill_reauction"
-    )
+    assert result == "exit_blocked: global_sell_gtc_required"
+    assert position.state == "holding"
     assert position.exit_retry_count == 0
-    payload = json.loads(
-        conn.execute(
-            """
-            SELECT payload_json
-              FROM position_events
-             WHERE position_id = ?
-               AND event_type = 'EXIT_ORDER_REJECTED'
-             ORDER BY sequence_no DESC
-             LIMIT 1
-            """,
-            (position.trade_id,),
-        ).fetchone()["payload_json"]
-    )
-    assert payload["side_effect_boundary_crossed"] is True
-    assert payload["command_id"] == "cmd-global-fak-submit-path"
-
 
 def test_no_bid_retry_waits_for_fresh_positive_bid_before_release(conn):
     from src.engine.lifecycle_events import build_position_current_projection

@@ -10836,6 +10836,7 @@ def _global_sell_candidate_from_raw_book(
         BookLevel,
         ExecutableSellCurve,
         executable_curve_identity,
+        passive_sell_proposal_curve,
     )
 
     if captured_at_utc.tzinfo is None:
@@ -10922,14 +10923,21 @@ def _global_sell_candidate_from_raw_book(
         min_order_size=selected_curve.min_order_size,
         quote_ttl=selected_curve.quote_ttl,
     )
+    proposal = passive_sell_proposal_curve(
+        curve,
+        capacity=Decimal(str(getattr(candidate, "held_shares", "0") or "0")),
+    )
     return dataclass_replace(
         candidate,
         book_snapshot_id=snapshot_id,
         book_captured_at_utc=captured_at_utc,
         execution_curve_identity=executable_curve_identity(curve),
         executable_sell_curve=curve,
+        proposal_sell_curve=proposal,
         native_ask_levels=ask_levels,
-        eligibility_reason=None,
+        eligibility_reason=(
+            None if proposal is not None else "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+        ),
     )
 
 
@@ -10938,7 +10946,7 @@ def _global_sell_execution_economics_drift(
     decision: object,
     current_candidate: object,
 ) -> str | None:
-    """Reject any current BID curve that worsens selected full-exit proceeds."""
+    """Reject any current maker proposal that worsens selected SELL economics."""
 
     shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
     selected_proceeds = Decimal(
@@ -10946,7 +10954,7 @@ def _global_sell_execution_economics_drift(
     )
     selected_limit = Decimal(str(getattr(decision, "limit_price", "0") or "0"))
     try:
-        proceeds, _vwap, limit = current_candidate.executable_sell_curve.proceeds_for_shares(
+        proceeds, _vwap, limit = current_candidate.economic_sell_curve.proceeds_for_shares(
             shares
         )
     except (AttributeError, ValueError) as exc:
@@ -11239,7 +11247,7 @@ def _submit_current_global_sell(
             from src.state.portfolio import ExitContext
 
             proceeds, current_vwap, _current_limit = (
-                current_candidate.executable_sell_curve.proceeds_for_shares(
+                current_candidate.economic_sell_curve.proceeds_for_shares(
                     Decimal(str(getattr(decision, "shares", "0") or "0"))
                 )
             )
@@ -11370,6 +11378,13 @@ def _submit_current_global_sell(
                     ),
                     "execution_mode": "MAKER_REST",
                     "submit_order_type": "GTC",
+                    "fill_probability": float(candidate.fill_probability),
+                    "fill_probability_source": str(
+                        candidate.fill_probability_source
+                    ),
+                    "rest_deadline_minutes": float(
+                        candidate.rest_deadline_minutes
+                    ),
                     "held_probability_point": held_q,
                     "sell_favorable_probability_functional": str(
                         getattr(candidate, "probability_functional", "") or ""
@@ -11386,7 +11401,7 @@ def _submit_current_global_sell(
                     ),
                     "exact_limit_price": str(maker_limit_price),
                     "partial_fill_certificate": (
-                        "maker_fill_price_dominates_positive_bid_prefix"
+                        "single_price_maker_fill_all_prefixes_positive"
                     ),
                 },
             )

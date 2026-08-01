@@ -88,6 +88,7 @@ nohup.out
 *.db.aborted-*
 *.db.pre-rebuild-*
 *.db.pre-migration-*
+*.db.cutover-lease
 
 # Orphan SQLite sidecars at repo root (should never exist).
 /zeus-world.db-shm

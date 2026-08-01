@@ -338,6 +338,7 @@ def _global_sell_candidate(
     bids,
     shares="10",
     fee="0",
+    min_tick="0.001",
     probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
     exit_authority_status="not_applicable",
     exit_authority_reason="non_day0_family",
@@ -359,9 +360,19 @@ def _global_sell_candidate(
             for price, size in bids
         ),
         fee_model=FeeModel(fee_rate=Decimal(fee)),
-        min_tick=Decimal("0.001"),
+        min_tick=Decimal(min_tick),
         min_order_size=Decimal("1"),
         quote_ttl=timedelta(seconds=1),
+    )
+    from src.strategy.live_inference.mode_consistent_ev import (
+        MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+        MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+        MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+    )
+
+    proposal = S.passive_sell_proposal_curve(
+        curve,
+        capacity=Decimal(shares),
     )
     return S.GlobalSingleOrderSellCandidate(
         candidate_id=candidate_id,
@@ -379,9 +390,84 @@ def _global_sell_candidate(
         ledger_snapshot_id="ledger-current",
         executable_sell_curve=curve,
         resolution_identity=probability_seed.resolution_identity,
+        proposal_sell_curve=proposal,
+        fill_probability=MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+        fill_probability_source=MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+        rest_deadline_minutes=MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+        eligibility_reason=(
+            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS" if proposal is None else None
+        ),
         probability_functional=probability_functional,
         exit_authority_status=exit_authority_status,
         exit_authority_reason=exit_authority_reason,
+    )
+
+
+def test_global_sell_candidate_does_not_invent_missing_maker_authority():
+    sell = _global_sell_candidate(
+        candidate_id="sell-explicit-authority",
+        family="sell-explicit-authority-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+    )
+
+    missing_proposal = replace(sell, proposal_sell_curve=None, eligibility_reason=None)
+    assert missing_proposal.eligibility_reason == "EXECUTION_AUTHORITY_MISSING"
+    with pytest.raises(ValueError, match="maker-rest authority is missing"):
+        replace(sell, fill_probability=None)
+    with pytest.raises(ValueError, match="maker-rest authority is missing"):
+        replace(sell, fill_probability_source=None)
+    with pytest.raises(ValueError, match="maker-rest authority is missing"):
+        replace(sell, rest_deadline_minutes=None)
+
+
+@pytest.mark.parametrize("capacity", (Decimal("NaN"), Decimal("Infinity"), Decimal("0")))
+def test_passive_sell_proposal_rejects_invalid_capacity(capacity):
+    sell = _global_sell_candidate(
+        candidate_id=f"sell-invalid-capacity-{capacity}",
+        family=f"sell-invalid-capacity-{capacity}-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+    )
+
+    assert S.passive_sell_proposal_curve(
+        sell.executable_sell_curve,
+        capacity=capacity,
+    ) is None
+
+
+def test_global_sell_scores_the_exact_maker_rest_not_the_bid_prefix():
+    sell = _global_sell_candidate(
+        candidate_id="sell-maker-rest-economics",
+        family="sell-maker-rest-economics-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "4"), ("0.50", "6")),
+        shares="10",
+        min_tick="0.01",
+    )
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is sell
+    assert decision.capital_action_mode == "CONTINGENT_MAKER_REST_SELL"
+    assert decision.limit_price == Decimal("0.61")
+    assert decision.expected_fill_price_before_fee == Decimal("0.61")
+    assert decision.cash_proceeds_usd == decision.shares * Decimal("0.61")
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(
+        decision.robust_delta_log_wealth * float(sell.fill_probability)
+    )
+    assert decision.expected_growth.expected_ev_usd == pytest.approx(
+        decision.robust_ev_usd * float(sell.fill_probability)
+    )
+    assert decision.capital_lock_hours == pytest.approx(
+        float(sell.fill_probability) * 24.0
+        + (1.0 - float(sell.fill_probability))
+        * float(sell.rest_deadline_minutes)
+        / 60.0
     )
 
 
@@ -1417,10 +1503,10 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
 
     assert decision.candidate is sell
     assert decision.shares == Decimal("10")
-    assert decision.cash_proceeds_usd == Decimal("3.4")
-    assert decision.cost_usd == Decimal("6.6")
-    assert decision.limit_price == Decimal("0.30")
-    assert decision.expected_fill_price_before_fee == Decimal("0.34")
+    assert decision.cash_proceeds_usd == Decimal("4.010000")
+    assert decision.cost_usd == Decimal("5.990000")
+    assert decision.limit_price == Decimal("0.401")
+    assert decision.expected_fill_price_before_fee == Decimal("0.401")
     assert decision.max_spend_usd == 0
     assert decision.robust_delta_log_wealth > 0
     assert decision.robust_ev_usd > 0
@@ -1441,9 +1527,15 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
         > evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
         > 0
     )
-    assert decision.capital_lock_hours == pytest.approx(24)
+    expected_lock_hours = (
+        float(sell.fill_probability) * 24.0
+        + (1.0 - float(sell.fill_probability))
+        * float(sell.rest_deadline_minutes)
+        / 60.0
+    )
+    assert decision.capital_lock_hours == pytest.approx(expected_lock_hours)
     assert decision.robust_log_growth_per_hour == pytest.approx(
-        decision.robust_delta_log_wealth / 24
+        decision.robust_delta_log_wealth / expected_lock_hours
     )
     assert (
         evaluations[sell.candidate_id].robust_log_growth_per_hour
@@ -1508,8 +1600,8 @@ def test_global_single_order_sell_uses_incremental_growth_not_loss_majority():
     assert decision.candidate is sell
     assert decision.terminal_wealth is not None
     assert decision.terminal_wealth.win_probability_lcb == pytest.approx(0.40)
-    assert decision.terminal_wealth.median_payoff_usd == Decimal("-1.0")
-    assert decision.cash_proceeds_usd == Decimal("9.0")
+    assert decision.terminal_wealth.median_payoff_usd == Decimal("-0.990000")
+    assert decision.cash_proceeds_usd == Decimal("9.010000")
     assert decision.robust_delta_log_wealth > 0
     assert decision.robust_ev_usd > 0
 
@@ -1559,9 +1651,18 @@ def test_global_single_order_ranks_buy_and_sell_by_one_capital_growth_rate():
     }
     assert evaluations[buy.candidate_id].expected_growth is not None
     assert evaluations[sell.candidate_id].expected_growth is not None
-    assert evaluations[sell.candidate_id].capital_lock_hours == pytest.approx(24)
+    expected_sell_lock_hours = (
+        float(sell.fill_probability) * 24.0
+        + (1.0 - float(sell.fill_probability))
+        * float(sell.rest_deadline_minutes)
+        / 60.0
+    )
+    assert evaluations[sell.candidate_id].capital_lock_hours == pytest.approx(
+        expected_sell_lock_hours
+    )
     assert evaluations[sell.candidate_id].robust_log_growth_per_hour == pytest.approx(
-        evaluations[sell.candidate_id].robust_delta_log_wealth / 24
+        evaluations[sell.candidate_id].robust_delta_log_wealth
+        / expected_sell_lock_hours
     )
     assert (
         evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
@@ -1601,7 +1702,7 @@ def test_global_single_order_entry_pause_blocks_buy_but_preserves_sell_and_cash(
     )
 
     assert decision.candidate is sell
-    assert decision.cash_proceeds_usd == Decimal("3.4")
+    assert decision.cash_proceeds_usd == Decimal("4.010000")
     assert decision.robust_delta_log_wealth > 0
     assert decision.rejection_reasons[buy.candidate_id] == (
         "ENTRY_ACTION_PAUSED:external:operator"
@@ -1629,7 +1730,7 @@ def test_family_entry_block_removes_higher_growth_buy_before_same_family_sell():
         family=family,
         side="YES",
         held_q=0.90,
-        bids=(("0.95", "10"),),
+        bids=(("0.94", "10"),),
         shares="10",
     )
     probability_witness = _global_probability_witness(sell)
@@ -1793,7 +1894,7 @@ def test_global_single_order_zero_buy_capacity_preserves_sell_and_cash():
     )
 
     assert decision.candidate is sell
-    assert decision.cash_proceeds_usd == Decimal("3.4")
+    assert decision.cash_proceeds_usd == Decimal("4.010000")
     assert decision.robust_delta_log_wealth > 0
     assert decision.rejection_reasons[buy.candidate_id] == (
         "CAPITAL_CAPACITY_EXHAUSTED"
@@ -1871,13 +1972,13 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
     assert evaluations[sell.candidate_id].position_id == "position-bad-sell"
     assert evaluations[sell.candidate_id].held_shares == Decimal("10")
     assert evaluations[sell.candidate_id].shares == Decimal("1")
-    assert evaluations[sell.candidate_id].cash_proceeds_usd == Decimal("0.2000")
-    assert evaluations[sell.candidate_id].limit_price == Decimal("0.20")
+    assert evaluations[sell.candidate_id].cash_proceeds_usd == Decimal("0.201000")
+    assert evaluations[sell.candidate_id].limit_price == Decimal("0.201")
     assert evaluations[sell.candidate_id].expected_fill_price_before_fee == Decimal(
-        "0.20"
+        "0.201"
     )
     assert evaluations[sell.candidate_id].robust_delta_log_wealth < 0
-    assert evaluations[sell.candidate_id].robust_ev_usd == pytest.approx(-0.6)
+    assert evaluations[sell.candidate_id].robust_ev_usd == pytest.approx(-0.599)
     assert evaluations[sell.candidate_id].terminal_wealth is not None
     assert evaluations[buy.candidate_id].position_id is None
     assert evaluations[buy.candidate_id].held_shares == 0
@@ -2032,7 +2133,7 @@ def test_cape_town_immature_day0_reversal_enters_capital_auction():
 
     assert decision.candidate is sell
     assert decision.shares == Decimal("128.2")
-    assert decision.limit_price == Decimal("0.53")
+    assert decision.limit_price == Decimal("0.531")
     assert decision.expected_terminal_wealth is not None
     assert decision.expected_terminal_wealth.expected_ev_usd > 0.0
     assert decision.candidate_evaluations[0].sell_exit_authority_status == "immature"
@@ -2062,7 +2163,7 @@ def test_hong_kong_day0_sell_uses_current_point_not_confidence_stress_mean():
 
     assert decision.candidate is sell
     assert decision.shares > 0
-    assert decision.limit_price == Decimal("0.73")
+    assert decision.limit_price == Decimal("0.731")
     assert decision.expected_terminal_wealth is not None
     assert decision.expected_terminal_wealth.held_probability_mean == pytest.approx(
         0.7126666666666668
@@ -2250,8 +2351,8 @@ def test_global_single_order_capital_authority_failure_preserves_sell_and_stops_
     )
 
     assert decision.candidate is sell
-    assert decision.capital_action_mode == "IMMEDIATE_REDUCE_ONLY_SELL"
-    assert decision.cash_proceeds_usd == Decimal("3.4")
+    assert decision.capital_action_mode == "CONTINGENT_MAKER_REST_SELL"
+    assert decision.cash_proceeds_usd == Decimal("4.010000")
     assert calls == [buy.candidate_id]
     evaluations = {
         evaluation.candidate_id: evaluation
@@ -2366,26 +2467,28 @@ def test_global_single_order_sell_legal_depth_is_tick_aligned_without_clamping()
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
 @pytest.mark.parametrize(
-    ("price", "held_q"),
-    (("0.05", 0.001), ("0.95", 0.20)),
+    ("best_bid", "expected_price", "held_q"),
+    (("0.049", "0.05", 0.001), ("0.949", "0.95", 0.20)),
 )
-def test_global_single_order_sell_price_band_is_inclusive(side, price, held_q):
+def test_global_single_order_sell_price_band_is_inclusive(
+    side, best_bid, expected_price, held_q
+):
     sell = _global_sell_candidate(
-        candidate_id=f"sell-boundary-{side}-{price}",
-        family=f"sell-boundary-{side}-{price}-family",
+        candidate_id=f"sell-boundary-{side}-{expected_price}",
+        family=f"sell-boundary-{side}-{expected_price}-family",
         side=side,
         held_q=held_q,
-        bids=((price, "10"),),
+        bids=((best_bid, "10"),),
         shares="10",
     )
 
     decision = _global_select((sell,))
 
     assert decision.candidate is sell
-    assert decision.limit_price == Decimal(price)
+    assert decision.limit_price == Decimal(expected_price)
 
 
-def test_global_single_order_sell_uses_best_partial_depth_when_full_depth_is_absent():
+def test_global_single_order_maker_sell_is_not_capped_by_taker_bid_depth():
     sell = _global_sell_candidate(
         candidate_id="sell-thin-depth",
         family="sell-thin-depth-family",
@@ -2398,13 +2501,13 @@ def test_global_single_order_sell_uses_best_partial_depth_when_full_depth_is_abs
     decision = _global_select((sell,))
 
     assert decision.candidate is sell
-    assert decision.shares == Decimal("9.99")
-    assert decision.cash_proceeds_usd == Decimal("4.995")
+    assert decision.shares == Decimal("10")
+    assert decision.cash_proceeds_usd == Decimal("5.010000")
     assert decision.robust_delta_log_wealth > 0.0
     assert decision.robust_ev_usd > 0.0
 
 
-def test_global_single_order_sell_with_subminimum_depth_is_a_complete_no_trade():
+def test_global_single_order_maker_sell_ignores_subminimum_taker_bid_depth():
     sell = _global_sell_candidate(
         candidate_id="sell-subminimum-depth",
         family="sell-subminimum-depth-family",
@@ -2416,13 +2519,13 @@ def test_global_single_order_sell_with_subminimum_depth_is_a_complete_no_trade()
 
     decision = _global_select((sell,))
 
-    assert decision.candidate is None
-    assert decision.no_trade_reason == "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
-    assert decision.capital_action_mode == "UNSCORED"
-    assert decision.rejection_reasons == {sell.candidate_id: "DEPTH_INFEASIBLE"}
+    assert decision.candidate is sell
+    assert decision.no_trade_reason is None
+    assert decision.capital_action_mode == "CONTINGENT_MAKER_REST_SELL"
+    assert decision.shares == Decimal("10")
+    assert decision.limit_price == Decimal("0.501")
     assert len(decision.candidate_evaluations) == 1
-    assert decision.candidate_evaluations[0].status == "REJECTED"
-    assert decision.candidate_evaluations[0].rejection_reason == "DEPTH_INFEASIBLE"
+    assert decision.candidate_evaluations[0].status == "SELECTED"
 
 
 def test_global_single_order_sell_selects_interior_capital_optimal_reduction():
@@ -2450,7 +2553,7 @@ def test_global_single_order_sell_selects_interior_capital_optimal_reduction():
     )
 
     assert decision.candidate is sell
-    assert Decimal("4.98") <= decision.shares <= Decimal("5.00")
+    assert Decimal("5.42") <= decision.shares <= Decimal("5.44")
     assert decision.shares < sell.held_shares
     assert decision.robust_delta_log_wealth > 0.0
     assert decision.robust_ev_usd > 0.0
@@ -2489,7 +2592,7 @@ def test_global_single_order_sell_matches_every_cent_grid_oracle(
         ),
     )
 
-    curve = sell.executable_sell_curve
+    curve = sell.economic_sell_curve
     max_shares = min(
         sell.held_shares,
         sum((level.size for level in curve.levels), Decimal("0")),
