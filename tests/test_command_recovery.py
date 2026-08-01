@@ -8729,8 +8729,10 @@ class TestRecoveryResolutionTable:
             return scoped_conn
 
         observed_scopes = []
+        call_order = []
 
         def _maker_fill_scope_spy(conn, *, observed_at=None, live_tick_scope=False):
+            call_order.append("recorded_fill_repair")
             observed_scopes.append(live_tick_scope)
             return {"scanned": 0, "corrected": 0, "stayed": 0, "errors": 0}
 
@@ -8741,14 +8743,31 @@ class TestRecoveryResolutionTable:
             _maker_fill_scope_spy,
         )
         client = MagicMock(
-            spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"]
+            spec_set=[
+                "get_account_truth",
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+            ]
         )
-        client.get_open_orders.return_value = []
-        client.get_trades.return_value = []
+        client.get_account_truth.side_effect = lambda **_kwargs: (
+            call_order.append("venue_snapshot")
+            or SimpleNamespace(open_orders=[], trades=[])
+        )
+        client.get_open_orders.side_effect = lambda: call_order.append(
+            "venue_snapshot"
+        ) or []
+        client.get_trades.side_effect = lambda: call_order.append(
+            "venue_snapshot"
+        ) or []
 
         command_recovery.reconcile_unresolved_commands(client=client, scope="live_tick")
 
         assert observed_scopes == [True]
+        assert call_order.index("recorded_fill_repair") < call_order.index(
+            "venue_snapshot"
+        )
 
     def test_live_tick_preserves_cancel_pending_when_venue_snapshot_fails(
         self,

@@ -3356,7 +3356,9 @@ def test_taker_fak_mixed_maker_legs_preserve_exact_cash_and_reproject(conn):
     assert Decimal(confirmed["fill_price"]) == exact_price
 
     summary = reconcile_recorded_maker_fill_economics(
-        conn, observed_at=NOW + timedelta(seconds=2)
+        conn,
+        observed_at=NOW + timedelta(seconds=2),
+        live_tick_scope=True,
     )
 
     assert summary["corrected"] == 1
@@ -3386,6 +3388,17 @@ def test_taker_fak_mixed_maker_legs_preserve_exact_cash_and_reproject(conn):
         """,
         (position_id, order_id),
     ).fetchone()[0] == 1
+    assert reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=NOW + timedelta(seconds=3),
+        live_tick_scope=True,
+    ) == {
+        "scanned": 0,
+        "corrected": 0,
+        "projected": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
 
 
 @pytest.mark.parametrize(

@@ -22689,6 +22689,25 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     )
 
     if scope == "live_tick":
+        # Recorded trade facts are already local capital truth.  Reproject
+        # their exact economics before any account-wide venue snapshot so a
+        # timeout/quota failure cannot leave wealth and Kelly on rounded REST
+        # top-line prices.
+        from src.execution.exchange_reconcile import (
+            reconcile_recorded_maker_fill_economics,
+        )
+
+        _db_pass(
+            "recorded_maker_fill_economics",
+            reconcile_recorded_maker_fill_economics,
+            "recorded_maker_fill_economics",
+            advanced_key="corrected",
+            fold_stayed=False,
+            observed_at=started_at,
+            live_tick_scope=True,
+        )
+
+    if scope == "live_tick":
         # Submit-time MATCHED facts are durable current exit truth, but the
         # recorded-fill pass correctly reserves MATCHED/MINED for already
         # closed projections. Reconcile command-bound full EXIT fills before
@@ -23042,18 +23061,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         # live_tick also handles current fill/partial maintenance. boot_fast
         # does not: those historical rows are not required before scheduler
         # start, and live evidence showed they can add minutes to daemon boot.
-        if scope == "live_tick":
-            from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
-
-            _db_pass(
-                "recorded_maker_fill_economics",
-                reconcile_recorded_maker_fill_economics,
-                "recorded_maker_fill_economics",
-                advanced_key="corrected",
-                fold_stayed=False,
-                observed_at=started_at,
-                live_tick_scope=True,
-            )
         _client_pass("local_orphan_no_fill_findings",
                      reconcile_local_orphan_no_fill_findings,
                      "local_orphan_no_fill_findings")

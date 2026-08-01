@@ -1900,10 +1900,44 @@ def reconcile_recorded_maker_fill_economics(
                     )
                     )
                )
+            UNION
+            SELECT DISTINCT cmd.command_id
+              FROM venue_commands cmd
+              JOIN venue_trade_facts fact
+                ON fact.command_id = cmd.command_id
+              JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+             WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND COALESCE(pc.phase, '') IN ({phase_placeholders})
+               AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND json_valid(fact.raw_payload_json)
+               AND UPPER(COALESCE(
+                       json_extract(fact.raw_payload_json, '$.trader_side'),
+                       json_extract(
+                           fact.raw_payload_json,
+                           '$.trade_fact_proof.trade.trader_side'
+                       ),
+                       json_extract(fact.raw_payload_json, '$.trade.trader_side'),
+                       ''
+                   )) = 'TAKER'
+               AND NOT EXISTS (
+                       SELECT 1
+                         FROM venue_trade_facts repaired
+                        WHERE repaired.command_id = fact.command_id
+                          AND repaired.trade_id = fact.trade_id
+                          AND json_valid(repaired.raw_payload_json)
+                          AND json_extract(
+                                  repaired.raw_payload_json,
+                                  '$.zeus_repair.reason'
+                              ) = 'taker_maker_legs_selected_token_quote_cost'
+                   )
         ),
         """
         params.extend(sorted(_ENTRY_FILL_PROJECTION_PHASES))
         params.extend(sorted(_TERMINAL_ENTRY_COMMAND_STATES))
+        params.extend(sorted(_ENTRY_FILL_PROJECTION_PHASES))
         source_clause_sql = """
                               JOIN live_tick_entry_repair_commands live_cmd
                                 ON live_cmd.command_id = fact.command_id
