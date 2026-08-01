@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Lifecycle: created=2026-05-24; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Executor-class assignment (no DB writer on file-only executor; UMA->backfill_db).
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-07-29
+# Last reused or audited: 2026-07-31
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -255,6 +255,55 @@ def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) 
     assert cfg["raw_manifest_dir"] == (
         STATE_DIR / "replacement_forecast_live" / "raw_manifests"
     )
+
+
+def test_replacement_materialize_poll_uses_configured_micro_batch(monkeypatch) -> None:
+    """Every hot-queue branch must use the configured bounded micro-batch."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest.forecast_live_daemon as daemon
+
+    cfg = {
+        "request_dir": "requests",
+        "seed_dir": "seeds",
+        "poll_batch_limit": 8,
+    }
+    pending = {"request_dir": False, "seed_dir": False, "inflight": False}
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_queue_pending",
+        lambda _cfg, key: pending[key],
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_inflight_pending",
+        lambda _cfg: pending["inflight"],
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_materialize_job",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    pending["request_dir"] = True
+    daemon._replacement_forecast_materialize_poll_job()
+    pending["request_dir"] = False
+    pending["seed_dir"] = True
+    daemon._replacement_forecast_materialize_poll_job()
+    pending["seed_dir"] = False
+    pending["inflight"] = True
+    daemon._replacement_forecast_materialize_poll_job()
+
+    assert calls == [
+        {"discover": False, "limit": 8, "seed_limit": 0},
+        {"discover": False, "limit": 8, "seed_limit": 8},
+        {"discover": False, "limit": 8, "seed_limit": 0},
+    ]
 
 
 def test_replacement_discovery_is_not_limited_by_poll_claim_size(

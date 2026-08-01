@@ -1181,25 +1181,26 @@ def _replacement_forecast_materialize_poll_job() -> None:
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
+    batch_limit = max(1, int(cfg["poll_batch_limit"]))
     requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
     seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
     inflight_pending = _replacement_forecast_inflight_pending(cfg)
     if requests_pending:
         _replacement_forecast_materialize_job(
             discover=False,
-            limit=1,
+            limit=batch_limit,
             seed_limit=0,
         )
     elif seeds_pending:
         _replacement_forecast_materialize_job(
             discover=False,
-            limit=1,
-            seed_limit=1,
+            limit=batch_limit,
+            seed_limit=batch_limit,
         )
     elif inflight_pending:
         _replacement_forecast_materialize_job(
             discover=False,
-            limit=1,
+            limit=batch_limit,
             seed_limit=0,
         )
 
