@@ -1500,7 +1500,10 @@ def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
     assert summary["book_native_side_non_executable_count"] == 2
 
 
-def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path):
+def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
+    tmp_path,
+    monkeypatch,
+):
     db_path = tmp_path / "trade.db"
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -1891,6 +1894,53 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
             (winner_row_id,),
         ).fetchone()["artifact_json"]
     ) < len(rows[0]["artifact_json"])
+
+    fallback_evaluations = (
+        replace(evaluations[0], rejection_reason="BOOK_STALE"),
+        *evaluations[1:],
+    )
+    fallback_selected = SimpleNamespace(
+        decision=replace(
+            decision,
+            rejection_reasons={
+                **decision.rejection_reasons,
+                evaluations[0].candidate_id: "BOOK_STALE",
+            },
+            candidate_evaluations=fallback_evaluations,
+        )
+    )
+
+    def reject_inexact_candidate_delta(**_kwargs):
+        raise ValueError(
+            "GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_HASH_MISMATCH"
+        )
+
+    with monkeypatch.context() as candidate_delta_patch:
+        candidate_delta_patch.setattr(
+            global_batch_runtime,
+            "_candidate_evaluations_delta_receipt",
+            reject_inexact_candidate_delta,
+        )
+        fallback_row_id = store(
+            suffix="candidate-delta-mismatch",
+            current_selected=fallback_selected,
+        )
+    fallback_summary = json.loads(
+        conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (fallback_row_id,),
+        ).fetchone()["artifact_json"]
+    )["summary"]
+    inline_candidate_json = zlib.decompress(
+        base64.b64decode(
+            fallback_summary["candidate_evaluations_zlib_b64"]
+        )
+    )
+    assert hashlib.sha256(inline_candidate_json).hexdigest() == (
+        fallback_summary["candidate_evaluations_sha256"]
+    )
+    assert "candidate_evaluations_delta_zlib_b64" not in fallback_summary
+    assert "candidate_evaluations_base_decision_log_id" not in fallback_summary
     conn.close()
 
 

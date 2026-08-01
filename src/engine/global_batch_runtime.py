@@ -2912,32 +2912,49 @@ def _store_global_auction_receipt(
                 and candidate_identity[0] == candidate_ref.encoding
                 and isinstance(candidate_ref.payload, Mapping)
             ):
-                candidate_delta = _candidate_evaluations_delta_receipt(
-                    base=candidate_ref.payload,
-                    current=compact_evaluations,
-                    expected_sha256=candidate_identity[1],
-                )
-                candidate_delta_bytes = len(
-                    str(candidate_delta["candidate_evaluations_delta_zlib_b64"])
-                )
-                candidate_full_bytes = len(str(receipt[candidate_field]))
-                if candidate_delta_bytes * 2 < candidate_full_bytes:
-                    compact_receipt.update(candidate_delta)
-                    compact_receipt.update(
-                        {
-                            "candidate_evaluations_base_decision_log_id": candidate_ref.row_id,
-                            "candidate_evaluations_base_mode": candidate_ref.mode,
-                            "candidate_evaluations_base_receipt_hash": candidate_ref.receipt_hash,
-                            "candidate_evaluations_base_sha256": candidate_ref.sha256,
-                            "candidate_evaluations_delta_chain_depth": (
-                                candidate_ref.delta_depth + 1
-                            ),
-                        }
+                try:
+                    candidate_delta = _candidate_evaluations_delta_receipt(
+                        base=candidate_ref.payload,
+                        current=compact_evaluations,
+                        expected_sha256=candidate_identity[1],
                     )
-                    base_refs[candidate_ref.row_id] = candidate_ref
-                else:
+                except ValueError as exc:
+                    if exc.args != (
+                        "GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_HASH_MISMATCH",
+                    ):
+                        raise
+                    _LOG.warning(
+                        "candidate receipt delta did not reproduce the exact "
+                        "payload; persisting the verified inline payload"
+                    )
                     compact_receipt[candidate_field] = receipt[candidate_field]
                     inline_fields.add(candidate_field)
+                else:
+                    candidate_delta_bytes = len(
+                        str(
+                            candidate_delta[
+                                "candidate_evaluations_delta_zlib_b64"
+                            ]
+                        )
+                    )
+                    candidate_full_bytes = len(str(receipt[candidate_field]))
+                    if candidate_delta_bytes * 2 < candidate_full_bytes:
+                        compact_receipt.update(candidate_delta)
+                        compact_receipt.update(
+                            {
+                                "candidate_evaluations_base_decision_log_id": candidate_ref.row_id,
+                                "candidate_evaluations_base_mode": candidate_ref.mode,
+                                "candidate_evaluations_base_receipt_hash": candidate_ref.receipt_hash,
+                                "candidate_evaluations_base_sha256": candidate_ref.sha256,
+                                "candidate_evaluations_delta_chain_depth": (
+                                    candidate_ref.delta_depth + 1
+                                ),
+                            }
+                        )
+                        base_refs[candidate_ref.row_id] = candidate_ref
+                    else:
+                        compact_receipt[candidate_field] = receipt[candidate_field]
+                        inline_fields.add(candidate_field)
             else:
                 compact_receipt[candidate_field] = receipt[candidate_field]
                 inline_fields.add(candidate_field)
