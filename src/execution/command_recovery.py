@@ -8187,10 +8187,26 @@ def reconcile_missing_filled_entry_execution_fact_repairs(
 
 def reconcile_terminal_entry_exposure_obligations(
     conn: sqlite3.Connection,
+    *,
+    command_id: str | None = None,
 ) -> dict:
-    """Release entry obligations only after terminal exposure truth exists."""
+    """Release entry obligations only after terminal exposure truth exists.
+
+    ``command_id`` narrows the same proof to one command so a writer that has
+    just materialized terminal fill truth can release its obligation before
+    giving up the canonical write transaction.
+    """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    scoped_command_id = None
+    if command_id is not None:
+        scoped_command_id = str(command_id).strip()
+        if not scoped_command_id:
+            return summary
+    scope_clause = (
+        " AND obligation.command_id = ?" if scoped_command_id is not None else ""
+    )
+    scope_params = (scoped_command_id,) if scoped_command_id is not None else ()
     required = {
         "entry_exposure_obligations",
         "execution_fact",
@@ -8204,12 +8220,14 @@ def reconcile_terminal_entry_exposure_obligations(
     projection_gate_sql = "0"
     settlement_absorption_sql = "0"
     if _table_exists(conn, "position_current") and _table_exists(conn, "position_events"):
+        # EXIT_INTENT is not closure: pending_exit still carries the command's
+        # materialized exposure and therefore supersedes its pre-submit bound.
         projection_gate_sql = """
                EXISTS (
                    SELECT 1
                      FROM position_current position
                     WHERE position.position_id = command.position_id
-                      AND position.phase IN ('active', 'day0_window')
+                      AND position.phase IN ('active', 'day0_window', 'pending_exit')
                       AND position.shares > 0.0
                       AND position.shares < 1e308
                       AND position.cost_basis_usd > 0.0
@@ -8325,13 +8343,16 @@ def reconcile_terminal_entry_exposure_obligations(
             ON command.command_id = obligation.command_id
          WHERE obligation.status = 'OPEN'
            AND command.intent_kind = 'ENTRY'
+           {scope_clause}
          ORDER BY obligation.created_at, obligation.command_id
         """,
-        no_fill_events,
+        no_fill_events + scope_params,
     ).fetchall()
+    if not rows:
+        return summary
     canonical_orders_by_command: dict[str, list[dict]] = {}
     canonical_order_rows = conn.execute(
-        """
+        f"""
         WITH open_entry_obligation_command AS (
             SELECT obligation.command_id
               FROM entry_exposure_obligations obligation
@@ -8339,6 +8360,7 @@ def reconcile_terminal_entry_exposure_obligations(
                 ON command.command_id = obligation.command_id
              WHERE obligation.status = 'OPEN'
                AND command.intent_kind = 'ENTRY'
+               {scope_clause}
         ),
         """
         + _canonical_order_truth_cte(
@@ -8352,9 +8374,10 @@ def reconcile_terminal_entry_exposure_obligations(
                fact.remaining_size,
                fact.source,
                fact.raw_payload_json
-          FROM canonical_order_truth fact
+         FROM canonical_order_truth fact
          ORDER BY fact.command_id, fact.venue_order_id
-        """
+        """,
+        scope_params,
     ).fetchall()
     for raw in canonical_order_rows:
         order = _dict_row(raw)
@@ -8602,10 +8625,24 @@ def _terminal_partial_entry_obligation_proven(
         ).fetchone()
         if cancel_ack is None:
             return False
+    reducer_terminal_partial_for_all_orders = True
     for order in canonical_orders:
         payload = _json_dict(order.get("raw_payload_json"))
         order_state = str(order.get("state") or "").upper()
         proof_class = payload.get("proof_class")
+        reducer_terminal_partial = (
+            order_state
+            in {"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
+            and payload.get("order_truth_proof_class") == "TERMINAL_PARTIAL"
+            and str(payload.get("order_truth_source_state") or "").upper()
+            == order_state
+            and payload.get("source_module") == "src.execution.exchange_reconcile"
+            and payload.get("reason")
+            == "m5_exchange_reconcile_entry_fill_order_fact"
+        )
+        reducer_terminal_partial_for_all_orders = (
+            reducer_terminal_partial_for_all_orders and reducer_terminal_partial
+        )
         terminal_order_proven = (
             order_state == "PARTIALLY_MATCHED"
             and proof_class == "terminal_partial_order_fact"
@@ -8613,7 +8650,7 @@ def _terminal_partial_entry_obligation_proven(
             order_state == "EXPIRED"
             and proof_class
             == "confirmed_fill_plus_point_order_terminal_remainder"
-        )
+        ) or reducer_terminal_partial
         if (
             not terminal_order_proven
             or _decimal_or_none(order.get("matched_size")) is None
@@ -8636,7 +8673,7 @@ def _terminal_partial_entry_obligation_proven(
         filled_size,
         command.get("command_size"),
         side=command.get("command_side"),
-    ):
+    ) and not reducer_terminal_partial_for_all_orders:
         return False
     execution_rows = conn.execute(
         """

@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-30
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-30; last_reused=2026-07-30
+# Last reused/audited: 2026-08-01
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Authority basis: first-principles same-position incremental fill aggregation
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -2093,6 +2093,80 @@ def test_partial_fak_increment_projects_known_fill_and_keeps_remainder_obligatio
     assert conn.execute(
         "SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-partial-top-up'"
     ).fetchone()[0] == "OPEN"
+
+
+def test_entry_fill_projection_reuses_writer_for_terminal_obligation(monkeypatch):
+    """The fill writer releases proven capital without opening another connection."""
+
+    from src.execution import command_recovery, exchange_reconcile
+    from src.state import db as state_db
+    from src.state import projection as state_projection
+
+    calls = []
+
+    class RecordingConnection:
+        def execute(self, sql, *_args):
+            calls.append(("sql", sql.strip().split()[0]))
+            return SimpleNamespace()
+
+    conn = RecordingConnection()
+    monkeypatch.setattr(
+        state_projection,
+        "upsert_position_current",
+        lambda used_conn, _projection: calls.append(("projection", used_conn)),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "log_execution_fact",
+        lambda used_conn, **_kwargs: calls.append(("execution", used_conn)),
+    )
+    monkeypatch.setattr(
+        exchange_reconcile,
+        "_append_entry_position_lots_for_command",
+        lambda used_conn, **_kwargs: calls.append(("lots", used_conn)),
+    )
+
+    def release(used_conn, *, command_id):
+        calls.append(("obligation", used_conn, command_id))
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_terminal_entry_exposure_obligations",
+        release,
+    )
+    exchange_reconcile._apply_entry_fill_projection_and_execution_fact(
+        conn,
+        events=[],
+        projection={"position_id": "pos-terminal"},
+        position=SimpleNamespace(
+            trade_id="pos-terminal",
+            strategy_key="forecast_qkernel_entry",
+            order_posted_at=NOW.isoformat(),
+        ),
+        command={
+            "command_id": "cmd-terminal",
+            "decision_id": "dec-terminal",
+            "created_at": NOW.isoformat(),
+            "price": 0.29,
+        },
+        observed_at=NOW,
+        order_status="partial",
+        shares=Decimal("9.992813"),
+        entry_price=Decimal("0.29"),
+        upsert_only=True,
+        incremental=False,
+    )
+
+    assert calls[-2:] == [
+        ("sql", "RELEASE"),
+        ("obligation", conn, "cmd-terminal"),
+    ]
+    assert all(
+        call[1] is conn
+        for call in calls
+        if call[0] in {"projection", "execution", "lots", "obligation"}
+    )
 
 
 def test_maker_fill_materializes_missing_position_projection_after_cancel(

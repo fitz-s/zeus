@@ -13679,6 +13679,98 @@ class TestRecoveryResolutionTable:
             "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
         ).fetchone()[0] == expected_status
 
+    def test_m5_terminal_partial_releases_obligation_after_exit_intent(self, conn):
+        """Reducer terminality survives late fills and an intervening EXIT_INTENT."""
+        _insert(conn, size=10.0, price=0.50, order_type="GTC")
+        _open_test_entry_obligation(conn, "cmd-001")
+        _advance_to_acked(conn, venue_order_id="ord-gtc-late-partial")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-gtc-late-partial",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-gtc-late-partial",
+            state="EXPIRED",
+            matched_size="9.992813",
+            remaining_size="0",
+            raw_payload_json={
+                "reason": "m5_exchange_reconcile_entry_fill_order_fact",
+                "source_module": "src.execution.exchange_reconcile",
+                "order_truth_proof_class": "TERMINAL_PARTIAL",
+                "order_truth_source_state": "EXPIRED",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-gtc-late-partial",
+            trade_id="trade-gtc-late-partial",
+            state="CONFIRMED",
+            filled_size="9.992813",
+            fill_price="0.50",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-gtc-late-partial",
+                "filled_size": "9.992813",
+                "fill_price": "0.50",
+            },
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_projection_repairs,
+            reconcile_terminal_entry_exposure_obligations,
+        )
+
+        assert reconcile_filled_entry_projection_repairs(conn, MagicMock()) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        conn.execute(
+            "UPDATE execution_fact SET terminal_exec_status = 'partial', "
+            "venue_status = 'PARTIAL' WHERE command_id = 'cmd-001'"
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="EXPIRED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={
+                "reason": "partial_remainder_absent_from_exchange_open_orders",
+                "proof_class": "confirmed_fill_plus_point_order_terminal_remainder",
+                "venue_order_id": "ord-gtc-late-partial",
+                "positive_fill_size": "9.992813",
+            },
+        )
+        conn.execute(
+            "UPDATE position_current SET phase = 'pending_exit' "
+            "WHERE position_id = 'pos-001'"
+        )
+
+        assert reconcile_terminal_entry_exposure_obligations(
+            conn,
+            command_id="cmd-001",
+        ) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
+        ).fetchone()[0] == "RESOLVED"
+
     def test_already_canceled_exit_ambiguous_point_read_stays_review_required(
         self,
         conn,

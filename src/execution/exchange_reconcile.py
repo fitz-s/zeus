@@ -5836,6 +5836,40 @@ def _apply_entry_fill_projection_and_execution_fact(
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
         raise
 
+    if command_id:
+        try:
+            from src.execution.command_recovery import (
+                reconcile_terminal_entry_exposure_obligations,
+            )
+
+            obligation = reconcile_terminal_entry_exposure_obligations(
+                conn,
+                command_id=command_id,
+            )
+            if obligation["advanced"]:
+                logger.info(
+                    "exchange_reconcile: released terminal entry obligation "
+                    "with the materialized fill command_id=%s",
+                    command_id,
+                )
+            elif obligation["errors"]:
+                logger.warning(
+                    "exchange_reconcile: terminal entry obligation release "
+                    "remained conservative command_id=%s errors=%d",
+                    command_id,
+                    obligation["errors"],
+                )
+        except sqlite3.Error:
+            # The fill projection is authoritative even when this conservative
+            # capital-release optimization cannot finish. The normal recovery
+            # sweep retains the obligation and retries it fail-closed.
+            logger.warning(
+                "exchange_reconcile: terminal entry obligation release deferred "
+                "command_id=%s",
+                command_id,
+                exc_info=True,
+            )
+
 
 def _apply_exit_fill_projection_and_execution_fact(
     conn: sqlite3.Connection,
