@@ -1010,6 +1010,117 @@ def test_monitoring_phase_processes_local_books_before_blocking_network_fetch(
     )
 
 
+def test_monitoring_phase_serves_durable_debt_before_bulk_prefetch(monkeypatch):
+    """A slow network batch cannot precede the oldest canonical monitor attempt."""
+    from src.engine import cycle_runtime
+
+    positions = [
+        _make_position(
+            trade_id=f"fairness-{index}",
+            token_id=f"fairness-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(18)
+    ]
+    for index, position in enumerate(positions):
+        position._canonical_monitor_refreshed_at = (
+            f"2026-08-01T00:{index:02d}:00+00:00"
+        )
+    positions[0]._canonical_monitor_refreshed_at = ""
+    local_positions = positions[-2:]
+    local_books = {
+        position.token_id: {
+            "asset_id": position.token_id,
+            "bids": [{"price": "0.40", "size": "20"}],
+            "asks": [{"price": "0.42", "size": "20"}],
+        }
+        for position in local_positions
+    }
+    events: list[object] = []
+    clock = [0.0]
+
+    class SlowBatchClob:
+        def get_orderbook(self, token_id):
+            events.append(("singular", token_id))
+            return None
+
+        def get_orderbook_snapshots(self, token_ids):
+            events.append(("bulk", tuple(token_ids)))
+            clock[0] = 76.0
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.40", "size": "20"}],
+                    "asks": [{"price": "0.42", "size": "20"}],
+                }
+                for token_id in token_ids
+            }
+
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda _conn, _positions, **_kwargs: local_books,
+    )
+    def _refresh_through_singular_quote(_conn, clob, position):
+        from src.engine.monitor_refresh import monitor_quote_refresh
+
+        monitor_quote_refresh(_conn, clob, position)
+        events.append(f"refresh:{position.trade_id}")
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        _refresh_through_singular_quote,
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+
+    clob = SlowBatchClob()
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        clob,
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_durable_debt_before_prefetch"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=75.0,
+    )
+
+    refresh_index = events.index("refresh:fairness-0")
+    bulk_index, bulk_tokens = next(
+        (index, payload[1])
+        for index, payload in enumerate(events)
+        if isinstance(payload, tuple) and payload[0] == "bulk"
+    )
+    assert refresh_index < bulk_index
+    assert len(bulk_tokens) == 15
+    assert "fairness-token-0" not in bulk_tokens
+    from src.engine.monitor_refresh import prefetched_monitor_orderbook
+
+    assert [event for event in events if event[0] == "singular"] == [
+        ("singular", "fairness-token-0")
+    ]
+    assert prefetched_monitor_orderbook(clob, "fairness-token-16") == local_books[
+        "fairness-token-16"
+    ]
+    assert summary["held_monitor_durable_debt_position"] == "fairness-0"
+    assert summary["held_monitor_durable_debt_network_attempted"] is True
+
+
 def test_monitoring_phase_active_network_hard_fact_exits_after_local_tranche(
     monkeypatch,
 ):
@@ -1691,15 +1802,10 @@ def test_monitoring_phase_positive_budget_sweeps_unreserved_active_tail(monkeypa
     assert summary.get("held_monitor_positions_deferred", 0) == 0
 
 
-def test_monitor_reservation_attempt_fairness_prevents_sticky_oldest(monkeypatch):
-    """A failed oldest refresh cannot monopolize the bounded monitor lane."""
+def test_monitor_durable_debt_retries_oldest_until_timestamp_advances(monkeypatch):
+    """Selection alone cannot rotate an older debt past an unpersisted attempt."""
     from src.engine import cycle_runtime
 
-    monkeypatch.setattr(
-        cycle_runtime,
-        "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE",
-        {},
-    )
     monkeypatch.setattr(
         cycle_runtime,
         "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE",
@@ -1721,28 +1827,142 @@ def test_monitor_reservation_attempt_fairness_prevents_sticky_oldest(monkeypatch
         "canonical-test",
         [newer, oldest, middle],
         limit=1,
+        durable_only=True,
     )
     after_failed_oldest = cycle_runtime._reserve_held_monitor_positions(
         "canonical-test",
         [newer, oldest, middle],
         limit=1,
+        durable_only=True,
     )
-    middle._canonical_monitor_refreshed_at = "2026-07-22T14:00:00+00:00"
-    unattempted_newer = cycle_runtime._reserve_held_monitor_positions(
+    oldest._canonical_monitor_refreshed_at = "2026-07-22T13:00:00+00:00"
+    next_oldest = cycle_runtime._reserve_held_monitor_positions(
         "canonical-test",
         [newer, oldest, middle],
         limit=1,
+        durable_only=True,
     )
-    failed_oldest_retry = cycle_runtime._reserve_held_monitor_positions(
+    middle._canonical_monitor_refreshed_at = "2026-07-22T16:00:00+00:00"
+    oldest._canonical_monitor_refreshed_at = "2026-07-22T15:00:00+00:00"
+    after_progress = cycle_runtime._reserve_held_monitor_positions(
         "canonical-test",
         [newer, oldest, middle],
         limit=1,
+        durable_only=True,
     )
 
     assert first == [oldest]
-    assert after_failed_oldest == [middle]
-    assert unattempted_newer == [newer]
-    assert failed_oldest_retry == [oldest]
+    assert after_failed_oldest == [oldest]
+    assert next_oldest == [middle]
+    assert after_progress == [newer]
+
+
+def test_monitor_bounded_recovery_tranches_cover_book_without_overtaking_debt(
+    monkeypatch,
+):
+    """Slow quote work still gives all 18 canonical append attempts in <=4 passes."""
+    from src.engine import cycle_runtime
+    from src.engine.monitor_refresh import monitor_quote_refresh
+
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    positions = [
+        _make_position(
+            trade_id=f"bounded-debt-{index}",
+            token_id=f"bounded-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(18)
+    ]
+    for index, position in enumerate(positions):
+        position._canonical_monitor_refreshed_at = (
+            f"2026-08-01T00:{index:02d}:00+00:00"
+        )
+
+    clock = [0.0]
+    events: list[tuple[str, object]] = []
+
+    def _book(token_id):
+        return {
+            "asset_id": token_id,
+            "bids": [{"price": "0.40", "size": "20"}],
+            "asks": [{"price": "0.42", "size": "20"}],
+        }
+
+    class SlowQuoteClob:
+        def get_orderbook(self, token_id):
+            events.append(("singular", token_id))
+            clock[0] += 13.0
+            return _book(token_id)
+
+        def get_orderbook_snapshots(self, token_ids):
+            events.append(("bulk", tuple(token_ids)))
+            clock[0] += 1.0
+            return {token_id: _book(token_id) for token_id in token_ids}
+
+    clob = SlowQuoteClob()
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def _refresh(_conn, current_clob, position):
+        monitor_quote_refresh(_conn, current_clob, position)
+        clock[0] += 12.0
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+
+    covered: set[str] = set()
+    pass_attempts: list[list[str]] = []
+    cycle_number = [0]
+
+    def _append_attempt(_conn, position, **_kwargs):
+        pass_attempts[-1].append(position.trade_id)
+        covered.add(position.trade_id)
+        position._canonical_monitor_refreshed_at = (
+            f"2026-08-{cycle_number[0] + 2:02d}T00:00:00+00:00"
+        )
+        return True
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        _append_attempt,
+    )
+
+    for cycle in range(4):
+        cycle_number[0] = cycle
+        pass_attempts.append([])
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None,
+            clob,
+            _make_portfolio(*positions),
+            _monitor_test_artifact(),
+            _monitor_test_tracker(),
+            summary,
+            deps=_monitor_test_deps(f"bounded-runtime-{cycle}"),
+            run_exit_preflight=False,
+            held_position_monitor_budget_seconds=75.0,
+        )
+        assert len(pass_attempts[-1]) <= 6
+        if len(covered) == 18:
+            break
+
+    assert len(pass_attempts) <= 4
+    assert covered == {f"bounded-debt-{index}" for index in range(18)}
+    assert all(pass_attempts)
+    assert sum(len(attempts) for attempts in pass_attempts) == 18
 
 
 def test_monitor_reservation_attempts_full_batch_before_retry(monkeypatch):

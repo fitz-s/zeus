@@ -4506,6 +4506,7 @@ def _held_monitor_schedule_key(
     pos,
     *,
     deadline_rescue_position_id: int | None,
+    durable_debt_position_id: int | None,
     dead_bin_position_ids: frozenset[int],
     selected_urgent_position_ids: frozenset[int],
     selected_coverage_position_ids: frozenset[int],
@@ -4525,6 +4526,11 @@ def _held_monitor_schedule_key(
         return -4, urgency
     if position_id in selected_urgent_position_ids:
         return (-3 if position_id in dead_bin_position_ids else -2), urgency
+    # Durable fairness is service, not selection.  The oldest canonical
+    # monitor debt gets the first optional slot; process-local reservation
+    # attempts must not let an already-served position overtake it.
+    if position_id == durable_debt_position_id:
+        return -1, -1
     if has_selected_urgent:
         if position_id in selected_coverage_position_ids:
             return -1, urgency if urgency < 2 else 2 + int(network_dependent)
@@ -4569,6 +4575,7 @@ def _reserve_held_monitor_positions(
     limit: int,
     priority_key: Callable[[object], object] | None = None,
     fair_by_attempt: bool = False,
+    durable_only: bool = False,
 ) -> list:
     """Select a thread-safe fair slice, seeded by durable monitor progress."""
 
@@ -4580,6 +4587,16 @@ def _reserve_held_monitor_positions(
         return []
     if limit <= 0:
         return []
+    if durable_only:
+        ordered = sorted(
+            positions,
+            key=lambda pos: (
+                bool(str(getattr(pos, "_canonical_monitor_refreshed_at", "") or "")),
+                str(getattr(pos, "_canonical_monitor_refreshed_at", "") or ""),
+                _held_monitor_stable_position_key(pos),
+            ),
+        )
+        return ordered[: min(limit, len(ordered))]
     if fair_by_attempt or all(
         hasattr(pos, "_canonical_monitor_refreshed_at") for pos in positions
     ):
@@ -4751,13 +4768,16 @@ def _prefetch_held_monitor_orderbooks(
     now_utc: datetime,
     deps,
     local_only: bool = False,
+    preserve_existing: bool = False,
+    mark_unfetched_attempted: bool = True,
 ) -> frozenset[str]:
     from src.data.market_scanner import _configured_batch_orderbook_getter
-    from src.engine.monitor_refresh import install_monitor_orderbook_prefetch
+    from src.engine.monitor_refresh import (
+        install_monitor_orderbook_prefetch,
+        monitor_orderbook_prefetch_attempted,
+        prefetched_monitor_orderbook,
+    )
 
-    # A client may survive across cycles. Clear the prior cycle before any
-    # return or failed fetch so stale executable truth cannot be reused.
-    install_monitor_orderbook_prefetch(clob, {})
     getter = _configured_batch_orderbook_getter(clob)
     token_ids = list(
         dict.fromkeys(
@@ -4766,6 +4786,19 @@ def _prefetch_held_monitor_orderbooks(
             if (token_id := _position_held_token_id(pos))
         )
     )
+    existing_books: dict[str, dict] = {}
+    existing_attempted: set[str] = set()
+    if preserve_existing:
+        for token_id in token_ids:
+            book = prefetched_monitor_orderbook(clob, token_id)
+            if book is not None:
+                existing_books[token_id] = book
+            if monitor_orderbook_prefetch_attempted(clob, token_id):
+                existing_attempted.add(token_id)
+    else:
+        # A client may survive across cycles. Clear the prior cycle before any
+        # return or failed fetch so stale executable truth cannot be reused.
+        install_monitor_orderbook_prefetch(clob, {})
     summary["held_monitor_orderbooks_requested"] = len(token_ids)
     local_books = _fresh_local_held_monitor_orderbooks(
         conn,
@@ -4774,13 +4807,24 @@ def _prefetch_held_monitor_orderbooks(
         summary=summary,
         deps=deps,
     )
+    local_books = {**existing_books, **local_books}
     summary["held_monitor_orderbooks_local"] = len(local_books)
     missing_token_ids = [
-        token_id for token_id in token_ids if token_id not in local_books
+        token_id
+        for token_id in token_ids
+        if token_id not in local_books and token_id not in existing_attempted
     ]
     summary["held_monitor_orderbooks_network_requested"] = len(missing_token_ids)
     if local_only or not missing_token_ids or getter is None:
-        installed = install_monitor_orderbook_prefetch(clob, local_books)
+        attempted = (
+            existing_attempted
+            | (set(missing_token_ids) if mark_unfetched_attempted else set())
+        )
+        installed = install_monitor_orderbook_prefetch(
+            clob,
+            local_books,
+            attempted_token_ids=attempted,
+        )
         summary["held_monitor_orderbook_prefetch_installed"] = installed
         summary["held_monitor_orderbooks_prefetched"] = (
             len(local_books) if installed else 0
@@ -4801,11 +4845,48 @@ def _prefetch_held_monitor_orderbooks(
     installed = install_monitor_orderbook_prefetch(
         clob,
         books,
-        attempted_token_ids=missing_token_ids,
+        attempted_token_ids=existing_attempted | set(missing_token_ids),
     )
     summary["held_monitor_orderbook_prefetch_installed"] = installed
     summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0
     return frozenset(missing_token_ids if installed else token_ids)
+
+
+def _mark_held_monitor_orderbook_attempted(
+    clob,
+    positions,
+    attempted_token_id: str,
+) -> bool:
+    """Preserve cycle-local books while recording one completed singular attempt."""
+
+    from src.engine.monitor_refresh import (
+        install_monitor_orderbook_prefetch,
+        monitor_orderbook_prefetch_attempted,
+        prefetched_monitor_orderbook,
+    )
+
+    token_ids = {
+        token_id
+        for pos in positions
+        if (token_id := _position_held_token_id(pos))
+    }
+    token_ids.add(str(attempted_token_id))
+    books = {
+        token_id: book
+        for token_id in token_ids
+        if (book := prefetched_monitor_orderbook(clob, token_id)) is not None
+    }
+    attempted = {
+        token_id
+        for token_id in token_ids
+        if monitor_orderbook_prefetch_attempted(clob, token_id)
+    }
+    attempted.add(str(attempted_token_id))
+    return install_monitor_orderbook_prefetch(
+        clob,
+        books,
+        attempted_token_ids=attempted,
+    )
 
 
 def _blocking_review_fact_for_position(portfolio, pos):
@@ -5999,6 +6080,7 @@ def execute_monitoring_phase(
         now_utc=monitor_now_utc,
         deps=deps,
         local_only=True,
+        mark_unfetched_attempted=False,
     )
     summary.update(local_prefetch)
     local_book_tokens = frozenset(
@@ -6047,6 +6129,24 @@ def execute_monitoring_phase(
         id(pos) for pos in selected_urgent_positions
     )
     has_selected_urgent = bool(selected_urgent_positions)
+    # INV-47 held-monitor debt gate: SCOPE is current held-position debt only;
+    # DRAIN is one finite oldest-debt monitor attempt per bounded recovery pass;
+    # RESET is a successful canonical MONITOR_REFRESHED timestamp advance.
+    durable_debt_candidates = [
+        pos
+        for pos in monitor_positions
+        if hasattr(pos, "_canonical_monitor_refreshed_at")
+        and id(pos) not in selected_urgent_position_ids
+    ]
+    durable_debt_position = _reserve_held_monitor_positions(
+        "durable_debt",
+        durable_debt_candidates,
+        limit=1,
+        durable_only=True,
+    )
+    durable_debt_position_id = (
+        id(durable_debt_position[0]) if durable_debt_position else None
+    )
     ordinary_active_local_positions = [
         pos
         for pos in monitor_positions
@@ -6114,6 +6214,7 @@ def execute_monitoring_phase(
         key=lambda pos: _held_monitor_schedule_key(
             pos,
             deadline_rescue_position_id=deadline_rescue_position_id,
+            durable_debt_position_id=durable_debt_position_id,
             dead_bin_position_ids=dead_bin_position_ids,
             selected_urgent_position_ids=selected_urgent_position_ids,
             selected_coverage_position_ids=selected_coverage_position_ids,
@@ -6150,7 +6251,13 @@ def execute_monitoring_phase(
     )
     network_prefetch_started = False
     network_prefetch_unavailable = False
+    durable_debt_network_attempted = False
     summary["held_monitor_budget_reservation_count"] = monitor_reservation_count
+    summary["held_monitor_durable_debt_position"] = (
+        str(getattr(durable_debt_position[0], "trade_id", "") or "")
+        if durable_debt_position
+        else ""
+    )
     summary["held_monitor_budget_bypass_scanned"] = 0
     monitor_wealth_witness_cache: dict[str, object] = {}
     deadline_rescue_used = False
@@ -6365,6 +6472,7 @@ def execute_monitoring_phase(
             continue
 
         held_token_id = _position_held_token_id(pos)
+        is_durable_debt_network_attempt = False
         if held_token_id in network_book_tokens:
             if network_prefetch_unavailable:
                 summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
@@ -6375,7 +6483,19 @@ def execute_monitoring_phase(
                     + 1
                 )
                 continue
-            if not network_prefetch_started:
+            is_durable_debt_network_attempt = (
+                durable_debt_position_id == id(pos)
+                and not durable_debt_network_attempted
+            )
+            if is_durable_debt_network_attempt:
+                # The initial local-only pass deliberately does not mark
+                # missing network books as attempted.  Let the oldest durable
+                # debt take one finite singular quote attempt first; a later
+                # bulk prefetch cannot consume the whole 75s tranche before
+                # this position reaches monitor_refresh/canonical append.
+                durable_debt_network_attempted = True
+                summary["held_monitor_durable_debt_network_attempted"] = True
+            elif not network_prefetch_started:
                 # Local lifecycle writes must be durable before optional CLOB
                 # I/O.  A failed commit is a typed deferral, never permission
                 # to call the batch getter against an uncertain write state.
@@ -6406,6 +6526,7 @@ def execute_monitoring_phase(
                     network_prefetch,
                     now_utc=monitor_now_utc,
                     deps=deps,
+                    preserve_existing=True,
                 )
                 summary["held_monitor_orderbooks_prefetched"] = (
                     int(summary.get("held_monitor_orderbooks_prefetched", 0) or 0)
@@ -6787,6 +6908,12 @@ def execute_monitoring_phase(
                 try:
                     edge_ctx = refresh_position(conn, clob, pos)
                 finally:
+                    if is_durable_debt_network_attempt and held_token_id:
+                        _mark_held_monitor_orderbook_attempted(
+                            clob,
+                            quote_positions,
+                            held_token_id,
+                        )
                     try:
                         delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
                     except AttributeError:

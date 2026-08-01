@@ -1246,3 +1246,64 @@ Restore truthful live entry admission after the global auction reached a real wi
   identically on live because they pass `object()` into `EventWriter`; neither
   reaches this cancellation path. Independent review found no P0/P1/P2 and
   returned LAND.
+
+## Slice B73 -- Give durable held-monitor debt the first bounded service turn
+
+- Current proof: the 2026-08-01 21:09:04--21:10:37Z cycle lasted 93.028s;
+  18 held candidates produced only 5 scans while 13 deferred with
+  `cycle_budget_exhausted`/`MONITOR_DEADLINE_EXPIRED`. Sixteen network
+  orderbooks were prefetched before durable monitor progress. The 30s recovery
+  job uses `max_instances=1`, so it repeatedly skipped behind the long pass
+  and overdue debt grew to 15. Existing oldest-first durable reservation is
+  present, but selection/attempt bookkeeping can rotate a position whose
+  canonical `MONITOR_REFRESHED` append never committed. Moscow's separate
+  11:36:41Z--16:52:01Z canonical gap is evidence of the class, not a city rule.
+- First-principles invariant: held-monitor fairness is durable service, not
+  selection. Scope is current held-position monitor debt only. Every bounded
+  recovery pass must begin with the least-recently persisted
+  `MONITOR_REFRESHED` debt and make one finite monitor attempt before optional
+  bulk prefetch or tail work; prefetch consumes the same monotonic budget and
+  cannot starve that first debt. A debt item stays oldest until its canonical
+  timestamp advances or the existing finite deferred/fault evidence is emitted.
+  Urgent wake preemption remains absolute. Reset is a successful canonical
+  `MONITOR_REFRESHED`, which advances that position and transfers ownership to
+  the next oldest debt.
+- Minimal repair: reuse the existing durable timestamp and reservation/tranche
+  machinery to schedule one durable-debt position ahead of optional tail work.
+  The initial local-only book pass no longer marks missing network books as
+  attempted; the oldest network debt gets one singular quote attempt first,
+  and only then may the existing bulk batch prefetch the remaining network
+  positions. Preserve the 75s budget, normal full-book sweep, current
+  probability/quote/exit rules, lifecycle, sizing, price band, venue behavior,
+  and all fail-closed paths. No state or schema is added.
+- Files authorized: `src/engine/cycle_runtime.py`,
+  `tests/test_live_safety_invariants.py`, this plan, and the existing
+  `src/engine/cycle_runtime.py` rationale row in
+  `architecture/source_rationale.yaml`.
+- Forbidden: touch `live`, DBs, processes, tmux, other worktrees, branches, or
+  venue state; commit or deploy; increase `max_instances`, thread count,
+  deadline, or concurrency; run monitor and reactor venue work concurrently;
+  change probability, edge thresholds, lifecycle, sizing, venue, price-band,
+  or fail-closed semantics; create new state/schema or tailor the repair to
+  Moscow.
+- Acceptance: with 18 held positions, 16 mocked slow network books, and a 75s
+  fake clock, the oldest debt receives an actual finite monitor attempt before
+  bulk prefetch can exhaust the budget. Consecutive bounded recovery passes
+  cover all 18 at least once in no more than 4 passes, and a successful newer
+  position cannot overtake an older unserved debt. A canonical append failure
+  leaves that position oldest for retry. Existing normal fast-budget full
+  sweep, zero-budget reservation, deadline-degraded thirds, urgent preemption,
+  probability/edge/exit/lifecycle/sizing/venue/price-band behavior remain
+  unchanged.
+- Verification after tests: test headers and topology were audited first.
+  Focused B73 and affected monitor tests pass `15/15`. The complete
+  `tests/test_live_safety_invariants.py` run passes `250` and has `12` failures
+  in pre-existing fixture/current-contract paths outside B73; plain collection
+  is blocked because this worktree intentionally lacks `config/settings.json`,
+  so the full run used a read-only in-memory redirect to the identical
+  `config/settings.example.json` plus a subprocess-only schema-fingerprint
+  collection bypass. Changed Python compiles; changed-line Ruff reports zero
+  findings (the scoped files retain six unrelated existing findings); the
+  planning-lock/topology check, source-rationale validation, YAML parse, and
+  `git diff --check` pass. No live/DB/process/venue proof is claimed from this
+  worktree-only verification.
