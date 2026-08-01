@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-31
+# Last reused or audited: 2026-08-01
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-31; last_reused=2026-07-31
+# Lifecycle: created=2026-05-19; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -546,6 +546,7 @@ def _write_high_yes_edge_dbs(
                         condition_id,
                         "YES",
                         "token-high-yes-1",
+                        "TAKER_LIMIT",
                     ]
                 ]
             evaluation_json = json.dumps(
@@ -561,7 +562,7 @@ def _write_high_yes_edge_dbs(
             decision_at = (now - timedelta(minutes=1)).isoformat()
             artifact = {
                 "summary": {
-                    "schema_version": 19 if v12 else (18 if v11 else 5),
+                    "schema_version": 20 if v12 else (18 if v11 else 5),
                     "decision_at_utc": decision_at,
                     "candidate_coverage_complete": True,
                     "candidate_condition_index_complete": True,

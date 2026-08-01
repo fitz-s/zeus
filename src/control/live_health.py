@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-15
+# Last reused or audited: 2026-08-01
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 #
@@ -5994,7 +5994,7 @@ def _latest_global_auction_candidate_counts(
             expected_schema_versions = (
                 {17, 18}
                 if candidate_encoding == "zlib+base64+canonical-json-v11"
-                else {19}
+                else {19, 20}
             )
             if schema_version not in expected_schema_versions:
                 return invalid("SCHEMA_VERSION_CONTRACT")
@@ -6027,8 +6027,14 @@ def _latest_global_auction_candidate_counts(
         buy_candidate_ids: tuple[str, ...] = ()
         if candidate_encoding == "zlib+base64+canonical-json-v12":
             buy_index = payload["buy_candidate_index"]
+            expected_buy_index_size = 7 if schema_version >= 20 else 6
             if not isinstance(buy_index, list) or any(
-                not isinstance(row, list) or len(row) != 6
+                not isinstance(row, list)
+                or len(row) != expected_buy_index_size
+                or (
+                    expected_buy_index_size == 7
+                    and row[6] not in {"TAKER_LIMIT", "MAKER_REST"}
+                )
                 for row in buy_index
             ):
                 return invalid("BUY_CANDIDATE_INDEX_INVALID")
