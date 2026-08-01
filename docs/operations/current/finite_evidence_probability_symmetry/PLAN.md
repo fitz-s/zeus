@@ -4,6 +4,31 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-31 Source-clock location-batch failure isolation
+
+Current canonical raw-capture evidence showed provider issue-to-capture delays
+of 51--118 minutes while raw commit-to-posterior materialization normally took
+1--20 seconds.  Data-ingest logs tied the lost capture cycles to transient TLS
+handshake and read failures on 25-location Open-Meteo requests: one transport
+failure flattened every independent location in the batch into the same drop.
+
+The hot-fix bisects only a multi-location, non-NBM request that failed without
+a typed HTTP outcome, quota/rate-limit signal, or expired absolute deadline.
+Successful halves retain their original provider, model, source run, requested
+dates, order, provenance, and normal partial commit.  Typed provider outcomes,
+quota denial, NBM's atomic metadata-stamped fallback, and single-location
+failures keep their existing behavior.  SCOPE is the failed request's exact
+location subset.  DRAIN is bounded recursive bisection under the request's
+existing monotonic source-clock deadline.  RESET is the next successful subset
+capture or next normal source-clock poll.  No probability, calibration, Kelly,
+price-band, risk, venue, or order-throughput rule changes.
+
+Acceptance requires a four-location transport failure to recover as two
+ordered two-location requests, quota failure to make no split request, the
+focused BPF download suite and source-clock integration tests to pass, and live
+deployment to prove current loaded SHA, fresh ingest/forecast heartbeats, a new
+raw capture, posterior materialization, and complete global auction receipt.
+
 ## 2026-07-31 Exit cooldown preserves continuous redecision
 
 The seven-day full-loss replay found canonical `MONITOR_REFRESHED` events

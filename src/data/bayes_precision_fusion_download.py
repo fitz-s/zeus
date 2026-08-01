@@ -542,6 +542,32 @@ def _is_quota_transport_error(message: object) -> bool:
     )
 
 
+def _can_split_location_batch(
+    error: object,
+    *,
+    location_count: int,
+    deadline_monotonic: float | None,
+) -> bool:
+    """Whether an untyped transport failure may be isolated by location."""
+
+    if location_count <= 1 or _typed_transport_outcome(error) is not None:
+        return False
+    text = str(error or "").lower()
+    if _is_quota_transport_error(text) or any(
+        marker in text
+        for marker in (
+            "request embargoed",
+            "terminally cached",
+            "request deadline expired",
+        )
+    ):
+        return False
+    return (
+        deadline_monotonic is None
+        or deadline_monotonic - time.monotonic() > 0.05
+    )
+
+
 def bayes_precision_fusion_quota_cooldown_seconds() -> int:
     """Return time until the source-clock quota lane can make another call."""
 
@@ -1039,6 +1065,35 @@ def _default_live_fetch_locations_batched(
                     exc = RuntimeError(
                         f"{exc}; nbm_standard_meta_stamped_failed={fallback_exc}"
                     )
+        if models != ["ncep_nbm_conus"] and _can_split_location_batch(
+            exc,
+            location_count=len(locations),
+            deadline_monotonic=deadline_monotonic,
+        ):
+            midpoint = len(locations) // 2
+            _LOG.warning(
+                "BAYES_PRECISION_FUSION multi-location transport failed; "
+                "isolating ordered subsets size=%d->%d+%d: %s",
+                len(locations),
+                midpoint,
+                len(locations) - midpoint,
+                exc,
+            )
+            return _default_live_fetch_locations_batched(
+                models=models,
+                locations=locations[:midpoint],
+                run=run,
+                forecast_hours=forecast_hours,
+                source_available_at=source_available_at,
+                deadline_monotonic=deadline_monotonic,
+            ) + _default_live_fetch_locations_batched(
+                models=models,
+                locations=locations[midpoint:],
+                run=run,
+                forecast_hours=forecast_hours,
+                source_available_at=source_available_at,
+                deadline_monotonic=deadline_monotonic,
+            )
         error = {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
         return [
             {target_local_date: dict(error) for target_local_date in target_local_dates}
