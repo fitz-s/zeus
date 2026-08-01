@@ -18897,6 +18897,26 @@ def _actionable_payload_from_receipt(
             _day0_observation_value("observed_extreme_native"),
             _event_identity_value(event, "raw_value"),
         ),
+        "station_id": _first_present(
+            _day0_observation_value("station_id"),
+            _event_identity_value(event, "station_id"),
+        ),
+        "configured_station_id": _first_present(
+            _day0_observation_value("configured_station_id"),
+            _event_identity_value(event, "configured_station_id"),
+        ),
+        "settlement_source": _first_present(
+            _day0_observation_value("settlement_source"),
+            _event_identity_value(event, "settlement_source"),
+        ),
+        "raw_payload_sha256": _first_present(
+            _day0_observation_value("raw_payload_sha256"),
+            _event_identity_value(event, "raw_payload_sha256"),
+        ),
+        "day0_observation_provenance_hash": _first_present(
+            _day0_observation_value("day0_observation_provenance_hash"),
+            _event_identity_value(event, "day0_observation_provenance_hash"),
+        ),
         "rounded_value": _first_present(
             _day0_observation_value("rounded_value"),
             _event_identity_value(event, "rounded_value"),

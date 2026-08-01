@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-29
+# Last reused/audited: 2026-07-31
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from src.engine.event_reactor_adapter import (
     _record_qkernel_selection_family_facts,
 )
 from src.events.candidate_binding import MarketTopologyCandidate
+from src.events.day0_authority import assert_live_day0_entry_provenance
 from src.events.reactor import EventSubmissionReceipt, _is_transient_money_path_reason
 from src.riskguard.risk_level import RiskLevel
 from src.contracts.execution_intent import DecisionSourceContext
@@ -295,7 +296,9 @@ def _deterministic_day0_observation_payload() -> dict[str, object]:
         "target_date": "2026-07-20",
         "metric": "high",
         "station_id": "HKO",
+        "configured_station_id": "HKO",
         "settlement_source": "wu",
+        "raw_payload_sha256": "a" * 64,
         "settlement_unit": "C",
         "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
         "observation_time": "2026-07-19T08:00:00+00:00",
@@ -305,13 +308,34 @@ def _deterministic_day0_observation_payload() -> dict[str, object]:
         "sample_count": 8,
         "probability_base_identity": "day0-base-1",
     }
+    binding["day0_observation_provenance_hash"] = stable_hash(
+        {
+            key: binding[key]
+            for key in (
+                "city",
+                "target_date",
+                "metric",
+                "settlement_source",
+                "station_id",
+                "configured_station_id",
+                "raw_payload_sha256",
+                "observation_time",
+                "observation_available_at",
+            )
+        }
+    )
     return {
         "city": binding["city"],
         "target_date": binding["target_date"],
         "metric": binding["metric"],
         "temperature_metric": binding["metric"],
         "station_id": binding["station_id"],
+        "configured_station_id": binding["configured_station_id"],
         "settlement_source": binding["settlement_source"],
+        "raw_payload_sha256": binding["raw_payload_sha256"],
+        "day0_observation_provenance_hash": binding[
+            "day0_observation_provenance_hash"
+        ],
         "settlement_unit": binding["settlement_unit"],
         "evidence_finality": binding["evidence_finality"],
         "observation_time": binding["observation_time"],
@@ -3755,6 +3779,34 @@ def test_global_deterministic_day0_actionable_prefers_current_observation_to_eve
     assert payload["source_match_status"] == "MATCH"
     assert payload["live_authority_status"] == "live"
     _assert_live_entry_submit_authority(payload)
+
+
+def test_global_day0_actionable_preserves_current_observation_entry_provenance():
+    payload = _deterministic_day0_actionable_payload(
+        stale_event_observation=True,
+    )
+
+    assert payload["station_id"] == "HKO"
+    assert payload["configured_station_id"] == "HKO"
+    assert payload["settlement_source"] == "wu"
+    assert payload["raw_payload_sha256"] == "a" * 64
+    assert payload["day0_observation_provenance_hash"] == stable_hash(
+        {
+            key: payload[key]
+            for key in (
+                "city",
+                "target_date",
+                "metric",
+                "settlement_source",
+                "station_id",
+                "configured_station_id",
+                "raw_payload_sha256",
+                "observation_time",
+                "observation_available_at",
+            )
+        }
+    )
+    assert_live_day0_entry_provenance(payload)
 
 
 def test_global_deterministic_day0_entry_rejects_missing_probability_type():
