@@ -3127,11 +3127,11 @@ def test_global_single_order_rejects_cheap_minimum_lot_above_fractional_target()
         side="YES",
         q=0.9187643552930886,
         levels=(
-            ("0.001", "2063.59"),
-            ("0.028", "70"),
-            ("0.029", "129"),
-            ("0.030", "265.8"),
-            ("0.033", "73.36"),
+            ("0.050", "2063.59"),
+            ("0.058", "70"),
+            ("0.059", "129"),
+            ("0.060", "265.8"),
+            ("0.063", "73.36"),
             ("0.300", "500"),
             ("0.600", "1000"),
             ("0.900", "2000"),
@@ -3144,7 +3144,7 @@ def test_global_single_order_rejects_cheap_minimum_lot_above_fractional_target()
         ceiling="1189.71",
         cash="1189.71",
         cap="107.58",
-        multiplier="0.03125",
+        multiplier="0.00001",
     )
 
     assert decision.candidate is None
@@ -3363,7 +3363,7 @@ def test_global_single_order_self_issued_13pct_without_external_current_is_rejec
         family="tail",
         side="YES",
         q=0.13,
-        levels=(("0.008", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     valid_no = _global_candidate(
         candidate_id="valid-no-external",
@@ -3838,12 +3838,12 @@ def test_global_single_order_rejects_curve_from_another_token_or_snapshot():
         family="a",
         side="YES",
         q=0.02,
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     wrong_curve = _global_curve(
         side="YES",
         token="stale-wrong-token",
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     forged = replace(cheap_yes, executable_cost_curve=wrong_curve)
     valid_no = _global_candidate(
@@ -3938,6 +3938,40 @@ def test_global_single_order_buy_rejects_legal_limit_with_illegal_fill_vwap(side
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_buy_rejects_legal_limit_and_vwap_with_illegal_first_fill(side):
+    out_of_band = _global_candidate(
+        candidate_id=f"illegal-first-fill-{side}",
+        family=f"illegal-first-fill-{side}-family",
+        side=side,
+        q=0.80,
+        levels=(("0.04", "0.10"), ("0.06", "1000")),
+        min_order="1",
+    )
+    legal = _global_candidate(
+        candidate_id=f"legal-after-illegal-first-fill-{side}",
+        family=f"legal-after-illegal-first-fill-{side}-family",
+        side=side,
+        q=0.75,
+        levels=(("0.06", "1000"),),
+    )
+
+    # The forbidden candidate can have a legal deepest limit and a legal VWAP,
+    # but a taker BUY necessarily consumes the 0.04 ask first.
+    assert out_of_band.executable_cost_curve.avg_cost_for_shares(
+        Decimal("1")
+    ).value > 0.05
+    assert out_of_band.executable_cost_curve.levels[1].price == Decimal("0.06")
+
+    decision = _global_select((out_of_band, legal))
+
+    assert decision.candidate is legal
+    assert (
+        decision.rejection_reasons[out_of_band.candidate_id]
+        == "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_single_order_buy_price_band_applies_to_raw_limit_not_fee_vwap(side):
     candidate = _global_candidate(
         candidate_id=f"fee-boundary-{side}",
@@ -4009,7 +4043,7 @@ def test_global_single_order_unknown_collateral_makes_every_candidate_unrankable
 def test_global_single_order_rejects_stale_wealth_values_not_bound_to_current_ledger():
     cheap_yes = _global_candidate(
         candidate_id="cheap-yes", family="a", side="YES", q=0.02,
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     valid_no = _global_candidate(
         candidate_id="valid-no", family="b", side="NO", q=0.65,
@@ -4122,14 +4156,14 @@ def test_global_single_order_rejects_probability_from_one_bin_welded_to_another_
         family="a",
         side="YES",
         q=0.002,
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     probability = _global_probability_witness(cheap_yes)
     wrong_binding = probability.bindings[1]
     forged_curve = _global_curve(
         side="YES",
         token=wrong_binding.yes_token_id,
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     forged = replace(
         cheap_yes,
@@ -4161,7 +4195,7 @@ def test_global_single_order_rejects_external_current_authority_alpha_drift():
         family="a",
         side="YES",
         q=0.03,
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     tail_samples = np.concatenate(
         (np.full(20, 0.001, dtype=np.float64), np.full(380, 0.03, dtype=np.float64))

@@ -1504,6 +1504,23 @@ class GlobalSingleOrderCandidate:
             or self.rest_deadline_minutes is not None
         ):
             raise ValueError("taker proposal cannot carry passive execution terms")
+        if (
+            self.execution_mode == "TAKER_LIMIT"
+            and self.eligibility_reason is None
+            and not _live_unit_price_in_band(
+                self.executable_cost_curve.levels[0].price
+            )
+        ):
+            # A BUY limit is a ceiling.  If the cheapest ask is outside the
+            # absolute live band, every marketable order would fill that level
+            # before reaching any legal deeper limit/VWAP.  Exclude the action
+            # before capital scoring; a downstream legal limit cannot make the
+            # actual fill legal.
+            object.__setattr__(
+                self,
+                "eligibility_reason",
+                "LIVE_UNIT_PRICE_OUT_OF_BOUNDS",
+            )
         if self.execution_mode == "MAKER_REST" and (
             self.proposal_cost_curve is None
             or self.rest_deadline_minutes is None
@@ -3823,6 +3840,8 @@ def _single_order_min_marketable_shares(
 def _single_order_execution_boundary(
     candidate: GlobalSingleOrderCandidate,
     shares: Decimal,
+    *,
+    enforce_live_fill_band: bool = True,
 ) -> tuple[Decimal, Decimal, Decimal]:
     """Return raw limit, raw VWAP, and fee-aware max spend for exact shares."""
 
@@ -3834,6 +3853,8 @@ def _single_order_execution_boundary(
     for level in candidate.economic_cost_curve.levels:
         take = min(level.size, remaining)
         if take > 0:
+            if enforce_live_fill_band and not _live_unit_price_in_band(level.price):
+                raise ValueError("single-order fill level is outside the live price band")
             limit_price = level.price
             raw_cost += take * level.price
             remaining -= take
@@ -3864,7 +3885,11 @@ def _single_order_venue_legal_neighbor(
     # one final pass proves stability at the last reached boundary.
     for _ in range(len(candidate.economic_cost_curve.levels) + 2):
         try:
-            limit_price, _, _ = _single_order_execution_boundary(candidate, current)
+            limit_price, _, _ = _single_order_execution_boundary(
+                candidate,
+                current,
+                enforce_live_fill_band=False,
+            )
             tick = candidate.economic_cost_curve.min_tick
             price_decimals = abs(tick.normalize().as_tuple().exponent)
             scale = 10 ** price_decimals
