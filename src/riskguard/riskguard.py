@@ -2652,12 +2652,41 @@ def _rollback_and_close(conn: sqlite3.Connection | None) -> None:
     _close_conn(conn)
 
 
-def _full_risk_row_is_fresh(row: sqlite3.Row, *, now: datetime) -> bool:
+_RISK_DETAILS_CONTRACT_KEYS = (
+    "execution_quality_level",
+    "strategy_signal_level",
+    "recommended_controls",
+    "recommended_strategy_gates",
+)
+
+
+def _risk_details_from_row(row: sqlite3.Row) -> dict:
     try:
         details = json.loads(row["details_json"]) if row["details_json"] else {}
     except (json.JSONDecodeError, TypeError):
-        details = {}
-    if isinstance(details, dict) and details.get("riskguard_degraded_reason"):
+        return {}
+    return details if isinstance(details, dict) else {}
+
+
+def _risk_details_contract_from_full_row(row: sqlite3.Row) -> dict:
+    details = _risk_details_from_row(row)
+    return {key: details[key] for key in _RISK_DETAILS_CONTRACT_KEYS}
+
+
+def _degraded_risk_details_contract() -> dict:
+    return {
+        "execution_quality_level": RiskLevel.DATA_DEGRADED.value,
+        "strategy_signal_level": RiskLevel.DATA_DEGRADED.value,
+        "recommended_controls": [],
+        "recommended_strategy_gates": [],
+    }
+
+
+def _full_risk_row_is_fresh(row: sqlite3.Row, *, now: datetime) -> bool:
+    details = _risk_details_from_row(row)
+    if details.get("riskguard_degraded_reason"):
+        return False
+    if any(key not in details for key in _RISK_DETAILS_CONTRACT_KEYS):
         return False
     checked_at = datetime.fromisoformat(str(row["checked_at"]).replace("Z", "+00:00"))
     return (now - checked_at).total_seconds() <= 300
@@ -2695,6 +2724,7 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
         if previous_full is None:
             level = RiskLevel.DATA_DEGRADED
             details = {
+                **_degraded_risk_details_contract(),
                 "status": "dependency_db_locked",
                 "riskguard_degraded_reason": "dependency_db_locked",
                 "bankroll_truth_source": "polymarket_wallet",
@@ -2718,6 +2748,7 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
             previous_level = RiskLevel(previous_full["level"])
             level = previous_level
             details = {
+                **_risk_details_contract_from_full_row(previous_full),
                 "status": "dependency_db_locked_previous_risk_level_preserved",
                 "riskguard_degraded_reason": "dependency_db_locked",
                 "bankroll_truth_source": "polymarket_wallet",
@@ -2767,6 +2798,7 @@ def _persist_tick_in_progress_attestation() -> None:
         if previous_full is None:
             return
         details = {
+            **_risk_details_contract_from_full_row(previous_full),
             "status": "metrics_in_progress_previous_risk_level_preserved",
             "riskguard_degraded_reason": "metrics_refresh_in_progress",
             "full_metrics_status": "in_progress_previous_fresh_level_preserved",
@@ -2861,7 +2893,37 @@ def _tick_once() -> RiskLevel:
         # The fail-closed write below needs risk_conn, so the None-handling stays
         # here; direct venue I/O itself never runs under a held conn.
         if bankroll_of_record is None:
-            now_ts = datetime.now(timezone.utc).isoformat()
+            now_dt = datetime.now(timezone.utc)
+            now_ts = now_dt.isoformat()
+            previous_full = _latest_fresh_full_risk_row(risk_conn, now=now_dt)
+            contract = _degraded_risk_details_contract()
+            if previous_full is not None:
+                previous_contract = _risk_details_contract_from_full_row(previous_full)
+                contract["recommended_controls"] = previous_contract["recommended_controls"]
+                contract["recommended_strategy_gates"] = previous_contract[
+                    "recommended_strategy_gates"
+                ]
+            details = {
+                **contract,
+                "status": "bankroll_provider_unavailable",
+                "riskguard_degraded_reason": "bankroll_provider_unavailable",
+                "full_metrics_status": (
+                    "bankroll_unavailable_previous_fresh_contract_preserved"
+                    if previous_full is not None
+                    else "bankroll_unavailable_no_fresh_full_risk_row"
+                ),
+                "bankroll_truth": {
+                    "source": "polymarket_wallet",
+                    "value_usd": None,
+                    "fetched_at": None,
+                    "staleness_seconds": None,
+                    "cached": False,
+                    "reason": "collateral snapshot and direct wallet query both unavailable",
+                },
+            }
+            if previous_full is not None:
+                details["previous_full_risk_level"] = previous_full["level"]
+                details["previous_full_risk_checked_at"] = previous_full["checked_at"]
             risk_conn.execute(
                 """
                 INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
@@ -2869,17 +2931,7 @@ def _tick_once() -> RiskLevel:
                 """,
                 (
                     RiskLevel.DATA_DEGRADED.value,
-                    json.dumps({
-                        "status": "bankroll_provider_unavailable",
-                        "bankroll_truth": {
-                            "source": "polymarket_wallet",
-                            "value_usd": None,
-                            "fetched_at": None,
-                            "staleness_seconds": None,
-                            "cached": False,
-                            "reason": "collateral snapshot and direct wallet query both unavailable",
-                        },
-                    }),
+                    json.dumps(details),
                     now_ts,
                 ),
             )

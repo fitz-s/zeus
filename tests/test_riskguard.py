@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-07-25
+# Last reused/audited: 2026-07-31
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-07-25; last_reused=2026-07-25
+# Lifecycle: created=2026-03-30; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
@@ -511,6 +511,10 @@ def _insert_risk_state_row(
     initial_bankroll: float = 211.37,
     total_pnl: float = 0.0,
     effective_bankroll: float | None = None,
+    execution_quality_level: str = "GREEN",
+    strategy_signal_level: str = "GREEN",
+    recommended_controls: list[str] | None = None,
+    recommended_strategy_gates: list[str] | None = None,
 ) -> int:
     """Insert a risk_state row that `_risk_state_reference_from_row` accepts.
 
@@ -537,6 +541,10 @@ def _insert_risk_state_row(
                     "total_pnl": round(total_pnl, 2),
                     "effective_bankroll": round(effective_bankroll, 2),
                     "bankroll_truth_source": "polymarket_wallet",
+                    "execution_quality_level": execution_quality_level,
+                    "strategy_signal_level": strategy_signal_level,
+                    "recommended_controls": list(recommended_controls or []),
+                    "recommended_strategy_gates": list(recommended_strategy_gates or []),
                 }
             ),
             checked_at,
@@ -1277,6 +1285,10 @@ class TestRiskGuardSettlementSource:
         assert details["conservative_floor_applied"] is False
         assert details["previous_full_risk_level"] == RiskLevel.GREEN.value
         assert details["bankroll_truth_source"] == "polymarket_wallet"
+        assert details["execution_quality_level"] == "GREEN"
+        assert details["strategy_signal_level"] == "GREEN"
+        assert details["recommended_controls"] == []
+        assert details["recommended_strategy_gates"] == []
         # Single-authority read surfaces the preserved fresh GREEN to the entry gate.
         assert riskguard_module.get_current_level() == RiskLevel.GREEN
         assert trade_conn.rollback_called is True
@@ -1324,6 +1336,10 @@ class TestRiskGuardSettlementSource:
         assert row["level"] == RiskLevel.DATA_DEGRADED.value
         assert details["status"] == "dependency_db_locked"
         assert details["full_metrics_status"] == "unavailable_no_fresh_full_risk_row"
+        assert details["execution_quality_level"] == "DATA_DEGRADED"
+        assert details["strategy_signal_level"] == "DATA_DEGRADED"
+        assert details["recommended_controls"] == []
+        assert details["recommended_strategy_gates"] == []
         assert riskguard_module.get_current_level() == RiskLevel.DATA_DEGRADED
 
     def test_tick_prefers_position_current_for_portfolio_truth(self, monkeypatch, tmp_path):
@@ -2211,7 +2227,10 @@ class TestRiskGuardSettlementSource:
         _insert_risk_state_row(
             risk_conn,
             checked_at=(datetime.now(timezone.utc) - timedelta(minutes=4)).isoformat(),
-            level=RiskLevel.GREEN.value,
+            level=RiskLevel.YELLOW.value,
+            strategy_signal_level="YELLOW",
+            recommended_controls=["review_strategy_gates"],
+            recommended_strategy_gates=["forecast_qkernel_entry"],
         )
         risk_conn.commit()
         risk_conn.close()
@@ -2229,11 +2248,15 @@ class TestRiskGuardSettlementSource:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert row["level"] == RiskLevel.GREEN.value
+        assert row["level"] == RiskLevel.YELLOW.value
         assert details["status"] == "metrics_in_progress_previous_risk_level_preserved"
         assert details["riskguard_degraded_reason"] == "metrics_refresh_in_progress"
-        assert details["previous_full_risk_level"] == RiskLevel.GREEN.value
-        assert riskguard_module.get_current_level() == RiskLevel.GREEN
+        assert details["previous_full_risk_level"] == RiskLevel.YELLOW.value
+        assert details["execution_quality_level"] == "GREEN"
+        assert details["strategy_signal_level"] == "YELLOW"
+        assert details["recommended_controls"] == ["review_strategy_gates"]
+        assert details["recommended_strategy_gates"] == ["forecast_qkernel_entry"]
+        assert riskguard_module.get_current_level() == RiskLevel.YELLOW
 
         # The in-progress row is not itself a full metrics row and cannot extend
         # the full-risk freshness chain indefinitely.
@@ -2274,6 +2297,113 @@ class TestRiskGuardSettlementSource:
 
         assert len(rows) == 1
         assert riskguard_module.get_current_level() == RiskLevel.RED
+
+    def test_bankroll_unavailable_row_keeps_degraded_details_contract(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        risk_db = tmp_path / "risk_state.db"
+        trade_conn = sqlite3.connect(":memory:")
+        trade_conn.row_factory = sqlite3.Row
+
+        def _fake_get_connection(path=None, **_kwargs):
+            assert path == riskguard_module.RISK_DB_PATH
+            return get_connection(risk_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(
+            riskguard_module,
+            "_bankroll_of_record_for_riskguard",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "_get_runtime_trade_connection",
+            lambda: trade_conn,
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "_load_riskguard_portfolio_truth",
+            lambda conn: (PortfolioState(bankroll=0.0), {}),
+        )
+
+        level = riskguard_module._tick_once()
+
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+        assert level == RiskLevel.DATA_DEGRADED
+        assert row["level"] == RiskLevel.DATA_DEGRADED.value
+        assert details["status"] == "bankroll_provider_unavailable"
+        assert details["riskguard_degraded_reason"] == "bankroll_provider_unavailable"
+        assert details["execution_quality_level"] == "DATA_DEGRADED"
+        assert details["strategy_signal_level"] == "DATA_DEGRADED"
+        assert details["recommended_controls"] == []
+        assert details["recommended_strategy_gates"] == []
+
+    def test_writer_contract_keys_match_health_reader_contract(self):
+        from scripts import healthcheck
+
+        assert riskguard_module._RISK_DETAILS_CONTRACT_KEYS == (
+            healthcheck.RISK_DETAILS_REQUIRED_KEYS
+        )
+
+    def test_bankroll_unavailable_with_fresh_full_degrades_levels_and_keeps_recommendations(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        risk_db = tmp_path / "risk_state.db"
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+            level=RiskLevel.GREEN.value,
+            recommended_controls=["review_strategy_gates"],
+            recommended_strategy_gates=["forecast_qkernel_entry"],
+        )
+        risk_conn.commit()
+        risk_conn.close()
+        trade_conn = sqlite3.connect(":memory:")
+        trade_conn.row_factory = sqlite3.Row
+
+        def _fake_get_connection(path=None, **_kwargs):
+            assert path == riskguard_module.RISK_DB_PATH
+            return get_connection(risk_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(
+            riskguard_module,
+            "_bankroll_of_record_for_riskguard",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "_get_runtime_trade_connection",
+            lambda: trade_conn,
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "_load_riskguard_portfolio_truth",
+            lambda conn: (PortfolioState(bankroll=0.0), {}),
+        )
+
+        level = riskguard_module._tick_once()
+
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+        assert level == RiskLevel.DATA_DEGRADED
+        assert details["execution_quality_level"] == "DATA_DEGRADED"
+        assert details["strategy_signal_level"] == "DATA_DEGRADED"
+        assert details["recommended_controls"] == ["review_strategy_gates"]
+        assert details["recommended_strategy_gates"] == ["forecast_qkernel_entry"]
+        assert details["previous_full_risk_level"] == "GREEN"
+        assert details["previous_full_risk_checked_at"]
 
     def test_tick_records_canonical_settlement_source(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"

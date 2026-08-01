@@ -965,7 +965,7 @@ files:
   src/riskguard/riskguard.py:
     zone: K1_governance
     authority_role: risk_runtime
-    why: Independent risk process; risk output must change trading behavior. Its canonical risk DB schema includes the transaction-bound cutover generation receipt used for crash-safe migration resume.
+    why: Independent risk process; risk output must change trading behavior, and every persisted full or degraded row keeps one risk-details contract shape for health readers. Its canonical risk DB schema includes the transaction-bound cutover generation receipt used for crash-safe migration resume.
     downstream:
     - src/engine/cycle_runner.py
     - src/observability/status_summary.py
