@@ -171,6 +171,18 @@ class FakeOrderManagerNotReady425Client(FakeTwoStepClient):
         raise PolyApiException(response)
 
 
+class FakePostOnlyCross400Client(FakeTwoStepClient):
+    def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
+        from py_clob_client_v2.exceptions import PolyApiException
+
+        self.calls.append(("post_order", order, order_type, post_only, defer_exec))
+        response = SimpleNamespace(
+            status_code=400,
+            json=lambda: {"error": "invalid post-only order: order crosses book"},
+        )
+        raise PolyApiException(response)
+
+
 class FakeFokKilledClient(FakeTwoStepClient):
     def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
         self.calls.append(("post_order", order, order_type, post_only, defer_exec))
@@ -2505,6 +2517,32 @@ def test_order_manager_not_ready_425_is_deterministic_rejection(
     assert legacy["success"] is False
     assert legacy["status"] == "rejected"
     assert legacy["errorCode"] == "venue_order_manager_not_ready_425"
+
+
+def test_post_only_cross_400_is_deterministic_rejection(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakePostOnlyCross400Client()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(),
+        FakeSnapshot(),
+        order_type="GTC",
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_rejected_400"
+    assert result.envelope.error_code == "venue_rejected_400"
+    assert result.envelope.order_id is None
+    assert result.envelope.signed_order == fake.signed_order
+    assert any(call[0] == "post_order" for call in fake.calls)
 
 
 def test_other_425_response_remains_ambiguous(tmp_path, monkeypatch):

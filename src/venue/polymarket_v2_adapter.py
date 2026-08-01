@@ -915,6 +915,14 @@ class PolymarketV2Adapter:
                     error_code=rejected.error_code,
                     error_message=rejected.error_message,
                 )
+            if post_started and _is_polymarket_deterministic_request_400_error(exc):
+                return _rejected_submit_result(
+                    envelope,
+                    error_code="venue_rejected_400",
+                    error_message=str(exc),
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                )
             if not post_started:
                 error_code = (
                     "SUBMIT_ABORTED_PRICE_MOVED"
@@ -3202,6 +3210,12 @@ def _is_l2_auth_error(exc: BaseException) -> bool:
 def _is_polymarket_invalid_safe_signature_error(exc: BaseException) -> bool:
     text = " ".join(f"{type(exc).__name__}:{exc}".split())
     return "status_code=400" in text and "invalid POLY_GNOSIS_SAFE signature" in text
+
+
+def _is_polymarket_deterministic_request_400_error(exc: BaseException) -> bool:
+    """True only for a synchronous typed venue request rejection."""
+
+    return isinstance(exc, PolyApiException) and exc.status_code == 400
 
 
 def _is_polymarket_geoblock_403_error(exc: BaseException) -> bool:
