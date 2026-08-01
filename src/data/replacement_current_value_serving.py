@@ -257,6 +257,12 @@ def read_current_instrument_values(
                     ]
                 ),
             ).fetchall()
+        except sqlite3.OperationalError:
+            # A cancelled/deadline-bounded read is UNKNOWN authority, not an
+            # honestly empty provider set.  Propagate it so the held monitor can
+            # classify its SQLite deadline and retry/reseed without relabelling
+            # every consumed raw row as missing.
+            raise
         except Exception:
             return {}
         for row in rows:

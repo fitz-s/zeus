@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import sys
@@ -14,7 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, ContextManager, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -42,6 +43,18 @@ from src.data.raw_forecast_artifact_manifest import read_manifest, write_manifes
 
 UTC = timezone.utc
 _SNAPSHOT_RETRY_LIMIT = 3
+_WriterLockFactory = Callable[[], ContextManager[None]]
+
+
+@contextlib.contextmanager
+def _forecast_writer_lock():
+    """Own the forecasts LIVE flock only for a canonical write transaction."""
+
+    from src.state.db import ZEUS_FORECASTS_DB_PATH
+    from src.state.db_writer_lock import WriteClass, db_writer_lock
+
+    with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE):
+        yield
 
 
 @dataclass(frozen=True)
@@ -232,6 +245,8 @@ def _prepare_live_schema_and_manifest(
 def _commit_from_read_snapshot(
     conn,
     request: ReplacementForecastMaterializeRequest,
+    *,
+    writer_lock: _WriterLockFactory = contextlib.nullcontext,
 ) -> ReplacementForecastMaterializeResult:
     for _attempt in range(_SNAPSHOT_RETRY_LIMIT):
         version = _data_version(conn)
@@ -244,18 +259,23 @@ def _commit_from_read_snapshot(
         if isinstance(prepared, ReplacementForecastMaterializeResult):
             return prepared
 
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            if _data_version(conn) != version:
-                conn.rollback()
-                continue
-            result = write_prepared_replacement_forecast_live(conn, prepared)
-            conn.commit()
-            return result
-        except Exception:
-            if conn.in_transaction:
-                conn.rollback()
-            raise
+        # The posterior build above is intentionally lock-free.  Only the
+        # snapshot revalidation and durable write own the process-global writer
+        # flock; otherwise four concurrent materializers can blind Day0 exits by
+        # starving observation/vector writers for the whole fusion compute.
+        with writer_lock():
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if _data_version(conn) != version:
+                    conn.rollback()
+                    continue
+                result = write_prepared_replacement_forecast_live(conn, prepared)
+                conn.commit()
+                return result
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
 
     logging.getLogger(__name__).warning(
         "forecast DB changed during %s snapshot retries; deferring materialization for %s %s %s",
@@ -327,11 +347,13 @@ def _materialize(
     conn=None,
     publish_wake: bool = True,
     schema_ready: bool = False,
+    writer_lock: _WriterLockFactory | None = None,
 ) -> tuple[int, dict[str, object]]:
     if conn is None:
-        from src.state.db import get_forecasts_connection_with_world
+        from src.state.db import get_forecasts_connection
 
-        with get_forecasts_connection_with_world(write_class="live") as owned_conn:
+        owned_conn = get_forecasts_connection(write_class=None)
+        try:
             return _materialize(
                 input_json,
                 commit=commit,
@@ -339,7 +361,11 @@ def _materialize(
                 conn=owned_conn,
                 publish_wake=publish_wake,
                 schema_ready=schema_ready,
+                writer_lock=writer_lock or _forecast_writer_lock,
             )
+        finally:
+            owned_conn.close()
+    effective_writer_lock = writer_lock or contextlib.nullcontext
     payload = _load_json(input_json)
     if not isinstance(payload, Mapping):
         raise ValueError("input JSON must decode to an object")
@@ -458,18 +484,23 @@ def _materialize(
     receipt: _DurablePreparationReceipt | None = None
     try:
         if commit:
-            receipt = _prepare_live_schema_and_manifest(
-                conn,
-                init_schema=init_schema,
-                schema_ready=schema_ready,
-                payload=payload,
-                base_dir=base_dir,
-                anchor_artifact_id=anchor_artifact_id,
-            )
+            with effective_writer_lock():
+                receipt = _prepare_live_schema_and_manifest(
+                    conn,
+                    init_schema=init_schema,
+                    schema_ready=schema_ready,
+                    payload=payload,
+                    base_dir=base_dir,
+                    anchor_artifact_id=anchor_artifact_id,
+                )
             anchor_artifact_id = receipt.anchor_artifact_id
             if anchor_artifact_id is not None:
                 request = replace(request, anchor_artifact_id=anchor_artifact_id)
-            result = _commit_from_read_snapshot(conn, request)
+            result = _commit_from_read_snapshot(
+                conn,
+                request,
+                writer_lock=effective_writer_lock,
+            )
             if result.ok and publish_wake:
                 wake_published = _publish_materialization_wake(request)
         else:
@@ -535,6 +566,7 @@ def _run_one(
     capture_logs: bool = False,
     publish_wake: bool = True,
     schema_ready: bool = False,
+    writer_lock: _WriterLockFactory | None = None,
 ) -> tuple[int, str, str]:
     log_output = StringIO()
     handler: logging.Handler | None = None
@@ -550,6 +582,7 @@ def _run_one(
             conn=conn,
             publish_wake=publish_wake,
             schema_ready=schema_ready,
+            writer_lock=writer_lock,
         )
         encoded = json.dumps(response, sort_keys=True) + "\n"
         if returncode == 2:
@@ -616,20 +649,22 @@ def main(argv: list[str] | None = None) -> int:
             "--input-json or --batch-input-json is required unless --print-template is set"
         )
     if args.batch_input_json:
-        from src.state.db import get_forecasts_connection_with_world
+        from src.state.db import get_forecasts_connection
 
-        with get_forecasts_connection_with_world(write_class="live") as conn:
+        conn = get_forecasts_connection(write_class=None)
+        try:
             schema_ready = False
             if args.commit:
                 try:
-                    receipt = _prepare_live_schema_and_manifest(
-                        conn,
-                        init_schema=args.init_schema,
-                        schema_ready=False,
-                        payload={},
-                        base_dir=ROOT,
-                        anchor_artifact_id=None,
-                    )
+                    with _forecast_writer_lock():
+                        receipt = _prepare_live_schema_and_manifest(
+                            conn,
+                            init_schema=args.init_schema,
+                            schema_ready=False,
+                            payload={},
+                            base_dir=ROOT,
+                            anchor_artifact_id=None,
+                        )
                     schema_ready = receipt.schema_ready
                 except Exception as exc:
                     stderr = json.dumps(_error_response(exc), sort_keys=True) + "\n"
@@ -645,8 +680,11 @@ def main(argv: list[str] | None = None) -> int:
                     capture_logs=True,
                     publish_wake=True,
                     schema_ready=schema_ready,
+                    writer_lock=_forecast_writer_lock,
                 )
                 _print_batch_envelope(input_json, returncode, stdout, stderr)
+        finally:
+            conn.close()
         return 0
     returncode, stdout, stderr = _run_one(
         args.input_json,

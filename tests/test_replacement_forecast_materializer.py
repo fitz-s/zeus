@@ -2107,6 +2107,7 @@ def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
 
     inputs = [tmp_path / "a.json", tmp_path / "b.json"]
     calls = []
+    lock_held = False
 
     class _Connection:
         closed = False
@@ -2115,29 +2116,42 @@ def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
             self.closed = True
 
     conn = _Connection()
-    @contextmanager
-    def _connection_with_world(**_kwargs):
-        try:
-            yield conn
-        finally:
-            conn.close()
-
     monkeypatch.setattr(
         state_db,
-        "get_forecasts_connection_with_world",
-        _connection_with_world,
+        "get_forecasts_connection",
+        lambda **_kwargs: conn,
     )
-    monkeypatch.setattr(
-        cli,
-        "_prepare_live_schema_and_manifest",
-        lambda *args, **kwargs: cli._DurablePreparationReceipt(
+
+    @contextmanager
+    def _writer_lock():
+        nonlocal lock_held
+        assert lock_held is False
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    monkeypatch.setattr(cli, "_forecast_writer_lock", _writer_lock)
+
+    def _prepare(*_args, **_kwargs):
+        assert lock_held is True
+        return cli._DurablePreparationReceipt(
             schema_ready=True,
             anchor_artifact_id=None,
             manifest_committed=False,
-        ),
+        )
+
+    monkeypatch.setattr(
+        cli,
+        "_prepare_live_schema_and_manifest",
+        _prepare,
     )
 
     def _run_one(input_json, **kwargs):
+        assert lock_held is False
+        with kwargs["writer_lock"]():
+            assert lock_held is True
         calls.append((input_json, kwargs))
         return 0, json.dumps(
             {
@@ -2188,18 +2202,17 @@ def test_materialize_script_batch_prepares_schema_before_first_input_error(
             return None
 
     conn = _Connection()
-    @contextmanager
-    def _connection_with_world(**_kwargs):
-        try:
-            yield conn
-        finally:
-            conn.close()
-
     monkeypatch.setattr(
         state_db,
-        "get_forecasts_connection_with_world",
-        _connection_with_world,
+        "get_forecasts_connection",
+        lambda **_kwargs: conn,
     )
+
+    @contextmanager
+    def _writer_lock():
+        yield
+
+    monkeypatch.setattr(cli, "_forecast_writer_lock", _writer_lock)
 
     def _prepare(*args, **kwargs):
         preparations.append(kwargs)
@@ -2280,30 +2293,48 @@ def test_materialize_script_computes_before_acquiring_writer_lock(
     conn.set_trace_callback(trace.append)
     prepared = object()
 
-    monkeypatch.setattr(
-        cli,
-        "prepare_replacement_forecast_live",
-        lambda _conn, _request: prepared,
-    )
+    lock_held = False
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_held
+        assert lock_held is False
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    def prepare(_conn, _request):
+        assert lock_held is False
+        return prepared
+
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", prepare)
     monkeypatch.setattr(
         cli,
         "write_prepared_replacement_forecast_live",
-        lambda _conn, value: materializer_mod.ReplacementForecastMaterializeResult(
-            status="READY",
-            reason_codes=(),
-            posterior_id=1,
-            anchor_id=1,
-            readiness_id="ready-1",
-        )
-        if value is prepared
-        else pytest.fail("unexpected prepared value"),
+        lambda _conn, value: (
+            materializer_mod.ReplacementForecastMaterializeResult(
+                status="READY",
+                reason_codes=(),
+                posterior_id=1,
+                anchor_id=1,
+                readiness_id="ready-1",
+            )
+            if lock_held and value is prepared
+            else pytest.fail("write occurred without the writer lock")
+        ),
     )
 
-    result = cli._commit_from_read_snapshot(conn, SimpleNamespace(
-        city="London",
-        target_date=date(2026, 7, 19),
-        temperature_metric="high",
-    ))
+    result = cli._commit_from_read_snapshot(
+        conn,
+        SimpleNamespace(
+            city="London",
+            target_date=date(2026, 7, 19),
+            temperature_metric="high",
+        ),
+        writer_lock=writer_lock,
+    )
     conn.close()
 
     statements = [statement.upper() for statement in trace]
@@ -2512,7 +2543,9 @@ def test_materialize_script_reports_durable_manifest_when_posterior_fails(
     monkeypatch.setattr(
         cli,
         "_commit_from_read_snapshot",
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("posterior failed")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("posterior failed")
+        ),
     )
     conn = sqlite3.connect(":memory:")
 
