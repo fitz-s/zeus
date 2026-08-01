@@ -356,6 +356,14 @@ def _openmeteo_manifest_metadata_allows_target_date(
     if isinstance(dates, list) and dates:
         if target_date in {str(item).strip() for item in dates}:
             return True
+        # A run-pinned single-runs payload may contain several local days, but
+        # its manifest also binds target-specific precision metadata.  The
+        # planner must not call that dependency complete for another day: doing
+        # so suppresses the downloader while seed discovery correctly refuses
+        # the mismatched certificate.  Meta-stamped artifacts are the legacy
+        # multi-day contract and remain horizon-admissible after payload proof.
+        if str(metadata.get("openmeteo_endpoint") or "") != "standard_api_meta_stamped":
+            return False
         return _openmeteo_manifest_horizon_allows_target_date(
             metadata, target_date=target_date
         )

@@ -2396,7 +2396,7 @@ def test_current_target_plan_counts_meta_stamped_horizon_manifest_with_target_da
     assert london.can_seed is True
 
 
-def test_current_target_plan_counts_single_runs_horizon_manifest_with_target_day_samples(tmp_path) -> None:
+def test_current_target_plan_requires_target_specific_single_runs_manifest(tmp_path) -> None:
     db = tmp_path / "forecasts.db"
     _create_db(db)
     payload = tmp_path / "london_single_runs_horizon_payload.json"
@@ -2449,8 +2449,9 @@ def test_current_target_plan_counts_single_runs_horizon_manifest_with_target_day
     )
     london = next(row for row in plan.rows if row.city == "London")
 
-    assert london.openmeteo_manifest_count == 1
-    assert london.can_seed is True
+    assert london.openmeteo_manifest_count == 0
+    assert london.missing_openmeteo_manifest is True
+    assert london.can_seed is False
 
 
 def test_current_target_plan_reseeds_when_openmeteo_anchor_advances_under_same_baseline(tmp_path) -> None:
