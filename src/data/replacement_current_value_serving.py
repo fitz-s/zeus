@@ -145,12 +145,17 @@ def read_current_instrument_values(
     Without it, the historical carrier-bound behavior is unchanged.
 
     LEAD_DAYS IS NOT A FILTER: the served row reports its real lead bucket, which names the
-    history residual variance for that value. Fail-soft: any DB error -> empty dict.
+    history residual variance for that value. Legacy reads remain fail-soft; source-clock and
+    station-authority SQLite failures propagate because UNKNOWN truth is not an empty family.
     """
     try:
         columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(raw_model_forecasts)")
         }
+    except sqlite3.OperationalError:
+        if decision_time_iso is not None or include_station_sources:
+            raise
+        return {}
     except Exception:
         return {}
     has_captured_at = "captured_at" in columns
@@ -190,6 +195,10 @@ def read_current_instrument_values(
                 """,
                 (city, metric, target_date, source_cycle_time_iso, endpoint),
             ).fetchall()
+        except sqlite3.OperationalError:
+            if decision_time_iso is not None or include_station_sources:
+                raise
+            return []
         except Exception:
             return []
 
@@ -364,6 +373,8 @@ def read_current_instrument_values(
                 """,
                 (city, metric, target_date, SERVED_VIA_SINGLE_RUNS),
             ).fetchall()
+        except sqlite3.OperationalError:
+            raise
         except Exception:
             station_rows = []
         # This is an OVERRIDE tier, not a first-match-wins fallback: a station model's own-cycle

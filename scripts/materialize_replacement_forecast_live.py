@@ -31,6 +31,7 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (  # noqa: E402
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
 )
 from src.data.replacement_forecast_materializer import (  # noqa: E402
+    PreparedReplacementForecastSnapshotStale,
     ReplacementForecastMaterializeRequest,
     ReplacementForecastMaterializeResult,
     _ensure_replacement_identity_columns,
@@ -246,8 +247,10 @@ def _commit_from_read_snapshot(
     conn,
     request: ReplacementForecastMaterializeRequest,
     *,
-    writer_lock: _WriterLockFactory = contextlib.nullcontext,
+    writer_lock: _WriterLockFactory | None = None,
 ) -> ReplacementForecastMaterializeResult:
+    if writer_lock is None:
+        raise RuntimeError("REPLACEMENT_FORECAST_WRITER_LOCK_REQUIRED")
     for _attempt in range(_SNAPSHOT_RETRY_LIMIT):
         version = _data_version(conn)
         conn.execute("BEGIN")
@@ -269,7 +272,13 @@ def _commit_from_read_snapshot(
                 if _data_version(conn) != version:
                     conn.rollback()
                     continue
-                result = write_prepared_replacement_forecast_live(conn, prepared)
+                try:
+                    result = write_prepared_replacement_forecast_live(
+                        conn, prepared
+                    )
+                except PreparedReplacementForecastSnapshotStale:
+                    conn.rollback()
+                    continue
                 conn.commit()
                 return result
             except Exception:
@@ -365,6 +374,8 @@ def _materialize(
             )
         finally:
             owned_conn.close()
+    if commit and writer_lock is None:
+        raise RuntimeError("REPLACEMENT_FORECAST_WRITER_LOCK_REQUIRED")
     effective_writer_lock = writer_lock or contextlib.nullcontext
     payload = _load_json(input_json)
     if not isinstance(payload, Mapping):

@@ -12,7 +12,7 @@ import json
 import sqlite3
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -563,7 +563,17 @@ def test_stronger_absorbing_frontier_after_prepare_invalidates_fast_owner(
     likelihood_bound["value"] = 19.0
 
     conn.execute("BEGIN IMMEDIATE")
-    result = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    with pytest.raises(
+        materializer_mod.PreparedReplacementForecastSnapshotStale
+    ):
+        materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    conn.rollback()
+
+    refreshed = _prepare_for_final_write(conn, prepared.request)
+    conn.execute("BEGIN IMMEDIATE")
+    result = materializer_mod.write_prepared_replacement_forecast_live(
+        conn, refreshed
+    )
     conn.commit()
 
     assert result.status == "BLOCKED"
@@ -1211,10 +1221,22 @@ def test_materializer_write_keeps_high_physical_frontier_on_same_cycle(monkeypat
 
     # The old WU worker computed from an earlier read snapshot. A delayed AWC
     # writer commits the stronger, still-causal HIGH31 before that worker owns
-    # the writer lock; write_prepared must re-reduce and recompute rather than
-    # commit its stale HIGH30 payload.
+    # the writer lock. The writer rejects the stale payload; recomputation must
+    # happen after its caller releases the lock.
     assert materialize_replacement_forecast_live(conn, awc).ok is True
-    result = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    with pytest.raises(
+        materializer_mod.PreparedReplacementForecastSnapshotStale
+    ):
+        materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    refreshed = materializer_mod.prepare_replacement_forecast_live(
+        conn, prepared.request
+    )
+    assert isinstance(
+        refreshed, materializer_mod.PreparedReplacementForecastMaterialization
+    )
+    result = materializer_mod.write_prepared_replacement_forecast_live(
+        conn, refreshed
+    )
 
     assert result.ok is True
     provenance = json.loads(
@@ -1300,9 +1322,18 @@ def test_materializer_readonly_keeps_low_physical_frontier_on_same_cycle(monkeyp
     )
     assert materialize_replacement_forecast_live(conn, awc).ok is True
 
+    with pytest.raises(
+        materializer_mod.PreparedReplacementForecastSnapshotStale
+    ):
+        materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    refreshed = materializer_mod.prepare_replacement_forecast_live(
+        conn, prepared.request
+    )
+    assert isinstance(
+        refreshed, materializer_mod.PreparedReplacementForecastMaterialization
+    )
     write_result = materializer_mod.write_prepared_replacement_forecast_live(
-        conn,
-        prepared,
+        conn, refreshed
     )
     assert write_result.ok is True
     write_provenance = json.loads(
@@ -2382,7 +2413,7 @@ def test_materialize_script_recomputes_when_snapshot_changes(
         city="London",
         target_date=date(2026, 7, 19),
         temperature_metric="high",
-    ))
+    ), writer_lock=nullcontext)
     reader.close()
     writer.close()
 
@@ -2424,11 +2455,140 @@ def test_materialize_script_snapshot_retry_exhaustion_never_computes_under_write
                 target_date=date(2026, 7, 19),
                 temperature_metric="high",
             ),
+            writer_lock=nullcontext,
         )
     conn.close()
 
     assert len(prepare_calls) == cli._SNAPSHOT_RETRY_LIMIT
     assert write_calls == []
+
+
+def test_materialize_script_reprepares_changed_frontier_outside_writer_lock(
+    monkeypatch,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    prepared = [object(), object()]
+    prepare_calls = []
+    write_calls = []
+    lock_held = False
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_held
+        assert lock_held is False
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    def _prepare(_conn, _request):
+        assert lock_held is False
+        value = prepared[len(prepare_calls)]
+        prepare_calls.append(value)
+        return value
+
+    def _write(_conn, value):
+        assert lock_held is True
+        if value is prepared[0]:
+            raise cli.PreparedReplacementForecastSnapshotStale(
+                "changed frontier"
+            )
+        write_calls.append(value)
+        return materializer_mod.ReplacementForecastMaterializeResult(
+            status="READY",
+            reason_codes=(),
+            posterior_id=1,
+            anchor_id=1,
+            readiness_id="ready-1",
+        )
+
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", _prepare)
+    monkeypatch.setattr(cli, "write_prepared_replacement_forecast_live", _write)
+
+    result = cli._commit_from_read_snapshot(
+        conn,
+        SimpleNamespace(
+            city="London",
+            target_date=date(2026, 7, 19),
+            temperature_metric="high",
+        ),
+        writer_lock=writer_lock,
+    )
+    conn.close()
+
+    assert result.ok is True
+    assert prepare_calls == prepared
+    assert write_calls == [prepared[1]]
+
+
+def test_prepared_writer_never_recomputes_changed_snapshot(
+    monkeypatch,
+) -> None:
+    original_request = object()
+    changed_request = object()
+    prepared = materializer_mod.PreparedReplacementForecastMaterialization(
+        request=original_request,
+        metric="high",
+        posterior=object(),
+    )
+    monkeypatch.setattr(
+        materializer_mod,
+        "_validated_replacement_forecast_request",
+        lambda _conn, _request: (changed_request, "high"),
+    )
+    monkeypatch.setattr(
+        materializer_mod,
+        "_compute_posterior_payload",
+        lambda *_args, **_kwargs: pytest.fail(
+            "writer must never compute a posterior"
+        ),
+    )
+
+    with pytest.raises(
+        materializer_mod.PreparedReplacementForecastSnapshotStale
+    ):
+        materializer_mod.write_prepared_replacement_forecast_live(
+            object(), prepared
+        )
+
+
+def test_materialize_script_commit_helper_requires_writer_lock() -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    with pytest.raises(
+        RuntimeError, match="^REPLACEMENT_FORECAST_WRITER_LOCK_REQUIRED$"
+    ):
+        cli._commit_from_read_snapshot(
+            conn,
+            SimpleNamespace(
+                city="London",
+                target_date=date(2026, 7, 19),
+                temperature_metric="high",
+            ),
+        )
+    conn.close()
+
+
+def test_materialize_script_injected_commit_connection_requires_writer_lock(
+    tmp_path,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    with pytest.raises(
+        RuntimeError, match="^REPLACEMENT_FORECAST_WRITER_LOCK_REQUIRED$"
+    ):
+        cli._materialize(
+            tmp_path / "not-read.json",
+            commit=True,
+            init_schema=False,
+            conn=conn,
+        )
+    conn.close()
 
 
 def test_materialize_script_dry_run_compute_does_not_hold_writer_lock(
@@ -2554,6 +2714,7 @@ def test_materialize_script_reports_durable_manifest_when_posterior_fails(
         commit=True,
         init_schema=False,
         conn=conn,
+        writer_lock=nullcontext,
     )
     conn.close()
 

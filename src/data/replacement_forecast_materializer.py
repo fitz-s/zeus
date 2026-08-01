@@ -199,6 +199,10 @@ class PreparedReplacementForecastMaterialization:
     anchor_id: int | None = None
 
 
+class PreparedReplacementForecastSnapshotStale(RuntimeError):
+    """The write snapshot changed; recompute only after releasing writer locks."""
+
+
 def _to_utc(value: datetime | str, *, field_name: str) -> datetime:
     if isinstance(value, datetime):
         parsed = value
@@ -6391,14 +6395,8 @@ def write_prepared_replacement_forecast_live(
     anchor_id = prepared.anchor_id
     posterior = prepared.posterior
     if request != prepared.request:
-        # The writer lock may observe a newly persisted causal Day0 frontier
-        # after the read snapshot was computed. Rebuild the pure payload against
-        # that frontier before it can be committed.
-        posterior = _compute_posterior_payload(
-            conn,
-            request,
-            metric=metric,
-            anchor_id=anchor_id if anchor_id is not None else -1,
+        raise PreparedReplacementForecastSnapshotStale(
+            "replacement forecast write snapshot changed"
         )
     if anchor_id is None:
         anchor_id = _insert_anchor(conn, request, metric=metric)
