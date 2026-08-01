@@ -467,8 +467,43 @@ def test_day0_visibility_retry_recovers_raw_hwm_after_250ms(monkeypatch):
     assert refresh_pos is not None
     assert is_fresh is True
     assert attempts == 4
-    assert build_deadlines == pytest.approx([10.35, 10.35, 10.35, 10.35])
+    assert build_deadlines == pytest.approx([11.0, 10.35, 10.35, 10.35])
     assert clock[0] == pytest.approx(10.3)
+
+
+def test_day0_primary_snapshot_read_does_not_use_visibility_retry_budget(monkeypatch):
+    """A normal primary authority read may outlive the publish-retry window."""
+    import src.engine.monitor_refresh as mr
+
+    clock = [10.0]
+    build_deadlines = []
+    snapshot = SimpleNamespace()
+
+    def build(*_args, deadline_monotonic, **_kwargs):
+        build_deadlines.append(deadline_monotonic)
+        clock[0] = 10.5
+        if clock[0] >= deadline_monotonic:
+            raise mr._Day0SnapshotReadDeadlineExceeded("primary read interrupted")
+        return snapshot
+
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_build_current_global_day0_family_snapshot", build)
+    monkeypatch.setattr(
+        mr,
+        "_materialize_current_global_day0_probability",
+        lambda position, built: (0.30, position, built is snapshot),
+    )
+    monkeypatch.setattr(mr.time, "monotonic", lambda: clock[0])
+
+    held_prob, _refresh_pos, is_fresh = mr._refresh_current_global_day0_probability(
+        _pos(),
+        trade_conn=object(),
+        deadline_monotonic=20.0,
+    )
+
+    assert held_prob == pytest.approx(0.30)
+    assert is_fresh is True
+    assert build_deadlines == pytest.approx([15.0])
 
 
 def test_day0_visibility_retry_fails_closed_when_event_never_publishes(monkeypatch):

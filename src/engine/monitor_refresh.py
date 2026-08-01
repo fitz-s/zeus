@@ -190,6 +190,18 @@ def _day0_materialization_visibility_retry_deadline(
     return retry_deadline
 
 
+def _day0_primary_snapshot_read_deadline(
+    deadline_monotonic: float | None,
+) -> float:
+    """Bound the primary authority read without borrowing the retry budget."""
+    primary_deadline = (
+        time.monotonic() + _HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+    )
+    if deadline_monotonic is not None:
+        primary_deadline = min(primary_deadline, deadline_monotonic)
+    return primary_deadline
+
+
 def _raise_if_day0_snapshot_read_deadline_elapsed(
     deadline_monotonic: float | None,
 ) -> None:
@@ -4964,7 +4976,7 @@ def _refresh_current_global_day0_probability(
                 _cnt_inc("monitor_day0_family_failure_cache_hit_total")
                 raise _CachedCurrentGlobalDay0FamilyError(reason)
 
-    effective_deadline = _day0_materialization_visibility_retry_deadline(
+    primary_deadline = _day0_primary_snapshot_read_deadline(
         deadline_monotonic
     )
     try:
@@ -4973,7 +4985,7 @@ def _refresh_current_global_day0_probability(
             trade_conn=trade_conn,
             decision_time=decision_time,
             cached_snapshots=cached_snapshots,
-            deadline_monotonic=effective_deadline,
+            deadline_monotonic=primary_deadline,
         )
     except Exception as exc:
         if _is_day0_materialization_visibility_gap(exc):
@@ -4982,6 +4994,9 @@ def _refresh_current_global_day0_probability(
             # RESET: a bounded read-only connection pair sees that commit; otherwise
             # the existing fail-closed cache/reseed path remains authoritative.
             _cnt_inc("monitor_day0_materialization_visibility_retry_total")
+            effective_deadline = _day0_materialization_visibility_retry_deadline(
+                deadline_monotonic
+            )
             while time.monotonic() < effective_deadline:
                 remaining = effective_deadline - time.monotonic()
                 if remaining <= 0:
