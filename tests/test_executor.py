@@ -905,7 +905,7 @@ class TestExecutor:
         assert result.status == "pending"
         assert captured["order_type"] == "FOK"
 
-    def test_risk_allocator_immediate_mode_preserves_frozen_fak(self):
+    def test_exit_allocator_allows_legal_passive_override_of_immediate_mode(self):
         from src.execution.executor import _risk_allocator_order_type_allows_intent
 
         assert _risk_allocator_order_type_allows_intent(
@@ -916,7 +916,7 @@ class TestExecutor:
             selected_order_type="FAK",
             intent_order_type="FOK",
         )
-        assert not _risk_allocator_order_type_allows_intent(
+        assert _risk_allocator_order_type_allows_intent(
             selected_order_type="FOK",
             intent_order_type="GTC",
         )
@@ -1822,7 +1822,7 @@ class TestExecutor:
         assert intent.best_bid == pytest.approx(0.45)
         assert intent.intent_id == "trade-1:exit"
 
-    def test_execute_exit_order_places_sell_and_rounds_down(self, monkeypatch):
+    def test_execute_exit_order_places_passive_sell_and_rounds_down(self, monkeypatch):
         captured = {}
 
         class DummyClient:
@@ -1832,7 +1832,29 @@ class TestExecutor:
             def bind_submission_envelope(self, envelope):
                 self.bound_envelope = envelope
 
+            def bind_signed_submission_identity_persister(self, persister):
+                self.persist_signed_identity = persister
+
             def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                import hashlib
+
+                from src.contracts.venue_submission_envelope import (
+                    VenueSubmissionEnvelope,
+                )
+
+                signed_order = b"test-passive-exit-signed-order"
+                result = _final_submit_result(
+                    self.bound_envelope,
+                    order_id="sell-1",
+                )
+                self.persist_signed_identity(
+                    VenueSubmissionEnvelope.from_dict(
+                        result["_venue_submission_envelope"]
+                    ).with_updates(
+                        signed_order=signed_order,
+                        signed_order_hash=hashlib.sha256(signed_order).hexdigest(),
+                    )
+                )
                 captured.update(
                     token_id=token_id,
                     price=price,
@@ -1840,12 +1862,15 @@ class TestExecutor:
                     side=side,
                     order_type=order_type,
                 )
-                return _final_submit_result(self.bound_envelope, order_id="sell-1")
+                return result
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
         monkeypatch.setattr(
             "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
-            lambda conn: {"component": "collateral_snapshot_refresh", "allowed": True},
+            lambda conn, **_kwargs: {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+            },
         )
         monkeypatch.setattr(
             "src.execution.executor._assert_collateral_allows_sell",
@@ -1869,7 +1894,7 @@ class TestExecutor:
         assert result.order_id == "sell-1"
         assert captured == {
             "token_id": "yes-token",
-            "price": pytest.approx(0.49),
+            "price": pytest.approx(0.50),
             "size": pytest.approx(12.34),
             "side": "SELL",
             "order_type": "GTC",
@@ -2062,6 +2087,7 @@ class TestExecutor:
                 shares=12.349,
                 current_price=0.50,
                 best_bid=0.49,
+                submit_order_type="FAK",
                 **_snapshot_kwargs("yes-token"),
             ),
             conn=_TEST_CONN,

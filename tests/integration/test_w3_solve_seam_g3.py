@@ -26356,18 +26356,9 @@ def test_global_sell_jit_rejects_changed_day0_statistical_authority(monkeypatch)
     "probability_functional",
     ("LOWER_CVAR_PARAMETER_DRAWS", "POSTERIOR_PREDICTIVE_MEAN"),
 )
-@pytest.mark.parametrize(
-    ("bid_levels", "expected_limit"),
-    (
-        ((("0.60", "4"), ("0.50", "6")), 0.50),
-        ((("0.97", "10"),), 0.95),
-    ),
-)
 def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     monkeypatch,
     probability_functional,
-    bid_levels,
-    expected_limit,
 ):
     from src.data.polymarket_request_governor import RequestPriority
     from src.events.event_store import (
@@ -26396,7 +26387,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     actuation = _adapter_sell_actuation(
         event,
         selected_shares="6",
-        bid_levels=bid_levels,
+        bid_levels=(("0.60", "4"), ("0.50", "6")),
         probability_functional=probability_functional,
     )
     position = SimpleNamespace(
@@ -26465,7 +26456,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                     "min_order_size": "5",
                     "bids": [
                         {"price": price, "size": size}
-                        for price, size in bid_levels
+                        for price, size in (("0.60", "4"), ("0.50", "6"))
                     ],
                 }
             }
@@ -26510,10 +26501,13 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         assert authority.actuation is actuation
         assert authority.jit_candidate.executable_sell_curve.book_hash
         intent = kwargs["exit_intent"]
-        assert intent.exact_limit_price == pytest.approx(expected_limit)
+        assert intent.exact_limit_price == pytest.approx(0.61)
         assert intent.shares == pytest.approx(6.0)
         assert intent.close_position is False
-        assert intent.submit_order_type == "FAK"
+        assert intent.submit_order_type == "GTC"
+        assert intent.capital_certificate["execution_mode"] == "MAKER_REST"
+        assert intent.capital_certificate["economic_limit_price"] == "0.50"
+        assert intent.capital_certificate["exact_limit_price"] == "0.61"
         assert intent.capital_certificate["held_shares"] == "10.006602"
         assert intent.capital_certificate["sellable_shares"] == "10"
         if probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
@@ -26531,7 +26525,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         evidence.venue_ack_received = True
         evidence.command_id = "command-1"
         evidence.command_state = "ACKED"
-        evidence.order_type = "FAK"
+        evidence.order_type = "GTC"
         evidence.result_status = "pending"
         return "sell_placed: order=sell-1"
 
@@ -26598,7 +26592,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert receipt.venue_ack_received is True
     assert receipt.venue_command_id == "command-1"
     assert receipt.venue_command_state == "ACKED"
-    assert receipt.venue_order_type == "FAK"
+    assert receipt.venue_order_type == "GTC"
     from src.events.reactor import (
         _is_global_reduce_only_exit_receipt,
         _receipt_matches_event,
@@ -26671,7 +26665,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         evidence.venue_ack_received = False
         evidence.command_id = "command-unknown"
         evidence.command_state = "SUBMIT_UNKNOWN_SIDE_EFFECT"
-        evidence.order_type = "FAK"
+        evidence.order_type = "GTC"
         evidence.result_status = "unknown_side_effect"
         raise TimeoutError("venue result unknown")
 
@@ -26707,7 +26701,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         evidence.venue_ack_received = False
         evidence.command_id = "command-rejected"
         evidence.command_state = "REJECTED"
-        evidence.order_type = "FAK"
+        evidence.order_type = "GTC"
         evidence.result_status = "rejected"
         evidence.result_reason = "venue rejected"
         raise RuntimeError("lifecycle persistence failed after rejection")
@@ -26797,6 +26791,8 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         "execution_authority_identity": authority.authority_identity,
         "jit_book_hash": jit.executable_sell_curve.book_hash,
         "jit_curve_identity": jit.execution_curve_identity,
+        "execution_mode": "MAKER_REST",
+        "submit_order_type": "GTC",
         "robust_delta_log_wealth": decision.robust_delta_log_wealth,
         "robust_ev_usd": decision.robust_ev_usd,
         "expected_comparison_delta_log_wealth": (
@@ -26807,7 +26803,8 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         "sellable_shares": str(candidate.held_shares),
         "selected_shares": str(decision.shares),
         "selected_cash_proceeds_usd": str(decision.cash_proceeds_usd),
-        "exact_limit_price": str(decision.limit_price),
+        "economic_limit_price": str(decision.limit_price),
+        "exact_limit_price": str(authority.maker_limit_price()),
     }
     intent = ExitIntent(
         trade_id=candidate.position_id,
@@ -26816,8 +26813,8 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         shares=float(decision.shares),
         current_market_price=float(decision.expected_fill_price_before_fee),
         best_bid=float(jit.executable_sell_curve.levels[0].price),
-        exact_limit_price=float(decision.limit_price),
-        submit_order_type="FAK",
+        exact_limit_price=float(authority.maker_limit_price()),
+        submit_order_type="GTC",
         close_position=False,
         capital_certificate=certificate,
     )
@@ -26874,6 +26871,41 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         snapshot_context=context,
         now=captured_at + _dt.timedelta(seconds=1),
     ) == "global_sell_execution_authority_required"
+
+
+def test_global_sell_execution_authority_requires_a_legal_passive_price():
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+
+    event = _global_scope_event(city="Alpha", source_run_id="run-maker-band")
+    actuation = _adapter_sell_actuation(
+        event,
+        selected_shares="6",
+        bid_levels=(("0.95", "10"),),
+    )
+    jit = era._global_sell_candidate_from_raw_book(
+        actuation.decision.candidate,
+        {
+            "asset_id": "yes-token",
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "bids": [{"price": "0.95", "size": "10"}],
+            "asks": [{"price": "0.96", "size": "10"}],
+        },
+        captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+    )
+    authority = GlobalSellExecutionAuthority.from_current(
+        actuation=actuation,
+        jit_candidate=jit,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE",
+    ):
+        authority.maker_limit_price()
+    assert era._global_preflight_block_status(
+        "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:best_bid=0.95:tick=0.01"
+    ) == "CANDIDATE_BLOCKED"
 
 
 def test_global_sell_worse_jit_bid_requires_complete_reauction():
@@ -27125,7 +27157,7 @@ def test_exact_sell_limit_is_audited_and_off_tick_is_rejected_before_submit(
     assert result.reason.startswith("exact_limit_price_not_tick_aligned:")
 
 
-def test_global_sell_fak_reaches_exit_envelope_and_sdk_when_allocator_is_gtc(
+def test_global_sell_gtc_reaches_exit_envelope_when_allocator_prefers_immediate(
     monkeypatch,
 ):
     from tests import test_executor as executor_fixtures
@@ -27199,7 +27231,7 @@ def test_global_sell_fak_reaches_exit_envelope_and_sdk_when_allocator_is_gtc(
     )
     monkeypatch.setattr(
         "src.execution.executor._select_risk_allocator_order_type",
-        lambda *_args, **_kwargs: "GTC",
+        lambda *_args, **_kwargs: "FOK",
     )
     monkeypatch.setattr(
         "src.execution.executor._reserve_collateral_for_sell",
@@ -27225,12 +27257,12 @@ def test_global_sell_fak_reaches_exit_envelope_and_sdk_when_allocator_is_gtc(
                 shares=10.0,
                 current_price=0.54,
                 best_bid=0.60,
-                exact_limit_price=0.50,
-                submit_order_type="FAK",
+                exact_limit_price=0.61,
+                submit_order_type="GTC",
                 **executor_fixtures._snapshot_kwargs("yes-token"),
             ),
             conn=conn,
-            decision_id="global-capital-sell-fak",
+            decision_id="global-capital-sell-gtc",
         )
     finally:
         executor_fixtures._TEST_CONN = old_test_conn
@@ -27238,10 +27270,10 @@ def test_global_sell_fak_reaches_exit_envelope_and_sdk_when_allocator_is_gtc(
     assert result.status == "pending", result.reason
     assert result.venue_call_started is True
     assert result.venue_ack_received is True
-    assert result.submitted_order_type == "FAK"
+    assert result.submitted_order_type == "GTC"
     assert captured["side"] == "SELL"
-    assert captured["order_type"] == "FAK"
-    assert captured["envelope_order_type"] == "FAK"
+    assert captured["order_type"] == "GTC"
+    assert captured["envelope_order_type"] == "GTC"
     envelope = conn.execute(
         """
         SELECT e.order_type
@@ -27249,7 +27281,7 @@ def test_global_sell_fak_reaches_exit_envelope_and_sdk_when_allocator_is_gtc(
           JOIN venue_submission_envelopes e ON e.envelope_id = c.envelope_id
          WHERE c.decision_id = ?
         """,
-        ("global-capital-sell-fak",),
+        ("global-capital-sell-gtc",),
     ).fetchone()
-    assert dict(envelope) == {"order_type": "FAK"}
+    assert dict(envelope) == {"order_type": "GTC"}
     conn.close()

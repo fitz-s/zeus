@@ -11122,6 +11122,25 @@ def _submit_current_global_sell(
                     proof_accepted=False,
                     jit_candidate=current_candidate,
                 )
+            from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+
+            execution_authority = GlobalSellExecutionAuthority.from_current(
+                actuation=global_actuation,
+                jit_candidate=current_candidate,
+            )
+            try:
+                maker_limit_price = execution_authority.maker_limit_price()
+            except ValueError as exc:
+                # SCOPE: only this SELL candidate lacks a venue-legal passive
+                # price. DRAIN: the same cut can rank the remaining actions.
+                # RESET: the next cut rebuilds the JIT bid and tick.
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason=f"GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:{exc}",
+                    proof_accepted=False,
+                    jit_candidate=current_candidate,
+                )
             if preflight_only:
                 from src.execution.collateral import (
                     prepare_collateral_snapshot_for_submit,
@@ -11168,7 +11187,6 @@ def _submit_current_global_sell(
             from src.execution.exit_lifecycle import (
                 ExitExecutionEvidence,
                 ExitIntent,
-                GlobalSellExecutionAuthority,
                 execute_exit,
             )
             from src.state.portfolio import ExitContext
@@ -11186,10 +11204,6 @@ def _submit_current_global_sell(
             state_raw = getattr(position, "state", "")
             position_state = str(getattr(state_raw, "value", state_raw) or "")
             best_bid = float(current_candidate.executable_sell_curve.levels[0].price)
-            execution_authority = GlobalSellExecutionAuthority.from_current(
-                actuation=global_actuation,
-                jit_candidate=current_candidate,
-            )
             expected_growth = getattr(decision, "expected_growth", None)
             expected_terminal = getattr(
                 decision,
@@ -11255,10 +11269,8 @@ def _submit_current_global_sell(
                 shares=float(Decimal(str(getattr(decision, "shares", "0")))),
                 current_market_price=float(current_vwap),
                 best_bid=best_bid,
-                exact_limit_price=float(
-                    Decimal(str(getattr(decision, "limit_price", "0") or "0"))
-                ),
-                submit_order_type="FAK",
+                exact_limit_price=float(maker_limit_price),
+                submit_order_type="GTC",
                 close_position=(
                     Decimal(str(getattr(decision, "shares", "0") or "0"))
                     >= Decimal(str(getattr(position, "effective_shares", "0") or "0"))
@@ -11309,6 +11321,8 @@ def _submit_current_global_sell(
                     "jit_curve_identity": str(
                         current_candidate.execution_curve_identity
                     ),
+                    "execution_mode": "MAKER_REST",
+                    "submit_order_type": "GTC",
                     "held_probability_point": held_q,
                     "sell_favorable_probability_functional": str(
                         getattr(candidate, "probability_functional", "") or ""
@@ -11320,8 +11334,13 @@ def _submit_current_global_sell(
                     "selected_cash_proceeds_usd": str(
                         getattr(decision, "cash_proceeds_usd", "")
                     ),
-                    "exact_limit_price": str(getattr(decision, "limit_price", "")),
-                    "partial_fill_certificate": "positive_piecewise_concave_bid_prefix",
+                    "economic_limit_price": str(
+                        getattr(decision, "limit_price", "")
+                    ),
+                    "exact_limit_price": str(maker_limit_price),
+                    "partial_fill_certificate": (
+                        "maker_fill_price_dominates_positive_bid_prefix"
+                    ),
                 },
             )
             exit_evidence = ExitExecutionEvidence()
@@ -11547,6 +11566,8 @@ def _global_preflight_block_status(reason: str) -> str:
         # Targeted chain inventory/approval governs only this exact SELL. The
         # batch can safely compare the remaining BUY/SELL/HOLD/CASH actions,
         # while the next cut retries this token with fresh chain truth.
+        return "CANDIDATE_BLOCKED"
+    if reason.startswith("GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:"):
         return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (

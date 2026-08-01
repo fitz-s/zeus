@@ -1395,6 +1395,27 @@ class GlobalSellExecutionAuthority:
         if self.authority_identity != expected:
             raise ValueError("GLOBAL_SELL_EXECUTION_AUTHORITY_IDENTITY_MISMATCH")
 
+    def maker_limit_price(self) -> Decimal:
+        """Return the nearest legal passive SELL price above the JIT best bid."""
+
+        from src.contracts.venue_submission_envelope import (
+            assert_live_order_unit_price,
+        )
+
+        curve = self.jit_candidate.executable_sell_curve
+        best_bid = Decimal(curve.levels[0].price)
+        limit = best_bid + Decimal(curve.min_tick)
+        try:
+            bounded = assert_live_order_unit_price(limit)
+        except ValueError as exc:
+            raise ValueError(
+                "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:"
+                f"best_bid={best_bid}:tick={curve.min_tick}"
+            ) from exc
+        if bounded <= best_bid:
+            raise ValueError("GLOBAL_SELL_MAKER_PRICE_NOT_PASSIVE")
+        return bounded
+
 
 def place_sell_order(
     *,
@@ -2816,7 +2837,11 @@ def _global_sell_capital_certificate_error(
         and chain_held == exact_held
         and matches_decimal(candidate.held_shares, sellable)
         and matches_decimal(exit_intent.shares, decision.shares)
-        and matches_decimal(exit_intent.exact_limit_price, decision.limit_price)
+        and matches_decimal(
+            exit_intent.exact_limit_price,
+            authority.maker_limit_price(),
+        )
+        and str(exit_intent.submit_order_type or "").upper() == "GTC"
     ):
         return "global_sell_execution_position_economics_mismatch"
     certificate = exit_intent.capital_certificate
@@ -2839,6 +2864,8 @@ def _global_sell_capital_certificate_error(
         "execution_authority_identity": authority.authority_identity,
         "jit_book_hash": jit.executable_sell_curve.book_hash,
         "jit_curve_identity": jit.execution_curve_identity,
+        "execution_mode": "MAKER_REST",
+        "submit_order_type": "GTC",
     }
     if any(
         str(certificate.get(field) or "") != str(expected)
@@ -2850,7 +2877,8 @@ def _global_sell_capital_certificate_error(
         "sellable_shares": candidate.held_shares,
         "selected_shares": decision.shares,
         "selected_cash_proceeds_usd": decision.cash_proceeds_usd,
-        "exact_limit_price": decision.limit_price,
+        "economic_limit_price": decision.limit_price,
+        "exact_limit_price": authority.maker_limit_price(),
         "expected_comparison_delta_log_wealth": (
             decision.expected_growth.expected_delta_log_wealth
         ),

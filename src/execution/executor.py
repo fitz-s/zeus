@@ -168,6 +168,13 @@ def _risk_allocator_order_type_allows_intent(
         return True
     if selected in resting and intended in immediate:
         return True
+    if selected in immediate and intended in resting:
+        # Exit-only callers use this resolver.  When the absolute actual-fill
+        # band forbids a taker-capable SELL, a passive order is the only legal
+        # reduce-only action.  The cumulative heartbeat gate below still owns
+        # the resting-order lease and rejects GTC/GTD while that lease is not
+        # healthy.
+        return True
     return False
 
 
@@ -219,7 +226,13 @@ def _resolve_exit_order_type(
 
     intended = str(submit_order_type or "").strip().upper()
     if not intended:
-        return _exit_order_type(selected_order_type)
+        # The absolute actual-fill band makes a taker-capable SELL
+        # unrepresentable: its limit is only a floor, so venue price
+        # improvement can exceed the upper bound.  The default exit grammar is
+        # therefore passive GTC.  Heartbeat lease authority remains a
+        # cumulative gate at submit and rejects this order when resting is not
+        # currently safe.
+        return "GTC"
     if intended not in {"FOK", "FAK", "GTC", "GTD"}:
         raise ValueError(f"unsupported_exit_submit_order_type:{intended}")
     exit_selected = _exit_order_type(selected_order_type)
@@ -6103,23 +6116,15 @@ def execute_exit_order(
         else base_price
     )
 
-    if intent.exact_limit_price is None and best_bid is not None and best_bid < base_price:
-        # Slice P3.3b (PR #19 phase 4 closeout, 2026-04-26): typed
-        # anticipated-slippage at the price-planning seam. Pre-fix used
-        # raw `slippage = current_price - best_bid` + raw `slippage /
-        # current_price <= 0.03` arithmetic — both unit-ambiguous and
-        # invisible to the type system. Now wraps in SlippageBps which
-        # enforces non-negative magnitude + direction semantics. The
-        # `.fraction` accessor (200 bps == 0.02 fraction) makes the
-        # 3% threshold compare cleanly against a typed value.
-        if current_price > 0:
-            slip_bps = abs(current_price - best_bid) / current_price * 10_000.0
-            slippage = SlippageBps(
-                value_bps=slip_bps,
-                direction="adverse",  # sell crossing down to bid receives adverse
-            )
-            if slippage.fraction <= 0.03:
-                limit_price = best_bid
+    if intent.exact_limit_price is None and best_bid is not None:
+        # A post-only SELL must be strictly above the current best bid.  Keep
+        # the economic reservation when it is higher; otherwise quote the
+        # nearest passive tick.  The absolute band check below rejects the
+        # edge case where no legal passive price exists above the bid.
+        limit_price = max(
+            base_price,
+            float(Decimal(str(best_bid)) + effective_min_tick_size),
+        )
 
     # T5.b 2026-04-23 (also closes T5.a-LOW follow-up): exit-path NaN/
     # ±inf guard. Pre-T5.b the `max(0.01, min(0.99, limit_price))`

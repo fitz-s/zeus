@@ -693,7 +693,7 @@ def _is_global_reduce_only_exit_receipt(receipt: EventSubmissionReceipt) -> bool
         and receipt.side_effect_status == "EXIT_SUBMITTED"
         and receipt.venue_call_started
         and bool(receipt.venue_command_id)
-        and receipt.venue_order_type == "FAK"
+        and receipt.venue_order_type == "GTC"
         and str(receipt.reason or "").startswith(
             ("GLOBAL_SELL_EXIT:", "GLOBAL_SELL_EXIT_UNKNOWN:")
         )
