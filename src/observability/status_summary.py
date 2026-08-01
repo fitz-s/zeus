@@ -240,6 +240,7 @@ def _write_cycle_status(
             require_explicit=True,
             refreshed_by_pulse=False,
         )
+        _project_recommended_commands(status)
         # Preserve the last verified top-level freshness instant.  This write
         # publishes only the completed cycle; it must not make retained DB-derived
         # portfolio/execution/control fields appear newly refreshed.
@@ -294,6 +295,7 @@ def _write_cycle_status(
         status = annotate_truth_payload(status, STATUS_PATH, generated_at=generated_at, authority="VERIFIED")
     else:
         _preserve_prior_status_freshness_after_pulse_failure(status, prior)
+    _project_recommended_commands(status)
     _atomic_write_status_payload(status)
 
 
@@ -321,6 +323,21 @@ def _refresh_control_status_for_pulse(status: dict) -> None:
         control["status"] = "control_refresh_failed"
         control["refresh_error_type"] = type(exc).__name__
         control["refresh_error"] = str(exc)
+
+
+def _project_recommended_commands(status: dict) -> None:
+    """Keep every daemon-owned status write on the full control contract."""
+
+    control = status.get("control")
+    if not isinstance(control, dict):
+        control = {}
+        status["control"] = control
+    control["recommended_auto_commands"] = recommended_autosafe_commands_from_status(status)
+    control["review_required_commands"] = review_required_commands_from_status(status)
+    control["recommended_commands"] = recommended_commands_from_status(
+        status,
+        include_review_required=True,
+    )
 
 
 def _preserve_prior_status_freshness_after_pulse_failure(status: dict, prior: dict) -> None:
@@ -1880,12 +1897,7 @@ def write_status(cycle_summary: dict = None) -> None:
     }
     legacy_positions_artifact = _legacy_positions_artifact_summary(position_view)
     status["portfolio"]["legacy_artifact"] = legacy_positions_artifact
-    status["control"]["recommended_auto_commands"] = recommended_autosafe_commands_from_status(status)
-    status["control"]["review_required_commands"] = review_required_commands_from_status(status)
-    status["control"]["recommended_commands"] = recommended_commands_from_status(
-        status,
-        include_review_required=True,
-    )
+    _project_recommended_commands(status)
     risk_effective_bankroll = _round_money_or_none(risk_details.get("effective_bankroll"))
     risk_initial_bankroll = _round_money_or_none(risk_details.get("initial_bankroll"))
     realized_pnl = risk_details.get("realized_pnl")

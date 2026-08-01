@@ -3049,7 +3049,7 @@ files:
   src/observability/status_summary.py:
     zone: K2_runtime
     authority_role: derived_status_read_model
-    why: Produces the derived operator/Venus health snapshot; cycle pulses reuse cycle or prior risk projection so status I/O cannot hold money-path scheduler work on RiskGuard DB reads.
+    why: Produces the derived operator/Venus health snapshot; every daemon writer projects the same command-recommendation contract while cycle pulses reuse cycle or prior risk projection so status I/O cannot hold money-path scheduler work on RiskGuard DB reads.
     hazards:
     - DERIVED_ONLY
     - NO_WRITE_PATH
