@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-08-01
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -5794,6 +5794,18 @@ def execute_monitoring_phase(
         summary["held_monitor_defer_reason"] = "urgent_day0_wake"
         return portfolio_dirty, tracker_dirty
 
+    # Preflight may release a due retry back to its economic holding phase
+    # before the normal monitor pass. Preserve the preflight identity fact so
+    # a stale snapshot may still recover only the held token identity; the
+    # quote itself must always come from the current CLOB below.
+    retry_quote_identity_seed_position_ids = frozenset(
+        id(position)
+        for position in tuple(getattr(portfolio, "positions", ()) or ())
+        if position.state == "pending_exit"
+        and getattr(position, "exit_state", "") == "retry_pending"
+        and not is_exit_cooldown_active(position)
+    )
+
     if run_exit_preflight:
         global_retry_runtime_before_preflight = snapshot_global_retry_runtime()
         try:
@@ -6216,9 +6228,12 @@ def execute_monitoring_phase(
             continue
         pending_exit_monitor_only = False
         pending_exit_retry_identity_seed_allowed = (
-            pos.state == "pending_exit"
-            and getattr(pos, "exit_state", "") == "retry_pending"
-            and not is_exit_cooldown_active(pos)
+            id(pos) in retry_quote_identity_seed_position_ids
+            or (
+                pos.state == "pending_exit"
+                and getattr(pos, "exit_state", "") == "retry_pending"
+                and not is_exit_cooldown_active(pos)
+            )
         )
         if pos.state == "pending_exit":
             if pos.exit_state == "backoff_exhausted":

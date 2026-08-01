@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-04-28; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-08-01
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -12651,7 +12651,9 @@ def test_pending_exit_retry_snapshot_identity_seed_uses_current_clob_quote(tmp_p
     assert t_dirty is False
     assert clob.tokens == ["no-from-snapshot"]
     assert pos.no_token_id == "no-from-snapshot"
-    assert captured["context"].current_market_price == pytest.approx(0.435)
+    # Preflight released this retry into Day0; exit economics therefore use
+    # the executable same-side bid, not the midpoint/VWMP telemetry price.
+    assert captured["context"].current_market_price == pytest.approx(0.42)
     assert captured["context"].current_market_price_is_fresh is True
     assert captured["context"].best_bid == pytest.approx(0.42)
     assert captured["context"].best_ask == pytest.approx(0.45)
