@@ -8335,8 +8335,20 @@ def reconcile_terminal_entry_exposure_obligations(
     ).fetchall()
     canonical_orders_by_command: dict[str, list[dict]] = {}
     canonical_order_rows = conn.execute(
-        "WITH "
-        + _canonical_order_truth_cte(partition_by_venue_order=True)
+        """
+        WITH open_entry_obligation_command AS (
+            SELECT obligation.command_id
+              FROM entry_exposure_obligations obligation
+              JOIN venue_commands command
+                ON command.command_id = obligation.command_id
+             WHERE obligation.status = 'OPEN'
+               AND command.intent_kind = 'ENTRY'
+        ),
+        """
+        + _canonical_order_truth_cte(
+            partition_by_venue_order=True,
+            command_scope_cte="open_entry_obligation_command",
+        )
         + """
         SELECT fact.command_id,
                fact.state,
@@ -8345,9 +8357,6 @@ def reconcile_terminal_entry_exposure_obligations(
                fact.source,
                fact.raw_payload_json
           FROM canonical_order_truth fact
-          JOIN entry_exposure_obligations obligation
-            ON obligation.command_id = fact.command_id
-           AND obligation.status = 'OPEN'
          ORDER BY fact.command_id, fact.venue_order_id
         """
     ).fetchall()
