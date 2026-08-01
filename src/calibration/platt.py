@@ -9,9 +9,12 @@ Without bootstrap_params, edge CI is systematically too narrow → overtrading.
 """
 
 import logging
+from typing import TYPE_CHECKING
 
 import numpy as np
-from sklearn.linear_model import LogisticRegression
+
+if TYPE_CHECKING:
+    from sklearn.linear_model import LogisticRegression
 
 from src.config import calibration_n_bootstrap
 
@@ -263,7 +266,12 @@ class ExtendedPlattCalibrator:
     @staticmethod
     def _fit_lr(
         X: np.ndarray, y: np.ndarray, C: float
-    ) -> LogisticRegression:
+    ) -> "LogisticRegression":
+        # Fitting is an offline calibration concern.  Importing sklearn at
+        # module load stalls the live monitor behind Python's global import
+        # lock even though prediction only needs the persisted coefficients.
+        from sklearn.linear_model import LogisticRegression
+
         lr = LogisticRegression(C=C, solver="lbfgs", max_iter=1000)
         lr.fit(X, y)
         return lr

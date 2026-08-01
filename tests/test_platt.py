@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-08-01
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Tests for ExtendedPlattCalibrator.
 
@@ -8,6 +8,9 @@ Covers:
 2. Edge cases: n=15 (minimum), identity calibration, all outcomes=0
 3. Failure modes: n < 15 rejected, predict before fit
 """
+
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -21,6 +24,26 @@ from src.calibration.platt import (
     WIDTH_NORMALIZED_SPACE,
     normalize_bin_probability_for_calibration,
 )
+
+
+def test_live_import_path_does_not_load_sklearn():
+    """Prediction/monitor imports must not acquire sklearn's heavy import tree."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import src.calibration.platt; "
+                "assert not any(name == 'sklearn' or name.startswith('sklearn.') "
+                "for name in sys.modules)"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _synthetic_data(n: int = 200, seed: int = 42):
