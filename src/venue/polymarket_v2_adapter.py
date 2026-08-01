@@ -319,7 +319,7 @@ class PolymarketV2AdapterProtocol(Protocol):
         intent: ExecutionIntent,
         snapshot: Any,
         order_type: str,
-        post_only: bool = False,
+        post_only: bool = True,
     ) -> VenueSubmissionEnvelope: ...
 
     def submit(
@@ -617,7 +617,7 @@ class PolymarketV2Adapter:
         intent: ExecutionIntent,
         snapshot: Any,
         order_type: str,
-        post_only: bool = False,
+        post_only: bool = True,
     ) -> VenueSubmissionEnvelope:
         _assert_snapshot_fresh(snapshot)
         outcome_label = _outcome_label(intent.direction)
@@ -704,7 +704,7 @@ class PolymarketV2Adapter:
         try:
             _assert_absolute_live_price_before_sdk(envelope.price)
             envelope = self._bind_runtime_submission_envelope(envelope)
-            envelope.assert_live_submit_bound()
+            envelope.assert_live_fill_price_bound()
         except ValueError as exc:
             _cnt_inc("placeholder_envelope_blocked_total")
             logger.warning(
@@ -712,7 +712,11 @@ class PolymarketV2Adapter:
             )
             return _rejected_submit_result(
                 envelope,
-                error_code="BOUND_ENVELOPE_NOT_LIVE_AUTHORITY",
+                error_code=(
+                    "LIVE_FILL_PRICE_UNBOUNDED"
+                    if "live fill price is unbounded" in str(exc)
+                    else "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+                ),
                 error_message=str(exc),
             )
         if not callable(before_post):
@@ -778,7 +782,7 @@ class PolymarketV2Adapter:
                     chain_id=self.chain_id,
                     neg_risk=envelope.neg_risk,
                 )
-                _assert_final_fok_depth_bound(active_client, envelope)
+                _assert_final_executable_price_bound(active_client, envelope)
                 if not expected_order_id:
                     raise V2AdapterError(
                         "signed order has no deterministic venue order id"
@@ -1003,7 +1007,7 @@ class PolymarketV2Adapter:
             try:
                 _assert_absolute_live_price_before_sdk(envelope.price)
                 bound_envelope = self._bind_runtime_submission_envelope(envelope)
-                bound_envelope.assert_live_submit_bound()
+                bound_envelope.assert_live_fill_price_bound()
             except ValueError as exc:
                 _cnt_inc("placeholder_envelope_blocked_total")
                 logger.warning(
@@ -1012,7 +1016,11 @@ class PolymarketV2Adapter:
                 return [
                     _rejected_submit_result(
                         e,
-                        error_code="BOUND_ENVELOPE_NOT_LIVE_AUTHORITY",
+                        error_code=(
+                            "LIVE_FILL_PRICE_UNBOUNDED"
+                            if "live fill price is unbounded" in str(exc)
+                            else "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+                        ),
                         error_message=str(exc),
                     )
                     for e in envelopes
@@ -1097,7 +1105,7 @@ class PolymarketV2Adapter:
 
         try:
             for envelope in bound:
-                _assert_final_fok_depth_bound(client, envelope)
+                _assert_final_executable_price_bound(client, envelope)
         except Exception as exc:
             error_code = (
                 "SUBMIT_ABORTED_PRICE_MOVED"
@@ -3240,8 +3248,26 @@ def _is_polymarket_fak_no_match_error(exc: BaseException) -> bool:
     )
 
 
+def _assert_final_executable_price_bound(
+    _client: Any,
+    envelope: VenueSubmissionEnvelope,
+) -> None:
+    """Independently require a legal maker-only envelope immediately pre-POST."""
+
+    _assert_absolute_live_price_before_sdk(envelope.price)
+    order_type = str(envelope.order_type or "").strip().upper()
+    if not envelope.post_only or order_type not in {"GTC", "GTD"}:
+        # INV-47 SCOPE: only this token/side submission (or its atomic batch)
+        # is rejected. DRAIN: the next submit may carry a certified maker-only
+        # envelope. RESET: no latch is stored; legal GTC/GTD post-only passes.
+        raise ValueError(
+            "LIVE_FILL_PRICE_UNBOUNDED:FINAL_SDK_BOUNDARY:"
+            f"order_type={order_type or 'ABSENT'}:post_only={envelope.post_only}"
+        )
+
+
 def _assert_final_fok_depth_bound(client: Any, envelope: VenueSubmissionEnvelope) -> None:
-    """Bind an FOK to executable depth after SDK preparation, immediately pre-POST."""
+    """Legacy FOK depth checker retained for offline diagnostics and tests."""
 
     if str(envelope.order_type).upper() != "FOK":
         return

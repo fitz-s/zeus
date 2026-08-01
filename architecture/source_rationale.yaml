@@ -638,7 +638,7 @@ files:
   src/contracts/venue_submission_envelope.py:
     zone: K0_frozen_kernel
     authority_role: venue_submission_contract
-    why: Frozen provenance envelope for Polymarket V2 submissions; pins canonical pre-sign/request/response evidence and enforces the non-waivable inclusive live unit-price band [0.05,0.95].
+    why: Frozen provenance envelope for Polymarket V2 submissions; pins canonical pre-sign/request/response evidence and enforces both the non-waivable inclusive live unit-price band [0.05,0.95] and GTC/GTD post-only maker semantics required to bind actual fills to that two-sided band.
     downstream:
     - src/venue/polymarket_v2_adapter.py
     - src/execution/executor.py
@@ -1362,7 +1362,7 @@ files:
   src/venue/polymarket_v2_adapter.py:
     zone: K2_runtime
     authority_role: v2_venue_adapter
-    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects prices outside [0.05,0.95] before any SDK submit contact. Its account-truth read fully paginates orders then trades through one authenticated HTTP client, one server timestamp, endpoint-specific signatures, and one monotonic wall-clock deadline; incomplete transport or page truth never becomes an empty-account fact. Its chain collateral surface reads pUSD balance plus both executable allowances in one exact JSON-RPC batch, rejecting partial or duplicate response identities. Targeted CTF exit reads confirm a missing, unavailable, or zero CLOB balance through exact Polygon ERC-1155 balanceOf plus both venue-operator approvals; failure of both readers remains unknown instead of becoming a false zero. A synchronous CLOB 425 `order manager not ready, please retry` response is a deterministic whole-request rejection for both single and batch submission, while transport failures and unrecognized post-sign exceptions remain ambiguous.
+    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects submitted limits outside [0.05,0.95] or any taker-capable shape before SDK contact, then repeats the legal-limit plus GTC/GTD post-only maker check immediately before POST. Its account-truth read fully paginates orders then trades through one authenticated HTTP client, one server timestamp, endpoint-specific signatures, and one monotonic wall-clock deadline; incomplete transport or page truth never becomes an empty-account fact. Its chain collateral surface reads pUSD balance plus both executable allowances in one exact JSON-RPC batch, rejecting partial or duplicate response identities. Targeted CTF exit reads confirm a missing, unavailable, or zero CLOB balance through exact Polygon ERC-1155 balanceOf plus both venue-operator approvals; failure of both readers remains unknown instead of becoming a false zero. A synchronous CLOB 425 `order manager not ready, please retry` response is a deterministic whole-request rejection for both single and batch submission, while transport failures and unrecognized post-sign exceptions remain ambiguous.
     downstream:
     - src/execution/executor.py
     - src/data/polymarket_client.py
@@ -1657,6 +1657,8 @@ files:
       payoffs; unrelated held-token upside cannot be coupled only to one candidate branch. A global
       BUY candidate also carries the same captured native bid levels as its executable ask curve;
       bids are execution-policy provenance, never a second probability or objective authority.
+      SELL scoring rejects the whole executable prefix when its best crossing bid is outside the
+      absolute live price band; a legal limit floor must not hide an illegal fill price.
     downstream:
     - src/engine/qkernel_spine_bridge.py
   src/solve/exits.py:
@@ -1983,7 +1985,7 @@ files:
   src/execution/executor.py:
     zone: K2_runtime
     authority_role: live_order_executor
-    why: Places live CLOB limit orders; real-money boundary. R3 U2 persists pre-submit VenueSubmissionEnvelope provenance before SDK contact; R3 A2 consults RiskAllocator/PortfolioGovernor before command persistence or SDK contact and persists/submits the selected maker/taker order type. ENTRY carries exact executable-snapshot family identity into the unresolved exposure reservation so the next global auction prices the correct correlated endowment; this metadata is not a sibling-token veto.
+    why: Places live CLOB limit orders; real-money boundary. R3 U2 persists pre-submit VenueSubmissionEnvelope provenance before SDK contact; R3 A2 consults RiskAllocator/PortfolioGovernor before command persistence or SDK contact. Live ENTRY/EXIT permits only GTC/GTD post-only maker submission because taker price improvement cannot be constrained to a two-sided actual-fill band; venue-reported fill prices are range-checked again before normal fill projection. Reduce-only SELL also rejects an out-of-band current executable best bid before command persistence even when its limit floor is legal. ENTRY carries exact executable-snapshot family identity into the unresolved exposure reservation so the next global auction prices the correct correlated endowment; this metadata is not a sibling-token veto.
     write_routes:
     - canonical_position_write
     downstream:
@@ -2026,7 +2028,7 @@ files:
   src/execution/exit_lifecycle.py:
     zone: K2_runtime
     authority_role: exit_lifecycle_runtime
-    why: Manages exit order lifecycle while preserving exit vs settlement split. Intentional partial-position reductions use exact order-bound venue fill quantities, reduce canonical exposure without manufacturing economic closure, and return the remaining claim to normal redecision. Generic no-order release defers terminal positive-fill EXIT remainders to command recovery so a monitor/restart race cannot clear pending_exit before the V3 durable reauction debt is written.
+    why: Manages exit order lifecycle while preserving exit vs settlement split. Exit liquidity admission and retry reset require both intent and executable-snapshot best bids inside the inclusive absolute price band; fill receipts are range-checked before economic projection, and an external open SELL is adopted only with explicit legal price plus GTC/GTD post-only proof while unproved matches are canceled. Intentional partial-position reductions use exact order-bound venue fill quantities, reduce canonical exposure without manufacturing economic closure, and return the remaining claim to normal redecision. Generic no-order release defers terminal positive-fill EXIT remainders to command recovery so a monitor/restart race cannot clear pending_exit before the V3 durable reauction debt is written.
     downstream:
     - src/engine/cycle_runtime.py
     - src/execution/harvester.py
@@ -2553,7 +2555,7 @@ files:
   src/state/venue_command_repo.py:
     zone: K2_runtime
     authority_role: venue_command_journal
-    why: Durable venue command/event journal; insert_command rejects order-creating BUY/SELL commands outside inclusive [0.05,0.95] before persistence while preserving CANCEL; every live nonterminal command records one exact decision-certificate attribution, with later position commands inheriting the unique entry certificate or failing closed; R3 Z4 terminal command transitions release collateral reservations atomically; authenticated already-canceled zero-fill clearance validates command-specific absence without confusing an older same-position fill for exposure from the canceled increment; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
+    why: Durable venue command/event journal; insert_command rejects order-creating BUY/SELL commands outside inclusive [0.05,0.95], and its in-memory envelope gate rejects any live shape other than GTC/GTD post-only maker before persistence while preserving CANCEL. Every live nonterminal command records one exact decision-certificate attribution, with later position commands inheriting the unique entry certificate or failing closed; R3 Z4 terminal command transitions release collateral reservations atomically; authenticated already-canceled zero-fill clearance validates command-specific absence without confusing an older same-position fill for exposure from the canceled increment; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
     write_routes:
     - venue_command_write
     downstream:

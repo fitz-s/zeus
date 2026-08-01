@@ -142,10 +142,24 @@ class VenueSubmissionEnvelope:
             )
 
     def assert_live_submit_bound(self) -> None:
-        """Fail closed unless a trade envelope is price-safe and market-bound."""
+        """Fail closed unless a trade envelope's limit is safe and market-bound."""
 
         assert_live_order_unit_price(self.price)
         self.assert_live_market_bound()
+
+    def assert_live_fill_price_bound(self) -> None:
+        """Require maker-only execution so actual fills cannot improve out of band."""
+
+        self.assert_live_submit_bound()
+        order_type = str(self.order_type or "").strip().upper()
+        if not self.post_only or order_type not in {"GTC", "GTD"}:
+            # INV-47 SCOPE: only this token/side order is rejected.
+            # DRAIN: the next decision may emit a certified GTC/GTD post-only order.
+            # RESET: no latch is stored; a maker-only envelope passes immediately.
+            raise ValueError(
+                "live fill price is unbounded for taker-capable order: "
+                f"order_type={order_type or 'ABSENT'}:post_only={self.post_only}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {

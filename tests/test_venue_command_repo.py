@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-31; last_reused=2026-07-31
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
 # Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S1
@@ -125,6 +125,78 @@ class TestAbsoluteLivePriceBand:
             "side": side,
             "price": pytest.approx(price),
         }
+
+    def test_taker_capable_envelope_rejects_before_command_persistence(self, conn):
+        from src.state.venue_command_repo import insert_command
+
+        envelope = _make_envelope(token_id="tok-taker").with_updates(post_only=False)
+        snapshot_id = _ensure_snapshot(conn, token_id="tok-taker")
+        _ensure_entry_certificate(
+            conn,
+            certificate_hash="cert-taker",
+            envelope=envelope,
+        )
+
+        with pytest.raises(ValueError, match="live fill price is unbounded"):
+            insert_command(
+                conn,
+                command_id="cmd-taker",
+                snapshot_id=snapshot_id,
+                envelope_id="env-taker",
+                submission_envelope=envelope,
+                position_id="pos-taker",
+                decision_id="dec-taker",
+                idempotency_key="idem-taker",
+                intent_kind="ENTRY",
+                market_id="mkt-taker",
+                token_id="tok-taker",
+                side="BUY",
+                size=10.0,
+                price=0.5,
+                created_at="2026-08-01T00:00:00Z",
+                decision_certificate_hash="cert-taker",
+            )
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id='cmd-taker'"
+        ).fetchone()[0] == 0
+
+    def test_persisted_taker_exit_envelope_rejects_before_command_persistence(
+        self, conn
+    ):
+        from src.state.venue_command_repo import (
+            insert_command,
+            insert_submission_envelope,
+        )
+
+        envelope = _make_envelope(
+            token_id="tok-exit-taker",
+            side="SELL",
+        ).with_updates(post_only=False)
+        insert_submission_envelope(conn, envelope, envelope_id="env-exit-taker")
+        snapshot_id = _ensure_snapshot(conn, token_id="tok-exit-taker")
+
+        with pytest.raises(ValueError, match="persisted taker-capable order"):
+            insert_command(
+                conn,
+                command_id="cmd-exit-taker",
+                snapshot_id=snapshot_id,
+                envelope_id="env-exit-taker",
+                position_id="pos-exit-taker",
+                decision_id="dec-exit-taker",
+                idempotency_key="idem-exit-taker",
+                intent_kind="EXIT",
+                market_id="mkt-exit-taker",
+                token_id="tok-exit-taker",
+                side="SELL",
+                size=10.0,
+                price=0.5,
+                created_at="2026-08-01T00:00:00Z",
+            )
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id='cmd-exit-taker'"
+        ).fetchone()[0] == 0
 
     @pytest.mark.parametrize(
         ("intent_kind", "side", "price"),
@@ -313,7 +385,7 @@ def _make_envelope(
         price=Decimal(str(price)),
         size=Decimal(str(size)),
         order_type="GTC",
-        post_only=False,
+        post_only=True,
         tick_size=Decimal("0.01"),
         min_order_size=Decimal("0.01"),
         neg_risk=False,
@@ -382,7 +454,7 @@ def _signed_envelope(*, order_id="0xorder", token_id="tok-001", side="BUY"):
         price=Decimal("0.5"),
         size=Decimal("10"),
         order_type="GTC",
-        post_only=False,
+        post_only=True,
         tick_size=Decimal("0.01"),
         min_order_size=Decimal("0.01"),
         neg_risk=False,

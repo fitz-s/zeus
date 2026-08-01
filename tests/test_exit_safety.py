@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-31
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-31; last_reused=2026-07-31
+# Last reused/audited: 2026-08-01
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -268,7 +268,7 @@ def _ensure_envelope(
             price=price_dec,
             size=size_dec,
             order_type="GTC",
-            post_only=False,
+            post_only=True,
             tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
             neg_risk=False,
@@ -5988,6 +5988,25 @@ def test_exit_liquidity_classification_uses_snapshot_bid_truth():
         )
         == ""
     )
+    above_band_intent = replace(
+        intent,
+        current_market_price=0.999,
+        best_bid=0.999,
+    )
+    assert (
+        _exit_sell_liquidity_error(
+            above_band_intent,
+            {"executable_snapshot_orderbook_top_bid": "0.95"},
+        )
+        == "exit_no_in_band_bid"
+    )
+    assert (
+        _exit_sell_liquidity_error(
+            in_band_intent,
+            {"executable_snapshot_orderbook_top_bid": "0.999"},
+        )
+        == "exit_no_in_band_bid"
+    )
 
 
 def test_live_exit_sub_floor_bid_waits_without_submit_or_retry_budget(conn, monkeypatch):
@@ -8895,7 +8914,7 @@ def test_execute_exit_adopts_active_prior_sell_without_new_submit(conn, monkeypa
         position_id="pos-active-exit",
         venue_order_id="ord-active-exit",
         size=9.7,
-        price=0.02,
+        price=0.50,
     )
     _ack_exit(conn, command_id="cmd-active-exit", venue_order_id="ord-active-exit")
 
@@ -8933,9 +8952,9 @@ def test_execute_exit_adopts_active_prior_sell_without_new_submit(conn, monkeypa
         pos,
         ExitContext(
             exit_reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
-            current_market_price=0.02,
+            current_market_price=0.50,
             current_market_price_is_fresh=True,
-            best_bid=0.019,
+            best_bid=0.49,
             position_state="active",
         ),
         clob=None,
@@ -8984,9 +9003,9 @@ def test_execute_exit_adopts_active_prior_sell_without_new_submit(conn, monkeypa
         pos,
         ExitContext(
             exit_reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
-            current_market_price=0.02,
+            current_market_price=0.50,
             current_market_price_is_fresh=True,
-            best_bid=0.019,
+            best_bid=0.49,
             position_state="active",
         ),
         clob=None,
@@ -9005,6 +9024,57 @@ def test_execute_exit_adopts_active_prior_sell_without_new_submit(conn, monkeypa
         (pos.trade_id, "ord-active-exit"),
     ).fetchone()[0]
     assert posted_count == 1
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        {"price": "0.023", "order_type": "GTC", "post_only": True},
+        {"price": "0.50", "order_type": "FAK", "post_only": False},
+        {"price": "0.50"},
+    ],
+)
+def test_unproved_venue_open_sell_is_canceled_not_adopted(order):
+    from src.execution.exit_lifecycle import _venue_open_exit_sell_order
+
+    class FakeClob:
+        def __init__(self):
+            self.canceled = []
+
+        def get_open_orders(self):
+            return [
+                {
+                    "id": "ord-unsafe-open-exit",
+                    "asset_id": YES_TOKEN,
+                    "side": "SELL",
+                    "status": "LIVE",
+                    "original_size": "9.7",
+                    "size_matched": "0",
+                    **order,
+                }
+            ]
+
+        def cancel_order(self, order_id):
+            self.canceled.append(order_id)
+            return {"canceled": [order_id]}
+
+    clob = FakeClob()
+
+    unsafe = _venue_open_exit_sell_order(
+        clob,
+        token_id=YES_TOKEN,
+        expected_shares=9.7,
+    )
+    assert unsafe["unsafe_open_exit_order"] is True
+    assert unsafe["venue_order_id"] == "ord-unsafe-open-exit"
+    assert clob.canceled == ["ord-unsafe-open-exit"]
+
+
+@pytest.mark.parametrize("price", ["0.049", "0.951", "0.999"])
+def test_exit_fill_receipt_rejects_out_of_band_price(price):
+    from src.execution.exit_lifecycle import _extract_fill_price
+
+    assert _extract_fill_price({"avgPrice": price}) is None
 
 
 def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn, monkeypatch):
@@ -9044,7 +9114,9 @@ def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn
                     "asset_id": YES_TOKEN,
                     "side": "SELL",
                     "status": "LIVE",
-                    "price": "0.023",
+                    "price": "0.50",
+                    "order_type": "GTC",
+                    "post_only": True,
                     "original_size": "9.7",
                     "size_matched": "0",
                 }
@@ -9063,9 +9135,9 @@ def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn
         pos,
         ExitContext(
             exit_reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
-            current_market_price=0.02,
+            current_market_price=0.50,
             current_market_price_is_fresh=True,
-            best_bid=0.019,
+            best_bid=0.49,
             position_state="active",
         ),
         clob=FakeClob(),
@@ -9087,7 +9159,7 @@ def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn
     assert command["command_id"].startswith("adopted_exit_")
     assert command["state"] == "ACKED"
     assert command["venue_order_id"] == "ord-venue-open-exit"
-    assert command["price"] == 0.023
+    assert command["price"] == 0.50
     assert command["size"] == 9.7
     assert command["review_required_reason"] == "adopted_from_clob_open_orders;venue_state=LIVE"
     current = conn.execute(

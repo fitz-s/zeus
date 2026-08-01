@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-29
+# Last reused/audited: 2026-08-01
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
@@ -2483,7 +2483,7 @@ def test_order_manager_not_ready_425_is_deterministic_rejection(
     envelope = adapter.create_submission_envelope(
         _intent(),
         FakeSnapshot(),
-        order_type="FAK",
+        order_type="GTC",
     )
     monkeypatch.setattr(
         adapter_mod,
@@ -2534,7 +2534,7 @@ def test_other_425_response_remains_ambiguous(tmp_path, monkeypatch):
     envelope = adapter.create_submission_envelope(
         _intent(),
         FakeSnapshot(),
-        order_type="FAK",
+        order_type="GTC",
     )
     monkeypatch.setattr(
         adapter_mod,
@@ -2582,7 +2582,7 @@ def test_runtime_error_cannot_impersonate_order_manager_425(
     envelope = adapter.create_submission_envelope(
         _intent(),
         FakeSnapshot(),
-        order_type="FAK",
+        order_type="GTC",
     )
     monkeypatch.setattr(
         adapter_mod,
@@ -2821,7 +2821,7 @@ def test_geoblock_403_is_definitive_rejection_without_venue_identity(
     fake = FakeGeoblockClient()
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(
-        _intent(), FakeSnapshot(), order_type="FAK"
+        _intent(), FakeSnapshot(), order_type="GTC"
     )
     monkeypatch.setattr(
         adapter_mod,
@@ -2840,105 +2840,85 @@ def test_geoblock_403_is_definitive_rejection_without_venue_identity(
     assert any(call[0] == "post_order" for call in fake.calls)
 
 
-def test_fok_killed_400_is_definitive_rejection(tmp_path, monkeypatch):
+def test_fok_killed_400_classifier_remains_available_for_recovery():
     import src.venue.polymarket_v2_adapter as adapter_mod
 
     fake = FakeFokKilledClient()
-    adapter, _ = _adapter(tmp_path, fake)
-    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
-    monkeypatch.setattr(
-        adapter_mod,
-        "_deterministic_v2_order_id",
-        lambda *args, **kwargs: "0xexpected-order-id",
-    )
+    with pytest.raises(RuntimeError) as caught:
+        fake.post_order(fake.signed_order, order_type="FOK")
 
-    result = _submit(adapter, envelope)
-
-    assert result.status == "rejected"
-    assert result.error_code == "venue_fok_not_fully_filled_400"
-    assert result.envelope.order_id == "0xexpected-order-id"
-    assert result.envelope.signed_order == fake.signed_order
+    assert adapter_mod._is_polymarket_fok_killed_error(caught.value)
 
 
-def test_fak_no_match_400_is_definitive_zero_fill_rejection(tmp_path, monkeypatch):
+def test_fak_no_match_400_classifier_remains_available_for_recovery():
     import src.venue.polymarket_v2_adapter as adapter_mod
 
     fake = FakeFakNoMatchClient()
+    with pytest.raises(RuntimeError) as caught:
+        fake.post_order(fake.signed_order, order_type="FAK")
+
+    assert adapter_mod._is_polymarket_fak_no_match_error(caught.value)
+
+
+@pytest.mark.parametrize("order_type", ["FAK", "FOK"])
+def test_taker_capable_order_rejects_before_signing_or_post(tmp_path, order_type):
+    fake = FakeTwoStepClient()
     adapter, _ = _adapter(tmp_path, fake)
-    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FAK")
-    monkeypatch.setattr(
-        adapter_mod,
-        "_deterministic_v2_order_id",
-        lambda *args, **kwargs: "0xexpected-order-id",
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type=order_type, post_only=False
     )
 
     result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
-    assert result.error_code == "venue_fak_no_match_400"
-    assert result.envelope.order_id == "0xexpected-order-id"
-    assert result.envelope.signed_order == fake.signed_order
-
-    from src.data.polymarket_client import _legacy_order_result_from_submit
-
-    payload = _legacy_order_result_from_submit(result)
-    assert payload["success"] is False
-    assert payload["errorCode"] == "venue_fak_no_match_400"
+    assert result.error_code == "LIVE_FILL_PRICE_UNBOUNDED"
+    assert f"order_type={order_type}:post_only=False" in (result.error_message or "")
+    assert fake.calls == []
 
 
-def test_fok_rechecks_full_depth_after_signing_immediately_before_post(tmp_path, monkeypatch):
+def test_final_sdk_boundary_independently_rejects_non_maker_before_post(
+    tmp_path, monkeypatch
+):
     import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 
-    fake = FakeTwoStepClient(post_response={"orderID": "0xexpected", "status": "LIVE"})
+    fake = FakeTwoStepClient()
     adapter, _ = _adapter(tmp_path, fake)
-    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
-    monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: "0xexpected")
-
-    result = _submit(adapter, envelope)
-
-    names = [call[0] for call in fake.calls]
-    assert result.status == "accepted"
-    assert names.index("create_order") < names.index("get_order_book") < names.index("post_order")
-
-
-def test_fok_depth_loss_after_signing_rejects_without_post(tmp_path, monkeypatch):
-    import src.venue.polymarket_v2_adapter as adapter_mod
-
-    class ThinFinalBookClient(FakeTwoStepClient):
-        def get_order_book(self, token_id):
-            self.calls.append(("get_order_book", token_id))
-            return {
-                "asset_id": token_id,
-                "bids": [{"price": "0.49", "size": "100"}],
-                "asks": [{"price": "0.50", "size": "19.99"}],
-            }
-
-    fake = ThinFinalBookClient()
-    adapter, _ = _adapter(tmp_path, fake)
-    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
-    monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: "0xexpected")
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC", post_only=False
+    )
+    monkeypatch.setattr(
+        VenueSubmissionEnvelope,
+        "assert_live_fill_price_bound",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected",
+    )
 
     result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
-    assert result.error_code == "SUBMIT_ABORTED_PRICE_MOVED"
-    assert "FOK_FINAL_DEPTH_INSUFFICIENT" in (result.error_message or "")
-    assert result.envelope.signed_order == fake.signed_order
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "LIVE_FILL_PRICE_UNBOUNDED:FINAL_SDK_BOUNDARY" in (result.error_message or "")
+    assert any(call[0] == "create_order" for call in fake.calls)
     assert not any(call[0] == "post_order" for call in fake.calls)
 
 
 def test_fok_one_step_only_client_fails_closed_before_submit(tmp_path):
     fake = FakeOneStepClient()
     adapter, _ = _adapter(tmp_path, fake)
-    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="FOK", post_only=False
+    )
 
     result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
-    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
-    assert "pre-POST signed identity persistence requires two-step SDK submit" in (
-        result.error_message or ""
-    )
+    assert result.error_code == "LIVE_FILL_PRICE_UNBOUNDED"
+    assert "order_type=FOK:post_only=False" in (result.error_message or "")
     assert not any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
@@ -3013,7 +2993,11 @@ def test_invalid_safe_signature_is_deterministic_rejection_not_l2_credential_ret
     assert result.status == "rejected"
     assert result.error_code == "venue_auth_invalid_signature_400"
     assert "invalid POLY_GNOSIS_SAFE signature" in (result.error_message or "")
-    assert [call[0] for call in fake.calls] == ["get_ok", "create_order", "post_order"]
+    assert [call[0] for call in fake.calls] == [
+        "get_ok",
+        "create_order",
+        "post_order",
+    ]
     assert adapter_mod._cached_derived_api_creds(
         host="https://clob-v2.polymarket.com",
         chain_id=137,
@@ -3040,7 +3024,11 @@ def test_two_step_invalid_safe_signature_preserves_signed_order_hash(tmp_path, m
     assert result.error_code == "venue_auth_invalid_signature_400"
     assert result.envelope.signed_order == signed
     assert result.envelope.signed_order_hash == hashlib.sha256(signed).hexdigest()
-    assert [call[0] for call in fake.calls] == ["get_ok", "create_order", "post_order"]
+    assert [call[0] for call in fake.calls] == [
+        "get_ok",
+        "create_order",
+        "post_order",
+    ]
 
 
 def test_create_submission_envelope_captures_all_provenance_fields(tmp_path):
@@ -4096,7 +4084,7 @@ def _priced_intent(price: float) -> ExecutionIntent:
     return replace(_intent(), limit_price=price)
 
 
-def _batch_envelopes(adapter, n: int, *, post_only: bool = False):
+def _batch_envelopes(adapter, n: int, *, post_only: bool = True):
     # FakeSnapshot's yes_token_id is fixed ("yes-token"); vary limit_price
     # per order instead of token_id so create_submission_envelope's
     # assert_live_submit_bound (selected_outcome_token_id must equal the
@@ -4219,7 +4207,7 @@ class TestSubmitBatch:
         assert len(results) == 3
         assert all(r.status == "unmapped" for r in results)
 
-    def test_mixed_post_only_rejects_whole_batch_before_signing(self, tmp_path):
+    def test_non_post_only_rejects_whole_batch_before_signing(self, tmp_path):
         fake = FakeBatchTwoStepClient()
         adapter, _ = _adapter(tmp_path, fake)
         mixed = [
@@ -4229,7 +4217,7 @@ class TestSubmitBatch:
 
         results = adapter.submit_batch(mixed)
 
-        assert all(r.status == "rejected" and r.error_code == "BATCH_POST_ONLY_MISMATCH" for r in results)
+        assert all(r.status == "rejected" and r.error_code == "LIVE_FILL_PRICE_UNBOUNDED" for r in results)
         assert not any(c[0] == "create_order" for c in fake.calls)
 
     def test_signing_failure_for_any_envelope_rejects_whole_batch_before_network(self, tmp_path):
@@ -4242,22 +4230,22 @@ class TestSubmitBatch:
         assert all(r.status == "rejected" and r.error_code == "V2_PRE_SUBMIT_EXCEPTION" for r in results)
         assert not any(c[0] == "post_orders" for c in fake.calls)
 
-    def test_fok_batch_checks_depth_after_all_signing_before_post(self, tmp_path):
+    def test_fok_batch_rejects_before_signing_or_post(self, tmp_path):
         fake = FakeBatchTwoStepClient(
             post_orders_response=[{"orderID": "ord-0", "status": "LIVE"}]
         )
         adapter, _ = _adapter(tmp_path, fake)
         envelope = adapter.create_submission_envelope(
-            _priced_intent(0.50), FakeSnapshot(), order_type="FOK"
+            _priced_intent(0.50), FakeSnapshot(), order_type="FOK", post_only=False
         )
 
         results = adapter.submit_batch([envelope])
 
-        names = [call[0] for call in fake.calls]
-        assert results[0].status == "accepted"
-        assert names.index("create_order") < names.index("get_order_book") < names.index("post_orders")
+        assert results[0].status == "rejected"
+        assert results[0].error_code == "LIVE_FILL_PRICE_UNBOUNDED"
+        assert fake.calls == []
 
-    def test_fok_batch_depth_loss_rejects_whole_batch_without_post(self, tmp_path):
+    def test_fok_batch_rejects_without_book_or_post(self, tmp_path):
         class ThinBatchClient(FakeBatchTwoStepClient):
             def get_order_book(self, token_id):
                 self.calls.append(("get_order_book", token_id))
@@ -4270,15 +4258,14 @@ class TestSubmitBatch:
         fake = ThinBatchClient()
         adapter, _ = _adapter(tmp_path, fake)
         envelope = adapter.create_submission_envelope(
-            _priced_intent(0.50), FakeSnapshot(), order_type="FOK"
+            _priced_intent(0.50), FakeSnapshot(), order_type="FOK", post_only=False
         )
 
         results = adapter.submit_batch([envelope])
 
         assert results[0].status == "rejected"
-        assert results[0].error_code == "SUBMIT_ABORTED_PRICE_MOVED"
-        assert "FOK_FINAL_DEPTH_INSUFFICIENT" in (results[0].error_message or "")
-        assert not any(call[0] == "post_orders" for call in fake.calls)
+        assert results[0].error_code == "LIVE_FILL_PRICE_UNBOUNDED"
+        assert fake.calls == []
 
     def test_post_orders_exception_propagates_as_ambiguous_side_effect(self, tmp_path):
         fake = FakePostOrdersExceptionClient()

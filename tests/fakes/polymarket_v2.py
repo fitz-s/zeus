@@ -200,7 +200,7 @@ class FakePolymarketVenue:
         intent: Any,
         snapshot: Any,
         order_type: str,
-        post_only: bool = False,
+        post_only: bool = True,
     ) -> VenueSubmissionEnvelope:
         return self._envelope_adapter.create_submission_envelope(intent, snapshot, order_type, post_only)
 

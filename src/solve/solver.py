@@ -122,19 +122,19 @@ def _live_unit_price_in_band(value: Decimal) -> bool:
 
 
 def _live_sell_limit_price(
+    best_bid: Decimal,
     deepest_bid: Decimal,
     min_tick: Decimal,
 ) -> Decimal | None:
-    """Return a legal SELL floor without discarding better executable bids."""
+    """Return a legal SELL floor only when every crossing bid is in band."""
 
     if (
-        not deepest_bid.is_finite()
-        or deepest_bid < LIVE_ORDER_MIN_UNIT_PRICE
+        not _live_unit_price_in_band(best_bid)
+        or not _live_unit_price_in_band(deepest_bid)
     ):
         return None
-    capped = min(deepest_bid, LIVE_ORDER_MAX_UNIT_PRICE)
     aligned = (
-        capped / min_tick
+        deepest_bid / min_tick
     ).to_integral_value(rounding=ROUND_FLOOR) * min_tick
     return aligned if aligned >= LIVE_ORDER_MIN_UNIT_PRICE else None
 
@@ -5335,7 +5335,11 @@ def _score_global_single_order_sell(
     price_band_rejected = False
     for shares in sorted(venue_probes):
         proceeds, expected_fill_price, deepest_bid = curve.proceeds_for_shares(shares)
-        limit_price = _live_sell_limit_price(deepest_bid, curve.min_tick)
+        limit_price = _live_sell_limit_price(
+            curve.levels[0].price,
+            deepest_bid,
+            curve.min_tick,
+        )
         if limit_price is None:
             price_band_rejected = True
             continue

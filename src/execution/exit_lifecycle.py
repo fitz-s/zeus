@@ -43,7 +43,10 @@ from src.execution.executor import (
     _exit_execution_authority_deadline_error,
     _refresh_exit_collateral_snapshot_for_submit,  # noqa: F401
 )
-from src.contracts.venue_submission_envelope import LIVE_ORDER_MIN_UNIT_PRICE
+from src.contracts.venue_submission_envelope import (
+    LIVE_ORDER_MAX_UNIT_PRICE,
+    LIVE_ORDER_MIN_UNIT_PRICE,
+)
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     enter_pending_exit_runtime_state,
@@ -375,7 +378,7 @@ def _pending_exit_status_budget_seconds() -> float:
         return DEFAULT_PENDING_EXIT_STATUS_BUDGET_SECONDS
 
 
-def _is_sub_floor_exit_price_error(error: object) -> bool:
+def _is_out_of_band_exit_price_error(error: object) -> bool:
     text = str(error or "")
     if "absolute inclusive [0.05, 0.95]" not in text:
         return False
@@ -383,13 +386,14 @@ def _is_sub_floor_exit_price_error(error: object) -> bool:
     if match is None:
         return False
     try:
-        return Decimal(match.group(1)) < LIVE_ORDER_MIN_UNIT_PRICE
+        price = Decimal(match.group(1))
+        return not LIVE_ORDER_MIN_UNIT_PRICE <= price <= LIVE_ORDER_MAX_UNIT_PRICE
     except InvalidOperation:
         return False
 
 
 def _is_exit_liquidity_wait_error(error: object) -> bool:
-    return str(error or "") in _EXIT_LIQUIDITY_WAIT_ERRORS or _is_sub_floor_exit_price_error(error)
+    return str(error or "") in _EXIT_LIQUIDITY_WAIT_ERRORS or _is_out_of_band_exit_price_error(error)
 
 
 def _pending_exit_scan_candidate(position: Position) -> bool:
@@ -822,13 +826,64 @@ def _venue_open_exit_sell_order(
         remaining = _venue_open_order_remaining_size(payload)
         if remaining is None or remaining <= 0 or remaining > expected + tolerance:
             continue
+        price = _positive_decimal(
+            _payload_first(payload, "price", "limit_price")
+        )
+        order_type = str(
+            _payload_first(payload, "order_type", "orderType", "type") or ""
+        ).strip().upper()
+        post_only = _payload_first(payload, "post_only", "postOnly") is True
+        if (
+            price is None
+            or not LIVE_ORDER_MIN_UNIT_PRICE <= price <= LIVE_ORDER_MAX_UNIT_PRICE
+            or order_type not in {"GTC", "GTD"}
+            or not post_only
+        ):
+            # INV-47 SCOPE: only this matching token's unproved open SELL is
+            # canceled. DRAIN: authenticated cancel acknowledgment/chain
+            # recovery clears it. RESET: a later proved maker order is eligible.
+            cancel_order = getattr(clob, "cancel_order", None)
+            if callable(cancel_order):
+                try:
+                    cancel_order(order_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.critical(
+                        "UNSAFE_OPEN_EXIT_CANCEL_FAILED token=%s order=%s: %s",
+                        token_id,
+                        order_id,
+                        exc,
+                    )
+                else:
+                    logger.error(
+                        "UNSAFE_OPEN_EXIT_CANCELED token=%s order=%s price=%s "
+                        "order_type=%s post_only=%s",
+                        token_id,
+                        order_id,
+                        price,
+                        order_type or "ABSENT",
+                        post_only,
+                    )
+            else:
+                logger.critical(
+                    "UNSAFE_OPEN_EXIT_CANCEL_UNAVAILABLE token=%s order=%s",
+                    token_id,
+                    order_id,
+                )
+            return {
+                "unsafe_open_exit_order": True,
+                "command_id": "unsafe_venue_open_order",
+                "state": status or "LIVE",
+                "venue_order_id": order_id,
+                "price": str(price or ""),
+                "size": str(remaining),
+            }
         return {
             "command_id": "venue_open_order",
             "state": status or "LIVE",
             "venue_order_id": order_id,
             "updated_at": _payload_first(payload, "updated_at", "updatedAt") or "",
             "created_at": _payload_first(payload, "created_at", "createdAt") or "",
-            "price": _payload_first(payload, "price", "limit_price") or "",
+            "price": str(price),
             "size": str(remaining),
         }
     return None
@@ -847,17 +902,31 @@ def _active_exit_sell_command(
     try:
         return conn.execute(
             f"""
-            SELECT command_id, state, venue_order_id, updated_at, created_at
-              FROM venue_commands
-             WHERE position_id = ?
-               AND token_id = ?
-               AND side = 'SELL'
-               AND intent_kind = 'EXIT'
-               AND UPPER(COALESCE(state, '')) IN ({placeholders})
-             ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, command_id DESC
+            SELECT command.command_id, command.state, command.venue_order_id,
+                   command.updated_at, command.created_at
+              FROM venue_commands AS command
+              JOIN venue_submission_envelopes AS envelope
+                ON envelope.envelope_id = command.envelope_id
+               AND envelope.post_only = 1
+               AND UPPER(envelope.order_type) IN ('GTC', 'GTD')
+               AND envelope.price BETWEEN ? AND ?
+             WHERE command.position_id = ?
+               AND command.token_id = ?
+               AND command.side = 'SELL'
+               AND command.intent_kind = 'EXIT'
+               AND UPPER(COALESCE(command.state, '')) IN ({placeholders})
+             ORDER BY datetime(command.updated_at) DESC,
+                      datetime(command.created_at) DESC,
+                      command.command_id DESC
              LIMIT 1
             """,
-            (position_id, token_id, *states),
+            (
+                str(LIVE_ORDER_MIN_UNIT_PRICE),
+                str(LIVE_ORDER_MAX_UNIT_PRICE),
+                position_id,
+                token_id,
+                *states,
+            ),
         ).fetchone()
     except sqlite3.Error:
         return None
@@ -883,6 +952,10 @@ def _active_exit_sell_for_lock(
         token_id=token_id,
         expected_shares=float(getattr(position, "effective_shares", 0.0) or 0.0),
     )
+
+
+def _unsafe_open_exit_cancel_pending(row: object) -> bool:
+    return isinstance(row, Mapping) and row.get("unsafe_open_exit_order") is True
 
 
 def _active_exit_already_projected(
@@ -3831,9 +3904,14 @@ def _exit_sell_liquidity_error(
     if best_bid is None or snapshot_bid is None:
         return "exit_no_executable_bid"
     if (
-        best_bid < LIVE_ORDER_MIN_UNIT_PRICE
-        or snapshot_bid < LIVE_ORDER_MIN_UNIT_PRICE
+        not LIVE_ORDER_MIN_UNIT_PRICE <= best_bid <= LIVE_ORDER_MAX_UNIT_PRICE
+        or not LIVE_ORDER_MIN_UNIT_PRICE
+        <= snapshot_bid
+        <= LIVE_ORDER_MAX_UNIT_PRICE
     ):
+        # INV-47 SCOPE: only this token's SELL attempt is held for liquidity.
+        # DRAIN: the next monitor refresh captures a new executable snapshot.
+        # RESET: no latch is stored; matching in-band bids return an empty error.
         return "exit_no_in_band_bid"
     return ""
 
@@ -4138,6 +4216,8 @@ def _execute_live_exit(
             clob=clob,
         )
         if active_exit is not None:
+            if _unsafe_open_exit_cancel_pending(active_exit):
+                return "exit_blocked: unsafe_open_exit_cancel_pending"
             return _adopt_active_exit_sell(
                 position,
                 active_exit,
@@ -4563,6 +4643,8 @@ def _execute_live_exit(
                     clob=clob,
                 )
                 if active_exit is not None:
+                    if _unsafe_open_exit_cancel_pending(active_exit):
+                        return "exit_blocked: unsafe_open_exit_cancel_pending"
                     return _adopt_active_exit_sell(
                         position,
                         active_exit,
@@ -7136,7 +7218,7 @@ def check_pending_retries(
     )
 
     if position.exit_state == "backoff_exhausted":
-        if not _is_sub_floor_exit_price_error(previous_error):
+        if not _is_out_of_band_exit_price_error(previous_error):
             return False
         _mark_exit_retry(
             position,
@@ -7210,7 +7292,12 @@ def check_pending_retries(
         snapshot_bid = _positive_decimal(
             snapshot.get("executable_snapshot_orderbook_top_bid")
         )
-        if snapshot_bid is None or snapshot_bid < LIVE_ORDER_MIN_UNIT_PRICE:
+        if (
+            snapshot_bid is None
+            or not LIVE_ORDER_MIN_UNIT_PRICE
+            <= snapshot_bid
+            <= LIVE_ORDER_MAX_UNIT_PRICE
+        ):
             return False
 
     # Cooldown expired — position is eligible for exit re-evaluation.
@@ -7566,7 +7653,12 @@ def _pending_exit_no_order_waits_for_liquidity(
     snapshot_bid = _positive_decimal(
         snapshot.get("executable_snapshot_orderbook_top_bid")
     )
-    return snapshot_bid is None or snapshot_bid < LIVE_ORDER_MIN_UNIT_PRICE
+    return (
+        snapshot_bid is None
+        or not LIVE_ORDER_MIN_UNIT_PRICE
+        <= snapshot_bid
+        <= LIVE_ORDER_MAX_UNIT_PRICE
+    )
 
 
 def _check_order_fill(clob, order_id: str) -> tuple[str, object]:
@@ -7667,7 +7759,16 @@ def _positive_finite_float(value: object) -> Optional[float]:
         numeric = float(value)
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(numeric) or numeric <= 0.0 or numeric > 1.0:
+    if (
+        not math.isfinite(numeric)
+        or numeric < float(LIVE_ORDER_MIN_UNIT_PRICE)
+        or numeric > float(LIVE_ORDER_MAX_UNIT_PRICE)
+    ):
+        if math.isfinite(numeric) and numeric > 0.0:
+            logger.critical(
+                "LIVE_FILL_PRICE_OUT_OF_BOUNDS_RECEIPT price=%s; suppressing normal fill projection",
+                numeric,
+            )
         return None
     return numeric
 
@@ -7740,7 +7841,12 @@ def _pending_exit_reprice_reason(
 
     if not math.isfinite(resting_price) or resting_price <= 0.0:
         return ""
-    if best_bid is None or best_bid < float(LIVE_ORDER_MIN_UNIT_PRICE):
+    if (
+        best_bid is None
+        or not float(LIVE_ORDER_MIN_UNIT_PRICE)
+        <= best_bid
+        <= float(LIVE_ORDER_MAX_UNIT_PRICE)
+    ):
         return ""
     min_move = max(float(min_tick) * PENDING_EXIT_REPRICE_MIN_TICKS, 0.001)
     if best_bid is not None and resting_price - float(best_bid) >= min_move:
@@ -8053,7 +8159,7 @@ def _mark_exit_retry(
 
     if _is_exit_liquidity_wait_error(error):
         normalized_error = (
-            "exit_no_in_band_bid" if _is_sub_floor_exit_price_error(error) else error
+            "exit_no_in_band_bid" if _is_out_of_band_exit_price_error(error) else error
         )
         position.last_exit_error = normalized_error
         position.exit_state = "retry_pending"

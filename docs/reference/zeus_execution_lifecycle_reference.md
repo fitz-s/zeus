@@ -541,12 +541,23 @@ These are separate truth surfaces that should not be conflated.
 
 Live venue submission adds cumulative order-price contracts: every BUY/SELL,
 entry/exit, single/batch order must have a finite unit price inside inclusive
-`[0.05, 0.95]`, and it must also be tick-aligned and in-range for the current
-executable snapshot. `VenueSubmissionEnvelope.assert_live_submit_bound()`
-enforces the band, command persistence rejects it earlier, and the adapter
-independently rechecks it immediately before SDK contact. Tick legality, minimum
-size, identity, tradeability, fees/depth, and economic proof remain additional
-requirements and cannot waive the band (INV-43).
+`[0.05, 0.95]`. A SELL limit is only a floor and a BUY limit is only a ceiling,
+so a legal taker limit cannot constrain favorable price improvement to the same
+two-sided band. Clamping `0.999` to a legal `0.95` SELL floor is therefore
+forbidden. Live orders must use GTC/GTD post-only maker semantics; FAK/FOK and
+non-post-only orders fail closed before command persistence. The order must also
+be tick-aligned and in-range for the current executable snapshot.
+`VenueSubmissionEnvelope.assert_live_fill_price_bound()` enforces this contract,
+command persistence repeats it, and the adapter independently checks the legal
+limit plus maker-only shape immediately before the SDK POST. Tick legality,
+minimum size, identity, tradeability, fees/depth, and economic proof remain
+additional requirements and cannot waive the band (INV-43).
+
+Venue-reported fill prices are independently range-checked before normal fill or
+economic-close projection. An out-of-band receipt is retained as abnormal venue
+truth but cannot become ordinary lifecycle economics. Likewise, an open SELL may
+be adopted as an existing exit only when its price, GTC/GTD type, and post-only
+flag are all explicit and legal; an unproved matching open order is canceled.
 
 Same-family exposure is portfolio endowment, not an entry prohibition. Before
 ranking a sibling-bin BUY, the global auction projects every current

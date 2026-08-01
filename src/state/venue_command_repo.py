@@ -1471,7 +1471,8 @@ def _assert_envelope_gate(
             row = conn.execute(
                 """
                 SELECT selected_outcome_token_id, side, price, size,
-                       condition_id, question_id, yes_token_id, no_token_id
+                       order_type, post_only, condition_id, question_id,
+                       yes_token_id, no_token_id
                 FROM venue_submission_envelopes
                 WHERE envelope_id = ?
                 """,
@@ -1491,6 +1492,15 @@ def _assert_envelope_gate(
         raise ValueError("venue command price does not match provenance envelope price")
     if _decimal(row["size"]) != _decimal(size):
         raise ValueError("venue command size does not match provenance envelope size")
+    order_type = str(row["order_type"] or "").strip().upper()
+    if not bool(row["post_only"]) or order_type not in {"GTC", "GTD"}:
+        # INV-47 SCOPE: only this token/side command is rejected.
+        # DRAIN: the next decision may persist a certified maker-only envelope.
+        # RESET: no latch is stored; legal GTC/GTD post-only passes immediately.
+        raise ValueError(
+            "live fill price is unbounded for persisted taker-capable order: "
+            f"order_type={order_type or 'ABSENT'}:post_only={bool(row['post_only'])}"
+        )
     if isinstance(snapshot_id, str) and snapshot_id.strip():
         with _row_factory_as(conn, sqlite3.Row):
             snapshot_row = conn.execute(
@@ -1524,7 +1534,7 @@ def _assert_in_memory_envelope_gate(
 
     if not isinstance(envelope, VenueSubmissionEnvelope):
         raise TypeError("submission_envelope must be a VenueSubmissionEnvelope")
-    envelope.assert_live_submit_bound()
+    envelope.assert_live_fill_price_bound()
     if envelope.selected_outcome_token_id != str(token_id):
         raise ValueError(
             "venue command token_id does not match in-memory envelope selected token"

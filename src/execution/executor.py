@@ -3108,18 +3108,33 @@ def _venue_submit_fill_price(
     response_contract = _first_submit_value(result, "_venue_response_contract")
     if response_contract == "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS":
         value = _first_submit_value(result, "_v2_fill_price")
-        return str(value) if _positive_decimal_or_none(value) is not None else None
+        return _live_fill_price_text_or_none(value)
     making = _positive_decimal_or_none(_first_submit_value(result, "makingAmount", "making_amount"))
     taking = _positive_decimal_or_none(_first_submit_value(result, "takingAmount", "taking_amount"))
     if making is not None and taking is not None:
         if _venue_submit_side(result, side=side) == "SELL":
-            return _decimal_text(taking / making)
-        return _decimal_text(making / taking)
+            return _live_fill_price_text_or_none(taking / making)
+        return _live_fill_price_text_or_none(making / taking)
     for key in ("avgPrice", "avg_price", "fillPrice", "fill_price", "price"):
         value = _first_submit_value(result, key)
-        if _positive_decimal_or_none(value) is not None:
-            return str(value)
+        bounded = _live_fill_price_text_or_none(value)
+        if bounded is not None:
+            return bounded
     return None
+
+
+def _live_fill_price_text_or_none(value: object) -> str | None:
+    price = _positive_decimal_or_none(value)
+    if price is None:
+        return None
+    try:
+        return _decimal_text(assert_live_order_unit_price(price))
+    except ValueError:
+        logger.critical(
+            "LIVE_FILL_PRICE_OUT_OF_BOUNDS_RECEIPT price=%s; suppressing normal fill projection",
+            price,
+        )
+        return None
 
 
 def _venue_fill_covers_submit(matched_size: str, submitted_size: float | Decimal) -> bool:
@@ -4388,7 +4403,7 @@ def _build_pre_submit_envelope(
     if normalized_intent_kind == "CANCEL":
         envelope.assert_live_market_bound()
     elif normalized_intent_kind in {"ENTRY", "EXIT", "DERISK"}:
-        envelope.assert_live_submit_bound()
+        envelope.assert_live_fill_price_bound()
     else:
         raise ValueError(
             f"intent_kind={intent_kind!r} has no submission-envelope price classification"
@@ -6121,6 +6136,21 @@ def execute_exit_order(
             intent_id=intent.intent_id,
             idempotency_key=intent.idempotency_key,
         )
+    if best_bid is not None:
+        try:
+            assert_live_order_unit_price(best_bid)
+        except ValueError as exc:
+            # INV-47 SCOPE: only this token's SELL submission is rejected.
+            # DRAIN: the next monitor/JIT pass supplies a fresh best bid.
+            # RESET: no latch is stored; an in-band fresh bid passes normally.
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"live_order_executable_price_out_of_bounds: {exc}",
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=intent.idempotency_key,
+            )
     try:
         aligned_limit_price = _align_sell_limit_price_to_tick(
             limit_price,
@@ -6244,9 +6274,10 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
-        # Exit is IOC, never all-or-nothing: coerce a TAKER FOK selection to FAK
-        # so a thin/dying book realizes a partial exit instead of killing the
-        # whole sell (live 2026-06-24: Houston FOK rejects, market 0.356->0.076).
+        # Legacy exit selection may still propose FAK/FOK. The absolute actual-
+        # fill band has no taker exception: a SELL limit is only a floor and a
+        # taker can receive price improvement above 0.95. Only GTC/GTD post-only
+        # can bind the actual fill price on both sides of the legal interval.
         selected_order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
         try:
             order_type = _resolve_exit_order_type(
@@ -6258,6 +6289,23 @@ def execute_exit_order(
                 trade_id=intent.trade_id,
                 status="rejected",
                 reason=str(exc),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
+        if order_type not in {"GTC", "GTD"}:
+            # INV-47 SCOPE: only this token's taker-capable SELL is rejected.
+            # DRAIN: the next redecision may emit a maker-only GTC/GTD exit.
+            # RESET: no latch is stored; a post-only exit passes this gate.
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=(
+                    "live_fill_price_unbounded_taker_order:"
+                    f"order_type={order_type}:post_only=False"
+                ),
                 submitted_price=limit_price,
                 shares=shares,
                 order_role="exit",
@@ -6467,7 +6515,7 @@ def execute_exit_order(
                     price=limit_price,
                     size=shares,
                     order_type=order_type,
-                    post_only=False,
+                    post_only=True,
                     captured_at=now_str,
                 )
                 envelope_id = _persist_prebuilt_submit_envelope(
@@ -7545,6 +7593,24 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
+            )
+        if not submit_post_only:
+            # INV-47 SCOPE: only this token's taker-capable BUY is rejected.
+            # DRAIN: the next redecision may emit a maker-only GTC/GTD entry.
+            # RESET: no latch is stored; a post-only entry passes this gate.
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=(
+                    "live_fill_price_unbounded_taker_order:"
+                    f"order_type={effective_order_type}:post_only=False"
+                ),
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_id=command_id,
+                command_state="REJECTED",
             )
         taker_quality_component = _entry_taker_quality_component(
             effective_order_type=effective_order_type,

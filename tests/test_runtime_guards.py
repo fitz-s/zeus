@@ -14595,11 +14595,19 @@ def test_check_pending_exits_releases_loaded_pre_exit_state_bare_exit_intent_wit
     "error",
     ["exit_no_executable_bid", "exit_no_in_band_bid"],
 )
+@pytest.mark.parametrize(
+    ("blocked_bid", "blocked_ask"),
+    [("0.049", "0.051"), ("0.999", "1.0")],
+)
 def test_check_pending_exits_keeps_no_order_liquidity_rejection_pending_until_fresh_in_band_bid(
     tmp_path,
     error,
+    blocked_bid,
+    blocked_ask,
 ):
-    conn = get_connection(tmp_path / f"pending-exit-liquidity-wait-{error}.db")
+    conn = get_connection(
+        tmp_path / f"pending-exit-liquidity-wait-{error}-{blocked_bid}.db"
+    )
     init_schema(conn)
     init_schema_trade_only(conn)
     now = datetime.now(timezone.utc)
@@ -14612,12 +14620,12 @@ def test_check_pending_exits_keeps_no_order_liquidity_rejection_pending_until_fr
     )
     _insert_executable_snapshot(
         conn,
-        snapshot_id=f"snapshot-low-bid-{error}",
+        snapshot_id=f"snapshot-blocked-bid-{error}-{blocked_bid}",
         selected_outcome_token_id=pos.token_id,
         yes_token_id=pos.token_id,
         no_token_id=pos.no_token_id,
-        top_bid="0.049",
-        top_ask="0.051",
+        top_bid=blocked_bid,
+        top_ask=blocked_ask,
         captured_at=now,
     )
     assert exit_lifecycle_module._dual_write_canonical_pending_exit_if_available(

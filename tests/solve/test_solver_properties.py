@@ -2326,7 +2326,7 @@ def test_global_single_order_sell_rejects_bids_below_live_price_band(
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_single_order_sell_caps_limit_but_keeps_favorable_fill(side):
+def test_global_single_order_sell_rejects_best_bid_above_live_price_band(side):
     sell = _global_sell_candidate(
         candidate_id=f"sell-favorable-above-band-{side}",
         family=f"sell-favorable-above-band-{side}-family",
@@ -2338,17 +2338,28 @@ def test_global_single_order_sell_caps_limit_but_keeps_favorable_fill(side):
 
     decision = _global_select((sell,))
 
-    assert decision.candidate is sell
-    assert decision.limit_price == Decimal("0.95")
-    assert decision.expected_fill_price_before_fee == Decimal("0.999")
-    assert decision.cash_proceeds_usd == Decimal("9.990")
-    assert decision.robust_delta_log_wealth > 0.0
-    assert decision.robust_ev_usd > 0.0
+    assert decision.candidate is None
+    assert (
+        decision.rejection_reasons[sell.candidate_id]
+        == "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+    )
 
 
-def test_global_single_order_sell_cap_is_tick_aligned():
+def test_global_single_order_sell_rejects_out_of_band_best_bid_even_if_deepest_is_legal():
+    assert (
+        S._live_sell_limit_price(
+            Decimal("0.98"),
+            Decimal("0.94"),
+            Decimal("0.02"),
+        )
+        is None
+    )
+
+
+def test_global_single_order_sell_legal_depth_is_tick_aligned_without_clamping():
     assert S._live_sell_limit_price(
-        Decimal("0.98"),
+        Decimal("0.95"),
+        Decimal("0.95"),
         Decimal("0.02"),
     ) == Decimal("0.94")
 
