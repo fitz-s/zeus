@@ -1994,7 +1994,7 @@ def _validate_terminal_partial_command_correction_payload(
         or filled is None
         or requested <= 0
         or filled <= 0
-        or requested - filled <= Decimal("0.01")
+        or requested - filled < Decimal("0.01")
         or not _decimal_text_equal(requested, payload.get("requested_size"))
     ):
         raise ValueError("terminal partial command correction is not a short fill")

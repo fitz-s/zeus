@@ -11375,8 +11375,11 @@ def _clear_review_required_terminal_fak_partial_exit(
     filled = _positive_decimal_or_none(trade_summary.get("filled_size"))
     if (
         requested is None
-        or original != requested
+        or original is None
+        or original > requested
+        or requested - original > Decimal("0.011")
         or matched is None
+        or matched > original
         or filled != matched
         or matched >= requested
         or int(trade_summary.get("count") or 0) <= 0

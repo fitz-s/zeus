@@ -12950,27 +12950,36 @@ class TestRecoveryResolutionTable:
 
     @pytest.mark.parametrize(
         (
+            "projected_shares",
             "chain_shares",
             "chain_seen_at",
+            "point_original_size",
+            "filled_size",
             "command_order_type",
             "point_order_type",
             "expected_state",
         ),
         (
-            (4.0, "2026-04-26T00:09:00Z", "FAK", "FAK", "EXPIRED"),
-            (4.0, "2026-04-26T00:07:00Z", "FAK", "FAK", "EXPIRED"),
-            (4.0, "2026-04-26T00:05:00Z", "FAK", "FAK", "REVIEW_REQUIRED"),
-            (4.0, "2026-04-26T00:04:00Z", "FAK", "FAK", "REVIEW_REQUIRED"),
-            (5.0, "2026-04-26T00:09:00Z", "FAK", "FAK", "REVIEW_REQUIRED"),
-            (4.0, "2026-04-26T00:09:00Z", "GTC", "GTC", "REVIEW_REQUIRED"),
-            (4.0, "2026-04-26T00:09:00Z", "GTC", "FAK", "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", "FAK", "EXPIRED"),
+            (4.0, 4.0, "2026-04-26T00:07:00Z", "6", "2", "FAK", "FAK", "EXPIRED"),
+            (0.017, 0.017, "2026-04-26T00:09:00Z", "5.99", "5.99", "FAK", "FAK", "EXPIRED"),
+            (0.017, 0.017, "2026-04-26T00:09:00Z", "5.995", "5.995", "FAK", "FAK", "REVIEW_REQUIRED"),
+            (0.02, 0.02, "2026-04-26T00:09:00Z", "5.98", "5.98", "FAK", "FAK", "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:05:00Z", "6", "2", "FAK", "FAK", "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:04:00Z", "6", "2", "FAK", "FAK", "REVIEW_REQUIRED"),
+            (4.0, 5.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", "FAK", "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "GTC", "GTC", "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "GTC", "FAK", "REVIEW_REQUIRED"),
         ),
     )
     def test_terminal_fak_partial_exit_review_releases_only_exact_chain_residual(
         self,
         conn,
+        projected_shares,
         chain_shares,
         chain_seen_at,
+        point_original_size,
+        filled_size,
         command_order_type,
         point_order_type,
         expected_state,
@@ -12997,7 +13006,7 @@ class TestRecoveryResolutionTable:
             """
             UPDATE position_current
                SET phase = 'day0_window',
-                   shares = 4.0,
+                   shares = ?,
                    cost_basis_usd = 1.24,
                    size_usd = 1.24,
                    entry_price = 0.31,
@@ -13007,7 +13016,7 @@ class TestRecoveryResolutionTable:
                    order_status = 'filled'
              WHERE position_id = 'pos-001'
             """,
-            (chain_shares, chain_seen_at),
+            (projected_shares, chain_shares, chain_seen_at),
         )
         _insert(
             conn,
@@ -13035,7 +13044,7 @@ class TestRecoveryResolutionTable:
             payload={
                 "venue_order_id": "ord-exit-partial",
                 "trade_id": "trade-exit-partial",
-                "filled_size": "2",
+                "filled_size": filled_size,
                 "fill_price": "0.46",
             },
         )
@@ -13044,8 +13053,8 @@ class TestRecoveryResolutionTable:
             command_id="cmd-exit",
             order_id="ord-exit-partial",
             state="PARTIALLY_MATCHED",
-            matched_size="2",
-            remaining_size="4",
+            matched_size=filled_size,
+            remaining_size=str(Decimal("6") - Decimal(filled_size)),
         )
         _append_trade_fact(
             conn,
@@ -13053,7 +13062,7 @@ class TestRecoveryResolutionTable:
             order_id="ord-exit-partial",
             trade_id="trade-exit-partial",
             state="CONFIRMED",
-            filled_size="2",
+            filled_size=filled_size,
             fill_price="0.46",
             tx_hash="0xterminal-partial",
         )
@@ -13063,7 +13072,7 @@ class TestRecoveryResolutionTable:
             order_id="ord-exit-partial",
             trade_id="0xterminal-partial",
             state="CONFIRMED",
-            filled_size="2",
+            filled_size=filled_size,
             fill_price="0.46",
             tx_hash="0xterminal-partial",
         )
@@ -13082,8 +13091,8 @@ class TestRecoveryResolutionTable:
                     "order_type": point_order_type,
                     "side": "SELL",
                     "asset_id": "tok-001",
-                    "original_size": "6",
-                    "size_matched": "2",
+                    "original_size": point_original_size,
+                    "size_matched": filled_size,
                     "price": "0.46",
                 },
             },
@@ -13116,7 +13125,7 @@ class TestRecoveryResolutionTable:
             ).fetchone()
             assert dict(terminal) == {
                 "state": "PARTIALLY_MATCHED",
-                "matched_size": "2",
+                "matched_size": filled_size,
                 "remaining_size": "0",
             }
         else:
@@ -13133,7 +13142,7 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert dict(current) == {
             "phase": "day0_window",
-            "shares": 4.0,
+            "shares": projected_shares,
             "cost_basis_usd": 1.24,
         }
 
