@@ -11397,6 +11397,7 @@ def _clear_review_required_terminal_fak_partial_exit(
         or matched is None
         or matched > original
         or filled != matched
+        or requested - matched < Decimal("0.01")
         or matched >= requested
         or int(trade_summary.get("count") or 0) <= 0
     ):
@@ -11445,21 +11446,39 @@ def _clear_review_required_terminal_fak_partial_exit(
     sp_name = f"sp_terminal_fak_partial_exit_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
-        fact_id = _append_terminal_partial_order_fact(
-            conn,
-            venue_order_id=venue_order_id,
-            command_id=command_id,
-            matched_size=_decimal_text(filled),
-            source="REST",
-            observed_at=observed_at,
-            payload=terminal_payload,
-        )
-        order_fact = _dict_row(
-            conn.execute(
-                "SELECT * FROM venue_order_facts WHERE fact_id = ?",
-                (fact_id,),
-            ).fetchone()
-        )
+        if original == matched:
+            order_fact = _latest_order_fact_for_command_order(
+                conn,
+                command_id=command_id,
+                venue_order_id=venue_order_id,
+            )
+            if (
+                str(order_fact.get("state") or "").upper()
+                not in {"MATCHED", "FILLED"}
+                or not _decimal_is_zero(order_fact.get("remaining_size"))
+                or _positive_decimal_or_none(order_fact.get("matched_size"))
+                != filled
+            ):
+                raise RuntimeError(
+                    f"terminal FAK wire fill fact is incomplete for {command_id}"
+                )
+            fact_id = int(order_fact["fact_id"])
+        else:
+            fact_id = _append_terminal_partial_order_fact(
+                conn,
+                venue_order_id=venue_order_id,
+                command_id=command_id,
+                matched_size=_decimal_text(filled),
+                source="REST",
+                observed_at=observed_at,
+                payload=terminal_payload,
+            )
+            order_fact = _dict_row(
+                conn.execute(
+                    "SELECT * FROM venue_order_facts WHERE fact_id = ?",
+                    (fact_id,),
+                ).fetchone()
+            )
         if not _clear_review_required_terminal_partial(
             conn,
             command=command,
@@ -11508,7 +11527,8 @@ def _clear_review_required_terminal_partial(
     requested = _positive_decimal_or_none(command.get("size"))
     remaining = _decimal_or_none(order_fact.get("remaining_size"))
     if not (
-        fact_state in {"PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}
+        fact_state
+        in {"MATCHED", "FILLED", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}
         and int(trade_summary.get("count") or 0) > 0
         and matched is not None
         and filled == matched

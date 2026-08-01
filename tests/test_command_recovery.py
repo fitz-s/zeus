@@ -13052,9 +13052,17 @@ class TestRecoveryResolutionTable:
             conn,
             command_id="cmd-exit",
             order_id="ord-exit-partial",
-            state="PARTIALLY_MATCHED",
+            state=(
+                "MATCHED"
+                if point_original_size == filled_size != "6"
+                else "PARTIALLY_MATCHED"
+            ),
             matched_size=filled_size,
-            remaining_size=str(Decimal("6") - Decimal(filled_size)),
+            remaining_size=(
+                "0"
+                if point_original_size == filled_size != "6"
+                else str(Decimal("6") - Decimal(filled_size))
+            ),
         )
         _append_trade_fact(
             conn,
@@ -13144,7 +13152,11 @@ class TestRecoveryResolutionTable:
                 """
             ).fetchone()
             assert dict(terminal) == {
-                "state": "PARTIALLY_MATCHED",
+                "state": (
+                    "MATCHED"
+                    if point_original_size == filled_size
+                    else "PARTIALLY_MATCHED"
+                ),
                 "matched_size": filled_size,
                 "remaining_size": "0",
             }
