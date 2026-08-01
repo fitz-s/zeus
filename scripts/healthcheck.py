@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-03-26; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-03-26; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Operator healthcheck for live daemon, launchd, source truth, entry capability, and settlement freshness.
 # Reuse: Run when live health predicates, launchd contracts, or readiness/status summary health fields change.
 # Created: 2026-03-26
-# Last reused or audited: 2026-07-24
+# Last reused or audited: 2026-07-31
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 """Zeus health check for Venus/OpenClaw monitoring.
 
@@ -25,6 +25,12 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import get_mode, state_path  # noqa: E402
+from src.execution.order_truth_reducer import (  # noqa: E402
+    TERMINAL_FILLED,
+    TERMINAL_NO_FILL,
+    TERMINAL_PARTIAL,
+    VenueOrderTruthReducer,
+)
 from src.ops.edli_queue import (  # noqa: E402
     EDLI_REACTOR_CONSUMER,
     collect_edli_queue_evidence,
@@ -72,6 +78,10 @@ NONTERMINAL_VENUE_ORDER_STATES = frozenset(
         "PARTIALLY_MATCHED",
         "RESTING",
     }
+)
+TERMINAL_POSITION_PHASES = frozenset({"settled", "voided", "admin_closed"})
+TERMINAL_ORDER_PROOF_CLASSES = frozenset(
+    {TERMINAL_FILLED, TERMINAL_NO_FILL, TERMINAL_PARTIAL}
 )
 
 # WAVE-4 F91+F99+F100 — daemon heartbeat staleness budgets, per
@@ -926,10 +936,13 @@ def _terminal_entry_command_venue_fact_conflicts_status() -> dict:
         "authority": "derived_operator_visibility",
         "source": "venue_commands+position_current+venue_order_facts",
         "count": 0,
+        "historical_count": 0,
+        "blocking_count": 0,
         "by_command_state": {},
         "by_venue_state": {},
         "by_position_phase": {},
         "sample": [],
+        "blocking_sample": [],
     }
     if not db_path.exists():
         return {
@@ -961,11 +974,13 @@ def _terminal_entry_command_venue_fact_conflicts_status() -> dict:
             }
         has_position_current = "position_current" in present
         pc_select = (
-            "pc.position_id, pc.phase, pc.order_status, pc.chain_state, pc.city, "
+            "pc.position_id, CASE WHEN pc.position_id IS NULL THEN 0 ELSE 1 END "
+            "AS position_projection_present, pc.phase, pc.order_status, pc.chain_state, pc.city, "
             "pc.target_date, pc.strategy_key"
             if has_position_current
             else (
-                "vc.position_id, NULL AS phase, NULL AS order_status, NULL AS chain_state, "
+                "vc.position_id, 0 AS position_projection_present, NULL AS phase, "
+                "NULL AS order_status, NULL AS chain_state, "
                 "NULL AS city, NULL AS target_date, NULL AS strategy_key"
             )
         )
@@ -1013,6 +1028,10 @@ def _terminal_entry_command_venue_fact_conflicts_status() -> dict:
         by_venue_state: dict[str, int] = {}
         by_position_phase: dict[str, int] = {}
         sample = []
+        blocking_sample = []
+        blocking_count = 0
+        terminal_position_count = 0
+        terminal_order_truth_count = 0
         for row in rows:
             command_state = str(row["command_state"] or "UNKNOWN").upper()
             venue_state = str(row["venue_state"] or "UNKNOWN").upper()
@@ -1020,39 +1039,76 @@ def _terminal_entry_command_venue_fact_conflicts_status() -> dict:
             by_command_state[command_state] = by_command_state.get(command_state, 0) + 1
             by_venue_state[venue_state] = by_venue_state.get(venue_state, 0) + 1
             by_position_phase[phase] = by_position_phase.get(phase, 0) + 1
-            if len(sample) < 5:
-                sample.append(
+            order_truth = VenueOrderTruthReducer.reduce(
+                order_facts=(
                     {
-                        "command_id": str(row["command_id"] or ""),
-                        "venue_order_id": str(row["venue_order_id"] or ""),
-                        "position_id": str(row["position_id"] or ""),
-                        "city": str(row["city"] or ""),
-                        "target_date": str(row["target_date"] or ""),
-                        "strategy_key": str(row["strategy_key"] or "unclassified"),
-                        "phase": phase,
-                        "order_status": str(row["order_status"] or ""),
-                        "chain_state": str(row["chain_state"] or ""),
-                        "command_state": command_state,
-                        "venue_state": venue_state,
-                        "side": str(row["side"] or ""),
-                        "submitted_price": _float_or_none(row["submitted_price"]),
-                        "submitted_size": _float_or_none(row["submitted_size"]),
-                        "remaining_size": _float_or_none(row["remaining_size"]),
-                        "matched_size": _float_or_none(row["matched_size"]),
-                        "updated_at": str(row["updated_at"] or ""),
-                        "venue_observed_at": str(row["venue_observed_at"] or ""),
-                    }
-                )
+                        "state": venue_state,
+                        "remaining_size": row["remaining_size"],
+                        "matched_size": row["matched_size"],
+                    },
+                ),
+                command_size=row["submitted_size"],
+                command_state=command_state,
+            )
+            terminal_position = phase.lower() in TERMINAL_POSITION_PHASES
+            terminal_order_truth = order_truth.proof_class in TERMINAL_ORDER_PROOF_CLASSES
+            position_projection_present = bool(row["position_projection_present"])
+            if terminal_position:
+                terminal_position_count += 1
+            if terminal_order_truth:
+                terminal_order_truth_count += 1
+            blocking = not position_projection_present or (
+                not terminal_position and not terminal_order_truth
+            )
+            if blocking:
+                blocking_count += 1
+            item = {
+                "command_id": str(row["command_id"] or ""),
+                "venue_order_id": str(row["venue_order_id"] or ""),
+                "position_id": str(row["position_id"] or ""),
+                "city": str(row["city"] or ""),
+                "target_date": str(row["target_date"] or ""),
+                "strategy_key": str(row["strategy_key"] or "unclassified"),
+                "phase": phase,
+                "position_projection_present": position_projection_present,
+                "order_status": str(row["order_status"] or ""),
+                "chain_state": str(row["chain_state"] or ""),
+                "command_state": command_state,
+                "venue_state": venue_state,
+                "canonical_order_truth_state": order_truth.state,
+                "canonical_order_proof_class": order_truth.proof_class.value,
+                "blocking": blocking,
+                "side": str(row["side"] or ""),
+                "submitted_price": _float_or_none(row["submitted_price"]),
+                "submitted_size": _float_or_none(row["submitted_size"]),
+                "remaining_size": _float_or_none(row["remaining_size"]),
+                "matched_size": _float_or_none(row["matched_size"]),
+                "updated_at": str(row["updated_at"] or ""),
+                "venue_observed_at": str(row["venue_observed_at"] or ""),
+            }
+            if len(sample) < 5:
+                sample.append(item)
+            if blocking and len(blocking_sample) < 5:
+                blocking_sample.append(item)
         count = len(rows)
         return {
             **base,
-            "ok": count == 0,
-            "issue": "TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICT" if count else None,
+            "ok": blocking_count == 0,
+            "issue": (
+                "TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICT"
+                if blocking_count
+                else None
+            ),
             "count": count,
+            "historical_count": count,
+            "blocking_count": blocking_count,
+            "terminal_position_count": terminal_position_count,
+            "terminal_order_truth_count": terminal_order_truth_count,
             "by_command_state": by_command_state,
             "by_venue_state": by_venue_state,
             "by_position_phase": by_position_phase,
             "sample": sample,
+            "blocking_sample": blocking_sample,
         }
     except Exception as exc:
         return {

@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-07-30; last_reused=2026-07-30
+# Lifecycle: created=2026-04-30; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Lock healthcheck relationship predicates for live daemon, launchd, entry capability, and settlement truth.
 # Reuse: Run when scripts/healthcheck.py health predicates or live readiness status fields change.
 # Created: 2026-04-30
-# Last reused/audited: 2026-07-30
+# Last reused/audited: 2026-07-31
 # Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; healthcheck live-only runtime contract; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 from __future__ import annotations
 import pytest
@@ -1488,7 +1488,15 @@ def test_venue_commands_schema_status_rejects_active_entry_missing_q_version(
     assert result["active_missing_q_version_sample"][0]["position_id"] == "pos-no-q"
 
 
-def _init_venue_order_truth_db(db_path: Path, *, command_state: str, venue_state: str) -> None:
+def _init_venue_order_truth_db(
+    db_path: Path,
+    *,
+    command_state: str,
+    venue_state: str,
+    phase: str = "active",
+    remaining_size: str = "9.0",
+    matched_size: str = "0.0",
+) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
         """
@@ -1543,10 +1551,11 @@ def _init_venue_order_truth_db(db_path: Path, *, command_state: str, venue_state
         INSERT INTO position_current (
             position_id, phase, order_status, chain_state, city, target_date, strategy_key
         ) VALUES (
-            'pos-1', 'quarantined', 'rejected', 'entry_authority_quarantined',
+            'pos-1', ?, 'rejected', 'synced',
             'Paris', '2026-07-04', 'center_bin_buy'
         )
-        """
+        """,
+        (phase,),
     )
     conn.execute(
         """
@@ -1554,12 +1563,12 @@ def _init_venue_order_truth_db(db_path: Path, *, command_state: str, venue_state
             venue_order_id, command_id, state, remaining_size, matched_size,
             observed_at, ingested_at, local_sequence
         ) VALUES (
-            'ord-1', 'cmd-1', ?, '9.0', '0.0',
+            'ord-1', 'cmd-1', ?, ?, ?,
             '2026-07-04T00:01:30+00:00',
             '2026-07-04T00:01:31+00:00', 2
         )
         """,
-        (venue_state,),
+        (venue_state, remaining_size, matched_size),
     )
     conn.commit()
     conn.close()
@@ -1581,10 +1590,111 @@ def test_terminal_entry_command_venue_fact_conflict_status_rejects_resting_fact(
     assert result["ok"] is False
     assert result["issue"] == "TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICT"
     assert result["count"] == 1
+    assert result["historical_count"] == 1
+    assert result["blocking_count"] == 1
     assert result["by_command_state"] == {"SUBMIT_REJECTED": 1}
     assert result["by_venue_state"] == {"RESTING": 1}
     assert result["sample"][0]["command_id"] == "cmd-1"
     assert result["sample"][0]["remaining_size"] == 9.0
+    assert result["blocking_sample"][0]["command_id"] == "cmd-1"
+
+
+def test_terminal_position_keeps_historical_conflict_visible_without_blocking(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _init_venue_order_truth_db(
+        db_path,
+        command_state="CANCELLED",
+        venue_state="PARTIALLY_MATCHED",
+        phase="settled",
+        remaining_size="4.0",
+        matched_size="5.0",
+    )
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["historical_count"] == 1
+    assert result["blocking_count"] == 0
+    assert result["terminal_position_count"] == 1
+    assert result["sample"][0]["blocking"] is False
+    assert result["blocking_sample"] == []
+
+
+def test_reducer_terminal_partial_does_not_block_active_position(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _init_venue_order_truth_db(
+        db_path,
+        command_state="CANCELLED",
+        venue_state="PARTIALLY_MATCHED",
+        phase="active",
+        remaining_size="0",
+        matched_size="5.0",
+    )
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS()
+
+    assert result["ok"] is True
+    assert result["historical_count"] == 1
+    assert result["blocking_count"] == 0
+    assert result["terminal_order_truth_count"] == 1
+    assert result["sample"][0]["canonical_order_proof_class"] == "TERMINAL_PARTIAL"
+
+
+def test_missing_position_row_blocks_even_with_terminal_order_proof(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _init_venue_order_truth_db(
+        db_path,
+        command_state="CANCELLED",
+        venue_state="PARTIALLY_MATCHED",
+        remaining_size="0",
+        matched_size="5.0",
+    )
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DELETE FROM position_current WHERE position_id = 'pos-1'")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS()
+
+    assert result["ok"] is False
+    assert result["blocking_count"] == 1
+    assert result["terminal_order_truth_count"] == 1
+    assert result["blocking_sample"][0]["position_projection_present"] is False
+
+
+def test_missing_position_table_blocks_even_with_terminal_order_proof(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _init_venue_order_truth_db(
+        db_path,
+        command_state="CANCELLED",
+        venue_state="PARTIALLY_MATCHED",
+        remaining_size="0",
+        matched_size="5.0",
+    )
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DROP TABLE position_current")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS()
+
+    assert result["ok"] is False
+    assert result["blocking_count"] == 1
+    assert result["terminal_order_truth_count"] == 1
+    assert result["blocking_sample"][0]["position_projection_present"] is False
 
 
 def test_terminal_entry_command_venue_fact_conflict_status_accepts_terminal_fact(
@@ -1603,6 +1713,8 @@ def test_terminal_entry_command_venue_fact_conflict_status_accepts_terminal_fact
     assert result["ok"] is True
     assert result["issue"] is None
     assert result["count"] == 0
+    assert result["historical_count"] == 0
+    assert result["blocking_count"] == 0
     assert result["sample"] == []
 
 
