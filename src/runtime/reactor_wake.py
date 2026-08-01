@@ -777,6 +777,7 @@ def read_reactor_wake(
     *,
     path: Path | None = None,
     exclude_wake_ids: Collection[str] = (),
+    prefer_exact_held_sell: bool = False,
 ) -> ReactorWake | None:
     """Read the queued fact with the shortest alpha clock first.
 
@@ -798,6 +799,13 @@ def read_reactor_wake(
     queued = [
         item for item in _queued_wakes(path) if item[1].wake_id not in excluded
     ]
+    if prefer_exact_held_sell:
+        for _queue_file, wake in queued:
+            if (
+                wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+                and wake.held_sell_reauction_requests
+            ):
+                return wake
     for _queue_file, wake in reversed(queued):
         if wake.reason == "day0_extreme_event_committed":
             return wake

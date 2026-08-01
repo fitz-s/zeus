@@ -7980,7 +7980,7 @@ def test_forced_held_sell_generation_waits_for_its_exact_receipt(
         lambda _job: False,
     )
     monkeypatch.setattr(main_module, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
-    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
     monkeypatch.setattr(
         wake_module,
@@ -8012,6 +8012,7 @@ def test_forced_held_sell_generation_waits_for_its_exact_receipt(
         ),
         path=receipt_path,
     )
+    assert main_module._edli_reactor_wake_poll_once() is False
     assert main_module._edli_reactor_wake_poll_once() is True
     assert acknowledgements == [wake.wake_id]
 

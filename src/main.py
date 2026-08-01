@@ -4765,17 +4765,24 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
 
     excluded_wake_ids = _exit_monitor_excluded_wake_ids()
-    one_turn_yield_ids = frozenset(
-        _edli_global_completion_yield.consume()
-        | _edli_day0_post_monitor_yield.consume()
-    )
-    wake = (
-        read_reactor_wake(exclude_wake_ids=excluded_wake_ids)
-        if excluded_wake_ids
-        else read_reactor_wake()
-    )
-    if wake is not None and wake.wake_id in one_turn_yield_ids:
-        excluded_wake_ids = frozenset(excluded_wake_ids | one_turn_yield_ids)
+    global_yield_ids = _edli_global_completion_yield.consume()
+    day0_post_monitor_yield_ids = _edli_day0_post_monitor_yield.consume()
+    if day0_post_monitor_yield_ids:
+        excluded_wake_ids = frozenset(
+            excluded_wake_ids | day0_post_monitor_yield_ids
+        )
+        wake = read_reactor_wake(
+            exclude_wake_ids=excluded_wake_ids,
+            prefer_exact_held_sell=True,
+        )
+    else:
+        wake = (
+            read_reactor_wake(exclude_wake_ids=excluded_wake_ids)
+            if excluded_wake_ids
+            else read_reactor_wake()
+        )
+    if wake is not None and wake.wake_id in global_yield_ids:
+        excluded_wake_ids = frozenset(excluded_wake_ids | global_yield_ids)
         wake = read_reactor_wake(exclude_wake_ids=excluded_wake_ids)
     if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
         return False
@@ -4995,6 +5002,10 @@ def _edli_reactor_wake_poll_once() -> bool:
         if wake_event_state is not None and wake_event_state.finished:
             if not day0_monitor_succeeded:
                 return False
+            _yield_incomplete_day0_after_monitor_once(
+                wake,
+                monitor_succeeded=True,
+            )
             if not _acknowledge_edli_reactor_wake_batch(
                 wake,
                 wakes,
@@ -5053,6 +5064,10 @@ def _edli_reactor_wake_poll_once() -> bool:
         _started, result = _day0_exit_monitor_attempt_state(wake.wake_id)
         if result is not True:
             return False
+    _yield_incomplete_day0_after_monitor_once(
+        wake,
+        monitor_succeeded=day0_monitor_succeeded,
+    )
     if not _acknowledge_edli_reactor_wake_batch(
         wake,
         wakes,

@@ -772,11 +772,23 @@ def test_completed_day0_monitor_yields_one_turn_to_exact_held_sell_debt(
         event_ids=("event-day0-incomplete",),
         forecast_families=(request.family,),
     )
+    other_day0_wake = reactor_wake.publish_reactor_wake(
+        source="day0_test_producer",
+        reason="day0_extreme_event_committed",
+        path=wake_path,
+        wake_id="wake-day0-also-queued",
+        published_at=published_at + timedelta(milliseconds=500),
+        event_ids=("event-day0-also-incomplete",),
+        forecast_families=(request.family,),
+    )
     held_bytes = reactor_wake._wake_queue_target(
         held_wake, path=wake_path
     ).read_bytes()
     day0_bytes = reactor_wake._wake_queue_target(
         day0_wake, path=wake_path
+    ).read_bytes()
+    other_day0_bytes = reactor_wake._wake_queue_target(
+        other_day0_wake, path=wake_path
     ).read_bytes()
 
     assert main._edli_reactor_wake_poll_once() is False
@@ -793,3 +805,91 @@ def test_completed_day0_monitor_yields_one_turn_to_exact_held_sell_debt(
         reactor_wake._wake_queue_target(day0_wake, path=wake_path).read_bytes()
         == day0_bytes
     )
+    assert (
+        reactor_wake._wake_queue_target(
+            other_day0_wake, path=wake_path
+        ).read_bytes()
+        == other_day0_bytes
+    )
+
+
+def test_day0_monitor_ack_failure_still_yields_exact_held_sell_turn(
+    monkeypatch, tmp_path: Path
+) -> None:
+    wake_path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
+    request = _request(position_id="capital-debt-after-ack-failure")
+    monkeypatch.setattr(
+        "src.config.state_path",
+        lambda filename: tmp_path / filename,
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main,
+        "_edli_global_completion_yield",
+        main._OneTurnWakeExclusion(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_day0_post_monitor_yield",
+        main._OneTurnWakeExclusion(),
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    monkeypatch.setattr(main, "_day0_wake_requires_exit_monitor", lambda _scope: True)
+    monkeypatch.setattr(
+        main,
+        "_day0_exit_monitor_attempt_state",
+        lambda _wake_id: (True, True),
+    )
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _event_ids: main._ReactorWakeEventState(
+            ready=True,
+            finished=True,
+        ),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: False,
+    )
+    acknowledgements: list[str] = []
+    monkeypatch.setattr(
+        main,
+        "_acknowledge_edli_reactor_wake_batch",
+        lambda wake, *_args, **_kwargs: acknowledgements.append(wake.wake_id)
+        or False,
+    )
+    selected_reasons: list[str] = []
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: selected_reasons.append(kwargs["producer_wake_reason"])
+        or False,
+    )
+    published_at = datetime(2026, 8, 1, 13, 0, tzinfo=timezone.utc)
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id="wake-capital-debt-after-ack-failure",
+        published_at=published_at,
+        held_sell_reauction_requests=(request,),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="day0_test_producer",
+        reason="day0_extreme_event_committed",
+        path=wake_path,
+        wake_id="wake-day0-ack-failure",
+        published_at=published_at + timedelta(seconds=1),
+        event_ids=("event-day0-terminal",),
+        forecast_families=(request.family,),
+    )
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert acknowledgements == ["wake-day0-ack-failure"]
+    assert main._edli_reactor_wake_poll_once() is False
+    assert selected_reasons == [
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+    ]
