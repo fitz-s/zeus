@@ -1161,6 +1161,11 @@ def _replacement_forecast_discovery_revision(
                     "SELECT COALESCE(MAX(id), 0) FROM observation_instants"
                 ).fetchone()[0]
             )
+            observation_print_id = int(
+                world.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM observation_prints"
+                ).fetchone()[0]
+            )
         finally:
             world.close()
     except Exception:  # noqa: BLE001 - unknown revision must run recovery discovery
@@ -1170,7 +1175,7 @@ def _replacement_forecast_discovery_revision(
         second=0,
         microsecond=0,
     ).isoformat()
-    return (*revision, observation_id, hour)
+    return (*revision, observation_id, observation_print_id, hour)
 
 
 def _replacement_forecast_materialize_poll_job() -> None:

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-07-31; last_reused=2026-07-31
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Purpose: Executor-class assignment (no DB writer on file-only executor; UMA->backfill_db).
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
@@ -368,6 +368,58 @@ def test_replacement_discovery_is_not_limited_by_poll_claim_size(
     daemon._replacement_forecast_discovery_job.__wrapped__()
 
     assert daemon._replacement_forecast_last_discovery_revision == ("revision",)
+
+
+def test_replacement_discovery_revision_advances_on_fast_observation_print(
+    monkeypatch, tmp_path
+) -> None:
+    """A new fast METAR must invalidate Day0 materialization discovery."""
+    import sqlite3
+
+    import src.ingest.forecast_live_daemon as daemon
+    import src.state.db as state_db
+
+    forecast_db = tmp_path / "forecast.db"
+    forecast = sqlite3.connect(forecast_db)
+    forecast.executescript(
+        """
+        CREATE TABLE market_events (event_id INTEGER PRIMARY KEY);
+        CREATE TABLE raw_model_forecasts (raw_model_forecast_id INTEGER PRIMARY KEY);
+        CREATE TABLE raw_forecast_artifacts (artifact_id INTEGER PRIMARY KEY);
+        CREATE TABLE source_run_coverage (source_run_id TEXT);
+        CREATE TABLE readiness_state (expires_at TEXT);
+        """
+    )
+    forecast.commit()
+    forecast.close()
+
+    world_db = tmp_path / "world.db"
+    world = sqlite3.connect(world_db)
+    world.executescript(
+        """
+        CREATE TABLE observation_instants (id INTEGER PRIMARY KEY);
+        CREATE TABLE observation_prints (id INTEGER PRIMARY KEY);
+        INSERT INTO observation_instants(id) VALUES (7);
+        INSERT INTO observation_prints(id) VALUES (11);
+        """
+    )
+    world.commit()
+    world.close()
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_db)
+
+    cfg = {"forecast_db": forecast_db}
+    before = daemon._replacement_forecast_discovery_revision(cfg)
+
+    world = sqlite3.connect(world_db)
+    world.execute("INSERT INTO observation_prints(id) VALUES (12)")
+    world.commit()
+    world.close()
+    after = daemon._replacement_forecast_discovery_revision(cfg)
+
+    assert before is not None and after is not None
+    assert before[-3:] == (7, 11, before[-1])
+    assert after[-3:] == (7, 12, after[-1])
+    assert before != after
 
 
 def test_replacement_discovery_runs_with_backlog_and_retries_pending_family(
