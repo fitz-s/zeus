@@ -13356,11 +13356,11 @@ class TestRecoveryResolutionTable:
         _append_order_fact(
             conn,
             order_id="ord-gtc-partial",
-            state="PARTIALLY_MATCHED",
+            state="EXPIRED",
             matched_size="4",
             remaining_size="0",
             raw_payload_json={
-                "proof_class": "terminal_partial_order_fact",
+                "proof_class": "confirmed_fill_plus_point_order_terminal_remainder",
                 "status": "CANCELED",
                 "order_id": "ord-gtc-partial",
             },

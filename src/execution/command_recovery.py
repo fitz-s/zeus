@@ -8599,12 +8599,21 @@ def _terminal_partial_entry_obligation_proven(
             return False
     for order in canonical_orders:
         payload = _json_dict(order.get("raw_payload_json"))
+        order_state = str(order.get("state") or "").upper()
+        proof_class = payload.get("proof_class")
+        terminal_order_proven = (
+            order_state == "PARTIALLY_MATCHED"
+            and proof_class == "terminal_partial_order_fact"
+        ) or (
+            order_state == "EXPIRED"
+            and proof_class
+            == "confirmed_fill_plus_point_order_terminal_remainder"
+        )
         if (
-            str(order.get("state") or "").upper() != "PARTIALLY_MATCHED"
+            not terminal_order_proven
             or _decimal_or_none(order.get("matched_size")) is None
             or _decimal_or_none(order.get("remaining_size")) != 0
             or str(order.get("source") or "") not in _LIVE_TERMINAL_ORDER_FACT_SOURCES
-            or payload.get("proof_class") != "terminal_partial_order_fact"
         ):
             return False
     fill_summary = _positive_fill_trade_fact_summary(
