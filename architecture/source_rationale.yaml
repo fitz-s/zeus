@@ -1543,7 +1543,7 @@ files:
   src/data/live_entry_status.py:
     zone: K2_runtime
     authority_role: live_entry_blocker_summary
-    why: PR47 read-only status surface that summarizes producer-readiness rows + rollout_mode into a {LIVE_ELIGIBLE, BLOCKED} verdict with blocker codes. Consumed by healthcheck and operator dashboards; never writes.
+    why: PR47 read-only status surface that summarizes producer-readiness rows into a {LIVE_ELIGIBLE, BLOCKED} verdict with blocker codes. Consumed by healthcheck and operator dashboards; never writes.
     hazards:
     - DERIVED_ONLY
     - NO_WRITE_PATH
