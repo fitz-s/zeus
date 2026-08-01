@@ -1,5 +1,5 @@
 # Created: 2026-06-21
-# Last reused or audited: 2026-07-24
+# Last reused or audited: 2026-08-01
 # Authority basis: docs/evidence/live_order_pathology/2026-06-21_forward_chain_diagnosis.md
 #   "CHOSEN FIX (consult-validated, two layers)" — LAYER 2 monitor read-through.
 """ANTIBODY: stale held belief must recover without blocking portfolio monitoring.
@@ -192,6 +192,46 @@ def test_bounded_monitor_defers_sync_readthrough_to_independent_producer(monkeyp
         "bounded_monitor_reseed_required" in validation
         for validation in pos.applied_validations
     )
+
+
+def test_day0_unobserved_prefix_forwards_portfolio_deadline(monkeypatch):
+    """The Day0 zero-observation fallback cannot reopen an unbounded DB read."""
+    import src.engine.monitor_refresh as mr
+    import src.engine.position_belief as pb
+
+    captured_deadlines = []
+    monkeypatch.setattr(mr.time, "monotonic", lambda: 300.0)
+    monkeypatch.setattr(mr, "_day0_absorbing_hard_fact_overlay", lambda **_kw: None)
+    monkeypatch.setattr(mr, "_would_use_day0_monitor_lane", lambda *_a: True)
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _pos: "condition-1")
+    monkeypatch.setattr(
+        mr,
+        "_refresh_current_global_day0_probability",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            mr._Day0UnobservedPrefixUnavailable("zero observations")
+        ),
+    )
+    monkeypatch.setattr(
+        pb,
+        "load_replacement_belief",
+        lambda **kw: captured_deadlines.append(kw.get("deadline_monotonic")) or None,
+    )
+    monkeypatch.setattr(
+        mr,
+        "_enqueue_single_family_belief_reseed_failsoft",
+        lambda **_kw: None,
+    )
+
+    _prob, _refreshed, is_fresh = mr.monitor_probability_refresh(
+        _pos(),
+        conn=object(),
+        city=object(),
+        target_d=None,
+        deadline_monotonic=321.0,
+    )
+
+    assert is_fresh is False
+    assert captured_deadlines == [305.0]
 
 
 def test_readthrough_does_not_itself_decide_an_exit(monkeypatch):

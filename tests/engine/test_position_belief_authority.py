@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Purpose: Prove held-position probability authority, freshness, and compact decision lineage.
 # Reuse: pytest tests/engine/test_position_belief_authority.py
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
@@ -207,8 +207,77 @@ def _load(db_path, *, direction="buy_no", bin_label=BIN, now=NOW, **kw):
 
 
 class TestLoadReplacementBelief:
+    def test_monitor_deadline_bounds_forecast_db_lock_wait(self, forecasts_db):
+        """An EXCLUSIVE writer cannot retain the held monitor past its deadline."""
+        _insert(
+            forecasts_db,
+            posterior_id="deadline-locked-forecast",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.24},
+            source_cycle_time=(NOW - timedelta(hours=1)).isoformat(),
+        )
+        locker = sqlite3.connect(forecasts_db)
+        locker.execute("PRAGMA journal_mode=DELETE")
+        locker.execute("BEGIN EXCLUSIVE")
+        try:
+            started = time.monotonic()
+            belief = _load(
+                forecasts_db,
+                deadline_monotonic=started + 0.10,
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            locker.rollback()
+            locker.close()
+
+        assert belief is None
+        assert elapsed < 0.18
+
+    def test_monitor_deadline_bounds_world_observed_floor_lock_wait(
+        self, forecasts_db, tmp_path
+    ):
+        """The post-forecast world-floor read shares the same monitor deadline."""
+        _insert(
+            forecasts_db,
+            posterior_id="deadline-locked-world",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.24},
+            source_cycle_time=(NOW - timedelta(hours=1)).isoformat(),
+        )
+        world_db = tmp_path / "zeus-world.db"
+        setup = sqlite3.connect(world_db)
+        setup.execute(
+            """
+            CREATE TABLE observation_instants (
+                city TEXT, target_date TEXT, local_timestamp TEXT,
+                utc_timestamp TEXT, running_max REAL, running_min REAL,
+                causality_status TEXT, authority TEXT, source_role TEXT,
+                training_allowed INTEGER, source TEXT
+            )
+            """
+        )
+        setup.commit()
+        setup.close()
+        locker = sqlite3.connect(world_db)
+        locker.execute("PRAGMA journal_mode=DELETE")
+        locker.execute("BEGIN EXCLUSIVE")
+        try:
+            started = time.monotonic()
+            belief = _load(
+                forecasts_db,
+                world_db_path=str(world_db),
+                deadline_monotonic=started + 0.10,
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            locker.rollback()
+            locker.close()
+
+        assert belief is None
+        assert elapsed < 0.18
+
     def test_monitor_deadline_interrupts_primary_belief_sql(
-        self, forecasts_db, monkeypatch
+        self, forecasts_db, monkeypatch, caplog
     ):
         """A fresh-authority lookup cannot retain every later held position."""
         import src.engine.position_belief as pb
@@ -237,6 +306,7 @@ class TestLoadReplacementBelief:
             raise AssertionError("monitor deadline failed to interrupt belief SQL")
 
         monkeypatch.setattr(pb, "_latest_live_input_cycle", unbounded_latest_cycle)
+        caplog.set_level("WARNING", logger=pb.__name__)
         started = time.monotonic()
         belief = _load(
             forecasts_db,
@@ -245,6 +315,7 @@ class TestLoadReplacementBelief:
 
         assert belief is None
         assert time.monotonic() - started < 1.0
+        assert "interrupted" in caplog.text
 
     def test_old_current_evidence_semantics_is_not_belief_authority(self, forecasts_db):
         _insert(

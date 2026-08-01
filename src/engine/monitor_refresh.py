@@ -5033,6 +5033,7 @@ def _refresh_day0_unobserved_prefix_probability(
     city,
     target_d,
     zero_observation_proven: bool = False,
+    deadline_monotonic: float | None = None,
 ) -> tuple[float, Position, bool] | None:
     """Keep current belief continuous before the first target-day observation.
 
@@ -5056,6 +5057,15 @@ def _refresh_day0_unobserved_prefix_probability(
     )
 
     try:
+        belief_deadline = (
+            None
+            if deadline_monotonic is None
+            else min(
+                float(deadline_monotonic),
+                time.monotonic()
+                + _HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+            )
+        )
         belief = load_replacement_belief(
             city=position.city,
             target_date=position.target_date,
@@ -5063,6 +5073,7 @@ def _refresh_day0_unobserved_prefix_probability(
             bin_label=position.bin_label,
             direction=str(getattr(position.direction, "value", position.direction)),
             max_age_hours=monitor_belief_max_age_hours(),
+            deadline_monotonic=belief_deadline,
         )
     except Exception as exc:  # noqa: BLE001 - absence remains fail-closed
         logger.debug(
@@ -5281,6 +5292,7 @@ def monitor_probability_refresh(
                         city=city,
                         target_d=target_d,
                         zero_observation_proven=True,
+                        deadline_monotonic=deadline_monotonic,
                     )
                     if unobserved_prefix is not None:
                         return unobserved_prefix

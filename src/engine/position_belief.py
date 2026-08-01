@@ -52,6 +52,7 @@ import math
 import re
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping
@@ -73,6 +74,56 @@ SELECTED_METHOD_REPLACEMENT_POSTERIOR = "replacement_posterior"
 POSTERIOR_PREDICTIVE_MEAN = "POSTERIOR_PREDICTIVE_MEAN"
 
 _WS_RE = re.compile(r"\s+")
+
+
+class _BeliefReadDeadlineExceeded(TimeoutError):
+    """A bounded held-belief read exhausted its caller-owned deadline."""
+
+
+def _remaining_read_timeout(
+    deadline_monotonic: float | None,
+    *,
+    default_seconds: float = 2.0,
+) -> float:
+    if deadline_monotonic is None:
+        return float(default_seconds)
+    remaining = float(deadline_monotonic) - time.monotonic()
+    if remaining <= 0.0:
+        raise _BeliefReadDeadlineExceeded("held-belief read deadline elapsed")
+    return min(float(default_seconds), remaining)
+
+
+@contextmanager
+def _bounded_sqlite_read(conn: sqlite3.Connection, deadline_monotonic: float | None):
+    """Bound SQLite execution and lock wait to the held-monitor deadline."""
+
+    if deadline_monotonic is None:
+        yield
+        return
+    # SCOPE: one held family's private read-only SQLite connection.
+    # DRAIN: query progress and lock waits consume only the caller deadline.
+    # RESET: the handler is cleared here and the caller closes the connection.
+    remaining = _remaining_read_timeout(deadline_monotonic)
+    conn.execute(f"PRAGMA busy_timeout = {max(1, int(remaining * 1000.0))}")
+
+    def _deadline_expired() -> int:
+        return int(time.monotonic() >= float(deadline_monotonic))
+
+    conn.set_progress_handler(_deadline_expired, 1_000)
+    try:
+        yield
+        _remaining_read_timeout(deadline_monotonic)
+    except sqlite3.OperationalError as exc:
+        if time.monotonic() >= float(deadline_monotonic):
+            raise _BeliefReadDeadlineExceeded(
+                "held-belief SQLite read deadline elapsed"
+            ) from exc
+        raise
+    finally:
+        try:
+            conn.set_progress_handler(None, 0)
+        except sqlite3.Error:
+            pass
 
 
 def _normalize_label(label: str) -> str:
@@ -515,6 +566,7 @@ def _observed_running_extreme_native(
     metric: str,
     now: datetime,
     world_db_path: str | None = None,
+    deadline_monotonic: float | None = None,
 ) -> float | None:
     """Cheap O(1) read of the canonical observed running extreme from world.observation_instants.
 
@@ -538,15 +590,26 @@ def _observed_running_extreme_native(
     agg = "MIN" if metric_l == "low" else "MAX"
     now_iso = now.astimezone(timezone.utc).isoformat()
     try:
-        conn = sqlite3.connect(f"file:{world_db_path}?mode=ro", uri=True, timeout=2.0)
+        timeout = _remaining_read_timeout(deadline_monotonic)
+        conn = sqlite3.connect(
+            f"file:{world_db_path}?mode=ro", uri=True, timeout=timeout
+        )
+    except _BeliefReadDeadlineExceeded:
+        raise
     except sqlite3.Error:
         return None
     try:
         conn.row_factory = sqlite3.Row
-        for table_ref in ("world.observation_instants", "observation_instants"):
-            try:
-                row = conn.execute(
-                    f"""
+        with _bounded_sqlite_read(conn, deadline_monotonic):
+            for table_ref in ("world.observation_instants", "observation_instants"):
+                if deadline_monotonic is not None:
+                    remaining = _remaining_read_timeout(deadline_monotonic)
+                    conn.execute(
+                        f"PRAGMA busy_timeout = {max(1, int(remaining * 1000.0))}"
+                    )
+                try:
+                    row = conn.execute(
+                        f"""
                     SELECT {agg}(CAST({extreme_col} AS REAL)) AS extreme,
                            COUNT(*) AS n_rows
                     FROM {table_ref}
@@ -574,18 +637,27 @@ def _observed_running_extreme_native(
                             )
                       )
                       AND {extreme_col} IS NOT NULL
-                    """,
-                    (city, target_date, now_iso),
-                ).fetchone()
-            except sqlite3.Error:
-                continue
-            if row is None:
-                continue
-            extreme = row["extreme"] if hasattr(row, "keys") else row[0]
-            n_rows = int((row["n_rows"] if hasattr(row, "keys") else row[1]) or 0)
-            if extreme is None or n_rows <= 0:
-                continue
-            return float(extreme)
+                        """,
+                        (city, target_date, now_iso),
+                    ).fetchone()
+                except sqlite3.Error as exc:
+                    if (
+                        deadline_monotonic is not None
+                        and time.monotonic() >= float(deadline_monotonic)
+                    ):
+                        raise _BeliefReadDeadlineExceeded(
+                            "held-belief world-floor deadline elapsed"
+                        ) from exc
+                    continue
+                if row is None:
+                    continue
+                extreme = row["extreme"] if hasattr(row, "keys") else row[0]
+                n_rows = int(
+                    (row["n_rows"] if hasattr(row, "keys") else row[1]) or 0
+                )
+                if extreme is None or n_rows <= 0:
+                    continue
+                return float(extreme)
         return None
     finally:
         try:
@@ -638,7 +710,10 @@ def load_replacement_belief(
     latest_raw_cycle_basis: str | None = None
     raw_input_lag_reason: str | None = None
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        timeout = _remaining_read_timeout(deadline_monotonic)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=timeout)
+    except _BeliefReadDeadlineExceeded:
+        return None
     except sqlite3.Error as exc:
         logger.warning("position_belief: read-only open failed: %s", exc)
         return None
@@ -646,13 +721,17 @@ def load_replacement_belief(
         conn.row_factory = sqlite3.Row
         if deadline_monotonic is not None:
             deadline = float(deadline_monotonic)
+            conn.execute(
+                f"PRAGMA busy_timeout = "
+                f"{max(1, int(_remaining_read_timeout(deadline_monotonic) * 1000.0))}"
+            )
 
             def _deadline_expired() -> int:
                 return int(time.monotonic() >= deadline)
 
             # SCOPE: this held family's read-only probability lookup.
-            # DRAIN: SQLite interrupts at the caller's monitor deadline; the
-            # independent materializer/reseed producer restores authority.
+            # DRAIN: SQLite query and lock waits stop at the caller deadline;
+            # the independent materializer/reseed producer restores authority.
             # RESET: this private connection and handler close after the read.
             conn.set_progress_handler(_deadline_expired, 1_000)
         columns = _table_columns(conn, "forecast_posteriors")
@@ -732,6 +811,8 @@ def load_replacement_belief(
                     temperature_metric,
                     exc,
                 )
+    except _BeliefReadDeadlineExceeded:
+        return None
     except sqlite3.Error as exc:
         logger.warning("position_belief: posterior read failed: %s", exc)
         return None
@@ -742,6 +823,11 @@ def load_replacement_belief(
             except sqlite3.Error:
                 pass
         conn.close()
+    if deadline_monotonic is not None:
+        try:
+            _remaining_read_timeout(deadline_monotonic)
+        except _BeliefReadDeadlineExceeded:
+            return None
     if row is None:
         return None
     provenance: Mapping[str, object] = {}
@@ -781,6 +867,7 @@ def load_replacement_belief(
             metric=temperature_metric,
             now=now_dt,
             world_db_path=world_db_path,
+            deadline_monotonic=deadline_monotonic,
         )
         if observed_extreme is not None:
             q = apply_observed_floor_to_q_vector(
@@ -804,6 +891,8 @@ def load_replacement_belief(
                     rounding_rule=_belief_rounding_rule(city),
                 ).items()
             }
+    except _BeliefReadDeadlineExceeded:
+        return None
     except Exception as exc:  # noqa: BLE001 — the floor must never kill belief serving
         logger.warning(
             "position_belief: observed-floor skipped for %s/%s/%s: %s",
