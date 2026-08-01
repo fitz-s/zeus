@@ -502,6 +502,128 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     )
 
 
+def test_live_monitor_deadline_defers_stale_fusion_and_dispatches_reseed(monkeypatch):
+    """The real monitor caller must preserve the bounded producer/consumer split."""
+    from src.engine import cycle_runtime
+    from src.engine import monitor_refresh as mr
+    from src.engine import position_belief as pb
+
+    position = _make_position(
+        trade_id="bounded-stale-belief",
+        city="Singapore",
+        cluster="Southeast Asia",
+        target_date="2026-08-02",
+        bin_label="32C",
+        direction="buy_no",
+        state="holding",
+        token_id="bounded-yes",
+        no_token_id="bounded-no",
+        chain_state="synced",
+        shares=10.0,
+        chain_shares=10.0,
+        entry_method="ens_member_counting",
+        selected_method="replacement_posterior",
+    )
+    stale = pb.ReplacementBelief(
+        held_side_prob=0.75,
+        held_side_lcb=0.68,
+        held_side_ucb=0.82,
+        q_yes_bin=0.25,
+        q_yes_lcb=0.18,
+        q_yes_ucb=0.32,
+        posterior_id="stale-posterior",
+        computed_at="2026-07-31T00:00:00+00:00",
+        age_hours=24.0,
+        fresh=False,
+        bin_key="32C",
+        direction="buy_no",
+    )
+    reseeds = []
+    monitor_results = []
+
+    monkeypatch.setattr(pb, "load_replacement_belief", lambda **_kwargs: stale)
+    monkeypatch.setattr(
+        mr,
+        "_attempt_held_belief_readthrough",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bounded live monitor called synchronous fusion")
+        ),
+    )
+    monkeypatch.setattr(
+        mr,
+        "_enqueue_single_family_belief_reseed_failsoft",
+        lambda **kwargs: reseeds.append(kwargs) or None,
+    )
+    monkeypatch.setattr(
+        mr,
+        "monitor_quote_refresh",
+        lambda *_args, **_kwargs: mr.HeldTokenMonitorQuote(
+            token_id="bounded-no",
+            best_bid=0.40,
+            best_ask=0.42,
+            bid_size=100.0,
+            ask_size=100.0,
+            mark_price=0.41,
+            source_timestamp="2026-08-01T08:00:00+00:00",
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _context: ExitDecision(
+            False,
+            "EVIDENCE_UNAVAILABLE",
+            trigger="EVIDENCE_UNAVAILABLE",
+            selected_method=self.selected_method,
+            applied_validations=list(self.applied_validations),
+        ),
+    )
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: monitor_results.append(result)},
+    )()
+    deps = _monitor_test_deps("test_bounded_stale_belief_caller")
+    deps.cities_by_name = {}
+    deps._utcnow = staticmethod(
+        lambda: datetime(2026, 8, 1, 8, 0, tzinfo=timezone.utc)
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        artifact,
+        _monitor_test_tracker(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=10.0,
+    )
+
+    assert summary["monitors"] == 1
+    assert len(monitor_results) == 1
+    assert monitor_results[0].fresh_prob is None
+    assert reseeds == [
+        {"city": "Singapore", "target_date": "2026-08-02", "metric": "high"}
+    ]
+    assert "replacement_belief_readthrough_deferred_to_independent_producer" in (
+        position.applied_validations
+    )
+    assert not hasattr(position, "_zeus_held_monitor_deadline_monotonic")
+
+
 def test_monitor_reservations_cover_large_held_book_within_three_degraded_cycles():
     """Deadline-degraded cycles still reserve rotating slices of a large book."""
     from src.engine import cycle_runtime

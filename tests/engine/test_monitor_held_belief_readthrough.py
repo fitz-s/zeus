@@ -2,16 +2,16 @@
 # Last reused or audited: 2026-07-24
 # Authority basis: docs/evidence/live_order_pathology/2026-06-21_forward_chain_diagnosis.md
 #   "CHOSEN FIX (consult-validated, two layers)" — LAYER 2 monitor read-through.
-"""ANTIBODY: a non-day0 held position with a STALE/MISSING cached posterior must
-attempt a SYNCHRONOUS same-authority read-through recompute BEFORE fail-closing.
+"""ANTIBODY: stale held belief must recover without blocking portfolio monitoring.
 
 The disease (live −$27.63): a held family's cached forecast_posteriors row goes
 stale and the monitor fail-closes to HOLD (BELIEF_AUTHORITY_FAULT) FOREVER —
 never recomputing — so the conservative CI_SEPARATED_REVERSAL exit is starved and
 the position rides physics reversals to full settlement loss. These tests pin:
 
-1. When the read-through yields a FRESH posterior, the monitor returns is_fresh=True
-   (probability authority restored → the exit organ can arm the reversal this cycle).
+1. An unbounded diagnostic read-through may restore same-authority probability.
+   The bounded live portfolio monitor never runs that Python fusion inline; it
+   fails closed and dispatches the independent producer for the next re-decision.
 2. When inputs are genuinely insufficient, the monitor STILL fail-closes (is_fresh
    not True) AND records a DURABLE, RETRYABLE belief_debt marker — never a silent
    permanent freeze.
@@ -19,9 +19,9 @@ the position rides physics reversals to full settlement loss. These tests pin:
    an exit. A freshly-recomputed belief that has NOT reversed simply becomes fresh
    authority (HOLD is still decided downstream by the untouched CI gate).
 
-These are antibodies: deleting the read-through call from monitor_probability_refresh
-makes (1) and (3) fail (is_fresh would be False on a recompute-eligible family), and
-removing the belief_debt record makes (2) fail.
+These are antibodies: removing the bounded producer/consumer split can again
+let one family retain the whole portfolio beyond its deadline; removing the
+belief_debt record makes producer failure silent.
 """
 from __future__ import annotations
 
