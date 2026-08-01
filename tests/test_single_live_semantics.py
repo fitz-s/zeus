@@ -1,5 +1,5 @@
 # Created: 2026-07-22
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-31
 # Authority basis: operator-directed single-live-semantics extinction pass.
 """Relapse antibodies for dormant alternate-runtime concepts."""
 
@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.check_single_live_semantics import violations
+from src.config import entry_forecast_config
 
 
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
@@ -405,6 +406,22 @@ def test_gate_rejects_resurrected_inactive_lane(tmp_path: Path) -> None:
     token = "shadow_" + "veto_only"
     (source / "bad.py").write_text(f"mode = {token!r}\n", encoding="utf-8")
     assert violations(tmp_path)
+
+
+def test_entry_forecast_config_has_no_alternate_runtime_mode() -> None:
+    config = entry_forecast_config()
+
+    assert "rollout_mode" not in config.__dataclass_fields__
+
+
+def test_gate_rejects_resurrected_rollout_mode(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "config.py").write_text(
+        "mode = 'rollout_' + 'mode'\n",
+        encoding="utf-8",
+    )
+    assert any(item.startswith("src/config.py:") for item in violations(tmp_path))
 
 
 def test_gate_rejects_literal_split_dormant_token(tmp_path: Path) -> None:
