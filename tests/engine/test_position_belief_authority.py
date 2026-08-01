@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -206,6 +207,45 @@ def _load(db_path, *, direction="buy_no", bin_label=BIN, now=NOW, **kw):
 
 
 class TestLoadReplacementBelief:
+    def test_monitor_deadline_interrupts_primary_belief_sql(
+        self, forecasts_db, monkeypatch
+    ):
+        """A fresh-authority lookup cannot retain every later held position."""
+        import src.engine.position_belief as pb
+
+        _insert(
+            forecasts_db,
+            posterior_id="deadline-primary",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.24},
+            q_lcb={BIN: 0.18},
+            q_ucb={BIN: 0.31},
+            source_cycle_time=(NOW - timedelta(hours=1)).isoformat(),
+        )
+
+        def unbounded_latest_cycle(conn, **_kwargs):
+            conn.execute(
+                """
+                WITH RECURSIVE spin(value) AS (
+                    SELECT 1
+                    UNION ALL
+                    SELECT value + 1 FROM spin
+                )
+                SELECT SUM(value) FROM spin
+                """
+            ).fetchone()
+            raise AssertionError("monitor deadline failed to interrupt belief SQL")
+
+        monkeypatch.setattr(pb, "_latest_live_input_cycle", unbounded_latest_cycle)
+        started = time.monotonic()
+        belief = _load(
+            forecasts_db,
+            deadline_monotonic=started + 0.02,
+        )
+
+        assert belief is None
+        assert time.monotonic() - started < 1.0
+
     def test_old_current_evidence_semantics_is_not_belief_authority(self, forecasts_db):
         _insert(
             forecasts_db,

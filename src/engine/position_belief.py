@@ -51,6 +51,7 @@ import logging
 import math
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping
@@ -604,6 +605,7 @@ def load_replacement_belief(
     max_age_hours: float = DEFAULT_MAX_AGE_HOURS,
     db_path: str | None = None,
     world_db_path: str | None = None,
+    deadline_monotonic: float | None = None,
 ) -> ReplacementBelief | None:
     """Freshest replacement-chain belief for a held bin, or None (fail-closed).
 
@@ -642,6 +644,17 @@ def load_replacement_belief(
         return None
     try:
         conn.row_factory = sqlite3.Row
+        if deadline_monotonic is not None:
+            deadline = float(deadline_monotonic)
+
+            def _deadline_expired() -> int:
+                return int(time.monotonic() >= deadline)
+
+            # SCOPE: this held family's read-only probability lookup.
+            # DRAIN: SQLite interrupts at the caller's monitor deadline; the
+            # independent materializer/reseed producer restores authority.
+            # RESET: this private connection and handler close after the read.
+            conn.set_progress_handler(_deadline_expired, 1_000)
         columns = _table_columns(conn, "forecast_posteriors")
         if "runtime_layer" not in columns:
             logger.warning(
@@ -723,6 +736,11 @@ def load_replacement_belief(
         logger.warning("position_belief: posterior read failed: %s", exc)
         return None
     finally:
+        if deadline_monotonic is not None:
+            try:
+                conn.set_progress_handler(None, 0)
+            except sqlite3.Error:
+                pass
         conn.close()
     if row is None:
         return None

@@ -147,7 +147,14 @@ def test_bounded_monitor_defers_sync_readthrough_to_independent_producer(monkeyp
     import src.engine.monitor_refresh as mr
     import src.engine.position_belief as pb
 
-    monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: _stale_belief())
+    belief_deadlines = []
+    monkeypatch.setattr(
+        pb,
+        "load_replacement_belief",
+        lambda **kw: belief_deadlines.append(kw.get("deadline_monotonic"))
+        or _stale_belief(),
+    )
+    monkeypatch.setattr(mr.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(
         mr,
         "_attempt_held_belief_readthrough",
@@ -174,6 +181,7 @@ def test_bounded_monitor_defers_sync_readthrough_to_independent_producer(monkeyp
     assert prob == pytest.approx(pos.p_posterior)
     assert refresh_pos is pos
     assert is_fresh is False
+    assert belief_deadlines == [pytest.approx(105.0)]
     assert reseed_called == [
         {"city": "Karachi", "target_date": "2026-06-12", "metric": "high"}
     ]

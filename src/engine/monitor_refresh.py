@@ -103,6 +103,7 @@ _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
     "_zeus_monitor_prefetch_attempted_tokens"
 )
 _HELD_MONITOR_DEADLINE_ATTR = "_zeus_held_monitor_deadline_monotonic"
+_HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS = 5.0
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
 _DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS = 0.1
 _DAY0_MATERIALIZATION_VISIBILITY_RETRY_BUDGET_SECONDS = 0.35
@@ -5330,6 +5331,15 @@ def monitor_probability_refresh(
     )
 
     try:
+        primary_belief_deadline = (
+            None
+            if deadline_monotonic is None
+            else min(
+                float(deadline_monotonic),
+                time.monotonic()
+                + _HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+            )
+        )
         belief = load_replacement_belief(
             city=pos.city,
             target_date=pos.target_date,
@@ -5337,6 +5347,7 @@ def monitor_probability_refresh(
             bin_label=pos.bin_label,
             direction=str(getattr(pos.direction, "value", pos.direction)),
             max_age_hours=monitor_belief_max_age_hours(),
+            deadline_monotonic=primary_belief_deadline,
         )
     except Exception as exc:  # noqa: BLE001 — belief read must not kill the monitor
         belief = None
