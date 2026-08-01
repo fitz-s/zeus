@@ -22516,6 +22516,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             )
             cancel_candidates = _capital_blocking_cancel_commands(conn)
             terminal_candidates = _terminal_point_order_candidates(conn)
+            stale_terminal_finding_candidates = (
+                _stale_local_orphan_terminal_no_fill_candidates(conn)
+            )
             partial_candidates = (
                 _partial_remainder_candidates(
                     conn,
@@ -22556,6 +22559,35 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                     obligation_states,
                 ).fetchone()
             )
+        stale_terminal_finding_result = None
+        if stale_terminal_finding_candidates:
+            # These findings already carry an identity-bound terminal no-fill
+            # fact.  They globally force the allocator into reduce-only, so
+            # reset them from durable truth before any venue or historical
+            # maintenance work can consume the live-tick budget.
+            finding_deadline = time.monotonic() + max(live_tick_budget, 0.5)
+            finding_conn_factory = _recovery_apply_conn_factory(
+                conn_factory,
+                scope="live_tick",
+                deadline_monotonic=finding_deadline,
+            )
+            stale_terminal_finding_result = _run_recovery_pass_with_lock_policy(
+                "stale_terminal_no_fill_findings_fast",
+                lambda: run_db_only_pass(
+                    reconcile_stale_terminal_no_fill_findings,
+                    conn_factory=finding_conn_factory,
+                    label="recovery.stale_terminal_no_fill_findings_fast",
+                ),
+                scope="live_tick",
+                summary=summary,
+                deadline_monotonic=finding_deadline,
+            )
+            if stale_terminal_finding_result is not None:
+                _accumulate(
+                    summary,
+                    "stale_terminal_no_fill_findings_fast",
+                    stale_terminal_finding_result,
+                )
         if identity_submit_deferred:
             summary["identity_bound_inflight_deferred"] = identity_submit_deferred
         identity_submit_command_ids = {
@@ -22623,7 +22655,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             and not partial_candidates
             and not terminal_obligation_open
         ):
-            return identity_result
+            return stale_terminal_finding_result
         cancel_command_ids = {
             str(row.get("command_id") or "") for row in cancel_candidates
         }
@@ -22766,7 +22798,13 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                     "terminal_point_recovery_fast",
                     terminal_result,
                 )
-        return cancel_result or partial_result or obligation_result or terminal_result
+        return (
+            stale_terminal_finding_result
+            or cancel_result
+            or partial_result
+            or obligation_result
+            or terminal_result
+        )
 
     def _entry_posterior_recovery_fast_pass():
         """Restore decision-time q after capital-release work, before maintenance.

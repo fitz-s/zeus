@@ -1906,6 +1906,70 @@ def test_live_tick_prioritizes_capital_releases_before_terminal_order_budget_def
     assert summary["db_budget_deferred_at"] == "terminal_order_facts"
 
 
+def test_live_tick_resets_terminal_orphan_before_general_budget_defer(monkeypatch):
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+    now = [0.0]
+
+    def _conn_factory():
+        return sqlite3.connect(":memory:")
+
+    def _stale_candidates(_conn):
+        return [{"finding_id": "finding-terminal"}]
+
+    def _reset_terminal_orphan(_conn):
+        calls.append("stale_terminal_no_fill_findings_fast")
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    def _later_pass(_conn):
+        calls.append("review_required_matched_submit_trade_fact")
+        now[0] = 2.0
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "_stale_local_orphan_terminal_no_fill_candidates",
+        _stale_candidates,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_stale_terminal_no_fill_findings",
+        _reset_terminal_orphan,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_review_required_matched_submit_trade_facts",
+        _later_pass,
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-08-01T20:00:00+00:00",
+        scope="live_tick",
+    )
+
+    assert calls == [
+        "stale_terminal_no_fill_findings_fast",
+        "review_required_matched_submit_trade_fact",
+    ]
+    assert summary["stale_terminal_no_fill_findings_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["db_budget_deferred"] is True
+    assert summary["db_budget_deferred_at"] == (
+        "review_required_matched_submit_trade_fact"
+    )
+
+
 def test_full_recovery_does_not_swallow_sqlite_interrupt():
     from src.execution import command_recovery
 
