@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-01; last_reused=2026-08-01
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-29
+# Last reused/audited: 2026-08-01
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -12958,8 +12958,9 @@ class TestRecoveryResolutionTable:
         ),
         (
             (4.0, "2026-04-26T00:09:00Z", "FAK", "FAK", "EXPIRED"),
-            (4.0, "2026-04-26T00:08:00Z", "FAK", "FAK", "REVIEW_REQUIRED"),
-            (4.0, "2026-04-26T00:07:00Z", "FAK", "FAK", "REVIEW_REQUIRED"),
+            (4.0, "2026-04-26T00:07:00Z", "FAK", "FAK", "EXPIRED"),
+            (4.0, "2026-04-26T00:05:00Z", "FAK", "FAK", "REVIEW_REQUIRED"),
+            (4.0, "2026-04-26T00:04:00Z", "FAK", "FAK", "REVIEW_REQUIRED"),
             (5.0, "2026-04-26T00:09:00Z", "FAK", "FAK", "REVIEW_REQUIRED"),
             (4.0, "2026-04-26T00:09:00Z", "GTC", "GTC", "REVIEW_REQUIRED"),
             (4.0, "2026-04-26T00:09:00Z", "GTC", "FAK", "REVIEW_REQUIRED"),
@@ -13134,6 +13135,124 @@ class TestRecoveryResolutionTable:
             "phase": "day0_window",
             "shares": 4.0,
             "cost_basis_usd": 1.24,
+        }
+
+    def test_terminal_fak_partial_entry_review_expires_unfilled_remainder(
+        self,
+        conn,
+    ):
+        """A terminal FAK BUY keeps its exact fill without inventing a live tail."""
+        _insert(
+            conn,
+            command_id="cmd-entry-fak-partial",
+            position_id="pos-entry-fak-partial",
+            order_type="FAK",
+            size=6.0,
+            price=0.31,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-entry-fak-partial",
+            venue_order_id="ord-entry-fak-partial",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            command_id="cmd-entry-fak-partial",
+            position_id="pos-entry-fak-partial",
+            order_id="ord-entry-fak-partial",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-entry-fak-partial",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "venue_order_id": "ord-entry-fak-partial",
+                "trade_id": "trade-entry-fak-partial",
+                "filled_size": "4",
+                "fill_price": "0.31",
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-entry-fak-partial",
+            order_id="ord-entry-fak-partial",
+            state="PARTIALLY_MATCHED",
+            matched_size="4",
+            remaining_size="2",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-entry-fak-partial",
+            order_id="ord-entry-fak-partial",
+            trade_id="trade-entry-fak-partial",
+            state="CONFIRMED",
+            filled_size="4",
+            fill_price="0.31",
+            tx_hash="0xentry-terminal-partial",
+        )
+        append_event(
+            conn,
+            command_id="cmd-entry-fak-partial",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+                "venue_order_id": "ord-entry-fak-partial",
+                "point_order_status": "MATCHED",
+                "point_order": {
+                    "orderID": "ord-entry-fak-partial",
+                    "status": "MATCHED",
+                    "order_type": "FAK",
+                    "side": "BUY",
+                    "asset_id": "tok-001",
+                    "original_size": "6",
+                    "size_matched": "4",
+                    "price": "0.31",
+                },
+            },
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+
+        summary = reconcile_matched_cancel_review_required_entries(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-entry-fak-partial") == "EXPIRED"
+        assert [
+            event["event_type"]
+            for event in _get_events(conn, "cmd-entry-fak-partial")[-2:]
+        ] == ["PARTIAL_FILL_OBSERVED", "EXPIRED"]
+        terminal = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-entry-fak-partial'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(terminal) == {
+            "state": "PARTIALLY_MATCHED",
+            "matched_size": "4",
+            "remaining_size": "0",
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, order_status
+              FROM position_current
+             WHERE position_id = 'pos-entry-fak-partial'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 4.0,
+            "cost_basis_usd": 1.24,
+            "order_status": "partial",
         }
 
     def test_already_canceled_exit_ambiguous_point_read_stays_review_required(
