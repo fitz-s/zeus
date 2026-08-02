@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import tempfile
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -23,7 +24,78 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 RUNTIME_ROOT = Path(os.environ.get("ZEUS_PRIMARY_ROOT") or PROJECT_ROOT).expanduser().resolve()
-STATE_DIR = RUNTIME_ROOT / "state"
+TEST_STATE_ROOT_ENV = "ZEUS_TEST_STATE_ROOT"
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _test_state_forbidden_roots() -> tuple[Path, ...]:
+    return (
+        PROJECT_ROOT.resolve(strict=False),
+        (PROJECT_ROOT / "state").resolve(strict=False),
+    )
+
+
+def validate_test_state_root(value: str | os.PathLike[str] | Path) -> Path:
+    """Validate a pytest state root before any test state path is resolved.
+
+    The marker is intentionally independent of ``ZEUS_PRIMARY_ROOT``. It is a
+    test-only capability boundary, not a production runtime-root override.
+    """
+
+    raw = os.fspath(value) if value is not None else ""
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("test state root must be non-empty")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("test state root must be absolute")
+    if candidate.is_symlink():
+        raise ValueError("test state root must not be a symlink")
+
+    resolved = candidate.resolve(strict=False)
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+    if resolved == temp_root or not _path_is_within(resolved, temp_root):
+        raise ValueError("test state root must be a private temporary child")
+    for forbidden in _test_state_forbidden_roots():
+        if _path_is_within(resolved, forbidden):
+            raise ValueError("test state root may not overlap repo/live state")
+    return resolved
+
+
+def validate_test_state_path(value: str | os.PathLike[str] | Path) -> Path:
+    """Validate a test-only state target by resolved filesystem boundaries."""
+
+    marker = os.environ.get(TEST_STATE_ROOT_ENV)
+    if marker is None:
+        raise RuntimeError("test state path validation requires the test marker")
+    validate_test_state_root(marker)
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("test state path must be absolute")
+    resolved = candidate.resolve(strict=False)
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+    if resolved == temp_root or not _path_is_within(resolved, temp_root):
+        raise ValueError("test state path must stay under a temporary directory")
+    for forbidden in _test_state_forbidden_roots():
+        if _path_is_within(resolved, forbidden):
+            raise ValueError("test state path may not overlap repo/live state")
+    return candidate
+
+
+_TEST_STATE_ROOT: Path | None = None
+if TEST_STATE_ROOT_ENV in os.environ:
+    # SCOPE: only the pytest marker's root; production has no marker and is untouched.
+    # DRAIN: pytest owns this temporary namespace until session teardown.
+    # RESET: removing the marker restores the existing ZEUS_PRIMARY_ROOT/state path.
+    _TEST_STATE_ROOT = validate_test_state_root(os.environ[TEST_STATE_ROOT_ENV])
+
+STATE_DIR = _TEST_STATE_ROOT or (RUNTIME_ROOT / "state")
 
 
 def runtime_state_path(filename: str) -> Path:
@@ -32,7 +104,12 @@ def runtime_state_path(filename: str) -> Path:
     Backtest/replay lanes use their own DB paths and must not route through
     runtime state files.
     """
-    return STATE_DIR / filename
+    target = STATE_DIR / filename
+    if _TEST_STATE_ROOT is not None:
+        validated = validate_test_state_path(target)
+        if not _path_is_within(validated.resolve(strict=False), _TEST_STATE_ROOT):
+            raise ValueError("default state path escaped the test state root")
+    return target
 
 
 ACTIVE_MODES = ("live",)

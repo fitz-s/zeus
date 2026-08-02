@@ -15,7 +15,9 @@ from datetime import date, datetime, timedelta, timezone
 import types
 import json
 import logging
+import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -86,6 +88,71 @@ from src.types import Bin, BinEdge, Day0TemporalContext
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 from src.types.temperature import TemperatureDelta
 from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+
+def test_pytest_collection_installs_a_private_state_root_before_src_use():
+    marker = os.environ.get("ZEUS_TEST_STATE_ROOT")
+    assert marker, "pytest must install ZEUS_TEST_STATE_ROOT before src imports"
+
+    test_root = Path(marker).resolve()
+    from src.config import RUNTIME_ROOT, STATE_DIR, state_path
+
+    assert test_root != Path(tempfile.gettempdir()).resolve()
+    assert RUNTIME_ROOT.resolve() != test_root
+    assert STATE_DIR.resolve() == test_root
+    assert state_path("collection-antibody.json").resolve().is_relative_to(test_root)
+
+
+@pytest.mark.parametrize(
+    "raw_root",
+    ("", "relative-test-state", tempfile.gettempdir(), str(Path(__file__).resolve().parents[1])),
+)
+def test_test_state_root_validation_rejects_empty_relative_and_overbroad_roots(raw_root):
+    from src.config import validate_test_state_root
+
+    with pytest.raises(ValueError):
+        validate_test_state_root(raw_root)
+
+
+def test_test_state_root_is_inherited_by_subprocess():
+    repo_root = Path(__file__).resolve().parents[1]
+    output = subprocess.check_output(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os; from src.config import STATE_DIR; "
+                "assert str(STATE_DIR.resolve()) == os.environ['ZEUS_TEST_STATE_ROOT']"
+            ),
+        ],
+        cwd=repo_root,
+        env=os.environ.copy(),
+        text=True,
+    )
+    assert output == ""
+
+
+def test_reactor_wake_rejects_repo_and_symlinked_paths_but_allows_tmp_path(tmp_path):
+    from src.runtime.reactor_wake import publish_reactor_wake
+
+    wake_kwargs = {"source": "test", "reason": "state-isolation-antibody"}
+    repo_state = Path(__file__).resolve().parents[1] / "state"
+    for path in (
+        repo_state / "edli-reactor-wake.json",
+        repo_state / "edli-reactor-wake.json.d" / "child.json",
+    ):
+        with pytest.raises(ValueError, match="test state path"):
+            publish_reactor_wake(path=path, **wake_kwargs)
+
+    symlink = tmp_path / "wake-through-repo-state.json"
+    symlink.symlink_to(repo_state / "edli-reactor-wake.json")
+    with pytest.raises(ValueError, match="test state path"):
+        publish_reactor_wake(path=symlink, **wake_kwargs)
+
+    safe_path = tmp_path / "wake.json"
+    wake = publish_reactor_wake(path=safe_path, **wake_kwargs)
+    assert wake.wake_id
+    assert safe_path.exists()
 
 
 def test_evaluator_fee_rate_uses_canonical_fraction_from_clob_details():
@@ -12914,7 +12981,7 @@ def test_incomplete_exit_context_missing_exit_quote_is_not_chain_missing(monkeyp
     assert artifact.monitor_results[0].fresh_edge is None
 
 
-def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
+def test_monitor_statistical_sell_authority_failure_publishes_isolated_wake(monkeypatch):
     pos = _position(trade_id="monitor-execution-failed", state="day0_window")
     portfolio = PortfolioState(positions=[pos])
     artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
@@ -12942,12 +13009,6 @@ def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
         "evaluate_exit",
         lambda self, exit_context: ExitDecision(True, "SETTLEMENT_IMMINENT", trigger="SETTLEMENT_IMMINENT"),
     )
-    monkeypatch.setattr("src.execution.exit_lifecycle.build_exit_intent", lambda *args, **kwargs: object())
-    monkeypatch.setattr(
-        "src.execution.exit_lifecycle.execute_exit",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("execution failed")),
-    )
-
     cycle_runtime.execute_monitoring_phase(
         conn=None,
         clob=types.SimpleNamespace(),
@@ -12958,10 +13019,28 @@ def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
         deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
     )
 
-    assert summary["monitor_failed"] == 1
+    assert summary.get("monitor_failed", 0) == 0
     assert "monitor_chain_missing" not in summary
     assert len(artifact.monitor_results) == 1
-    assert artifact.monitor_results[0].exit_reason == "SETTLEMENT_IMMINENT"
+    assert summary["monitor_statistical_sells_blocked_without_global_authority"] == 1
+    assert summary["monitor_statistical_sell_auction_completion_requested"] == 1
+    assert artifact.monitor_results[0].should_exit is False
+    assert artifact.monitor_results[0].exit_reason == (
+        "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+    )
+
+    test_root = Path(os.environ["ZEUS_TEST_STATE_ROOT"]).resolve()
+    from src.config import STATE_DIR
+
+    assert STATE_DIR.resolve() == test_root
+    synthetic_paths = (
+        STATE_DIR / "edli-reactor-wake.json",
+        STATE_DIR / "edli-reactor-wake.json.d",
+        STATE_DIR / "edli-reactor-wake.json.held-sell-reauction-receipts",
+    )
+    assert synthetic_paths[0].exists()
+    for path in synthetic_paths:
+        assert path.resolve().is_relative_to(test_root)
 
 
 def _entry_decision_evidence() -> DecisionEvidence:

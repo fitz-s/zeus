@@ -438,7 +438,7 @@ files:
   src/runtime/reactor_wake.py:
     zone: K2_runtime
     authority_role: event_reactor_wake_hint
-    why: Publishes and reads atomic non-authoritative wake hints after durable producer commits so the live daemon can invoke the existing canonical reactor without waiting for its periodic recovery scan; incremental queue reads let an in-flight forecast family distinguish a dependent update from unrelated family work. Exact held-SELL completion wake IDs can be read as a one-turn fairness snapshot; the hint carries no market, probability, risk, or order truth; loss or corruption falls back to the existing scan.
+    why: Publishes and reads atomic non-authoritative wake hints after durable producer commits so the live daemon can invoke the existing canonical reactor without waiting for its periodic recovery scan; incremental queue reads let an in-flight forecast family distinguish a dependent update from unrelated family work. Exact held-SELL completion wake IDs can be read as a one-turn fairness snapshot; the hint carries no market, probability, risk, or order truth; loss or corruption falls back to the existing scan. When the pytest state marker is present, every default or explicit wake path is rejected unless its resolved target stays in a temporary namespace and outside repo/live state.
     downstream:
     - src/data/replacement_forecast_production.py
     - src/data/substrate_observer.py
@@ -450,7 +450,7 @@ files:
   src/config.py:
     zone: K2_runtime
     authority_role: runtime_config_seed
-    why: Loads settings, cities, state paths, and live-only runtime configuration.
+    why: Loads settings, cities, state paths, and live-only runtime configuration. A pytest-only state marker is validated at import time and redirects test STATE_DIR without changing ZEUS_PRIMARY_ROOT production semantics.
     downstream:
     - src/calibration/effective_sample_size.py
     - src/calibration/manager.py

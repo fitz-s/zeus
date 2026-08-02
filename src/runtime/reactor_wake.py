@@ -134,10 +134,19 @@ class ReactorWake:
 
 def _wake_path(path: Path | None) -> Path:
     if path is not None:
-        return Path(path)
-    from src.config import state_path
+        target = Path(path)
+    else:
+        from src.config import state_path
 
-    return state_path(REACTOR_WAKE_FILENAME)
+        target = state_path(REACTOR_WAKE_FILENAME)
+    if "ZEUS_TEST_STATE_ROOT" in os.environ:
+        # SCOPE: this wake target and its derived queue/socket/receipt siblings.
+        # DRAIN: pytest's temporary root is discarded after the owning session.
+        # RESET: marker absence takes the pre-hotfix production path unchanged.
+        from src.config import validate_test_state_path
+
+        validate_test_state_path(target)
+    return target
 
 
 def _wake_queue_dir(path: Path | None) -> Path:

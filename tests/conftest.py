@@ -8,13 +8,90 @@
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
+from pathlib import Path
 
 import pytest
 
-from tests.fakes.polymarket_v2 import FakeClock, FakeCollateralLedger, FakePolymarketVenue
+_TEST_STATE_ROOT_ENV = "ZEUS_TEST_STATE_ROOT"
+_TEST_STATE_ROOT: Path
+_TEST_STATE_ROOT_OWNED = False
 
 
+def _validate_test_state_root(value: str | os.PathLike[str] | Path) -> Path:
+    raw = os.fspath(value) if value is not None else ""
+    if not isinstance(raw, str) or not raw.strip():
+        raise pytest.UsageError("ZEUS_TEST_STATE_ROOT must be non-empty")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise pytest.UsageError("ZEUS_TEST_STATE_ROOT must be absolute")
+    if candidate.is_symlink():
+        raise pytest.UsageError("ZEUS_TEST_STATE_ROOT must not be a symlink")
+
+    resolved = candidate.resolve(strict=False)
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+    if resolved == temp_root or not resolved.is_relative_to(temp_root):
+        raise pytest.UsageError(
+            "ZEUS_TEST_STATE_ROOT must be a private temporary child"
+        )
+    repo_root = Path(__file__).resolve().parent.parent
+    forbidden = (
+        repo_root,
+        (repo_root / "state").resolve(strict=False),
+    )
+    if any(resolved.is_relative_to(path) for path in forbidden):
+        raise pytest.UsageError(
+            "ZEUS_TEST_STATE_ROOT may not overlap repo/live state"
+        )
+    return resolved
+
+
+def _install_test_state_root() -> tuple[Path, bool]:
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "").strip()
+    raw = os.environ.get(_TEST_STATE_ROOT_ENV)
+    if raw is None:
+        base = Path(tempfile.mkdtemp(prefix="zeus-pytest-state-"))
+        root = base / (worker or f"pid-{os.getpid()}")
+        root.mkdir()
+        return _validate_test_state_root(root), True
+
+    root = _validate_test_state_root(raw)
+    if worker and root.name != worker:
+        # The xdist master root is inherited by workers; namespace each worker
+        # below that already-validated temporary root. Test subprocesses retain
+        # the worker-named root and therefore inherit the same state namespace.
+        root = root / worker
+        root.mkdir(parents=True, exist_ok=True)
+        root = _validate_test_state_root(root)
+    return root, False
+
+
+# This runs while pytest loads conftest, before any test helper imports src.
+_TEST_STATE_ROOT, _TEST_STATE_ROOT_OWNED = _install_test_state_root()
+os.environ[_TEST_STATE_ROOT_ENV] = str(_TEST_STATE_ROOT)
 os.environ.setdefault("ZEUS_MODE", "live")
+
+from tests.fakes.polymarket_v2 import (  # noqa: E402
+    FakeClock,
+    FakeCollateralLedger,
+    FakePolymarketVenue,
+)
+
+
+def pytest_unconfigure(config) -> None:
+    """Remove only the session namespace created under a verified temp root."""
+
+    del config
+    if not _TEST_STATE_ROOT_OWNED:
+        return
+    try:
+        verified = _validate_test_state_root(_TEST_STATE_ROOT)
+    except (OSError, pytest.UsageError):
+        return
+    if verified != _TEST_STATE_ROOT.resolve(strict=False):
+        return
+    shutil.rmtree(verified)
 
 
 @pytest.fixture(autouse=True)
