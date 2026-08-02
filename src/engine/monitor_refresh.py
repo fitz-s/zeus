@@ -2921,7 +2921,10 @@ def monitor_quote_refresh(
                 remaining = float(deadline) - time.monotonic()
                 if remaining <= 0.0:
                     return None
-                book = clob.get_orderbook_snapshot(tid, timeout=remaining)
+                book = clob.get_held_orderbook_snapshots_hard_deadline(
+                    [tid],
+                    timeout_seconds=remaining,
+                ).get(tid)
             else:
                 book = get_orderbook(tid) if callable(get_orderbook) else None
             _remember_monitor_orderbook(clob, tid, book)

@@ -1350,7 +1350,7 @@ files:
   src/data/polymarket_client.py:
     zone: K2_runtime
     authority_role: clob_boundary
-    why: CLOB market-data compatibility wrapper; live placement/cancel/order query delegates to the R3 Z2 PolymarketV2Adapter boundary. R3 A2 threads RiskAllocator-selected order_type through this shim so maker/taker policy reaches the venue adapter. Held-monitor book reads clamp every HTTP phase to the cycle's remaining budget; this is an amplification bound, not a killable total wall-clock guarantee.
+    why: CLOB market-data compatibility wrapper; live placement/cancel/order query delegates to the R3 Z2 PolymarketV2Adapter boundary. R3 A2 threads RiskAllocator-selected order_type through this shim so maker/taker policy reaches the venue adapter. Held-monitor public-book network phases run in a DB-free, command-free spawned child that the parent can terminate after the remaining read budget; process startup, IPC, and OS reap are explicit cleanup tails rather than an absolute method-level wall-clock guarantee. Inner HTTP phases are also clamped.
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/evaluator.py
@@ -1752,7 +1752,7 @@ files:
   src/engine/cycle_runtime.py:
     zone: K2_runtime
     authority_role: runtime_helper
-    why: Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority. R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge as exit evaluation, including lossless reconstruction of exit-specific validation subsets indexed into the event's canonical monitor validation vector. Held-monitor recovery serves the least-recently persisted MONITOR_REFRESHED debt before optional tail work; batch quote failure defers missing tokens without singular fan-out, and quote/probability work shares one cycle admission deadline instead of resetting a budget per position. Deadline expiry revokes new I/O, not a preclassified local absorbing hard fact: one dead-bin rescue explicitly disables quote refresh and retry preflight while recording its direct exit/retry decision, then the next cycle retries executable truth.
+    why: Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority. R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge as exit evaluation, including lossless reconstruction of exit-specific validation subsets indexed into the event's canonical monitor validation vector. Held-monitor recovery serves the least-recently persisted MONITOR_REFRESHED debt before optional tail work; production batch books use the DB-free killable reader, failure defers without singular fan-out, and quote/probability work shares one cycle deadline instead of resetting a budget per position. Deadline expiry revokes new I/O, not a preclassified local absorbing hard fact: one dead-bin rescue explicitly disables quote refresh and retry preflight while recording its direct exit/retry decision, then the next cycle retries executable truth.
   src/engine/discovery_mode.py:
     zone: K2_runtime
     authority_role: mode_enum
@@ -1810,7 +1810,7 @@ files:
   src/engine/monitor_refresh.py:
     zone: K2_runtime
     authority_role: position_monitoring
-    why: Refreshes held position probabilities and exit signals using entry-parity math; current token identity reads use the compact latest-snapshot mirror rather than scanning the high-frequency append log. Day0 repair seeds read the same canonical conditioning payload as current-global/seed discovery, and a bounded one-shot visibility retry covers a freshly committed observation clock that temporarily outruns its conditioned posterior without caching or relabeling the failed cut as fresh. A production singular held-book read receives only the enclosing cycle deadline's remaining transport budget.
+    why: Refreshes held position probabilities and exit signals using entry-parity math; current token identity reads use the compact latest-snapshot mirror rather than scanning the high-frequency append log. Day0 repair seeds read the same canonical conditioning payload as current-global/seed discovery, and a bounded one-shot visibility retry covers a freshly committed observation clock that temporarily outruns its conditioned posterior without caching or relabeling the failed cut as fresh. A production one-token held-book fallback uses the same DB-free killable reader and receives only the enclosing cycle deadline's remaining budget.
     downstream:
     - src/engine/cycle_runtime.py
   src/engine/process_lock.py:

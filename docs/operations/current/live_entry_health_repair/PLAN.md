@@ -1412,3 +1412,37 @@ Focused batch-failure, shared-deadline, next-cycle recovery, monitor fairness,
 compilation, planning-lock, and diff checks pass before exact-SHA deployment.
 The separate killable-supervisor work remains required before claiming a hard
 240-second monitor guarantee.
+
+### 2026-08-02 Follow-up -- Isolate public held-book I/O behind a hard deadline
+
+The shared-deadline slice removes retry and per-position budget amplification,
+but sync HTTP phase ceilings cannot kill a DNS/TLS/socket operation that outlives
+the cycle. The remaining safe isolation boundary is the public quote read, not
+the whole monitor: killing an entire monitor could interrupt a durable SELL
+between venue side effect and receipt persistence.
+
+Production held-book reads therefore run in a spawned child that receives only
+token IDs and a timeout, opens no DB, and has no command or submission-capable
+parent client. The parent reserves cleanup time inside the read budget, then
+terminates/kills and gives the OS a fixed cleanup tail to reap a wedged reader.
+The child-started network phase is therefore terminable; `process.start()`, IPC
+decode, and the final reap are not claimed as an absolute method-level
+wall-clock bound. Missing, malformed, or
+timed-out output is DATA_DEGRADED for that cycle and is retried from fresh venue
+truth next cycle. Probability SQLite interruption and the existing parent SELL
+command/idempotency lane remain unchanged.
+
+SCOPE is one missing-book batch in one held-monitor invocation. DRAIN is child
+response inside the supplied read budget or forced termination followed by the
+bounded cleanup tail.
+RESET is the next cycle's fresh child and fresh token batch. This makes the
+known public-book hang killable without making a no-loss claim for market gaps,
+no bid, or resolution jumps.
+
+Authorized files are the existing shared-deadline source/test/registry rows and
+this plan. Acceptance: success returns only requested book objects; a hung child
+is terminated and reaped; batch and one-token held reads use this hard boundary;
+no DB/BUY/SELL method is reachable in the worker; batch failure still cannot fan
+out; shared deadline and next-cycle recovery antibodies remain green; planning,
+compile, lint differential, and diff checks pass. Deployment remains exact-SHA
+hot-fix only after independent review.

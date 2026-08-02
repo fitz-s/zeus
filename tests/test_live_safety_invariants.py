@@ -9786,8 +9786,7 @@ def test_held_monitor_production_book_reads_receive_only_cycle_remaining_time(
         chain_state="synced",
     )
     clock = [3.0]
-    batch_timeouts = []
-    singular_timeouts = []
+    hard_deadline_calls = []
     clob = PolymarketClient(public_http_timeout=2.0)
 
     monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
@@ -9798,8 +9797,8 @@ def test_held_monitor_production_book_reads_receive_only_cycle_remaining_time(
         lambda *_args, **_kwargs: {},
     )
 
-    def batch(token_ids, *, timeout):
-        batch_timeouts.append(timeout)
+    def hard_deadline_books(token_ids, *, timeout_seconds):
+        hard_deadline_calls.append((list(token_ids), timeout_seconds))
         return {
             token_ids[0]: {
                 "asset_id": token_ids[0],
@@ -9808,7 +9807,11 @@ def test_held_monitor_production_book_reads_receive_only_cycle_remaining_time(
             }
         }
 
-    monkeypatch.setattr(clob, "get_orderbook_snapshots", batch)
+    monkeypatch.setattr(
+        clob,
+        "get_held_orderbook_snapshots_hard_deadline",
+        hard_deadline_books,
+    )
     summary = {}
     cycle_runtime._prefetch_held_monitor_orderbooks(
         None,
@@ -9819,23 +9822,19 @@ def test_held_monitor_production_book_reads_receive_only_cycle_remaining_time(
         deps=_monitor_test_deps("test_shared_batch_deadline"),
         deadline_monotonic=10.0,
     )
-    assert batch_timeouts == [pytest.approx(7.0)]
+    assert hard_deadline_calls == [
+        (["shared-deadline-token"], pytest.approx(7.0))
+    ]
 
     monitor_refresh.install_monitor_orderbook_prefetch(clob, {})
     setattr(position, "_zeus_held_monitor_deadline_monotonic", 10.0)
 
-    def singular(token_id, *, timeout=None):
-        singular_timeouts.append(timeout)
-        return {
-            "asset_id": token_id,
-            "bids": [{"price": "0.40", "size": "20"}],
-            "asks": [{"price": "0.42", "size": "20"}],
-        }
-
-    monkeypatch.setattr(clob, "get_orderbook_snapshot", singular)
     quote = monitor_refresh.monitor_quote_refresh(None, clob, position)
     assert quote is not None
-    assert singular_timeouts == [pytest.approx(7.0)]
+    assert hard_deadline_calls == [
+        (["shared-deadline-token"], pytest.approx(7.0)),
+        (["shared-deadline-token"], pytest.approx(7.0)),
+    ]
 
 
 def test_polymarket_book_http_phases_are_clamped_to_remaining_budget(monkeypatch):
@@ -9866,6 +9865,209 @@ def test_polymarket_book_http_phases_are_clamped_to_remaining_budget(monkeypatch
     assert request_timeout.read == pytest.approx(0.2)
     assert request_timeout.write == pytest.approx(0.2)
     assert request_timeout.pool == pytest.approx(0.2)
+
+
+def test_held_book_worker_receives_only_ids_and_returns_public_books(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    calls = []
+
+    class ReadOnlyClient:
+        def __init__(self, *, public_http_timeout, public_request_priority):
+            calls.append(
+                ("init", public_http_timeout, public_request_priority.value)
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get_orderbook_snapshots(self, token_ids, *, timeout):
+            calls.append(("books", list(token_ids), timeout))
+            return {token_ids[0]: {"asset_id": token_ids[0], "bids": [], "asks": []}}
+
+    class Send:
+        def __init__(self):
+            self.messages = []
+
+        def send(self, message):
+            self.messages.append(message)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(pm, "PolymarketClient", ReadOnlyClient)
+    send = Send()
+    pm._held_orderbook_read_worker(send, ["held-token"], 0.5)
+
+    assert calls == [
+        ("init", 0.5, 20),
+        ("books", ["held-token"], 0.5),
+    ]
+    assert json.loads(send.messages[0]) == {
+        "status": "ok",
+        "books": {
+            "held-token": {
+                "asset_id": "held-token",
+                "bids": [],
+                "asks": [],
+            }
+        },
+    }
+
+
+def test_held_book_hard_deadline_terminates_and_reaps_hung_reader(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    class Receive:
+        def poll(self, _timeout):
+            return False
+
+        def close(self):
+            return None
+
+    class Send:
+        def close(self):
+            return None
+
+    class HungProcess:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.alive = False
+            self.started = False
+            self.terminated = False
+            self.joined = []
+
+        def start(self):
+            self.started = True
+            self.alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminated = True
+            self.alive = False
+
+        def kill(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            self.joined.append(timeout)
+
+    class Context:
+        def Pipe(self, *, duplex):
+            assert duplex is False
+            return Receive(), Send()
+
+        def Process(self, **kwargs):
+            self.process = HungProcess(**kwargs)
+            return self.process
+
+    context = Context()
+    monkeypatch.setattr(pm.multiprocessing, "get_context", lambda mode: context)
+    clob = pm.PolymarketClient(public_http_timeout=2.0)
+
+    with pytest.raises(TimeoutError, match="held orderbook batch exceeded"):
+        clob.get_held_orderbook_snapshots_hard_deadline(
+            ["hung-token"],
+            timeout_seconds=0.1,
+        )
+
+    assert context.process.started is True
+    assert context.process.terminated is True
+    assert context.process.is_alive() is False
+    assert context.process.kwargs["target"] is pm._held_orderbook_read_worker
+    assert context.process.kwargs["args"][1] == ["hung-token"]
+
+
+def test_held_book_hard_deadline_never_extends_insufficient_budget(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    monkeypatch.setattr(
+        pm.multiprocessing,
+        "get_context",
+        lambda _mode: pytest.fail("insufficient budget must not spawn a reader"),
+    )
+    clob = pm.PolymarketClient(public_http_timeout=2.0)
+
+    with pytest.raises(TimeoutError, match="insufficient remaining deadline"):
+        clob.get_held_orderbook_snapshots_hard_deadline(
+            ["held-token"],
+            timeout_seconds=0.009,
+        )
+
+
+def test_held_book_hard_deadline_accepts_only_requested_book_objects(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    payload = json.dumps(
+        {
+            "status": "ok",
+            "books": {
+                "held-token": {"asset_id": "held-token", "bids": [], "asks": []},
+                "unexpected-token": {"asset_id": "unexpected-token"},
+                "invalid-token": ["not", "a", "book"],
+            },
+        }
+    )
+
+    class Receive:
+        def poll(self, _timeout):
+            return True
+
+        def recv(self):
+            return payload
+
+        def close(self):
+            return None
+
+    class Send:
+        def close(self):
+            return None
+
+    class CompletedProcess:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def terminate(self):
+            raise AssertionError("completed reader must not be terminated")
+
+        def kill(self):
+            raise AssertionError("completed reader must not be killed")
+
+        def join(self, timeout=None):
+            return None
+
+    class Context:
+        def Pipe(self, *, duplex):
+            assert duplex is False
+            return Receive(), Send()
+
+        def Process(self, **kwargs):
+            return CompletedProcess(**kwargs)
+
+    monkeypatch.setattr(
+        pm.multiprocessing,
+        "get_context",
+        lambda mode: Context(),
+    )
+    clob = pm.PolymarketClient(public_http_timeout=2.0)
+
+    assert clob.get_held_orderbook_snapshots_hard_deadline(
+        ["held-token", "invalid-token"],
+        timeout_seconds=0.5,
+    ) == {
+        "held-token": {"asset_id": "held-token", "bids": [], "asks": []}
+    }
 
 
 def test_monitoring_batch_transport_failure_defers_without_singular_fanout(

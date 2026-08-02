@@ -4846,7 +4846,10 @@ def _prefetch_held_monitor_orderbooks(
             from src.data.polymarket_client import PolymarketClient
 
             network_books = (
-                getter(missing_token_ids, timeout=remaining)
+                clob.get_held_orderbook_snapshots_hard_deadline(
+                    missing_token_ids,
+                    timeout_seconds=remaining,
+                )
                 if isinstance(clob, PolymarketClient)
                 else getter(missing_token_ids)
             )

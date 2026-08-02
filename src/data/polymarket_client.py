@@ -1,5 +1,5 @@
 # Created: prior to 2026-04-26
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-08-02
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
@@ -7,6 +7,7 @@
 #                  + 2026-05-17 riskguard/read-only bankroll lock remediation.
 #                  + 2026-07-09 concurrent public CLOB metadata prefetch.
 #                  + 2026-07-23 pre-POST deterministic signed-order identity journal.
+#                  + 2026-08-02 killable held-position public-book reads.
 """Polymarket CLOB API client. Spec §6.4.
 
 Limit orders ONLY. Auth via macOS Keychain.
@@ -16,9 +17,12 @@ All numeric fields from API are STRINGS — always float() before use.
 import functools as _functools
 import json
 import logging
+import math
+import multiprocessing
 import os
 import sys
 import threading
+import time
 import warnings
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -58,6 +62,45 @@ PRESUBMIT_JIT_CLOB_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=4, max_c
 # value is the already-canonicalized details dict.
 _FEE_RATE_CACHE: dict[str, tuple[dict[str, Any], datetime]] = {}
 _FEE_RATE_TTL_SECONDS = 1800.0
+
+
+def _held_orderbook_read_worker(
+    send_conn,
+    token_ids: list[str],
+    timeout_seconds: float,
+) -> None:
+    """Read only the supplied public books in a killable child process."""
+
+    try:
+        with PolymarketClient(
+            public_http_timeout=timeout_seconds,
+            public_request_priority=RequestPriority.HELD_REDUCE_ONLY,
+        ) as client:
+            books = client.get_orderbook_snapshots(
+                token_ids,
+                timeout=timeout_seconds,
+            )
+        send_conn.send(
+            json.dumps(
+                {"status": "ok", "books": books},
+                separators=(",", ":"),
+            )
+        )
+    except BaseException as exc:  # noqa: BLE001 - process boundary reports failure.
+        try:
+            send_conn.send(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                    separators=(",", ":"),
+                )
+            )
+        except BaseException:
+            pass
+    finally:
+        send_conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +774,109 @@ class PolymarketClient:
                 continue
             books[str(asset_id)] = entry
         return books
+
+    def get_held_orderbook_snapshots_hard_deadline(
+        self,
+        token_ids: list[str],
+        *,
+        timeout_seconds: float,
+    ) -> dict[str, dict]:
+        """Isolate public held-book network reads in a terminable child.
+
+        The child receives token IDs only, opens no DB, and has no submitted
+        command or parent venue client. Killing it can lose only a quote read;
+        the caller must treat timeout or malformed output as unavailable truth
+        and retry from a fresh book on a later monitor cycle. ``timeout_seconds``
+        bounds the parent poll after child start; process startup, IPC decoding,
+        and the final OS reap are cleanup tails, not an absolute method-level
+        wall-clock guarantee.
+        """
+
+        from src.state.db import assert_no_world_mutex_held_for_io
+
+        assert_no_world_mutex_held_for_io(
+            "get_held_orderbook_snapshots_hard_deadline"
+        )
+        wanted = list(
+            dict.fromkeys(
+                str(token_id).strip()
+                for token_id in token_ids
+                if str(token_id).strip()
+            )
+        )
+        if not wanted:
+            return {}
+        timeout = float(timeout_seconds)
+        if not math.isfinite(timeout) or timeout < 0.01:
+            raise TimeoutError(
+                "held orderbook batch has insufficient remaining deadline"
+            )
+        deadline = time.monotonic() + timeout
+
+        def _remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        def _stop_and_reap(process) -> None:
+            if not process.is_alive():
+                return
+            process.terminate()
+            process.join(timeout=min(0.25, max(0.01, _remaining())))
+            if process.is_alive():
+                process.kill()
+                # Reaping is correctness cleanup, not network-budget work.  A
+                # fixed tail avoids returning immediately with an unreaped
+                # child when the supplied read budget is already exhausted.
+                process.join(timeout=0.25)
+
+        context = multiprocessing.get_context("spawn")
+        receive_conn, send_conn = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_held_orderbook_read_worker,
+            args=(send_conn, wanted, timeout),
+            name="zeus-held-orderbook-read",
+            daemon=True,
+        )
+        try:
+            process.start()
+            send_conn.close()
+            cleanup_reserve = min(0.5, timeout / 4.0)
+            poll_budget = max(0.0, _remaining() - cleanup_reserve)
+            if poll_budget <= 0.0 or not receive_conn.poll(poll_budget):
+                _stop_and_reap(process)
+                raise TimeoutError(
+                    "held orderbook batch exceeded "
+                    f"{timeout:.2f}s child-read budget"
+                )
+            try:
+                message = json.loads(receive_conn.recv())
+            except (EOFError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"held orderbook worker returned no usable result: {exc}"
+                ) from exc
+            process.join(timeout=min(0.25, _remaining()))
+            _stop_and_reap(process)
+            if not isinstance(message, dict) or message.get("status") != "ok":
+                detail = (
+                    message.get("error")
+                    if isinstance(message, dict)
+                    else "invalid result"
+                )
+                raise RuntimeError(f"held orderbook worker failed: {detail}")
+            books = message.get("books")
+            if not isinstance(books, dict):
+                raise RuntimeError("held orderbook worker returned non-object books")
+            return {
+                str(token_id): book
+                for token_id, book in books.items()
+                if str(token_id) in wanted and isinstance(book, dict)
+            }
+        finally:
+            receive_conn.close()
+            try:
+                send_conn.close()
+            except OSError:
+                pass
+            _stop_and_reap(process)
 
     def get_clob_market_info(
         self,
