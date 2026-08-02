@@ -6276,7 +6276,8 @@ def request_global_auction_completion(
     probability_observed_at: str = "",
     generation: str | None = None,
     scope_identity: str = "",
-    schema_version: int = 3,
+    schema_version: int = 4,
+    wake_path: Path | None = None,
     force_new_generation: bool = False,
     return_request: bool = False,
 ) -> bool | tuple[bool, object | None]:
@@ -6303,9 +6304,11 @@ def request_global_auction_completion(
         from src.runtime.reactor_wake import (
             held_sell_reauction_material_identity,
             held_sell_reauction_scope_identity,
+            latest_v4_held_sell_reauction_request,
             make_held_sell_reauction_request,
             publish_reactor_wake,
             reactor_wakes_since,
+            v4_held_sell_reauction_request_is_queued,
         )
 
         held_request = None
@@ -6331,6 +6334,7 @@ def request_global_auction_completion(
                     family=clean_family,
                     probability_content_identity=probability_content_identity,
                     held_token_id=held_token_id,
+                    schema_version=schema_version,
                 )
             held_request_kwargs = {
                 "position_id": str(position_id or ""),
@@ -6354,101 +6358,145 @@ def request_global_auction_completion(
                 }
             )
 
-        durable_wakes = tuple(
-            wake
-            for wake in reactor_wakes_since(None)
-            if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
-        )
-        same_asset_versioned_requests = tuple(
-            request
-            for wake in durable_wakes
-            for request in getattr(wake, "held_sell_reauction_requests", ())
+        if held_request_kwargs is not None and int(schema_version) == 4:
+            existing_v4 = latest_v4_held_sell_reauction_request(
+                str(scope_identity or ""),
+                path=wake_path,
+            )
             if (
-                int(getattr(request, "schema_version", 1) or 1) in {2, 3}
-                and str(getattr(request, "position_id", "") or "")
-                == str(position_id or "")
-                and tuple(getattr(request, "family", ()) or ()) == clean_family
-                and str(getattr(request, "held_token_id", "") or "")
-                == str(held_token_id or "")
-            )
-        )
-        if (
-            held_request_kwargs is not None
-            and int(schema_version) in {2, 3}
-            and not caller_supplied_scope
-            and same_asset_versioned_requests
-            and not force_new_generation
-        ):
-            existing_scope = str(
-                getattr(same_asset_versioned_requests[-1], "scope_identity", "") or ""
-            ).strip()
-            if existing_scope:
-                held_request_kwargs["scope_identity"] = existing_scope
-                held_request_material_identity = held_sell_reauction_material_identity(
-                    **{
-                        key: value
-                        for key, value in held_request_kwargs.items()
-                        if key != "generation"
-                    }
+                existing_v4 is not None
+                and generation
+                and str(generation) != existing_v4.generation
+                and not force_new_generation
+            ):
+                raise ValueError("HELD_SELL_REAUCTION_GENERATION_CONFLICT")
+            if existing_v4 is not None and not generation and not force_new_generation:
+                held_request_kwargs["generation"] = existing_v4.generation
+            held_request = make_held_sell_reauction_request(**held_request_kwargs)
+            if existing_v4 is not None and (
+                existing_v4.position_id != held_request.position_id
+                or existing_v4.family != held_request.family
+                or existing_v4.held_token_id != held_request.held_token_id
+                or existing_v4.scope_identity != held_request.scope_identity
+            ):
+                raise ValueError("HELD_SELL_REAUCTION_LINEAGE_SCOPE_CONFLICT")
+            durable_request_exists = bool(
+                existing_v4 is not None
+                and existing_v4.request_id == held_request.request_id
+                and existing_v4.attempt_identity == held_request.attempt_identity
+                and v4_held_sell_reauction_request_is_queued(
+                    existing_v4,
+                    path=wake_path,
                 )
-        matching_versioned_requests = tuple(
-            request
-            for request in same_asset_versioned_requests
-            if str(getattr(request, "material_identity", "") or "")
-            == held_request_material_identity
-        )
-        if (
-            held_request_kwargs is not None
-            and int(schema_version) in {2, 3}
-            and not generation
-            and matching_versioned_requests
-            and not force_new_generation
-        ):
-            # The durable scope owns the generation.  A later fresh book only
-            # upgrades its context; it must never mint a second obligation.
-            held_request_kwargs["generation"] = str(
-                getattr(matching_versioned_requests[-1], "generation", "") or ""
             )
-        if held_request_kwargs is not None:
-            held_request = make_held_sell_reauction_request(
-                **held_request_kwargs
+            context_upgrade = False
+            attempt_refresh = bool(
+                existing_v4 is not None
+                and existing_v4.attempt_identity != held_request.attempt_identity
             )
-        def _context_rank(request: object) -> tuple[int, int, int]:
-            state = str(getattr(request, "book_state", "UNKNOWN") or "UNKNOWN").upper()
-            state_rank = {
-                "UNKNOWN": 0,
-                "NO_EXECUTABLE_BOOK": 1,
-                "STALE": 1,
-                "EXECUTABLE": 2,
-            }.get(state, -1)
-            return (
-                state_rank,
-                int(bool(getattr(request, "probability_content_identity", ""))),
-                int(bool(getattr(request, "bid_observed_at", ""))),
+        else:
+            queued_wakes = (
+                reactor_wakes_since(None)
+                if wake_path is None
+                else reactor_wakes_since(None, path=wake_path)
             )
-        durable_request_exists = (
-            any(
-                str(getattr(request, "request_id", "") or "")
-                == held_request.request_id
+            durable_wakes = tuple(
+                wake
+                for wake in queued_wakes
+                if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+            )
+            same_asset_versioned_requests = tuple(
+                request
                 for wake in durable_wakes
                 for request in getattr(wake, "held_sell_reauction_requests", ())
+                if (
+                    int(getattr(request, "schema_version", 1) or 1) in {2, 3}
+                    and str(getattr(request, "position_id", "") or "")
+                    == str(position_id or "")
+                    and tuple(getattr(request, "family", ()) or ()) == clean_family
+                    and str(getattr(request, "held_token_id", "") or "")
+                    == str(held_token_id or "")
+                )
             )
-            if held_request is not None
-            else (
-                any(wake_families[0] in wake.forecast_families for wake in durable_wakes)
-                if wake_families
-                else bool(durable_wakes)
+            if (
+                held_request_kwargs is not None
+                and int(schema_version) in {2, 3}
+                and not caller_supplied_scope
+                and same_asset_versioned_requests
+                and not force_new_generation
+            ):
+                existing_scope = str(
+                    getattr(same_asset_versioned_requests[-1], "scope_identity", "")
+                    or ""
+                ).strip()
+                if existing_scope:
+                    held_request_kwargs["scope_identity"] = existing_scope
+                    held_request_material_identity = held_sell_reauction_material_identity(
+                        **{
+                            key: value
+                            for key, value in held_request_kwargs.items()
+                            if key != "generation"
+                        }
+                    )
+            matching_versioned_requests = tuple(
+                request
+                for request in same_asset_versioned_requests
+                if str(getattr(request, "material_identity", "") or "")
+                == held_request_material_identity
             )
-        )
-        context_upgrade = bool(
-            held_request is not None
-            and matching_versioned_requests
-            and _context_rank(held_request)
-            > max(
-                _context_rank(request)
-                for request in matching_versioned_requests
+            if (
+                held_request_kwargs is not None
+                and int(schema_version) in {2, 3}
+                and not generation
+                and matching_versioned_requests
+                and not force_new_generation
+            ):
+                held_request_kwargs["generation"] = str(
+                    getattr(matching_versioned_requests[-1], "generation", "") or ""
+                )
+            if held_request_kwargs is not None:
+                held_request = make_held_sell_reauction_request(**held_request_kwargs)
+
+            def _context_rank(request: object) -> tuple[int, int, int]:
+                state = str(
+                    getattr(request, "book_state", "UNKNOWN") or "UNKNOWN"
+                ).upper()
+                state_rank = {
+                    "UNKNOWN": 0,
+                    "NO_EXECUTABLE_BOOK": 1,
+                    "STALE": 1,
+                    "EXECUTABLE": 2,
+                }.get(state, -1)
+                return (
+                    state_rank,
+                    int(bool(getattr(request, "probability_content_identity", ""))),
+                    int(bool(getattr(request, "bid_observed_at", ""))),
+                )
+
+            durable_request_exists = (
+                any(
+                    str(getattr(request, "request_id", "") or "")
+                    == held_request.request_id
+                    for wake in durable_wakes
+                    for request in getattr(wake, "held_sell_reauction_requests", ())
+                )
+                if held_request is not None
+                else (
+                    any(
+                        wake_families[0] in wake.forecast_families
+                        for wake in durable_wakes
+                    )
+                    if wake_families
+                    else bool(durable_wakes)
+                )
             )
-        )
+            context_upgrade = bool(
+                held_request is not None
+                and matching_versioned_requests
+                and _context_rank(held_request)
+                > max(_context_rank(request) for request in matching_versioned_requests)
+            )
+            attempt_refresh = False
     except ValueError:
         logging.getLogger("zeus.events.reactor").error(
             "held SELL reauction request rejected before durable publish: "
@@ -6458,15 +6506,12 @@ def request_global_auction_completion(
         )
         return (False, None) if return_request else False
     except OSError:
-        if return_request:
-            logging.getLogger("zeus.events.reactor").exception(
-                "held SELL reauction queue read failed before a durable "
-                "request could be accepted: position_id=%s",
-                str(position_id or "unknown"),
-            )
-            return False, None
-        durable_request_exists = False
-        held_request = None
+        logging.getLogger("zeus.events.reactor").exception(
+            "held SELL reauction queue read failed before a durable "
+            "request could be accepted: position_id=%s",
+            str(position_id or "unknown"),
+        )
+        return (False, None) if return_request else False
     if return_request and held_request is None:
         return False, None
     if not already_due:
@@ -6481,11 +6526,12 @@ def request_global_auction_completion(
         logger = logging.getLogger("zeus.events.reactor")
     if force_new_generation:
         durable_request_exists = False
-    if not durable_request_exists or context_upgrade:
+    if not durable_request_exists or context_upgrade or attempt_refresh:
         try:
             publish_reactor_wake(
                 source="held_position_monitor",
                 reason=GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+                path=wake_path,
                 forecast_families=wake_families,
                 held_sell_reauction_requests=(held_request,)
                 if held_request is not None

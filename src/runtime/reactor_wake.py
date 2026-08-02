@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
@@ -23,6 +24,7 @@ REACTOR_URGENT_WAKE_SUFFIX = ".urgent"
 HELD_SELL_REAUCTION_RECEIPT_SUFFIX = ".held-sell-reauction-receipts"
 HELD_SELL_REAUCTION_V2 = 2
 HELD_SELL_REAUCTION_V3 = 3
+HELD_SELL_REAUCTION_V4 = 4
 POSITION_NO_LONGER_EXPOSED = "POSITION_NO_LONGER_EXPOSED"
 SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO = (
     "SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO"
@@ -76,6 +78,7 @@ URGENT_WAKE_REASONS = frozenset(
 _WAKE_QUEUE_CACHE_LOCK = threading.Lock()
 _WAKE_QUEUE_CACHE: dict[Path, dict[Path, ReactorWake | None]] = {}
 _WAKE_QUEUE_REVISIONS: dict[Path, tuple[int, ...]] = {}
+_HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,21 @@ class HeldSellReauctionReceipt:
     capital_objective_proof: str = ""
     answered_probability_content_identity: str = ""
     attempt_identity: str = ""
+
+
+@dataclass(frozen=True)
+class HeldSellReauctionLineage:
+    """Fixed-size durable latest-attempt fence for one V4 debt scope."""
+
+    scope_identity: str
+    request_id: str
+    material_identity: str
+    generation: str
+    latest_attempt_identity: str
+    latest_wake_id: str
+    latest_request: dict[str, object]
+    schema_version: int = HELD_SELL_REAUCTION_V4
+    lineage_version: int = 2
 
 
 @dataclass(frozen=True)
@@ -318,6 +336,7 @@ def _held_sell_reauction_material(
     elif clean_schema_version in {
         HELD_SELL_REAUCTION_V2,
         HELD_SELL_REAUCTION_V3,
+        HELD_SELL_REAUCTION_V4,
     }:
         if (
             len(clean_family) != 1
@@ -347,6 +366,7 @@ def _held_sell_reauction_material(
     if clean_schema_version in {
         HELD_SELL_REAUCTION_V2,
         HELD_SELL_REAUCTION_V3,
+        HELD_SELL_REAUCTION_V4,
     }:
         material.update(
             {
@@ -365,19 +385,28 @@ def held_sell_reauction_scope_identity(
     family: tuple[str, str, str],
     probability_content_identity: str,
     held_token_id: str,
+    schema_version: int = HELD_SELL_REAUCTION_V4,
 ) -> str:
-    """Stable versioned scope for one position/token obligation."""
+    """Return the durable held SELL debt scope for one position/token."""
 
-    material = {
+    scope = {
         "position_id": str(position_id or "").strip(),
         "family": tuple(str(value or "").strip() for value in family),
-        "probability_content_identity": str(
-            probability_content_identity or ""
-        ).strip(),
         "held_token_id": str(held_token_id or "").strip(),
     }
+    if int(schema_version) in {HELD_SELL_REAUCTION_V2, HELD_SELL_REAUCTION_V3}:
+        # Preserve V2/V3's q-bound identity for durable wake compatibility.
+        scope["probability_content_identity"] = str(
+            probability_content_identity or ""
+        ).strip()
+    elif int(schema_version) == HELD_SELL_REAUCTION_V4:
+        # SCOPE: one exact held SELL obligation. DRAIN: global-auction receipt
+        # or canonical terminal proof. RESET: changed position/family/token/intent.
+        scope.update({"intent": "SELL", "scope_version": 4})
+    else:
+        raise ValueError("HELD_SELL_REAUCTION_SCHEMA_VERSION_INVALID")
     return hashlib.sha256(
-        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(scope, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 
 
@@ -411,6 +440,7 @@ def held_sell_reauction_material_identity(
     if int(schema_version) in {
         HELD_SELL_REAUCTION_V2,
         HELD_SELL_REAUCTION_V3,
+        HELD_SELL_REAUCTION_V4,
     }:
         # Versioned book/q clocks describe one attempt, not the obligation. A new
         # executable book must answer the original no-book wake generation.
@@ -445,12 +475,14 @@ def _held_sell_reauction_request_id(
     material_identity: str,
     generation: str,
     attempt_identity: str = "",
+    *,
+    schema_version: int = 1,
 ) -> str:
     identity = {
         "generation": generation,
         "material_identity": material_identity,
     }
-    if attempt_identity:
+    if attempt_identity and int(schema_version) != HELD_SELL_REAUCTION_V4:
         identity["attempt_identity"] = attempt_identity
     return hashlib.sha256(
         json.dumps(
@@ -480,12 +512,14 @@ def make_held_sell_reauction_request(
     if int(schema_version) in {
         HELD_SELL_REAUCTION_V2,
         HELD_SELL_REAUCTION_V3,
-    } and not scope_identity:
+        HELD_SELL_REAUCTION_V4,
+    } and (not scope_identity or int(schema_version) == HELD_SELL_REAUCTION_V4):
         scope_identity = held_sell_reauction_scope_identity(
             position_id=position_id,
             family=family,
             probability_content_identity=probability_content_identity,
             held_token_id=held_token_id,
+            schema_version=schema_version,
         )
     material = _held_sell_reauction_material(
         position_id=position_id,
@@ -516,13 +550,15 @@ def make_held_sell_reauction_request(
         raise ValueError("HELD_SELL_REAUCTION_GENERATION_INVALID")
     attempt_identity = (
         _held_sell_reauction_attempt_identity(material)
-        if int(material.get("schema_version", 1)) == HELD_SELL_REAUCTION_V3
+        if int(material.get("schema_version", 1))
+        in {HELD_SELL_REAUCTION_V3, HELD_SELL_REAUCTION_V4}
         else ""
     )
     request_id = _held_sell_reauction_request_id(
         material_identity,
         clean_generation,
         attempt_identity,
+        schema_version=int(material.get("schema_version", 1)),
     )
     return HeldSellReauctionRequest(
         request_id=request_id,
@@ -652,8 +688,41 @@ def publish_reactor_wake(
     queue_dir = _wake_queue_dir(path)
     queue_dir.mkdir(parents=True, exist_ok=True)
     queue_target = _wake_queue_target(wake, path=path)
-    _atomic_write_wake(queue_target, wake)
-    _atomic_write_wake(target, wake)
+    v4_requests = tuple(
+        request
+        for request in wake.held_sell_reauction_requests
+        if request.schema_version == HELD_SELL_REAUCTION_V4
+    )
+    if v4_requests:
+        with _held_sell_reauction_lineage_locks(
+            tuple(request.scope_identity for request in v4_requests),
+            path=path,
+        ):
+            for request in v4_requests:
+                _read_v4_held_sell_reauction_lineage(
+                    request.scope_identity,
+                    path=path,
+                )
+            for request in v4_requests:
+                _write_v4_held_sell_reauction_lineage(
+                    request,
+                    wake_id=wake.wake_id,
+                    path=path,
+                )
+            # Publish the fence before replacing the deterministic queue slot.
+            # A partial write can leave a missing wake for retry, but can never
+            # let an old acknowledgement delete a newer attempt.
+            _atomic_write_wake(queue_target, wake)
+            with _WAKE_QUEUE_CACHE_LOCK:
+                _WAKE_QUEUE_CACHE.get(queue_dir, {}).pop(queue_target, None)
+                _WAKE_QUEUE_REVISIONS.pop(queue_dir, None)
+            # The fallback participates in the same ordering fence as the V4
+            # lineage and deterministic queue slot. An older publisher can
+            # never overwrite it after a newer attempt has become durable.
+            _atomic_write_wake(target, wake)
+    else:
+        _atomic_write_wake(queue_target, wake)
+        _atomic_write_wake(target, wake)
     if wake.reason in URGENT_WAKE_REASONS:
         _atomic_write_wake(_urgent_wake_path(path), wake)
     _notify_reactor_wake(path)
@@ -686,6 +755,13 @@ def _atomic_write_wake(target: Path, wake: ReactorWake) -> None:
 
 
 def _wake_queue_target(wake: ReactorWake, *, path: Path | None) -> Path:
+    if (
+        len(wake.held_sell_reauction_requests) == 1
+        and wake.held_sell_reauction_requests[0].schema_version
+        == HELD_SELL_REAUCTION_V4
+    ):
+        scope_identity = wake.held_sell_reauction_requests[0].scope_identity
+        return _v4_wake_queue_target(scope_identity, path=path)
     published_us = int(
         datetime.fromisoformat(wake.published_at.replace("Z", "+00:00")).timestamp()
         * 1_000_000
@@ -693,7 +769,15 @@ def _wake_queue_target(wake: ReactorWake, *, path: Path | None) -> Path:
     return _wake_queue_dir(path) / f"{published_us:020d}-{wake.wake_id}.json"
 
 
-def _read_reactor_wake_path(path: Path) -> ReactorWake | None:
+def _v4_wake_queue_target(scope_identity: str, *, path: Path | None) -> Path:
+    return _wake_queue_dir(path) / f"held-sell-v4-{scope_identity}.json"
+
+
+def _read_reactor_wake_path(
+    path: Path,
+    *,
+    fail_on_error: bool = False,
+) -> ReactorWake | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         wake = ReactorWake(
@@ -713,9 +797,19 @@ def _read_reactor_wake_path(path: Path) -> ReactorWake | None:
                 payload.get("held_sell_reauction_requests", ())
             ),
         )
-    except (FileNotFoundError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    except FileNotFoundError:
+        return None
+    except OSError:
+        if fail_on_error:
+            raise
+        return None
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        if fail_on_error:
+            raise ValueError("REACTOR_WAKE_INVALID") from exc
         return None
     if not all((wake.wake_id, wake.published_at, wake.source, wake.reason)):
+        if fail_on_error:
+            raise ValueError("REACTOR_WAKE_INVALID")
         return None
     return wake
 
@@ -1049,6 +1143,341 @@ def _held_sell_reauction_receipt_path(
     return _held_sell_reauction_receipt_dir(path) / f"{request_id}.json"
 
 
+def _held_sell_reauction_lineage_path(
+    scope_identity: str,
+    *,
+    path: Path | None = None,
+) -> Path:
+    return _held_sell_reauction_receipt_dir(path) / f"v4-{scope_identity}.json"
+
+
+def _held_sell_reauction_attempt_receipt_path(
+    request_id: str,
+    attempt_identity: str,
+    *,
+    path: Path | None = None,
+) -> Path:
+    return _held_sell_reauction_receipt_dir(path) / (
+        f"{request_id}.{attempt_identity}.receipt.json"
+    )
+
+
+def _held_sell_reauction_lineage_lock_path(
+    scope_identity: str,
+    *,
+    path: Path | None = None,
+) -> Path:
+    """Return the cross-process lock for one stable V4 debt scope."""
+
+    return _held_sell_reauction_receipt_dir(path) / f".v4-{scope_identity}.lock"
+
+
+@contextmanager
+def _held_sell_reauction_lineage_locks(
+    scope_identities: tuple[str, ...],
+    *,
+    path: Path | None = None,
+) -> Iterator[None]:
+    """Serialize V4 publish, receipt, completion fence, and acknowledgement."""
+
+    scopes = tuple(sorted(set(scope_identities)))
+    if not scopes or any(not scope for scope in scopes):
+        raise ValueError("HELD_SELL_REAUCTION_SCOPE_IDENTITY_INVALID")
+    directory = _held_sell_reauction_receipt_dir(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    with _HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK:
+        descriptors = []
+        try:
+            for scope_identity in scopes:
+                descriptor = os.open(
+                    _held_sell_reauction_lineage_lock_path(
+                        scope_identity,
+                        path=path,
+                    ),
+                    os.O_CREAT | os.O_RDWR,
+                    0o600,
+                )
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                descriptors.append(descriptor)
+            yield
+        finally:
+            for descriptor in reversed(descriptors):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+
+@contextmanager
+def _held_sell_reauction_lineage_lock(
+    scope_identity: str,
+    *,
+    path: Path | None = None,
+) -> Iterator[None]:
+    with _held_sell_reauction_lineage_locks((scope_identity,), path=path):
+        yield
+
+
+def _held_sell_reauction_receipt_from_payload(
+    payload: object,
+    *,
+    request_id: str,
+) -> HeldSellReauctionReceipt | None:
+    """Decode and validate one immutable terminal receipt payload."""
+
+    if not isinstance(payload, dict):
+        return None
+    try:
+        receipt = HeldSellReauctionReceipt(
+            request_id=str(payload["request_id"]).strip(),
+            material_identity=str(payload["material_identity"]).strip(),
+            generation=str(payload["generation"]).strip(),
+            status=str(payload["status"]).strip(),
+            reason=str(payload["reason"]).strip(),
+            lifecycle_phase=str(payload.get("lifecycle_phase") or "").strip(),
+            chain_state=str(payload.get("chain_state") or "").strip(),
+            chain_shares=(
+                None
+                if payload.get("chain_shares") in (None, "")
+                else float(payload["chain_shares"])
+            ),
+            settled_at=str(payload.get("settled_at") or "").strip(),
+            selection_epoch_identity=str(
+                payload.get("selection_epoch_identity") or ""
+            ).strip(),
+            sell_book_witness_identity=str(
+                payload.get("sell_book_witness_identity") or ""
+            ).strip(),
+            schema_version=int(payload.get("schema_version", 1)),
+            scope_identity=str(payload.get("scope_identity") or "").strip(),
+            book_state=str(payload.get("book_state") or "EXECUTABLE").strip(),
+            capital_objective_proof=str(
+                payload.get("capital_objective_proof") or ""
+            ).strip(),
+            answered_probability_content_identity=str(
+                payload.get("answered_probability_content_identity") or ""
+            ).strip(),
+            attempt_identity=str(payload.get("attempt_identity") or "").strip(),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        receipt.request_id != str(request_id or "").strip()
+        or receipt.request_id
+        != _held_sell_reauction_request_id(
+            receipt.material_identity,
+            receipt.generation,
+            receipt.attempt_identity,
+            schema_version=receipt.schema_version,
+        )
+        or not receipt.material_identity
+        or not receipt.generation
+        or receipt.schema_version not in {
+            1,
+            HELD_SELL_REAUCTION_V2,
+            HELD_SELL_REAUCTION_V3,
+            HELD_SELL_REAUCTION_V4,
+        }
+        or not receipt.reason
+    ):
+        return None
+    if receipt.status == POSITION_NO_LONGER_EXPOSED:
+        if not _terminal_no_longer_exposed_receipt_valid(receipt):
+            return None
+    elif receipt.schema_version == 1 and receipt.status not in {"ACTUATED", "REJECTED"}:
+        return None
+    elif receipt.schema_version in {
+        HELD_SELL_REAUCTION_V2,
+        HELD_SELL_REAUCTION_V3,
+        HELD_SELL_REAUCTION_V4,
+    } and (
+        receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
+        or not receipt.scope_identity
+        or receipt.book_state != "EXECUTABLE"
+        or not receipt.answered_probability_content_identity
+    ):
+        return None
+    if (
+        receipt.schema_version in {HELD_SELL_REAUCTION_V3, HELD_SELL_REAUCTION_V4}
+        and not receipt.attempt_identity
+    ):
+        return None
+    if receipt.status == "ACTUATED" and not all(
+        (
+            receipt.selection_epoch_identity,
+            receipt.sell_book_witness_identity,
+        )
+    ):
+        return None
+    if receipt.status == "CAPITAL_REJECTED" and not all(
+        (
+            receipt.selection_epoch_identity,
+            receipt.sell_book_witness_identity,
+            receipt.capital_objective_proof,
+        )
+    ):
+        return None
+    return receipt
+
+
+def _v4_held_sell_reauction_lineage_request(
+    lineage: HeldSellReauctionLineage,
+) -> HeldSellReauctionRequest:
+    requests = _clean_held_sell_reauction_requests((lineage.latest_request,))
+    if len(requests) != 1:
+        raise ValueError("HELD_SELL_REAUCTION_LINEAGE_REQUEST_INVALID")
+    request = requests[0]
+    if (
+        request.schema_version != HELD_SELL_REAUCTION_V4
+        or request.scope_identity != lineage.scope_identity
+        or request.request_id != lineage.request_id
+        or request.material_identity != lineage.material_identity
+        or request.generation != lineage.generation
+        or request.attempt_identity != lineage.latest_attempt_identity
+    ):
+        raise ValueError("HELD_SELL_REAUCTION_LINEAGE_IDENTITY_INVALID")
+    return request
+
+
+def _read_v4_held_sell_reauction_lineage(
+    scope_identity: str,
+    *,
+    path: Path | None = None,
+) -> HeldSellReauctionLineage | None:
+    """Read one fixed-size V4 latest-attempt index; malformed state fails closed."""
+
+    try:
+        payload = json.loads(
+            _held_sell_reauction_lineage_path(scope_identity, path=path).read_text(
+                encoding="utf-8"
+            )
+        )
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("HELD_SELL_REAUCTION_LINEAGE_INVALID") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("HELD_SELL_REAUCTION_LINEAGE_INVALID")
+    try:
+        lineage = HeldSellReauctionLineage(
+            scope_identity=str(payload["scope_identity"]).strip(),
+            request_id=str(payload["request_id"]).strip(),
+            material_identity=str(payload["material_identity"]).strip(),
+            generation=str(payload["generation"]).strip(),
+            latest_attempt_identity=str(
+                payload["latest_attempt_identity"]
+            ).strip(),
+            latest_wake_id=str(payload["latest_wake_id"]).strip(),
+            latest_request=dict(payload["latest_request"]),
+            schema_version=int(payload["schema_version"]),
+            lineage_version=int(payload["lineage_version"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("HELD_SELL_REAUCTION_LINEAGE_INVALID") from exc
+    if (
+        lineage.scope_identity != str(scope_identity or "").strip()
+        or lineage.schema_version != HELD_SELL_REAUCTION_V4
+        or lineage.lineage_version != 2
+        or not all(
+            (
+                lineage.request_id,
+                lineage.material_identity,
+                lineage.generation,
+                lineage.latest_attempt_identity,
+                lineage.latest_wake_id,
+            )
+        )
+    ):
+        raise ValueError("HELD_SELL_REAUCTION_LINEAGE_INVALID")
+    _v4_held_sell_reauction_lineage_request(lineage)
+    return lineage
+
+
+def latest_v4_held_sell_reauction_request(
+    scope_identity: str,
+    *,
+    path: Path | None = None,
+) -> HeldSellReauctionRequest | None:
+    """Return the latest V4 witness with one bounded durable file read."""
+
+    lineage = _read_v4_held_sell_reauction_lineage(scope_identity, path=path)
+    return (
+        _v4_held_sell_reauction_lineage_request(lineage)
+        if lineage is not None
+        else None
+    )
+
+
+def v4_held_sell_reauction_request_is_queued(
+    request: HeldSellReauctionRequest,
+    *,
+    path: Path | None = None,
+) -> bool:
+    """Check one V4 deterministic queue slot without scanning the backlog."""
+
+    if request.schema_version != HELD_SELL_REAUCTION_V4:
+        return False
+    with _held_sell_reauction_lineage_lock(request.scope_identity, path=path):
+        lineage = _read_v4_held_sell_reauction_lineage(
+            request.scope_identity,
+            path=path,
+        )
+        if lineage is None:
+            return False
+        latest = _v4_held_sell_reauction_lineage_request(lineage)
+        if (
+            latest.request_id != request.request_id
+            or latest.generation != request.generation
+            or latest.attempt_identity != request.attempt_identity
+        ):
+            return False
+        queued = _read_reactor_wake_path(
+            _v4_wake_queue_target(request.scope_identity, path=path),
+            fail_on_error=True,
+        )
+        return bool(
+            queued is not None
+            and queued.wake_id == lineage.latest_wake_id
+            and queued.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+            and queued.held_sell_reauction_requests == (latest,)
+        )
+
+
+def _write_v4_held_sell_reauction_lineage(
+    request: HeldSellReauctionRequest,
+    *,
+    wake_id: str,
+    path: Path | None = None,
+) -> None:
+    lineage = HeldSellReauctionLineage(
+        scope_identity=request.scope_identity,
+        request_id=request.request_id,
+        material_identity=request.material_identity,
+        generation=request.generation,
+        latest_attempt_identity=request.attempt_identity,
+        latest_wake_id=str(wake_id or "").strip(),
+        latest_request=request.__dict__,
+    )
+    _v4_held_sell_reauction_lineage_request(lineage)
+    if not lineage.latest_wake_id:
+        raise ValueError("HELD_SELL_REAUCTION_LINEAGE_WAKE_INVALID")
+    target = _held_sell_reauction_lineage_path(request.scope_identity, path=path)
+    temp = target.with_name(
+        f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temp.write_text(
+            json.dumps(lineage.__dict__, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(temp, target)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def held_sell_no_longer_exposed_reason(
     *,
     lifecycle_phase: str,
@@ -1112,100 +1541,22 @@ def _read_held_sell_reauction_receipt(
     request_id: str,
     *,
     path: Path | None = None,
+    attempt_identity: str = "",
 ) -> HeldSellReauctionReceipt | None:
+    target = (
+        _held_sell_reauction_attempt_receipt_path(
+            request_id,
+            attempt_identity,
+            path=path,
+        )
+        if attempt_identity
+        else _held_sell_reauction_receipt_path(request_id, path=path)
+    )
     try:
-        payload = json.loads(
-            _held_sell_reauction_receipt_path(request_id, path=path).read_text(
-                encoding="utf-8"
-            )
-        )
-        receipt = HeldSellReauctionReceipt(
-            request_id=str(payload["request_id"]).strip(),
-            material_identity=str(payload["material_identity"]).strip(),
-            generation=str(payload["generation"]).strip(),
-            status=str(payload["status"]).strip(),
-            reason=str(payload["reason"]).strip(),
-            lifecycle_phase=str(payload.get("lifecycle_phase") or "").strip(),
-            chain_state=str(payload.get("chain_state") or "").strip(),
-            chain_shares=(
-                None
-                if payload.get("chain_shares") in (None, "")
-                else float(payload["chain_shares"])
-            ),
-            settled_at=str(payload.get("settled_at") or "").strip(),
-            selection_epoch_identity=str(
-                payload.get("selection_epoch_identity") or ""
-            ).strip(),
-            sell_book_witness_identity=str(
-                payload.get("sell_book_witness_identity") or ""
-            ).strip(),
-            schema_version=int(payload.get("schema_version", 1)),
-            scope_identity=str(payload.get("scope_identity") or "").strip(),
-            book_state=str(payload.get("book_state") or "EXECUTABLE").strip(),
-            capital_objective_proof=str(
-                payload.get("capital_objective_proof") or ""
-            ).strip(),
-            answered_probability_content_identity=str(
-                payload.get("answered_probability_content_identity") or ""
-            ).strip(),
-            attempt_identity=str(payload.get("attempt_identity") or "").strip(),
-        )
-    except (FileNotFoundError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
-    if (
-        receipt.request_id != str(request_id or "").strip()
-        or receipt.request_id
-        != _held_sell_reauction_request_id(
-            receipt.material_identity,
-            receipt.generation,
-            receipt.attempt_identity,
-        )
-        or not receipt.material_identity
-        or not receipt.generation
-        or receipt.schema_version not in {
-            1,
-            HELD_SELL_REAUCTION_V2,
-            HELD_SELL_REAUCTION_V3,
-        }
-        or not receipt.reason
-    ):
-        return None
-    if receipt.status == POSITION_NO_LONGER_EXPOSED:
-        if not _terminal_no_longer_exposed_receipt_valid(receipt):
-            return None
-    elif receipt.schema_version == 1 and receipt.status not in {"ACTUATED", "REJECTED"}:
-        return None
-    elif receipt.schema_version in {
-        HELD_SELL_REAUCTION_V2,
-        HELD_SELL_REAUCTION_V3,
-    } and (
-        receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
-        or not receipt.scope_identity
-        or receipt.book_state != "EXECUTABLE"
-        or not receipt.answered_probability_content_identity
-    ):
-        return None
-    if (
-        receipt.schema_version == HELD_SELL_REAUCTION_V3
-        and not receipt.attempt_identity
-    ):
-        return None
-    if receipt.status == "ACTUATED" and not all(
-        (
-            receipt.selection_epoch_identity,
-            receipt.sell_book_witness_identity,
-        )
-    ):
-        return None
-    if receipt.status == "CAPITAL_REJECTED" and not all(
-        (
-            receipt.selection_epoch_identity,
-            receipt.sell_book_witness_identity,
-            receipt.capital_objective_proof,
-        )
-    ):
-        return None
-    return receipt
+    return _held_sell_reauction_receipt_from_payload(payload, request_id=request_id)
 
 
 def persist_held_sell_reauction_receipts(
@@ -1225,6 +1576,7 @@ def persist_held_sell_reauction_receipts(
                     1,
                     HELD_SELL_REAUCTION_V2,
                     HELD_SELL_REAUCTION_V3,
+                    HELD_SELL_REAUCTION_V4,
                 }
                 or not receipt.request_id
                 or not receipt.material_identity
@@ -1234,6 +1586,7 @@ def persist_held_sell_reauction_receipts(
                     receipt.material_identity,
                     receipt.generation,
                     receipt.attempt_identity,
+                    schema_version=receipt.schema_version,
                 )
                 or not receipt.reason
                 or (
@@ -1251,6 +1604,7 @@ def persist_held_sell_reauction_receipts(
                     receipt.schema_version in {
                         HELD_SELL_REAUCTION_V2,
                         HELD_SELL_REAUCTION_V3,
+                        HELD_SELL_REAUCTION_V4,
                     }
                     and (
                         receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
@@ -1260,7 +1614,8 @@ def persist_held_sell_reauction_receipts(
                     )
                 )
                 or (
-                    receipt.schema_version == HELD_SELL_REAUCTION_V3
+                    receipt.schema_version
+                    in {HELD_SELL_REAUCTION_V3, HELD_SELL_REAUCTION_V4}
                     and not receipt.attempt_identity
                 )
                 or (
@@ -1281,6 +1636,55 @@ def persist_held_sell_reauction_receipts(
             ):
                 raise ValueError("HELD_SELL_REAUCTION_RECEIPT_INVALID")
             target = _held_sell_reauction_receipt_path(receipt.request_id, path=path)
+            if receipt.schema_version == HELD_SELL_REAUCTION_V4:
+                # Each V4 attempt owns one immutable receipt file. Different
+                # attempts never read/merge/write one shared payload.
+                with _held_sell_reauction_lineage_lock(
+                    receipt.scope_identity,
+                    path=path,
+                ):
+                    lineage = _read_v4_held_sell_reauction_lineage(
+                        receipt.scope_identity,
+                        path=path,
+                    )
+                    if (
+                        lineage is None
+                        or lineage.request_id != receipt.request_id
+                        or lineage.material_identity != receipt.material_identity
+                        or lineage.generation != receipt.generation
+                    ):
+                        raise ValueError("HELD_SELL_REAUCTION_RECEIPT_LINEAGE_INVALID")
+                    target = _held_sell_reauction_attempt_receipt_path(
+                        receipt.request_id,
+                        receipt.attempt_identity,
+                        path=path,
+                    )
+                    existing = _read_held_sell_reauction_receipt(
+                        receipt.request_id,
+                        path=path,
+                        attempt_identity=receipt.attempt_identity,
+                    )
+                    if existing is not None:
+                        continue
+                    temp = target.with_name(
+                        f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+                    )
+                    try:
+                        temp.write_text(
+                            json.dumps(
+                                receipt.__dict__,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            encoding="utf-8",
+                        )
+                        os.replace(temp, target)
+                    finally:
+                        try:
+                            temp.unlink()
+                        except FileNotFoundError:
+                            pass
+                continue
             existing = _read_held_sell_reauction_receipt(receipt.request_id, path=path)
             if existing is not None:
                 # The first valid terminal receipt is immutable authority. A
@@ -1320,7 +1724,38 @@ def held_sell_reauction_requests_completed(
     if not requests:
         return False
     for request in requests:
-        receipt = _read_held_sell_reauction_receipt(request.request_id, path=path)
+        if request.schema_version == HELD_SELL_REAUCTION_V4:
+            try:
+                with _held_sell_reauction_lineage_lock(
+                    request.scope_identity,
+                    path=path,
+                ):
+                    lineage = _read_v4_held_sell_reauction_lineage(
+                        request.scope_identity,
+                        path=path,
+                    )
+                    if lineage is None:
+                        return False
+                    latest = _v4_held_sell_reauction_lineage_request(lineage)
+                    if (
+                        request.request_id != latest.request_id
+                        or request.material_identity != latest.material_identity
+                        or request.generation != latest.generation
+                        or request.attempt_identity != latest.attempt_identity
+                    ):
+                        return False
+                    receipt = _read_held_sell_reauction_receipt(
+                        request.request_id,
+                        path=path,
+                        attempt_identity=request.attempt_identity,
+                    )
+            except (OSError, ValueError):
+                return False
+        else:
+            receipt = _read_held_sell_reauction_receipt(
+                request.request_id,
+                path=path,
+            )
         if (
             receipt is None
             or receipt.material_identity != request.material_identity
@@ -1330,6 +1765,7 @@ def held_sell_reauction_requests_completed(
                 request.schema_version in {
                     HELD_SELL_REAUCTION_V2,
                     HELD_SELL_REAUCTION_V3,
+                    HELD_SELL_REAUCTION_V4,
                 }
                 and (
                     receipt.scope_identity != request.scope_identity
@@ -1343,7 +1779,8 @@ def held_sell_reauction_requests_completed(
                 )
             )
             or (
-                request.schema_version == HELD_SELL_REAUCTION_V3
+                request.schema_version
+                in {HELD_SELL_REAUCTION_V3, HELD_SELL_REAUCTION_V4}
                 and receipt.attempt_identity != request.attempt_identity
             )
         ):
@@ -1366,16 +1803,48 @@ def acknowledge_reactor_wakes(
     *,
     path: Path | None = None,
 ) -> bool:
-    """Acknowledge one coalesced reactor drain without rescanning the queue."""
+    """Acknowledge one drain while fencing V4 against a concurrent refresh."""
 
     try:
         wake_ids = {wake.wake_id for wake in wakes}
-        for wake in wakes:
-            _wake_queue_target(wake, path=path).unlink(missing_ok=True)
-        legacy = _wake_path(path)
-        latest = _read_reactor_wake_path(legacy)
-        if latest is not None and latest.wake_id in wake_ids:
-            legacy.unlink(missing_ok=True)
+        v4_pairs = tuple(
+            (wake, request)
+            for wake in wakes
+            for request in wake.held_sell_reauction_requests
+            if request.schema_version == HELD_SELL_REAUCTION_V4
+        )
+
+        def unlink_wakes() -> None:
+            for queued in wakes:
+                _wake_queue_target(queued, path=path).unlink(missing_ok=True)
+            legacy = _wake_path(path)
+            latest = _read_reactor_wake_path(legacy)
+            if latest is not None and latest.wake_id in wake_ids:
+                legacy.unlink(missing_ok=True)
+
+        if v4_pairs:
+            with _held_sell_reauction_lineage_locks(
+                tuple(request.scope_identity for _wake, request in v4_pairs),
+                path=path,
+            ):
+                for wake, request in v4_pairs:
+                    lineage = _read_v4_held_sell_reauction_lineage(
+                        request.scope_identity,
+                        path=path,
+                    )
+                    if lineage is None:
+                        return False
+                    latest_request = _v4_held_sell_reauction_lineage_request(lineage)
+                    if (
+                        lineage.latest_wake_id != wake.wake_id
+                        or latest_request.request_id != request.request_id
+                        or latest_request.generation != request.generation
+                        or latest_request.attempt_identity != request.attempt_identity
+                    ):
+                        return False
+                unlink_wakes()
+        else:
+            unlink_wakes()
     except (OSError, ValueError):
         return False
     return True

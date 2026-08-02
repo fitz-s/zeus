@@ -8245,7 +8245,7 @@ def test_global_sell_post_only_cross_rejection_reauctions_without_backoff(
         requester=request_reauction,
     )
     assert requests == [(position.trade_id, True)]
-    assert requested_obligations[0]["schema_version"] == 3
+    assert requested_obligations[0]["schema_version"] == 4
     assert requested_obligations[0]["held_token_id"] == NO_TOKEN
     assert requested_obligations[0]["book_state"] == "UNKNOWN"
     assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 2
@@ -8545,7 +8545,7 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
         "global_sell_exit_executable_snapshot_unavailable"
     )
     obligation = release_payload["held_sell_reauction_obligation"]
-    assert obligation["schema_version"] == 3
+    assert obligation["schema_version"] == 4
     assert obligation["book_state"] == "UNKNOWN"
     assert obligation["held_token_id"] == NO_TOKEN
     assert requested_obligations == [obligation]
@@ -8694,7 +8694,7 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
     ).fetchone()["phase"] == "pending_exit"
 
 
-def test_restart_republishes_unbound_v3_residual_with_same_generation_until_terminal(
+def test_restart_republishes_unbound_v4_residual_with_same_generation_until_terminal(
     conn,
     monkeypatch,
     tmp_path,
@@ -8763,20 +8763,17 @@ def test_restart_republishes_unbound_v3_residual_with_same_generation_until_term
     restarted._day0_monitor_probability_receipt = {
         "probability_content_identity": "q-karachi-restarted-current"
     }
+    wake_path = tmp_path / "wake.json"
     published = []
+    real_publish = reactor_wake.publish_reactor_wake
 
     def publish(**kwargs):
-        published.append(
-            SimpleNamespace(
-                reason=kwargs["reason"],
-                forecast_families=kwargs["forecast_families"],
-                held_sell_reauction_requests=kwargs["held_sell_reauction_requests"],
-            )
-        )
-        return published[-1]
+        assert kwargs["path"] == wake_path
+        wake = real_publish(**kwargs)
+        published.append(wake)
+        return wake
 
     monkeypatch.setattr(reactor_wake, "publish_reactor_wake", publish)
-    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", lambda _at: tuple(published))
     reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     try:
         def publish_after_restart(released, force_new_generation):
@@ -8797,6 +8794,7 @@ def test_restart_republishes_unbound_v3_residual_with_same_generation_until_term
                 book_state=restored["book_state"],
                 generation=restored["generation"],
                 scope_identity=restored["scope_identity"],
+                wake_path=wake_path,
                 force_new_generation=force_new_generation,
             )
 
@@ -8811,7 +8809,7 @@ def test_restart_republishes_unbound_v3_residual_with_same_generation_until_term
         assert request.scope_identity == obligation["scope_identity"]
         assert request.book_state == "UNKNOWN"
         assert not reactor_wake.held_sell_reauction_requests_completed(
-            (request,), path=tmp_path / "wake.json"
+            (request,), path=wake_path
         )
 
         coverage = SimpleNamespace(
@@ -8837,10 +8835,10 @@ def test_restart_republishes_unbound_v3_residual_with_same_generation_until_term
         )
         assert receipts[0].answered_probability_content_identity == "q-karachi-restarted-current"
         assert reactor_wake.persist_held_sell_reauction_receipts(
-            receipts, path=tmp_path / "wake.json"
+            receipts, path=wake_path
         )
         assert reactor_wake.held_sell_reauction_requests_completed(
-            (request,), path=tmp_path / "wake.json"
+            (request,), path=wake_path
         )
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()

@@ -5707,6 +5707,7 @@ def execute_monitoring_phase(
                 book_state=str(obligation.get("book_state") or "UNKNOWN"),
                 generation=str(obligation.get("generation") or "") or None,
                 scope_identity=str(obligation.get("scope_identity") or ""),
+                schema_version=int(obligation.get("schema_version") or 4),
                 force_new_generation=force_new_generation,
             )
         except Exception as exc:  # noqa: BLE001 - failed reservation keeps retry pending.

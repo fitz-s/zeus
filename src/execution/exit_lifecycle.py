@@ -688,7 +688,7 @@ def _held_sell_reauction_obligation(
     *,
     generation_material: Mapping[str, object],
 ) -> dict[str, object]:
-    """Build the V3 durable scope without treating a missing book as a price."""
+    """Build the V4 durable scope without treating a missing book as a price."""
 
     raw_direction = getattr(position, "direction", "")
     direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
@@ -722,6 +722,7 @@ def _held_sell_reauction_obligation(
         family=family,
         probability_content_identity=probability_content_identity,
         held_token_id=token_id,
+        schema_version=4,
     )
     generation = hashlib.sha256(
         json.dumps(
@@ -735,7 +736,7 @@ def _held_sell_reauction_obligation(
         ).encode("utf-8")
     ).hexdigest()
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "scope_identity": scope_identity,
         "generation": generation,
         "position_id": position_id,
@@ -775,7 +776,7 @@ def _latest_held_sell_reauction_obligation(
     except (sqlite3.Error, AttributeError, TypeError, json.JSONDecodeError):
         return {}
     obligation = payload.get("held_sell_reauction_obligation")
-    if not isinstance(obligation, dict) or obligation.get("schema_version") not in {2, 3}:
+    if not isinstance(obligation, dict) or obligation.get("schema_version") not in {2, 3, 4}:
         return {}
     required = ("scope_identity", "generation", "position_id", "held_token_id")
     if not all(str(obligation.get(key) or "").strip() for key in required):

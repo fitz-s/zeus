@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-30
-# Lifecycle: created=2026-05-24; last_reviewed=2026-07-30; last_reused=2026-07-30
+# Last reused/audited: 2026-08-02
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -2681,6 +2681,7 @@ def test_parent_v2_held_sell_request_and_receipt_remain_compatible(tmp_path):
         family=family,
         probability_content_identity="legacy-v2-q",
         held_token_id="legacy-v2-token",
+        schema_version=2,
     )
     generation = "legacy-v2-generation"
     request_id = hashlib.sha256(
@@ -3054,6 +3055,512 @@ def test_v3_no_book_wake_upgrades_same_generation_on_fresh_superseding_q(monkeyp
         ) is False
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_v4_fresh_q_attempts_reuse_one_debt_and_complete_latest_action(tmp_path):
+    """42 fresh q witnesses retain one held SELL debt across a restart."""
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    attempts = []
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        common = {
+            "reason": "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            "position_id": "7ba16223-79c",
+            "family": ("Istanbul", "2026-08-02", "high"),
+            "held_token_id": "istanbul-held-no",
+            "schema_version": 4,
+            "held_best_bid": 0.22,
+            "book_state": "EXECUTABLE",
+        }
+        for index in range(42):
+            observed_at = f"2026-08-02T12:{index:02d}:00+00:00"
+            accepted, request = reactor.request_global_auction_completion(
+                **common,
+                probability_content_identity=f"q-istanbul-{index}",
+                probability_observed_at=observed_at,
+                bid_observed_at=observed_at,
+                wake_path=path,
+                return_request=True,
+            )
+            assert accepted is True
+            assert request is not None
+            attempts.append(request)
+
+        attempts = tuple(attempts)
+        assert len(attempts) == 42
+        assert {request.scope_identity for request in attempts} == {
+            attempts[0].scope_identity
+        }
+        assert {request.generation for request in attempts} == {attempts[0].generation}
+        assert {request.request_id for request in attempts} == {attempts[0].request_id}
+        assert len({request.attempt_identity for request in attempts}) == 42
+        assert attempts[-1].probability_content_identity == "q-istanbul-41"
+        assert attempts[0].scope_identity != reactor_wake.held_sell_reauction_scope_identity(
+            position_id="7ba16223-79c",
+            family=("Istanbul", "2026-08-02", "high"),
+            probability_content_identity="q-istanbul-41",
+            held_token_id="istanbul-held-yes",
+            schema_version=4,
+        )
+
+        queued = reactor_wake.reactor_wakes_since(None, path=path)
+        assert len(queued) == 1
+        restarted = queued[0]
+        request = restarted.held_sell_reauction_requests[0]
+        assert request == attempts[-1]
+
+        receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+            requests=(request,),
+            result=_held_sell_completion_result(
+                position_id=request.position_id,
+                token_id=request.held_token_id,
+                probability_content_identity="q-istanbul-41",
+            ),
+        )
+        assert receipts[0].status == "ACTUATED"
+        assert receipts[0].request_id == request.request_id
+        assert receipts[0].attempt_identity == request.attempt_identity
+        assert receipts[0].answered_probability_content_identity == "q-istanbul-41"
+        assert reactor_wake.persist_held_sell_reauction_receipts(receipts, path=path)
+        assert not reactor_wake.held_sell_reauction_requests_completed(
+            (attempts[0],), path=path
+        )
+        assert reactor_wake.held_sell_reauction_requests_completed(
+            (attempts[-1],), path=path
+        )
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def _v4_stable_debt_attempts(
+    tmp_path,
+    *,
+    publish_old=True,
+    publish_fresh=True,
+):
+    """Publish deterministic old/new witnesses for one V4 stable debt."""
+    from src.runtime import reactor_wake
+
+    common = {
+        "position_id": "istanbul-v4-lineage",
+        "family": ("Istanbul", "2026-08-02", "high"),
+        "held_token_id": "istanbul-v4-no",
+        "schema_version": 4,
+        "generation": "istanbul-v4-stable-generation",
+        "held_best_bid": 0.22,
+        "book_state": "EXECUTABLE",
+    }
+    old = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        probability_content_identity="q-old",
+        probability_observed_at="2026-08-02T12:00:00+00:00",
+        bid_observed_at="2026-08-02T12:00:00+00:00",
+    )
+    fresh = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        probability_content_identity="q-fresh",
+        probability_observed_at="2026-08-02T12:01:00+00:00",
+        bid_observed_at="2026-08-02T12:01:00+00:00",
+    )
+    assert old.request_id == fresh.request_id
+    assert old.generation == fresh.generation
+    assert old.attempt_identity != fresh.attempt_identity
+    path = tmp_path / "wake.json"
+    attempts = []
+    if publish_old:
+        attempts.append((old, datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)))
+    if publish_fresh:
+        attempts.append(
+            (fresh, datetime(2026, 8, 2, 12, 1, tzinfo=timezone.utc))
+        )
+    for request, published_at in attempts:
+        reactor_wake.publish_reactor_wake(
+            source="held_position_monitor",
+            reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            path=path,
+            published_at=published_at,
+            held_sell_reauction_requests=(request,),
+        )
+    return path, old, fresh
+
+
+def _v4_actuated_receipt(request):
+    from src.events import reactor
+
+    return reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=_held_sell_completion_result(
+            position_id=request.position_id,
+            token_id=request.held_token_id,
+            probability_content_identity=request.probability_content_identity,
+        ),
+    )[0]
+
+
+def test_v4_old_receipt_after_new_witness_cannot_complete_current_attempt(tmp_path):
+    from src.runtime import reactor_wake
+
+    path, old, fresh = _v4_stable_debt_attempts(tmp_path)
+    old_receipt = _v4_actuated_receipt(old)
+    assert reactor_wake.persist_held_sell_reauction_receipts((old_receipt,), path=path)
+    assert reactor_wake._read_held_sell_reauction_receipt(
+        old.request_id,
+        path=path,
+        attempt_identity=old.attempt_identity,
+    ) == old_receipt
+    assert not reactor_wake.held_sell_reauction_requests_completed((old,), path=path)
+    assert not reactor_wake.held_sell_reauction_requests_completed((fresh,), path=path)
+
+    fresh_receipt = _v4_actuated_receipt(fresh)
+    assert reactor_wake.persist_held_sell_reauction_receipts((fresh_receipt,), path=path)
+    assert not reactor_wake.held_sell_reauction_requests_completed((old,), path=path)
+    assert reactor_wake.held_sell_reauction_requests_completed((fresh,), path=path)
+
+
+def test_v4_new_receipt_then_old_receipt_cannot_roll_back_current_lineage(tmp_path):
+    from src.runtime import reactor_wake
+
+    path, old, fresh = _v4_stable_debt_attempts(tmp_path)
+    fresh_receipt = _v4_actuated_receipt(fresh)
+    assert reactor_wake.persist_held_sell_reauction_receipts((fresh_receipt,), path=path)
+    assert reactor_wake.held_sell_reauction_requests_completed((fresh,), path=path)
+
+    old_receipt = _v4_actuated_receipt(old)
+    assert reactor_wake.persist_held_sell_reauction_receipts((old_receipt,), path=path)
+    assert reactor_wake._read_held_sell_reauction_receipt(
+        fresh.request_id,
+        path=path,
+        attempt_identity=fresh.attempt_identity,
+    ) == fresh_receipt
+    assert reactor_wake.held_sell_reauction_requests_completed((fresh,), path=path)
+    assert reactor_wake._read_held_sell_reauction_receipt(
+        old.request_id,
+        path=path,
+        attempt_identity=old.attempt_identity,
+    ) == old_receipt
+    lineage = reactor_wake._read_v4_held_sell_reauction_lineage(
+        fresh.scope_identity,
+        path=path,
+    )
+    assert lineage is not None
+    assert lineage.latest_attempt_identity == fresh.attempt_identity
+
+
+def test_v4_concurrent_receipt_writers_preserve_both_attempts(tmp_path):
+    from src.runtime import reactor_wake
+
+    path, old, fresh = _v4_stable_debt_attempts(tmp_path)
+    barrier = threading.Barrier(2)
+    results = []
+    failures = []
+
+    def persist(receipt):
+        try:
+            barrier.wait(timeout=2.0)
+            results.append(
+                reactor_wake.persist_held_sell_reauction_receipts((receipt,), path=path)
+            )
+        except Exception as exc:  # pragma: no cover - assertions report worker failure.
+            failures.append(exc)
+
+    threads = tuple(
+        threading.Thread(target=persist, args=(receipt,))
+        for receipt in (_v4_actuated_receipt(old), _v4_actuated_receipt(fresh))
+    )
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert failures == []
+    assert results == [True, True]
+    assert reactor_wake._read_held_sell_reauction_receipt(
+        old.request_id,
+        path=path,
+        attempt_identity=old.attempt_identity,
+    ) == _v4_actuated_receipt(old)
+    assert reactor_wake._read_held_sell_reauction_receipt(
+        fresh.request_id,
+        path=path,
+        attempt_identity=fresh.attempt_identity,
+    ) == _v4_actuated_receipt(fresh)
+    assert reactor_wake.held_sell_reauction_requests_completed((fresh,), path=path)
+
+
+def test_v4_lineage_latest_marker_fences_old_attempt_after_wake_ack(tmp_path):
+    from src.runtime import reactor_wake
+
+    path, old, fresh = _v4_stable_debt_attempts(tmp_path)
+    fresh_receipt = _v4_actuated_receipt(fresh)
+    assert reactor_wake.persist_held_sell_reauction_receipts((fresh_receipt,), path=path)
+    assert reactor_wake.acknowledge_reactor_wakes(
+        reactor_wake.reactor_wakes_since(None, path=path),
+        path=path,
+    )
+    assert not reactor_wake.held_sell_reauction_requests_completed((old,), path=path)
+    assert reactor_wake.held_sell_reauction_requests_completed((fresh,), path=path)
+
+
+def test_v4_ack_revalidates_after_new_attempt_interleaves(tmp_path):
+    from src.runtime import reactor_wake
+
+    path, old, fresh = _v4_stable_debt_attempts(
+        tmp_path,
+        publish_fresh=False,
+    )
+    old_wake = reactor_wake.reactor_wakes_since(None, path=path)[0]
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (_v4_actuated_receipt(old),),
+        path=path,
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed((old,), path=path)
+
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        published_at=datetime(2026, 8, 2, 12, 1, tzinfo=timezone.utc),
+        held_sell_reauction_requests=(fresh,),
+    )
+
+    assert not reactor_wake.acknowledge_reactor_wake(old_wake, path=path)
+    queued = reactor_wake.reactor_wakes_since(None, path=path)
+    assert len(queued) == 1
+    assert queued[0].held_sell_reauction_requests == (fresh,)
+    assert not reactor_wake.held_sell_reauction_requests_completed((old,), path=path)
+
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (_v4_actuated_receipt(fresh),),
+        path=path,
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed((fresh,), path=path)
+    assert reactor_wake.acknowledge_reactor_wake(queued[0], path=path)
+
+
+def test_v4_publish_fence_prevents_legacy_fallback_regression(
+    monkeypatch,
+    tmp_path,
+):
+    from src.runtime import reactor_wake
+
+    path, old, fresh = _v4_stable_debt_attempts(
+        tmp_path,
+        publish_old=False,
+        publish_fresh=False,
+    )
+    legacy_path = reactor_wake._wake_path(path)
+    real_atomic_write = reactor_wake._atomic_write_wake
+    real_lineage_locks = reactor_wake._held_sell_reauction_lineage_locks
+    a_at_fallback = threading.Event()
+    release_a = threading.Event()
+    b_attempted_fence = threading.Event()
+    b_finished = threading.Event()
+    failures = []
+
+    @contextmanager
+    def observed_lineage_locks(scope_identities, *, path=None):
+        if threading.current_thread().name == "v4-publisher-b":
+            b_attempted_fence.set()
+        with real_lineage_locks(scope_identities, path=path):
+            yield
+
+    def ordered_atomic_write(target, wake):
+        if target == legacy_path and wake.wake_id == "wake-a":
+            a_at_fallback.set()
+            if not release_a.wait(timeout=2.0):
+                raise TimeoutError("publisher A fallback was not released")
+        real_atomic_write(target, wake)
+
+    monkeypatch.setattr(
+        reactor_wake,
+        "_held_sell_reauction_lineage_locks",
+        observed_lineage_locks,
+    )
+    monkeypatch.setattr(reactor_wake, "_atomic_write_wake", ordered_atomic_write)
+
+    def publish(request, wake_id, published_at):
+        try:
+            reactor_wake.publish_reactor_wake(
+                source="held_position_monitor",
+                reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+                path=path,
+                wake_id=wake_id,
+                published_at=published_at,
+                held_sell_reauction_requests=(request,),
+            )
+        except Exception as exc:  # pragma: no cover - assertion reports failure.
+            failures.append(exc)
+        finally:
+            if wake_id == "wake-b":
+                b_finished.set()
+
+    publisher_a = threading.Thread(
+        name="v4-publisher-a",
+        target=publish,
+        args=(old, "wake-a", datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)),
+    )
+    publisher_b = threading.Thread(
+        name="v4-publisher-b",
+        target=publish,
+        args=(fresh, "wake-b", datetime(2026, 8, 2, 12, 1, tzinfo=timezone.utc)),
+    )
+    publisher_a.start()
+    assert a_at_fallback.wait(timeout=2.0)
+    a_holds_fence = reactor_wake._HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK.locked()
+    publisher_b.start()
+    assert b_attempted_fence.wait(timeout=2.0)
+    if not a_holds_fence:
+        assert b_finished.wait(timeout=2.0)
+    release_a.set()
+    publisher_a.join(timeout=2.0)
+    publisher_b.join(timeout=2.0)
+
+    assert a_holds_fence
+    assert not publisher_a.is_alive()
+    assert not publisher_b.is_alive()
+    assert failures == []
+    lineage = reactor_wake._read_v4_held_sell_reauction_lineage(
+        fresh.scope_identity,
+        path=path,
+    )
+    assert lineage is not None
+    assert lineage.latest_wake_id == "wake-b"
+    queued = reactor_wake.reactor_wakes_since(None, path=path)
+    assert len(queued) == 1
+    assert queued[0].wake_id == "wake-b"
+    assert queued[0].held_sell_reauction_requests == (fresh,)
+
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (_v4_actuated_receipt(fresh),),
+        path=path,
+    )
+    assert reactor_wake.acknowledge_reactor_wake(queued[0], path=path)
+    assert reactor_wake.exact_held_sell_completion_wake_ids(path=path) == frozenset()
+    assert reactor_wake.read_reactor_wake(path=path) is None
+
+
+def test_v4_lineage_read_error_fails_closed(tmp_path):
+    from src.runtime import reactor_wake
+
+    path, _old, fresh = _v4_stable_debt_attempts(tmp_path)
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (_v4_actuated_receipt(fresh),), path=path
+    )
+
+    lineage_path = reactor_wake._held_sell_reauction_lineage_path(
+        fresh.scope_identity,
+        path=path,
+    )
+    lineage_path.unlink()
+    lineage_path.mkdir()
+    assert not reactor_wake.held_sell_reauction_requests_completed((fresh,), path=path)
+
+
+def test_v4_queue_read_error_fails_closed_without_publish(tmp_path):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    path, old, _fresh = _v4_stable_debt_attempts(
+        tmp_path,
+        publish_fresh=False,
+    )
+    queue_path = reactor_wake._v4_wake_queue_target(
+        old.scope_identity,
+        path=path,
+    )
+    queue_path.unlink()
+    queue_path.mkdir()
+
+    accepted, request = reactor.request_global_auction_completion(
+        reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+        position_id=old.position_id,
+        family=old.family,
+        probability_content_identity=old.probability_content_identity,
+        held_token_id=old.held_token_id,
+        held_best_bid=old.held_best_bid,
+        bid_observed_at=old.bid_observed_at,
+        book_state=old.book_state,
+        probability_observed_at=old.probability_observed_at,
+        schema_version=4,
+        wake_path=path,
+        return_request=True,
+    )
+
+    assert accepted is False
+    assert request is None
+    assert queue_path.is_dir()
+
+
+def test_v4_latest_lookup_is_bounded_under_unrelated_backlog(monkeypatch, tmp_path):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    path, _old, fresh = _v4_stable_debt_attempts(tmp_path)
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (_v4_actuated_receipt(fresh),),
+        path=path,
+    )
+    for index in range(512):
+        reactor_wake.publish_reactor_wake(
+            source="bounded-backlog-antibody",
+            reason="forecast_posterior_advanced",
+            path=path,
+            wake_id=f"unrelated-{index}",
+            event_ids=(f"event-{index}",),
+        )
+    assert len(tuple(reactor_wake._wake_queue_dir(path).glob("*.json"))) == 513
+
+    def unbounded_scan_forbidden(*_args, **_kwargs):
+        raise AssertionError("V4 lookup must not scan the wake backlog")
+
+    monkeypatch.setattr(reactor_wake, "_queued_wakes", unbounded_scan_forbidden)
+    assert reactor_wake.held_sell_reauction_requests_completed((fresh,), path=path)
+    accepted, request = reactor.request_global_auction_completion(
+        reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+        position_id=fresh.position_id,
+        family=fresh.family,
+        probability_content_identity=fresh.probability_content_identity,
+        held_token_id=fresh.held_token_id,
+        held_best_bid=fresh.held_best_bid,
+        bid_observed_at=fresh.bid_observed_at,
+        book_state=fresh.book_state,
+        probability_observed_at=fresh.probability_observed_at,
+        schema_version=4,
+        wake_path=path,
+        return_request=True,
+    )
+    assert accepted is True
+    assert request == fresh
+
+
+def test_v4_receipt_lineage_restart_requires_and_retains_latest_attempt(tmp_path):
+    from src.runtime import reactor_wake
+
+    path, old, fresh = _v4_stable_debt_attempts(tmp_path)
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (_v4_actuated_receipt(old),), path=path
+    )
+    with reactor_wake._WAKE_QUEUE_CACHE_LOCK:
+        reactor_wake._WAKE_QUEUE_CACHE.clear()
+        reactor_wake._WAKE_QUEUE_REVISIONS.clear()
+    assert not reactor_wake.held_sell_reauction_requests_completed((fresh,), path=path)
+
+    fresh_receipt = _v4_actuated_receipt(fresh)
+    assert reactor_wake.persist_held_sell_reauction_receipts((fresh_receipt,), path=path)
+    with reactor_wake._WAKE_QUEUE_CACHE_LOCK:
+        reactor_wake._WAKE_QUEUE_CACHE.clear()
+        reactor_wake._WAKE_QUEUE_REVISIONS.clear()
+    assert not reactor_wake.held_sell_reauction_requests_completed((old,), path=path)
+    assert reactor_wake.held_sell_reauction_requests_completed((fresh,), path=path)
+    assert reactor_wake._read_held_sell_reauction_receipt(
+        fresh.request_id,
+        path=path,
+        attempt_identity=fresh.attempt_identity,
+    ) == fresh_receipt
 
 
 def test_v3_in_band_current_q_actuates_or_capital_rejects_only(monkeypatch):

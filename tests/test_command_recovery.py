@@ -3578,7 +3578,7 @@ def _seed_full_exit_intent(
         )
 
 
-def test_terminal_no_fill_global_maker_rest_creates_one_v3_reauction_debt(conn):
+def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(conn):
     from src.execution import command_recovery, exit_lifecycle
 
     _insert(
@@ -3685,7 +3685,7 @@ def test_terminal_no_fill_global_maker_rest_creates_one_v3_reauction_debt(conn):
     assert payload["error"].startswith(
         "global_sell_exit_terminal_no_fill_reauction:"
     )
-    assert obligation["schema_version"] == 3
+    assert obligation["schema_version"] == 4
     assert obligation["position_id"] == "pos-global-maker"
     assert obligation["held_token_id"] == "tok-global-maker"
     assert obligation["family"] == ["Karachi", "2026-05-17", "high"]
@@ -23692,7 +23692,7 @@ class TestRecoveryResolutionTable:
             },
         }
         assert obligation == {
-            "schema_version": 3,
+            "schema_version": 4,
             "scope_identity": obligation["scope_identity"],
             "generation": obligation["generation"],
             "position_id": position_id,
@@ -23727,7 +23727,7 @@ class TestRecoveryResolutionTable:
         assert json.loads(stored["payload_json"])["held_sell_reauction_obligation"] == obligation
 
     def test_expired_partial_exit_debt_cannot_be_generic_released(self, conn):
-        """Monitor cannot clear the exact terminal remainder owned by V3 recovery."""
+        """Monitor cannot clear the exact terminal remainder owned by V4 recovery."""
         from src.execution.command_recovery import (
             reconcile_pending_exit_terminal_order_releases,
         )
@@ -23837,7 +23837,7 @@ class TestRecoveryResolutionTable:
         obligation = json.loads(event["payload_json"])[
             "held_sell_reauction_obligation"
         ]
-        assert obligation["schema_version"] == 3
+        assert obligation["schema_version"] == 4
         assert obligation["position_id"] == position_id
         assert obligation["held_token_id"] == token_id
         assert obligation["residual_proof"]["command_id"] == command_id

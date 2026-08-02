@@ -14640,6 +14640,7 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                 family=family,
                 probability_content_identity="",
                 held_token_id=held_token_id,
+                schema_version=4,
             )
             residual_proof = {
                 "command_id": command_id,
@@ -14664,7 +14665,7 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                 ).encode("utf-8")
             ).hexdigest()
             held_sell_reauction_obligation = {
-                "schema_version": 3,
+                "schema_version": 4,
                 "scope_identity": scope_identity,
                 "generation": generation,
                 "position_id": position_id,
