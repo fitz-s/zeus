@@ -1334,3 +1334,26 @@ admitted after a slow first read receiving a new finite deadline, and a stale
 probability read failing closed only for that position while its eligible sibling
 continues. Existing outer admission, oldest-debt/fairness, urgent-preemption,
 and no-concurrency antibodies remain mandatory.
+
+### 2026-08-02 Follow-up -- Terminal FAK partial EXIT collateral drain
+
+Fixed defect shape: a `REVIEW_REQUIRED` FAK `SELL` has exact confirmed terminal
+point-order/trade proof for a partial fill, but its position is already
+`settled` or `economically_closed`. The prior recovery path required an open
+position plus synced chain residual, leaving the active `CTF_SELL` reservation
+debt in place.
+
+SCOPE is one command, venue order, and held token. DRAIN is exact command/order/
+token identity, terminal point-order status, cumulative confirmed trade size,
+zero live remainder, and an active identity-matched `CTF_SELL` reservation.
+RESET is the existing `append_event` terminal-partial transition: convert the
+matched cumulative amount, release the unmatched remainder, and preserve the
+terminal position phase. It emits no exit intent/order, venue call, reauction,
+or second sell. Unknown, mismatched, or nonterminal proof stays
+`REVIEW_REQUIRED` with the reservation active; repeat delivery is a no-op.
+
+The restart preflight reports an exact current-shaped terminal/no-live-remainder
+reservation-debt sample as a scoped blocker. It does not use a global
+reservation count as an entry gate. Authorized slice: `src/execution/command_recovery.py`,
+`scripts/check_live_restart_preflight.py`, focused existing tests, and this plan.
+No live checkout, process, venue, DB, deploy, push, or PR action is in scope.

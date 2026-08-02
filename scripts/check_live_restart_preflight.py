@@ -27,7 +27,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +47,7 @@ from src.contracts.position_truth import (
 from src.execution.command_bus import TERMINAL_STATES as COMMAND_TERMINAL_STATES
 
 from src.ops.monitor_cadence import collect_monitor_cadence_evidence
-from src.state.fill_dedup import canonical_trade_fact_cte
+from src.state.fill_dedup import canonical_trade_fact_cte, economic_trade_fact_cte
 
 SETTINGS_PATH = ROOT / "config" / "settings.json"
 LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
@@ -3297,7 +3297,8 @@ def _terminal_fak_order_has_no_resting_remainder(item: dict[str, Any]) -> bool:
         str(item.get("intent_kind") or "").upper() in {"ENTRY", "EXIT"}
         and str(item.get("command_state") or item.get("state") or "").upper()
         == "REVIEW_REQUIRED"
-        and str(item.get("position_phase") or "") == "settled"
+        and str(item.get("position_phase") or "")
+        in {"settled", "economically_closed"}
         and str(item.get("order_type") or "").upper() == "FAK"
         and str(item.get("positive_trade_fact_state") or "").upper()
         == "CONFIRMED"
@@ -3311,6 +3312,285 @@ def _terminal_fak_order_has_no_resting_remainder(item: dict[str, Any]) -> bool:
         and abs(filled - matched) <= 1e-6
         and requested is not None
         and requested - filled > 0.01
+    )
+
+
+def _terminal_fak_collateral_reservation_debt_check() -> CheckResult:
+    """Block restart on exact terminal FAK SELL collateral debt.
+
+    This is scoped per command/order/token.  It deliberately does not turn a
+    global reservation count into an entry gate: only a REVIEW_REQUIRED FAK
+    SELL with exact terminal point/trade proof and a matching terminal
+    position can be named as unreleased collateral debt.
+    """
+
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "scope": "one command_id + venue_order_id + token_id",
+        "proof_class": "terminal_fak_partial_no_live_remainder",
+        "debt_samples": [],
+    }
+    with _connect_live_ro() as conn:
+        required = {
+            "venue_commands",
+            "venue_command_events",
+            "venue_submission_envelopes",
+            "venue_order_facts",
+            "venue_trade_facts",
+            "position_current",
+            "collateral_reservations",
+        }
+        missing = sorted(table for table in required if not _table_exists(conn, "main", table))
+        if missing:
+            evidence["missing_tables"] = missing
+            return CheckResult(
+                "terminal_fak_collateral_reservation_debt",
+                False,
+                "terminal FAK collateral-debt surface is unavailable",
+                evidence,
+            )
+        try:
+            rows = conn.execute(
+                """
+            SELECT reservation.command_id AS reservation_command_id,
+                   reservation.token_id AS reservation_token_id,
+                   cmd.command_id, cmd.position_id, cmd.token_id, cmd.side,
+                   cmd.intent_kind, cmd.state, cmd.venue_order_id, cmd.size,
+                   pc.position_id AS current_position_id, pc.phase,
+                   pc.direction, pc.token_id AS position_token_id,
+                   pc.no_token_id, env.order_type AS envelope_order_type,
+                   reservation.amount AS reserved_amount,
+                   review.payload_json AS review_payload
+              FROM collateral_reservations reservation
+              LEFT JOIN venue_commands cmd
+                ON cmd.command_id = reservation.command_id
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+              LEFT JOIN venue_submission_envelopes env
+                ON env.envelope_id = cmd.envelope_id
+              LEFT JOIN venue_command_events review
+                ON review.command_id = cmd.command_id
+               AND review.event_type = 'REVIEW_REQUIRED'
+               AND review.sequence_no = (
+                    SELECT MAX(latest.sequence_no)
+                      FROM venue_command_events latest
+                     WHERE latest.command_id = cmd.command_id
+                       AND latest.event_type = 'REVIEW_REQUIRED'
+               )
+             WHERE reservation.reservation_type = 'CTF_SELL'
+               AND reservation.released_at IS NULL
+            ORDER BY reservation.command_id
+                """
+            ).fetchall()
+        except sqlite3.DatabaseError as exc:
+            evidence["query_error"] = f"{type(exc).__name__}: {exc}"
+            return CheckResult(
+                "terminal_fak_collateral_reservation_debt",
+                False,
+                "terminal FAK collateral-debt candidate query failed",
+                evidence,
+            )
+        debts: list[dict[str, Any]] = []
+        unknowns: list[dict[str, Any]] = []
+        for raw_row in rows:
+            row = dict(raw_row)
+            sample = {
+                "command_id": str(
+                    row.get("command_id")
+                    or row.get("reservation_command_id")
+                    or ""
+                ),
+                "position_id": str(row.get("position_id") or ""),
+                "venue_order_id": str(row.get("venue_order_id") or ""),
+                "token_id": str(row.get("token_id") or ""),
+            }
+
+            def unknown(reason: str) -> None:
+                unknowns.append({**sample, "reason": reason})
+
+            if not str(row.get("command_id") or ""):
+                unknown("venue_command_missing")
+                continue
+            if str(row.get("reservation_token_id") or "") != str(
+                row.get("token_id") or ""
+            ):
+                unknown("reservation_command_token_mismatch")
+                continue
+            if not str(row.get("current_position_id") or ""):
+                unknown("position_current_missing")
+                continue
+            if str(row.get("phase") or "") not in {
+                "settled",
+                "economically_closed",
+            }:
+                continue
+            if (
+                str(row.get("state") or "").upper() != "REVIEW_REQUIRED"
+                or str(row.get("intent_kind") or "").upper() != "EXIT"
+                or str(row.get("side") or "").upper() != "SELL"
+                or not str(row.get("venue_order_id") or "").strip()
+            ):
+                unknown("terminal_position_command_shape_mismatch")
+                continue
+
+            try:
+                review = json.loads(str(row.get("review_payload") or "{}"))
+            except json.JSONDecodeError:
+                unknown("review_payload_invalid_json")
+                continue
+            if not isinstance(review, dict) or review.get("reason") != (
+                "partial_remainder_point_order_filled_without_full_trade_fact"
+            ):
+                unknown("latest_review_reason_or_shape_mismatch")
+                continue
+            point = review.get("point_order")
+            if not isinstance(point, dict):
+                unknown("point_order_missing")
+                continue
+
+            def first(*keys: str) -> object:
+                for key in keys:
+                    if point.get(key) not in (None, ""):
+                        return point[key]
+                return None
+
+            order_id = str(row.get("venue_order_id") or "").strip()
+            point_order_id = str(first("orderID", "order_id", "orderId", "id") or "").strip()
+            point_token = str(first("asset_id", "assetId", "token_id") or "").strip()
+            held_token = str(
+                row.get("no_token_id")
+                if str(row.get("direction") or "").lower() == "buy_no"
+                else row.get("position_token_id")
+                or ""
+            ).strip()
+            try:
+                requested = Decimal(str(row.get("size")))
+                original = Decimal(str(first("original_size", "originalSize")))
+                matched = Decimal(str(first("size_matched", "sizeMatched", "matched_size")))
+            except (InvalidOperation, TypeError, ValueError):
+                unknown("point_order_size_invalid")
+                continue
+            if not all(value.is_finite() for value in (requested, original, matched)):
+                unknown("point_order_size_non_finite")
+                continue
+            remaining = first("remaining_size", "remainingSize", "size_remaining")
+            if remaining not in (None, ""):
+                try:
+                    parsed_remaining = Decimal(str(remaining))
+                    if not parsed_remaining.is_finite() or parsed_remaining != 0:
+                        unknown("point_order_explicit_remainder_nonzero")
+                        continue
+                except (InvalidOperation, TypeError, ValueError):
+                    unknown("point_order_explicit_remainder_invalid")
+                    continue
+            try:
+                fact = conn.execute(
+                    """
+                    SELECT state, matched_size, remaining_size, venue_order_id
+                      FROM venue_order_facts
+                     WHERE command_id = ? AND venue_order_id = ?
+                     ORDER BY fact_id DESC
+                     LIMIT 1
+                    """,
+                    (row["command_id"], order_id),
+                ).fetchone()
+                trade_rows = conn.execute(
+                    "WITH "
+                    + canonical_trade_fact_cte(
+                        source_clause_sql=(
+                            "WHERE fact.command_id = ? "
+                            "AND fact.venue_order_id = ?"
+                        )
+                    )
+                    + ", "
+                    + economic_trade_fact_cte()
+                    + """
+                    SELECT state, filled_size, fill_price, venue_order_id
+                      FROM economic_trade_fact
+                     WHERE state = 'CONFIRMED'
+                    """,
+                    (row["command_id"], order_id),
+                ).fetchall()
+            except sqlite3.DatabaseError as exc:
+                unknown(f"canonical_fact_query_failed:{type(exc).__name__}")
+                continue
+            try:
+                trade_total = sum(
+                    (Decimal(str(trade["filled_size"])) for trade in trade_rows),
+                    Decimal("0"),
+                )
+                fact_matched = Decimal(str(fact["matched_size"] or "0")) if fact else Decimal("0")
+                trade_prices_ok = all(
+                    Decimal(str(trade["fill_price"] or "0")) > 0
+                    for trade in trade_rows
+                )
+                reserved_amount = int(row.get("reserved_amount") or 0)
+            except (InvalidOperation, TypeError, ValueError):
+                unknown("canonical_fact_or_reservation_invalid")
+                continue
+            predicates = {
+                "envelope_fak": str(row.get("envelope_order_type") or "").upper()
+                == "FAK",
+                "point_terminal": str(point.get("status") or "").upper()
+                in {"MATCHED", "FILLED"},
+                "point_order_identity": point_order_id == order_id,
+                "point_sell": str(point.get("side") or "").upper() == "SELL",
+                "point_token_identity": point_token
+                == str(row.get("token_id") or "").strip(),
+                "held_token_identity": held_token == point_token,
+                "partial_size": requested > 0
+                and original == requested
+                and matched > 0
+                and matched < requested
+                and requested - matched > Decimal("0.01"),
+                "local_order_fact": fact is not None
+                and str(fact["venue_order_id"] or "") == order_id
+                and str(fact["state"] or "").upper()
+                in {"MATCHED", "FILLED", "PARTIAL", "PARTIALLY_MATCHED"}
+                and fact_matched == matched,
+                "canonical_trade_facts": bool(trade_rows)
+                and trade_total == matched
+                and trade_prices_ok,
+                "reservation_exact": reserved_amount
+                == int(
+                    (requested * Decimal("1000000")).to_integral_value(
+                        rounding=ROUND_CEILING
+                    )
+                ),
+            }
+            failed = sorted(name for name, ok in predicates.items() if not ok)
+            if failed:
+                unknown("predicate_failed:" + ",".join(failed))
+                continue
+            debts.append(
+                {
+                    "command_id": row["command_id"],
+                    "position_id": row["position_id"],
+                    "venue_order_id": order_id,
+                    "token_id": point_token,
+                    "position_phase": row["phase"],
+                    "requested_size": str(row["size"]),
+                    "matched_size": str(matched),
+                    "active_ctf_reservation_amount": reserved_amount,
+                    "resolution": "command_recovery.terminal_fak_partial_exit_review",
+                }
+            )
+    evidence["debt_samples"] = debts[:25]
+    evidence["debt_count"] = len(debts)
+    evidence["unknown_samples"] = unknowns[:25]
+    evidence["unknown_count"] = len(unknowns)
+    clean = not debts and not unknowns
+    return CheckResult(
+        "terminal_fak_collateral_reservation_debt",
+        clean,
+        "no exact terminal FAK SELL collateral reservation debt"
+        if clean
+        else (
+            "terminal/no-live-remainder FAK SELL has active CTF collateral reservation debt"
+            if debts
+            else "terminal FAK collateral debt evidence is incomplete"
+        ),
+        evidence,
     )
 
 
@@ -6780,6 +7060,7 @@ def evaluate() -> dict[str, Any]:
         _edli_confirmed_fill_bridge_coverage_check(),
         _position_current_projection_integrity_check(projection_rows),
         _economically_closed_sell_projection_exposure_check(),
+        _terminal_fak_collateral_reservation_debt_check(),
         _resting_venue_command_lifecycle_alignment_check(),
         _full_family_executable_substrate_redecision_check(quote_rows),
         _execution_feasibility_evidence_check(quote_rows),

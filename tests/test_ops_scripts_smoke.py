@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-08-02
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -71,6 +71,249 @@ def test_zeus_status_failsoft_on_empty_dbs(tmp_path, capsys):
     assert "error" in data["events"]
     assert "error" in data["blocks"]
     assert "error" in data["orders"]
+
+
+@pytest.mark.parametrize("phase", ("settled", "economically_closed"))
+def test_restart_preflight_catches_terminal_fak_ctf_reservation_debt(
+    monkeypatch,
+    tmp_path,
+    phase,
+):
+    """The blocker reports one exact terminal/no-live-remainder debt sample."""
+    preflight = _load(
+        f"preflight_terminal_fak_debt_{phase}",
+        "check_live_restart_preflight.py",
+    )
+    db = tmp_path / f"terminal-fak-debt-{phase}.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY, position_id TEXT, token_id TEXT,
+            side TEXT, intent_kind TEXT, state TEXT, venue_order_id TEXT,
+            size TEXT, envelope_id TEXT
+        );
+        CREATE TABLE venue_command_events (
+            command_id TEXT, event_type TEXT, sequence_no INTEGER,
+            payload_json TEXT
+        );
+        CREATE TABLE venue_submission_envelopes (
+            envelope_id TEXT PRIMARY KEY, order_type TEXT
+        );
+        CREATE TABLE venue_order_facts (
+            fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command_id TEXT, venue_order_id TEXT, state TEXT,
+            matched_size TEXT, remaining_size TEXT
+        );
+        CREATE TABLE venue_trade_facts (
+            trade_fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id TEXT, command_id TEXT, venue_order_id TEXT, state TEXT,
+            filled_size TEXT, fill_price TEXT, tx_hash TEXT,
+            observed_at TEXT, venue_timestamp TEXT, local_sequence INTEGER,
+            raw_payload_json TEXT
+        );
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY, phase TEXT, direction TEXT,
+            token_id TEXT, no_token_id TEXT
+        );
+        CREATE TABLE collateral_reservations (
+            command_id TEXT, reservation_type TEXT, token_id TEXT,
+            amount INTEGER, released_at TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands(
+            command_id, position_id, token_id, side, intent_kind, state,
+            venue_order_id, size, envelope_id
+        ) VALUES ('cmd-terminal-debt', 'pos-terminal-debt', 'tok-terminal-debt',
+                  'SELL', 'EXIT', 'REVIEW_REQUIRED', 'ord-terminal-debt',
+                  '6', 'env-terminal-debt')
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_submission_envelopes VALUES ('env-terminal-debt', 'FAK')"
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, 'buy_yes', ?, ?)" ,
+        ("pos-terminal-debt", phase, "tok-terminal-debt", "tok-terminal-debt-no"),
+    )
+    conn.execute(
+        """INSERT INTO collateral_reservations VALUES (
+            'cmd-terminal-debt', 'CTF_SELL', 'tok-terminal-debt', 6000000, NULL
+        )"""
+    )
+    review_payload = {
+        "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+        "point_order": {
+            "orderID": "ord-terminal-debt",
+            "status": "MATCHED",
+            "order_type": "FAK",
+            "side": "SELL",
+            "asset_id": "tok-terminal-debt",
+            "original_size": "6",
+            "size_matched": "2",
+            "remaining_size": "0",
+        },
+    }
+    conn.execute(
+        "INSERT INTO venue_command_events VALUES (?, 'REVIEW_REQUIRED', 1, ?)",
+        ("cmd-terminal-debt", json.dumps(review_payload)),
+    )
+    conn.execute(
+        """INSERT INTO venue_order_facts(
+            command_id, venue_order_id, state, matched_size, remaining_size
+        ) VALUES (
+            'cmd-terminal-debt', 'ord-terminal-debt', 'PARTIALLY_MATCHED', '2', '4'
+        )"""
+    )
+    # A later revision of the same trade is one economic fill, not a second
+    # fill.  The preflight must use the canonical reducer shared with recovery.
+    conn.execute(
+        """INSERT INTO venue_trade_facts(
+            trade_id, command_id, venue_order_id, state, filled_size,
+            fill_price, tx_hash, observed_at, local_sequence, raw_payload_json
+        ) VALUES (
+            'trade-terminal-debt', 'cmd-terminal-debt', 'ord-terminal-debt',
+            'CONFIRMED', '2', '0.46', 'tx-terminal-debt',
+            '2026-08-02T00:01:00+00:00', 2, '{}'
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO venue_trade_facts(
+            trade_id, command_id, venue_order_id, state, filled_size,
+            fill_price, tx_hash, observed_at, local_sequence, raw_payload_json
+        ) VALUES (
+            'trade-terminal-debt', 'cmd-terminal-debt', 'ord-terminal-debt',
+            'CONFIRMED', '2', '0.46', 'tx-terminal-debt',
+            '2026-08-02T00:00:00+00:00', 1, '{}'
+        )"""
+    )
+    conn.commit()
+
+    @contextlib.contextmanager
+    def _temp_trade_db():
+        yield conn
+
+    monkeypatch.setattr(preflight, "_connect_live_ro", _temp_trade_db)
+    result = preflight._terminal_fak_collateral_reservation_debt_check()
+
+    assert result.ok is False
+    assert result.restart_blocking is True
+    assert result.name == "terminal_fak_collateral_reservation_debt"
+    assert result.evidence["debt_samples"] == [
+        {
+            "command_id": "cmd-terminal-debt",
+            "position_id": "pos-terminal-debt",
+            "venue_order_id": "ord-terminal-debt",
+            "token_id": "tok-terminal-debt",
+            "position_phase": phase,
+            "requested_size": "6",
+            "matched_size": "2",
+            "active_ctf_reservation_amount": 6000000,
+            "resolution": "command_recovery.terminal_fak_partial_exit_review",
+        }
+    ]
+
+    conn.execute(
+        "UPDATE collateral_reservations SET amount = 1000000 "
+        "WHERE command_id = 'cmd-terminal-debt'"
+    )
+    amount_mismatch = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert amount_mismatch.ok is False
+    assert amount_mismatch.evidence["debt_count"] == 0
+    assert "reservation_exact" in amount_mismatch.evidence["unknown_samples"][0][
+        "reason"
+    ]
+    conn.execute(
+        "UPDATE collateral_reservations SET amount = 6000000 "
+        "WHERE command_id = 'cmd-terminal-debt'"
+    )
+
+    review_payload["point_order"]["remaining_size"] = "4"
+    conn.execute(
+        "UPDATE venue_command_events SET payload_json = ?",
+        (json.dumps(review_payload),),
+    )
+    nonzero = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert nonzero.ok is False
+    assert nonzero.evidence["debt_count"] == 0
+    assert nonzero.evidence["unknown_samples"][0]["reason"] == (
+        "point_order_explicit_remainder_nonzero"
+    )
+
+    review_payload["point_order"]["remaining_size"] = "invalid"
+    conn.execute(
+        "UPDATE venue_command_events SET payload_json = ?",
+        (json.dumps(review_payload),),
+    )
+    invalid_remainder = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert invalid_remainder.ok is False
+    assert invalid_remainder.evidence["unknown_samples"][0]["reason"] == (
+        "point_order_explicit_remainder_invalid"
+    )
+
+    conn.execute("UPDATE venue_command_events SET payload_json = '{bad-json'")
+    malformed = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert malformed.ok is False
+    assert malformed.evidence["unknown_samples"][0]["reason"] == (
+        "review_payload_invalid_json"
+    )
+
+    review_payload["point_order"]["remaining_size"] = "0"
+    conn.execute(
+        "UPDATE venue_command_events SET payload_json = ?",
+        (json.dumps(review_payload),),
+    )
+    conn.execute(
+        "DELETE FROM position_current WHERE position_id = 'pos-terminal-debt'"
+    )
+    missing_position = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert missing_position.ok is False
+    assert missing_position.evidence["unknown_samples"][0]["reason"] == (
+        "position_current_missing"
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, 'buy_yes', ?, ?)",
+        (
+            "pos-terminal-debt",
+            phase,
+            "tok-terminal-debt",
+            "tok-terminal-debt-no",
+        ),
+    )
+    conn.execute("DELETE FROM venue_command_events")
+    missing_review = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert missing_review.ok is False
+    assert missing_review.evidence["unknown_samples"][0]["reason"] == (
+        "latest_review_reason_or_shape_mismatch"
+    )
+    conn.close()
+
+
+def test_restart_preflight_terminal_fak_debt_missing_surface_fails_closed(
+    monkeypatch,
+):
+    preflight = _load(
+        "preflight_terminal_fak_debt_missing_surface",
+        "check_live_restart_preflight.py",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    @contextlib.contextmanager
+    def _missing_surface():
+        yield conn
+
+    monkeypatch.setattr(preflight, "_connect_live_ro", _missing_surface)
+    result = preflight._terminal_fak_collateral_reservation_debt_check()
+
+    assert result.ok is False
+    assert result.restart_blocking is True
+    assert "venue_commands" in result.evidence["missing_tables"]
+    conn.close()
 
 
 def test_zeus_status_failsoft_on_missing_db_file(tmp_path, capsys):

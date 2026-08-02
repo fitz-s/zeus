@@ -13815,6 +13815,370 @@ class TestRecoveryResolutionTable:
             "cost_basis_usd": 1.24,
         }
 
+    @pytest.mark.parametrize("terminal_phase", ("settled", "economically_closed"))
+    @pytest.mark.parametrize("point_remaining", ("0", None))
+    def test_terminal_fak_partial_exit_terminal_phase_drains_ctf_reservation(
+        self,
+        conn,
+        terminal_phase,
+        point_remaining,
+    ):
+        """Terminal position proof drains only the matched CTF collateral."""
+        _insert(
+            conn,
+            command_id="cmd-terminal-entry",
+            position_id="pos-terminal-partial",
+            size=6.0,
+            price=0.31,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-terminal-entry",
+            venue_order_id="ord-terminal-entry",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-terminal-partial",
+            command_id="cmd-terminal-entry",
+            order_id="ord-terminal-entry",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = ?, shares = 4.0, token_id = 'tok-001',
+                   no_token_id = 'tok-001-no', order_status = 'sell_filled'
+             WHERE position_id = 'pos-terminal-partial'
+            """,
+            (terminal_phase,),
+        )
+        _insert(
+            conn,
+            command_id="cmd-terminal-exit",
+            position_id="pos-terminal-partial",
+            intent_kind="EXIT",
+            side="SELL",
+            order_type="GTC",
+            envelope_id="env-terminal-exit-legal",
+            size=6.0,
+            price=0.46,
+        )
+        _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            selected_outcome_token_id="tok-001",
+            side="SELL",
+            order_type="FAK",
+            envelope_id="env-terminal-exit-fak",
+            price=0.46,
+            size=6.0,
+        )
+        conn.execute(
+            "UPDATE venue_commands SET envelope_id = ? WHERE command_id = ?",
+            ("env-terminal-exit-fak", "cmd-terminal-exit"),
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-terminal-exit",
+            venue_order_id="ord-terminal-exit",
+        )
+        from src.state.venue_command_repo import append_event
+
+        point_order = {
+            "orderID": "ord-terminal-exit",
+            "status": "MATCHED",
+            "order_type": "FAK",
+            "side": "SELL",
+            "asset_id": "tok-001",
+            "original_size": "6",
+            "size_matched": "2",
+            "price": "0.46",
+        }
+        if point_remaining is not None:
+            point_order["remaining_size"] = point_remaining
+        append_event(
+            conn,
+            command_id="cmd-terminal-exit",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "venue_order_id": "ord-terminal-exit",
+                "trade_id": "trade-terminal-exit",
+                "filled_size": "2",
+                "fill_price": "0.46",
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-terminal-exit",
+            order_id="ord-terminal-exit",
+            state="MATCHED",
+            matched_size="2",
+            remaining_size="0",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-terminal-exit",
+            order_id="ord-terminal-exit",
+            trade_id="trade-terminal-exit",
+            state="CONFIRMED",
+            filled_size="2",
+            fill_price="0.46",
+            tx_hash="0xterminal-exit",
+        )
+        conn.execute(
+            """
+            INSERT INTO collateral_reservations (
+                command_id, reservation_type, token_id, amount, created_at
+            ) VALUES ('cmd-terminal-exit', 'CTF_SELL', 'tok-001', 6000000, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        append_event(
+            conn,
+            command_id="cmd-terminal-exit",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+                "venue_order_id": "ord-terminal-exit",
+                "point_order_status": "MATCHED",
+                "point_order": point_order,
+            },
+        )
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+
+        summary = reconcile_matched_cancel_review_required_entries(conn)
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-terminal-exit") == "EXPIRED"
+        terminal_event = _get_events(conn, "cmd-terminal-exit")[-2]
+        assert terminal_event["event_type"] == "PARTIAL_FILL_OBSERVED"
+        terminal_payload = json.loads(terminal_event["payload_json"])
+        assert terminal_payload["position_phase"] == terminal_phase
+        assert terminal_payload["required_predicates"][
+            "position_phase_terminal_proof"
+        ] is True
+        assert terminal_payload["required_predicates"][
+            "active_ctf_reservation_matches_requested_size"
+        ] is True
+        assert conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = ?",
+            ("pos-terminal-partial",),
+        ).fetchone()[0] == terminal_phase
+        assert conn.execute(
+            """
+            SELECT COUNT(*) FROM position_events
+             WHERE position_id = ?
+               AND event_type IN ('EXIT_INTENT', 'EXIT_ORDER_POSTED')
+            """,
+            ("pos-terminal-partial",),
+        ).fetchone()[0] == 0
+        reservation = conn.execute(
+            "SELECT released_at, release_reason, converted_amount"
+            " FROM collateral_reservations WHERE command_id = ?",
+            ("cmd-terminal-exit",),
+        ).fetchone()
+        assert reservation[0] is not None
+        assert reservation[1] == "CONVERTED_ON_FILL"
+        assert reservation[2] == 2000000
+        proceeds = conn.execute(
+            "SELECT direction, reservation_type, token_id, amount_micro"
+            " FROM collateral_unsettled_proceeds WHERE command_id = ?",
+            ("cmd-terminal-exit",),
+        ).fetchone()
+        assert dict(proceeds) == {
+            "direction": "INCOMING_PROCEEDS",
+            "reservation_type": "CTF_SELL",
+            "token_id": "tok-001",
+            "amount_micro": 920000,
+        }
+        command_event_count = conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = ?",
+            ("cmd-terminal-exit",),
+        ).fetchone()[0]
+        position_event_count = conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            ("pos-terminal-partial",),
+        ).fetchone()[0]
+        repeated = reconcile_matched_cancel_review_required_entries(conn)
+        assert repeated == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = ?",
+            ("cmd-terminal-exit",),
+        ).fetchone()[0] == command_event_count
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            ("pos-terminal-partial",),
+        ).fetchone()[0] == position_event_count
+
+    @pytest.mark.parametrize(
+        "proof_failure",
+        (
+            "missing",
+            "mismatched_token",
+            "nonterminal",
+            "nonzero_remainder",
+            "reservation_amount_mismatch",
+        ),
+    )
+    def test_terminal_fak_partial_exit_bad_proof_keeps_review_and_reservation(
+        self,
+        conn,
+        proof_failure,
+    ):
+        """Incomplete identity or terminal proof cannot release CTF collateral."""
+        _insert(
+            conn,
+            command_id="cmd-invalid-entry",
+            position_id="pos-invalid-partial",
+            size=6.0,
+            price=0.31,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-invalid-entry",
+            venue_order_id="ord-invalid-entry",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-invalid-partial",
+            command_id="cmd-invalid-entry",
+            order_id="ord-invalid-entry",
+        )
+        conn.execute(
+            "UPDATE position_current SET phase = 'settled' WHERE position_id = ?",
+            ("pos-invalid-partial",),
+        )
+        _insert(
+            conn,
+            command_id="cmd-invalid-exit",
+            position_id="pos-invalid-partial",
+            intent_kind="EXIT",
+            side="SELL",
+            order_type="GTC",
+            envelope_id="env-invalid-exit-legal",
+            size=6.0,
+            price=0.46,
+        )
+        _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            selected_outcome_token_id="tok-001",
+            side="SELL",
+            order_type="FAK",
+            envelope_id="env-invalid-exit-fak",
+            price=0.46,
+            size=6.0,
+        )
+        conn.execute(
+            "UPDATE venue_commands SET envelope_id = ? WHERE command_id = ?",
+            ("env-invalid-exit-fak", "cmd-invalid-exit"),
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-invalid-exit",
+            venue_order_id="ord-invalid-exit",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-invalid-exit",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "venue_order_id": "ord-invalid-exit",
+                "trade_id": "trade-invalid-exit",
+                "filled_size": "2",
+                "fill_price": "0.46",
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-invalid-exit",
+            order_id="ord-invalid-exit",
+            state="MATCHED",
+            matched_size="2",
+            remaining_size="0",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-invalid-exit",
+            order_id="ord-invalid-exit",
+            trade_id="trade-invalid-exit",
+            state="CONFIRMED",
+            filled_size="2",
+            fill_price="0.46",
+            tx_hash="0xinvalid-exit",
+        )
+        conn.execute(
+            """
+            INSERT INTO collateral_reservations (
+                command_id, reservation_type, token_id, amount, created_at
+            ) VALUES ('cmd-invalid-exit', 'CTF_SELL', 'tok-001', ?, ?)
+            """,
+            (
+                1000000
+                if proof_failure == "reservation_amount_mismatch"
+                else 6000000,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        point_order = {
+            "orderID": "ord-invalid-exit",
+            "status": "MATCHED" if proof_failure != "nonterminal" else "LIVE",
+            "order_type": "FAK",
+            "side": "SELL",
+            "asset_id": "tok-001" if proof_failure != "mismatched_token" else "other-token",
+            "original_size": "6",
+            "size_matched": "2",
+            "remaining_size": "1" if proof_failure == "nonzero_remainder" else "0",
+            "price": "0.46",
+        }
+        review_payload = {
+            "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+            "venue_order_id": "ord-invalid-exit",
+            "point_order_status": point_order["status"],
+        }
+        if proof_failure != "missing":
+            review_payload["point_order"] = point_order
+        append_event(
+            conn,
+            command_id="cmd-invalid-exit",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload=review_payload,
+        )
+
+        command_event_count = conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = ?",
+            ("cmd-invalid-exit",),
+        ).fetchone()[0]
+
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+
+        summary = reconcile_matched_cancel_review_required_entries(conn)
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert _get_state(conn, "cmd-invalid-exit") == "REVIEW_REQUIRED"
+        reservation = conn.execute(
+            "SELECT released_at, release_reason, converted_amount "
+            "FROM collateral_reservations WHERE command_id = ?",
+            ("cmd-invalid-exit",),
+        ).fetchone()
+        assert reservation[0] is None
+        assert reservation[2] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = ?",
+            ("cmd-invalid-exit",),
+        ).fetchone()[0] == command_event_count
+        assert conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = ?",
+            ("pos-invalid-partial",),
+        ).fetchone()[0] == "settled"
+
     def test_terminal_fak_partial_entry_review_expires_unfilled_remainder(
         self,
         conn,

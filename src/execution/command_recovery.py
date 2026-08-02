@@ -44,7 +44,7 @@ import uuid
 from dataclasses import replace
 from collections.abc import Collection, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
@@ -11334,9 +11334,50 @@ def _review_required_terminal_fak_partial_exit_projection_matches(
         (position_id,),
     ).fetchone()
     current = _dict_row(row)
+    phase = str(current.get("phase") or "")
+    if phase in {"settled", "economically_closed"}:
+        held_token_id = str(
+            current.get("no_token_id")
+            if str(current.get("direction") or "").lower() == "buy_no"
+            else current.get("token_id")
+            or ""
+        )
+        if not _table_exists(conn, "collateral_reservations"):
+            return False
+        reservation = conn.execute(
+            """
+            SELECT reservation_type, token_id, amount
+             FROM collateral_reservations
+             WHERE command_id = ?
+               AND reservation_type = 'CTF_SELL'
+               AND token_id = ?
+               AND released_at IS NULL
+             LIMIT 1
+            """,
+            (
+                str(command.get("command_id") or ""),
+                command_token_id,
+            ),
+        ).fetchone()
+        try:
+            active_amount = int(reservation[2]) if reservation is not None else 0
+        except (TypeError, ValueError):
+            active_amount = 0
+        expected_amount = int(
+            (requested * Decimal("1000000")).to_integral_value(
+                rounding=ROUND_CEILING
+            )
+        )
+        return bool(
+            command_token_id
+            and held_token_id == command_token_id
+            and reservation is not None
+            and str(reservation[0] or "") == "CTF_SELL"
+            and str(reservation[1] or "") == command_token_id
+            and active_amount == expected_amount
+        )
     if (
-        str(current.get("phase") or "")
-        not in {"active", "day0_window", "pending_exit"}
+        phase not in {"active", "day0_window", "pending_exit"}
         or str(current.get("chain_state") or "").lower() != "synced"
         or not str(current.get("chain_seen_at") or "").strip()
     ):
@@ -11525,8 +11566,9 @@ def _clear_review_required_terminal_fak_partial_exit(
 
     SCOPE: one EXIT/SELL command whose latest review was raised only because a
     MATCHED point order arrived before its complete trade fact.
-    DRAIN: canonical confirmed trade facts, the persisted FAK point payload, and
-    a newer synced Chain residual must all agree on the exact partial fill.
+    DRAIN: canonical confirmed trade facts and the persisted FAK point payload
+    must agree on the exact partial fill; terminal positions additionally need
+    an active, identity-matched CTF reservation as the drain target.
     RESET: one transaction records the terminal partial and advances
     REVIEW_REQUIRED -> PARTIAL -> EXPIRED so only the positive residual remains.
     """
@@ -11558,6 +11600,17 @@ def _clear_review_required_terminal_fak_partial_exit(
     if not isinstance(point_order, Mapping):
         return False
     point = dict(point_order)
+    point_remaining_raw = _first_present(
+        point,
+        "remaining_size",
+        "remainingSize",
+        "size_remaining",
+    )
+    point_remaining = (
+        _decimal_or_none(point_remaining_raw)
+        if point_remaining_raw not in (None, "")
+        else None
+    )
     if (
         _order_status(point) not in {"MATCHED", "FILLED"}
         or str(_first_present(point, "order_type", "orderType") or "").upper() != "FAK"
@@ -11565,6 +11618,12 @@ def _clear_review_required_terminal_fak_partial_exit(
         or str(_first_present(point, "side") or "").upper() != "SELL"
         or str(_first_present(point, "asset_id", "assetId", "token_id") or "")
         != str(command.get("token_id") or "")
+        # MATCHED/FILLED FAK is terminal even when the venue omits a
+        # remainder field.  An explicit remainder must nevertheless agree.
+        or (
+            point_remaining_raw not in (None, "")
+            and point_remaining != Decimal("0")
+        )
     ):
         return False
     requested = _positive_decimal_or_none(command.get("size"))
@@ -11613,6 +11672,12 @@ def _clear_review_required_terminal_fak_partial_exit(
         fill_observed_at=fill_observed_at,
     ):
         return False
+    position_row = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ? LIMIT 1",
+        (str(command.get("position_id") or ""),),
+    ).fetchone()
+    position_phase = str(position_row[0] or "") if position_row is not None else ""
+    terminal_position = position_phase in {"settled", "economically_closed"}
 
     observed_at = str(trade_summary.get("observed_at") or _now_iso())
     terminal_payload = {
@@ -11631,26 +11696,38 @@ def _clear_review_required_terminal_fak_partial_exit(
             "canonical_trade_facts_match_terminal_order_fact": True,
             "cumulative_fill_below_requested_size": True,
             "fak_order_not_live": True,
-            "synced_chain_residual_matches_unfilled_size": True,
         },
+        "position_phase": position_phase,
     }
+    if terminal_position:
+        terminal_payload["required_predicates"]["position_phase_terminal_proof"] = True
+        terminal_payload["required_predicates"][
+            "active_ctf_reservation_matches_command_token"
+        ] = True
+        terminal_payload["required_predicates"][
+            "active_ctf_reservation_matches_requested_size"
+        ] = True
+    else:
+        terminal_payload["required_predicates"][
+            "synced_chain_residual_matches_unfilled_size"
+        ] = True
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
     sp_name = f"sp_terminal_fak_partial_exit_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
-        if original == matched:
-            order_fact = _latest_order_fact_for_command_order(
-                conn,
-                command_id=command_id,
-                venue_order_id=venue_order_id,
-            )
-            if (
-                str(order_fact.get("state") or "").upper()
-                not in {"MATCHED", "FILLED"}
-                or not _decimal_is_zero(order_fact.get("remaining_size"))
-                or _positive_decimal_or_none(order_fact.get("matched_size"))
-                != filled
-            ):
+        order_fact = _latest_order_fact_for_command_order(
+            conn,
+            command_id=command_id,
+            venue_order_id=venue_order_id,
+        )
+        existing_terminal_fact = (
+            str(order_fact.get("state") or "").upper()
+            in {"MATCHED", "FILLED"}
+            and _decimal_is_zero(order_fact.get("remaining_size"))
+            and _positive_decimal_or_none(order_fact.get("matched_size")) == filled
+        )
+        if original == matched or existing_terminal_fact:
+            if not existing_terminal_fact:
                 raise RuntimeError(
                     f"terminal FAK wire fill fact is incomplete for {command_id}"
                 )
@@ -11676,6 +11753,7 @@ def _clear_review_required_terminal_fak_partial_exit(
             command=command,
             order_fact=order_fact,
             trade_summary=trade_summary,
+            terminal_proof=terminal_payload,
         ):
             raise RuntimeError(
                 f"terminal FAK partial EXIT review did not clear for {command_id}"
@@ -11710,6 +11788,7 @@ def _clear_review_required_terminal_partial(
     command: Mapping[str, object],
     order_fact: Mapping[str, object],
     trade_summary: Mapping[str, object],
+    terminal_proof: Mapping[str, object] | None = None,
 ) -> bool:
     """Restore PARTIAL when exact venue facts prove a zero-remainder fill."""
 
@@ -11770,6 +11849,12 @@ def _clear_review_required_terminal_partial(
         "reviewed_by": "command_recovery",
         "cleared_at": observed_at,
     }
+    if terminal_proof:
+        proof_predicates = terminal_proof.get("required_predicates")
+        if isinstance(proof_predicates, Mapping):
+            payload["required_predicates"].update(proof_predicates)
+        if terminal_proof.get("position_phase"):
+            payload["position_phase"] = terminal_proof["position_phase"]
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
     sp_name = f"sp_terminal_partial_review_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
@@ -11807,9 +11892,10 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
     the command is left in REVIEW_REQUIRED even though canonical trade facts and
     position_current may still await the slower chain mirror. It also clears a
     terminal FAK partial ENTRY when the point order and canonical confirmed
-    trades agree exactly, and a terminal FAK partial EXIT only when those facts
-    also agree with the synced Chain residual. Other REVIEW_REQUIRED rows remain
-    operator-visible.
+    trades agree exactly, and a terminal FAK partial EXIT when those facts prove
+    either the synced Chain residual for an open position or an
+    identity-matched active CTF reservation for a terminal position. Other
+    REVIEW_REQUIRED rows remain operator-visible.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
