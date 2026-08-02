@@ -500,6 +500,41 @@ def _replacement_qkernel_live_probability_authority_enabled(cfg: dict) -> bool:
     return True
 
 
+GOVERNED_KELLY_MULTIPLIER = 1.0 / 32.0
+
+
+def assert_kelly_multiplier_matches_governed_fraction(cfg: dict) -> None:
+    """Fail closed unless live sizing uses the operator-governed 1/32 Kelly.
+
+    SCOPE: process-wide daemon boot; a mismatched Kelly config prevents entry,
+    monitoring, and exit jobs from starting until the operator restores it.
+    DRAIN: restore ``sizing.kelly_multiplier`` to 0.03125 in the active
+    operator config, then restart so every in-memory settings object reloads.
+    RESET: this guard is recomputed on every boot and clears only on an exact
+    finite match; there is no strategy, side, or runtime override.
+    """
+    sizing = cfg.get("sizing") or {}
+    raw_mult = sizing.get("kelly_multiplier")
+    if raw_mult is None:
+        raise RuntimeError(
+            "KELLY_MULT_GOVERNANCE_MISMATCH: missing "
+            "sizing.kelly_multiplier; required=0.03125 (1/32)"
+        )
+    if isinstance(raw_mult, bool) or not isinstance(raw_mult, (int, float)):
+        raise RuntimeError(
+            "KELLY_MULT_GOVERNANCE_MISMATCH: "
+            f"sizing.kelly_multiplier must be a JSON number, got "
+            f"{type(raw_mult).__name__}; required=0.03125 (1/32)"
+        )
+    kelly_mult = float(raw_mult)
+    if not math.isfinite(kelly_mult) or kelly_mult != GOVERNED_KELLY_MULTIPLIER:
+        raise RuntimeError(
+            "KELLY_MULT_GOVERNANCE_MISMATCH: "
+            f"sizing.kelly_multiplier={kelly_mult!r}; "
+            f"required={GOVERNED_KELLY_MULTIPLIER} (1/32)"
+        )
+
+
 def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
     """Fail-closed guard: sizing.kelly_multiplier must not exceed
     sizing.max_correlated_pct (the over-size door / iron rule 5 = ruin).
@@ -513,8 +548,8 @@ def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
     and ``f*·m ≤ kelly_multiplier``. So ``f*·m / f_cap_corr ≤ 1`` — and Σ stays
     under the ceiling — ONLY while ``kelly_multiplier ≤ max_correlated_pct``.
     These are TWO INDEPENDENT config knobs (sizing.kelly_multiplier vs
-    sizing.max_correlated_pct), equal at 0.25 today only by coincidence — the
-    SAME coincidence that masked the original bug. A legal operator value of
+    sizing.max_correlated_pct), historically equal at 0.25 only by coincidence
+    — the SAME coincidence that masked the original bug. A value of
     e.g. 0.5 silently breaches the ceiling (3 same-cycle same-city bets summed
     to $51 > $42.50 at B=170 in the critic repro, a 20% over-size) even with the
     INV-K3 single cap intact. ``_runtime_kelly_multiplier`` only rejects ≤ 0, so
@@ -570,7 +605,9 @@ def _run_boot_guards(raw_cfg: dict) -> list:
     Guards included (same set the real boot path runs, in the same order):
       1. assert_calibration_pin_shape_is_dict  — model_keys must be dict/absent
       2. assert_frozen_as_of_not_stale         — WARN>10d, FATAL>21d
-      3. assert_kelly_multiplier_within_correlated_ceiling
+      3. assert_kelly_multiplier_matches_governed_fraction
+                                               — kelly_multiplier == 1/32
+      4. assert_kelly_multiplier_within_correlated_ceiling
                                                — kelly_multiplier ≤ max_correlated_pct
                                                  (over-size door / iron rule 5)
 
@@ -602,7 +639,20 @@ def _run_boot_guards(raw_cfg: dict) -> list:
     except Exception as exc:  # pragma: no cover
         results.append(("frozen_as_of_staleness", False, f"unexpected: {exc}"))
 
-    # Guard 3: kelly_multiplier ≤ max_correlated_pct (over-size door / iron rule 5)
+    # Guard 3: exact operator-governed live Kelly fraction.
+    try:
+        assert_kelly_multiplier_matches_governed_fraction(raw_cfg)
+        results.append((
+            "kelly_mult_governed_fraction",
+            True,
+            "kelly_multiplier == 0.03125 (1/32) — governed fraction intact",
+        ))
+    except (RuntimeError, TypeError, ValueError) as exc:
+        results.append(("kelly_mult_governed_fraction", False, str(exc)))
+    except Exception as exc:  # pragma: no cover
+        results.append(("kelly_mult_governed_fraction", False, f"unexpected: {exc}"))
+
+    # Guard 4: kelly_multiplier ≤ max_correlated_pct (over-size door / iron rule 5)
     try:
         assert_kelly_multiplier_within_correlated_ceiling(raw_cfg)
         results.append((

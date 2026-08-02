@@ -1,12 +1,12 @@
 # Created: 2026-06-05
-# Last reused/audited: 2026-06-05
+# Last reused/audited: 2026-08-02
 # Authority basis: MAJOR #1 antibody on the P1 sizing fix (commits a281ba14a2 +
 #   efe91afdb5, branch fix/remove-live-caps) — the corr-ceiling
 #   ``Σ stakes ≤ max_correlated_pct·B`` holds ONLY when
 #   ``kelly_multiplier ≤ max_correlated_pct``. These are INDEPENDENT config
 #   knobs, equal at 0.25 only by coincidence — the same coincidence that masked
 #   the original bug. Iron rule 5: over-size = ruin.
-# Lifecycle: created=2026-06-05; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Lifecycle: created=2026-06-05; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Purpose: Boot-guard antibody — assert_kelly_multiplier_within_correlated_ceiling makes kelly_multiplier > max_correlated_pct (and any non-finite knob) FATAL at boot, closing the over-size door (iron rule 5 = ruin) the K1–K8 suite cannot see.
 # Reuse: Re-run when the guard, _run_boot_guards wiring, or evaluate_kelly's corr-ceiling sizing (f_cap_corr = max_correlated_pct) changes.
 """ANTIBODY for the unguarded over-size door (MAJOR #1).
@@ -57,6 +57,61 @@ def _cfg(kelly_multiplier, max_correlated_pct):
     }
 
 
+# ── Exact governed live fraction ─────────────────────────────────────────────
+
+def test_governed_fraction_accepts_exactly_one_over_32():
+    from src.main import assert_kelly_multiplier_matches_governed_fraction
+
+    assert_kelly_multiplier_matches_governed_fraction(
+        _cfg(kelly_multiplier=1.0 / 32.0, max_correlated_pct=0.25)
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0.25, 0.02, float("nan"), float("inf"), "0.03125", "not-a-number", True],
+)
+def test_governed_fraction_rejects_drift(value):
+    from src.main import assert_kelly_multiplier_matches_governed_fraction
+
+    with pytest.raises(RuntimeError, match="KELLY_MULT_GOVERNANCE_MISMATCH"):
+        assert_kelly_multiplier_matches_governed_fraction(
+            _cfg(kelly_multiplier=value, max_correlated_pct=0.25)
+        )
+
+
+def test_governed_fraction_rejects_missing_value():
+    from src.main import assert_kelly_multiplier_matches_governed_fraction
+
+    cfg = _cfg(kelly_multiplier=1.0 / 32.0, max_correlated_pct=0.25)
+    del cfg["sizing"]["kelly_multiplier"]
+    with pytest.raises(RuntimeError, match="KELLY_MULT_GOVERNANCE_MISMATCH"):
+        assert_kelly_multiplier_matches_governed_fraction(cfg)
+
+
+@pytest.mark.parametrize("value", ["0.03125", "not-a-number", True])
+def test_boot_guard_reports_malformed_governed_fraction(value):
+    from src.main import _run_boot_guards
+
+    results = _run_boot_guards(
+        _cfg(kelly_multiplier=value, max_correlated_pct=0.25)
+    )
+    names = {r[0]: r for r in results}
+    assert names["kelly_mult_governed_fraction"][1] is False
+    assert "KELLY_MULT_GOVERNANCE_MISMATCH" in names["kelly_mult_governed_fraction"][2]
+
+
+def test_governed_fraction_is_registered_in_boot_guards():
+    from src.main import _run_boot_guards
+
+    results = _run_boot_guards(
+        _cfg(kelly_multiplier=0.25, max_correlated_pct=0.25)
+    )
+    names = {r[0]: r for r in results}
+    assert names["kelly_mult_governed_fraction"][1] is False
+    assert "required=0.03125 (1/32)" in names["kelly_mult_governed_fraction"][2]
+
+
 # ── The boot guard fires when kelly_multiplier > max_correlated_pct ──────────
 
 def test_guard_raises_when_kelly_mult_exceeds_corr_ceiling():
@@ -73,7 +128,7 @@ def test_guard_raises_when_kelly_mult_exceeds_corr_ceiling():
 
 
 def test_guard_passes_when_kelly_mult_within_corr_ceiling():
-    """kelly_multiplier=0.25 ≤ max_correlated_pct=0.25 (the current valid config)
+    """kelly_multiplier=0.25 ≤ max_correlated_pct=0.25 (relationship fixture)
     → no error. Equality is the boundary and is allowed (the bound holds with
     equality: f*·m/f_cap ≤ 1)."""
     from src.main import assert_kelly_multiplier_within_correlated_ceiling
@@ -105,7 +160,7 @@ def test_guard_registered_in_run_boot_guards():
 
 
 def test_guard_registered_passes_on_valid_config():
-    """And the registered guard passes on the valid (≤) config."""
+    """The correlated-ceiling guard passes on a relationship-valid config."""
     from src.main import _run_boot_guards
     results = _run_boot_guards(_cfg(kelly_multiplier=0.25, max_correlated_pct=0.25))
     names = {r[0]: r for r in results}

@@ -767,7 +767,7 @@ test_trust_policy:
     tests/test_strict_evidence_row.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_t4_selection_rule_invariants.py: {created: "2026-05-28", last_used: "2026-05-29"}
     # PR #391 fix/remove-live-caps — no-caps + boot efficiency + over-size guard antibodies (2026-06-05)
-    tests/test_boot_guard_kelly_ceiling.py: {created: "2026-06-05", last_used: "2026-06-05", note: "MAJOR #1: assert_kelly_multiplier_within_correlated_ceiling boot guard — kelly_multiplier > max_correlated_pct (and non-finite) FATAL at boot (over-size door / iron rule 5)"}
+    tests/test_boot_guard_kelly_ceiling.py: {created: "2026-06-05", last_used: "2026-08-02", note: "Exact 1/32 governed Kelly plus correlated-ceiling boot guards; drift, non-finite values, and over-size relationships are FATAL before live entry."}
     tests/test_startup_wallet_dedup.py: {created: "2026-06-05", last_used: "2026-06-19", note: "efficiency #1 RT: production wallet gate routes through bankroll_provider.current() warm cache; wallet unavailable leaves submit fail-closed without killing monitor"}
     tests/test_startup_wallet_warm_overlap.py: {created: "2026-06-05", last_used: "2026-06-19", note: "efficiency #3 RT: boot warms current() on a background thread, joins, then the gate consumes the joined record (warm+gate = ONE fetch; None -> submit fail-closed without killing monitor)"}
     tests/test_wallet_source.py: {created: "2026-05-04", last_used: "2026-06-19", note: "P7 wallet bankroll source: wallet is sole live bankroll truth; wallet errors block submit without synthesizing bankroll or killing monitor/redecision"}
