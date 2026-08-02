@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-08-02
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
@@ -223,6 +223,45 @@ def _world_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     return conn
+
+
+class _ClaimLookupConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.claim_lookup_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def execute(self, sql, parameters=(), /):
+        if "WITH requested(event_id)" in sql:
+            self.claim_lookup_calls.append((sql, tuple(parameters)))
+        return super().execute(sql, parameters)
+
+
+def _claim_lookup_world_conn() -> _ClaimLookupConnection:
+    conn = sqlite3.connect(":memory:", factory=_ClaimLookupConnection)
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.claim_lookup_calls.clear()
+    return conn
+
+
+def _insert_processing_claims(
+    conn: sqlite3.Connection,
+    claims: dict[str, str],
+    *,
+    consumer_name: str = "edli_reactor_v1",
+) -> None:
+    conn.executemany(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, updated_at
+        ) VALUES (?, ?, 'processing', 1, ?, ?)
+        """,
+        (
+            (consumer_name, event_id, claimed_at, claimed_at)
+            for event_id, claimed_at in claims.items()
+        ),
+    )
 
 
 def _insert_no_value_regret(
@@ -855,6 +894,160 @@ def test_forecast_supersession_preserves_and_safely_recovers_targeted_global_win
             "GLOBAL_WINNER_TARGETED_CLAIM",
         )
     )
+
+
+def test_global_winner_current_claim_lookup_preserves_exact_equivalence_and_empty_ids():
+    conn = _claim_lookup_world_conn()
+    store = EventStore(conn)
+    claimed_at = "2026-05-24T04:17:00+00:00"
+    claims = {"current-claim": claimed_at}
+    _insert_processing_claims(conn, claims)
+    conn.commit()
+    target = _event(
+        "claim-lookup-exact",
+        0,
+        "2026-05-24T04:18:00+00:00",
+        "2026-05-24T04:19:00+00:00",
+    )
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations=claims,
+        )
+        is not None
+    )
+    conn.rollback()
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations={"current-claim": claimed_at + "-wrong"},
+        )
+        is None
+    )
+    conn.rollback()
+
+    _insert_processing_claims(conn, {"": claimed_at})
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations={"": claimed_at},
+        )
+        is None
+    )
+    conn.rollback()
+
+    conn.claim_lookup_calls.clear()
+    assert not conn.in_transaction
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations={},
+        )
+        is not None
+    )
+    assert conn.claim_lookup_calls == []
+    conn.rollback()
+
+
+def test_global_winner_current_claim_lookup_caps_chunk_at_251_parameters():
+    conn = _claim_lookup_world_conn()
+    store = EventStore(conn)
+    claims = {
+        f"current-claim-{index:03d}": "2026-05-24T04:17:00+00:00"
+        for index in range(250)
+    }
+    _insert_processing_claims(conn, claims)
+    conn.commit()
+    target = _event(
+        "claim-lookup-250",
+        0,
+        "2026-05-24T04:18:00+00:00",
+        "2026-05-24T04:19:00+00:00",
+    )
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations=claims,
+        )
+        is not None
+    )
+    assert len(conn.claim_lookup_calls) == 1
+    sql, parameters = conn.claim_lookup_calls[0]
+    assert sql.count("?") == 251
+    assert len(parameters) == 251
+    assert parameters[:-1] == tuple(sorted(claims))
+    assert parameters[-1] == store.consumer_name
+    conn.rollback()
+
+
+def test_global_winner_current_claim_lookup_uses_pk_and_bounded_vm_work():
+    conn = _claim_lookup_world_conn()
+    store = EventStore(conn)
+    claimed_at = "2026-05-24T04:17:00+00:00"
+    claims = {f"requested-{index}": claimed_at for index in range(4)}
+    _insert_processing_claims(conn, claims)
+    conn.commit()
+    target = _event(
+        "claim-lookup-plan",
+        0,
+        "2026-05-24T04:18:00+00:00",
+        "2026-05-24T04:19:00+00:00",
+    )
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations=claims,
+        )
+        is not None
+    )
+    sql, parameters = conn.claim_lookup_calls[0]
+    conn.rollback()
+
+    plan = conn.execute("EXPLAIN QUERY PLAN " + sql, parameters).fetchall()
+    search_details = [str(row[3]) for row in plan if "SEARCH p " in str(row[3])]
+    assert len(search_details) == 1
+    lookup_terms = search_details[0].split("(", 1)[-1]
+    assert "consumer_name=?" in lookup_terms
+    assert "event_id=?" in lookup_terms
+    assert "processing_status" not in lookup_terms
+    assert "claimed_at" not in lookup_terms
+
+    def measured_lookup() -> tuple[int, dict[str, str]]:
+        steps = 0
+
+        def count_step() -> int:
+            nonlocal steps
+            steps += 1
+            return 0
+
+        conn.set_progress_handler(count_step, 1)
+        try:
+            rows = conn.execute(sql, parameters).fetchall()
+        finally:
+            conn.set_progress_handler(None, 0)
+        return steps, {str(row[0]): str(row[1]) for row in rows}
+
+    baseline_steps, baseline_result = measured_lookup()
+    historical_claims = {
+        f"historical-{index:05d}": claimed_at for index in range(20_000)
+    }
+    _insert_processing_claims(conn, historical_claims)
+    conn.commit()
+    historical_steps, historical_result = measured_lookup()
+
+    assert baseline_result == claims
+    assert historical_result == claims
+    assert historical_steps <= baseline_steps * 2
 
 
 def test_archive_superseded_forecast_snapshot_events_capped_batch_checks_newer_tail():

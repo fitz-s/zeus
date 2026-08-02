@@ -3122,17 +3122,18 @@ class EventStore:
             ordered_ids = sorted(allowed_claims)
             for start in range(0, len(ordered_ids), 250):
                 chunk = ordered_ids[start : start + 250]
-                placeholders = ",".join("?" for _ in chunk)
+                requested_values = ",".join("(?)" for _ in chunk)
                 rows = self.conn.execute(
                     f"""
-                    SELECT event_id, claimed_at
-                      FROM opportunity_event_processing
-                     WHERE consumer_name = ?
-                       AND processing_status = 'processing'
-                       AND claimed_at IS NOT NULL
-                       AND event_id IN ({placeholders})
+                    WITH requested(event_id) AS (VALUES {requested_values})
+                    SELECT p.event_id, p.claimed_at
+                      FROM requested CROSS JOIN opportunity_event_processing AS p
+                     WHERE p.consumer_name = ?
+                       AND p.event_id = requested.event_id
+                       AND p.processing_status = 'processing'
+                       AND p.claimed_at IS NOT NULL
                     """,
-                    (self.consumer_name, *chunk),
+                    (*chunk, self.consumer_name),
                 ).fetchall()
                 current_claims.update(
                     (str(row[0]), str(row[1]))
