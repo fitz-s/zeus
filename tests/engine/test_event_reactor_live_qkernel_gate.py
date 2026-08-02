@@ -2758,7 +2758,14 @@ def test_actionable_payload_preserves_sealed_global_execution_economics(
     payload["event_type"] = "FORECAST_SNAPSHOT_READY"
 
     assert payload["qkernel_execution_economics"] == cert
-    _assert_live_entry_submit_authority(payload)
+    with pytest.raises(
+        ValueError,
+        match=(
+            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            "authority=missing:q_source=replacement_0_1"
+        ),
+    ):
+        _assert_live_entry_submit_authority(payload)
     taker = era._build_event_bound_taker_quality_proof(
         actionable_payload=payload,
         order_mode="TAKER",
@@ -3792,59 +3799,107 @@ def _day0_payload(**overrides) -> dict:
     return payload
 
 
-def test_live_entry_day0_gate_accepts_live_observation_authority_with_qkernel():
-    _assert_live_entry_submit_authority(
-        _day0_payload(
-            **_day0_probability_fields(),
-            selection_authority_applied="qkernel_spine",
-            direction="buy_yes",
-            strategy_key="day0_nowcast_entry",
-            candidate_bin_id="bin-1",
-            min_entry_price=0.10,
-            qkernel_execution_economics=_day0_qkernel_cert(),
-        )
-    )
-
-
-@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
-def test_live_entry_day0_remaining_day_v1_is_retired_for_both_sides(direction):
+def test_live_entry_day0_observation_does_not_qualify_remaining_probability():
     with pytest.raises(
         ValueError,
         match=(
-            "LIVE_ENTRY_DAY0_REMAINING_DAY_AUTHORITY_RETIRED:"
-            "authority=day0_remaining_day_global_probability_v1"
+            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            "authority=missing:q_source=day0_remaining_day"
         ),
     ):
         _assert_live_entry_submit_authority(
             _day0_payload(
                 **_day0_probability_fields(),
-                probability_authority="day0_remaining_day_global_probability_v1",
                 selection_authority_applied="qkernel_spine",
-                direction=direction,
+                direction="buy_yes",
                 strategy_key="day0_nowcast_entry",
                 candidate_bin_id="bin-1",
+                min_entry_price=0.10,
                 qkernel_execution_economics=_day0_qkernel_cert(),
             )
         )
 
 
-def test_live_entry_day0_replacement_0_1_authority_remains_accepted():
-    _assert_live_entry_submit_authority(
-        _day0_payload(
-            probability_authority="replacement_0_1",
-            _edli_q_source="replacement_0_1",
-            selection_authority_applied="qkernel_spine",
-            direction="buy_yes",
-            strategy_key="day0_nowcast_entry",
-            candidate_bin_id="bin-1",
-            q_live=0.70,
-            q_lcb_5pct=0.60,
-            qkernel_execution_economics=_qkernel_cert(),
-        )
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize(
+    "event_type,authority,q_source",
+    (
+        (
+            "DAY0_EXTREME_UPDATED",
+            "day0_remaining_day_global_probability_v1",
+            "day0_remaining_day",
+        ),
+        (
+            "DAY0_EXTREME_UPDATED",
+            "day0_conditioned_replacement_global_probability_v1",
+            "day0_conditioned_replacement",
+        ),
+        ("DAY0_EXTREME_UPDATED", "replacement_0_1", "replacement_0_1"),
+        (
+            "DAY0_EXTREME_UPDATED",
+            "replacement_provisional_day0_global_probability_v1",
+            "replacement_0_1",
+        ),
+        (
+            "FORECAST_SNAPSHOT_READY",
+            "replacement_current_global_probability_v1",
+            "replacement_0_1",
+        ),
+        ("FORECAST_SNAPSHOT_READY", "replacement_0_1", "replacement_0_1"),
+    ),
+)
+def test_live_entry_unqualified_probabilistic_authorities_fail_closed(
+    direction,
+    event_type,
+    authority,
+    q_source,
+):
+    payload = _day0_payload(
+        **_day0_probability_fields(),
+        event_type=event_type,
+        probability_authority=authority,
+        selection_authority_applied="qkernel_spine",
+        direction=direction,
+        strategy_key="day0_nowcast_entry",
+        candidate_bin_id="bin-1",
+        qkernel_execution_economics=_day0_qkernel_cert(),
     )
+    payload["_edli_q_source"] = q_source
+    with pytest.raises(
+        ValueError,
+        match=(
+            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            f"authority={authority}:q_source={q_source}"
+        ),
+    ):
+        _assert_live_entry_submit_authority(payload)
 
 
-def test_live_entry_day0_absorbing_hard_fact_authority_remains_accepted():
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+def test_live_entry_unqualified_q_source_cannot_hide_behind_unknown_authority(direction):
+    payload = _day0_payload(
+        **_day0_probability_fields(),
+        event_type="FORECAST_SNAPSHOT_READY",
+        probability_authority="renamed_but_unqualified",
+        selection_authority_applied="qkernel_spine",
+        direction=direction,
+        strategy_key="forecast_qkernel_entry",
+        candidate_bin_id="bin-1",
+        qkernel_execution_economics=_day0_qkernel_cert(),
+    )
+    payload["_edli_q_source"] = "replacement_0_1"
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            "authority=renamed_but_unqualified:q_source=replacement_0_1"
+        ),
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+def test_live_entry_day0_observation_hard_fact_cannot_rescue_unqualified_probability():
     payload = _day0_payload(
         **_day0_probability_fields(),
         probability_authority="day0_absorbing_hard_fact",
@@ -3857,8 +3912,14 @@ def test_live_entry_day0_absorbing_hard_fact_authority_remains_accepted():
     payload["day0_probability_authority"][
         "probability_authority"
     ] = "day0_absorbing_hard_fact"
-
-    _assert_live_entry_submit_authority(payload)
+    with pytest.raises(
+        ValueError,
+        match=(
+            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            "authority=day0_absorbing_hard_fact:q_source=day0_remaining_day"
+        ),
+    ):
+        _assert_live_entry_submit_authority(payload)
 
 
 def test_retired_day0_entry_authority_does_not_gate_held_monitor_surface(
@@ -4170,7 +4231,7 @@ def test_live_entry_day0_gate_accepts_degenerate_lcb_with_remaining_window_guard
     cert = _day0_qkernel_cert(q_live=q_live, q_lcb=q_lcb)
     cert.update(selection_guard_q_safe=q_lcb)
 
-    _assert_live_entry_submit_authority(
+    era._assert_day0_entry_uses_live_observation_authority(
         _day0_payload(
             **_day0_probability_fields(q_live=q_live, q_lcb=q_lcb),
             selection_authority_applied="qkernel_spine",
@@ -4202,7 +4263,7 @@ def test_live_entry_day0_gate_accepts_degenerate_lcb_with_oof_qkernel_guard():
         selection_guard_q_safe=q_lcb,
     )
 
-    _assert_live_entry_submit_authority(
+    era._assert_day0_entry_uses_live_observation_authority(
         _day0_payload(
             **_day0_probability_fields(q_live=q_live, q_lcb=q_lcb),
             selection_authority_applied="qkernel_spine",
@@ -4255,7 +4316,7 @@ def test_day0_order_mode_remains_maker_even_with_taker_policy():
 
 def test_live_entry_day0_gate_rejects_missing_qkernel_economics():
     with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED"):
-        _assert_live_entry_submit_authority(
+        era._assert_day0_entry_uses_live_observation_authority(
             _day0_payload(
                 **_day0_probability_fields(),
                 selection_authority_applied="qkernel_spine",
@@ -4295,7 +4356,7 @@ def test_live_entry_day0_gate_rejects_observed_boundary_qkernel_guard():
     )
 
     with pytest.raises(ValueError, match="LIVE_ENTRY_DAY0_QKERNEL_GUARD_AUTHORITY_REQUIRED"):
-        _assert_live_entry_submit_authority(
+        era._assert_day0_entry_uses_live_observation_authority(
             _day0_payload(
                 **_day0_probability_fields(),
                 selection_authority_applied="qkernel_spine",
@@ -4312,7 +4373,7 @@ def test_live_entry_day0_gate_accepts_remaining_guard_without_oof_sample_count()
     cert = _day0_qkernel_cert()
     cert.update(selection_guard_n=0)
 
-    _assert_live_entry_submit_authority(
+    era._assert_day0_entry_uses_live_observation_authority(
         _day0_payload(
             **_day0_probability_fields(),
             selection_authority_applied="qkernel_spine",
