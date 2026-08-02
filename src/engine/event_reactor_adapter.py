@@ -2914,17 +2914,14 @@ _FORECAST_DECISION_EVENT_TYPES: frozenset[str] = frozenset(
 # running extreme). Module-level so qkernel can feed the observed boundary into the
 # same family optimizer while the live adapter still applies Day0 authority guards.
 _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
-_UNQUALIFIED_PROBABILISTIC_ENTRY_AUTHORITIES: frozenset[str] = frozenset(
+_QUALIFIED_LIVE_ENTRY_PROBABILITY_BINDINGS: frozenset[tuple[str, str, str]] = frozenset(
     {
-        "day0_remaining_day_global_probability_v1",
-        "day0_conditioned_replacement_global_probability_v1",
-        "replacement_0_1",
-        "replacement_current_global_probability_v1",
-        "replacement_provisional_day0_global_probability_v1",
+        (
+            "DAY0_EXTREME_UPDATED",
+            "day0_deterministic_bin_payoff_v1",
+            "day0_deterministic_bin_payoff",
+        )
     }
-)
-_UNQUALIFIED_PROBABILISTIC_ENTRY_Q_SOURCES: frozenset[str] = frozenset(
-    {"day0_conditioned_replacement", "day0_remaining_day", "replacement_0_1"}
 )
 _DAY0_MAKER_ONLY_REST_POLICY = "REST_DAY0_MAKER_ONLY"
 _DAY0_MAKER_ONLY_TAKER_FORBIDDEN_REASON = "DAY0_MAKER_ONLY"
@@ -18753,31 +18750,30 @@ def _assert_live_entry_submit_authority(actionable_payload: Mapping[str, object]
     probability_authority = str(
         actionable_payload.get("probability_authority") or ""
     ).strip()
-    q_source = str(
-        actionable_payload.get("_edli_q_source")
-        or actionable_payload.get("q_source")
-        or ""
-    ).strip()
+    canonical_q_source = str(actionable_payload.get("q_source") or "").strip()
+    q_source = str(actionable_payload.get("_edli_q_source") or "").strip()
+    authority_binding = (event_type, probability_authority, q_source)
     if (
-        probability_authority in _UNQUALIFIED_PROBABILISTIC_ENTRY_AUTHORITIES
-        or q_source in _UNQUALIFIED_PROBABILISTIC_ENTRY_Q_SOURCES
+        authority_binding not in _QUALIFIED_LIVE_ENTRY_PROBABILITY_BINDINGS
+        or canonical_q_source != q_source
     ):
         # INV-47:
-        # SCOPE = new live entries whose exact probability_authority names a
-        # current probabilistic replacement/Day0 model without independent,
-        # preregistered walk-forward qualification. Held monitor/SELL and
-        # deterministic observation-backed exact-payoff authorities are outside
-        # this scope.
+        # SCOPE = every new live entry except an exact typed event/authority/q_source
+        # binding with internally consistent canonical fields. Held monitor/SELL
+        # and settlement are outside this scope.
         # DRAIN = recompute under a separately versioned causal posterior with
         # persisted input/scenario identity, then qualify that exact version on
         # independent target-day blocks using preregistered proper-score and
-        # executable-capital evidence; these authorities never drain themselves.
-        # RESET = the payload certificate carries a different qualified
-        # authority/version; no flag/time/data-count auto-reset.
+        # executable-capital evidence, and add its exact typed binding here; an
+        # authority string, alias, elapsed time, or sample count never drains itself.
+        # RESET = a submit payload carries one listed binding and all canonical,
+        # nested, and observation fields pass that authority's content validator.
         raise ValueError(
             "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
             f"authority={probability_authority or 'missing'}:"
-            f"q_source={q_source or 'missing'}"
+            f"q_source={q_source or 'missing'}:"
+            f"canonical_q_source={canonical_q_source or 'missing'}:"
+            f"event_type={event_type or 'missing'}"
         )
     if event_type in _FORECAST_DECISION_EVENT_TYPES or (
         event_type in _DAY0_LANE_EVENT_TYPES

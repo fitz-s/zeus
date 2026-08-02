@@ -1742,7 +1742,7 @@ def test_qkernel_selection_facts_fail_closed_without_attached_world(tmp_path):
 
 
 def test_live_entry_qkernel_gate_accepts_stamped_matching_cert():
-    _assert_live_entry_submit_authority(
+    era._assert_forecast_entry_uses_qkernel_authority(
         {
             "event_type": "FORECAST_SNAPSHOT_READY",
             "selection_authority_applied": "qkernel_spine",
@@ -1759,7 +1759,7 @@ def test_live_entry_qkernel_gate_accepts_stamped_matching_cert():
 
 def test_live_entry_qkernel_gate_rejects_legacy_unstamped_payload():
     with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_AUTHORITY_REQUIRED"):
-        _assert_live_entry_submit_authority(
+        era._assert_forecast_entry_uses_qkernel_authority(
             {
                 "event_type": "FORECAST_SNAPSHOT_READY",
                 "selection_authority_applied": None,
@@ -1772,7 +1772,7 @@ def test_live_entry_qkernel_gate_rejects_legacy_unstamped_payload():
 
 def test_live_entry_qkernel_gate_rejects_bin_mismatch():
     with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_CERT_BIN_MISMATCH"):
-        _assert_live_entry_submit_authority(
+        era._assert_forecast_entry_uses_qkernel_authority(
             {
                 "event_type": "FORECAST_SNAPSHOT_READY",
                 "selection_authority_applied": "qkernel_spine",
@@ -1787,7 +1787,7 @@ def test_live_entry_qkernel_gate_accepts_low_cost_when_qkernel_cert_is_high_conf
     cert = _qkernel_cert()
     cert.update(cost=0.07, payoff_q_lcb=0.60, payoff_q_point=0.70, edge_lcb=0.53)
 
-    _assert_live_entry_submit_authority(
+    era._assert_forecast_entry_uses_qkernel_authority(
         {
             "event_type": "FORECAST_SNAPSHOT_READY",
             "selection_authority_applied": "qkernel_spine",
@@ -1815,7 +1815,7 @@ def test_live_entry_qkernel_gate_accepts_center_yes_when_symmetric_quality_floor
         selection_guard_q_safe=0.52,
     )
 
-    _assert_live_entry_submit_authority(
+    era._assert_forecast_entry_uses_qkernel_authority(
         {
             "event_type": "FORECAST_SNAPSHOT_READY",
             "selection_authority_applied": "qkernel_spine",
@@ -1859,7 +1859,7 @@ def test_live_entry_qkernel_gate_accepts_underpriced_buenos_aires_yes():
         selection_guard_q_safe=0.0990451308919892,
     )
 
-    _assert_live_entry_submit_authority(
+    era._assert_forecast_entry_uses_qkernel_authority(
         {
             "event_type": "FORECAST_SNAPSHOT_READY",
             "selection_authority_applied": "qkernel_spine",
@@ -1888,7 +1888,7 @@ def test_current_state_live_entry_uses_robust_utility_not_legacy_strategy_floor(
     )
     _seal_current_qkernel_cert(cert)
 
-    _assert_live_entry_submit_authority(
+    era._assert_forecast_entry_uses_qkernel_authority(
         {
             "event_type": "FORECAST_SNAPSHOT_READY",
             "selection_authority_applied": "qkernel_spine",
@@ -2762,7 +2762,8 @@ def test_actionable_payload_preserves_sealed_global_execution_economics(
         ValueError,
         match=(
             "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
-            "authority=missing:q_source=replacement_0_1"
+            "authority=missing:q_source=missing:"
+            "canonical_q_source=replacement_0_1"
         ),
     ):
         _assert_live_entry_submit_authority(payload)
@@ -3641,7 +3642,7 @@ def test_live_entry_qkernel_gate_rejects_failed_near_day0_consistency_verdict():
     }
 
     with pytest.raises(ValueError, match="ADMISSION_NEAR_DAY0_RAW_EXTREMA_CONTRADICTION"):
-        _assert_live_entry_submit_authority(
+        era._assert_forecast_entry_uses_qkernel_authority(
             {
                 "event_type": "FORECAST_SNAPSHOT_READY",
                 "selection_authority_applied": "qkernel_spine",
@@ -3684,7 +3685,7 @@ def test_live_entry_qkernel_authority_rejects_out_of_band_price_despite_positive
     }
 
     with pytest.raises(ValueError, match="LIVE_ENTRY_UNIT_PRICE_OUT_OF_BOUNDS"):
-        _assert_live_entry_submit_authority(payload)
+        era._assert_forecast_entry_uses_qkernel_authority(payload)
 
 
 @pytest.mark.parametrize("price", (0.0, 1.0, float("nan")))
@@ -3709,7 +3710,7 @@ def test_live_entry_qkernel_gate_accepts_six_to_eight_cent_positive_yes():
         selection_guard_q_safe=0.078120,
     )
 
-    _assert_live_entry_submit_authority(
+    era._assert_forecast_entry_uses_qkernel_authority(
         {
             "event_type": "FORECAST_SNAPSHOT_READY",
             "selection_authority_applied": "qkernel_spine",
@@ -3729,7 +3730,7 @@ def test_live_entry_qkernel_gate_rejects_nonpositive_delta_u_at_min():
     cert.update(delta_u_at_min=-0.01)
 
     with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID"):
-        _assert_live_entry_submit_authority(
+        era._assert_forecast_entry_uses_qkernel_authority(
             {
                 "event_type": "FORECAST_SNAPSHOT_READY",
                 "selection_authority_applied": "qkernel_spine",
@@ -3749,7 +3750,7 @@ def test_live_entry_qkernel_gate_rejects_false_edge_rate_above_live_alpha():
     cert.update(false_edge_rate=0.50)
 
     with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID"):
-        _assert_live_entry_submit_authority(
+        era._assert_forecast_entry_uses_qkernel_authority(
             {
                 "event_type": "FORECAST_SNAPSHOT_READY",
                 "selection_authority_applied": "qkernel_spine",
@@ -3768,7 +3769,7 @@ def test_live_entry_qkernel_gate_does_not_reapply_legacy_price_floor():
     cert = _qkernel_cert()
     cert.update(cost=0.07, payoff_q_lcb=0.60, payoff_q_point=0.70, edge_lcb=0.53)
 
-    _assert_live_entry_submit_authority(
+    era._assert_forecast_entry_uses_qkernel_authority(
         {
             "event_type": "FORECAST_SNAPSHOT_READY",
             "selection_authority_applied": "qkernel_spine",
@@ -3899,6 +3900,44 @@ def test_live_entry_unqualified_q_source_cannot_hide_behind_unknown_authority(di
         _assert_live_entry_submit_authority(payload)
 
 
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+def test_live_entry_unknown_authority_and_q_source_aliases_fail_closed(direction):
+    payload = {
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "probability_authority": "replacement_qualified_alias",
+        "q_source": "replacement_qualified_alias",
+        "_edli_q_source": "replacement_qualified_alias",
+        "selection_authority_applied": "qkernel_spine",
+        "direction": direction,
+        "candidate_bin_id": "bin-1",
+        "q_live": 0.70,
+        "q_lcb_5pct": 0.60,
+        "qkernel_execution_economics": _qkernel_cert(),
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED",
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+def test_live_entry_canonical_q_source_cannot_conflict_with_qualified_binding():
+    payload = _deterministic_day0_actionable_payload()
+    payload["q_source"] = "replacement_0_1"
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            "authority=day0_deterministic_bin_payoff_v1:"
+            "q_source=day0_deterministic_bin_payoff:"
+            "canonical_q_source=replacement_0_1"
+        ),
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
 def test_live_entry_day0_observation_hard_fact_cannot_rescue_unqualified_probability():
     payload = _day0_payload(
         **_day0_probability_fields(),
@@ -4023,8 +4062,11 @@ def test_global_deterministic_day0_entry_rejects_missing_probability_type():
 
     with pytest.raises(
         ValueError,
-        match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
-        "day0_probability_q_source required:missing",
+        match=(
+            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            "authority=day0_deterministic_bin_payoff_v1:"
+            "q_source=missing:canonical_q_source=missing"
+        ),
     ):
         _assert_live_entry_submit_authority(payload)
 
@@ -4331,7 +4373,7 @@ def test_live_entry_day0_gate_rejects_missing_qkernel_economics():
 
 def test_live_entry_day0_gate_rejects_missing_probability_authority():
     with pytest.raises(ValueError, match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED"):
-        _assert_live_entry_submit_authority(
+        era._assert_day0_entry_uses_live_observation_authority(
             _day0_payload(
                 selection_authority_applied="qkernel_spine",
                 direction="buy_yes",
@@ -4391,7 +4433,9 @@ def test_live_entry_day0_gate_rejects_missing_live_observation_authority():
         ValueError,
         match="LIVE_ENTRY_DAY0_OBSERVATION_AUTHORITY_REQUIRED:live_authority_status=missing",
     ):
-        _assert_live_entry_submit_authority(_day0_payload(live_authority_status=None))
+        era._assert_day0_entry_uses_live_observation_authority(
+            _day0_payload(live_authority_status=None)
+        )
 
 
 def test_day0_fdr_rejection_reason_carries_route_evidence():
@@ -4875,7 +4919,10 @@ def test_pre_submit_payload_uses_fee_aware_global_worst_cost_edge():
 
 
 def test_live_entry_gate_rejects_unknown_event_type_even_with_qkernel_cert():
-    with pytest.raises(ValueError, match="LIVE_ENTRY_AUTHORITY_UNSUPPORTED_EVENT_TYPE"):
+    with pytest.raises(
+        ValueError,
+        match="LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED",
+    ):
         _assert_live_entry_submit_authority(
             {
                 "event_type": "EXPERIMENTAL_EVENT",
