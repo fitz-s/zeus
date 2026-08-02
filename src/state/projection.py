@@ -461,6 +461,37 @@ def _preserve_existing_pending_exit_authority(
     return projection
 
 
+def _preserve_existing_partial_exit_realized_pnl(
+    conn: sqlite3.Connection,
+    projection: dict,
+    *,
+    table_name: str = "position_current",
+) -> dict:
+    """Never let an open monitor/restart projection erase booked partial PnL.
+
+    ``build_position_current_projection`` intentionally emits NULL for open
+    positions.  A partial EXIT is open exposure with already-realized money,
+    so the canonical partial-fill writer supplies a non-NULL cumulative value;
+    all later generic projections preserve it until settlement supplies the
+    final cumulative result.
+    """
+
+    if projection.get("realized_pnl_usd") is not None:
+        return projection
+    position_id = str(projection.get("position_id") or "")
+    if not position_id or "realized_pnl_usd" not in table_columns(conn, table_name):
+        return projection
+    row = conn.execute(
+        f"SELECT realized_pnl_usd FROM {table_name} WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return projection
+    merged = dict(projection)
+    merged["realized_pnl_usd"] = row[0]
+    return merged
+
+
 def _preserve_existing_monitor_refresh_authority(
     conn: sqlite3.Connection,
     projection: dict,
@@ -664,6 +695,9 @@ def upsert_position_current(
     *,
     table_name: str = "position_current",
 ) -> None:
+    projection = _preserve_existing_partial_exit_realized_pnl(
+        conn, projection, table_name=table_name
+    )
     projection = _preserve_existing_monitor_refresh_authority(
         conn, projection, table_name=table_name
     )

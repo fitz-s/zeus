@@ -16,6 +16,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Optional
 
 import httpx
@@ -353,29 +354,92 @@ def _current_phase_in_db(conn, trade_id: str) -> dict:
 
 
 def _canonical_partial_exit_realized_pnl(conn, position_id: str) -> float:
-    """Fold canonical partial EXIT PnL before booking the residual settlement."""
+    """Fold canonical partial EXIT economics before residual settlement.
 
-    if not position_id:
-        return 0.0
-    try:
-        row = conn.execute(
-            """
-            SELECT COALESCE(
-                       SUM(CAST(json_extract(payload_json, '$.realized_pnl_delta_usd') AS REAL)),
-                       0
-                   )
-              FROM position_events
-             WHERE position_id = ?
-               AND caused_by = 'partial_exit_fill'
-               AND json_extract(payload_json, '$.semantic_event') = 'CAPITAL_REDUCTION_FILLED'
-            """,
-            (position_id,),
-        ).fetchone()
-    except sqlite3.Error as exc:
-        raise RuntimeError(
-            f"partial EXIT realized-PnL fold failed for {position_id}: {exc}"
-        ) from exc
-    return float(row[0] or 0.0)
+    The shared fold preserves legacy/minimal connections that never had
+    ``position_events`` while failing closed for a present but unprovable
+    partial-fill event.
+    """
+
+    from src.state.fill_dedup import partial_exit_realized_pnl_fold
+
+    return float(partial_exit_realized_pnl_fold(conn, position_id))
+
+
+def _repair_legacy_partial_exit_economics(conn, pos) -> None:
+    """Append exact economics for old partial events before settlement.
+
+    The repair is append-only and idempotent by canonical ``command_id`` /
+    ``trade_id`` identity.  Missing identity or a non-authoritative residual
+    basis raises typed debt through the caller rather than inventing $0 PnL.
+    """
+
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.db import append_many_and_project
+    from src.state.fill_dedup import (
+        PartialExitEconomicDebtError,
+        legacy_partial_exit_repair_fills,
+        partial_exit_realized_pnl_fold,
+    )
+
+    trade_id = str(getattr(pos, "trade_id", "") or "")
+    fills = legacy_partial_exit_repair_fills(conn, trade_id)
+    if not fills:
+        return
+    shares = Decimal(str(getattr(pos, "effective_shares", 0) or 0))
+    cost = Decimal(str(getattr(pos, "effective_cost_basis_usd", 0) or 0))
+    if shares <= 0 or cost < 0:
+        raise PartialExitEconomicDebtError(
+            f"partial EXIT repair basis missing: position_id={trade_id}"
+        )
+    phase = _current_phase_in_db(conn, trade_id).get("phase")
+    if phase not in {"active", "day0_window", "pending_exit"}:
+        raise PartialExitEconomicDebtError(
+            f"partial EXIT repair phase unsupported: position_id={trade_id} phase={phase}"
+        )
+    unit_cost = cost / shares
+    cumulative = Decimal("0")
+    for fill in fills:
+        allocated_cost = fill.quantity * unit_cost
+        delta = fill.notional - allocated_cost
+        cumulative += delta
+        occurred_at = datetime.now(timezone.utc).isoformat()
+        events, projection = build_monitor_refreshed_canonical_write(
+            pos,
+            sequence_no=_next_canonical_sequence_no(conn, trade_id),
+            phase_after=str(phase),
+            source_module="src.execution.harvester",
+            occurred_at=occurred_at,
+        )
+        event = dict(events[0])
+        payload = json.loads(str(event["payload_json"] or "{}"))
+        payload.update(
+            {
+                "semantic_event": "PARTIAL_EXIT_ECONOMICS_REPAIRED",
+                "economic_fill_identity": fill.identity,
+                "economic_fill_cumulative_shares": float(fill.quantity),
+                "economic_fill_cumulative_notional_usd": float(fill.notional),
+                "filled_shares": float(fill.quantity),
+                "filled_notional_usd": float(fill.notional),
+                "remaining_shares": float(shares),
+                "fill_price": float(fill.unit_price),
+                "allocated_cost_basis_usd": float(allocated_cost),
+                "realized_pnl_delta_usd": float(delta),
+                "cumulative_realized_pnl_usd": float(cumulative),
+            }
+        )
+        event["event_id"] = (
+            f"{trade_id}:partial_exit_economics_repair:{fill.identity}"
+        )
+        event["caused_by"] = "partial_exit_economics_repair"
+        event["occurred_at"] = occurred_at
+        event["order_id"] = fill.venue_order_id or None
+        event["payload_json"] = json.dumps(payload, sort_keys=True)
+        projection["updated_at"] = occurred_at
+        projection["realized_pnl_usd"] = float(cumulative)
+        append_many_and_project(conn, [event], projection)
+    # Validate the newly append-only repair fold before settlement consumes it.
+    partial_exit_realized_pnl_fold(conn, trade_id)
 
 
 def _dual_write_canonical_settlement_if_available(
@@ -2634,6 +2698,7 @@ def _settle_positions(
                 )
                 continue
         phase_before = _canonical_phase_before_for_settlement(pos)
+        _repair_legacy_partial_exit_economics(conn, pos)
         partial_exit_realized_pnl = _canonical_partial_exit_realized_pnl(
             conn, pos.trade_id
         )

@@ -1506,8 +1506,11 @@ def test_madrid_partial_exit_realized_pnl_is_canonical_and_settlement_adds_resid
     reduction_payload = json.loads(reduction["payload_json"])
     assert reduction_payload["semantic_event"] == "CAPITAL_REDUCTION_FILLED"
     assert reduction_payload["fill_identity"] == (
-        "pos-capital-reduction:partial_exit:ord-capital-reduction:2.5"
+        "economic-fill:v1:cmd-capital-reduction:trade-capital-reduction"
     )
+    assert reduction_payload["economic_fill_identity"] == reduction_payload["fill_identity"]
+    assert reduction_payload["economic_fill_cumulative_shares"] == pytest.approx(2.5)
+    assert reduction_payload["filled_notional_usd"] == pytest.approx(1.5)
     assert reduction_payload["allocated_cost_basis_usd"] == pytest.approx(1.75)
     assert reduction_payload["realized_pnl_delta_usd"] == pytest.approx(-0.25)
     assert reduction_payload["cumulative_realized_pnl_usd"] == pytest.approx(-0.25)
@@ -1545,13 +1548,40 @@ def test_madrid_partial_exit_realized_pnl_is_canonical_and_settlement_adds_resid
     assert len(partials) == 2
     second_payload = json.loads(partials[-1]["payload_json"])
     assert second_payload["fill_identity"] == (
-        "pos-capital-reduction:partial_exit:ord-capital-reduction:4"
+        "status-fill:v1:pos-capital-reduction:ord-capital-reduction"
     )
+    assert second_payload["economic_fill_cumulative_shares"] == pytest.approx(4.0)
+    assert second_payload["filled_notional_usd"] == pytest.approx(0.9)
     assert second_payload["allocated_cost_basis_usd"] == pytest.approx(1.05)
     assert second_payload["realized_pnl_delta_usd"] == pytest.approx(-0.15)
     assert second_payload["cumulative_realized_pnl_usd"] == pytest.approx(-0.4)
     assert position.shares == pytest.approx(16.0)
     assert position.cost_basis_usd == pytest.approx(11.2)
+    open_head = conn.execute(
+        "SELECT realized_pnl_usd FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    assert open_head["realized_pnl_usd"] == pytest.approx(-0.4)
+    # A later monitor/restart projection has no close timestamp and therefore
+    # builds NULL by default; it must preserve the partial-exit cumulative head.
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.db import append_many_and_project
+
+    position.last_monitor_at = datetime.now(timezone.utc).isoformat()
+    monitor_events, monitor_projection = build_monitor_refreshed_canonical_write(
+        position,
+        sequence_no=conn.execute(
+            "SELECT MAX(sequence_no) + 1 FROM position_events WHERE position_id = ?",
+            (position.trade_id,),
+        ).fetchone()[0],
+        phase_after="active",
+        source_module="tests.test_exit_safety",
+    )
+    append_many_and_project(conn, monitor_events, monitor_projection)
+    assert conn.execute(
+        "SELECT realized_pnl_usd FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0] == pytest.approx(-0.4)
     assert conn.execute(
         """
         SELECT COUNT(*) FROM position_events
@@ -1579,6 +1609,73 @@ def test_madrid_partial_exit_realized_pnl_is_canonical_and_settlement_adds_resid
     assert settled["shares"] == pytest.approx(16.0)
     assert settled["cost_basis_usd"] == pytest.approx(11.2)
     assert settled["realized_pnl_usd"] == pytest.approx(expected_pnl)
+
+
+def test_partial_exit_economic_fill_fold_dedups_tx_and_edli_aliases(conn):
+    from src.state.fill_dedup import economic_exit_fills_for_position
+    from src.state.venue_command_repo import append_trade_fact
+
+    command_id = "cmd-partial-exit-alias"
+    order_id = "ord-partial-exit-alias"
+    position_id = "pos-partial-exit-alias"
+    _insert_exit_command(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        token_id=NO_TOKEN,
+        size=3.0,
+        price=0.61,
+        venue_order_id=order_id,
+    )
+    common = {
+        "venue_order_id": order_id,
+        "command_id": command_id,
+        "state": "CONFIRMED",
+        "filled_size": "3",
+        "fill_price": "0.61",
+        "source": "REST",
+        "observed_at": _NOW.isoformat(),
+        "tx_hash": "0xpartial-exit-alias",
+    }
+    source_fact_id = append_trade_fact(
+        conn,
+        trade_id="child-trade",
+        raw_payload_hash="1" * 64,
+        raw_payload_json={"trade_id": "child-trade"},
+        **common,
+    )
+    append_trade_fact(
+        conn,
+        trade_id="0xpartial-exit-alias",
+        raw_payload_hash="2" * 64,
+        raw_payload_json={"trade_id": "0xpartial-exit-alias"},
+        **common,
+    )
+    append_trade_fact(
+        conn,
+        trade_id="edli-replay-alias",
+        raw_payload_hash="3" * 64,
+        raw_payload_json={
+            "raw_fill_payload": {"source_trade_fact_id": source_fact_id}
+        },
+        **common,
+    )
+
+    fills = economic_exit_fills_for_position(conn, position_id)
+
+    assert [(fill.trade_id, fill.quantity, fill.unit_price) for fill in fills] == [
+        ("child-trade", Decimal("3"), Decimal("0.61"))
+    ]
+
+
+def test_partial_exit_fold_keeps_legacy_connection_settlement_compatible():
+    from src.state.fill_dedup import partial_exit_realized_pnl_fold
+
+    legacy_conn = sqlite3.connect(":memory:")
+    try:
+        assert partial_exit_realized_pnl_fold(legacy_conn, "legacy-position") == 0
+    finally:
+        legacy_conn.close()
 
 
 def test_confirmed_partial_reduction_trade_fact_reopens_exact_remaining_claim(conn):

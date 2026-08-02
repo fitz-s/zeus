@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from inspect import Parameter, signature
 from types import SimpleNamespace
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 # Compatibility exports for callers that patch the former lifecycle seam.
 # Submit-time authority is owned by executor.py below.
@@ -5763,6 +5763,10 @@ def _dual_write_partial_exit_projection_if_available(
     order_id: str,
     status: str,
     fill_identity: str = "",
+    economic_fill_identity: str = "",
+    economic_fill_cumulative_shares: float | None = None,
+    economic_fill_cumulative_notional_usd: float | None = None,
+    filled_notional_usd: float | None = None,
     allocated_cost_basis_usd: float | None = None,
     realized_pnl_delta_usd: float | None = None,
     cumulative_realized_pnl_usd: float | None = None,
@@ -5807,6 +5811,10 @@ def _dual_write_partial_exit_projection_if_available(
                 "remaining_shares": remaining_shares,
                 "fill_price": fill_price,
                 "fill_identity": fill_identity or None,
+                "economic_fill_identity": economic_fill_identity or None,
+                "economic_fill_cumulative_shares": economic_fill_cumulative_shares,
+                "economic_fill_cumulative_notional_usd": economic_fill_cumulative_notional_usd,
+                "filled_notional_usd": filled_notional_usd,
                 "allocated_cost_basis_usd": allocated_cost_basis_usd,
                 "realized_pnl_delta_usd": realized_pnl_delta_usd,
                 "cumulative_realized_pnl_usd": cumulative_realized_pnl_usd,
@@ -5818,6 +5826,10 @@ def _dual_write_partial_exit_projection_if_available(
         event["order_id"] = order_id or None
         event["venue_status"] = status or "PARTIAL"
         event["payload_json"] = _json.dumps(payload, default=str, sort_keys=True)
+        # Partial exits realize money while exposure remains open.  Carry the
+        # cumulative value on the head in this same append/project savepoint;
+        # projection's normal open-position builder intentionally emits NULL.
+        projection["realized_pnl_usd"] = cumulative_realized_pnl_usd
         projection["updated_at"] = occurred_at
         append_many_and_project(conn, [event], projection)
         return True
@@ -6244,6 +6256,7 @@ def _complete_intentional_position_reduction(
     order_id: str,
     status: str,
     conn: sqlite3.Connection | None,
+    economic_fills: Sequence[object] | None = None,
 ) -> Decimal:
     """Apply a confirmed partial-position SELL without manufacturing closure."""
 
@@ -6320,52 +6333,89 @@ def _complete_intentional_position_reduction(
                 raise RuntimeError(
                     "confirmed reduction could not update open exposure"
                 )
-        partial_fill = (
-            position.nested_fills[-1]
-            if position.nested_fills
-            and position.nested_fills[-1].get("type") == "partial_exit_fill"
-            and position.nested_fills[-1].get("order_id") == order_id
-            else None
+        from src.state.fill_dedup import (
+            PartialExitEconomicDebtError,
+            partial_exit_realized_pnl_fold,
+            recorded_partial_exit_fill_cursors,
         )
-        if partial_fill is not None:
-            allocated_cost_basis_usd = float(
-                partial_fill["realized_cost_basis_usd"]
+
+        basis_shares = Decimal(str(position.effective_shares))
+        basis_cost = Decimal(str(position.effective_cost_basis_usd))
+        if basis_shares <= Decimal("1e-9") or basis_cost < 0:
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT basis missing: position_id={trade_id}"
             )
-            realized_pnl_delta_usd = float(partial_fill["realized_pnl"])
-        else:
-            # Chain may already have reduced the residual exposure before the
-            # confirmed venue fact arrives. Reconstruct this fill's allocated
-            # cost from the authoritative remaining claim instead of losing its
-            # realized economics merely because no local mutation was needed.
-            allocated_cost_basis_usd = float(position.effective_cost_basis_usd) * (
-                float(newly_filled) / float(remaining_shares)
+        unit_cost = basis_cost / basis_shares
+        cursors = recorded_partial_exit_fill_cursors(conn, trade_id) if conn else {}
+        slices: list[tuple[str, Decimal, Decimal, Decimal, Decimal]] = []
+        for fact in economic_fills or ():
+            identity = str(getattr(fact, "identity", "") or "")
+            cumulative_qty = Decimal(str(getattr(fact, "quantity", "0")))
+            cumulative_notional = Decimal(str(getattr(fact, "notional", "0")))
+            prior_qty, prior_notional = cursors.get(
+                identity, (Decimal("0"), Decimal("0"))
             )
-            realized_pnl_delta_usd = round(
-                float(newly_filled) * fill_price - allocated_cost_basis_usd,
-                2,
+            if cumulative_qty < prior_qty or cumulative_notional < prior_notional:
+                raise PartialExitEconomicDebtError(
+                    f"partial EXIT canonical fill regressed: position_id={trade_id} identity={identity}"
+                )
+            delta_qty = cumulative_qty - prior_qty
+            delta_notional = cumulative_notional - prior_notional
+            if delta_qty == 0:
+                if delta_notional != 0:
+                    raise PartialExitEconomicDebtError(
+                        f"partial EXIT canonical fill revised price without a slice: position_id={trade_id} identity={identity}"
+                    )
+                continue
+            if delta_notional <= 0:
+                raise PartialExitEconomicDebtError(
+                    f"partial EXIT canonical fill has nonpositive delta notional: position_id={trade_id} identity={identity}"
+                )
+            slices.append((identity, delta_qty, delta_notional, cumulative_qty, cumulative_notional))
+        if not slices:
+            # Direct status receipts have no venue-trade-fact identity yet. Keep
+            # their historical behavior but give the cumulative receipt one
+            # stable cursor so MATCHED/CONFIRMED replay cannot double-book it.
+            identity = f"status-fill:v1:{trade_id}:{order_id}"
+            prior_qty, prior_notional = cursors.get(
+                identity,
+                (already_applied, already_applied * Decimal(str(fill_price))),
             )
-        persisted = _dual_write_partial_exit_projection_if_available(
-            conn,
-            position,
-            filled_shares=float(newly_filled),
-            remaining_shares=float(remaining_shares),
-            fill_price=fill_price,
-            order_id=order_id,
-            status=status,
-            fill_identity=(
-                f"{trade_id}:partial_exit:{order_id}:{format(total_filled, 'f')}"
-            ),
-            allocated_cost_basis_usd=allocated_cost_basis_usd,
-            realized_pnl_delta_usd=realized_pnl_delta_usd,
-            cumulative_realized_pnl_usd=round(
-                _recorded_reduction_realized_pnl(conn, position_id=trade_id)
-                + realized_pnl_delta_usd,
-                2,
-            ),
-            semantic_event="CAPITAL_REDUCTION_FILLED",
-        )
-        if conn is not None and not persisted:
-            raise RuntimeError("confirmed reduction canonical projection failed")
+            cumulative_notional = total_filled * Decimal(str(fill_price))
+            delta_qty = total_filled - prior_qty
+            delta_notional = cumulative_notional - prior_notional
+            if delta_qty > Decimal("1e-9") and delta_notional > 0:
+                slices.append((identity, delta_qty, delta_notional, total_filled, cumulative_notional))
+        slice_quantity = sum((item[1] for item in slices), Decimal("0"))
+        if slice_quantity != newly_filled:
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT fill/economics mismatch: position_id={trade_id} fill={newly_filled} economics={slice_quantity}"
+            )
+        cumulative_realized = partial_exit_realized_pnl_fold(conn, trade_id) if conn else Decimal("0")
+        for identity, quantity, notional, cumulative_qty, cumulative_notional in slices:
+            allocated_cost = quantity * unit_cost
+            pnl_delta = notional - allocated_cost
+            cumulative_realized += pnl_delta
+            persisted = _dual_write_partial_exit_projection_if_available(
+                conn,
+                position,
+                filled_shares=float(quantity),
+                remaining_shares=float(remaining_shares),
+                fill_price=float(notional / quantity),
+                order_id=order_id,
+                status=status,
+                fill_identity=identity,
+                economic_fill_identity=identity,
+                economic_fill_cumulative_shares=float(cumulative_qty),
+                economic_fill_cumulative_notional_usd=float(cumulative_notional),
+                filled_notional_usd=float(notional),
+                allocated_cost_basis_usd=float(allocated_cost),
+                realized_pnl_delta_usd=float(pnl_delta),
+                cumulative_realized_pnl_usd=float(cumulative_realized),
+                semantic_event="CAPITAL_REDUCTION_FILLED",
+            )
+            if conn is not None and not persisted:
+                raise RuntimeError("confirmed reduction canonical projection failed")
 
     previous_next_retry_at = str(
         getattr(position, "next_exit_retry_at", "") or ""
@@ -6589,39 +6639,11 @@ def _last_exit_order_id(
 
 
 def _canonical_exit_trade_fact_cte(cte_name: str = "canonical_exit_trade_fact") -> str:
-    """Rank duplicate trade facts so weaker later rows cannot hide a fill."""
+    """Use the state-owned stable revision identity for every EXIT reader."""
 
-    return f"""
-        {cte_name} AS (
-            SELECT ranked.*
-              FROM (
-                    SELECT scored.*,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY command_id, trade_id
-                               ORDER BY proof_rank DESC, local_sequence DESC
-                           ) AS canonical_rank
-                      FROM (
-                            SELECT fact.*,
-                                   CASE
-                                       WHEN UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
-                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 500
-                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MINED'
-                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 450
-                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MATCHED'
-                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 400
-                                       WHEN CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 300
-                                       ELSE 100
-                                   END AS proof_rank
-                              FROM venue_trade_facts fact
-                           ) scored
-                   ) ranked
-             WHERE ranked.canonical_rank = 1
-        )
-    """
+    from src.state.fill_dedup import canonical_trade_fact_cte
+
+    return canonical_trade_fact_cte(cte_name)
 
 
 def _economic_exit_trade_fact_cte(
@@ -6629,31 +6651,14 @@ def _economic_exit_trade_fact_cte(
     canonical_cte_name: str = "canonical_exit_trade_fact",
     cte_name: str = "economic_exit_trade_fact",
 ) -> str:
-    """Exclude a tx-hash alias once an exact child trade fact exists."""
+    """Use the full tx/source-trade-fact alias exclusion contract."""
 
-    return f"""
-        {cte_name} AS (
-            SELECT fact.*
-              FROM {canonical_cte_name} fact
-             WHERE NOT (
-                    TRIM(COALESCE(fact.tx_hash, '')) != ''
-                AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
-                    = LOWER(TRIM(fact.tx_hash))
-                AND EXISTS (
-                        SELECT 1
-                          FROM {canonical_cte_name} exact
-                         WHERE exact.command_id = fact.command_id
-                           AND LOWER(TRIM(COALESCE(exact.tx_hash, '')))
-                               = LOWER(TRIM(fact.tx_hash))
-                           AND LOWER(TRIM(COALESCE(exact.trade_id, '')))
-                               != LOWER(TRIM(COALESCE(fact.trade_id, '')))
-                           AND UPPER(COALESCE(exact.state, ''))
-                               IN ('MATCHED', 'MINED', 'CONFIRMED')
-                           AND CAST(COALESCE(exact.filled_size, '0') AS REAL) > 0
-                    )
-                )
-        )
-    """
+    from src.state.fill_dedup import economic_trade_fact_cte
+
+    return economic_trade_fact_cte(
+        canonical_cte_name=canonical_cte_name,
+        cte_name=cte_name,
+    )
 
 
 def _accumulate_exact_fills(
@@ -6814,6 +6819,15 @@ def _exit_trade_fact_close_candidate(
     fill_price = fill_notional / filled_size
     if not LIVE_ORDER_MIN_UNIT_PRICE <= fill_price <= LIVE_ORDER_MAX_UNIT_PRICE:
         return None
+    from src.state.fill_dedup import economic_exit_fills_for_position
+
+    economic_fills = economic_exit_fills_for_position(
+        conn,
+        position_id,
+        venue_order_id=str(row["venue_order_id"] or ""),
+    )
+    if not economic_fills:
+        return None
     return {
         "command_id": str(row["command_id"] or ""),
         "venue_order_id": str(row["venue_order_id"] or ""),
@@ -6824,6 +6838,7 @@ def _exit_trade_fact_close_candidate(
         "command_state": str(row["command_state"] or ""),
         "closes_position": reduction_target is None,
         "intended_reduction_shares": reduction_target,
+        "economic_fills": economic_fills,
     }
 
 
@@ -7035,6 +7050,7 @@ def check_pending_exits(
                         order_id=str(fill["venue_order_id"]),
                         status=str(fill.get("fill_states") or "CONFIRMED"),
                         conn=conn,
+                        economic_fills=fill.get("economic_fills"),
                     )
                 except RuntimeError as exc:
                     if _isolate_pending_exit_reduction_precondition(
@@ -7175,6 +7191,7 @@ def check_pending_exits(
                         order_id=exit_order_id,
                         status=str(fill.get("fill_states") or "CONFIRMED"),
                         conn=conn,
+                        economic_fills=fill.get("economic_fills"),
                     )
                 except RuntimeError as exc:
                     if _isolate_pending_exit_reduction_precondition(

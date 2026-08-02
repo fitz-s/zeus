@@ -52,6 +52,52 @@ re-deriving the exclusion rule ad hoc.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+import json
+import sqlite3
+
+
+class PartialExitEconomicDebtError(RuntimeError):
+    """Fail closed when one position's partial-exit economics lack proof.
+
+    INV-47 SCOPE: exactly one ``position_id``; no unrelated entry or exit is
+    blocked. DRAIN: a later canonical trade fact plus an authoritative unit
+    basis lets ``repair_legacy_partial_exit_slices`` append the missing slice.
+    RESET: every exact canonical fill identity has one economics event, so the
+    fold succeeds without retaining a latch.
+    """
+
+
+@dataclass(frozen=True)
+class EconomicExitFill:
+    """One exactly-once canonical EXIT economic fill atom."""
+
+    identity: str
+    command_id: str
+    venue_order_id: str
+    trade_id: str
+    quantity: Decimal
+    unit_price: Decimal
+    notional: Decimal
+
+
+def _decimal(value: object) -> Decimal | None:
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return result if result.is_finite() else None
+
+
+def _position_events_available(conn: sqlite3.Connection) -> bool:
+    try:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'position_events'"
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
 
 def canonical_trade_fact_cte(
     cte_name: str = "canonical_trade_fact",
@@ -275,3 +321,276 @@ def alias_edges_for_command(
          ORDER BY trade_id
     """
     return [dict(row) for row in conn.execute(sql, (command_id,)).fetchall()]
+
+
+def economic_exit_fills_for_position(
+    conn: sqlite3.Connection,
+    position_id: str,
+    *,
+    venue_order_id: str = "",
+) -> list[EconomicExitFill]:
+    """Return exact canonical EXIT fills once, including every alias rule.
+
+    This is the one economic-fill intake for partial exit booking, repair, and
+    settlement.  It intentionally composes ``canonical_trade_fact_cte`` and
+    ``economic_trade_fact_cte`` rather than reimplementing their MATCHED /
+    CONFIRMED, tx aggregate, or EDLI source-fact alias rules.
+    """
+
+    if not position_id:
+        return []
+    order_clause = ""
+    params: list[object] = [position_id]
+    if venue_order_id:
+        order_clause = "AND cmd.venue_order_id = ?"
+        params.append(venue_order_id)
+    try:
+        rows = conn.execute(
+            f"""
+            WITH {canonical_trade_fact_cte()},
+                 {economic_trade_fact_cte()}
+            SELECT fact.command_id, fact.trade_id, fact.venue_order_id,
+                   fact.filled_size, fact.fill_price
+              FROM economic_trade_fact fact
+              JOIN venue_commands cmd ON cmd.command_id = fact.command_id
+             WHERE cmd.position_id = ?
+               AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
+               AND UPPER(COALESCE(fact.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+               {order_clause}
+             ORDER BY fact.execution_ts, fact.command_id, fact.trade_id
+            """,
+            tuple(params),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise PartialExitEconomicDebtError(
+            f"partial EXIT canonical fill lookup failed: position_id={position_id}: {exc}"
+        ) from exc
+
+    fills: list[EconomicExitFill] = []
+    for row in rows:
+        quantity = _decimal(row["filled_size"])
+        unit_price = _decimal(row["fill_price"])
+        if quantity is None or unit_price is None or quantity <= 0 or unit_price <= 0:
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT canonical fill has invalid economics: position_id={position_id}"
+            )
+        command_id = str(row["command_id"] or "")
+        trade_id = str(row["trade_id"] or "")
+        if not command_id or not trade_id:
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT canonical fill identity missing: position_id={position_id}"
+            )
+        fills.append(
+            EconomicExitFill(
+                identity=f"economic-fill:v1:{command_id}:{trade_id.lower()}",
+                command_id=command_id,
+                venue_order_id=str(row["venue_order_id"] or ""),
+                trade_id=trade_id,
+                quantity=quantity,
+                unit_price=unit_price,
+                notional=quantity * unit_price,
+            )
+        )
+    return fills
+
+
+def recorded_partial_exit_fill_cursors(
+    conn: sqlite3.Connection,
+    position_id: str,
+) -> dict[str, tuple[Decimal, Decimal]]:
+    """Read already-booked canonical-fill cursors keyed by stable identity.
+
+    A source trade's later MATCHED→CONFIRMED revision may increase a cumulative
+    fill.  The cursor stores the prior cumulative quantity and notional so only
+    the newly proven exact slice is booked on replay.
+    """
+
+    if not position_id or not _position_events_available(conn):
+        return {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT event_id, caused_by, payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')
+             ORDER BY sequence_no, event_id
+            """,
+            (position_id,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise PartialExitEconomicDebtError(
+            f"partial EXIT event cursor lookup failed: position_id={position_id}: {exc}"
+        ) from exc
+
+    cursors: dict[str, tuple[Decimal, Decimal]] = {}
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT event payload malformed: position_id={position_id} event_id={row['event_id']}"
+            ) from exc
+        identity = str(payload.get("economic_fill_identity") or "").strip()
+        if not identity:
+            continue
+        quantity = _decimal(payload.get("economic_fill_cumulative_shares"))
+        notional = _decimal(payload.get("economic_fill_cumulative_notional_usd"))
+        if quantity is None or notional is None or quantity <= 0 or notional <= 0:
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT cursor lacks cumulative economics: position_id={position_id} identity={identity}"
+            )
+        prior = cursors.get(identity)
+        if prior is not None and prior != (quantity, notional):
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT stable identity conflicts: position_id={position_id} identity={identity}"
+            )
+        cursors[identity] = (quantity, notional)
+    return cursors
+
+
+def partial_exit_realized_pnl_fold(
+    conn: sqlite3.Connection,
+    position_id: str,
+) -> Decimal:
+    """Fold persisted, stable-identity partial EXIT deltas exactly once.
+
+    Legacy/minimal connections without ``position_events`` keep their historic
+    settlement behavior: no partial contribution instead of a new runtime
+    failure.  A present partial EXIT event without the new identity/economics
+    envelope is typed debt and must be repaired from canonical venue facts.
+    """
+
+    if not position_id or not _position_events_available(conn):
+        return Decimal("0")
+    try:
+        rows = conn.execute(
+            """
+            SELECT event_id, caused_by, payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')
+             ORDER BY sequence_no, event_id
+            """,
+            (position_id,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise PartialExitEconomicDebtError(
+            f"partial EXIT fold lookup failed: position_id={position_id}: {exc}"
+        ) from exc
+
+    parsed: list[tuple[object, dict]] = []
+    has_repair = False
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT event payload malformed: position_id={position_id} event_id={row['event_id']}"
+            ) from exc
+        has_repair = has_repair or str(row["caused_by"] or "") == (
+            "partial_exit_economics_repair"
+        )
+        parsed.append((row, payload))
+
+    total = Decimal("0")
+    seen: set[str] = set()
+    for row, payload in parsed:
+        identity = str(payload.get("economic_fill_identity") or "").strip()
+        if not identity:
+            if has_repair:
+                continue
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT economics repair required: position_id={position_id} event_id={row['event_id']}"
+            )
+        if identity in seen:
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT duplicate stable identity: position_id={position_id} identity={identity}"
+            )
+        delta = _decimal(payload.get("realized_pnl_delta_usd"))
+        quantity = _decimal(payload.get("filled_shares"))
+        notional = _decimal(payload.get("filled_notional_usd"))
+        cost = _decimal(payload.get("allocated_cost_basis_usd"))
+        if (
+            delta is None
+            or quantity is None
+            or notional is None
+            or cost is None
+            or quantity <= 0
+            or notional <= 0
+            or cost < 0
+            or delta != notional - cost
+        ):
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT event economics invalid: position_id={position_id} identity={identity}"
+            )
+        seen.add(identity)
+        total += delta
+    return total
+
+
+def legacy_partial_exit_repair_fills(
+    conn: sqlite3.Connection,
+    position_id: str,
+) -> list[EconomicExitFill]:
+    """Prove the exact canonical fills needed to repair old partial events.
+
+    Old payloads recorded a quantity/price observation but not the stable
+    economic identity.  Repair is permitted only when those old per-order
+    quantities exactly equal the complete canonical venue-fact fold.  Anything
+    else is typed debt; in particular, this never silently substitutes zero.
+    """
+
+    if not position_id or not _position_events_available(conn):
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT event_id, order_id, payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND caused_by = 'partial_exit_fill'
+             ORDER BY sequence_no, event_id
+            """,
+            (position_id,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise PartialExitEconomicDebtError(
+            f"partial EXIT repair lookup failed: position_id={position_id}: {exc}"
+        ) from exc
+    legacy_by_order: dict[str, Decimal] = {}
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT repair payload malformed: position_id={position_id} event_id={row['event_id']}"
+            ) from exc
+        if payload.get("economic_fill_identity"):
+            continue
+        order_id = str(row["order_id"] or payload.get("order_id") or "").strip()
+        quantity = _decimal(payload.get("filled_shares"))
+        if not order_id or quantity is None or quantity <= 0:
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT repair identity/quantity missing: position_id={position_id} event_id={row['event_id']}"
+            )
+        legacy_by_order[order_id] = legacy_by_order.get(order_id, Decimal("0")) + quantity
+    if not legacy_by_order:
+        return []
+
+    exact: list[EconomicExitFill] = []
+    for order_id, legacy_quantity in legacy_by_order.items():
+        fills = economic_exit_fills_for_position(
+            conn, position_id, venue_order_id=order_id
+        )
+        canonical_quantity = sum((fill.quantity for fill in fills), Decimal("0"))
+        if not fills or canonical_quantity != legacy_quantity:
+            raise PartialExitEconomicDebtError(
+                "partial EXIT repair cannot prove exact fill identity/quantity: "
+                f"position_id={position_id} order_id={order_id} "
+                f"legacy={legacy_quantity} canonical={canonical_quantity}"
+            )
+        exact.extend(fills)
+    return exact
