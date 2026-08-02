@@ -95,7 +95,6 @@ from src.solve.solver import (
     global_candidate_from_native,
     global_sell_fill_prefix_objective,
     executable_curve_identity,
-    family_payoff_q_samples,
     joint_probability_content_identity,
     joint_probability_witness_identity,
     portfolio_wealth_identity,
@@ -19340,10 +19339,6 @@ def test_global_batch_rejects_inflight_buy_before_scope_scan(monkeypatch):
 def test_global_batch_reduce_only_skips_nonheld_universe(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
-    scope = current_global_auction_scope_from_events(
-        (event,),
-        captured_at_utc=decision_at,
-    )
     trade_conn = _wealth_test_conn(captured_at=decision_at)
     monkeypatch.setattr(
         global_batch_runtime,
@@ -19353,7 +19348,7 @@ def test_global_batch_reduce_only_skips_nonheld_universe(monkeypatch):
     monkeypatch.setattr(
         global_batch_runtime,
         "scan_current_global_auction_scope",
-        lambda **_: scope,
+        lambda **_: pytest.fail("empty held scope must fail before scan"),
     )
 
     result = global_batch_runtime.process_current_global_batch(
@@ -19410,6 +19405,8 @@ def test_entry_suppression_rewrite_invalidates_economic_cut_completion():
 
 
 def test_global_batch_routes_restricted_day0_epoch_to_day0_only_scope(monkeypatch):
+    import src.data.replacement_input_hwm as replacement_hwm
+
     from src.events.candidate_binding import weather_family_id
 
     decision_at = _dt.datetime(2026, 7, 11, 17, 6, tzinfo=_dt.timezone.utc)
@@ -19436,6 +19433,11 @@ def test_global_batch_routes_restricted_day0_epoch_to_day0_only_scope(monkeypatc
         "scan_current_global_auction_scope",
         scan,
     )
+    monkeypatch.setattr(
+        replacement_hwm,
+        "prime_frozen_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: lambda: None,
+    )
 
     result = global_batch_runtime.process_current_global_batch(
         (event,),
@@ -19444,17 +19446,20 @@ def test_global_batch_routes_restricted_day0_epoch_to_day0_only_scope(monkeypatc
         forecast_conn=object(),
         trade_conn=trade_conn,
         payload_reader=lambda item: json.loads(item.payload_json),
-        prepare_event=lambda *_: pytest.fail(
-            "reduce-only must not prepare a nonheld Day0 family"
+        prepare_event=lambda item, _at: EventSubmissionReceipt(
+            False,
+            item.event_id,
+            item.causal_snapshot_id,
+            reason="GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:test",
         ),
         actuate_winner=lambda *_: pytest.fail(
-            "reduce-only must not actuate a nonheld Day0 family"
+            "restricted Day0 scope must not actuate"
         ),
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: 0,
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
-        buy_candidates_enabled=False,
+        buy_candidates_enabled=True,
         restrict_to_family_keys=frozenset(
             {
                 weather_family_id(
@@ -19468,6 +19473,200 @@ def test_global_batch_routes_restricted_day0_epoch_to_day0_only_scope(monkeypatc
 
     assert result.venue_submit_count == 0
     assert scan_calls[0]["day0_only"] is True
+
+
+def test_global_batch_reduce_only_prefilters_scan_prepare_and_book_scope(
+    monkeypatch,
+):
+    """ANTIBODY: completion scope is held-only before expensive family work."""
+    import src.data.replacement_input_hwm as replacement_hwm
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    all_events = tuple(
+        _global_scope_event(
+            city=f"City{index:03d}",
+            source_run_id=f"run-{index:03d}",
+        )
+        for index in range(142)
+    )
+    all_scope = current_global_auction_scope_from_events(
+        all_events,
+        captured_at_utc=decision_at,
+    )
+    family_by_event_id = {
+        event.event_id: family_key
+        for family_key, event in all_scope.events_by_family
+    }
+    family_by_tuple = {
+        (
+            payload["city"],
+            payload["target_date"],
+            payload["metric"],
+        ): family_key
+        for family_key, event in all_scope.events_by_family
+        for payload in (json.loads(event.payload_json),)
+    }
+    held_events = all_events[:4]
+    held_families = tuple(
+        (
+            payload["city"],
+            payload["target_date"],
+            payload["metric"],
+        )
+        for event in held_events
+        for payload in (json.loads(event.payload_json),)
+    )
+    held_family_keys = frozenset(
+        family_by_event_id[event.event_id] for event in held_events
+    )
+    scan_seen: list[tuple[int, object]] = []
+    prepared_seen: list[frozenset[str]] = []
+    book_seen: list[frozenset[str]] = []
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: held_families,
+    )
+    monkeypatch.setattr(
+        replacement_hwm,
+        "prime_frozen_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            spendable_cash_usd=Decimal("100"),
+            economic_identity="wealth",
+            ledger_snapshot_id="ledger",
+            witness_identity="wealth-witness",
+        ),
+    )
+
+    def scan(**kwargs):
+        restricted = kwargs["restrict_to_families"]
+        scan_seen.append(
+            (
+                len(restricted)
+                if restricted is not None
+                else len(all_scope.family_keys),
+                restricted,
+            )
+        )
+        if restricted is None:
+            return all_scope
+        restricted_keys = frozenset(
+            family_by_tuple[(city, target_date, metric)]
+            for city, target_date, metric in restricted
+        )
+        return current_global_auction_scope_from_events(
+            tuple(
+                event
+                for family_key, event in all_scope.events_by_family
+                if family_key in restricted_keys
+            ),
+            captured_at_utc=decision_at,
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        scan,
+    )
+
+    def prepare(event, _at):
+        family_key = family_by_event_id[event.event_id]
+        prepared_seen[-1] = prepared_seen[-1] | {family_key}
+        payload = json.loads(event.payload_json)
+        witness = SimpleNamespace(
+            family_key=family_key,
+            captured_at_utc=decision_at,
+            posterior_identity_hash=payload["source_run_id"],
+            witness_identity=f"witness-{family_key}",
+            q_version=f"q-{family_key}",
+            family_binding_identity=f"binding-{family_key}",
+        )
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason="GLOBAL_CURRENT_PROBABILITY_PREPARED",
+            prepared_global_family=bridge.PreparedGlobalFamily(
+                decision_id=f"decision-{family_key}",
+                probability_witness=witness,
+                candidate_seeds=(),
+            ),
+        )
+
+    def provide_books(probabilities, _at):
+        book_seen[-1] = frozenset(probabilities)
+        return probabilities, None
+
+    def select(*_args, **_kwargs):
+        return PreparedGlobalAuctionResult(
+            decision=GlobalSingleOrderDecision(
+                shares=Decimal("0"),
+                cost_usd=Decimal("0"),
+                robust_delta_log_wealth=0.0,
+                robust_ev_usd=0.0,
+                capital_efficiency=0.0,
+                candidate=None,
+                no_trade_reason="CASH_DOMINATES",
+                rejection_reasons={},
+                candidate_evaluations=(),
+            ),
+            winner_event_id=None,
+            actuation=None,
+            holding_coverage=(),
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        select,
+    )
+
+    def run(*, buy_candidates_enabled):
+        prepared_seen.append(frozenset())
+        book_seen.append(frozenset())
+        return global_batch_runtime.process_current_global_batch(
+            (held_events[0],),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=object(),
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=prepare,
+            actuate_winner=lambda *_: pytest.fail("no-trade cut must not actuate"),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            portfolio_state_provider=lambda: PortfolioState(
+                authority="canonical_db",
+                authority_scope="runtime_exposure",
+            ),
+            current_book_epoch_provider=provide_books,
+            buy_candidates_enabled=buy_candidates_enabled,
+        )
+
+    reduce_only = run(buy_candidates_enabled=False)
+    buy_enabled = run(buy_candidates_enabled=True)
+
+    assert reduce_only.winner_event_id is None
+    assert buy_enabled.winner_event_id is None
+    assert scan_seen == [
+        (4, held_families),
+        (142, None),
+    ]
+    assert prepared_seen == [held_family_keys, frozenset(all_scope.family_keys)]
+    assert book_seen == [held_family_keys, frozenset(all_scope.family_keys)]
 
 
 def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):

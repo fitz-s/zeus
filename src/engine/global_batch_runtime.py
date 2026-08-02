@@ -4508,6 +4508,8 @@ def process_current_global_batch(
             raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
         scope_at = current_time()
         held_families = _current_held_weather_families(trade_conn)
+        if not buy_candidates_enabled and not held_families:
+            return reject("GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY")
         restricted_families = None
         if restrict_to_family_keys is not None:
             restricted_families = frozenset(
@@ -4552,7 +4554,11 @@ def process_current_global_batch(
                 decision_at_utc=scope_at,
                 held_families=held_families,
                 missing_held_families=missing_held_families,
-                restrict_to_families=(restricted_families or None),
+                restrict_to_families=(
+                    held_families
+                    if not buy_candidates_enabled
+                    else (restricted_families or None)
+                ),
                 day0_only=day0_only_scope,
                 cancelled=selection_cancelled,
             )
