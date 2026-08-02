@@ -14234,6 +14234,69 @@ def test_monitor_waiter_death_releases_kernel_reservation(tmp_path):
         assert conn.execute("SELECT owner FROM writes").fetchall() == [("background",)]
 
 
+def test_monitor_reservation_oserror_closes_fd_once(tmp_path, monkeypatch):
+    from src.state import write_coordinator as module
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: tmp_path / "monitor-oserror.db"})
+    closed = []
+    real_close = module.os.close
+    monkeypatch.setattr(module.fcntl, "flock", lambda *_args: (_ for _ in ()).throw(OSError("boom")))
+    monkeypatch.setattr(module.os, "close", lambda fd: (closed.append(fd), real_close(fd))[1])
+    with pytest.raises(OSError, match="boom"):
+        coordinator._acquire_monitor_waiter_reservation(
+            tmp_path / "monitor-oserror.db",
+            deadline=None,
+            db=DBIdentity.TRADE,
+            owner="monitor-oserror",
+        )
+    assert len(closed) == 1
+
+
+def test_background_reservation_oserror_closes_fd_once(tmp_path, monkeypatch):
+    from src.state import write_coordinator as module
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: tmp_path / "background-oserror.db"})
+    closed = []
+    real_close = module.os.close
+    monkeypatch.setattr(module.fcntl, "flock", lambda *_args: (_ for _ in ()).throw(OSError("boom")))
+    monkeypatch.setattr(module.os, "close", lambda fd: (closed.append(fd), real_close(fd))[1])
+    with pytest.raises(OSError, match="boom"):
+        coordinator._acquire_background_reservation(
+            tmp_path / "background-oserror.db",
+            db=DBIdentity.TRADE,
+            owner="background-oserror",
+        )
+    assert len(closed) == 1
+
+
+def test_gate_cleanup_releases_reservation_when_turnstile_release_fails(monkeypatch, tmp_path):
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: tmp_path / "nested-release.db"})
+    released = []
+    coordinator._acquire_monitor_waiter_reservation = lambda *_a, **_k: 11
+    coordinator._acquire_turnstile = lambda *_a, **_k: 22
+    coordinator._acquire_process_lock = lambda *_a, **_k: None
+    coordinator._acquire_file_lock = lambda *_a, **_k: 33
+
+    def release(fd):
+        released.append(fd)
+        if fd == 22:
+            raise OSError("turnstile release failed")
+
+    coordinator._release_turnstile = release
+    with pytest.raises(OSError, match="turnstile release failed"):
+        coordinator._acquire_gates(
+            (DBIdentity.TRADE,),
+            deadline=None,
+            owner="nested-release",
+            priority=WritePriority.MONITOR,
+        )
+    assert released == [22, 11]
+
+
 def test_full_recovery_quantum_is_one_row_and_specialized_debts_stay_in_full_lane(
     monkeypatch,
 ):

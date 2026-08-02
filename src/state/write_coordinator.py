@@ -419,10 +419,12 @@ class WriteCoordinator:
                         process_lock.release()
                     raise
                 finally:
-                    if turnstile_fd is not None:
-                        self._release_turnstile(turnstile_fd)
-                    if monitor_waiter_fd is not None:
-                        self._release_turnstile(monitor_waiter_fd)
+                    try:
+                        if turnstile_fd is not None:
+                            self._release_turnstile(turnstile_fd)
+                    finally:
+                        if monitor_waiter_fd is not None:
+                            self._release_turnstile(monitor_waiter_fd)
                 acquired.append(
                     _AcquiredGate(
                         db=db,
@@ -536,20 +538,25 @@ class WriteCoordinator:
         path = writer_monitor_waiter_path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                return fd
-            except BlockingIOError as exc:
-                if deadline is not None and self._clock() >= deadline:
-                    os.close(fd)
-                    raise WriteLeaseTimeout(
-                        f"DB monitor waiter reservation timed out for owner={owner} db={db.value}"
-                    ) from exc
-                sleep_for = 0.01
-                if deadline is not None:
-                    sleep_for = max(0.001, min(sleep_for, deadline - self._clock()))
-                self._sleep(sleep_for)
+        owned = False
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    owned = True
+                    return fd
+                except BlockingIOError as exc:
+                    if deadline is not None and self._clock() >= deadline:
+                        raise WriteLeaseTimeout(
+                            f"DB monitor waiter reservation timed out for owner={owner} db={db.value}"
+                        ) from exc
+                    sleep_for = 0.01
+                    if deadline is not None:
+                        sleep_for = max(0.001, min(sleep_for, deadline - self._clock()))
+                    self._sleep(sleep_for)
+        finally:
+            if not owned:
+                os.close(fd)
 
     @staticmethod
     def _acquire_background_reservation(
@@ -561,14 +568,18 @@ class WriteCoordinator:
         path = writer_monitor_waiter_path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+        owned = False
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            owned = True
             return fd
         except BlockingIOError as exc:
-            os.close(fd)
             raise WriteLeaseTimeout(
                 f"DB writer monitor waiter reservation deferred for owner={owner} db={db.value}"
             ) from exc
+        finally:
+            if not owned:
+                os.close(fd)
 
     @staticmethod
     def _release_turnstile(fd: int) -> None:
