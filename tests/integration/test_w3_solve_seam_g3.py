@@ -17503,7 +17503,7 @@ def test_global_selection_counts_open_entry_without_granting_sell_inventory():
     assert represented_snapshot.pending_endowments == ()
 
 
-def test_two_prepared_families_choose_one_globally_unique_order():
+def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
     family, proofs, payload = _corpus()[0]
     decision_at = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
     captured_at = "2026-06-13T11:59:59.900000+00:00"
@@ -17672,6 +17672,27 @@ def test_two_prepared_families_choose_one_globally_unique_order():
     selected = select_prepared_global_auction(
         prepared_by_event,
         **auction_kwargs,
+    )
+    assert selected.decision.max_spend_usd > Decimal("40")
+    import src.config as live_config
+
+    configured_sizing = dict(live_config.sizing_defaults())
+    configured_sizing["max_single_position_pct"] = 0.04
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            live_config,
+            "sizing_defaults",
+            lambda: configured_sizing,
+        )
+        concentration_limited = select_prepared_global_auction(
+            prepared_by_event,
+            **auction_kwargs,
+        )
+    assert concentration_limited.decision.candidate is not None
+    assert concentration_limited.decision.max_spend_usd <= Decimal("40")
+    assert (
+        concentration_limited.decision.max_spend_usd
+        < selected.decision.max_spend_usd
     )
     assert selected.decision.candidate is not None, selected.decision.no_trade_reason
     fallthrough = select_prepared_global_auction(

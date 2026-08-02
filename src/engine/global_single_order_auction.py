@@ -1048,27 +1048,54 @@ def select_prepared_global_auction(
         return universe_witness.witness_identity
 
     def _candidate_capital_limit(candidate: GlobalSingleOrderAnyCandidate) -> Decimal:
-        if current_capital_limit_resolver is None:
-            return capital_limit_usd
-        if book_epoch is None:
-            raise ValueError("GLOBAL_CAPITAL_LIMIT_BOOK_EPOCH_MISSING")
-        asset = book_epoch.asset_by_key.get(
-            (
-                candidate.family_key,
-                candidate.bin_id,
-                candidate.side,
-                candidate.token_id,
+        allocator_limit = Decimal(capital_limit_usd)
+        if current_capital_limit_resolver is not None:
+            if book_epoch is None:
+                raise ValueError("GLOBAL_CAPITAL_LIMIT_BOOK_EPOCH_MISSING")
+            asset = book_epoch.asset_by_key.get(
+                (
+                    candidate.family_key,
+                    candidate.bin_id,
+                    candidate.side,
+                    candidate.token_id,
+                )
             )
+            owner_event_id = event_by_family.get(candidate.family_key)
+            if asset is None or owner_event_id is None:
+                raise ValueError("GLOBAL_CAPITAL_LIMIT_SCOPE_MISSING")
+            allocator_limit = Decimal(
+                current_capital_limit_resolver(
+                    candidate,
+                    asset.gamma_market_id,
+                    asset.market_event_id,
+                    owner_event_id,
+                )
+            )
+
+        # The W3 selector owns the final executable BUY size, so the configured
+        # single-position fraction must constrain this same capital envelope.
+        # Leaving it only in the retired local sizing path let the global solver
+        # spend well above max_single_position_pct while every upstream receipt
+        # still advertised that setting.  Use the exact wealth floor that the
+        # solver's loss branch uses; this keeps sizing and the constraint on one
+        # current wealth witness.  Zero retains the documented disabled posture.
+        from src.config import sizing_defaults
+
+        single_position_pct = Decimal(
+            str(sizing_defaults()["max_single_position_pct"])
         )
-        owner_event_id = event_by_family.get(candidate.family_key)
-        if asset is None or owner_event_id is None:
-            raise ValueError("GLOBAL_CAPITAL_LIMIT_SCOPE_MISSING")
-        return current_capital_limit_resolver(
-            candidate,
-            asset.gamma_market_id,
-            asset.market_event_id,
-            owner_event_id,
-        )
+        if (
+            not single_position_pct.is_finite()
+            or single_position_pct < 0
+            or single_position_pct > 1
+        ):
+            raise ValueError("GLOBAL_SINGLE_POSITION_FRACTION_INVALID")
+        if single_position_pct > 0:
+            allocator_limit = min(
+                allocator_limit,
+                single_position_pct * Decimal(wealth_witness.wealth_floor_usd),
+            )
+        return allocator_limit
 
     def _candidate_payoff_q_lcb(
         candidate: GlobalSingleOrderAnyCandidate,
