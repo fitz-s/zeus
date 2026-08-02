@@ -1,5 +1,5 @@
 # Created: 2026-08-02
-# Last reused or audited: 2026-08-02
+# Last reused/audited: 2026-08-02
 # Authority basis: .gitleaks.toml scoping contract
 #                  docs/reference/security_false_positives.md [REVIEW-SAFE] index
 #                  .github/workflows/secrets-scan.yml (the gate this config arms)

@@ -166,6 +166,6 @@ When the operator clears another false-positive:
 3. **First check the finding still occurs.** If it does not, add no allowlist — an unnecessary entry costs real coverage (see `SCHEMA_PINNED_HASH`).
 4. If a scanner is in scope (gitleaks, semgrep, trufflehog, etc.), encode the clearance per the scoping law above: `regexes` only, no `paths` qualifier, `regexTarget = "match"` when clearing an assignment shape, and the tag in the description. Do **not** add a broad `[REVIEW-SAFE: ...]` regex: the pre-commit hook validates staged tags against this registry before scanners run.
 5. Add the literal to `tests/ci/test_gitleaks_allowlist_scope.py` — to `CLEARED_LITERALS` so it stays suppressed, and its file to `PREVIOUSLY_EXEMPT_PATHS` so the file never becomes whole-file exempt.
-6. Append a one-line entry to `MEMORY.md` so future Claude sessions find this index without grepping.
+6. Confirm this file is still listed in `docs/reference/AGENTS.md` — that registry is how an agent finds this index without grepping for it.
 
 **Anti-pattern to avoid**: silently allowlisting a value in a scanner config without updating this file. The scanner will be quiet but the next code-review agent (which doesn't read scanner configs) will re-raise the finding. The in-source banner + this file are what stop the loop.
