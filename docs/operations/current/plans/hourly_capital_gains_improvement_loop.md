@@ -270,3 +270,26 @@
 - DB 里的仓位/结算/成交是 live 账本,不在未经明确授权下删改。
 
 （历史分析已按操作员指令清除;需要旧内容从 git history 取。）
+
+### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
+
+- **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical
+  `CAPITAL_REDUCTION_FILLED` for a confirmed partial EXIT, but its payload
+  currently omits the already-computed allocated cost and realized-PnL facts.
+  The settlement fold must therefore retain cumulative partial realized PnL and
+  add only residual settlement payout/PnL; it must never overwrite it.
+- **Contract:** every partial fill carries a stable fill identity, allocated
+  cost basis, realized-PnL delta, and cumulative realized PnL. MATCHED /
+  CONFIRMED aliases and replay are idempotent; residual shares/cost remain open;
+  partial fills neither emit `EXIT_ORDER_FILLED` nor economically close a
+  position. Existing event/projection schema is reused unless inspection proves
+  it cannot represent those facts.
+- **Plan:** trace the canonical event writer and settlement reducer, propagate
+  the already computed economics through the existing event payload, and fold
+  partial cumulative plus residual settlement economics exactly once. Add
+  Madrid-like partial, duplicate observation, win/loss settlement, and
+  multi-partial antibodies after auditing lifecycle headers and test registry.
+- **Acceptance / evidence:** targeted event/projection/settlement tests prove
+  the six contract clauses above; `py_compile`, planning-lock, and
+  `git diff --check` pass. No live checkout, process, or production DB is read
+  or mutated. Rollback is one hot-fix commit.

@@ -352,6 +352,32 @@ def _current_phase_in_db(conn, trade_id: str) -> dict:
     return {"status": "ok", "phase": phase_str}
 
 
+def _canonical_partial_exit_realized_pnl(conn, position_id: str) -> float:
+    """Fold canonical partial EXIT PnL before booking the residual settlement."""
+
+    if not position_id:
+        return 0.0
+    try:
+        row = conn.execute(
+            """
+            SELECT COALESCE(
+                       SUM(CAST(json_extract(payload_json, '$.realized_pnl_delta_usd') AS REAL)),
+                       0
+                   )
+              FROM position_events
+             WHERE position_id = ?
+               AND caused_by = 'partial_exit_fill'
+               AND json_extract(payload_json, '$.semantic_event') = 'CAPITAL_REDUCTION_FILLED'
+            """,
+            (position_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise RuntimeError(
+            f"partial EXIT realized-PnL fold failed for {position_id}: {exc}"
+        ) from exc
+    return float(row[0] or 0.0)
+
+
 def _dual_write_canonical_settlement_if_available(
     conn,
     pos,
@@ -2608,10 +2634,20 @@ def _settle_positions(
                 )
                 continue
         phase_before = _canonical_phase_before_for_settlement(pos)
+        partial_exit_realized_pnl = _canonical_partial_exit_realized_pnl(
+            conn, pos.trade_id
+        )
 
         from src.execution.exit_lifecycle import mark_settled
         closed = mark_settled(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
-        pnl = closed.pnl if closed is not None else round(shares * exit_price - settlement_cost_basis, 2)
+        residual_pnl = (
+            closed.pnl
+            if closed is not None
+            else round(shares * exit_price - settlement_cost_basis, 2)
+        )
+        pnl = round(partial_exit_realized_pnl + residual_pnl, 2)
+        if closed is not None:
+            closed.pnl = pnl
         outcome = 1 if exit_price > 0 else 0
 
         if closed is not None:

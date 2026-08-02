@@ -1321,7 +1321,13 @@ def test_full_exit_fill_cannot_close_larger_current_holding(conn, filled_size):
     assert position.shares == pytest.approx(20.0)
 
 
-def test_confirmed_partial_fak_capital_reduction_keeps_remaining_position_open(conn):
+@pytest.mark.parametrize(
+    ("condition_yes_won", "expected_pnl"),
+    ((False, 4.4), (True, -11.6)),
+)
+def test_madrid_partial_exit_realized_pnl_is_canonical_and_settlement_adds_residual(
+    conn, condition_yes_won, expected_pnl
+):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position
     from src.state.venue_command_repo import append_trade_fact
@@ -1329,7 +1335,7 @@ def test_confirmed_partial_fak_capital_reduction_keeps_remaining_position_open(c
     position = Position(
         trade_id="pos-capital-reduction",
         market_id="mkt-capital-reduction",
-        city="Seoul",
+        city="Madrid",
         cluster="asia",
         target_date="2026-07-16",
         bin_label="30C",
@@ -1497,9 +1503,55 @@ def test_confirmed_partial_fak_capital_reduction_keeps_remaining_position_open(c
     ).fetchone()
     assert reduction["event_type"] == "MONITOR_REFRESHED"
     assert reduction["phase_after"] == "pending_exit"
-    assert json.loads(reduction["payload_json"])["semantic_event"] == (
-        "CAPITAL_REDUCTION_FILLED"
+    reduction_payload = json.loads(reduction["payload_json"])
+    assert reduction_payload["semantic_event"] == "CAPITAL_REDUCTION_FILLED"
+    assert reduction_payload["fill_identity"] == (
+        "pos-capital-reduction:partial_exit:ord-capital-reduction:2.5"
     )
+    assert reduction_payload["allocated_cost_basis_usd"] == pytest.approx(1.75)
+    assert reduction_payload["realized_pnl_delta_usd"] == pytest.approx(-0.25)
+    assert reduction_payload["cumulative_realized_pnl_usd"] == pytest.approx(-0.25)
+    assert exit_lifecycle._complete_intentional_position_reduction(
+        position,
+        intended_shares=Decimal("6"),
+        confirmed_filled_shares=Decimal("2.5"),
+        fill_price=0.60,
+        order_id="ord-capital-reduction",
+        status="MATCHED",
+        conn=conn,
+    ) == Decimal("0")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id = ? AND caused_by = 'partial_exit_fill'",
+        (position.trade_id,),
+    ).fetchone()[0] == 1
+    assert exit_lifecycle._complete_intentional_position_reduction(
+        position,
+        intended_shares=Decimal("6"),
+        confirmed_filled_shares=Decimal("4"),
+        fill_price=0.60,
+        order_id="ord-capital-reduction",
+        status="CONFIRMED",
+        conn=conn,
+    ) == Decimal("1.5")
+    partials = conn.execute(
+        """
+        SELECT payload_json FROM position_events
+         WHERE position_id = ? AND caused_by = 'partial_exit_fill'
+         ORDER BY sequence_no
+        """,
+        (position.trade_id,),
+    ).fetchall()
+    assert len(partials) == 2
+    second_payload = json.loads(partials[-1]["payload_json"])
+    assert second_payload["fill_identity"] == (
+        "pos-capital-reduction:partial_exit:ord-capital-reduction:4"
+    )
+    assert second_payload["allocated_cost_basis_usd"] == pytest.approx(1.05)
+    assert second_payload["realized_pnl_delta_usd"] == pytest.approx(-0.15)
+    assert second_payload["cumulative_realized_pnl_usd"] == pytest.approx(-0.4)
+    assert position.shares == pytest.approx(16.0)
+    assert position.cost_basis_usd == pytest.approx(11.2)
     assert conn.execute(
         """
         SELECT COUNT(*) FROM position_events
@@ -1507,6 +1559,26 @@ def test_confirmed_partial_fak_capital_reduction_keeps_remaining_position_open(c
         """,
         (position.trade_id,),
     ).fetchone()[0] == 0
+    from src.execution.harvester import _settle_positions
+
+    assert _settle_positions(
+        conn,
+        PortfolioState(positions=[position]),
+        "Madrid",
+        "2026-07-16",
+        "30C",
+        settlement_condition_id="condition-capital-reduction",
+        settlement_condition_yes_won=condition_yes_won,
+    ) == 1
+    settled = conn.execute(
+        "SELECT phase, shares, cost_basis_usd, realized_pnl_usd FROM position_current "
+        "WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    assert settled["phase"] == "settled"
+    assert settled["shares"] == pytest.approx(16.0)
+    assert settled["cost_basis_usd"] == pytest.approx(11.2)
+    assert settled["realized_pnl_usd"] == pytest.approx(expected_pnl)
 
 
 def test_confirmed_partial_reduction_trade_fact_reopens_exact_remaining_claim(conn):

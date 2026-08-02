@@ -5762,6 +5762,10 @@ def _dual_write_partial_exit_projection_if_available(
     fill_price: float,
     order_id: str,
     status: str,
+    fill_identity: str = "",
+    allocated_cost_basis_usd: float | None = None,
+    realized_pnl_delta_usd: float | None = None,
+    cumulative_realized_pnl_usd: float | None = None,
     semantic_event: str = "PARTIAL_FILL_OBSERVED",
 ) -> bool:
     """Persist the reduced open exposure after a partial exit fill."""
@@ -5802,6 +5806,10 @@ def _dual_write_partial_exit_projection_if_available(
                 "filled_shares": filled_shares,
                 "remaining_shares": remaining_shares,
                 "fill_price": fill_price,
+                "fill_identity": fill_identity or None,
+                "allocated_cost_basis_usd": allocated_cost_basis_usd,
+                "realized_pnl_delta_usd": realized_pnl_delta_usd,
+                "cumulative_realized_pnl_usd": cumulative_realized_pnl_usd,
             }
         )
         event["event_id"] = f"{trade_id}:partial_exit_fill:{sequence_no}"
@@ -6199,6 +6207,34 @@ def _recorded_reduction_fill_shares(
     return Decimal(str(row[0] or "0"))
 
 
+def _recorded_reduction_realized_pnl(
+    conn: sqlite3.Connection | None,
+    *,
+    position_id: str,
+) -> float:
+    """Return canonical realized PnL from already-persisted partial EXIT fills."""
+
+    if conn is None or not position_id:
+        return 0.0
+    try:
+        row = conn.execute(
+            """
+            SELECT COALESCE(
+                       SUM(CAST(json_extract(payload_json, '$.realized_pnl_delta_usd') AS REAL)),
+                       0
+                   )
+              FROM position_events
+             WHERE position_id = ?
+               AND caused_by = 'partial_exit_fill'
+               AND json_extract(payload_json, '$.semantic_event') = 'CAPITAL_REDUCTION_FILLED'
+            """,
+            (position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return 0.0
+    return float(row[0] or 0.0)
+
+
 def _complete_intentional_position_reduction(
     position: Position,
     *,
@@ -6284,6 +6320,30 @@ def _complete_intentional_position_reduction(
                 raise RuntimeError(
                     "confirmed reduction could not update open exposure"
                 )
+        partial_fill = (
+            position.nested_fills[-1]
+            if position.nested_fills
+            and position.nested_fills[-1].get("type") == "partial_exit_fill"
+            and position.nested_fills[-1].get("order_id") == order_id
+            else None
+        )
+        if partial_fill is not None:
+            allocated_cost_basis_usd = float(
+                partial_fill["realized_cost_basis_usd"]
+            )
+            realized_pnl_delta_usd = float(partial_fill["realized_pnl"])
+        else:
+            # Chain may already have reduced the residual exposure before the
+            # confirmed venue fact arrives. Reconstruct this fill's allocated
+            # cost from the authoritative remaining claim instead of losing its
+            # realized economics merely because no local mutation was needed.
+            allocated_cost_basis_usd = float(position.effective_cost_basis_usd) * (
+                float(newly_filled) / float(remaining_shares)
+            )
+            realized_pnl_delta_usd = round(
+                float(newly_filled) * fill_price - allocated_cost_basis_usd,
+                2,
+            )
         persisted = _dual_write_partial_exit_projection_if_available(
             conn,
             position,
@@ -6292,6 +6352,16 @@ def _complete_intentional_position_reduction(
             fill_price=fill_price,
             order_id=order_id,
             status=status,
+            fill_identity=(
+                f"{trade_id}:partial_exit:{order_id}:{format(total_filled, 'f')}"
+            ),
+            allocated_cost_basis_usd=allocated_cost_basis_usd,
+            realized_pnl_delta_usd=realized_pnl_delta_usd,
+            cumulative_realized_pnl_usd=round(
+                _recorded_reduction_realized_pnl(conn, position_id=trade_id)
+                + realized_pnl_delta_usd,
+                2,
+            ),
             semantic_event="CAPITAL_REDUCTION_FILLED",
         )
         if conn is not None and not persisted:
